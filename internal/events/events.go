@@ -70,10 +70,17 @@ const (
 	// remains correlated; the companion reconciler handler is tracked in
 	// #1497.
 	SessionWorkQueryFailed = "session.work_query_failed"
-	ConvoyCreated          = "convoy.created"
-	ConvoyClosed           = "convoy.closed"
-	ControllerStarted      = "controller.started"
-	ControllerStopped      = "controller.stopped"
+	// SessionColdStartTimeout fires when a pool session's first runtime spawn
+	// (a pending create) exceeds the start deadline and is rolled back. It is
+	// per-session: it fires whenever a fresh spawn times out, including a warm
+	// pool scale-up adding capacity — not only when the whole pool was at zero.
+	// Emitted by the session reconciler's start-result commit path; the
+	// envelope's Subject carries the session name.
+	SessionColdStartTimeout = "session.cold_start_timeout"
+	ConvoyCreated           = "convoy.created"
+	ConvoyClosed            = "convoy.closed"
+	ControllerStarted       = "controller.started"
+	ControllerStopped       = "controller.stopped"
 	// SupervisorShutdownRequested fires when the supervisor's main loop
 	// observes a shutdown trigger (signal or socket stop) and is about to
 	// cancel the supervisor context. Carries attribution so operators can
@@ -144,6 +151,7 @@ var KnownEventTypes = []string{
 	SessionStranded,
 	SessionResetStalled,
 	SessionWorkQueryFailed,
+	SessionColdStartTimeout,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
