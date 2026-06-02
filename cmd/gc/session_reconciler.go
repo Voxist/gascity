@@ -1497,6 +1497,44 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 		}
 
+		// Progress-aware recycle (ADR-0013 Amendment A1, move 3b): a desired,
+		// alive session that has stopped progressing has likely parked (e.g. its
+		// turn ended on a provider auth error) and will not self-recover. Opt-in
+		// via [session] progress_stall_timeout; disabled (zero) by default, so
+		// this is a no-op unless a city sets a threshold above its agents'
+		// longest legitimate quiet period. The cheap time check gates the
+		// store/health queries so they run only for the rare already-stalled
+		// session. Set the restart_requested marker and let the block below do
+		// the actual circuit-breaker-aware restart.
+		if threshold := cfg.Session.ProgressStallTimeoutDuration(); threshold > 0 && alive {
+			if lastActivity, _ := sp.GetLastActivity(name); !lastActivity.IsZero() && clk.Now().Sub(lastActivity) > threshold {
+				exempt := pendingInteractionKeepsAwake(*session, sp, name, clk)
+				if !exempt {
+					if attached, err := sessionAttachedForConfigDrift(*session, sp, cityPath, store, cfg, name); err == nil && attached {
+						exempt = true
+					}
+				}
+				holdsClaim := false
+				if !exempt {
+					if has, err := sessionHasOpenAssignedWorkForConfig(store, rigStores, *session, cfg); err == nil {
+						holdsClaim = has
+					}
+				}
+				providerHealthy := true
+				if !exempt && !holdsClaim {
+					snap, _ := loadProviderHealthSnapshot(store)
+					providerHealthy = snap.healthy(agentProviderName(cfg, findAgentByTemplate(cfg, tp.TemplateName)))
+				}
+				if sessionProgressStalled(threshold, holdsClaim, providerHealthy, exempt, lastActivity, clk.Now()) {
+					if session.Metadata == nil {
+						session.Metadata = map[string]string{}
+					}
+					session.Metadata["restart_requested"] = "true"
+					fmt.Fprintf(stderr, "session reconciler: %s progress-stalled (no progress for >%s, no open claim, provider healthy); requesting fresh restart\n", name, threshold) //nolint:errcheck
+				}
+			}
+		}
+
 		// Restart-requested: agent asked for a fresh session
 		// (gc runtime request-restart / gc handoff). This runs after
 		// drain-ack handling, but before autonomous rate-limit,
