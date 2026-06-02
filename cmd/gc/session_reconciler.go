@@ -802,7 +802,7 @@ func reconcileSessionBeadsAtPath(
 	stdout, stderr io.Writer,
 ) int {
 	return reconcileSessionBeadsAtPathWithNamedDemand(
-		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, nil,
+		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, nil, nil,
 		poolDesired, nil, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr,
 	)
 }
@@ -822,6 +822,7 @@ func reconcileSessionBeadsAtPathWithNamedDemand(
 	readyWaitSet map[string]bool,
 	dt *drainTracker,
 	gate *providerHealthGate,
+	pet *progressEpisodeTracker,
 	poolDesired map[string]int,
 	namedSessionDemand map[string]bool,
 	storeQueryPartial bool,
@@ -835,7 +836,7 @@ func reconcileSessionBeadsAtPathWithNamedDemand(
 	stdout, stderr io.Writer,
 ) int {
 	return reconcileSessionBeadsTracedWithNamedDemand(
-		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, gate,
+		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, gate, pet,
 		poolDesired, namedSessionDemand, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, nil,
 	)
 }
@@ -869,7 +870,7 @@ func reconcileSessionBeadsTraced(
 	startOptions ...startExecutionOption,
 ) int {
 	return reconcileSessionBeadsTracedWithNamedDemand(
-		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, nil,
+		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, nil, nil,
 		poolDesired, nil, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, trace,
 		startOptions...,
 	)
@@ -890,6 +891,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	readyWaitSet map[string]bool,
 	dt *drainTracker,
 	gate *providerHealthGate,
+	pet *progressEpisodeTracker,
 	poolDesired map[string]int,
 	namedSessionDemand map[string]bool,
 	storeQueryPartial bool,
@@ -1493,6 +1495,94 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						clk, rec, stderr,
 					)
 					continue
+				}
+			}
+		}
+
+		// Progress-aware recycle (ADR-0013 A1 M3b, vp-jpm): a desired, alive,
+		// claim-less pool session on a healthy provider that has not advanced
+		// progress in > ProgressStallTimeout is restarted fresh. Opt-in via
+		// [session] progress_stall_timeout; zero/unset disables (default).
+		//
+		// Gates (all must pass): threshold > 0, pool-managed, alive, no open
+		// claim, provider healthy (file-based registry from vp-0a3), not
+		// attached/pending-interaction/startup-grace.
+		//
+		// K=3 cap: after K consecutive stall restarts with no progress
+		// advancement, emit exactly one escalation alert and stop auto-restarting.
+		// The episode resets when progress_at advances past the last restart time.
+		if pet != nil && alive {
+			if threshold := cfg.Session.ProgressStallTimeoutDuration(); threshold > 0 && isPoolManagedSessionBead(*session) {
+				if pet.isEscalated(session.ID) {
+					// K=3 reached: auto-restart suspended. Wait for operator reset.
+					if trace != nil {
+						trace.recordDecision("reconciler.session.progress_stall", tp.TemplateName, name, "stall", "escalated_hold", traceRecordPayload{
+							"session_id": session.ID,
+						}, nil, "")
+					}
+				} else if lastActivity, _ := sp.GetLastActivity(name); !lastActivity.IsZero() {
+					pet.advanceProgress(session.ID, lastActivity)
+
+					providerName := ""
+					if tp.ResolvedProvider != nil {
+						providerName = tp.ResolvedProvider.Name
+					}
+					phHealthy, _ := phSnap.check(providerName)
+
+					exempt := pendingInteractionKeepsAwake(*session, sp, name, clk)
+					if !exempt {
+						if attached, err := sessionAttachedForConfigDrift(*session, sp, cityPath, store, cfg, name); err == nil && attached {
+							exempt = true
+						}
+					}
+					if !exempt {
+						startedAt, _ := parseRFC3339Metadata(session.Metadata["last_woke_at"])
+						if !startedAt.IsZero() && clk.Now().Sub(startedAt) < startupTimeout {
+							exempt = true // startup grace
+						}
+					}
+					holdsClaim := false
+					if !exempt {
+						has, err := sessionHasOpenAssignedWorkForConfig(store, rigStores, *session, cfg)
+						if err != nil {
+							fmt.Fprintf(stderr, "session reconciler: checking claim before progress-stall recycle for %s: %v\n", name, err) //nolint:errcheck
+							holdsClaim = true                                                                                               // fail safe: don't recycle an unreadable claim
+						} else {
+							holdsClaim = has
+						}
+						// Component 4: episode reset on reclaim. When the session holds a
+						// claim, it is actively working — reset the stall counter so a
+						// future quiet window starts a fresh episode.
+						if holdsClaim {
+							pet.resetOnReclaim(session.ID)
+						}
+					}
+					if sessionProgressStalled(threshold, holdsClaim, phHealthy, exempt, lastActivity, clk.Now().UTC()) {
+						now := clk.Now().UTC()
+						count, escalate := pet.recordStallRestart(session.ID, now)
+						epID := pet.episodeIDForSession(session.ID)
+						if escalate {
+							emitProgressStallEscalationAlert(rec, stdout, name, session.ID, tp.TemplateName,
+								epID, lastActivity, count,
+							)
+							if trace != nil {
+								trace.recordDecision("reconciler.session.progress_stall", tp.TemplateName, name, "stall", "escalation_fired", traceRecordPayload{
+									"restart_count": count,
+								}, nil, "")
+							}
+						} else {
+							if session.Metadata == nil {
+								session.Metadata = map[string]string{}
+							}
+							session.Metadata["restart_requested"] = "true"
+							fmt.Fprintf(stderr, "session reconciler: %s progress-stalled (no progress for >%s, no open claim, provider healthy); requesting fresh restart (#%d)\n", name, threshold, count) //nolint:errcheck
+							if trace != nil {
+								trace.recordDecision("reconciler.session.progress_stall", tp.TemplateName, name, "stall", "restart_requested", traceRecordPayload{
+									"restart_count": count,
+								}, nil, "")
+							}
+						}
+					}
 				}
 			}
 		}

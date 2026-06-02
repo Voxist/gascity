@@ -143,6 +143,12 @@ const (
 	// session count. One alert per episode; AlertSent is cleared on green so
 	// the next episode fires independently. (ADR-0013 A1 M3a)
 	ProviderHealthGateAlert = "provider.health_gate_alert"
+
+	// ProgressStallEscalation fires once per stall episode after K=3 consecutive
+	// stall-triggered restarts with no progress advancement. Auto-restart is
+	// suppressed after this fires; manual intervention is required.
+	// (ADR-0013 A1 M3b)
+	ProgressStallEscalation = "session.progress_stall_escalation"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
