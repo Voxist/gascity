@@ -1,6 +1,6 @@
 // provider_health_gate.go — reconciler-side provider health gate (ADR-0013 A1 M3a).
 //
-// Architecture: the pack's anthropic-failover-watcher (vp-8cf) writes
+// Architecture: the pack's anthropic-failover-watcher writes
 // provider-health.json; this file's code reads it. The reconciler is a
 // pure consumer: it never classifies errors itself.
 //
