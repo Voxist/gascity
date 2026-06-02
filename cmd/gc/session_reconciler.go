@@ -1511,7 +1511,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 				holdsClaim := false
 				if !exempt {
-					if has, err := sessionHasOpenAssignedWorkForConfig(store, rigStores, *session, cfg); err == nil {
+					has, err := sessionHasOpenAssignedWorkForConfig(store, rigStores, *session, cfg)
+					if err != nil {
+						// Fail safe: an unreadable claim check must not recycle a
+						// session that may hold in-progress work. Mirrors the drain
+						// guards elsewhere (they skip the destructive action on a
+						// claim-check error rather than assume the session is idle).
+						fmt.Fprintf(stderr, "session reconciler: checking assigned work before progress-stall recycle for %s: %v\n", name, err) //nolint:errcheck
+						holdsClaim = true
+					} else {
 						holdsClaim = has
 					}
 				}
