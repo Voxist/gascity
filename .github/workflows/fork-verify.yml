@@ -1,0 +1,41 @@
+name: fork-verify
+
+# Minimal fork-only CI for bourgois/gascity. Verifies WIP feature branches
+# WITHOUT upstream's Blacksmith self-hosted runners, runner-policy gating, or
+# secrets — none of which a fork has. ubuntu-latest compiles the Dolt
+# go-icu-regex CGO dependency cleanly; the `unicode/regex.h` build failure is
+# macOS-only (icu4c@78 header layout), so a Linux runner is exactly what's
+# needed to get a real green/red signal.
+#
+# Reuses the upstream composite action .github/actions/setup-gascity-ubuntu so
+# the Go + Dolt + native-dependency setup is not re-solved here.
+#
+# This workflow is fork-only scaffolding and is excluded from upstream PRs.
+
+on:
+  push:
+    branches: ["feat/**", "fix/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      DOLT_VERSION: "2.0.7"
+      BD_VERSION: "v1.0.5"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "false"
+      - name: Build (compiles the whole tree — catches compile errors the macOS ICU break hides)
+        run: go build ./...
+      - name: Vet changed packages
+        run: go vet ./cmd/gc/...
+      - name: Unit tests — provider-health reader (vc-de23n, ADR-0013 A1 / 3a)
+        run: go test ./cmd/gc/ -run 'TestProviderHealth' -count=1 -v
