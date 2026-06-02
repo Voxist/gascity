@@ -37,5 +37,5 @@ jobs:
         run: go build ./...
       - name: Vet changed packages
         run: go vet ./cmd/gc/...
-      - name: Unit tests — provider-health reader (vc-de23n, ADR-0013 A1 / 3a)
-        run: go test ./cmd/gc/ -run 'TestProviderHealth' -count=1 -v
+      - name: Unit tests — provider-health gate (vc-de23n, ADR-0013 A1 / 3a)
+        run: go test ./cmd/gc/ -run 'TestProviderHealth|TestAgentProviderName|TestRealizePoolDesiredSessions' -count=1 -v
