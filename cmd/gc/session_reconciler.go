@@ -1499,13 +1499,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 		}
 
-		// Progress-aware recycle (ADR-0013 A1 M3b, vp-jpm): a desired, alive,
+		// Progress-aware recycle (ADR-0013 A1 M3b): a desired, alive,
 		// claim-less pool session on a healthy provider that has not advanced
 		// progress in > ProgressStallTimeout is restarted fresh. Opt-in via
 		// [session] progress_stall_timeout; zero/unset disables (default).
 		//
 		// Gates (all must pass): threshold > 0, pool-managed, alive, no open
-		// claim, provider healthy (file-based registry from vp-0a3), not
+		// claim, provider healthy (file-based health registry), not
 		// attached/pending-interaction/startup-grace.
 		//
 		// K=3 cap: after K consecutive stall restarts with no progress
