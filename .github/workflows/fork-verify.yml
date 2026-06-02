@@ -36,6 +36,8 @@ jobs:
       - name: Build (compiles the whole tree — catches compile errors the macOS ICU break hides)
         run: go build ./...
       - name: Vet changed packages
-        run: go vet ./cmd/gc/...
-      - name: Unit tests — provider-health gate (vc-de23n, ADR-0013 A1 / 3a)
-        run: go test ./cmd/gc/ -run 'TestProviderHealth|TestAgentProviderName|TestRealizePoolDesiredSessions' -count=1 -v
+        run: go vet ./cmd/gc/... ./internal/config/...
+      - name: Unit tests — provider-health gate + progress predicate (vc-de23n/vc-uqnu9, ADR-0013 A1 / 3a+3b)
+        run: go test ./cmd/gc/ -run 'TestProviderHealth|TestAgentProviderName|TestRealizePoolDesiredSessions|TestSessionProgressStalled' -count=1 -v
+      - name: Unit tests — progress-stall config accessor (vc-uqnu9 / 3b)
+        run: go test ./internal/config/ -run 'TestProgressStallTimeoutDuration' -count=1 -v
