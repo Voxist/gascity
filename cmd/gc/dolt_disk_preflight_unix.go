@@ -25,5 +25,5 @@ func containerFreeBytes(path string) (int64, error) {
 	if err := unix.Statfs(path, &stat); err != nil {
 		return -1, fmt.Errorf("statfs %q: %w", path, err)
 	}
-	return int64(stat.Bavail) * int64(stat.Bsize), nil
+	return int64(stat.Bavail * uint64(stat.Bsize)), nil
 }
