@@ -562,6 +562,18 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			sessionBeads,
 			cr.stderr,
 		)
+		// Squatter guard (gastownhall/gascity#2930): a foreign Dolt that has
+		// bound this city's managed port returns zero demand, which looks
+		// identical to a genuinely-idle fleet and would drain every running
+		// pool. Only when there is no assigned work yet running sessions exist
+		// (the drain scenario) do we pay one @@datadir probe to confirm the
+		// store is ours; a confirmed data-dir mismatch is treated as a partial
+		// read so the existing hold suppresses the drain. A non-empty work set
+		// or no running sessions means there is nothing to protect this tick.
+		if len(result.AssignedWorkBeads) == 0 && len(sessionBeads.Open()) > 0 && managedDoltDataDirMismatch(cr.cityPath) {
+			fmt.Fprintf(cr.stderr, "%s: managed dolt serves an unexpected data-dir (squatter on the managed port?); holding pools this tick — see gastownhall/gascity#2930\n", cr.logPrefix) //nolint:errcheck // best-effort stderr
+			result.StoreQueryPartial = true
+		}
 		if ctx.Err() != nil {
 			return
 		}
