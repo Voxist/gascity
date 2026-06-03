@@ -2817,6 +2817,10 @@ esac
 	}
 	// The shell captures $PWD which on macOS resolves /tmp symlinks to
 	// /private/tmp. Resolve rigDir the same way before comparing.
+	// $PWD is captured by the shell, which on macOS resolves /tmp symlinks to
+	// /private/tmp; resolve rigDir the same way for the pwd= assertion. BEADS_DIR
+	// is the literal env value we pass (unresolved rigDir), so it keeps the
+	// original path — assert each against the form it actually takes.
 	realRigDir, _ := filepath.EvalSymlinks(rigDir)
 	if realRigDir == "" {
 		realRigDir = rigDir
@@ -2824,7 +2828,7 @@ esac
 	log := string(logData)
 	for _, want := range []string{
 		"pwd=" + realRigDir,
-		"BEADS_DIR=",
+		"BEADS_DIR=" + filepath.Join(rigDir, ".beads"),
 		"init --server -p tc --skip-hooks --database tc",
 	} {
 		if !strings.Contains(log, want) {
