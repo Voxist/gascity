@@ -1507,10 +1507,22 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// session. Set the restart_requested marker and let the block below do
 		// the actual circuit-breaker-aware restart.
 		if threshold := cfg.Session.ProgressStallTimeoutDuration(); threshold > 0 && alive {
-			if lastActivity, _ := sp.GetLastActivity(name); !lastActivity.IsZero() && clk.Now().Sub(lastActivity) > threshold {
+			lastActivity, lastActivityErr := sp.GetLastActivity(name)
+			if lastActivityErr != nil {
+				fmt.Fprintf(stderr, "session reconciler: reading last activity before progress-stall recycle for %s: %v\n", name, lastActivityErr) //nolint:errcheck
+			}
+			if lastActivityErr == nil && !lastActivity.IsZero() && clk.Now().Sub(lastActivity) > threshold {
 				exempt := pendingInteractionKeepsAwake(*session, sp, name, clk)
 				if !exempt {
-					if attached, err := sessionAttachedForConfigDrift(*session, sp, cityPath, store, cfg, name); err == nil && attached {
+					attached, attachErr := sessionAttachedForConfigDrift(*session, sp, cityPath, store, cfg, name)
+					if attachErr != nil {
+						// Fail safe: an unreadable attachment check must not recycle a
+						// session a human may be attached to. Mirrors the claim-check
+						// guard below — skip the destructive action on error rather
+						// than assume the session is unattended.
+						fmt.Fprintf(stderr, "session reconciler: checking attachment before progress-stall recycle for %s: %v\n", name, attachErr) //nolint:errcheck
+						exempt = true
+					} else if attached {
 						exempt = true
 					}
 				}
