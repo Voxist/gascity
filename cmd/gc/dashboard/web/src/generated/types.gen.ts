@@ -784,7 +784,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionSubmitSucceededPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorShutdownPayload | UnboundEventPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadEventPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionSubmitSucceededPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorShutdownPayload | UnboundEventPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -3165,6 +3165,19 @@ export type StatusWorkCounts = {
     ready: number;
 };
 
+export type StoreDiskCriticalPayload = {
+    data_dir: string;
+    floor_bytes: number;
+    free_bytes: number;
+};
+
+export type StoreDiskWarnPayload = {
+    data_dir: string;
+    floor_bytes: number;
+    free_bytes: number;
+    warn_bytes: number;
+};
+
 export type StoreMaintenanceDonePayload = {
     after_bytes: number;
     before_bytes: number;
@@ -3369,6 +3382,10 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeExtmsgOutbound) | ({
     type: 'extmsg.unbound';
 } & TypedEventStreamEnvelopeExtmsgUnbound) | ({
+    type: 'gc.store.disk_critical';
+} & TypedEventStreamEnvelopeGcStoreDiskCritical) | ({
+    type: 'gc.store.disk_warn';
+} & TypedEventStreamEnvelopeGcStoreDiskWarn) | ({
     type: 'gc.store.maintenance.done';
 } & TypedEventStreamEnvelopeGcStoreMaintenanceDone) | ({
     type: 'gc.store.maintenance.failed';
@@ -3741,6 +3758,34 @@ export type TypedEventStreamEnvelopeExtmsgUnbound = {
     subject?: string;
     ts: string;
     type: 'extmsg.unbound';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope gc.store.disk_critical
+ */
+export type TypedEventStreamEnvelopeGcStoreDiskCritical = {
+    actor: string;
+    message?: string;
+    payload: StoreDiskCriticalPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'gc.store.disk_critical';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope gc.store.disk_warn
+ */
+export type TypedEventStreamEnvelopeGcStoreDiskWarn = {
+    actor: string;
+    message?: string;
+    payload: StoreDiskWarnPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'gc.store.disk_warn';
     workflow?: WorkflowEventProjection;
 };
 
@@ -4336,6 +4381,10 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeExtmsgOutbound) | ({
     type: 'extmsg.unbound';
 } & TypedTaggedEventStreamEnvelopeExtmsgUnbound) | ({
+    type: 'gc.store.disk_critical';
+} & TypedTaggedEventStreamEnvelopeGcStoreDiskCritical) | ({
+    type: 'gc.store.disk_warn';
+} & TypedTaggedEventStreamEnvelopeGcStoreDiskWarn) | ({
     type: 'gc.store.maintenance.done';
 } & TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone) | ({
     type: 'gc.store.maintenance.failed';
@@ -4729,6 +4778,36 @@ export type TypedTaggedEventStreamEnvelopeExtmsgUnbound = {
     subject?: string;
     ts: string;
     type: 'extmsg.unbound';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope gc.store.disk_critical
+ */
+export type TypedTaggedEventStreamEnvelopeGcStoreDiskCritical = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: StoreDiskCriticalPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'gc.store.disk_critical';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope gc.store.disk_warn
+ */
+export type TypedTaggedEventStreamEnvelopeGcStoreDiskWarn = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: StoreDiskWarnPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'gc.store.disk_warn';
     workflow?: WorkflowEventProjection;
 };
 
