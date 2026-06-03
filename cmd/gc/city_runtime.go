@@ -562,18 +562,6 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			sessionBeads,
 			cr.stderr,
 		)
-		// Squatter guard (gastownhall/gascity#2930): a foreign Dolt that has
-		// bound this city's managed port returns zero demand, which looks
-		// identical to a genuinely-idle fleet and would drain every running
-		// pool. Only when there is no assigned work yet running sessions exist
-		// (the drain scenario) do we pay one @@datadir probe to confirm the
-		// store is ours; a confirmed data-dir mismatch is treated as a partial
-		// read so the existing hold suppresses the drain. A non-empty work set
-		// or no running sessions means there is nothing to protect this tick.
-		if len(result.AssignedWorkBeads) == 0 && len(sessionBeads.Open()) > 0 && managedDoltDataDirMismatch(cr.cityPath) {
-			fmt.Fprintf(cr.stderr, "%s: managed dolt serves an unexpected data-dir (squatter on the managed port?); holding pools this tick — see gastownhall/gascity#2930\n", cr.logPrefix) //nolint:errcheck // best-effort stderr
-			result.StoreQueryPartial = true
-		}
 		if ctx.Err() != nil {
 			return
 		}
@@ -1937,6 +1925,18 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 			fmt.Fprintf(cr.stderr, "released orphaned pool work: %s\n", r.ID) //nolint:errcheck
 		}
 		assignedWorkBeads, assignedWorkStoreRefs = filterReleasedAssignedWorkSnapshot(assignedWorkBeads, assignedWorkStoreRefs, released)
+	}
+	// Squatter guard (gastownhall/gascity#2930): a foreign Dolt that has bound
+	// this city's managed port returns zero demand, indistinguishable from a
+	// genuinely-idle fleet — and would drain every running pool. This runs on
+	// the steady-state tick (not just startup), before the sweep and the
+	// singleton reconcile below. Only the one drain scenario (no assigned work
+	// yet running sessions exist) pays a ctx-bounded @@datadir probe; a
+	// confirmed data-dir mismatch marks the tick partial so the existing hold
+	// suppresses the drain. Fail-open in every other case.
+	if storeIdentityHold(ctx, cr.cityPath, len(assignedWorkBeads), len(sessionBeads.Open()), cr.stderr) {
+		fmt.Fprintf(cr.stderr, "managed dolt serves an unexpected data-dir (squatter on the managed port?); holding pools this tick — see gastownhall/gascity#2930\n") //nolint:errcheck // best-effort stderr
+		result.StoreQueryPartial = true
 	}
 	// poolDesired determines how many sessions should be AWAKE. Uses the
 	// same scale_check counts that buildDesiredState already computed (no
