@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -43,7 +44,7 @@ func TestGateOpenWorkBoundedHonorsDispatchContext(t *testing.T) {
 		return false, nil
 	})
 	if err == nil {
-		t.Fatal("a cancelled dispatch context must abort the gate (skip + continue)")
+		t.Fatal("a canceled dispatch context must abort the gate (skip + continue)")
 	}
 }
 
@@ -52,7 +53,7 @@ func TestGateOpenWorkBoundedPropagatesGateError(t *testing.T) {
 	_, err := gateOpenWorkBounded(context.Background(), time.Second, "order:x", func() (bool, error) {
 		return false, wantErr
 	})
-	if err != wantErr {
+	if !errors.Is(err, wantErr) {
 		t.Fatalf("gate error must propagate unchanged: got %v, want %v", err, wantErr)
 	}
 }
