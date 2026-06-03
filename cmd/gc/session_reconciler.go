@@ -1529,9 +1529,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					}
 				}
 				providerHealthy := true
-				if !exempt && !holdsClaim {
-					snap, _ := loadProviderHealthSnapshot(store)
-					providerHealthy = snap.healthy(agentProviderName(cfg, findAgentByTemplate(cfg, tp.TemplateName)))
+				if !exempt && !holdsClaim && tp.ResolvedProvider != nil {
+					// Reuse the per-tick provider-health snapshot (#2962). Gate 1
+					// (provider RED) takes precedence: never recycle a session whose
+					// provider is red. Fail-open — absent/stale registry → healthy.
+					if h, present := phSnap.check(tp.ResolvedProvider.Name); present {
+						providerHealthy = h
+					}
 				}
 				if sessionProgressStalled(threshold, holdsClaim, providerHealthy, exempt, lastActivity, clk.Now()) {
 					if session.Metadata == nil {
