@@ -87,28 +87,26 @@ func TestStoreIdentityHold(t *testing.T) {
 	t.Cleanup(func() { managedDoltDataDirMismatchFn = restore })
 
 	for name, tc := range map[string]struct {
-		assignedWork int
-		openSessions int
+		drainPending bool
 		mismatch     bool
 		wantHold     bool
 		wantProbed   bool
 	}{
-		"drain scenario + mismatch":  {assignedWork: 0, openSessions: 3, mismatch: true, wantHold: true, wantProbed: true},
-		"drain scenario, store ours": {assignedWork: 0, openSessions: 3, mismatch: false, wantHold: false, wantProbed: true},
-		"has work skips probe":       {assignedWork: 5, openSessions: 3, mismatch: true, wantHold: false, wantProbed: false},
-		"no sessions skips probe":    {assignedWork: 0, openSessions: 0, mismatch: true, wantHold: false, wantProbed: false},
+		"drain pending + mismatch":  {drainPending: true, mismatch: true, wantHold: true, wantProbed: true},
+		"drain pending, store ours": {drainPending: true, mismatch: false, wantHold: false, wantProbed: true},
+		"no drain skips probe":      {drainPending: false, mismatch: true, wantHold: false, wantProbed: false},
 	} {
 		probed := false
 		managedDoltDataDirMismatchFn = func(_ context.Context, _ string, _ io.Writer) bool {
 			probed = true
 			return tc.mismatch
 		}
-		gotHold := storeIdentityHold(context.Background(), "/city", tc.assignedWork, tc.openSessions, nil)
+		gotHold := storeIdentityHold(context.Background(), "/city", tc.drainPending, nil)
 		if gotHold != tc.wantHold {
 			t.Errorf("%s: storeIdentityHold = %v, want %v", name, gotHold, tc.wantHold)
 		}
 		if probed != tc.wantProbed {
-			t.Errorf("%s: identity probed = %v, want %v (probe must be gated to the drain scenario)", name, probed, tc.wantProbed)
+			t.Errorf("%s: identity probed = %v, want %v (probe must be gated to a pending drain)", name, probed, tc.wantProbed)
 		}
 	}
 }

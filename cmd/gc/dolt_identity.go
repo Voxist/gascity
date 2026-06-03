@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/csv"
 	"fmt"
 	"io"
 	"strings"
@@ -25,23 +26,28 @@ func managedDoltServingDataDir(ctx context.Context, port string) (string, error)
 }
 
 // firstManagedDoltCSVValue returns the first data cell of a single-column CSV
-// result (the row after the header), with surrounding quotes/whitespace
-// stripped. Empty string if there is no data row.
+// result (the row after the header). It uses encoding/csv (like
+// managedDoltUserDatabasesFromCSV) so RFC 4180 quoting/escaping is handled
+// correctly. Empty string if there is no data row or the output is unparseable
+// (callers treat that as "cannot determine" → fail open).
 func firstManagedDoltCSVValue(out string) string {
-	lines := strings.Split(strings.ReplaceAll(out, "\r\n", "\n"), "\n")
-	row := 0
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	reader := csv.NewReader(strings.NewReader(out))
+	reader.FieldsPerRecord = 1
+	header := false
+	for {
+		record, err := reader.Read()
+		if err != nil { // io.EOF or parse error → no usable value
+			return ""
+		}
+		if len(record) == 0 {
 			continue
 		}
-		row++
-		if row == 1 {
-			continue // header (@@datadir)
+		if !header {
+			header = true // first record is the @@datadir column header
+			continue
 		}
-		return strings.Trim(line, `"`)
+		return strings.TrimSpace(record[0])
 	}
-	return ""
 }
 
 // managedDoltDataDirMismatchFn is the seam used by the reconciler gate (and its
@@ -111,12 +117,13 @@ func dataDirIsMismatch(serving, expected string) bool {
 
 // storeIdentityHold reports whether this reconcile tick must hold (suppress the
 // drain) because the managed Dolt store identity cannot be trusted. It is gated
-// to the only situation a squatter can drain: no assigned work yet running
-// sessions exist. A non-empty work set proves the store is live and ours; no
-// running sessions means there is nothing to protect this tick — so neither
-// pays the @@datadir probe.
-func storeIdentityHold(ctx context.Context, cityPath string, assignedWorkCount, openSessionCount int, stderr io.Writer) bool {
-	if assignedWorkCount != 0 || openSessionCount == 0 {
+// to the actual drain moment — drainPending is true only when the sweep would
+// close a running pool session this tick (see poolSweepWouldDrain). A steady
+// warm fleet (desired == current) never drains, so it never pays the @@datadir
+// probe; the cost is bounded to scale-down events, which is exactly when a
+// squatter could cause harm.
+func storeIdentityHold(ctx context.Context, cityPath string, drainPending bool, stderr io.Writer) bool {
+	if !drainPending {
 		return false
 	}
 	return managedDoltDataDirMismatchFn(ctx, cityPath, stderr)
