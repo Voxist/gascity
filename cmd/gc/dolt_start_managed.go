@@ -128,6 +128,9 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 	if err != nil {
 		return managedDoltStartReport{}, err
 	}
+	if err := checkManagedDoltDiskPreflight(layout.DataDir, doltDiskMinFreeBytes(), doltDiskWarnFreeBytes(), os.Stderr); err != nil {
+		return managedDoltStartReport{}, err
+	}
 	portNum, err := strconv.Atoi(strings.TrimSpace(port))
 	if err != nil || portNum <= 0 {
 		return managedDoltStartReport{}, fmt.Errorf("invalid port %q", port)

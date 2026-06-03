@@ -358,13 +358,16 @@ func (cs *controllerState) startMaintenanceLoop(ctx context.Context) {
 		return
 	}
 	deps := supervisor.StoreMaintenanceLoopDeps{
-		Cfg:       cfg.Maintenance.Dolt,
-		Store:     store,
-		CityPath:  cityPath,
-		Recorder:  cs.eventProv,
-		Stderr:    os.Stderr,
-		Mail:      mailProv,
-		LastRunAt: supervisor.SeedLastRunAt(cs.eventProv),
+		Cfg:               cfg.Maintenance.Dolt,
+		Store:             store,
+		CityPath:          cityPath,
+		Recorder:          cs.eventProv,
+		Stderr:            os.Stderr,
+		Mail:              mailProv,
+		LastRunAt:         supervisor.SeedLastRunAt(cs.eventProv),
+		DiskFreeBytes:     doltContainerFreeBytesFunc,
+		DiskMinFreeBytes:  doltDiskMinFreeBytes(),
+		DiskWarnFreeBytes: doltDiskWarnFreeBytes(),
 	}
 	if deps.OpenDoltOps == nil || deps.OpenDoltBackup == nil {
 		fmt.Fprintln(os.Stderr, "store-maintenance: enabled in observe-only mode (snapshot and DOLT_GC not yet wired)")
