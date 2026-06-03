@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"io"
 	"path/filepath"
 	"testing"
 )
@@ -40,8 +43,72 @@ func TestDataDirIsMismatch(t *testing.T) {
 			t.Errorf("%s: dataDirIsMismatch(%q, %q) = %v, want %v", name, tc.serving, expected, got, tc.want)
 		}
 	}
-	// Either side empty must fail open regardless of the other.
 	if dataDirIsMismatch("/a/b", "") {
 		t.Errorf("dataDirIsMismatch with empty expected = true, want false (fail open)")
+	}
+}
+
+// TestManagedDoltDataDirMismatchForConn exercises the read+compare fix logic via
+// the managedDoltServingDataDirFn seam (no live Dolt). This is the check whose
+// absence let a port squatter drain the fleet.
+func TestManagedDoltDataDirMismatchForConn(t *testing.T) {
+	expected := filepath.Join(t.TempDir(), ".beads", "dolt")
+	restore := managedDoltServingDataDirFn
+	t.Cleanup(func() { managedDoltServingDataDirFn = restore })
+
+	for name, tc := range map[string]struct {
+		serving string
+		err     error
+		want    bool
+	}{
+		"store is ours":       {serving: expected, want: false},
+		"squatter mismatch":   {serving: "/private/tmp/other/.beads/dolt", want: true},
+		"probe error":         {err: errors.New("connection refused"), want: false}, // fail open
+		"empty result":        {serving: "", want: false},                           // fail open
+		"trailing-slash same": {serving: expected + "/", want: false},
+	} {
+		managedDoltServingDataDirFn = func(_ context.Context, _ string) (string, error) {
+			return tc.serving, tc.err
+		}
+		got := managedDoltDataDirMismatchForConn(context.Background(), expected, "3306", nil)
+		if got != tc.want {
+			t.Errorf("%s: managedDoltDataDirMismatchForConn = %v, want %v", name, got, tc.want)
+		}
+	}
+}
+
+// TestStoreIdentityHold exercises the reconciler gate: it must hold ONLY when
+// there is no assigned work, running sessions exist, AND the identity check
+// confirms a mismatch. The identity check is stubbed via the seam so the gate
+// is testable without a live store (this is the test that would have caught the
+// original startup-only placement bug).
+func TestStoreIdentityHold(t *testing.T) {
+	restore := managedDoltDataDirMismatchFn
+	t.Cleanup(func() { managedDoltDataDirMismatchFn = restore })
+
+	for name, tc := range map[string]struct {
+		assignedWork int
+		openSessions int
+		mismatch     bool
+		wantHold     bool
+		wantProbed   bool
+	}{
+		"drain scenario + mismatch":  {assignedWork: 0, openSessions: 3, mismatch: true, wantHold: true, wantProbed: true},
+		"drain scenario, store ours": {assignedWork: 0, openSessions: 3, mismatch: false, wantHold: false, wantProbed: true},
+		"has work skips probe":       {assignedWork: 5, openSessions: 3, mismatch: true, wantHold: false, wantProbed: false},
+		"no sessions skips probe":    {assignedWork: 0, openSessions: 0, mismatch: true, wantHold: false, wantProbed: false},
+	} {
+		probed := false
+		managedDoltDataDirMismatchFn = func(_ context.Context, _ string, _ io.Writer) bool {
+			probed = true
+			return tc.mismatch
+		}
+		gotHold := storeIdentityHold(context.Background(), "/city", tc.assignedWork, tc.openSessions, nil)
+		if gotHold != tc.wantHold {
+			t.Errorf("%s: storeIdentityHold = %v, want %v", name, gotHold, tc.wantHold)
+		}
+		if probed != tc.wantProbed {
+			t.Errorf("%s: identity probed = %v, want %v (probe must be gated to the drain scenario)", name, probed, tc.wantProbed)
+		}
 	}
 }
