@@ -449,7 +449,7 @@ func runManagedDoltSQL(host, port, user string, args ...string) (string, error) 
 
 // runManagedDoltSQLContext is the context-aware form of runManagedDoltSQL: the
 // command is bounded by both managedDoltSQLCommandTimeout and the caller's ctx,
-// so a hung server cannot outlive a cancelled reconcile tick.
+// so a hung server cannot outlive a canceled reconcile tick.
 func runManagedDoltSQLContext(parent context.Context, host, port, user string, args ...string) (string, error) {
 	host = managedDoltConnectHost(host)
 	port = strings.TrimSpace(port)
