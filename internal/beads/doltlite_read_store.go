@@ -347,6 +347,10 @@ func (s *DoltliteReadStore) LastOrderRun(name string) (time.Time, error) {
 }
 
 func (s *DoltliteReadStore) loadOrderRuns() (map[string]time.Time, map[string]bool, error) {
+	lastRun := make(map[string]time.Time)
+	openRuns := make(map[string]bool)
+
+	// Issues tier: tracking beads (NoHistory, in labels/issues tables).
 	rows, err := s.db.Query(`SELECT l.label, MAX(i.created_at), MAX(CASE WHEN i.status != 'closed' THEN 1 ELSE 0 END)
 		FROM labels l
 		JOIN issues i ON i.id = l.issue_id
@@ -356,25 +360,57 @@ func (s *DoltliteReadStore) loadOrderRuns() (map[string]time.Time, map[string]bo
 		return nil, nil, err
 	}
 	defer rows.Close()
-	lastRun := make(map[string]time.Time)
-	openRuns := make(map[string]bool)
+	if err := mergeOrderRunRows(rows, lastRun, openRuns); err != nil {
+		return nil, nil, err
+	}
+
+	// Wisp tier: molecule step-beads stamped with order-run:NAME at
+	// materialization (vp-umj). Exclude molecule-root types ('molecule',
+	// 'wisp') so orphan roots (open root + all-closed children) don't
+	// permanently block re-dispatch (ga-jra/ga-lo8c).
+	if s.tableExists("wisp_labels") && s.tableExists("wisps") {
+		wispRows, err := s.db.Query(`SELECT wl.label, MAX(w.created_at), MAX(CASE WHEN w.status != 'closed' THEN 1 ELSE 0 END)
+			FROM wisp_labels wl
+			JOIN wisps w ON w.id = wl.issue_id
+			WHERE wl.label >= 'order-run:' AND wl.label < 'order-run;'
+			AND w.issue_type NOT IN ('molecule', 'wisp')
+			GROUP BY wl.label`)
+		if err != nil {
+			return nil, nil, err
+		}
+		defer wispRows.Close()
+		if err := mergeOrderRunRows(wispRows, lastRun, openRuns); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	return lastRun, openRuns, nil
+}
+
+// mergeOrderRunRows scans order-run label rows into lastRun/openRuns, taking
+// the latest timestamp and OR-ing the open flag across both tiers.
+func mergeOrderRunRows(rows *sql.Rows, lastRun map[string]time.Time, openRuns map[string]bool) error {
 	for rows.Next() {
 		var label string
 		var createdRaw any
 		var open int
 		if err := rows.Scan(&label, &createdRaw, &open); err != nil {
-			return nil, nil, err
+			return err
 		}
 		name := strings.TrimPrefix(label, "order-run:")
-		if name != "" {
-			lastRun[name] = parseDBTime(createdRaw).Truncate(time.Second)
-			openRuns[name] = open > 0
+		if name == "" {
+			continue
+		}
+		if t := parseDBTime(createdRaw).Truncate(time.Second); t.After(lastRun[name]) {
+			lastRun[name] = t
+		}
+		if open > 0 {
+			openRuns[name] = true
+		} else if _, seen := openRuns[name]; !seen {
+			openRuns[name] = false
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return nil, nil, err
-	}
-	return lastRun, openRuns, nil
+	return rows.Err()
 }
 
 func (s *DoltliteReadStore) HasOpenOrderRun(name string) (bool, error) {

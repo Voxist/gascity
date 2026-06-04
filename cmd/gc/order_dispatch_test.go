@@ -43,7 +43,10 @@ func workBeadByOrderLabel(t *testing.T, store beads.Store, label string) beads.B
 	for {
 		all := trackingBeads(t, store, label)
 		for _, b := range all {
-			if !strings.HasPrefix(b.Title, "order:") {
+			// Skip tracking beads (title "order:...") and step beads stamped by
+			// the descendant labeller — they carry order-run:NAME since vp-umj
+			// but are not the root work bead.
+			if !strings.HasPrefix(b.Title, "order:") && b.Metadata["gc.step_ref"] == "" {
 				return b
 			}
 		}
@@ -7795,5 +7798,88 @@ func TestDispatchClosesNoStoresWhenCitySuspended(t *testing.T) {
 
 	if len(spies) != 0 {
 		t.Errorf("storeFn called %d times, want 0 when city is suspended", len(spies))
+	}
+}
+
+// TestOrderDispatchStampsDescendantsWithOrderRunLabel verifies that all
+// non-root molecule step beads carry order-run:NAME after dispatch — PREREQ
+// for the O(1) wisp_labels EXISTS gate in HasOpenOrderRun (vp-umj).
+func TestOrderDispatchStampsDescendantsWithOrderRunLabel(t *testing.T) {
+	formulaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formulaDir, "two-step.toml"), []byte(`formula = "two-step"
+version = 1
+
+[[steps]]
+id = "root"
+title = "Root"
+
+[[steps]]
+id = "step-one"
+title = "Step One"
+`), 0o644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	aa := []orders.Order{{
+		Name:         "two-step-order",
+		Trigger:      "cooldown",
+		Interval:     "1m",
+		Formula:      "two-step",
+		Pool:         "worker",
+		FormulaLayer: formulaDir,
+	}}
+	ad := buildOrderDispatcherFromList(aa, store, nil)
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	all := trackingBeads(t, store, "order-run:two-step-order")
+	var stepBeads []beads.Bead
+	for _, b := range all {
+		if b.Metadata["gc.step_ref"] != "" {
+			stepBeads = append(stepBeads, b)
+		}
+	}
+	if len(stepBeads) == 0 {
+		t.Fatal("no step beads found with order-run:two-step-order label; " +
+			"dispatch must stamp all non-root descendants for the O(1) wisp_labels EXISTS gate (vp-umj PREREQ)")
+	}
+}
+
+// mockOrderRunCheckerStore wraps a Store and implements OrderRunChecker so
+// TestHasOpenWorkStrictUsesO1PathWhenCheckerAvailable can verify the fast
+// path is taken instead of the O(tree) BFS.
+type mockOrderRunCheckerStore struct {
+	beads.Store
+	hasOpen map[string]bool
+	queried []string
+	err     error
+}
+
+func (m *mockOrderRunCheckerStore) HasOpenOrderRun(name string) (bool, error) {
+	m.queried = append(m.queried, name)
+	return m.hasOpen[name], m.err
+}
+
+// TestHasOpenWorkStrictUsesO1PathWhenCheckerAvailable verifies that
+// hasOpenWorkStrict delegates to HasOpenOrderRun (the O(1) wisp_labels EXISTS
+// gate) when the store implements OrderRunChecker, instead of falling back to
+// the O(tree) BFS in storeHasOpenDescendants (vp-umj).
+func TestHasOpenWorkStrictUsesO1PathWhenCheckerAvailable(t *testing.T) {
+	checker := &mockOrderRunCheckerStore{
+		Store:   beads.NewMemStore(),
+		hasOpen: map[string]bool{"my-order": true},
+	}
+
+	ad := &memoryOrderDispatcher{}
+	has, err := ad.hasOpenWorkStrict(checker, "my-order")
+	if err != nil {
+		t.Fatalf("hasOpenWorkStrict: %v", err)
+	}
+	if !has {
+		t.Fatal("O(1) checker reported no open work, want true")
+	}
+	if len(checker.queried) == 0 {
+		t.Fatal("HasOpenOrderRun was not called; BFS path was used instead of the O(1) gate (vp-umj)")
 	}
 }

@@ -1298,6 +1298,17 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		return
 	}
 
+	// Stamp non-root descendants with order-run:NAME so the O(1)
+	// wisp_labels EXISTS gate in HasOpenOrderRun can find them (vp-umj PREREQ).
+	// Best-effort: the BFS fallback in storeHasOpenDescendants still works if
+	// individual stamps fail.
+	for _, id := range cookResult.IDMapping {
+		if id == rootID {
+			continue
+		}
+		store.Update(id, beads.UpdateOpts{Labels: []string{"order-run:" + scoped}}) //nolint:errcheck // best-effort
+	}
+
 	m.rec.Record(events.Event{
 		Type:    events.OrderCompleted,
 		Actor:   "controller",
@@ -1387,6 +1398,14 @@ func listCanonicalOpenOrderTrackingBeads(store beads.Store) ([]beads.Bead, error
 // (tr-kds01, where 24h-interval digest wisps accumulated because the
 // pool never picked them up).
 func (m *memoryOrderDispatcher) hasOpenWorkStrict(store beads.Store, scopedName string) (bool, error) {
+	// O(1) fast path: when all molecule descendants carry order-run:NAME,
+	// DoltliteReadStore can answer with a single SQL-EXISTS over wisp_labels
+	// instead of the O(tree) BFS in storeHasOpenDescendants (vp-umj).
+	if checker, ok := beads.OrderRunCheckerFor(store); ok {
+		return checker.HasOpenOrderRun(scopedName)
+	}
+
+	// Fallback: O(tree) BFS for stores without the indexed gate.
 	results, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 		Label: "order-run:" + scopedName,
 		Sort:  beads.SortCreatedDesc,

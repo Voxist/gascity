@@ -61,6 +61,12 @@ func unwrapBeadPolicyStore(store beads.Store) (beads.Store, *beadPolicyStore, bo
 	}
 }
 
+// OrderRunCheckerHandle delegates to the underlying store's O(1) open-work
+// checker, if available (same delegation pattern as GraphApplyHandleProvider).
+func (s *beadPolicyStore) OrderRunCheckerHandle() (beads.OrderRunChecker, bool) {
+	return beads.OrderRunCheckerFor(s.Store)
+}
+
 func (s *beadPolicyStore) Create(b beads.Bead) (beads.Bead, error) {
 	_, storage := s.policyForCreate(b)
 	return createWithStoragePolicy(s.Store, b, storage)

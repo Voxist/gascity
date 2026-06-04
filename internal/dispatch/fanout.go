@@ -183,6 +183,13 @@ func processFanout(store beads.Store, bead beads.Bead, opts ProcessOptions) (Con
 			}
 			totalCreated += inst.Created
 			idMapping = inst.IDMapping
+			// Propagate order-run:NAME to convoy-grow fragments so the O(1)
+			// wisp_labels EXISTS gate keeps working after fanout expansion (vp-umj).
+			if orderLabel := orderRunLabelFrom(bead.Labels); orderLabel != "" {
+				for _, id := range idMapping {
+					store.Update(id, beads.UpdateOpts{Labels: []string{orderLabel}}) //nolint:errcheck // best-effort
+				}
+			}
 		}
 
 		sinkIDs := mapStepIDs(fragment.Sinks, idMapping)
@@ -855,6 +862,16 @@ func lookupItemValue(item interface{}, path string) (interface{}, bool) {
 		}
 	}
 	return current, true
+}
+
+// orderRunLabelFrom returns the first "order-run:*" label in labels, or "".
+func orderRunLabelFrom(labels []string) string {
+	for _, l := range labels {
+		if strings.HasPrefix(l, "order-run:") {
+			return l
+		}
+	}
+	return ""
 }
 
 func mapStepIDs(stepIDs []string, idMapping map[string]string) []string {

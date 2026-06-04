@@ -403,3 +403,31 @@ type ParentProjectionWaiter interface {
 	// returns an error if the projection does not converge.
 	WaitForParentProjection(ctx context.Context, id, oldParentID, newParentID string) error
 }
+
+// OrderRunChecker is an optional Store capability for O(1) order-run
+// open-work detection. DoltliteReadStore implements this via an indexed
+// SQL-EXISTS over wisp_labels/wisps instead of the O(tree) BFS used by
+// storeHasOpenDescendants. Requires all molecule descendants to carry the
+// order-run membership label (stamped at materialization — vp-umj).
+type OrderRunChecker interface {
+	HasOpenOrderRun(name string) (bool, error)
+}
+
+// OrderRunCheckerProvider lets a wrapper store expose an OrderRunChecker from
+// its underlying store without claiming the interface globally (same pattern
+// as GraphApplyHandleProvider).
+type OrderRunCheckerProvider interface {
+	OrderRunCheckerHandle() (OrderRunChecker, bool)
+}
+
+// OrderRunCheckerFor returns the OrderRunChecker capability for store, if
+// available. Returns nil, false for stores that don't implement O(1) checks.
+func OrderRunCheckerFor(store Store) (OrderRunChecker, bool) {
+	if checker, ok := store.(OrderRunChecker); ok {
+		return checker, true
+	}
+	if provider, ok := store.(OrderRunCheckerProvider); ok {
+		return provider.OrderRunCheckerHandle()
+	}
+	return nil, false
+}

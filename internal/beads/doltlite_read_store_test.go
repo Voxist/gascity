@@ -1185,3 +1185,56 @@ func openTestDoltliteWriter(t *testing.T, readDB *sql.DB) *sql.DB {
 	}
 	return writer
 }
+
+// TestCrispinRegressionWispLabelsExistsIsO1 guards against re-introducing the
+// O(tree) BFS in HasOpenOrderRun. With 500 wisp step-beads all carrying the
+// order-run:NAME membership label, the indexed SQL-EXISTS gate (wisp_labels
+// JOIN wisps GROUP BY label) must answer in < 500ms; the old BFS would call
+// one subprocess per node and take >> 30s for this tree size (vp-umj).
+func TestCrispinRegressionWispLabelsExistsIsO1(t *testing.T) {
+	const nodeCount = 500
+	const budget = 500 * time.Millisecond
+
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+
+	writer := openTestDoltliteWriter(t, store.db)
+	defer writer.Close() //nolint:errcheck // test cleanup
+
+	now := time.Now().UTC()
+	for i := 0; i < nodeCount; i++ {
+		status := "open"
+		if i%50 == 0 {
+			status = "closed" // sprinkle closed nodes to exercise mergeOrderRunRows OR logic
+		}
+		insertTestDoltliteIssue(t, writer, "wisps", "wisp_labels", "wisp_dependencies", testDoltliteIssue{
+			ID:        fmt.Sprintf("crispin-%04d", i),
+			Title:     fmt.Sprintf("crispin step %d", i),
+			Status:    status,
+			IssueType: "task", // NOT molecule/wisp so the wisp-tier query includes it
+			CreatedAt: now.Add(time.Duration(i) * time.Millisecond),
+			Labels:    []string{"order-run:rig/crispin-order"},
+		})
+	}
+
+	// Force cache miss so loadOrderRuns runs against the full 500-node tree.
+	store.orderRunMu.Lock()
+	store.orderRunHash = ""
+	store.orderRunMu.Unlock()
+
+	start := time.Now()
+	open, err := store.HasOpenOrderRun("rig/crispin-order")
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("HasOpenOrderRun with %d wisp nodes: %v", nodeCount, err)
+	}
+	if !open {
+		t.Fatalf("HasOpenOrderRun: want open=true for %d-node wisp tree; "+
+			"wisp-tier stamp propagation (vp-umj PREREQ) may not be reaching HasOpenOrderRun", nodeCount)
+	}
+	if elapsed > budget {
+		t.Fatalf("HasOpenOrderRun took %v for %d nodes, want < %v — O(N) BFS reintroduced?",
+			elapsed, nodeCount, budget)
+	}
+}
