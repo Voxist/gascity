@@ -176,12 +176,14 @@ func (c PreflightChecker) checkDoltModeSafe(metadata preflightMetadata, ctx Pref
 	case "server":
 		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckPass, "bd context reports dolt server mode", details)
 	case "proxied-server":
-		// Proxied-server (the pooling db-proxy, gastownhall/gascity #1978) is
-		// server-mode semantics for the native store: it reaches the same
-		// external dolt sql-server over one persistent in-process connection.
-		// The proxy only collapses per-bd-CLI-invocation churn; it does not
-		// change how the native store talks to dolt, so this mode is safe.
-		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckPass, "bd context reports dolt proxied-server mode", details)
+		// Proxied-server keeps the in-process native store OFF on purpose: the
+		// native store path does not accept gascity's session-tracking beads
+		// (issue type "session" → "invalid issue type", breaking session
+		// spawning), so a proxied city must use the bd-subprocess store. bd
+		// itself still routes through the pooling db-proxy, so connection churn
+		// is collapsed regardless. This fails the gate (→ bd fallback) rather
+		// than reporting "unsupported dolt mode", so the diagnostic is accurate.
+		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckFail, "dolt_mode=proxied-server routes through the bd-subprocess store (native store not used)", details)
 	case "embedded":
 		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckFail, "dolt_mode=embedded requires server mode or native_embedded build tag", details)
 	default:
