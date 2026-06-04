@@ -27,8 +27,10 @@ import (
 // city does not opt in (or bd lacks support) every path here is a no-op or a
 // clean revert, so existing cities and standard-bd deployments are unaffected.
 
-const proxiedServerClientInfoFile = "proxied_server_client_info.json"
-const doltModeProxiedServer = "proxied-server"
+const (
+	proxiedServerClientInfoFile = "proxied_server_client_info.json"
+	doltModeProxiedServer       = "proxied-server"
+)
 
 // proxiedServerClientInfo mirrors the subset of beads'
 // configfile.ProxiedServerClientInfo that gascity writes. gascity cannot import
@@ -110,6 +112,8 @@ func applyProxiedPoolEnv(env map[string]string, cityPath string) {
 // target; active=false removes any stale client_info (metadata is already
 // "server" from ensureCanonicalScopeMetadata). Idempotent — safe on every
 // reconcile and for the on→off revert.
+//
+//nolint:unparam // fs is threaded for testability/parity with the contract helpers; production callers pass fsys.OSFS{}.
 func applyProxiedServerScopeOverlay(fs fsys.FS, cityRoot, scopeRoot string, active bool) error {
 	beadsDir := filepath.Join(scopeRoot, ".beads")
 	clientInfoPath := filepath.Join(beadsDir, proxiedServerClientInfoFile)
