@@ -2815,8 +2815,6 @@ esac
 	if err != nil {
 		t.Fatalf("read bd log: %v", err)
 	}
-	// The shell captures $PWD which on macOS resolves /tmp symlinks to
-	// /private/tmp. Resolve rigDir the same way before comparing.
 	// $PWD is captured by the shell, which on macOS resolves /tmp symlinks to
 	// /private/tmp; resolve rigDir the same way for the pwd= assertion. BEADS_DIR
 	// is the literal env value we pass (unresolved rigDir), so it keeps the
