@@ -1628,11 +1628,12 @@ var orderGateTimeout = 8 * time.Second
 
 // gateOpenWorkBounded runs the open-work gate under a per-order timeout that
 // also honors the dispatch context. On timeout (or cancellation) it returns an
-// error so the caller skips THAT order and continues to the rest
-// (fail-closed-but-continue, #2893 mitigation #2): a heavy gate never starves
-// the feeders. gate is invoked in a goroutine; on timeout that goroutine is
-// left to finish on its own (its result is discarded via the buffered channel)
-// rather than blocking the dispatch loop.
+// error; the caller resolves that error through gateFailClosed, which applies
+// the per-order policy — non-idempotent orders are skipped (fail-closed) while
+// idempotent ones dispatch anyway (fail-open). Either way a heavy gate never
+// stalls the LATER orders on the tick (#2893). gate is invoked in a goroutine;
+// on timeout that goroutine is left to finish on its own (its result is
+// discarded via the buffered channel) rather than blocking the dispatch loop.
 func gateOpenWorkBounded(ctx context.Context, timeout time.Duration, scoped string, gate func() (bool, error)) (bool, error) {
 	type gateResult struct {
 		has bool

@@ -54,7 +54,7 @@ func TestOrderDispatchIdempotentFailsOpenOnGateTimeout(t *testing.T) {
 	ad.drain(context.Background())
 
 	if got := trackingBeads(t, store, "order-run:unrouted-feeder"); len(got) == 0 {
-		t.Error("idempotent order should fail OPEN on gate timeout and dispatch (no tracking bead created)")
+		t.Error("idempotent order should fail OPEN on gate timeout and dispatch, but no tracking bead was created (order was skipped — the starvation regression)")
 	}
 	if got := trackingBeads(t, store, "order-run:merge-loop-sweep"); len(got) != 0 {
 		t.Errorf("non-idempotent order should fail CLOSED on gate timeout and skip; got %d tracking beads", len(got))
