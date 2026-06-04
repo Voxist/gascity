@@ -2115,6 +2115,7 @@ func TestMaintenanceDoltScriptsSkipTestPatternDatabases(t *testing.T) {
 		"beads_t1234abcd9",
 		"beads_ptbaz",
 		"beads_vrqux",
+		"beads_test_bench_1780469138694213039",
 		"doctest_xyz",
 		"doctortest_abc",
 	}
@@ -2290,6 +2291,26 @@ func TestReaperFormulaSQLReflectsCurrentSchema(t *testing.T) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("ReadFile(%s): %v", path, err)
+	}
+	formula := string(data)
+
+	for _, stalePhrase := range []string{
+		"Total open wisps (for alert threshold)",
+		"If total open wisps",
+		"Open wisp count exceeding",
+	} {
+		if strings.Contains(formula, stalePhrase) {
+			t.Errorf("formula still describes total-open-wisp alerting with %q; reaper alerts on stale non-message open wisps", stalePhrase)
+		}
+	}
+	for _, required := range []string{
+		"Stale non-message open wisps (for alert threshold)",
+		"issue_type NOT IN ('message')",
+		"created_at < DATE_SUB(NOW(), INTERVAL <max_age_hours> HOUR)",
+	} {
+		if !strings.Contains(formula, required) {
+			t.Errorf("formula is missing stale-only alert text/query fragment %q", required)
+		}
 	}
 
 	// Extract every ```sql ... ``` fence body and scan only those — prose

@@ -20,7 +20,9 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/nudgepoller"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -1176,14 +1178,14 @@ func terminalizeBlockedQueuedNudges(cityPath string, blocked map[string][]queued
 func ensureNudgePoller(cityPath, agentName, sessionName string) error {
 	pidPath := nudgePollerPIDPath(cityPath, sessionName)
 	return withNudgePollerPIDLock(pidPath, func() error {
-		if running, _ := existingPollerPID(pidPath); running {
+		if running, _ := existingPollerPID(pidPath, cityPath, sessionName); running {
 			return nil
 		}
 		exe, err := os.Executable()
 		if err != nil {
 			return err
 		}
-		cmd := exec.Command(exe, "nudge", "poll", "--city", cityPath, "--session", sessionName, agentName)
+		cmd := exec.Command(exe, nudgepoller.CommandArgs(cityPath, sessionName, agentName)...)
 		cmd.Env = os.Environ()
 		cmd.Stdout = io.Discard
 		cmd.Stderr = io.Discard
@@ -1923,7 +1925,7 @@ func acquireNudgePollerLease(cityPath, sessionName string) (func(), error) {
 		case err == nil && strings.TrimSpace(string(current)) == strings.TrimSpace(string(pid)):
 			return nil
 		case err == nil:
-			if running, _ := existingPollerPID(pidPath); running {
+			if running, _ := existingPollerPID(pidPath, cityPath, sessionName); running {
 				return errNudgePollerRunning
 			}
 		case !errors.Is(err, os.ErrNotExist):
@@ -1937,7 +1939,7 @@ func acquireNudgePollerLease(cityPath, sessionName string) (func(), error) {
 	return release, nil
 }
 
-func existingPollerPID(pidPath string) (bool, error) {
+func existingPollerPID(pidPath, cityPath, sessionName string) (bool, error) {
 	data, err := os.ReadFile(pidPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
@@ -1953,7 +1955,10 @@ func existingPollerPID(pidPath string) (bool, error) {
 	if _, err := fmt.Sscanf(pidText, "%d", &pid); err != nil || pid <= 0 {
 		return false, nil
 	}
-	if err := syscall.Kill(pid, 0); err == nil || errors.Is(err, syscall.EPERM) {
+	if cityPath == "" || sessionName == "" {
+		return false, nil
+	}
+	if pidutil.AliveWithCmdline(pid, nudgepoller.CmdlineMatcher(cityPath, sessionName)) {
 		return true, nil
 	}
 	return false, nil

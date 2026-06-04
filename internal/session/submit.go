@@ -14,7 +14,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/nudgepoller"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
@@ -563,7 +565,7 @@ var (
 func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
 	pidPath := sessionSubmitPollerPIDPath(cityPath, sessionName)
 	return withSessionSubmitPollerPIDLock(pidPath, func() error {
-		if running, _ := existingSessionSubmitPollerPID(pidPath); running {
+		if running, _ := existingSessionSubmitPollerPID(pidPath, cityPath, sessionName); running {
 			return nil
 		}
 		exe, err := sessionSubmitPollerExecutable()
@@ -573,7 +575,7 @@ func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
 		if isGoTestExecutable(exe) {
 			return fmt.Errorf("refusing to start nudge poller with Go test binary %q", exe)
 		}
-		cmd := exec.Command(exe, "nudge", "poll", "--city", cityPath, "--session", sessionName, agentName)
+		cmd := exec.Command(exe, nudgepoller.CommandArgs(cityPath, sessionName, agentName)...)
 		cmd.Env = os.Environ()
 		logFile, err := os.OpenFile(sessionSubmitPollerLogPath(cityPath, sessionName), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 		if err != nil {
@@ -607,7 +609,7 @@ func sessionSubmitPollerLogPath(cityPath, sessionName string) string {
 	return citylayout.RuntimePath(cityPath, "nudges", "pollers", sessionName+".log")
 }
 
-func existingSessionSubmitPollerPID(pidPath string) (bool, error) {
+func existingSessionSubmitPollerPID(pidPath, cityPath, sessionName string) (bool, error) {
 	data, err := os.ReadFile(pidPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
@@ -623,7 +625,10 @@ func existingSessionSubmitPollerPID(pidPath string) (bool, error) {
 	if _, err := fmt.Sscanf(pidText, "%d", &pid); err != nil || pid <= 0 {
 		return false, nil
 	}
-	if err := syscall.Kill(pid, 0); err == nil || errors.Is(err, syscall.EPERM) {
+	if cityPath == "" || sessionName == "" {
+		return false, nil
+	}
+	if pidutil.AliveWithCmdline(pid, nudgepoller.CmdlineMatcher(cityPath, sessionName)) {
 		return true, nil
 	}
 	return false, nil

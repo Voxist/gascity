@@ -78,12 +78,14 @@ var DiscoveryTargets = []Target{
 	},
 }
 
-// HeapInusePeakTarget is the memory ceiling from discovery.md: the store must
-// hold its working set in a bounded heap. Source: docs/coordination-store/
-// discovery.md §Targets (RAM ≤ 256MB HeapInuse peak).
+// HeapInusePeakTarget is retained as an informational threshold (256 MiB).
+// The primary memory gate is HeapInuseDeltaTarget (workload-induced growth);
+// HeapInusePeak is reported for visibility but does not fail the scorecard.
 const HeapInusePeakTarget = 256 * 1024 * 1024
 
 // HeapInuseDeltaTarget is the maximum workload-induced heap growth allowed.
+// This is the primary MemPass gate: HeapInuseDelta (peak minus baseline) must
+// stay at or below this value for the memory check to pass.
 const HeapInuseDeltaTarget = 256 * 1024 * 1024
 
 // MemReport captures memory consumption observed during a workload run.
@@ -147,11 +149,19 @@ type Scorecard struct {
 	// MemPass reports whether the HeapInuseDelta target was met. Only
 	// meaningful when Mem.Sampled is true.
 	MemPass bool
+	// LeakAborted is true when the run was canceled by the memory guard.
+	LeakAborted bool
+	// LeakFinding describes what triggered the memory guard abort.
+	// Empty when LeakAborted is false.
+	LeakFinding string
 }
 
 // Passed returns true if all measured targets passed, including the memory
 // target when memory was sampled.
 func (s *Scorecard) Passed() bool {
+	if s.LeakAborted {
+		return false
+	}
 	for _, r := range s.Results {
 		if r.Measured && !r.Pass {
 			return false
@@ -329,6 +339,10 @@ func (s *Scorecard) PrintTable(w io.Writer) {
 		fmt.Fprintf(w, "  %-*s  %-12s  %-12s  %-12s\n", //nolint:errcheck
 			colW, "RSS", rssBaseline, rssPeak, rssSteady)
 		fmt.Fprintf(w, "  %-*s  %-12s\n", colW, "alloc delta (churn)", FormatBytes(s.Mem.AllocDelta)) //nolint:errcheck
+	}
+
+	if s.LeakAborted {
+		fmt.Fprintf(w, "\n  *** LEAK DETECTED — run aborted: %s ***\n", s.LeakFinding) //nolint:errcheck
 	}
 
 	fmt.Fprintln(w) //nolint:errcheck

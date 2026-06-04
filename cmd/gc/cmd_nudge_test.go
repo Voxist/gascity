@@ -7,13 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/nudgepoller"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -2956,6 +2959,100 @@ func TestAcquireNudgePollerLeaseAllowsBootstrapPID(t *testing.T) {
 	if !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("pid file still exists after release: %v", err)
 	}
+}
+
+func TestExistingPollerPIDRejectsUnrelatedLivePID(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("poller ownership check uses /proc on linux")
+	}
+	dir := t.TempDir()
+	pidPath := nudgePollerPIDPath(dir, "sess-worker")
+	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	running, err := existingPollerPID(pidPath, dir, "sess-worker")
+	if err != nil {
+		t.Fatalf("existingPollerPID: %v", err)
+	}
+	if running {
+		t.Fatalf("existingPollerPID(%q) = true for unrelated live PID %d", pidPath, os.Getpid())
+	}
+}
+
+func TestExistingPollerPIDAcceptsMatchingCitySession(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("poller ownership check uses /proc on linux")
+	}
+	cityPath := t.TempDir()
+	sessionName := "sess-worker"
+	pidPath := nudgePollerPIDPath(cityPath, sessionName)
+	cmd := startPollerLikeProcess(t, cityPath, sessionName)
+	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	running, err := existingPollerPID(pidPath, cityPath, sessionName)
+	if err != nil {
+		t.Fatalf("existingPollerPID: %v", err)
+	}
+	if !running {
+		t.Fatalf("existingPollerPID(%q) = false for matching poller PID %d", pidPath, cmd.Process.Pid)
+	}
+}
+
+func TestExistingPollerPIDRejectsDifferentCitySameSession(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("poller ownership check uses /proc on linux")
+	}
+	cityPath := t.TempDir()
+	otherCityPath := t.TempDir()
+	sessionName := "sess-worker"
+	pidPath := nudgePollerPIDPath(cityPath, sessionName)
+	cmd := startPollerLikeProcess(t, otherCityPath, sessionName)
+	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	running, err := existingPollerPID(pidPath, cityPath, sessionName)
+	if err != nil {
+		t.Fatalf("existingPollerPID: %v", err)
+	}
+	if running {
+		t.Fatalf("existingPollerPID(%q) = true for same-session poller in different city", pidPath)
+	}
+}
+
+func startPollerLikeProcess(t *testing.T, cityPath, sessionName string) *exec.Cmd {
+	t.Helper()
+	scriptPath := filepath.Join(t.TempDir(), "gc-fake")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nread _hold\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(fake poller): %v", err)
+	}
+	cmd := exec.Command(scriptPath, nudgepoller.CommandArgs(cityPath, sessionName, "agent")...)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("StdinPipe(fake poller): %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		t.Fatalf("Start(fake poller): %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = stdin.Close()
+		_ = cmd.Wait()
+	})
+	return cmd
 }
 
 func TestSplitQueuedNudgesForTarget_RejectsFencedNudgesWithoutResolvedSession(t *testing.T) {

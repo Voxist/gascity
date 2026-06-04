@@ -169,15 +169,31 @@ func configureFSPressureForTests() {
 }
 
 func TestMain(m *testing.M) {
-	if !isTestscriptCommandInvocation(os.Args[0]) {
-		clearProcessLiveEnvForTests()
+	// testscript re-executes the test binary as "gc" or "bd" for each txtar
+	// command. On that path we must not create a new temp root — the parent
+	// already owns the fixtures. Just configure hooks and forward.
+	if isTestscriptCommandInvocation(os.Args[0]) {
+		configureFSPressureForTests()
+		configureSupervisorHooksForTests()
+		testscript.Main(m, map[string]func(){
+			"gc": func() {
+				configureTestscriptEnvDefaults()
+				os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+			},
+			"bd": bdTestCmd,
+		})
+		return
 	}
+
+	clearProcessLiveEnvForTests()
 	if err := os.Setenv(managedDoltTestModeEnv, "1"); err != nil {
 		panic(err)
 	}
 	if err := os.Setenv(managedDoltTestParentPIDEnv, fmt.Sprintf("%d", os.Getpid())); err != nil {
 		panic(err)
 	}
+	// Sweep stale testTempRoot dirs in system /tmp before creating a new one.
+	sweepOrphanPIDPrefixedDirs(os.TempDir(), testCmdGCTempRootPrefix)
 	testTempRoot, err := os.MkdirTemp("/tmp", pidPrefixedTempPattern(testCmdGCTempRootPrefix))
 	if err != nil {
 		panic(err)
@@ -6844,6 +6860,15 @@ max = -1
 	}
 	if !strings.Contains(out, "Do not start work with `bd update --status in_progress`") {
 		t.Fatalf("graph-worker prompt missing guard against unassigned in_progress work:\n%s", out)
+	}
+	if !strings.Contains(out, `ROOT_ID=$(bd show <id> --json | jq -r '.[0].metadata["gc.root_bead_id"] // empty')`) {
+		t.Fatalf("graph-worker prompt missing continuation-group root lookup:\n%s", out)
+	}
+	if !strings.Contains(out, `--metadata-field gc.root_bead_id=$ROOT_ID`) {
+		t.Fatalf("graph-worker prompt continuation-group sibling claim is not root-scoped:\n%s", out)
+	}
+	if !strings.Contains(out, `if [ -n "$GROUP" ] && [ -n "$ROOT_ID" ]; then`) {
+		t.Fatalf("graph-worker prompt should require group and root before preassigning siblings:\n%s", out)
 	}
 }
 
