@@ -513,7 +513,14 @@ func buildDesiredStateWithSessionBeads(
 			// a rig executor cannot do its work while its rig store is
 			// unreachable, and the partial flag must keep suppressing drain
 			// decisions rather than be overridden by a spurious city-store wake.
-			if isCold && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil {
+			//
+			// ownTarget.store != store guards the case where the rig store
+			// aliases the city store (an unbound rig falling back to the city
+			// scope): a separate "city" group over the same store would
+			// double-count the same beads, since defaultScaleCheckCounts dedups
+			// per group, not across groups. Current store-map builders skip
+			// such rigs, so this is defense-in-depth against future callers.
+			if isCold && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
 				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: store, storeKey: "city"})
 			}
 			continue

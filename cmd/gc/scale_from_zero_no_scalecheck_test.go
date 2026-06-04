@@ -174,3 +174,32 @@ func TestBuildDesiredState_ScaleFromZero_NoScaleCheck_MissingRigStoreNoCrossWake
 		t.Errorf("template should be marked partial when its rig store is missing")
 	}
 }
+
+// TestBuildDesiredState_ScaleFromZero_NoScaleCheck_AliasedRigStoreNoDoubleCount
+// guards the alias defense: if a rig store aliases the city store (the same
+// store object), the cross-store city probe must be skipped so the one routed
+// bead is counted once, not twice (defaultScaleCheckCounts dedups per group,
+// not across groups).
+func TestBuildDesiredState_ScaleFromZero_NoScaleCheck_AliasedRigStoreNoDoubleCount(t *testing.T) {
+	cfg, cityStore, _, qualified := newNoScaleCheckRigPoolCity(t)
+
+	if _, err := cityStore.Create(beads.Bead{
+		ID:       "shared-1",
+		Status:   "open",
+		Type:     "task",
+		Metadata: map[string]string{"gc.routed_to": qualified},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Rig store IS the city store (aliased).
+	aliased := map[string]beads.Store{"rig-A": cityStore}
+	result := buildDesiredStateWithSessionBeads(
+		"test-city", t.TempDir(), time.Now(), cfg, &localMockProvider{},
+		cityStore, aliased, &sessionBeadSnapshot{}, nil, os.Stderr,
+	)
+
+	if got := result.ScaleCheckCounts[qualified]; got != 1 {
+		t.Errorf("aliased-store demand = %d, want 1 (must not double-count the same bead)", got)
+	}
+}
