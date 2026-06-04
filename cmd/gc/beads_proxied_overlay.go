@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -92,18 +91,58 @@ func applyProxiedPoolEnv(env map[string]string, cityPath string) {
 	if env == nil {
 		return
 	}
-	cfg, err := loadCityConfig(cityPath, io.Discard)
-	if err != nil || !proxiedServerScopeActive(cfg) {
+	active, n, idle := resolveProxiedGate(cityPath)
+	if !active {
 		return
 	}
-	n := strconv.Itoa(cfg.Beads.ProxyPoolSizeOrDefault())
-	idle := cfg.Beads.ProxyIdleTimeoutOrDefault()
 	env["GC_BEADS_PROXIED"] = "1"
 	env["GC_BEADS_PROXY_POOL_SIZE"] = n
 	env["BEADS_PROXY_POOL_SIZE"] = n
 	// Keep proxies warm across sparse controller probes (kills respawn churn).
 	env["GC_BEADS_PROXY_IDLE_TIMEOUT"] = idle
 	env["BEADS_PROXY_IDLE_TIMEOUT"] = idle
+}
+
+// proxiedGateCache memoizes the [beads] proxied gate per city, keyed by
+// city.toml's mtime. applyProxiedPoolEnv runs on every bd-command env build (hot
+// under active agents); resolving it through the full loadCityConfig forced a
+// pack-DAG expansion per invocation. The gate fields (proxied / proxy_pool_size
+// / proxy_idle_timeout) are operator-set in city.toml, so a cheap TOML parse —
+// cached until city.toml changes — suffices and skips the per-command expansion.
+var proxiedGateCache sync.Map // cityPath -> proxiedGateEntry
+
+type proxiedGateEntry struct {
+	mtime    int64
+	active   bool
+	poolSize string
+	idle     string
+}
+
+// resolveProxiedGate reports whether the city opts into proxied mode (and bd
+// supports it), plus the pool size and idle timeout, parsing only city.toml's
+// [beads] section and memoizing by city.toml mtime.
+func resolveProxiedGate(cityPath string) (active bool, poolSize, idle string) {
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	fi, err := os.Stat(tomlPath)
+	if err != nil {
+		return false, "", ""
+	}
+	mt := fi.ModTime().UnixNano()
+	if v, ok := proxiedGateCache.Load(cityPath); ok {
+		if e := v.(proxiedGateEntry); e.mtime == mt {
+			return e.active, e.poolSize, e.idle
+		}
+	}
+	entry := proxiedGateEntry{mtime: mt}
+	if data, readErr := os.ReadFile(tomlPath); readErr == nil {
+		if cfg, parseErr := config.Parse(data); parseErr == nil && proxiedServerScopeActive(cfg) {
+			entry.active = true
+			entry.poolSize = strconv.Itoa(cfg.Beads.ProxyPoolSizeOrDefault())
+			entry.idle = cfg.Beads.ProxyIdleTimeoutOrDefault()
+		}
+	}
+	proxiedGateCache.Store(cityPath, entry)
+	return entry.active, entry.poolSize, entry.idle
 }
 
 // applyProxiedServerScopeOverlay reconciles a scope's proxied-server state.
