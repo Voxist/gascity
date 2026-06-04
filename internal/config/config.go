@@ -1289,6 +1289,12 @@ type SessionConfig struct {
 	// StartupTimeout is how long to wait for each agent's Start() call before
 	// treating it as failed. Duration string (e.g., "60s", "2m"). Defaults to "60s".
 	StartupTimeout string `toml:"startup_timeout,omitempty" jsonschema:"default=60s"`
+	// ProgressStallTimeout, when set, enables progress-aware session recycling:
+	// a desired, alive, claim-less session on a healthy provider whose last
+	// progress is older than this duration is restarted fresh. Such a session
+	// has likely parked (e.g. its turn ended on a provider auth error) and will
+	// not self-recover. Duration string (e.g. "30m"). Unset/zero disables it.
+	ProgressStallTimeout string `toml:"progress_stall_timeout,omitempty"`
 	// Socket specifies the tmux socket name for per-city isolation.
 	// When set, all tmux commands use "tmux -L <socket>" to connect to
 	// a dedicated server. When empty, defaults to the city name
@@ -1363,6 +1369,21 @@ func (s *SessionConfig) StartupTimeoutDuration() time.Duration {
 	d, err := time.ParseDuration(s.StartupTimeout)
 	if err != nil {
 		return 60 * time.Second
+	}
+	return d
+}
+
+// ProgressStallTimeoutDuration returns the progress-stall recycle timeout, or 0
+// when unset or unparseable. Zero disables progress-aware recycling (the
+// default): only a city that explicitly opts in by setting a duration above its
+// agents' longest legitimate quiet period gets the behavior.
+func (s *SessionConfig) ProgressStallTimeoutDuration() time.Duration {
+	if s.ProgressStallTimeout == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(s.ProgressStallTimeout)
+	if err != nil {
+		return 0
 	}
 	return d
 }
@@ -2029,6 +2050,14 @@ type DaemonConfig struct {
 	// false as a global kill switch (e.g., for production cities where a
 	// rebuild on the host should not auto-restart the supervisor).
 	AutoRestartOnDrift *bool `toml:"auto_restart_on_drift,omitempty" jsonschema:"default=true"`
+	// AutoReapClosedBeadWorktrees controls whether the reconciler patrol
+	// automatically removes per-bead git worktrees once their associated
+	// work bead reaches closed status. Only worktrees with a clean working
+	// tree, no unpushed commits, and no stashes are removed; unsafe worktrees
+	// are logged as warnings and left in place for operator review. Session
+	// home directories (agent template directories) are never touched.
+	// Defaults to false. Set to true to enable automated worktree cleanup.
+	AutoReapClosedBeadWorktrees *bool `toml:"auto_reap_closed_bead_worktrees,omitempty" jsonschema:"default=false"`
 	// StartReadyTimeout is how long `gc start` and `gc register` wait for
 	// the supervisor to report the city as Running. Cities with many
 	// registered or adopted sessions take longer to start because the
@@ -2069,6 +2098,17 @@ func (d *DaemonConfig) AutoRestartOnDriftEnabled() bool {
 		return true
 	}
 	return *d.AutoRestartOnDrift
+}
+
+// AutoReapClosedBeadWorktreesEnabled reports whether the patrol should
+// automatically remove per-bead git worktrees for closed beads. Defaults
+// to false when the field is unset (nil). Set to true in city.toml to
+// enable automated cleanup.
+func (d *DaemonConfig) AutoReapClosedBeadWorktreesEnabled() bool {
+	if d.AutoReapClosedBeadWorktrees == nil {
+		return false
+	}
+	return *d.AutoReapClosedBeadWorktrees
 }
 
 // AutoPruneWorkerDirEnabled reports whether the reconciler should remove a
