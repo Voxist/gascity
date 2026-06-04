@@ -122,27 +122,58 @@ func fairPoolSessionCreateShares(states []PoolDesiredState, limit int, seed uint
 	type demand struct {
 		template string
 		count    int
+		floor    bool
 	}
 	var demands []demand
 	for _, state := range states {
 		count := 0
+		floor := false
 		for _, request := range state.Requests {
 			// Requests with a session bead ID represent in-flight capacity and
 			// should not reserve fresh-create budget for this template.
 			if request.Tier == "new" && request.SessionBeadID == "" {
 				count++
+				if request.FloorGuarantee {
+					floor = true
+				}
 			}
 		}
 		if count > 0 {
-			demands = append(demands, demand{template: state.Template, count: count})
+			demands = append(demands, demand{template: state.Template, count: count, floor: floor})
 		}
 	}
 	if len(demands) <= 1 {
 		return nil, 0
 	}
 	shares := make(map[string]int, len(demands))
-	start := int(seed % uint64(len(demands)))
 	remaining := limit
+	// start rotates the per-tick allocation by seed so neither the floor
+	// reservation (Phase 1) nor the elastic round-robin (Phase 2) deterministically
+	// favors the same (e.g. alphabetically-first) templates every tick. Without
+	// this rotation, when floor-bearing templates exceed the budget the same
+	// late-order floor templates would be starved on every tick and never spawn
+	// their floor (the starvation pattern fixed in fair wake-budget selection).
+	start := int(seed % uint64(len(demands)))
+	// Phase 1: guarantee one create token per floor-bearing template
+	// (min_active_sessions floor) before elastic scale-check demand competes for
+	// the budget. Without this, a cold pool's lone floor request loses the
+	// round-robin to a warm pool's large demand and its floor never spawns.
+	// Reserved in seed-rotated order; if floor-bearing templates exceed the
+	// budget, a different subset is prioritized each tick so none is permanently
+	// starved.
+	for off := 0; off < len(demands); off++ {
+		if remaining <= 0 {
+			break
+		}
+		d := demands[(start+off)%len(demands)]
+		if d.floor {
+			shares[d.template]++
+			remaining--
+		}
+	}
+	// Phase 2: round-robin the remaining budget across all demand, capped at
+	// each template's request count (a reserved floor token counts toward that
+	// cap, so a floor-only template is not topped up further here).
 	for remaining > 0 {
 		progressed := false
 		for offset := 0; offset < len(demands) && remaining > 0; offset++ {

@@ -3683,6 +3683,77 @@ func TestBuildDesiredStateFairSharesFreshPoolCreatesAcrossPools(t *testing.T) {
 	}
 }
 
+// TestFairPoolSessionCreateSharesReservesFloorFirst guards against cold-pool
+// floor starvation: a cold pool's min_active_sessions floor request must get a
+// create-budget token before
+// a warm pool's larger elastic scale-check demand, regardless of the round-robin
+// seed. Before the fix the floor competed equally in the round-robin and was
+// starved (cold pools never spawned their floor).
+func TestFairPoolSessionCreateSharesReservesFloorFirst(t *testing.T) {
+	// "alpha" sorts first and has large elastic demand; "zulu" sorts last and
+	// has only a single floor-guarantee request. With budget=1 the floor must
+	// still win for every seed.
+	states := []PoolDesiredState{
+		{Template: "alpha", Requests: []SessionRequest{{Tier: "new"}, {Tier: "new"}, {Tier: "new"}}},
+		{Template: "zulu", Requests: []SessionRequest{{Tier: "new", FloorGuarantee: true}}},
+	}
+	for seed := uint64(0); seed < 5; seed++ {
+		shares, _ := fairPoolSessionCreateShares(states, 1, seed)
+		if shares["zulu"] != 1 {
+			t.Errorf("seed=%d: floor pool zulu got %d budget, want 1 (floor reserved before elastic)", seed, shares["zulu"])
+		}
+		if shares["alpha"] != 0 {
+			t.Errorf("seed=%d: elastic alpha got %d budget, want 0 (budget consumed by floor)", seed, shares["alpha"])
+		}
+	}
+
+	// Surplus budget beyond the reserved floor still flows to elastic demand,
+	// and a floor-only template is not topped up past its single request.
+	shares, spare := fairPoolSessionCreateShares(states, 3, 0)
+	if shares["zulu"] != 1 {
+		t.Errorf("floor pool zulu got %d, want 1 (not topped up past its single request)", shares["zulu"])
+	}
+	if shares["alpha"] != 2 {
+		t.Errorf("elastic alpha got %d of surplus, want 2", shares["alpha"])
+	}
+	if spare != 0 {
+		t.Errorf("spare=%d, want 0 (all budget allocated)", spare)
+	}
+}
+
+// TestFairPoolSessionCreateSharesRotatesFloorReservation guards the Phase-1 floor
+// reservation against deterministic starvation: when floor-bearing templates
+// exceed the budget, the seed must rotate which floors are reserved so that no
+// (e.g. alphabetically-late) floor template is permanently starved across ticks.
+func TestFairPoolSessionCreateSharesRotatesFloorReservation(t *testing.T) {
+	// Three floor-bearing templates, budget 1 -> only one floor reserved per tick.
+	// Over rotating seeds every template must be reserved at least once.
+	states := []PoolDesiredState{
+		{Template: "alpha", Requests: []SessionRequest{{Tier: "new", FloorGuarantee: true}}},
+		{Template: "mike", Requests: []SessionRequest{{Tier: "new", FloorGuarantee: true}}},
+		{Template: "zulu", Requests: []SessionRequest{{Tier: "new", FloorGuarantee: true}}},
+	}
+	reserved := map[string]bool{}
+	for seed := uint64(0); seed < 6; seed++ {
+		shares, _ := fairPoolSessionCreateShares(states, 1, seed)
+		total := 0
+		for tmpl, n := range shares {
+			if n > 0 {
+				reserved[tmpl] = true
+				total += n
+			}
+		}
+		if total != 1 {
+			t.Errorf("seed=%d: total floor reservations=%d, want 1 (budget=1)", seed, total)
+		}
+	}
+	for _, tmpl := range []string{"alpha", "mike", "zulu"} {
+		if !reserved[tmpl] {
+			t.Errorf("floor template %q never reserved across seeds (deterministic starvation)", tmpl)
+		}
+	}
+}
+
 func TestBuildDesiredStateFairShareIgnoresInFlightPoolCreates(t *testing.T) {
 	maxWakes := 2
 	store := beads.NewMemStore()
