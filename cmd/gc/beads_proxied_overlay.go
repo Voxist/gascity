@@ -95,9 +95,13 @@ func applyProxiedPoolEnv(env map[string]string, cityPath string) {
 		return
 	}
 	n := strconv.Itoa(cfg.Beads.ProxyPoolSizeOrDefault())
+	idle := cfg.Beads.ProxyIdleTimeoutOrDefault()
 	env["GC_BEADS_PROXIED"] = "1"
 	env["GC_BEADS_PROXY_POOL_SIZE"] = n
 	env["BEADS_PROXY_POOL_SIZE"] = n
+	// Keep proxies warm across sparse controller probes (kills respawn churn).
+	env["GC_BEADS_PROXY_IDLE_TIMEOUT"] = idle
+	env["BEADS_PROXY_IDLE_TIMEOUT"] = idle
 }
 
 // applyProxiedServerScopeOverlay reconciles a scope's proxied-server state.
