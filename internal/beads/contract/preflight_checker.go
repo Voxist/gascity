@@ -175,6 +175,13 @@ func (c PreflightChecker) checkDoltModeSafe(metadata preflightMetadata, ctx Pref
 	switch ctx.DoltMode {
 	case "server":
 		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckPass, "bd context reports dolt server mode", details)
+	case "proxied-server":
+		// Proxied-server (the pooling db-proxy, gastownhall/gascity #1978) is
+		// server-mode semantics for the native store: it reaches the same
+		// external dolt sql-server over one persistent in-process connection.
+		// The proxy only collapses per-bd-CLI-invocation churn; it does not
+		// change how the native store talks to dolt, so this mode is safe.
+		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckPass, "bd context reports dolt proxied-server mode", details)
 	case "embedded":
 		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckFail, "dolt_mode=embedded requires server mode or native_embedded build tag", details)
 	default:

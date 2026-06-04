@@ -129,6 +129,27 @@ func TestPreflightPassesOnHealthyDolt(t *testing.T) {
 	}
 }
 
+func TestPreflightAcceptsProxiedServerDoltMode(t *testing.T) {
+	// Proxied-server (pooling db-proxy, #1978) must be native-store eligible:
+	// the native store connects to the same external dolt over one persistent
+	// in-process connection; only bd-CLI invocations route through the proxy.
+	scope := "/city"
+	checker := testPreflightChecker(preflightMetadataJSON(`{
+		"backend": "dolt",
+		"dolt_mode": "proxied-server",
+		"dolt_database": "gascity",
+		"project_id": "gc-local"
+	}`), PreflightBDContext{Backend: "dolt", DoltMode: "proxied-server"}, "gc-local")
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	assertCheckState(t, result, PreflightCheckDoltModeSafe, PreflightCheckPass)
+	assertPreflightVerdict(t, result, PreflightVerdictEligible, true)
+}
+
 func TestPreflightAcceptsExecGcBeadsBdProviderPath(t *testing.T) {
 	scope := "/city"
 	checker := testPreflightChecker(preflightMetadataJSON(`{
