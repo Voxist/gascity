@@ -693,7 +693,7 @@ func TestBeadsProxiedGateAccessors(t *testing.T) {
 }
 
 func TestParseBeadsProxiedSection(t *testing.T) {
-	cfg, err := Parse([]byte("[workspace]\nname = \"t\"\n\n[beads]\nproxied = true\nproxy_pool_size = 8\n"))
+	cfg, err := Parse([]byte("[workspace]\nname = \"t\"\n\n[beads]\nproxied = true\nproxy_pool_size = 8\nproxy_idle_timeout = \"15m\"\n"))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -702,6 +702,23 @@ func TestParseBeadsProxiedSection(t *testing.T) {
 	}
 	if got := cfg.Beads.ProxyPoolSizeOrDefault(); got != 8 {
 		t.Errorf("proxy_pool_size = %d, want 8", got)
+	}
+	if got := cfg.Beads.ProxyIdleTimeoutOrDefault(); got != "15m" {
+		t.Errorf("proxy_idle_timeout = %q, want 15m", got)
+	}
+}
+
+func TestBeadsProxyIdleTimeoutAccessor(t *testing.T) {
+	if got := (BeadsConfig{}).ProxyIdleTimeoutOrDefault(); got != defaultBeadsProxyIdleTimeout {
+		t.Errorf("default = %q, want %q", got, defaultBeadsProxyIdleTimeout)
+	}
+	blank := "  "
+	if got := (BeadsConfig{ProxyIdleTimeout: &blank}).ProxyIdleTimeoutOrDefault(); got != defaultBeadsProxyIdleTimeout {
+		t.Errorf("blank = %q, want default %q", got, defaultBeadsProxyIdleTimeout)
+	}
+	v := "5m"
+	if got := (BeadsConfig{ProxyIdleTimeout: &v}).ProxyIdleTimeoutOrDefault(); got != "5m" {
+		t.Errorf("set = %q, want 5m", got)
 	}
 }
 
