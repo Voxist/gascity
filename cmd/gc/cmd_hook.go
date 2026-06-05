@@ -166,11 +166,16 @@ func cmdHookWithFormat(args []string, inject bool, hookFormat string, stdout, st
 
 	// A cross-store-eligible (city-scoped) agent federates its work query across
 	// all stores — its own first, then every rig store — matched on its own
-	// identity (vp-kvp stage iii). Rig agents get a single-entry list, so their
-	// behavior is byte-for-byte unchanged.
+	// identity (vp-kvp stage iii). A rig-scoped agent ("<rig>/<name>") instead
+	// adds just its own <rig> store: its routed work lives there, but its
+	// city-scoped work-query env does not reach it, so without this the hook
+	// returns empty and the spawned session exits with nothing to do. This
+	// extends the #2877 city-scoped cross-store delivery to rig-scoped agents.
 	stores := []hookStore{{dir: workDir, env: queryEnv}}
 	if agentIsCrossStoreEligible(&a) {
 		stores = appendRigHookStores(stores, cityPath, cfg, &a, overrides)
+	} else if rig := rigScopedHookRig(cfg, agentForQuery); rig != "" {
+		stores = appendOneRigHookStore(stores, cityPath, cfg, &a, rig, overrides)
 	}
 
 	runner := func(command, _ string) (string, error) {
