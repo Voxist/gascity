@@ -947,6 +947,51 @@ func TestDefaultScaleCheckCountsCountsUnassignedRoutedTaskWisp(t *testing.T) {
 	}
 }
 
+// TestDefaultScaleCheckCountsCountsTypelessRoutedRigPoolBacklog reproduces the
+// Platform-team "4 ready → scaler sees 1" report against the live voxist-city
+// shape: a rig-scoped executor pool with no custom scale_check and a BACKLOG of
+// N unclaimed, routed-to-the-rig-template beads in the rig store. Two details
+// match production exactly and are what earlier TestDefaultScaleCheckCounts
+// tests do NOT cover: (a) the beads are TYPE-UNSET (the live vw store shows
+// type=None), so readyExcludeTypes must not drop them; (b) there are MULTIPLE
+// of them. The default demand probe is authoritative + unclamped for a
+// no-scale_check pool, so it must size to the WHOLE backlog (N) — if it returns
+// < N, the pool sizes to a fraction of its queue and trickles (the 4→1).
+func TestDefaultScaleCheckCountsCountsTypelessRoutedRigPoolBacklog(t *testing.T) {
+	const template = "voxist-web/voxist.executor"
+	const backlog = 4
+	backing := beads.NewMemStore()
+	for i := 0; i < backlog; i++ {
+		if _, err := backing.Create(beads.Bead{
+			Title: "routed executor work",
+			// Type intentionally UNSET — matches the live vw store (type=None).
+			Status: "open",
+			Metadata: map[string]string{
+				"gc.routed_to": template,
+			},
+		}); err != nil {
+			t.Fatalf("create routed bead %d: %v", i, err)
+		}
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:voxist-web",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts[template]; got != backlog {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want %d "+
+			"(Platform 4→1: a no-scale_check rig pool must size to its whole routed-unclaimed backlog, not a fraction)",
+			template, got, backlog)
+	}
+}
+
 func TestDefaultScaleCheckCountsCountsRunTargetOnlyWorkflowDuringMigration(t *testing.T) {
 	const template = "gascity/reviewer"
 	backing := beads.NewMemStore()
