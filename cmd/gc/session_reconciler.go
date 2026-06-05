@@ -1586,6 +1586,33 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						exempt = true
 					}
 				}
+				// Min-floor idle workers are legitimately unclaimed: they hold no
+				// bead because they are waiting for routed work to arrive, not
+				// because they parked on an error. Exempt them before the
+				// I/O-bound claim and provider-health checks so those queries
+				// are skipped entirely for floor workers every reconcile tick.
+				if !exempt && cfg != nil {
+					if cfgAgent := findAgentByTemplate(cfg, tp.TemplateName); cfgAgent != nil {
+						minFloor := cfgAgent.EffectiveMinActiveSessions()
+						if minFloor > 0 {
+							openInPool := 0
+							for j := range ordered {
+								if ordered[j].Status != "closed" && normalizedSessionTemplate(ordered[j], cfg) == tp.TemplateName {
+									openInPool++
+								}
+							}
+							if isMinFloorIdleWorker(minFloor, openInPool) {
+								exempt = true
+								if trace != nil {
+									trace.recordDecision(string(TraceSiteReconcilerProgressStallExempt), tp.TemplateName, name, "min_floor_idle_worker", "exempt", traceRecordPayload{
+										"pool_min":  minFloor,
+										"pool_open": openInPool,
+									}, nil, "")
+								}
+							}
+						}
+					}
+				}
 				holdsClaim := false
 				if !exempt {
 					has, err := sessionHasInProgressAssignedWorkForConfig(store, rigStores, *session, cfg)
