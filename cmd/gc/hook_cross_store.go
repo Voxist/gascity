@@ -45,9 +45,10 @@ func appendRigHookStores(stores []hookStore, cityPath string, cfg *config.City, 
 // the per-rig env machinery (a per-rig agent view whose store env points bd at
 // that rig, with the agent's identity overrides preserved so the query still
 // matches work routed/assigned to this agent). Best-effort: returns stores
-// unchanged if the rig is unknown or its env cannot be built — the agent's own
-// store is always queried first by the caller. Shared by appendRigHookStores
-// (city-scoped read federation, #2877) and the rig-scoped hook path.
+// unchanged if the rig is unknown or its env cannot be built. Shared by
+// appendRigHookStores (city-scoped read federation, #2877, which keeps the
+// agent's own store first) and the rig-scoped hook path (which puts the rig
+// store first, as the agent's primary store).
 func appendOneRigHookStore(stores []hookStore, cityPath string, cfg *config.City, a *config.Agent, rigName string, identityOverrides map[string]string) []hookStore {
 	rigName = strings.TrimSpace(rigName)
 	if cfg == nil || a == nil || rigName == "" {
