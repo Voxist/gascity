@@ -6748,6 +6748,109 @@ func TestHasOpenWorkStrictBlocksOnWispWithOpenChildren(t *testing.T) {
 	}
 }
 
+// TestStoreHasOpenDescendantsUsesMembershipFastPath proves the #2893
+// optimization: an open descendant reachable ONLY by its gc.root_bead_id
+// membership metadata (no ParentID, no dependency edge) is found in a single
+// metadata-filtered List, without the O(tree) per-node ParentID/DepList walk.
+// Because the descendant has no walkable edge to the root, a true result can
+// only come from the membership fast path.
+func TestStoreHasOpenDescendantsUsesMembershipFastPath(t *testing.T) {
+	store := beads.NewMemStore()
+
+	root, err := store.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Open member tied to the root only by membership metadata.
+	if _, err := store.Create(beads.Bead{
+		Title:    "determine-period",
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	has, err := storeHasOpenDescendants(store, root.ID)
+	if err != nil {
+		t.Fatalf("storeHasOpenDescendants: %v", err)
+	}
+	if !has {
+		t.Fatal("open member carrying gc.root_bead_id must count as in-flight via the membership fast path")
+	}
+}
+
+// TestStoreHasOpenDescendantsMembershipOrphanAllClosed guards against false
+// positives: when every member carries gc.root_bead_id but all are closed, the
+// root is an orphan (ga-jra/ga-lo8c) and must NOT count as in-flight work, so a
+// later cooldown tick can re-dispatch.
+func TestStoreHasOpenDescendantsMembershipOrphanAllClosed(t *testing.T) {
+	store := beads.NewMemStore()
+
+	root, err := store.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := store.Create(beads.Bead{
+		Title:    "determine-period",
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(child.ID); err != nil {
+		t.Fatalf("close member: %v", err)
+	}
+
+	has, err := storeHasOpenDescendants(store, root.ID)
+	if err != nil {
+		t.Fatalf("storeHasOpenDescendants: %v", err)
+	}
+	if has {
+		t.Fatal("all-closed membership is an orphan root and must not count as in-flight work")
+	}
+}
+
+// TestStoreHasOpenDescendantsFallsBackWithoutMembershipMetadata proves the
+// fallback: a descendant materialized before gc.root_bead_id stamping is linked
+// only by ParentID and carries no membership metadata. The metadata List
+// returns nothing, so the gate must fall back to the authoritative tree walk
+// and still find the open child — behavior is byte-identical to the historical
+// implementation for un-stamped data.
+func TestStoreHasOpenDescendantsFallsBackWithoutMembershipMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+
+	root, err := store.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Open child linked only by ParentID — no gc.root_bead_id (pre-stamp data).
+	if _, err := store.Create(beads.Bead{
+		Title:    "determine-period",
+		ParentID: root.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	has, err := storeHasOpenDescendants(store, root.ID)
+	if err != nil {
+		t.Fatalf("storeHasOpenDescendants: %v", err)
+	}
+	if !has {
+		t.Fatal("ParentID-linked open child without membership metadata must be found via the walk fallback")
+	}
+}
+
 func TestHasOpenWorkStrictFindsOlderInFlightWispBehindOrphanRoots(t *testing.T) {
 	const formerOpenWorkProbeLimit = 50
 
