@@ -3031,5 +3031,46 @@ func TestFindSpecBeadPrefersRefOverStepID(t *testing.T) {
 	}
 }
 
+// TestUnsupportedControlKindIsParkable pins the control-dispatcher robustness
+// invariant (ga-3p3o): a control bead with an empty/unknown gc.kind is a
+// per-bead categorization failure that must be PARKED, never crash the
+// singleton serve loop. ProcessControl must surface ErrControlUnsupportedKind,
+// and IsParkableControlError must classify only that — not nil, pending, or
+// transient errors, which keep their existing skip/retry/surface handling.
+func TestUnsupportedControlKindIsParkable(t *testing.T) {
+	t.Parallel()
+	store := beads.NewMemStore()
+	bad := mustCreate(t, store, beads.Bead{
+		Title:    "malformed control",
+		Metadata: map[string]string{"gc.kind": ""},
+	})
+
+	_, err := ProcessControl(store, bad, ProcessOptions{})
+	if err == nil {
+		t.Fatal("ProcessControl(empty gc.kind) err = nil, want unsupported-kind error")
+	}
+	if !errors.Is(err, ErrControlUnsupportedKind) {
+		t.Fatalf("ProcessControl err = %v, want errors.Is ErrControlUnsupportedKind", err)
+	}
+	if !IsParkableControlError(err) {
+		t.Fatalf("IsParkableControlError(%v) = false, want true", err)
+	}
+
+	// The classifier must stay narrow: nil/pending/transient are NOT parkable.
+	if IsParkableControlError(nil) {
+		t.Fatal("IsParkableControlError(nil) = true, want false")
+	}
+	if IsParkableControlError(ErrControlPending) {
+		t.Fatal("IsParkableControlError(ErrControlPending) = true, want false")
+	}
+	transient := fmt.Errorf("dispatch boundary: %w", context.DeadlineExceeded)
+	if !IsTransientControllerError(transient) {
+		t.Fatalf("test setup: %v not classified transient", transient)
+	}
+	if IsParkableControlError(transient) {
+		t.Fatalf("IsParkableControlError(%v) = true, want false for transient", transient)
+	}
+}
+
 // Unused import guard.
 var _ = strconv.Itoa

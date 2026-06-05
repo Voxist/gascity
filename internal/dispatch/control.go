@@ -380,6 +380,25 @@ func IsTransientControllerError(err error) bool {
 	return false
 }
 
+// IsParkableControlError reports whether err is a per-bead control
+// categorization failure that the singleton serve loop must PARK (skip +
+// quarantine) rather than treat as fatal. It is deliberately narrow: true only
+// for ErrControlUnsupportedKind today (empty/unknown gc.kind); the errors.Is
+// set is the extension point for future un-routable per-bead sentinels. It is
+// false for nil, ErrControlPending (retry later), and transient store/boundary
+// errors (IsTransientControllerError) — those keep their existing skip/retry/
+// surface handling so genuinely systemic faults still propagate. See ga-3p3o:
+// one malformed work item must not crash-loop the control plane into quarantine.
+func IsParkableControlError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrControlPending) || IsTransientControllerError(err) {
+		return false
+	}
+	return errors.Is(err, ErrControlUnsupportedKind)
+}
+
 func handleRetryExhaustion(store beads.Store, beadID string, attemptNum int, reason, onExhausted, attemptLog string) (ControlResult, error) {
 	if onExhausted == "soft_fail" {
 		closeMetadata := map[string]string{
