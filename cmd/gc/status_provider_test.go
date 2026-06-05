@@ -122,6 +122,31 @@ func TestBoundedStatusProviderUsesPerProviderTimeout(t *testing.T) {
 	})
 }
 
+func TestStatusSessionProviderAppliesProxiedTimeout(t *testing.T) {
+	proxied := true
+	embedded := false
+	cases := []struct {
+		name string
+		cfg  *config.City
+		want time.Duration
+	}{
+		{"proxied", &config.City{Beads: config.BeadsConfig{Proxied: &proxied}}, statusProviderProxiedCallTimeout},
+		{"embedded", &config.City{Beads: config.BeadsConfig{Proxied: &embedded}}, statusProviderCallTimeout},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := newStatusSessionProviderForCity(tc.cfg, t.TempDir())
+			sp, ok := provider.(*statusProvider)
+			if !ok {
+				t.Fatalf("provider type = %T, want *statusProvider", provider)
+			}
+			if sp.timeout != tc.want {
+				t.Fatalf("timeout = %v, want %v", sp.timeout, tc.want)
+			}
+		})
+	}
+}
+
 func TestStatusProviderPreservesNativeLivenessObservation(t *testing.T) {
 	base := newStatusProbeProvider()
 	base.liveness.Store(runtime.Liveness{Running: true, Alive: true})
