@@ -1626,6 +1626,11 @@ func (m *memoryOrderDispatcher) hasOpenWorkInStoresStrict(stores []beads.Store, 
 // overridable in tests.
 var orderGateTimeout = 8 * time.Second
 
+// errGateTimeout marks an open-work gate error caused by the per-order
+// bound elapsing (the #2893 contention case), as opposed to ctx cancel or a
+// genuine store-read error. Only this case fails open for idempotent orders.
+var errGateTimeout = errors.New("open-work gate timed out")
+
 // gateOpenWorkBounded runs the open-work gate under a per-order timeout that
 // also honors the dispatch context. On timeout (or cancellation) it returns an
 // error; the caller resolves that error through gateFailClosed, which applies
@@ -1650,7 +1655,7 @@ func gateOpenWorkBounded(ctx context.Context, timeout time.Duration, scoped stri
 	case r := <-done:
 		return r.has, r.err
 	case <-timer.C:
-		return false, fmt.Errorf("open-work gate for %s timed out after %s; skipping this order so later orders still dispatch (see #2893)", scoped, timeout)
+		return false, fmt.Errorf("open-work gate for %s timed out after %s; skipping this order so later orders still dispatch (see #2893): %w", scoped, timeout, errGateTimeout)
 	case <-ctx.Done():
 		return false, fmt.Errorf("open-work gate for %s aborted: %w", scoped, ctx.Err())
 	}
@@ -1663,9 +1668,13 @@ func gateOpenWorkBounded(ctx context.Context, timeout time.Duration, scoped stri
 // starve them forever (#2893 #2'). Policy:
 //   - dispatch context done (shutdown / tick deadline): always block — there is
 //     no point dispatching into a canceled context.
-//   - otherwise (a per-order gate timeout): a non-idempotent order fails CLOSED
-//     (block, preserving single-flight); an idempotent order fails OPEN
+//   - a per-order gate TIMEOUT (errGateTimeout): a non-idempotent order fails
+//     CLOSED (block, preserving single-flight); an idempotent order fails OPEN
 //     (dispatch anyway), since its re-run is a no-op.
+//   - any other gate error (e.g. a genuine store-read failure): always block.
+//     Only the bounded-gate timeout is the #2893 contention signal that is
+//     safe to relax; a real store/gate error is a different signal where the
+//     conservative response is to fail CLOSED, matching the pre-#2893 behavior.
 //
 // Failing open deliberately relaxes single-flight for idempotent orders: it may
 // dispatch while a prior run is still in flight. That is safe by the
@@ -1680,7 +1689,7 @@ func (m *memoryOrderDispatcher) gateFailClosed(ctx context.Context, a orders.Ord
 	if ctx.Err() != nil {
 		return true
 	}
-	if a.Idempotent {
+	if a.Idempotent && errors.Is(err, errGateTimeout) {
 		logDispatchError(m.stderr, "gc: order dispatch: %s open-work gate failed but order is idempotent; dispatching anyway (#2893)", scoped)
 		return false
 	}

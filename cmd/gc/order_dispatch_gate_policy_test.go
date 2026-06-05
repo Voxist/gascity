@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -66,13 +67,16 @@ func TestOrderDispatchIdempotentFailsOpenOnGateTimeout(t *testing.T) {
 // context (shutdown / tick deadline) always blocks, even for idempotent orders.
 func TestGateFailClosed(t *testing.T) {
 	m := &memoryOrderDispatcher{stderr: lockedStderr(&bytes.Buffer{})}
-	gateErr := errors.New("open-work gate for x timed out")
+	gateErr := fmt.Errorf("open-work gate for x timed out: %w", errGateTimeout)
 
 	if m.gateFailClosed(context.Background(), orders.Order{Idempotent: true}, "feeder", gateErr) {
 		t.Error("idempotent order on a live-context gate timeout should fail OPEN (not blocked)")
 	}
 	if !m.gateFailClosed(context.Background(), orders.Order{Idempotent: false}, "sweep", gateErr) {
 		t.Error("non-idempotent order on gate timeout should fail CLOSED (blocked)")
+	}
+	if !m.gateFailClosed(context.Background(), orders.Order{Idempotent: true}, "feeder", errors.New("dolt: read failed")) {
+		t.Error("idempotent order must fail CLOSED on a non-timeout gate error (only the bounded-gate timeout fails open)")
 	}
 
 	canceledCtx, cancel := context.WithCancel(context.Background())
