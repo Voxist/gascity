@@ -85,6 +85,43 @@ func TestStatusProbeTimeoutSelectsProxiedBound(t *testing.T) {
 	}
 }
 
+func TestBoundedStatusProviderUsesPerProviderTimeout(t *testing.T) {
+	origWarn := statusProviderTimeoutWarning
+	t.Cleanup(func() { statusProviderTimeoutWarning = origWarn })
+
+	t.Run("deadline-shorter-than-call-times-out", func(t *testing.T) {
+		var warnings atomic.Int32
+		statusProviderTimeoutWarning = func() { warnings.Add(1) }
+		base := newStatusProbeProvider()
+		base.running.Store(true)
+		base.delay.Store(int64(50 * time.Millisecond))
+		wrapped := newBoundedStatusProviderWithTimeout(base, 10*time.Millisecond)
+
+		if wrapped.IsRunning("worker") {
+			t.Fatal("IsRunning returned true, want timeout fallback false")
+		}
+		if got := warnings.Load(); got != 1 {
+			t.Fatalf("timeout warnings = %d, want 1", got)
+		}
+	})
+
+	t.Run("deadline-longer-than-call-returns-real-result", func(t *testing.T) {
+		var warnings atomic.Int32
+		statusProviderTimeoutWarning = func() { warnings.Add(1) }
+		base := newStatusProbeProvider()
+		base.running.Store(true)
+		base.delay.Store(int64(50 * time.Millisecond))
+		wrapped := newBoundedStatusProviderWithTimeout(base, 200*time.Millisecond)
+
+		if !wrapped.IsRunning("worker") {
+			t.Fatal("IsRunning returned false, want real provider result true")
+		}
+		if got := warnings.Load(); got != 0 {
+			t.Fatalf("timeout warnings = %d, want 0", got)
+		}
+	})
+}
+
 func TestStatusProviderPreservesNativeLivenessObservation(t *testing.T) {
 	base := newStatusProbeProvider()
 	base.liveness.Store(runtime.Liveness{Running: true, Alive: true})

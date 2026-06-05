@@ -38,18 +38,29 @@ func statusProbeTimeout(cfg *config.City) time.Duration {
 
 type statusProvider struct {
 	base     runtime.Provider
+	timeout  time.Duration
 	warnOnce sync.Once
 }
 
+// newBoundedStatusProvider wraps base with the default embedded deadline,
+// snapshotting the current statusProviderCallTimeout global at construction so
+// the per-provider bound is fixed for the provider's lifetime.
 func newBoundedStatusProvider(base runtime.Provider) runtime.Provider {
+	return newBoundedStatusProviderWithTimeout(base, statusProviderCallTimeout)
+}
+
+// newBoundedStatusProviderWithTimeout wraps base so each status probe is
+// bounded by d (d <= 0 means unbounded). An already-wrapped provider is
+// returned unchanged so re-wrapping stays idempotent.
+func newBoundedStatusProviderWithTimeout(base runtime.Provider, d time.Duration) runtime.Provider {
 	if sp, ok := base.(*statusProvider); ok {
 		return sp
 	}
-	return &statusProvider{base: base}
+	return &statusProvider{base: base, timeout: d}
 }
 
 func boundedStatusCall[T any](p *statusProvider, fallback T, fn func() T) T {
-	if statusProviderCallTimeout <= 0 {
+	if p.timeout <= 0 {
 		return fn()
 	}
 	resultCh := make(chan T, 1)
@@ -59,7 +70,7 @@ func boundedStatusCall[T any](p *statusProvider, fallback T, fn func() T) T {
 	select {
 	case result := <-resultCh:
 		return result
-	case <-time.After(statusProviderCallTimeout):
+	case <-time.After(p.timeout):
 		p.warnOnce.Do(statusProviderTimeoutWarning)
 		return fallback
 	}
