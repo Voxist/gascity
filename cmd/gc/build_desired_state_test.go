@@ -3721,6 +3721,39 @@ func TestFairPoolSessionCreateSharesReservesFloorFirst(t *testing.T) {
 	}
 }
 
+// TestFairPoolSessionCreateSharesReservesElasticSliceFromFloorSaturation guards
+// against the inverse of the floor guarantee: when floor-bearing demand meets or
+// exceeds the budget, the Phase-1 floor reservation must NOT consume the whole
+// budget and zero out elastic pools. A high-demand elastic pool (e.g. a rig
+// executor with a full rig-store queue, min=0) sitting behind ~budget floor pools
+// would otherwise get zero create tokens every tick and never spawn — the
+// voxist-city vw-executor starvation. The elastic reserve (limit/4) guarantees it
+// a share for every seed.
+func TestFairPoolSessionCreateSharesReservesElasticSliceFromFloorSaturation(t *testing.T) {
+	var states []PoolDesiredState
+	for i := 0; i < 8; i++ {
+		states = append(states, PoolDesiredState{
+			Template: fmt.Sprintf("rig%d/reviewer", i),
+			Requests: []SessionRequest{{Tier: "new", FloorGuarantee: true}},
+		})
+	}
+	// One elastic pool (no floor) with demand 6, like a backed-up rig executor.
+	elastic := PoolDesiredState{Template: "voxist-web/executor"}
+	for j := 0; j < 6; j++ {
+		elastic.Requests = append(elastic.Requests, SessionRequest{Tier: "new"})
+	}
+	states = append(states, elastic)
+
+	const budget = 8 // floors (8) >= budget: Phase 1 alone would consume it all.
+	wantReserve := budget / 4
+	for seed := uint64(0); seed < uint64(len(states)); seed++ {
+		shares, _ := fairPoolSessionCreateShares(states, budget, seed)
+		if got := shares["voxist-web/executor"]; got < wantReserve {
+			t.Fatalf("seed=%d: elastic pool starved by floor saturation (got %d), want >= %d (reserved elastic slice)", seed, got, wantReserve)
+		}
+	}
+}
+
 // TestFairPoolSessionCreateSharesRotatesFloorReservation guards the Phase-1 floor
 // reservation against deterministic starvation: when floor-bearing templates
 // exceed the budget, the seed must rotate which floors are reserved so that no

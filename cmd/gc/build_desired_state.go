@@ -154,24 +154,65 @@ func fairPoolSessionCreateShares(states []PoolDesiredState, limit int, seed uint
 	// late-order floor templates would be starved on every tick and never spawn
 	// their floor (the starvation pattern fixed in fair wake-budget selection).
 	start := int(seed % uint64(len(demands)))
+	// Reserve a slice of the budget for elastic (non-floor) demand so a large
+	// floor set can't consume the whole budget in Phase 1 and starve elastic
+	// pools to zero. Without this, when floor-bearing demand >= the budget, an
+	// elastic pool with real demand (e.g. a high-queue rig executor sitting
+	// behind ~budget floor pools) gets zero create tokens every tick and never
+	// spawns a single session. Floors keep priority (3/4 of the budget) but the
+	// reserve guarantees elastic progress; for tiny budgets (< 4) the reserve is
+	// 0, preserving the original floor-first behavior.
+	elasticDemand := 0
+	for _, d := range demands {
+		if !d.floor {
+			elasticDemand += d.count
+		}
+	}
+	elasticReserve := limit / 4
+	if elasticReserve > elasticDemand {
+		elasticReserve = elasticDemand
+	}
+	floorBudget := limit - elasticReserve
 	// Phase 1: guarantee one create token per floor-bearing template
 	// (min_active_sessions floor) before elastic scale-check demand competes for
 	// the budget. Without this, a cold pool's lone floor request loses the
 	// round-robin to a warm pool's large demand and its floor never spawns.
-	// Reserved in seed-rotated order; if floor-bearing templates exceed the
-	// budget, a different subset is prioritized each tick so none is permanently
-	// starved.
+	// Reserved in seed-rotated order, capped at floorBudget so floors can't zero
+	// the elastic reserve; if floor-bearing templates exceed floorBudget, a
+	// different subset is prioritized each tick so none is permanently starved.
+	floorUsed := 0
 	for off := 0; off < len(demands); off++ {
-		if remaining <= 0 {
+		if floorUsed >= floorBudget {
 			break
 		}
 		d := demands[(start+off)%len(demands)]
 		if d.floor {
 			shares[d.template]++
 			remaining--
+			floorUsed++
 		}
 	}
-	// Phase 2: round-robin the remaining budget across all demand, capped at
+	// Phase 2a: hand the reserved elastic slice to elastic (non-floor) demand
+	// before the general round-robin, so floors deferred out of Phase 1 can't
+	// reclaim it. Seed-rotated, capped at each template's request count.
+	elasticGiven := 0
+	for elasticGiven < elasticReserve && remaining > 0 {
+		progressed := false
+		for offset := 0; offset < len(demands) && remaining > 0 && elasticGiven < elasticReserve; offset++ {
+			d := demands[(start+offset)%len(demands)]
+			if d.floor || shares[d.template] >= d.count {
+				continue
+			}
+			shares[d.template]++
+			remaining--
+			elasticGiven++
+			progressed = true
+		}
+		if !progressed {
+			break
+		}
+	}
+	// Phase 2b: round-robin the remaining budget across all demand, capped at
 	// each template's request count (a reserved floor token counts toward that
 	// cap, so a floor-only template is not topped up further here).
 	for remaining > 0 {
