@@ -197,3 +197,33 @@ planner discipline so an auditor sees the explicit consideration.
   crash-loop; the quarantine threshold stays as-is.
 - Re-categorizing existing already-quarantined beads.
 - `origin/main` — this fix targets `feat/beads-proxied-pooling` only.
+
+## Status
+
+**(B) DISPATCHER ROBUSTNESS — shipped (the must-ship reliability fix).**
+
+- [x] T-001 — failing test `TestUnsupportedControlKindIsParkable` (undefined symbols)   ✅ red at `7576dfac7`
+- [x] T-002 — `ErrControlUnsupportedKind` sentinel + `IsParkableControlError` classifier; wrap at `runtime.go` default case   ✅ green at `7576dfac7`
+- [x] T-003 — failing test `TestServeDrainParksBadBeadWithoutCrashing` (fatal error propagates at l.491)   ✅ red at `4da603884`
+- [x] T-004 — parkable backstop branch in `drainWorkflowServeWork` before the fatal return; existing serve/quarantine tests stay green   ✅ green at `4da603884`
+
+Gates: `go test ./internal/dispatch/ ./internal/sling/` green; `cmd/gc` serve/dispatch/convoy/quarantine blast-radius (`-run 'Serve|Drain|ControlDispatcher|Convoy|Quarantine|Parked'`) green; `go vet` clean. (Full `./cmd/gc/` single-invocation exceeds 9 min — CI runs it as 12 shards; not run whole here by design.)
+
+**(A) SLING HYGIENE — deferred to a follow-up bead (plan-sanctioned).**
+
+- [ ] T-005 / T-006 — deferred. The planner's lead (`sling.go:1474` wisp-root
+  `gc.kind` strip) was investigated and does **not** route to the
+  control-dispatcher: `privatizeAttachedRootOnlyWisp` only fires for a
+  `RootOnly` wisp attached to a source bead, sets `Type="molecule"`, and routes
+  to the **execution** target (`a.QualifiedName()`), producing an execution
+  molecule, not a control bead. `IsControlDispatcherKind("wisp")` is false, so
+  the workflow decorator never control-routes it. The real "auto-task"
+  empty-kind source (most likely the generic routing boundary
+  `cliBeadRouter.Route` at `cmd_sling.go:631`, which stamps `gc.routed_to`
+  with no kind guard) needs more design work than a 5-min micro-task, and the
+  naive fix (re-stamp an arbitrary control kind) would be **unsound** — it would
+  make `ProcessControl` mis-handle the bead. Per the PR-splitting guidance,
+  (B) fully satisfies the crash-survival invariant on its own, so (A) is pure
+  trigger-reduction and is tracked in a follow-up bead. With (B) shipped, the
+  dispatcher now **survives** any such bead regardless, so (A) is no longer a
+  crash risk — only a hygiene improvement.
