@@ -7,15 +7,34 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 var (
-	statusProviderCallTimeout    = 50 * time.Millisecond
-	statusProviderTimeoutWarning = func() {
+	statusProviderCallTimeout = 50 * time.Millisecond
+	// statusProviderProxiedCallTimeout is the bounded deadline used when the
+	// bd runtime is proxied-server. Status probes then traverse the
+	// bd-subprocess / dbproxy round-trip (plus per-session/rig probing) and
+	// routinely exceed the 50ms embedded deadline; 1s is large enough to
+	// avoid false "probe timed out" warnings yet still bounds gc status so it
+	// never hangs on a genuinely wedged runtime. Design range: 500ms–1s.
+	statusProviderProxiedCallTimeout = 1 * time.Second
+	statusProviderTimeoutWarning     = func() {
 		fmt.Fprintln(os.Stderr, "gc status: runtime status probe timed out; using partial status")
 	}
 )
+
+// statusProbeTimeout selects the bounded-status-call deadline for a city:
+// the larger proxied bound when the bd runtime is proxied-server, otherwise
+// the tight embedded default. A nil cfg (or embedded/unset Proxied) keeps the
+// 50ms default so embedded latency is unchanged.
+func statusProbeTimeout(cfg *config.City) time.Duration {
+	if cfg != nil && cfg.Beads.ProxiedEnabled() {
+		return statusProviderProxiedCallTimeout
+	}
+	return statusProviderCallTimeout
+}
 
 type statusProvider struct {
 	base     runtime.Provider

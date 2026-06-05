@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -59,6 +60,28 @@ func TestStatusProviderTimeoutDoesNotStickAcrossCalls(t *testing.T) {
 	}
 	if got := warnings.Load(); got != 1 {
 		t.Fatalf("timeout warnings = %d, want 1", got)
+	}
+}
+
+func TestStatusProbeTimeoutSelectsProxiedBound(t *testing.T) {
+	proxied := true
+	embedded := false
+	cases := []struct {
+		name string
+		cfg  *config.City
+		want time.Duration
+	}{
+		{"proxied", &config.City{Beads: config.BeadsConfig{Proxied: &proxied}}, statusProviderProxiedCallTimeout},
+		{"embedded-false", &config.City{Beads: config.BeadsConfig{Proxied: &embedded}}, statusProviderCallTimeout},
+		{"embedded-nil", &config.City{Beads: config.BeadsConfig{}}, statusProviderCallTimeout},
+		{"nil-cfg", nil, statusProviderCallTimeout},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := statusProbeTimeout(tc.cfg); got != tc.want {
+				t.Fatalf("statusProbeTimeout(%s) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
 	}
 }
 
