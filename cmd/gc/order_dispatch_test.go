@@ -6851,6 +6851,53 @@ func TestStoreHasOpenDescendantsFallsBackWithoutMembershipMetadata(t *testing.T)
 	}
 }
 
+// TestStoreHasOpenDescendantsFallsBackOnPartialStampMembership guards the
+// single-flight safety of a partial-stamp molecule: some steps carry
+// gc.root_bead_id (a nested sub-molecule) while sibling ParentID-only steps do
+// not. When every stamped member is closed but an un-stamped sibling is still
+// open, the membership set is non-empty yet has no open member — the gate must
+// still fall back to the walk and report in-flight work, not declare the root
+// idle (which would re-dispatch while work is in flight).
+func TestStoreHasOpenDescendantsFallsBackOnPartialStampMembership(t *testing.T) {
+	base := beads.NewMemStore()
+	store := listIncludingClosedStore{Store: base}
+
+	root, err := store.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A stamped member (e.g. a nested sub-molecule) that is CLOSED.
+	stamped, err := store.Create(beads.Bead{
+		Title:    "sub-molecule",
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(stamped.ID); err != nil {
+		t.Fatalf("close stamped member: %v", err)
+	}
+	// A sibling step linked only by ParentID, NOT stamped, still OPEN.
+	if _, err := store.Create(beads.Bead{
+		Title:    "unstamped-step",
+		ParentID: root.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	has, err := storeHasOpenDescendants(store, root.ID)
+	if err != nil {
+		t.Fatalf("storeHasOpenDescendants: %v", err)
+	}
+	if !has {
+		t.Fatal("partial-stamp molecule with a closed stamped member and an open un-stamped ParentID sibling must still report in-flight via the walk fallback (single-flight false negative otherwise)")
+	}
+}
+
 func TestHasOpenWorkStrictFindsOlderInFlightWispBehindOrphanRoots(t *testing.T) {
 	const formerOpenWorkProbeLimit = 50
 

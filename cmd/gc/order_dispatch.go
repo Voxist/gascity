@@ -1432,11 +1432,6 @@ func isOrderRootOnlyWispCandidate(b beads.Bead) bool {
 	return b.Metadata["gc.kind"] == "wisp" && !beads.IsMoleculeType(b.Type)
 }
 
-// storeHasOpenDescendants reports whether any transitive descendant of rootID
-// is non-closed. It includes closed intermediate nodes so nested molecule work
-// remains visible after a direct child step has completed. Graph-v2 workflows
-// can link children with dependency edges instead of ParentID, so descendants
-// include parent-child/tracks/blocks dependents too.
 // storeHasOpenDescendants reports whether the wisp rooted at rootID still has
 // any open descendant bead. It first consults the molecule membership index:
 // every descendant created by any growth path (initial pour, convoy Attach,
@@ -1450,10 +1445,11 @@ func isOrderRootOnlyWispCandidate(b beads.Bead) bool {
 // conservative as the walk — it can only ever report MORE open work, never
 // less, and single-flight is never weakened.
 //
-// When the membership index is empty (a molecule materialized before
-// gc.root_bead_id was stamped on every step, or a store without metadata
-// indexing), it falls back to the authoritative tree walk so behavior is
-// byte-identical for un-stamped data.
+// When the fast path finds no open member (the membership set is empty,
+// all-closed, or only partially stamped — a molecule can carry gc.root_bead_id
+// on some steps while sibling ParentID-only steps are un-stamped), it falls
+// back to the authoritative tree walk before reporting the root idle, so
+// single-flight is never weakened for un-stamped or partial-stamp data.
 func storeHasOpenDescendants(store beads.Store, rootID string) (bool, error) {
 	reader := beads.HandlesFor(store).Live
 	members, err := reader.List(beads.ListQuery{
@@ -1464,19 +1460,21 @@ func storeHasOpenDescendants(store beads.Store, rootID string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("listing wisp members of %s: %w", rootID, err)
 	}
-	if len(members) == 0 {
-		// Membership index not populated for this root; the authoritative walk
-		// still discovers ParentID-linked descendants that predate
-		// gc.root_bead_id stamping.
-		return storeHasOpenDescendantsByWalk(store, rootID)
-	}
 	for _, b := range members {
 		if b.ID == rootID || b.Status == "closed" {
 			continue
 		}
 		return true, nil
 	}
-	return false, nil
+	// No OPEN stamped member found. An empty or all-closed membership set does
+	// NOT prove the root is idle, because the index may be incomplete for a
+	// partial-stamp molecule (some steps carry gc.root_bead_id, sibling
+	// ParentID-only steps do not). Confirm with the authoritative walk before
+	// reporting no open work, keeping single-flight safe. The fast path still
+	// short-circuits the common in-flight case (any open stamped member) in one
+	// query; the walk runs only when no open member is found — i.e. for
+	// orphan/just-completed roots.
+	return storeHasOpenDescendantsByWalk(store, rootID)
 }
 
 // storeHasOpenDescendantsByWalk is the authoritative O(tree) traversal used as
