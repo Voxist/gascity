@@ -40,14 +40,14 @@ func (s *sessionObservationGetErrorStore) Get(id string) (beads.Bead, error) {
 	return s.Store.Get(id)
 }
 
-func newProgressStallTestEnv(t *testing.T, timeout string) (*restartRequestTestEnv, beads.Bead, string) {
+func newProgressStallTestEnv(t *testing.T) (*restartRequestTestEnv, beads.Bead, string) {
 	t.Helper()
 
 	env := newRestartRequestTestEnv()
 	env.cfg = &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Session: config.SessionConfig{
-			ProgressStallTimeout: timeout,
+			ProgressStallTimeout: "30m",
 			StartupTimeout:       "60s",
 		},
 		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
@@ -125,7 +125,7 @@ func (e *restartRequestTestEnv) reconcileAtPathWithProvider(cityPath string, sp 
 }
 
 func TestReconcileSessionBeads_ProgressStallRecyclesStaleClaimlessHealthySession(t *testing.T) {
-	env, session, sessionName := newProgressStallTestEnv(t, "30m")
+	env, session, sessionName := newProgressStallTestEnv(t)
 
 	env.reconcileAtPath(t.TempDir(), []beads.Bead{session})
 
@@ -148,7 +148,7 @@ func TestReconcileSessionBeads_ProgressStallRecyclesStaleClaimlessHealthySession
 }
 
 func TestReconcileSessionBeads_ProgressStallRecyclesWithOpenAssignedWork(t *testing.T) {
-	env, session, sessionName := newProgressStallTestEnv(t, "30m")
+	env, session, sessionName := newProgressStallTestEnv(t)
 	work, err := env.store.Create(beads.Bead{
 		Title:    "ready work not yet claimed",
 		Type:     "task",
@@ -274,7 +274,7 @@ func TestReconcileSessionBeads_ProgressStallDoesNotRecycleExemptOrSafeSessions(t
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			env, session, sessionName := newProgressStallTestEnv(t, "30m")
+			env, session, sessionName := newProgressStallTestEnv(t)
 			cityPath := t.TempDir()
 			if tc.cityPath != nil {
 				cityPath = tc.cityPath(t)
@@ -316,7 +316,7 @@ func TestReconcileSessionBeads_ProgressStallDoesNotRecycleExemptOrSafeSessions(t
 // waiting for routed work, not parked on an error, so it is exempt from the
 // progress-stall recycler.
 func TestReconcileSessionBeads_ProgressStallExemptsMinFloorIdleWorker(t *testing.T) {
-	env, session, sessionName := newProgressStallTestEnv(t, "30m")
+	env, session, sessionName := newProgressStallTestEnv(t)
 	env.cfg.Agents[0].MinActiveSessions = restartRequestTestIntPtr(1)
 
 	// Pool at floor: this single open session is the entire always-warm
@@ -347,7 +347,7 @@ func TestReconcileSessionBeads_ProgressStallExemptsMinFloorIdleWorker(t *testing
 // (open == 2 > min == 1), a stale claimless session is above the always-warm
 // contingent and IS recycled.
 func TestReconcileSessionBeads_ProgressStallRecyclesAboveFloorWorker(t *testing.T) {
-	env, session, sessionName := newProgressStallTestEnv(t, "30m")
+	env, session, sessionName := newProgressStallTestEnv(t)
 	env.cfg.Agents[0].MinActiveSessions = restartRequestTestIntPtr(1)
 	env.cfg.Agents[0].MaxActiveSessions = restartRequestTestIntPtr(2)
 
