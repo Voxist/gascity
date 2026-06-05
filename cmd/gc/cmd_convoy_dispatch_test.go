@@ -1830,6 +1830,68 @@ func TestRunWorkflowServeReturnsControlErrorWithoutQuarantine(t *testing.T) {
 	}
 }
 
+// TestServeDrainParksBadBeadWithoutCrashing pins the ga-3p3o invariant: a
+// per-bead parkable error (empty/unknown gc.kind, classified by
+// dispatch.IsParkableControlError) must NOT propagate out of the serve drain
+// loop as a fatal error. One malformed work item cannot crash the singleton
+// control-dispatcher — the loop skips it and keeps draining, so a following
+// well-formed bead is still processed and the process stays ACTIVE.
+func TestServeDrainParksBadBeadWithoutCrashing(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	cityDir := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n\n[daemon]\nformula_v2 = true\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+
+	prevCityFlag := cityFlag
+	prevList := workflowServeList
+	prevControl := controlDispatcherServe
+	prevInterval := workflowServeIdlePollInterval
+	prevAttempts := workflowServeIdlePollAttempts
+	cityFlag = ""
+	workflowServeIdlePollInterval = 0
+	workflowServeIdlePollAttempts = 0
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		workflowServeList = prevList
+		controlDispatcherServe = prevControl
+		workflowServeIdlePollInterval = prevInterval
+		workflowServeIdlePollAttempts = prevAttempts
+	})
+
+	calls := 0
+	var controlled []string
+	// Mirrors the real ProcessControl default-case wrap for an empty gc.kind.
+	parkErr := fmt.Errorf("gc-ctrl-bad: %w \"\"", dispatch.ErrControlUnsupportedKind)
+	workflowServeList = func(_, _ string, _ map[string]string) ([]hookBead, error) {
+		calls++
+		if calls == 1 {
+			return []hookBead{
+				{ID: "gc-ctrl-bad", Metadata: map[string]string{"gc.kind": ""}},
+				{ID: "gc-ctrl-good", Metadata: map[string]string{"gc.kind": "scope-check"}},
+			}, nil
+		}
+		return nil, nil
+	}
+	controlDispatcherServe = func(_, _ string, beadID string, _ io.Writer, _ io.Writer) error {
+		controlled = append(controlled, beadID)
+		if beadID == "gc-ctrl-bad" {
+			return parkErr
+		}
+		return nil
+	}
+
+	if err := runWorkflowServe("", false, io.Discard, io.Discard); err != nil {
+		t.Fatalf("runWorkflowServe err = %v, want nil (parkable bad bead must not crash the serve loop)", err)
+	}
+	if !slices.Equal(controlled, []string{"gc-ctrl-bad", "gc-ctrl-good"}) {
+		t.Fatalf("controlled beads = %#v, want bad parked then good still processed", controlled)
+	}
+}
+
 func TestQuarantineControlFailureBeadClosesWithDiagnostics(t *testing.T) {
 	store := beads.NewMemStore()
 	control, err := store.Create(beads.Bead{
