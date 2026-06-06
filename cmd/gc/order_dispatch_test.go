@@ -6773,7 +6773,7 @@ func TestStoreHasOpenDescendantsUsesMembershipFastPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	has, err := storeHasOpenDescendants(store, root.ID)
+	has, err := storeHasOpenDescendants(store, root.ID, nil)
 	if err != nil {
 		t.Fatalf("storeHasOpenDescendants: %v", err)
 	}
@@ -6808,7 +6808,7 @@ func TestStoreHasOpenDescendantsMembershipOrphanAllClosed(t *testing.T) {
 		t.Fatalf("close member: %v", err)
 	}
 
-	has, err := storeHasOpenDescendants(store, root.ID)
+	has, err := storeHasOpenDescendants(store, root.ID, nil)
 	if err != nil {
 		t.Fatalf("storeHasOpenDescendants: %v", err)
 	}
@@ -6842,7 +6842,7 @@ func TestStoreHasOpenDescendantsFallsBackWithoutMembershipMetadata(t *testing.T)
 		t.Fatal(err)
 	}
 
-	has, err := storeHasOpenDescendants(store, root.ID)
+	has, err := storeHasOpenDescendants(store, root.ID, nil)
 	if err != nil {
 		t.Fatalf("storeHasOpenDescendants: %v", err)
 	}
@@ -6889,12 +6889,61 @@ func TestStoreHasOpenDescendantsFallsBackOnPartialStampMembership(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	has, err := storeHasOpenDescendants(store, root.ID)
+	has, err := storeHasOpenDescendants(store, root.ID, nil)
 	if err != nil {
 		t.Fatalf("storeHasOpenDescendants: %v", err)
 	}
 	if !has {
 		t.Fatal("partial-stamp molecule with a closed stamped member and an open un-stamped ParentID sibling must still report in-flight via the walk fallback (single-flight false negative otherwise)")
+	}
+}
+
+// TestStoreHasOpenDescendantsMembershipSkipsTransientNotification proves the
+// #3102 skip predicate composes with the #2893 membership fast path: an OPEN
+// stamped transient-notification bead (a nudge or mail/message chore reaped on
+// its own TTL) carries gc.root_bead_id and so is returned by the membership
+// List, but it must NOT wedge the single-flight gate. With skip =
+// isTransientNotificationBead the fast path skips it, finds no other open
+// member, and the walk fallback (which also honors skip) likewise reports the
+// root idle so the order can re-dispatch.
+func TestStoreHasOpenDescendantsMembershipSkipsTransientNotification(t *testing.T) {
+	store := beads.NewMemStore()
+
+	root, err := store.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An OPEN stamped transient chore (a mail/message) tied to the root by
+	// membership metadata. Without skip it would be reported as in-flight work.
+	if _, err := store.Create(beads.Bead{
+		Title:    "delivery-mail",
+		Type:     "message",
+		Metadata: map[string]string{"gc.root_bead_id": root.ID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Without a skip predicate the open transient member counts as in-flight.
+	has, err := storeHasOpenDescendants(store, root.ID, nil)
+	if err != nil {
+		t.Fatalf("storeHasOpenDescendants(nil): %v", err)
+	}
+	if !has {
+		t.Fatal("open stamped member must count as in-flight when skip is nil")
+	}
+
+	// With isTransientNotificationBead the transient chore is skipped on the
+	// membership fast path and must NOT wedge the gate.
+	has, err = storeHasOpenDescendants(store, root.ID, isTransientNotificationBead)
+	if err != nil {
+		t.Fatalf("storeHasOpenDescendants(skip): %v", err)
+	}
+	if has {
+		t.Fatal("open stamped transient-notification bead must not count as in-flight on the membership fast path when skip=isTransientNotificationBead")
 	}
 }
 
@@ -7327,7 +7376,7 @@ func TestStoreHasOpenDescendantsShortCircuitsOpenParentChildBeforeGraphReads(t *
 	}
 
 	store := depListFailStore{Store: base, failID: wispRoot.ID}
-	has, err := storeHasOpenDescendants(store, wispRoot.ID)
+	has, err := storeHasOpenDescendants(store, wispRoot.ID, nil)
 	if err != nil {
 		t.Fatalf("storeHasOpenDescendants: %v", err)
 	}
