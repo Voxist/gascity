@@ -72,7 +72,7 @@
             "city",
             "rig"
           ],
-          "description": "Scope defines where this agent is instantiated: \"city\" (one per city) or\n\"rig\" (one per rig). Omit the field for an unscoped agent instantiated in\nboth city and rig expansion contexts. Only meaningful for pack-defined\nagents; inline agents in city.toml use Dir directly."
+          "description": "Scope defines where this agent is instantiated: \"city\" (one per city)\nor \"rig\" (one per rig, the default). Only meaningful for pack-defined\nagents; inline agents in city.toml use Dir directly."
         },
         "suspended": {
           "type": "boolean",
@@ -83,7 +83,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "PreStart is a list of shell commands run before session creation.\nCommands run on the target filesystem: locally for tmux, inside the\npod/container for exec providers. Template variables same as session_setup.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands."
+          "description": "PreStart is a list of shell commands run before session creation.\nCommands run on the target filesystem: locally for tmux, inside the\npod/container for exec providers. Template variables same as session_setup."
         },
         "prompt_template": {
           "type": "string",
@@ -103,10 +103,6 @@
         "provider": {
           "type": "string",
           "description": "Provider names the provider preset to use for this agent."
-        },
-        "upstream": {
-          "type": "string",
-          "description": "Upstream selects the model-serving endpoint (a key in [upstreams]) for\nthis agent — WHO serves the model. \"\" (default) falls back to\nagent_defaults.upstream; if still empty, no upstream env is injected\n(ambient behavior). Switching it relaunches the agent in the warm box."
         },
         "start_command": {
           "type": "string",
@@ -257,18 +253,18 @@
             "type": "string"
           },
           "type": "array",
-          "description": "SessionSetup is a list of shell commands run after session creation.\nEach command is a template string supporting placeholders:\n{{.Session}}, {{.Agent}}, {{.AgentBase}}, {{.Rig}}, {{.RigRoot}},\n{{.CityRoot}}, {{.CityName}}, {{.WorkDir}}.\nCommands run in gc's process (not inside the agent session) via sh -c.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands."
+          "description": "SessionSetup is a list of shell commands run after session creation.\nEach command is a template string supporting placeholders:\n{{.Session}}, {{.Agent}}, {{.AgentBase}}, {{.Rig}}, {{.RigRoot}},\n{{.CityRoot}}, {{.CityName}}, {{.WorkDir}}.\nCommands run in gc's process (not inside the agent session) via sh -c."
         },
         "session_setup_script": {
           "type": "string",
-          "description": "SessionSetupScript is the path to a script run after session_setup commands.\nRelative paths resolve against the declaring config file's directory\n(pack-safe). Paths prefixed with \"//\" resolve against the city root.\nThe script receives context via environment variables (GC_SESSION plus\nexisting GC_* vars). On failure, the last 4 KiB of the script's\nstdout/stderr is included in the error and may appear in controller\nand reconciler logs; avoid set -x or echoing secrets in setup scripts."
+          "description": "SessionSetupScript is the path to a script run after session_setup commands.\nRelative paths resolve against the declaring config file's directory\n(pack-safe). Paths prefixed with \"//\" resolve against the city root.\nThe script receives context via environment variables (GC_SESSION plus\nexisting GC_* vars)."
         },
         "session_live": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "SessionLive is a list of shell commands that are safe to re-apply\nwithout restarting the agent. Run at startup (after session_setup)\nand re-applied on config change without triggering a restart.\nMust be idempotent. Typical use: tmux theming, keybindings, status bars.\nSame template placeholders as session_setup.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands."
+          "description": "SessionLive is a list of shell commands that are safe to re-apply\nwithout restarting the agent. Run at startup (after session_setup)\nand re-applied on config change without triggering a restart.\nMust be idempotent. Typical use: tmux theming, keybindings, status bars.\nSame template placeholders as session_setup."
         },
         "overlay_dir": {
           "type": "string",
@@ -299,6 +295,10 @@
         "attach": {
           "type": "boolean",
           "description": "Attach controls whether the agent's session supports interactive\nattachment (e.g., tmux attach). When false, the agent can use a\nlighter runtime (subprocess instead of tmux). Defaults to true."
+        },
+        "fallback": {
+          "type": "boolean",
+          "description": "Fallback marks this agent as a fallback definition. During pack\ncomposition, a non-fallback agent with the same name wins silently.\nWhen two fallbacks collide, the first loaded (depth-first) wins.\nSee docs/guides/shareable-packs.md for pack layout guidance."
         },
         "depends_on": {
           "items": {
@@ -344,10 +344,6 @@
         "model": {
           "type": "string",
           "description": "Model is the parsed/composed default model name for agents\n(e.g., \"claude-sonnet-4-6\"), but it is not yet auto-applied at\nruntime. Agents with their own model override would take precedence."
-        },
-        "upstream": {
-          "type": "string",
-          "description": "Upstream is the default model-serving endpoint (a key in [upstreams])\nfor agents that do not set their own upstream (Phase C — the Upstream\naxis). Applied to agents with an empty Upstream by ApplyAgentDefaults."
         },
         "wake_mode": {
           "type": "string",
@@ -463,17 +459,6 @@
         "provider": {
           "type": "string",
           "description": "Provider overrides the provider name."
-        },
-        "upstream": {
-          "type": "string",
-          "description": "Upstream overrides the model-serving endpoint selection (Phase C)."
-        },
-        "args": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "Args overrides the provider's default arguments. Leave unset to keep\nthe pack-defined args; set to an empty list to clear them; set to a\npopulated list to replace them entirely (full replace, not append)."
         },
         "start_command": {
           "type": "string",
@@ -745,17 +730,6 @@
           "type": "string",
           "description": "Provider overrides the provider name."
         },
-        "upstream": {
-          "type": "string",
-          "description": "Upstream overrides the model-serving endpoint selection (Phase C)."
-        },
-        "args": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "Args overrides the provider's default arguments. Leave unset to keep\nthe pack-defined args; set to an empty list to clear them; set to a\npopulated list to replace them entirely (full replace, not append)."
-        },
         "start_command": {
           "type": "string",
           "description": "StartCommand overrides the start command."
@@ -977,7 +951,7 @@
         },
         "delete_after_close": {
           "type": "string",
-          "description": "DeleteAfterClose deletes matching GC-owned beads after they have been\nclosed for this duration. Accepts Go duration syntax plus whole-day \"d\"\nunits, e.g. \"7d\" or \"1d12h\". ApplyBeadPolicyDefaults fills in a\nnon-empty default for recognized policy types (order_tracking: \"7d\"),\nso this field is populated after config load even when the city.toml\nomits it."
+          "description": "DeleteAfterClose deletes matching GC-owned beads after they have been\nclosed for this duration. Accepts Go duration syntax plus whole-day \"d\"\nunits, e.g. \"7d\" or \"1d12h\". Empty means the policy is not GC-managed."
         }
       },
       "additionalProperties": false,
@@ -988,7 +962,7 @@
       "properties": {
         "provider": {
           "type": "string",
-          "description": "Provider selects the bead store backend: \"bd\" (default, Dolt-backed),\n\"file\", or \"exec:\u003cscript\u003e\" for a user-supplied script. The \"sqlite\",\n\"sqlite-cgo\", and \"coordstore\" coordination-store providers were removed\nand now hard-error; migrate to \"doltlite\" or remove the setting.",
+          "description": "Provider selects the bead store backend: \"bd\" (default, Dolt-backed),\n\"file\", \"exec:\u003cscript\u003e\" for a user-supplied script, or \"sqlite\" for\nthe built-in coordination store (pure-Go SQLite; use when Dolt is\nunavailable). \"sqlite-cgo\" is a deprecated alias for \"sqlite\".",
           "default": "bd"
         },
         "backend": {
@@ -1008,6 +982,21 @@
           ],
           "description": "BDCompatibility selects the bd CLI semantics Gas City may rely on.\nEmpty defaults to \"bd-1.0.4\", which keeps claimable work history-backed\nand avoids bd ready/list flags that are unavailable or incomplete in bd\n1.0.4."
         },
+        "proxied": {
+          "type": "boolean",
+          "description": "Proxied routes bd through the pooling db-proxy (ProxiedServerMode,\nexternal backend) instead of direct ServerMode, eliminating the per-call\nbd→dolt connection churn (#1978: ~71 new connections/sec to the managed\ndolt server). Defaults to false = current direct ServerMode, byte-for-byte\nidentical, so existing cities are unaffected. Requires a bd build that\nsupports `bd init --proxied-server` (external); when the resolved bd lacks\nit, gascity falls back to server mode and a doctor check flags it, so a\ncity paired with a standard bd never breaks.",
+          "default": false
+        },
+        "proxy_pool_size": {
+          "type": "integer",
+          "description": "ProxyPoolSize is the warm backend-connection pool size the db-proxy keeps\nper (capabilities, database) key when Proxied is true. Defaults to 4.\nThe proxy is shared per workspace root, so all agents of a scope share one\nwarm pool; the size is frozen by the first bd invocation that spawns the\nproxy (changing it requires restarting the db-proxy-child).",
+          "default": 4
+        },
+        "proxy_idle_timeout": {
+          "type": "string",
+          "description": "ProxyIdleTimeout is how long a db-proxy-child stays alive with no active\nclient before it shuts down. The bd default (30s) is tuned for one busy\nworkspace; gascity touches many scopes sparsely (controller patrol probes\nevery rig once per interval), starving any finite timeout so the proxy\nspawns, serves one op, idle-dies, and respawns on the next touch — pure\nchurn that never reaches the warm-pool steady state. gascity therefore\ndefaults to \"0\" (never idle) and owns the proxy lifecycle: proxies stay\nwarm for the city's lifetime and are reaped on `gc stop`. Operators who\nwant gc to relinquish that ownership can set a finite Go duration string.\nRead by bd as BEADS_PROXY_IDLE_TIMEOUT.",
+          "default": "0"
+        },
         "policies": {
           "additionalProperties": {
             "$ref": "#/$defs/BeadPolicyConfig"
@@ -1025,10 +1014,6 @@
         "idle_timeout": {
           "type": "string",
           "description": "IdleTimeout is the duration after which a detached chat session\nis auto-suspended. Duration string (e.g., \"30m\", \"1h\"). 0 = disabled."
-        },
-        "grace_period": {
-          "type": "string",
-          "description": "GracePeriod is the duration after creation during which a manual\nsession is protected from idle-sleep scale-to-zero. Duration string\n(e.g., \"10m\"). Empty = use default (10m). \"0\" = disabled."
         }
       },
       "additionalProperties": false,
@@ -1055,19 +1040,12 @@
           "type": "object",
           "description": "Providers defines named provider presets for agent startup."
         },
-        "upstreams": {
-          "additionalProperties": {
-            "$ref": "#/$defs/UpstreamSpec"
-          },
-          "type": "object",
-          "description": "Upstreams defines named model-serving endpoint presets selectable per\nagent via the Upstream axis (Phase C). Each maps a name → serving env\n(base URL + credential refs); see UpstreamSpec."
-        },
         "imports": {
           "additionalProperties": {
             "$ref": "#/$defs/Import"
           },
           "type": "object",
-          "description": "Imports defines named pack imports. Each key is a local\nbinding name; the authored public contract stores a durable source plus\noptional version. Processed during ExpandCityPacks."
+          "description": "Imports defines named pack imports (V2 mechanism). Each key is a\nbinding name; the value specifies the source and optional version,\nexport, and transitive controls. Processed during ExpandCityPacks."
         },
         "defaults": {
           "$ref": "#/$defs/PackDefaults",
@@ -1078,7 +1056,7 @@
             "$ref": "#/$defs/Agent"
           },
           "type": "array",
-          "description": "Agents lists all configured agents in this city. Pack-composed cities can\ncompose agents through [imports.*] and ship without any\n[[agent]] block."
+          "description": "Agents lists all configured agents in this city. Optional: PackV2\ncities compose agents through [imports.*] and ship without any\n[[agent]] block."
         },
         "named_session": {
           "items": {
@@ -1114,17 +1092,13 @@
           "$ref": "#/$defs/EventsConfig",
           "description": "Events configures the events provider backend."
         },
-        "usage": {
-          "$ref": "#/$defs/UsageConfig",
-          "description": "Usage configures the usage-fact sink backend."
-        },
         "dolt": {
           "$ref": "#/$defs/DoltConfig",
           "description": "Dolt configures optional dolt server connection overrides."
         },
         "formulas": {
           "$ref": "#/$defs/FormulasConfig",
-          "description": "Formulas is the legacy [formulas] table; authored [formulas].dir is\nrejected at config load. Formulas live in the well-known formulas/\ndirectory."
+          "description": "Formulas configures formula directory settings."
         },
         "daemon": {
           "$ref": "#/$defs/DaemonConfig",
@@ -1132,7 +1106,7 @@
         },
         "orders": {
           "$ref": "#/$defs/OrdersConfig",
-          "description": "Orders configures order settings: skip list, max_timeout cap, and\nper-order overrides."
+          "description": "Orders configures order settings (skip list)."
         },
         "api": {
           "$ref": "#/$defs/APIConfig",
@@ -1168,10 +1142,6 @@
         "github": {
           "$ref": "#/$defs/GitHubConfig",
           "description": "GitHub configures GitHub-facing repository monitors."
-        },
-        "extmsg": {
-          "$ref": "#/$defs/ExtMsgConfig",
-          "description": "ExtMsg configures the external-messaging fabric (default routes\nfor inbound conversations with no binding)."
         },
         "agent_defaults": {
           "$ref": "#/$defs/AgentDefaults",
@@ -1213,7 +1183,7 @@
       "properties": {
         "formula_v2": {
           "type": "boolean",
-          "description": "FormulaV2 enables formula compiler v2 workflow infrastructure:\ncompiler-v2 workflow compilation, batch graph-apply bead creation, and\nrouting to the core pack's control-dispatcher worker.\nRequires bd with --graph support. Default: ENABLED. A nil pointer means\nthe default-on behavior and is OMITTED from generated configs (so\nauto-generated city.toml files never pin the default and never\naccidentally write formula_v2=false); an explicit formula_v2=false (or\nthe deprecated graph_workflows=false alias) is preserved as a non-nil\nfalse. Read the effective value via FormulaV2Enabled(), never the field.",
+          "description": "FormulaV2 enables formula compiler v2 workflow infrastructure: the\ncontrol-dispatcher implicit agent and on-demand named session,\ncompiler-v2 workflow compilation, and batch graph-apply bead creation.\nThe implicit dispatcher follows normal session idle-sleep policy.\nRequires bd with --graph support. Default: true. Set false only for cities\npinned to formula compiler v1.",
           "default": true
         },
         "graph_workflows": {
@@ -1270,11 +1240,11 @@
         },
         "wisp_gc_interval": {
           "type": "string",
-          "description": "WispGCInterval is how often the garbage collector for wisps runs. A wisp is\nan ephemeral bead produced by a v1 formula run; this knob controls how often\nthe closed ones are swept. Duration string (e.g., \"5m\", \"1h\"). Wisp GC is\ndisabled unless both WispGCInterval and WispTTL are set."
+          "description": "WispGCInterval is how often wisp GC runs. Duration string (e.g., \"5m\", \"1h\").\nWisp GC is disabled unless both WispGCInterval and WispTTL are set."
         },
         "wisp_ttl": {
           "type": "string",
-          "description": "WispTTL is how long a closed wisp (an ephemeral v1 formula-run bead) survives\nbefore being purged. Duration string (e.g., \"24h\", \"7d\"). Wisp GC is disabled\nunless both WispGCInterval and WispTTL are set."
+          "description": "WispTTL is how long a closed molecule survives before being purged.\nDuration string (e.g., \"24h\", \"7d\"). Wisp GC is disabled unless both\nWispGCInterval and WispTTL are set."
         },
         "drift_drain_timeout": {
           "type": "string",
@@ -1382,11 +1352,6 @@
           "description": "ArchiveLevel controls Dolt's auto_gc archive aggressiveness.\n0 disables archive compaction (lower CPU on startup).\n1 enables archive compaction (higher CPU on startup).\nnil (omitted) defaults to 0.",
           "default": 0
         },
-        "auto_gc_enabled": {
-          "type": "boolean",
-          "description": "AutoGCEnabled toggles Dolt's incremental auto-GC on the managed\nsql-server. Auto-GC bounds the noms journal so it never reaches\nGB scale, which shrinks both the unclean-stop corruption window\nand the recovery blast radius. nil (omitted) defaults to true.",
-          "default": true
-        },
         "max_connections": {
           "type": "integer",
           "description": "MaxConnections overrides the managed Dolt listener max_connections.\n0 means use the managed default.",
@@ -1395,17 +1360,12 @@
         "read_timeout_millis": {
           "type": "integer",
           "description": "ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.\n0 means use the managed default.",
-          "default": 15000
+          "default": 30000
         },
         "write_timeout_millis": {
           "type": "integer",
           "description": "WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis.\n0 means use the managed default.",
           "default": 300000
-        },
-        "dolt_lock_release_timeout": {
-          "type": "string",
-          "description": "DoltLockReleaseTimeout is how long managed-dolt lifecycle operations\nwait for dolt's on-disk exclusive store locks (the root-level\n`\u003cdata_dir\u003e/.dolt/noms/LOCK` and per-database\n`\u003cdata_dir\u003e/\u003cdb\u003e/.dolt/noms/LOCK` forms) to be released by a prior\nserver process before failing closed. The start path refuses to launch a\nsecond `dolt sql-server` against a data_dir whose lock is still held —\na prior instance that is shutting down holds the lock until its chunk\njournal is flushed, and binding before release corrupts the journal\n(see gastownhall/gascity#3174). The stop path uses the same window to\nwait for lock release after process exit before reporting success.\nDuration string (e.g., \"1m\", \"90s\"). Defaults to \"1m\", which covers\nthe flush window of multi-GB journals on commodity SSDs. Set to \"0s\"\nto probe once with no wait (still fail-closed when held). Negative\nvalues are rejected at config load. The managed lifecycle also\nprojects this value into the gc-beads-bd.sh shell fallback as\nGC_DOLT_LOCK_RELEASE_TIMEOUT_MS (milliseconds), so both paths honor\nthe configured window.",
-          "default": "1m"
         }
       },
       "additionalProperties": false,
@@ -1483,48 +1443,11 @@
       "type": "object",
       "description": "EventsRotationConfig holds file-backed events rotation settings."
     },
-    "ExtMsgConfig": {
-      "properties": {
-        "default_route": {
-          "items": {
-            "$ref": "#/$defs/ExtMsgDefaultRoute"
-          },
-          "type": "array",
-          "description": "DefaultRoutes map inbound conversations that have no binding and no\ngroup route to a configured agent, keyed by provider and optionally\nnarrowed to one adapter account. The first matching inbound message\nbinds the conversation to the agent (an agent-name binding), so the\nroute is sticky until rebound or unbound."
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "description": "ExtMsgConfig configures the external-messaging fabric."
-    },
-    "ExtMsgDefaultRoute": {
-      "properties": {
-        "provider": {
-          "type": "string",
-          "description": "Provider is the external messaging provider name as registered by\nthe adapter (e.g. \"telegram\"). Required."
-        },
-        "account_id": {
-          "type": "string",
-          "description": "AccountID narrows the route to one adapter account. Empty matches\nevery account of the provider that has no account-specific route."
-        },
-        "agent": {
-          "type": "string",
-          "description": "Agent is the configured agent identity to route to. It must resolve\nto a configured named session so the delivery layer can cold-wake a\nsession for it."
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "provider",
-        "agent"
-      ],
-      "description": "ExtMsgDefaultRoute routes unbound inbound conversations from one external messaging provider (and optionally a single adapter account) to a configured agent."
-    },
     "FormulasConfig": {
       "properties": {},
       "additionalProperties": false,
       "type": "object",
-      "description": "FormulasConfig is the legacy [formulas] table with no supported fields: authored [formulas].dir is rejected at config load (use the well-known formulas/ directory instead), and gc doctor flags any declaration as a fixable v2-formulas-dir error."
+      "description": "FormulasConfig holds legacy formula directory settings."
     },
     "GitHubConfig": {
       "properties": {
@@ -1575,10 +1498,6 @@
         "repair_route": {
           "type": "string",
           "description": "RepairRoute is the operator-supplied route target for repair work."
-        },
-        "repair_workflow": {
-          "type": "string",
-          "description": "RepairWorkflow is the formula attached to repair beads created for this\nmonitor. Empty defaults to the standard polecat repair workflow so routed\nrepair work carries the branch/test/push/refinery steps instead of\nsitting as a raw routed task."
         },
         "webhook_secret_env": {
           "type": "string",
@@ -1657,10 +1576,6 @@
           "type": "string",
           "description": "RepairRoute overrides the repair route target."
         },
-        "repair_workflow": {
-          "type": "string",
-          "description": "RepairWorkflow overrides the formula attached to repair beads."
-        },
         "webhook_secret_env": {
           "type": "string",
           "description": "WebhookSecretEnv overrides the env var containing the webhook secret."
@@ -1699,6 +1614,22 @@
         "version": {
           "type": "string",
           "description": "Version is an optional semver constraint for git-backed imports (e.g.,\n\"^1.2\"). Empty for local paths. \"sha:\u003chex\u003e\" pins a specific commit."
+        },
+        "export": {
+          "type": "boolean",
+          "description": "Export re-exports this import's contents into the parent pack's\nnamespace. Consumers of the parent get this import's agents\nflattened under the parent's binding name."
+        },
+        "transitive": {
+          "type": "boolean",
+          "description": "Transitive controls whether this import's own imports are visible\nto the consumer. Defaults to true (transitive). Set to false to\nsuppress transitive resolution for this specific import."
+        },
+        "shadow": {
+          "type": "string",
+          "enum": [
+            "warn",
+            "silent"
+          ],
+          "description": "Shadow controls shadow warnings when the importer defines an agent\nwith the same name as one from this import. \"warn\" (default) emits\na warning; \"silent\" suppresses it."
         }
       },
       "additionalProperties": false,
@@ -1842,7 +1773,7 @@
         },
         "template": {
           "type": "string",
-          "description": "Template is the referenced agent template name. Root declarations may\ntarget imported agents via \"binding.agent\"."
+          "description": "Template is the referenced agent template name. Root declarations may\ntarget imported PackV2 agents via \"binding.agent\"."
         },
         "scope": {
           "type": "string",
@@ -1850,7 +1781,7 @@
             "city",
             "rig"
           ],
-          "description": "Scope defines where this named session is instantiated in pack\nexpansion: \"city\" (one per city) or \"rig\" (one per rig). Omit the\nfield for an unscoped session instantiated in both city and rig\nexpansion contexts."
+          "description": "Scope defines where this named session is instantiated in pack\nexpansion: \"city\" (one per city) or \"rig\" (one per rig)."
         },
         "dir": {
           "type": "string",
@@ -1902,12 +1833,10 @@
     "OptionChoice": {
       "properties": {
         "value": {
-          "type": "string",
-          "description": "Value is the choice identifier matched against ProviderOption.Default and\nthe user's selection (e.g. \"opus-4.8\")."
+          "type": "string"
         },
         "label": {
-          "type": "string",
-          "description": "Label is the human-readable choice name shown in tooling."
+          "type": "string"
         },
         "flag_args": {
           "items": {
@@ -2025,7 +1954,7 @@
       },
       "additionalProperties": false,
       "type": "object",
-      "description": "OrdersConfig holds order settings for orders discovered from flat TOML files (one file per order) in the orders/ directory beside each formula layer (packs, the city directory, and rig-local layers)."
+      "description": "OrdersConfig holds order settings."
     },
     "PackDefaults": {
       "properties": {
@@ -2128,27 +2057,23 @@
     "ProviderOption": {
       "properties": {
         "key": {
-          "type": "string",
-          "description": "Key is the option identifier (e.g. \"model\"); also the merge key for\noptions_schema_merge = \"by_key\"."
+          "type": "string"
         },
         "label": {
-          "type": "string",
-          "description": "Label is the human-readable option name shown in tooling."
+          "type": "string"
         },
         "type": {
           "type": "string",
           "description": "\"select\" only (v1)"
         },
         "default": {
-          "type": "string",
-          "description": "Default is the Value of the choice selected when the user makes none."
+          "type": "string"
         },
         "choices": {
           "items": {
             "$ref": "#/$defs/OptionChoice"
           },
-          "type": "array",
-          "description": "Choices are the allowed values; selecting one injects its FlagArgs into the\nagent command line (how the Model axis renders to a harness CLI flag)."
+          "type": "array"
         },
         "omit": {
           "type": "boolean",
@@ -2368,11 +2293,7 @@
         },
         "session_id_flag": {
           "type": "string",
-          "description": "SessionIDFlag is the CLI flag for providers that support creating a\nfresh session with a caller-supplied ID. Empty means fresh starts cannot\nreceive a preselected provider session ID; resume metadata must come from\nthe provider after startup."
-        },
-        "fork_flag": {
-          "type": "string",
-          "description": "ForkFlag is the CLI flag that forks a resumed conversation into a new\nbranch (claude's \"--fork-session\"). With ResumeFlag + SessionIDFlag it\nforms the fork-launch command (resume a parent brain session, fork off it,\nbind gc's own session id). Empty means the provider has no fork verb, in\nwhich case a launch carrying a parent sid fails loud rather than silently\ndegrading to a fresh session."
+          "description": "SessionIDFlag is the CLI flag for creating a session with a specific ID.\nEnables the Generate \u0026 Pass strategy for session key management.\nExample: \"--session-id\" (claude)"
         },
         "permission_modes": {
           "additionalProperties": {
@@ -2394,10 +2315,6 @@
           },
           "type": "array",
           "description": "OptionsSchema declares the configurable options this provider supports.\nEach option maps to CLI args via its Choices[].FlagArgs field.\nSerialized via a dedicated DTO (not directly to JSON) so FlagArgs stays server-side."
-        },
-        "upstream_env": {
-          "$ref": "#/$defs/UpstreamEnvBinding",
-          "description": "UpstreamEnv is this harness's serving-env contract (Phase C — the Upstream\naxis): the env-var NAMES this CLI reads for the model-serving base URL and\ncredential. It lets the resolver render an abstract [upstreams.\u003cname\u003e] onto\nthe right names for this harness, so an upstream preset is portable across\nharnesses (claude → ANTHROPIC_*, codex → OPENAI_*)."
         },
         "print_args": {
           "items": {
@@ -2454,7 +2371,7 @@
         },
         "formulas_dir": {
           "type": "string",
-          "description": "FormulasDir is a rig-local formula directory — the highest-priority\nformula layer, above city pack formulas, the city formulas/\ndirectory, and rig pack formulas. Overrides pack formulas for this\nrig by filename.\nRelative paths resolve against the city directory."
+          "description": "FormulasDir is a rig-local formula directory (Layer 4). Overrides\npack formulas for this rig by filename.\nRelative paths resolve against the city directory."
         },
         "includes": {
           "items": {
@@ -2769,78 +2686,6 @@
       ],
       "description": "Tier defines per-token-type rates in USD per 1 million tokens."
     },
-    "UpstreamEnvBinding": {
-      "properties": {
-        "base_url": {
-          "type": "string",
-          "description": "BaseURL is the env var name the harness reads for the serving base URL."
-        },
-        "api_key": {
-          "type": "string",
-          "description": "APIKey is the env var name the harness reads for the API key."
-        },
-        "auth_token": {
-          "type": "string",
-          "description": "AuthToken is the env var name the harness reads for a bearer auth token."
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "description": "UpstreamEnvBinding is a harness's serving-env contract: the env-var NAMES this CLI reads for the model-serving endpoint and credential."
-    },
-    "UpstreamSpec": {
-      "properties": {
-        "description": {
-          "type": "string",
-          "description": "Description is a human-readable summary shown in tooling."
-        },
-        "base_url": {
-          "type": "string",
-          "description": "BaseURL is the abstract serving endpoint, rendered onto the harness's\nbase_url env var name (UpstreamEnvBinding.BaseURL)."
-        },
-        "api_key": {
-          "type": "string",
-          "description": "APIKey is the abstract credential, rendered onto the harness's api_key env\nvar name. May be a $VAR ref so the secret stays out of config."
-        },
-        "auth_token": {
-          "type": "string",
-          "description": "AuthToken is an abstract bearer-token credential (an alternative to APIKey\nfor harnesses/upstreams that use a token), rendered onto the harness's\nauth_token env var name."
-        },
-        "base_url_env": {
-          "type": "string",
-          "description": "BaseURLEnv/APIKeyEnv/AuthTokenEnv override the HARNESS binding's env-var\nname for the corresponding abstract field. Needed for GATEWAY harnesses —\none CLI (e.g. opencode) fronting many upstreams where the credential env\nvar is upstream-dependent (GROQ_API_KEY, CEREBRAS_API_KEY, …), so the\nHARNESS has no single binding and the UPSTREAM names its own target.\nPrecedence per field: this override \u003e the harness binding \u003e error."
-        },
-        "api_key_env": {
-          "type": "string",
-          "description": "APIKeyEnv overrides the harness binding's api_key env-var name for this\nupstream (see BaseURLEnv for when this is needed)."
-        },
-        "auth_token_env": {
-          "type": "string",
-          "description": "AuthTokenEnv overrides the harness binding's auth_token env-var name for this\nupstream (see BaseURLEnv)."
-        },
-        "env": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "type": "object",
-          "description": "Env is a harness-specific escape hatch: raw env keys merged AFTER the\nabstract fields render. Values may use $VAR refs."
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "description": "UpstreamSpec is a named model-serving endpoint preset (Phase C — the Upstream axis: WHO serves+resolves the model)."
-    },
-    "UsageConfig": {
-      "properties": {
-        "provider": {
-          "type": "string",
-          "description": "Provider selects the usage sink backend:\n  - \"discard\" / \"fake\" → drop all facts\n  - \"exec:\u003cscript\u003e\" → user-supplied script (JSON fact per line on stdin)\n  - \"\" / \"local\" → durable file-backed JSONL at .gc/usage.jsonl (default)"
-        }
-      },
-      "additionalProperties": false,
-      "type": "object",
-      "description": "UsageConfig holds usage-fact sink settings."
-    },
     "Workspace": {
       "properties": {
         "name": {
@@ -2880,7 +2725,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "InstallAgentHooks lists provider names whose hooks should be installed\ninto agent working directories. Agent-level overrides workspace-level\n(replace, not additive). Supported: \"claude\", \"codex\", \"gemini\",\n\"antigravity\", \"kiro\", \"opencode\", \"mimocode\", \"groq\", \"cerebras\",\n\"copilot\", \"cursor\", \"pi\", \"omp\", \"kimi\"."
+          "description": "InstallAgentHooks lists provider names whose hooks should be installed\ninto agent working directories. Agent-level overrides workspace-level\n(replace, not additive). Supported: \"claude\", \"codex\", \"gemini\",\n\"antigravity\", \"kiro\", \"opencode\", \"groq\", \"cerebras\", \"copilot\",\n\"cursor\", \"pi\", \"omp\"."
         },
         "global_fragments": {
           "items": {
@@ -2917,5 +2762,5 @@
     }
   },
   "title": "Gas City Configuration",
-  "description": "Schema for city.toml — the deployment file for a Gas City instance. Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. Use [imports.*] for pack composition; legacy includes and [[agent]] fields remain visible for migration compatibility. Legacy [packs.*] entries are still accepted by the runtime for migration/fetch compatibility but are intentionally omitted from this public schema.\n\n\u003e **Pack format source of truth:** Public pack format and loader semantics are specified in [Gas City Pack Specification](/reference/specs/pack-spec)."
+  "description": "Schema for city.toml — the PackV2 deployment file for a Gas City instance. Pack definitions live in pack.toml and conventional pack directories such as agents/, formulas/, orders/, and commands/. Use [imports.*] for PackV2 composition; legacy includes and [[agent]] fields remain visible for migration compatibility. Legacy [packs.*] entries are still accepted by the runtime for migration/fetch compatibility but are intentionally omitted from this public schema.\n\n\u003e **PackV2 format source of truth:** The public PackV2 format and loader semantics are specified in [Gas City Pack Specification (2.0)](/specs/pack-spec)."
 }
