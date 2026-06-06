@@ -1262,12 +1262,14 @@ type BeadsConfig struct {
 	// ProxyIdleTimeout is how long a db-proxy-child stays alive with no active
 	// client before it shuts down. The bd default (30s) is tuned for one busy
 	// workspace; gascity touches many scopes sparsely (controller patrol probes
-	// every rig once per interval), starving each proxy below 30s so it spawns,
-	// serves one op, idle-dies, and respawns on the next touch — pure churn that
-	// never reaches the warm-pool steady state. A longer timeout keeps proxies
-	// warm across sparse bursts. Go duration string; defaults to "10m". Read by
-	// bd as BEADS_PROXY_IDLE_TIMEOUT.
-	ProxyIdleTimeout *string `toml:"proxy_idle_timeout,omitempty" jsonschema:"default=10m"`
+	// every rig once per interval), starving any finite timeout so the proxy
+	// spawns, serves one op, idle-dies, and respawns on the next touch — pure
+	// churn that never reaches the warm-pool steady state. gascity therefore
+	// defaults to "0" (never idle) and owns the proxy lifecycle: proxies stay
+	// warm for the city's lifetime and are reaped on `gc stop`. Operators who
+	// want gc to relinquish that ownership can set a finite Go duration string.
+	// Read by bd as BEADS_PROXY_IDLE_TIMEOUT.
+	ProxyIdleTimeout *string `toml:"proxy_idle_timeout,omitempty" jsonschema:"default=0"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
@@ -1300,9 +1302,15 @@ func (b BeadsConfig) ProxyPoolSizeOrDefault() int {
 }
 
 // defaultBeadsProxyIdleTimeout is the proxy idle-shutdown timeout used when
-// Proxied is on and ProxyIdleTimeout is unset/blank. Chosen well above the
-// controller patrol interval so warm proxies survive between sparse probes.
-const defaultBeadsProxyIdleTimeout = "10m"
+// Proxied is on and ProxyIdleTimeout is unset/blank. "0" disables idle
+// shutdown: gascity owns the db-proxy lifecycle (Option 2), keeping each proxy
+// warm for the city's lifetime and reaping it on `gc stop`
+// (reapProxiedChildrenForCity). A never-idle proxy eliminates the
+// spawn/serve/idle-die/respawn churn that any finite timeout suffers under
+// sparse controller probes; a crash at worst leaves a still-usable warm proxy,
+// which the next stop reaps. Operators who do not want gc to own the lifecycle
+// can still set a finite proxy_idle_timeout explicitly.
+const defaultBeadsProxyIdleTimeout = "0"
 
 // ProxyIdleTimeoutOrDefault returns the configured proxy idle timeout, or the
 // default when unset/blank.
