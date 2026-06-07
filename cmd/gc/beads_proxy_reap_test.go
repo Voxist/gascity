@@ -36,8 +36,8 @@ func TestProxyChildRootArg(t *testing.T) {
 	cases := map[string]string{
 		"bd db-proxy-child --root /a/.beads/proxieddb --port 5000":  "/a/.beads/proxieddb",
 		"bd db-proxy-child --root=/b/.beads/proxieddb --backend ex": "/b/.beads/proxieddb",
-		"bd db-proxy-child --port 5000 --backend external":         "",
-		"some other process":                                       "",
+		"bd db-proxy-child --port 5000 --backend external":          "",
+		"some other process": "",
 	}
 	for cmd, want := range cases {
 		if got := proxyChildRootArg(cmd); got != want {
@@ -56,7 +56,7 @@ func TestProxyChildPIDsFromPS(t *testing.T) {
 		"  202 bd db-proxy-child --root /srv/rig-a/.beads/proxieddb --port 50002 --backend external",
 		"  303 bd db-proxy-child --root /srv/rig-OTHER/.beads/proxieddb --port 50003", // not our scope
 		"  404 dolt sql-server -H 127.0.0.1 -P 48770",                                 // not a proxy
-		"  505 /usr/bin/bd list",                                                      // not a proxy child
+		"  505 /usr/bin/bd list", // not a proxy child
 		"garbage line without pid",
 	}, "\n")
 
