@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -92,7 +91,10 @@ func applyProxiedPoolEnv(env map[string]string, cityPath string) {
 	if env == nil {
 		return
 	}
-	cfg, err := loadCityConfig(cityPath, io.Discard)
+	// Use config.Load (not loadCityConfig) to avoid triggering built-in pack
+	// materialization, which would overwrite city-managed scripts while the
+	// lifecycle is in a health or recovery operation.
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil || !proxiedServerScopeActive(cfg) {
 		return
 	}
