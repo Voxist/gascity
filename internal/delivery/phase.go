@@ -66,6 +66,7 @@ var validTransitions = map[string]map[string]bool{
 		PhaseConflicted: true,
 	},
 	PhaseConflicted: {
+		PhaseCIPending: true, // M6: auto-rebase success → resume CI
 		PhaseRework:    true,
 		PhaseAbandoned: true,
 	},
