@@ -14,7 +14,7 @@ the taxonomy + decision tree this implements.
 
 Usage:
     scripts/bead-state.py                 # classify all rigs of the city in cwd
-    scripts/bead-state.py --rig voxist-api
+    scripts/bead-state.py --rig <rig-name>
     scripts/bead-state.py --state ready-unrouted   # only show one state
     scripts/bead-state.py --json          # machine-readable
     scripts/bead-state.py --ids           # print bead ids under each state
@@ -49,7 +49,7 @@ OWNER = {
     "orphaned": "RECLAIM",
     "blocked-deps": "upstream-beads",
     "waiting-human": "human",
-    "epic-triage": "human/planner",
+    "epic-triage": "human/triage",
     "routed-waiting": "agent-pool",
     "ready-unrouted": "DISPATCHER",
     "unknown": "INVESTIGATE",
