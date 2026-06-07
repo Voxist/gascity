@@ -121,3 +121,25 @@ follow:
 
 Recommendation: settle (1) vs (2) empirically with the two-scope shared-root
 test before writing code; either way it composes with Phases 0+1 unchanged.
+
+## Additional fixes found 2026-06-07 (same proxied-pooling incident)
+
+Two more gates were making `gc hook` return `[]` fleet-wide for a city placed
+under a shared directory (`/Users/Shared`) in proxied mode:
+
+1. **SEC-003 `/Users/Shared` boundary — fixed in beads (cstar/beads#2), NOT a
+   patch here.** bd's `isPathInSafeBoundary` rejected `/Users/Shared` as "another
+   user's home", so `bd context` hard-failed → gc's `bd_context_agreement` gate
+   failed → native store unavailable. The canonical fix is **cstar/beads#2**: a
+   direct `/Users/Shared` carve-out in `isPathInSafeBoundary` plus symlink-escape
+   hardening (`resolvedPathWithinRoot`). gc always sets `BEADS_DIR` for its
+   `bd context` call (`cmd/gc/bd_env.go`), so this fully covers gascity.
+   (Two of our earlier attempts were superseded by cstar#2 and removed/retired:
+   the always-allow patch `0003`, and the two-gate `gc/vp-mwm7` PR — do not
+   re-introduce either; the always-allow form weakened SEC-003 for auto-discovered
+   paths, and the two-gate form lacked the symlink hardening.)
+
+2. **proxied-server dolt mode — `0004-...proxied-server...patch` (gascity).**
+   `checkDoltModeSafe` only passed `dolt_mode=server`; `proxied-server` fell
+   through to Fail → native store disabled fleet-wide → slow BdStore fallback.
+   The patch adds a `proxied-server` pass case + regression test.
