@@ -10,6 +10,8 @@ description: The shortest path for new contributors to get productive in Gas Cit
 - [Primitive Test](primitive-test.md)
 - [PR Review Handoff Notes](pr-review-handoff.md)
 - [Reconciler Debugging](reconciler-debugging.md)
+- [Bead Effective-State Analysis](bead-effective-state.md) when triaging why
+  work looks stuck (waiting on a human? a review? another bead? a routing gap?)
 - [Huma Usage Notes](huma-usage.md) when touching `internal/api/`,
   OpenAPI generation, or SSE registration
 - [Excalidraw Setup](excalidraw-setup.md) when authoring diagrams for the docs
