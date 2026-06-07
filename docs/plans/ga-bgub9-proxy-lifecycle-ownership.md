@@ -156,3 +156,32 @@ CGO note for reviewers: raw `go test`/`vet`/`build` need icu4c headers —
 `CGO_CPPFLAGS=-I$(brew --prefix icu4c)/include`,
 `CGO_LDFLAGS=-L$(brew --prefix icu4c)/lib` (the Makefile sets these; `make
 generate`/`make test` handle it automatically).
+
+## Status — review round 1 (reviewer po-y6xge, CHANGES_REQUESTED on PR #5)
+
+Reviewer verdict confirmed the semantics (never-idle=0, scoped reap matcher,
+clearPublishedState gating) but blocked on CI-red: `Preflight / static checks`
+(golangci-lint) failed on 3 introduced, mechanical issues. All addressed:
+
+- [x] T-005 — clear golangci-lint blockers   ✅ green at `569a5e60f`
+  - drop unused const `proxiedDBSubdir` (the matcher keys on the `.beads`
+    prefix, not the `proxieddb` subdir, so the const was dead — removing it,
+    not wiring it, is the correct fix per the documented matching strategy).
+  - misspell `signalled` → `signaled` (golangci-lint `misspell` locale=US).
+  - gofumpt: reformat the `proxyChildRootArg` / `proxyChildPIDsFromPS` test
+    maps.
+  - Verified GREEN with the CI commands: `golangci-lint run ./cmd/gc/` = 0
+    issues; `lint-new --new-from-merge-base=feat/beads-proxied-pooling
+    --whole-files` = 0 issues; `golangci-lint fmt --diff` clean; the 4
+    proxy-reap unit tests pass.
+- [x] Reviewer non-blocking (b) — rebased `gc/ga-bgub9` `--onto` the fork base
+  to drop the `bd init` scaffolding commit (`e0c9bec81`, 9 files / +257 −26).
+  Fork base tip == `e0c9bec81^` exactly and bd-init touches only
+  `.beads/`/`.codex/`/`.agents/`/`AGENTS.md`/`CLAUDE.md` (zero overlap with the
+  feature files), so the replay was conflict-free. PR diff is now the 9
+  intended files only.
+- [ ] Reviewer non-blocking (a) — TOCTOU PID-reuse race in `signalProxyChild`
+  (discovery→signal window): re-verify the PID's argv is still a
+  `db-proxy-child` before `SIGKILL`. Deferred to a follow-up bead (the reviewer
+  recommended a `voxist.critic` sling on the kill path); out of scope for this
+  CI-unblock round and needs its own red test first.
