@@ -24,8 +24,6 @@ import (
 // stale pidfile from a crash must never make us signal an unrelated PID, and the
 // process table is the single source of truth for "what is running".
 
-const proxiedDBSubdir = "proxieddb"
-
 // proxiedScopeBeadsDirs returns the .beads directory for the city and every
 // configured rig. Each is the parent of a db-proxy rootDir (<.beads>/proxieddb)
 // when proxied mode is active.
@@ -105,7 +103,7 @@ func reapProxiedChildrenForCityPath(cityPath string) int {
 // reapProxiedChildrenForCity stops every db-proxy-child gc owns for the city
 // (SIGTERM, then SIGKILL after a short grace). Best-effort and idempotent: it is
 // safe to call when proxied mode is off (no matching processes) or when the
-// proxies have already exited. Returns the number of PIDs signalled.
+// proxies have already exited. Returns the number of PIDs signaled.
 func reapProxiedChildrenForCity(cityPath string, cfg *config.City, warn io.Writer) int {
 	if cfg == nil || !cfg.Beads.ProxiedEnabled() {
 		return 0
