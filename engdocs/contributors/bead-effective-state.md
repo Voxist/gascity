@@ -40,7 +40,7 @@ nudge / unblock / wait on?".
 | `waiting-human` | human | `human` label, `type=decision`, or `gc.do_not_auto_route=1`. |
 | `waiting-review` | human | `gc.phase=review-pending` — a PR awaits human review. |
 | `waiting-decision` | human | `gc.phase=decision-pending` — a merge/keep decision awaits a human. |
-| `epic-triage` | human/planner | `type=epic` or `EPIC:` title — a container needing decomposition. |
+| `epic-triage` | human/triage | `type=epic` or `EPIC:` title — a container needing decomposition. |
 | `routed-waiting` | agent-pool | routed via `gc.routed_to`, awaiting pool pickup (imminent). |
 | `in-progress` | agent | `status∈{in_progress,hooked}` or bound to a **live** session. |
 | `delivering` | agent | `gc.phase∈{building,ci-pending,rework,merge-pending,conflicted}`. |
@@ -72,7 +72,7 @@ blocking** one wins.
 scripts/bead-state.py
 
 # One rig, or one state with ids:
-scripts/bead-state.py --rig voxist-api
+scripts/bead-state.py --rig <rig-name>
 scripts/bead-state.py --state ready-unrouted
 scripts/bead-state.py --ids          # ids under every state
 scripts/bead-state.py --json         # machine-readable
