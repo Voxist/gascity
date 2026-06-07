@@ -129,3 +129,30 @@ sees the explicit consideration.
 - `be-8nd` / any beads-rig changes.
 - Reworking the proxy pool sizing or the dbproxy itself.
 - Upstream (`gastownhall`) — proxy mode does not exist there.
+
+## Status — executed 2026-06-07 (gc/ga-bgub9 @ 46d808f47)
+
+- [x] T-001 — apply test file only; new symbols undefined (RED for the right
+  reason: `undefined: proxiedScopeBeadsDirs / proxyChildRootArg /
+  proxyChildPIDsFromPS / reapProxiedChildrenForCity`).
+- [x] T-002 — apply impl + config + overlay-test + docs/schema; 4 new unit
+  tests + `TestApplyProxiedPoolEnvInjectsOnlyWhenGateOnAndBDCapable` (now
+  expecting `idle_timeout=0`) all GREEN.   ✅ green at `46d808f47`
+- [x] T-003 — `go build ./cmd/gc` clean; `go vet ./cmd/gc/... ./internal/config/...`
+  clean; `make generate` then `git diff --exit-code docs/schema/ docs/reference/`
+  **empty** → schema regen idempotent (patch schema == generator output).
+- [x] T-004 — behavior (non-destructive partial; full reap-on-stop deferred).
+  Confirmed the live process table matches the discovery parser: real
+  `bd db-proxy-child --root /Users/cstar/rigs/<rig>/.beads/proxieddb …` (space
+  `--root`) is extracted by `proxyChildRootArg` and matched under each scope
+  `.beads/` by `proxyChildPIDsFromPS`. `proxied = true` in city.toml.
+  **`gc stop` reap + never-idle-reuse NOT run here** — running them from inside
+  the live portharbour city would stop the fleet (and this executor session);
+  covered instead by the unit-tested pure functions + Karel's prod fork-verify
+  (HANDOFF.md: "Deployed + validated in prod, fork-verify CI green"). To be
+  noted in the PR for a maintainer to confirm on a throwaway proxied city.
+
+CGO note for reviewers: raw `go test`/`vet`/`build` need icu4c headers —
+`CGO_CPPFLAGS=-I$(brew --prefix icu4c)/include`,
+`CGO_LDFLAGS=-L$(brew --prefix icu4c)/lib` (the Makefile sets these; `make
+generate`/`make test` handle it automatically).
