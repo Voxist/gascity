@@ -128,9 +128,10 @@ func TestApplyProxiedPoolEnvInjectsOnlyWhenGateOnAndBDCapable(t *testing.T) {
 		if env["GC_BEADS_PROXIED"] != "1" || env["GC_BEADS_PROXY_POOL_SIZE"] != "6" || env["BEADS_PROXY_POOL_SIZE"] != "6" {
 			t.Fatalf("env = %v, want proxied=1 pool=6", env)
 		}
-		// Idle timeout defaults to keep proxies warm across sparse probes.
-		if env["BEADS_PROXY_IDLE_TIMEOUT"] != "10m" || env["GC_BEADS_PROXY_IDLE_TIMEOUT"] != "10m" {
-			t.Fatalf("env = %v, want idle_timeout=10m", env)
+		// Idle timeout defaults to "0" (never idle): gc owns the proxy
+		// lifecycle and reaps on stop, so proxies stay warm with no churn.
+		if env["BEADS_PROXY_IDLE_TIMEOUT"] != "0" || env["GC_BEADS_PROXY_IDLE_TIMEOUT"] != "0" {
+			t.Fatalf("env = %v, want idle_timeout=0", env)
 		}
 	})
 
