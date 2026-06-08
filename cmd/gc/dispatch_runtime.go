@@ -488,6 +488,20 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 					workflowTracef("serve transient-error-pending bead=%s kind=%s err=%v", beadID, kind, err)
 					continue
 				}
+				// Outermost backstop (ga-3p3o): a per-bead parkable error
+				// (empty/unknown gc.kind and other un-routable categorization
+				// failures) must never crash this singleton serve loop. Skip it
+				// and keep draining so one malformed work item cannot crash-loop
+				// the control plane into quarantine. Actual bead parking stays in
+				// the inner net (quarantineControlFailureBead); this branch only
+				// guarantees the process survives. Treated as pending so a lone
+				// bad bead exits the drain cleanly instead of spinning.
+				if dispatch.IsParkableControlError(err) {
+					pendingCount++
+					result.pendingAny = true
+					workflowTracef("serve parked-unroutable bead=%s kind=%s err=%v", beadID, kind, err)
+					continue
+				}
 				return result, fmt.Errorf("processing control bead %s: %w", beadID, err)
 			}
 			workflowTracef("serve processed bead=%s kind=%s", beadID, kind)

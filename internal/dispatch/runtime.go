@@ -89,6 +89,13 @@ var ErrControlPending = errors.New("workflow control pending")
 // that cannot become valid by waiting.
 var ErrControlGraphMalformed = errors.New("workflow control graph malformed")
 
+// ErrControlUnsupportedKind reports that a control bead carries an empty or
+// unrecognized gc.kind and so cannot be categorized to a handler. It is a
+// per-bead categorization failure: the singleton control-dispatcher must PARK
+// such a bead (skip + quarantine), never crash on it. See IsParkableControlError
+// and the serve drain loop's parkable branch (ga-3p3o).
+var ErrControlUnsupportedKind = errors.New("unsupported control bead kind")
+
 // ProcessControl executes a graph.v2 control bead.
 //
 // The current graph.v2 runtime assumes a single controller processes a given
@@ -135,7 +142,7 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 	case "workflow-finalize":
 		return processWorkflowFinalize(store, bead, opts)
 	default:
-		return ControlResult{}, fmt.Errorf("%s: unsupported control bead kind %q", bead.ID, bead.Metadata["gc.kind"])
+		return ControlResult{}, fmt.Errorf("%s: %w %q", bead.ID, ErrControlUnsupportedKind, bead.Metadata["gc.kind"])
 	}
 }
 
