@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -59,6 +60,90 @@ func TestStatusProviderTimeoutDoesNotStickAcrossCalls(t *testing.T) {
 	}
 	if got := warnings.Load(); got != 1 {
 		t.Fatalf("timeout warnings = %d, want 1", got)
+	}
+}
+
+func TestStatusProbeTimeoutSelectsProxiedBound(t *testing.T) {
+	proxied := true
+	embedded := false
+	cases := []struct {
+		name string
+		cfg  *config.City
+		want time.Duration
+	}{
+		{"proxied", &config.City{Beads: config.BeadsConfig{Proxied: &proxied}}, statusProviderProxiedCallTimeout},
+		{"embedded-false", &config.City{Beads: config.BeadsConfig{Proxied: &embedded}}, statusProviderCallTimeout},
+		{"embedded-nil", &config.City{Beads: config.BeadsConfig{}}, statusProviderCallTimeout},
+		{"nil-cfg", nil, statusProviderCallTimeout},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := statusProbeTimeout(tc.cfg); got != tc.want {
+				t.Fatalf("statusProbeTimeout(%s) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBoundedStatusProviderUsesPerProviderTimeout(t *testing.T) {
+	origWarn := statusProviderTimeoutWarning
+	t.Cleanup(func() { statusProviderTimeoutWarning = origWarn })
+
+	t.Run("deadline-shorter-than-call-times-out", func(t *testing.T) {
+		var warnings atomic.Int32
+		statusProviderTimeoutWarning = func() { warnings.Add(1) }
+		base := newStatusProbeProvider()
+		base.running.Store(true)
+		base.delay.Store(int64(50 * time.Millisecond))
+		wrapped := newBoundedStatusProviderWithTimeout(base, 10*time.Millisecond)
+
+		if wrapped.IsRunning("worker") {
+			t.Fatal("IsRunning returned true, want timeout fallback false")
+		}
+		if got := warnings.Load(); got != 1 {
+			t.Fatalf("timeout warnings = %d, want 1", got)
+		}
+	})
+
+	t.Run("deadline-longer-than-call-returns-real-result", func(t *testing.T) {
+		var warnings atomic.Int32
+		statusProviderTimeoutWarning = func() { warnings.Add(1) }
+		base := newStatusProbeProvider()
+		base.running.Store(true)
+		base.delay.Store(int64(50 * time.Millisecond))
+		wrapped := newBoundedStatusProviderWithTimeout(base, 200*time.Millisecond)
+
+		if !wrapped.IsRunning("worker") {
+			t.Fatal("IsRunning returned false, want real provider result true")
+		}
+		if got := warnings.Load(); got != 0 {
+			t.Fatalf("timeout warnings = %d, want 0", got)
+		}
+	})
+}
+
+func TestStatusSessionProviderAppliesProxiedTimeout(t *testing.T) {
+	proxied := true
+	embedded := false
+	cases := []struct {
+		name string
+		cfg  *config.City
+		want time.Duration
+	}{
+		{"proxied", &config.City{Beads: config.BeadsConfig{Proxied: &proxied}}, statusProviderProxiedCallTimeout},
+		{"embedded", &config.City{Beads: config.BeadsConfig{Proxied: &embedded}}, statusProviderCallTimeout},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := newStatusSessionProviderForCity(tc.cfg, t.TempDir())
+			sp, ok := provider.(*statusProvider)
+			if !ok {
+				t.Fatalf("provider type = %T, want *statusProvider", provider)
+			}
+			if sp.timeout != tc.want {
+				t.Fatalf("timeout = %v, want %v", sp.timeout, tc.want)
+			}
+		})
 	}
 }
 

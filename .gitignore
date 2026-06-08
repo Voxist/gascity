@@ -49,3 +49,7 @@ issues.jsonl
 # Beads / Dolt files (added by bd init)
 .beads/proxieddb/
 .beads.backup-*
+
+# Gas City
+.beads/*
+!.beads/identity.toml
