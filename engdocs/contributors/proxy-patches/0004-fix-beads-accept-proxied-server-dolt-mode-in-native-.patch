@@ -1,0 +1,69 @@
+From a409d140b9c952c26a417aee5921b6ee8e1aac10 Mon Sep 17 00:00:00 2001
+From: bourgois <karel@voxist.com>
+Date: Sun, 7 Jun 2026 17:57:57 +0200
+Subject: [PATCH] fix(beads): accept proxied-server dolt mode in native-store
+ preflight gate
+
+When [beads] proxied=true, bd context reports dolt_mode='proxied-server'
+(connection pooling via db-proxy fronting the managed Dolt server). The
+dolt_mode_safe preflight gate only passed 'server', so proxied mode fell
+through to default-Fail, marking the native store unavailable for every
+scope and forcing the slower BdStore (subprocess-per-query) fallback
+fleet-wide. Proxied-server is a server mode safe for the native store,
+which connects through the same proxied endpoint.
+---
+ internal/beads/contract/preflight_checker.go  |  5 +++++
+ .../beads/contract/preflight_checker_test.go  | 21 +++++++++++++++++++
+ 2 files changed, 26 insertions(+)
+
+diff --git a/internal/beads/contract/preflight_checker.go b/internal/beads/contract/preflight_checker.go
+index 6f693eec2..473eed72e 100644
+--- a/internal/beads/contract/preflight_checker.go
++++ b/internal/beads/contract/preflight_checker.go
+@@ -175,6 +175,11 @@ func (c PreflightChecker) checkDoltModeSafe(metadata preflightMetadata, ctx Pref
+ 	switch ctx.DoltMode {
+ 	case "server":
+ 		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckPass, "bd context reports dolt server mode", details)
++	case "proxied-server":
++		// Proxied-server fronts the managed Dolt server through the connection
++		// pool (bd db-proxy). It is a server mode and is safe for the native
++		// store, which connects through the same proxied endpoint.
++		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckPass, "bd context reports proxied-server (pooled) mode", details)
+ 	case "embedded":
+ 		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckFail, "dolt_mode=embedded requires server mode or native_embedded build tag", details)
+ 	default:
+diff --git a/internal/beads/contract/preflight_checker_test.go b/internal/beads/contract/preflight_checker_test.go
+index af665ca0b..23c6ad3a3 100644
+--- a/internal/beads/contract/preflight_checker_test.go
++++ b/internal/beads/contract/preflight_checker_test.go
+@@ -129,6 +129,27 @@ func TestPreflightPassesOnHealthyDolt(t *testing.T) {
+ 	}
+ }
+ 
++func TestPreflightPassesOnProxiedServerDolt(t *testing.T) {
++	// Proxied-server mode (bd connection pooling via db-proxy) is a server mode
++	// and must keep the native store eligible. Regression for the proxied-pooling
++	// rollout that left the dolt_mode_safe gate rejecting "proxied-server".
++	scope := "/city"
++	checker := testPreflightChecker(preflightMetadataJSON(`{
++		"backend": "dolt",
++		"dolt_mode": "proxied-server",
++		"dolt_database": "gascity",
++		"project_id": "gc-local"
++	}`), PreflightBDContext{Backend: "dolt", DoltMode: "proxied-server"}, "gc-local")
++
++	result, err := checker.Check(scope)
++	if err != nil {
++		t.Fatalf("Check() error = %v", err)
++	}
++
++	assertPreflightVerdict(t, result, PreflightVerdictEligible, true)
++	assertCheckState(t, result, PreflightCheckDoltModeSafe, PreflightCheckPass)
++}
++
+ func TestPreflightAcceptsExecGcBeadsBdProviderPath(t *testing.T) {
+ 	scope := "/city"
+ 	checker := testPreflightChecker(preflightMetadataJSON(`{
+-- 
+2.54.0
+
