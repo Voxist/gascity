@@ -1,8 +1,4 @@
-// Package deliverywarden implements the delivery-warden sweep — an idempotent
-// reconciler that repairs orphan/zombie delivery beads and escalates stalled or
-// long-lived PRs. It is registered as an exec-type order and runs on a 2-minute
-// cooldown interval.
-package deliverywarden
+package main
 
 import (
 	"fmt"
@@ -17,10 +13,9 @@ import (
 
 // Warden metadata key constants.
 const (
-	metaKeyPhaseEnteredAt    = "gc.phase_entered_at"    // Unix timestamp when bead entered current phase
-	metaKeyWardenRetries     = "gc.warden_retries"      // number of recovery attempts by the warden
-	metaKeyWardenEscalated   = "gc.warden_escalated"    // set when escalation mail has been sent
-	metaKeyCreatedAtOverride = "gc.created_at_override" // test hook: override effective creation time (Unix seconds)
+	metaKeyPhaseEnteredAt  = "gc.phase_entered_at" // Unix timestamp when bead entered current phase
+	metaKeyWardenRetries   = "gc.warden_retries"   // number of recovery attempts by the warden
+	metaKeyWardenEscalated = "gc.warden_escalated" // set when escalation mail has been sent
 )
 
 const maxLifetime = 24 * time.Hour
@@ -136,13 +131,18 @@ func (w *Warden) RepairOrphan(owner, repo string) error {
 		}
 
 		// Recreate the tacit-consent decision bead.
+		// gc.merge_deadline is set to 24 h from now — gc-merge-sweep uses this
+		// field for the tacit-consent window; orphan-repaired beads inherit the
+		// default window from the moment of repair.
+		deadline := strconv.FormatInt(w.now().Add(24*time.Hour).Unix(), 10)
 		_, err = w.store.Create(beads.Bead{
 			Title: fmt.Sprintf("merge-decision: %s/%s#%d (orphan repair)", owner, repo, pr.Number),
 			Type:  "decision",
 			Metadata: map[string]string{
-				"gc.merge_pr":     prNumStr,
-				"gc.merge_repo":   fmt.Sprintf("%s/%s", owner, repo),
-				"gc.merge_source": sourceID,
+				"gc.merge_pr":       prNumStr,
+				"gc.merge_repo":     fmt.Sprintf("%s/%s", owner, repo),
+				"gc.merge_source":   sourceID,
+				"gc.merge_deadline": deadline,
 			},
 		})
 		if err != nil {
@@ -175,7 +175,7 @@ func (w *Warden) RepairZombie() error {
 
 		pr, err := w.github.GetPR(prURL)
 		if err != nil {
-			// Fail-open: log and continue rather than aborting the sweep.
+			fmt.Fprintf(os.Stderr, "RepairZombie: GetPR(%s): %v — skipping\n", prURL, err)
 			continue
 		}
 
@@ -344,10 +344,11 @@ func (w *Warden) Sweep(repos [][2]string, heartbeatFile string) error {
 	if err := w.CheckGlobalLifetime(); err != nil {
 		errs = append(errs, err)
 	}
-	if len(errs) == 0 {
-		if err := WriteHeartbeat(heartbeatFile); err != nil {
-			errs = append(errs, fmt.Errorf("WriteHeartbeat: %w", err))
-		}
+	// Heartbeat records that the warden ran, not that it ran without per-item
+	// errors — always write it so a transient GetPR failure doesn't trigger a
+	// false supervisor restart alert.
+	if err := WriteHeartbeat(heartbeatFile); err != nil {
+		errs = append(errs, fmt.Errorf("WriteHeartbeat: %w", err))
 	}
 
 	if len(errs) == 0 {

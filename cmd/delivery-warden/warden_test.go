@@ -1,4 +1,4 @@
-package deliverywarden
+package main
 
 import (
 	"fmt"

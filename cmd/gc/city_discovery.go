@@ -89,13 +89,6 @@ func configuredSupervisorRuntimeRoot() string {
 
 func isCityDiscoveryCeiling(dir string, ceilings []string) bool {
 	dir = normalizeDiscoveryPath(dir)
-	if f := os.Getenv("GC_DEBUG_CEILING"); f != "" {
-		dbg, _ := os.OpenFile(f, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-		if dbg != nil {
-			fmt.Fprintf(dbg, "isCityDiscoveryCeiling: dir=%q ceilings=%v\n", dir, ceilings)
-			dbg.Close()
-		}
-	}
 	for _, ceiling := range ceilings {
 		if dir == ceiling {
 			return true
