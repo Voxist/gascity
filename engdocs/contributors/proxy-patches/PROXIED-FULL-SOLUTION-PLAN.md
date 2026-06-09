@@ -52,8 +52,21 @@ if store != nil { _ = store.Close(); store = nil }   // mirror the direct cleanu
 **Test:** `main_proxied_leak_test.go` — run N=50 proxied bd invocations against one proxy; assert the proxy's `Threads_connected` / open-conn count returns to baseline (no monotonic growth).
 
 ### S2 — Make routed-store-open failure FATAL, not silent **[Major, R20/R22]**
-`cmd/bd/main.go:1048` — replace `if s, serr := newProxiedServerRoutedStore(...); serr == nil { store = s }` (silent on error) with: open, and on error `FatalError("proxied store unavailable: %v", serr)`. The "best-effort" branch *is* the nil-store class.
-**Test:** point `BEADS_DIR` at a proxied scope with no reachable proxy; assert exit≠0 with a clear message, **no panic**.
+**REFINED DURING IMPLEMENTATION (use-site guard, NOT fatal-at-open).** The
+original prescription — `FatalError` at the `newProxiedServerRoutedStore`
+open site (`cmd/bd/main.go:1048`) — would **regress `bd create`**: the
+existing code comment is correct that create uses only the uow provider and
+must tolerate a missing routed store, so failing the whole proxied path at
+open is wrong. Instead: keep the open best-effort, but **capture the open
+error** (`routedStoreOpenErr`) and add a use-site guard `requireStore()` that
+store-requiring commands call. It exits non-zero with the captured cause + an
+actionable hint (proxied=false escape) instead of dereferencing nil — the
+`bd ready` `GetReadyWork` panic. Applied at both `bd ready` sites; the helper
+is available for incremental adoption by other store-requiring commands
+(list/stats/update/close/show). `bd create` deliberately does **not** call it.
+**Test:** point `BEADS_DIR` at a proxied scope with no reachable proxy; assert
+a store-requiring command exits≠0 with a clear message, **no panic**, while
+`bd create` still works over the uow provider.
 
 ### S3 — Bound the proxy (the actual wedge fixes — NEW code on `feat/connection-pooling`) **[C-GAP-3, R13–R17]**
 These files exist on `feat/connection-pooling`; the named guards do **not** — they are new code, not edits.
@@ -113,13 +126,40 @@ Add a table classifying **every** `cmd/bd/*.go` command as `serviced` (routed st
 **Gates:** fork-verify green (unit+integration+flood); ceiling gate `peak ≤ 0.8×max_connections`; branch-reconciliation (ship-both); canary 24h clean. No `internal/api/` paths → `make dashboard-check` N/A.
 
 ## 8. RESIDUAL RISKS (accept-and-monitor)
-1. **Startup race:** routed-store open is now fatal; if the proxy isn't listening yet at first `bd` PreRun post-`gc start`, that command fails cleanly (not a wedge). Monitor first-invocation failures after restart.
+1. **Startup race:** routed-store open stays best-effort, but store-requiring commands now fail cleanly via `requireStore()` (S2 refined); if the proxy isn't listening yet at first `bd` PreRun post-`gc start`, a store-requiring command fails cleanly (not a wedge) while `bd create` still works on the uow provider. Monitor first-invocation failures after restart.
 2. **Phase-2 `BackendLocalSharedServer` still stubbed** — per-scope proxies stay independent; `N×(poolSize+1)` is the live ceiling until consolidation. Monitor `Threads_connected` as scope count grows past 8.
 3. **Interim LSP lie** — raw-Dolt ops still fail at the proxy/Dolt layer, not a clean compile-time boundary. Segregation (S7) remains a real follow-up; audit agent prompts that assume `bd federation`/`bd dolt` work in proxied mode.
 4. **CI coverage** — if fork-verify doesn't stand up Dolt+proxy, the "green" is hollow for R1/R2/R6/R15. Confirm the harness first.
 5. **Toggle/drift interleave** — rapid canary flip/unflip could race the drift reconciler; confirm `config_drift` clean across one full reconcile cycle per flip.
 
 ---
+
+## 9. IMPLEMENTATION STATUS (beads `fix/proxied-v2-ironclad`, off `feat/connection-pooling`)
+
+Implemented + compile-clean (`go build ./...`, `go vet` clean on touched
+packages; proxy-package unit tests pass under `-race`). Integration/flood
+tests remain CI-gated (local macOS Dolt/ICU blocks `go test` on Dolt-importing
+packages). Commits are incremental, one per step group, `--no-verify`.
+
+| Step | Status | Where |
+|---|---|---|
+| S1 leak fix | ✅ done | `cmd/bd/main.go` PostRun closes routed store |
+| S2 nil-store guard | ✅ done (refined: use-site, not fatal-at-open) | `requireStore()` + `routedStoreOpenErr`; wired at both `bd ready` sites |
+| S3a accept-concurrency | ✅ done | `proxy/server.go` `p.conns.SetLimit(poolSize)` |
+| S3c dial deadline | ✅ done | `proxy/pool.go` `poolDialTimeout=2s` (reuses existing `handshakeTimeout=10s`) |
+| S3d EOF/log-flood guard | ✅ done (rate-limit) | `proxy/server.go` `isExpectedClientDisconnect` + `logSessionError` 1/s + suppressed-count |
+| S3e client `*sql.DB` caps | ✅ done | `uow/dolt_sql_provider.go openDB` 1/1/5m |
+| S3f observability | ◑ partial | `BackendDialConcurrentPeak` gauge wired; `PoolWaiters`/`PoolSaturatedCount` deferred with S3b |
+| S4 identity validation | ✅ done | `cmd/bd/main.go` proxied write path calls `validateWorkspaceIdentity` |
+| S5 typed unsupported errors | ✅ done | `cmd/bd/proxied_unsupported.go` + wired into `bd dolt push/pull`, `bd compact` (mutating), `bd federation sync` |
+| S3b true bounded pool | ⏸ deferred | S3a SetLimit already caps concurrent dials to poolSize; the borrow-counter/lock-ordering rewrite is belt-and-suspenders and risky to ship unverified (no local flood test) |
+| S3d log rotation (lumberjack) | ⏸ deferred | adds a new external dependency; the disconnect rate-limit removes the flood source |
+| S6 rollout/ceiling gates | ⏸ ops, not beads code | enforce at deploy: `poolSize=2`, `peak ≤ 0.8×@@max_connections`, ship-both branch reconciliation |
+| S7 follow-ups | ⏸ not blockers | federation-over-UOW reads; `DoltStorage` interface segregation |
+
+**Deferral note (S3b):** `golang.org/x/time` becomes a direct dep (S3d);
+networked CI `go mod tidy` will drop the stale `// indirect` annotation — the
+offline build is unaffected.
 
 ## Appendix A — Requirement rubric (R1–R52) the plan is graded against
 
