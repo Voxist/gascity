@@ -160,6 +160,8 @@ const (
 	cacheReconcileIntervalLarge     = 120 * time.Second
 	cacheProblemLogWindow           = time.Minute
 	cacheReconcileFailureBackoff    = time.Minute
+	cacheReconcileBaseBackoff       = 2 * time.Second
+	cacheReconcileMaxBackoff        = 10 * time.Minute
 	// cacheReconcileSuccessLogWindow rate-limits the per-reconcile success
 	// log line. Reuses the one-minute pattern from cacheProblemLogWindow so
 	// the reconciler's footprint in the operator-visible log stays bounded
