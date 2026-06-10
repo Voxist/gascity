@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltauth"
+	"github.com/gastownhall/gascity/internal/doltpool"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/sling"
 )
@@ -62,14 +63,12 @@ func workflowSQLCandidatesForWorkflowID(
 // a pre-fetched dep map. Connects to the dolt server on the given port
 // using the given database name.
 func workflowSQLSnapshot(user, password, host string, port int, database, rootID string) ([]beads.Bead, map[string]beads.Bead, map[string][]beads.Dep, error) {
-	dsn := buildDoltDSN(user, password, host, port, database)
-	db, err := sql.Open("mysql", dsn)
+	// Pooled handle owned by internal/doltpool; do not Close. Per-snapshot
+	// Open+Close here churned one TCP connection per dashboard refresh.
+	db, err := openWorkflowSQLDB(user, password, host, port, database)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("sql open: %w", err)
+		return nil, nil, nil, err
 	}
-	defer db.Close() //nolint:errcheck // best-effort cleanup
-	db.SetMaxOpenConns(1)
-	db.SetConnMaxLifetime(30 * time.Second)
 
 	tableSets, err := workflowSQLAvailableTableSets(db)
 	if err != nil {
@@ -634,11 +633,11 @@ func workflowStorePath(state State, info workflowStoreInfo) (string, bool) {
 }
 
 func workflowSQLFindRoot(cfg *config.City, user, password, host string, port int, database, workflowID string) (beads.Bead, bool, error) {
+	// Pooled handle owned by internal/doltpool; do not Close.
 	db, err := openWorkflowSQLDB(user, password, host, port, database)
 	if err != nil {
 		return beads.Bead{}, false, err
 	}
-	defer db.Close() //nolint:errcheck // best-effort cleanup
 
 	tableSets, err := workflowSQLAvailableTableSets(db)
 	if err != nil {
@@ -720,14 +719,14 @@ func workflowSQLFindRootByWorkflowID(db *sql.DB, tableSets []workflowSQLTableSet
 	return matches[0], true, nil
 }
 
+// openWorkflowSQLDB returns the shared pooled *sql.DB for a workflow
+// store endpoint. The handle is owned by internal/doltpool — callers
+// must NOT Close it.
 func openWorkflowSQLDB(user, password, host string, port int, database string) (*sql.DB, error) {
-	dsn := buildDoltDSN(user, password, host, port, database)
-	db, err := sql.Open("mysql", dsn)
+	db, err := doltpool.Open(host, strconv.Itoa(port), user, password, database)
 	if err != nil {
 		return nil, fmt.Errorf("sql open: %w", err)
 	}
-	db.SetMaxOpenConns(1)
-	db.SetConnMaxLifetime(30 * time.Second)
 	return db, nil
 }
 
