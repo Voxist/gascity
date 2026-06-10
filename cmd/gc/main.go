@@ -1213,7 +1213,7 @@ func openStoreResultAtForCity(storePath, cityPath string) (beads.StoreOpenResult
 			if err != nil {
 				return nil, fmt.Errorf("project native store env %s: %w", scopeRoot, err)
 			}
-			return beads.OpenNativeDoltStoreAt(context.Background(), scopeRoot, env)
+			return openNativeStoreWithIdentityAssertion(context.Background(), scopeRoot, env, nil)
 		},
 	})
 	if err != nil {

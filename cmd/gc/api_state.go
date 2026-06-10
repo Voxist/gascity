@@ -337,7 +337,7 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 			if err != nil {
 				return nil, fmt.Errorf("project native rig store env %s: %w", scopeRoot, err)
 			}
-			return beads.OpenNativeDoltStoreAt(context.Background(), scopeRoot, env)
+			return openNativeStoreWithIdentityAssertion(context.Background(), scopeRoot, env, nil)
 		},
 	})
 	if err != nil {
