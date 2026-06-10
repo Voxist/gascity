@@ -173,6 +173,14 @@ func createPoolSessionBeadWithAlias(
 	if err != nil {
 		return beads.Bead{}, err
 	}
+	if reused, ok := reuseOpenStartPendingPoolSlotBead(store, template, identity, now); ok {
+		if sessionBeads != nil {
+			if _, present := findOpenSessionBeadByID(sessionBeads, reused.ID); !present {
+				sessionBeads.add(reused)
+			}
+		}
+		return reused, nil
+	}
 	instanceToken := sessionpkg.NewInstanceToken()
 	agentName := strings.TrimSpace(identity.AgentName)
 	title := targetBasename(template)
@@ -234,6 +242,81 @@ func createPoolSessionBeadWithAlias(
 		sessionBeads.add(bead)
 	}
 	return bead, nil
+}
+
+// reuseOpenStartPendingPoolSlotBead returns an existing open start-pending
+// session bead for the same (template, pool_slot) so repeated create plans
+// for one slot converge on a single bead instead of minting duplicates
+// (incident 6: 200-415 stale pending duplicates per pool slot jammed
+// controller adoption). The dedup key is exact-match metadata only; no
+// judgment in Go.
+//
+// A bead is reusable when it is open with state=start-pending,
+// pending_create_claim=true, last_woke_at unset (never reached
+// preWakeCommit, so it holds no claims), a non-empty session_name, the same
+// template and pool_slot, and is not a configured named-session bead. The
+// oldest match wins (deterministic across ticks).
+//
+// On reuse the pending-create stale clock is reset to now — the reuse IS a
+// fresh spawn attempt, mirroring reopenClosedConfiguredNamedSessionBead. If
+// the store query or the clock reset fails, the caller falls back to a
+// fresh create (today's behavior) rather than reusing with a stale clock.
+func reuseOpenStartPendingPoolSlotBead(
+	store beads.Store,
+	template string,
+	identity poolSessionCreateIdentity,
+	now time.Time,
+) (beads.Bead, bool) {
+	template = strings.TrimSpace(template)
+	if store == nil || identity.Slot <= 0 || template == "" {
+		return beads.Bead{}, false
+	}
+	candidates, err := sessionpkg.ExactMetadataSessionCandidates(store, false, map[string]string{"template": template})
+	if err != nil {
+		return beads.Bead{}, false
+	}
+	slot := strconv.Itoa(identity.Slot)
+	matches := make([]beads.Bead, 0, 1)
+	for _, b := range candidates {
+		if b.Status == "closed" {
+			continue
+		}
+		if strings.TrimSpace(b.Metadata["template"]) != template {
+			continue
+		}
+		if strings.TrimSpace(b.Metadata["pool_slot"]) != slot {
+			continue
+		}
+		if strings.TrimSpace(b.Metadata["state"]) != string(sessionpkg.StateStartPending) {
+			continue
+		}
+		if strings.TrimSpace(b.Metadata["pending_create_claim"]) != "true" {
+			continue
+		}
+		if strings.TrimSpace(b.Metadata["last_woke_at"]) != "" {
+			continue
+		}
+		if strings.TrimSpace(b.Metadata["session_name"]) == "" {
+			continue
+		}
+		if isNamedSessionBead(b) {
+			continue
+		}
+		matches = append(matches, b)
+	}
+	if len(matches) == 0 {
+		return beads.Bead{}, false
+	}
+	sortSessionBeadsByCreatedAtThenID(matches)
+	reused := matches[0]
+	if err := store.SetMetadata(reused.ID, "pending_create_started_at", pendingCreateStartedAtNow(now)); err != nil {
+		return beads.Bead{}, false
+	}
+	if reused.Metadata == nil {
+		reused.Metadata = map[string]string{}
+	}
+	reused.Metadata["pending_create_started_at"] = pendingCreateStartedAtNow(now)
+	return reused, true
 }
 
 // derivePoolSessionName picks the session_name for a fresh pool bead. When

@@ -5478,6 +5478,50 @@ func TestSessionSetupTimeoutInvalid(t *testing.T) {
 	}
 }
 
+func TestSessionPendingCreateTTLDefault(t *testing.T) {
+	s := SessionConfig{}
+	got := s.PendingCreateTTLDuration()
+	if got != 30*time.Minute {
+		t.Errorf("PendingCreateTTLDuration() = %v, want 30m", got)
+	}
+}
+
+func TestSessionPendingCreateTTLCustom(t *testing.T) {
+	s := SessionConfig{PendingCreateTTL: "45m"}
+	got := s.PendingCreateTTLDuration()
+	if got != 45*time.Minute {
+		t.Errorf("PendingCreateTTLDuration() = %v, want 45m", got)
+	}
+}
+
+func TestSessionPendingCreateTTLInvalid(t *testing.T) {
+	s := SessionConfig{PendingCreateTTL: "not-a-duration"}
+	got := s.PendingCreateTTLDuration()
+	if got != 30*time.Minute {
+		t.Errorf("PendingCreateTTLDuration() = %v, want 30m (default for invalid)", got)
+	}
+}
+
+func TestParseSessionPendingCreateTTL(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test-city"
+
+[session]
+pending_create_ttl = "1h"
+
+[[agent]]
+name = "mayor"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.Session.PendingCreateTTLDuration(); got != time.Hour {
+		t.Errorf("PendingCreateTTLDuration() = %v, want 1h", got)
+	}
+}
+
 func TestSessionNudgeReadyTimeoutDefault(t *testing.T) {
 	s := SessionConfig{}
 	got := s.NudgeReadyTimeoutDuration()
