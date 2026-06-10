@@ -143,39 +143,102 @@ func TestTransportPoisonConfirmAfterThreshold(t *testing.T) {
 	}
 }
 
-// TestReapRateLimitWithinCooldown asserts a second confirmed poison inside
-// the cooldown window is alert-only (rate-limited) but STILL captures
-// forensics — reap-only would destroy the evidence.
+// TestReapRateLimitWithinCooldown asserts the reap is rate-limited across a
+// sustained poison episode: the proxy is reaped once at first confirmation,
+// not again inside the cooldown window, and once more after the window
+// expires. Forensics, the breaker trip, and the degraded emission are
+// once-per-episode (asserted in TestPoisonEpisodeEmitsOnceAcrossManyTicks);
+// here we focus on the reap cadence.
 func TestReapRateLimitWithinCooldown(t *testing.T) {
 	clk := &mutClock{}
 	h := &recordingHooks{aResult: fail(), bResult: ok(), forensicsDir: "/q/scope-1"}
 	p := NewScopePatrol(Config{ConsecutiveFails: 1, ReapCooldown: 10 * time.Minute}, h.hooks(), clk.now)
 
-	// First confirmed poison at t=0 → real reap.
+	// First confirmed poison at t=0 → real reap, forensics captured once.
 	p.EvaluateCycle(context.Background())
 	if h.reapCalled != 1 || len(h.reaped) != 1 || h.reaped[0].rateLimited {
 		t.Fatalf("first poison should reap non-rate-limited: reap=%d reaped=%+v", h.reapCalled, h.reaped)
 	}
+	if h.forensicsCaptured != 1 {
+		t.Fatalf("forensicsCaptured = %d after first confirmation, want 1", h.forensicsCaptured)
+	}
 
-	// Second confirmed poison 5m later (inside 10m cooldown) → alert-only,
-	// forensics still captured, reap NOT called again.
+	// Second poison 5m later (inside 10m cooldown), episode already confirmed
+	// → no reap, no extra forensics, no extra reap event.
 	clk.advance(5 * time.Minute)
 	p.EvaluateCycle(context.Background())
 	if h.reapCalled != 1 {
 		t.Fatalf("reap called again inside cooldown: reapCalled = %d, want 1", h.reapCalled)
 	}
-	if h.forensicsCaptured != 2 {
-		t.Fatalf("forensics NOT captured for the rate-limited poison: forensicsCaptured = %d, want 2", h.forensicsCaptured)
+	if h.forensicsCaptured != 1 {
+		t.Fatalf("forensics re-captured inside cooldown for a confirmed episode: forensicsCaptured = %d, want 1", h.forensicsCaptured)
 	}
-	if len(h.reaped) != 2 || !h.reaped[1].rateLimited {
-		t.Fatalf("second reap event should be rate-limited: reaped = %+v", h.reaped)
+	if len(h.reaped) != 1 {
+		t.Fatalf("extra reap event emitted inside cooldown: reaped = %+v, want 1", h.reaped)
 	}
 
-	// A third poison after the cooldown expires → real reap again.
+	// A third poison after the cooldown expires → real reap again (the proxy
+	// is still poisoned and the window has elapsed).
 	clk.advance(6 * time.Minute) // now t=11m, > 10m after the t=0 reap
 	p.EvaluateCycle(context.Background())
 	if h.reapCalled != 2 {
 		t.Fatalf("reap should fire after cooldown expiry: reapCalled = %d, want 2", h.reapCalled)
+	}
+}
+
+// TestPoisonEpisodeEmitsOnceAcrossManyTicks asserts that a sustained poison
+// across many patrol ticks captures forensics, trips the breaker, and emits
+// degraded exactly ONCE per episode — only the per-tick probe-failed
+// breadcrumb repeats — and that a genuine recovery followed by a re-poison
+// re-captures.
+func TestPoisonEpisodeEmitsOnceAcrossManyTicks(t *testing.T) {
+	clk := &mutClock{}
+	h := &recordingHooks{aResult: fail(), bResult: ok(), forensicsDir: "/q/ep"}
+	// Large cooldown so the reap never re-fires; we are asserting the
+	// once-per-episode forensics/trip/degraded, isolated from the reap cadence.
+	p := NewScopePatrol(Config{ConsecutiveFails: 3, ReapCooldown: time.Hour}, h.hooks(), clk.now)
+
+	// 20 poison ticks at a 30s interval (a multi-minute outage).
+	for i := 0; i < 20; i++ {
+		p.EvaluateCycle(context.Background())
+		clk.advance(30 * time.Second)
+	}
+	if h.forensicsCaptured != 1 {
+		t.Fatalf("forensicsCaptured = %d across a sustained episode, want 1", h.forensicsCaptured)
+	}
+	if h.tripped != 1 {
+		t.Fatalf("tripped = %d across a sustained episode, want 1", h.tripped)
+	}
+	if len(h.degraded) != 1 || h.degraded[0] != ClassTransport {
+		t.Fatalf("degraded = %v across a sustained episode, want exactly [transport]", h.degraded)
+	}
+	// The per-tick breadcrumb survives: one routed probe-failed per cycle.
+	if len(h.probeFailed) != 20 {
+		t.Fatalf("probeFailed = %d, want 20 (one per tick — the per-cycle signal must survive)", len(h.probeFailed))
+	}
+
+	// Recovery clears the episode.
+	h.aResult = ok()
+	p.EvaluateCycle(context.Background())
+	clk.advance(30 * time.Second)
+	if p.Degraded() != "" || len(h.recovered) != 1 {
+		t.Fatalf("recovery not registered: degraded=%q recovered=%v", p.Degraded(), h.recovered)
+	}
+
+	// Re-poison after recovery → a NEW episode re-captures and re-emits.
+	h.aResult = fail()
+	for i := 0; i < 3; i++ {
+		p.EvaluateCycle(context.Background())
+		clk.advance(30 * time.Second)
+	}
+	if h.forensicsCaptured != 2 {
+		t.Fatalf("forensicsCaptured = %d after recovery→re-poison, want 2 (new episode re-captures)", h.forensicsCaptured)
+	}
+	if h.tripped != 2 {
+		t.Fatalf("tripped = %d after recovery→re-poison, want 2", h.tripped)
+	}
+	if len(h.degraded) != 2 {
+		t.Fatalf("degraded = %v after recovery→re-poison, want 2 emissions", h.degraded)
 	}
 }
 
