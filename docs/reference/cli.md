@@ -1580,6 +1580,7 @@ gc import
 | [gc import check](#gc-import-check) | Validate installed pack import state |
 | [gc import install](#gc-import-install) | Install imports from pack.toml and packs.lock |
 | [gc import list](#gc-import-list) | List imported packs |
+| [gc import prune](#gc-import-prune) | Remove unreferenced clones from the global pack cache |
 | [gc import remove](#gc-import-remove) | Remove a pack import |
 | [gc import upgrade](#gc-import-upgrade) | Upgrade imported packs within their constraints |
 | [gc import why](#gc-import-why) | Explain why an import is present |
@@ -1650,6 +1651,32 @@ gc import list [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--tree` | bool |  | Show the import dependency tree |
+
+## gc import prune
+
+Remove unreferenced clones from the machine-wide pack cache.
+
+The pack cache (~/.gc/cache/repos) is shared by every city on the machine and
+is keyed by (source, commit), so commit churn accumulates stale clones over
+time. A clone is "referenced" when some city's packs.lock still pins it; prune
+keeps every referenced clone and removes only the rest.
+
+By default prune considers every city in the supervisor registry plus the city
+resolved from the current directory; pass --all-cities to reference the full
+registry set and ignore the current directory. Prune is a dry run unless
+--apply is given. The --keep-days guard never removes an unreferenced clone
+whose directory was modified more recently than N days ago, protecting
+in-flight installs from a race.
+
+```
+gc import prune [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--all-cities` | bool |  | Reference every city in the supervisor registry, ignoring the current directory |
+| `--apply` | bool |  | Delete unreferenced clones (default: dry run) |
+| `--keep-days` | int | `7` | Never prune unreferenced clones modified within this many days |
 
 ## gc import remove
 
