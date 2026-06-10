@@ -150,7 +150,8 @@ func SelectProvider(tier string, accounts []AccountState, policy Policy) (Decisi
 		}
 		return Decision{}, fmt.Errorf(
 			"providergov: no usable Claude account for tier %q (%d measured, all dark) and no overflow providers configured",
-			tier, len(accounts))
+			tier, len(accounts),
+		)
 	}
 
 	// Deterministic order: by name, so score ties and the multi-active
