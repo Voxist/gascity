@@ -35,6 +35,7 @@ order-firing-current
 codex-hooks-drift
 beads-proxied-capability
 beads-expected-build
+native-store-canary-identity
 rig-pack-coverage
 mcp-config
 mcp-shared-target
