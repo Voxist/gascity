@@ -799,7 +799,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionSubmitSucceededPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | UnboundEventPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OrderGateTimeoutFailOpenPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionSubmitSucceededPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | UnboundEventPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -1859,6 +1859,12 @@ export type OrderCheckResponse = {
     reason: string;
     rig?: string;
     scoped_name: string;
+};
+
+export type OrderGateTimeoutFailOpenPayload = {
+    elapsed_s: number;
+    order: string;
+    scope?: string;
 };
 
 export type OrderHistoryDetailResponse = {
@@ -3465,6 +3471,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeOrderFailed) | ({
     type: 'order.fired';
 } & TypedEventStreamEnvelopeOrderFired) | ({
+    type: 'order.gate_timeout_fail_open';
+} & TypedEventStreamEnvelopeOrderGateTimeoutFailOpen) | ({
     type: 'pg.credential_resolved';
 } & TypedEventStreamEnvelopePgCredentialResolved) | ({
     type: 'project.identity.stamped';
@@ -4043,6 +4051,20 @@ export type TypedEventStreamEnvelopeOrderFired = {
 };
 
 /**
+ * TypedEventStreamEnvelope order.gate_timeout_fail_open
+ */
+export type TypedEventStreamEnvelopeOrderGateTimeoutFailOpen = {
+    actor: string;
+    message?: string;
+    payload: OrderGateTimeoutFailOpenPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'order.gate_timeout_fail_open';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope pg.credential_resolved
  */
 export type TypedEventStreamEnvelopePgCredentialResolved = {
@@ -4512,6 +4534,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeOrderFailed) | ({
     type: 'order.fired';
 } & TypedTaggedEventStreamEnvelopeOrderFired) | ({
+    type: 'order.gate_timeout_fail_open';
+} & TypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen) | ({
     type: 'pg.credential_resolved';
 } & TypedTaggedEventStreamEnvelopePgCredentialResolved) | ({
     type: 'project.identity.stamped';
@@ -5123,6 +5147,21 @@ export type TypedTaggedEventStreamEnvelopeOrderFired = {
     subject?: string;
     ts: string;
     type: 'order.fired';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope order.gate_timeout_fail_open
+ */
+export type TypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: OrderGateTimeoutFailOpenPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'order.gate_timeout_fail_open';
     workflow?: WorkflowEventProjection;
 };
 
@@ -11378,6 +11417,10 @@ export type GetV0CityByCityNameStatusData = {
          * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
          */
         wait?: string;
+        /**
+         * When true, omit the expensive store-health, session-count, and work-count blocks for low-cost dashboard polls.
+         */
+        lite?: boolean;
     };
     url: '/v0/city/{cityName}/status';
 };

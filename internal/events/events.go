@@ -106,11 +106,17 @@ const (
 
 	// Non-terminal city lifecycle events recorded in the per-city
 	// event log during init/unregister for diagnostics.
-	CityCreated                     = "city.created"
-	CityUnregisterRequested         = "city.unregister_requested"
-	OrderFired                      = "order.fired"
-	OrderCompleted                  = "order.completed"
-	OrderFailed                     = "order.failed"
+	CityCreated             = "city.created"
+	CityUnregisterRequested = "city.unregister_requested"
+	OrderFired              = "order.fired"
+	OrderCompleted          = "order.completed"
+	OrderFailed             = "order.failed"
+	// OrderGateTimeoutFailOpen fires when an idempotent order's bounded
+	// open-work gate times out and the dispatcher fails OPEN — dispatching
+	// without having proven single-flight. Each emission is one fail-open;
+	// a rising count is the early-warning tripwire that store contention
+	// is degrading gate evaluation (incident 12 / #2893).
+	OrderGateTimeoutFailOpen        = "order.gate_timeout_fail_open"
 	ProviderSwapped                 = "provider.swapped"
 	WorkerOperation                 = "worker.operation"
 	ProjectIdentityStamped          = "project.identity.stamped"
@@ -185,7 +191,7 @@ var KnownEventTypes = []string{
 	RequestResultSessionCreate, RequestResultSessionMessage,
 	RequestResultSessionSubmit, RequestFailed,
 	CityCreated, CityUnregisterRequested,
-	OrderFired, OrderCompleted, OrderFailed,
+	OrderFired, OrderCompleted, OrderFailed, OrderGateTimeoutFailOpen,
 	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
 	SupervisorShutdownRequested, SupervisorRequest,
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
