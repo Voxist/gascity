@@ -1379,6 +1379,11 @@
           },
           "type": "array",
           "description": "Checks holds city-local inline doctor checks declared via\n[[doctor.check]] in city.toml."
+        },
+        "supervisor_interval": {
+          "type": "string",
+          "description": "SupervisorInterval is the cadence at which the supervisor evaluates\nthe cheap doctor subset (tick-age, agent_config_isolation, S6\nceiling, plus any registered provenance/port-consistency checks) and\npublishes doctor.alert on red. Duration string. Defaults to \"10m\".\nWithout this, every doctor-based retirement is detection at human\ncadence — the exact vigilance gap that produced incidents 5 and 11.",
+          "default": "10m"
         }
       },
       "additionalProperties": false,
