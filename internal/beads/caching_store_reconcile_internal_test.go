@@ -10,6 +10,60 @@ import (
 	"time"
 )
 
+// TestNextReconcileDelay verifies exponential backoff in nextReconcileDelay:
+// delay starts at failure 1 (not 5), doubles per increment, and caps at 10 min.
+func TestNextReconcileDelay(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(10000, 0)
+
+	makeCache := func(syncFails int, problemAt time.Time) *CachingStore {
+		c := NewCachingStoreForTest(NewMemStore(), nil)
+		c.state = cacheLive
+		c.lastFreshAt = time.Unix(1, 0) // stale — normal path returns 0
+		c.syncFailures = syncFails
+		c.stats.LastProblemAt = problemAt
+		return c
+	}
+
+	t.Run("backoff applies at failure 1", func(t *testing.T) {
+		t.Parallel()
+		// problemAt == now so delay == backoff exactly; normal cadence path returns 0 here.
+		c := makeCache(1, now)
+		if delay := c.nextReconcileDelay(now); delay <= 0 {
+			t.Fatalf("syncFailures=1: got delay %v, want > 0 (exponential backoff must apply from failure 1)", delay)
+		}
+	})
+
+	t.Run("delay doubles per failure", func(t *testing.T) {
+		t.Parallel()
+		// problemAt == now so delay == backoff; each step must be exactly 2× prior.
+		var prev time.Duration
+		for n := 1; n <= 6; n++ {
+			c := makeCache(n, now)
+			delay := c.nextReconcileDelay(now)
+			if delay <= 0 {
+				t.Fatalf("syncFailures=%d: got delay %v, want > 0", n, delay)
+			}
+			if n > 1 && delay != prev*2 {
+				t.Fatalf("syncFailures=%d: got %v, want %v (2× previous %v)", n, delay, prev*2, prev)
+			}
+			prev = delay
+		}
+	})
+
+	t.Run("caps at 10 minutes", func(t *testing.T) {
+		t.Parallel()
+		maxBackoff := 10 * time.Minute
+		// syncFailures=20 → 2s*2^20 far exceeds cap; delay must equal maxBackoff.
+		c := makeCache(20, now)
+		delay := c.nextReconcileDelay(now)
+		if delay != maxBackoff {
+			t.Fatalf("syncFailures=20: got %v, want %v (cap)", delay, maxBackoff)
+		}
+	})
+}
+
 type reconcileRaceStore struct {
 	Store
 	started chan struct{}
