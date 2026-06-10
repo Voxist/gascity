@@ -176,7 +176,8 @@ type sqlCleanupDoltClient struct {
 }
 
 // newSQLCleanupDoltClient opens a connection to the resolved Dolt server.
-// Caller must Close() when done.
+// The backing *sql.DB is the shared pooled handle from internal/doltpool;
+// Close() on the client is a no-op.
 func newSQLCleanupDoltClient(host, port string) (CleanupDoltClient, error) {
 	db, err := managedDoltOpenDB(host, port, "root")
 	if err != nil {
@@ -259,6 +260,8 @@ func (c *sqlCleanupDoltClient) ProbeLiveSessions(ctx context.Context) (map[strin
 	return out, nil
 }
 
+// Close is a no-op: the underlying *sql.DB is the shared pooled handle
+// owned by internal/doltpool and must outlive this client.
 func (c *sqlCleanupDoltClient) Close() error {
-	return c.db.Close()
+	return nil
 }
