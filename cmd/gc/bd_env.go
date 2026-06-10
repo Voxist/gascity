@@ -1216,17 +1216,71 @@ func bdRuntimeEnvForRigWithError(cityPath string, cfg *config.City, rigPath stri
 
 func nativeDoltOpenEnvForScope(cityPath string, cfg *config.City, scopeRoot string) (map[string]string, error) {
 	scopeRoot = resolveStoreScopeRoot(cityPath, scopeRoot)
-	if samePath(scopeRoot, cityPath) {
-		return bdRuntimeEnvWithError(cityPath)
-	}
 	if cfg == nil {
-		loaded, err := loadCityConfig(cityPath, io.Discard)
-		if err != nil {
-			return nil, err
+		if loaded, err := loadCityConfig(cityPath, io.Discard); err == nil {
+			cfg = loaded
 		}
-		cfg = loaded
 	}
-	return bdRuntimeEnvForRigWithError(cityPath, cfg, scopeRoot)
+	var env map[string]string
+	var err error
+	if samePath(scopeRoot, cityPath) {
+		env, err = bdRuntimeEnvWithError(cityPath)
+	} else {
+		if cfg == nil {
+			loaded, loadErr := loadCityConfig(cityPath, io.Discard)
+			if loadErr != nil {
+				return nil, loadErr
+			}
+			cfg = loaded
+		}
+		env, err = bdRuntimeEnvForRigWithError(cityPath, cfg, scopeRoot)
+	}
+	if err != nil {
+		return env, err
+	}
+	if canaryErr := applyNativeStoreCanaryEnvForScope(cityPath, cfg, scopeRoot, env); canaryErr != nil {
+		return env, canaryErr
+	}
+	return env, nil
+}
+
+// applyNativeStoreCanaryEnvForScope resolves the scope name and the configured
+// native-store canary set, then applies the canary env lever. It is the only
+// caller boundary that couples the projected env to the operator's canary
+// configuration; the lever itself (applyNativeStoreCanaryEnv) is a pure
+// function. When the scope is not canaried this is a no-op.
+func applyNativeStoreCanaryEnvForScope(cityPath string, cfg *config.City, scopeRoot string, env map[string]string) error {
+	scopeName := nativeStoreCanaryScopeName(cityPath, cfg, scopeRoot, env)
+	var beadsCfg config.BeadsConfig
+	if cfg != nil {
+		beadsCfg = cfg.Beads
+	}
+	enabled := beadsCfg.NativeStoreCanaryEnabledForScope(scopeName, os.Getenv(config.NativeStoreCanaryEnvVar))
+	return applyNativeStoreCanaryEnv(env, scopeName, enabled)
+}
+
+// nativeStoreCanaryScopeName returns the canary scope name for scopeRoot: the
+// rig name when the projection pinned one (GC_RIG), otherwise the city name.
+func nativeStoreCanaryScopeName(cityPath string, cfg *config.City, scopeRoot string, env map[string]string) string {
+	if env != nil {
+		if rig := strings.TrimSpace(env["GC_RIG"]); rig != "" {
+			return rig
+		}
+	}
+	if !samePath(scopeRoot, cityPath) && cfg != nil {
+		if rig := rigConfigForScopeRoot(cityPath, scopeRoot, cfg.Rigs); rig != nil && strings.TrimSpace(rig.Name) != "" {
+			return rig.Name
+		}
+	}
+	if cfg != nil {
+		if name := strings.TrimSpace(cfg.Workspace.Name); name != "" {
+			return name
+		}
+		if name := strings.TrimSpace(cfg.ResolvedWorkspaceName); name != "" {
+			return name
+		}
+	}
+	return filepath.Base(cityPath)
 }
 
 func bdRuntimeEnvWithError(cityPath string) (map[string]string, error) {
