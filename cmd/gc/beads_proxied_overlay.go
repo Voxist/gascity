@@ -36,6 +36,13 @@ const (
 // beads' internal/configfile, so this small mirror serializes the same JSON
 // schema (.beads/proxied_server_client_info.json) that bd reads to learn which
 // external dolt sql-server the proxy should front.
+//
+// Status-file demotion (city-scale plan P1.7): like .beads/dolt-server.port,
+// this file is a bd-facing status file. gc writes and removes it here but
+// NEVER reads it back for endpoint resolution — gc-side resolution is
+// live-state only (dolt_port_live.go). The port-file-consistency doctor
+// check hard-fails when this file's external endpoint disagrees with the
+// live managed listener.
 type proxiedServerClientInfo struct {
 	External *proxiedServerExternal `json:"external,omitempty"`
 }
