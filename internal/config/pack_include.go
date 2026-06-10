@@ -204,7 +204,7 @@ func resolveInstalledRemoteImport(source, cityRoot string) (string, error) {
 // remoteCacheValidationCache memoizes successful remote-cache validations. The
 // installed remote pack cache is a commit-pinned, gc-managed checkout: validating
 // it costs a repo-cache flock plus two git execs (`rev-parse HEAD` and
-// `status --porcelain --ignored`, the latter walking the whole tree), and config
+// `status --porcelain`, the latter walking the whole tree), and config
 // load runs it for every remote import on every reconcile (per rig, per pool).
 // Since the cache is immutable for a given commit unless `gc import install`
 // rewrites it, cache the success keyed by (cacheDir, commit) + a cheap stat
@@ -297,7 +297,12 @@ func validateLockedRemoteCache(source, cacheDir, commit string) error {
 	if !gitutil.SameCommit(head, commit) {
 		return fmt.Errorf("cached import %s is checked out at %s, expected %s; run \"gc import install\"", source, strings.TrimSpace(head), commit)
 	}
-	status, err := runRepoCacheGit(cacheDir, "status", "--porcelain", "--ignored")
+	// Intentionally NOT --ignored: gitignored build artifacts that land in the
+	// cache in place (Python __pycache__/*.pyc from a cached pack's scripts, a
+	// stray .DS_Store, etc.) are not local edits to the pack and must not trip
+	// this gate — otherwise the city wedges behind a perpetual "run gc import
+	// install" loop (vp-gny3). Reinstall's `git clean -ffdx` still clears them.
+	status, err := runRepoCacheGit(cacheDir, "status", "--porcelain")
 	if err != nil {
 		return fmt.Errorf("checking cached import %s worktree status: %w", source, err)
 	}
