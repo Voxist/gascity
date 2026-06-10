@@ -193,6 +193,13 @@ type cleanupOptions struct {
 	PortResolution PortResolution
 	Rigs           []resolverRig
 	FS             fsys.FS
+	// CityPath roots the live managed-dolt resolution (runtime handle +
+	// process table) used by the port resolver, the reaper's protected-port
+	// set, and the purge scoping. Empty disables the live steps.
+	CityPath string
+	// LiveResolve overrides the live managed-dolt resolution chain in
+	// tests. Nil uses newLiveDoltPortResolver().resolve.
+	LiveResolve func(cityPath string) (liveDoltPortResolution, error)
 	JSON           bool
 	Probe          bool
 	Force          bool
@@ -318,10 +325,10 @@ func cleanupPortResolution(opts cleanupOptions) PortResolution {
 		return opts.PortResolution
 	}
 	return ResolveDoltPort(PortResolverInput{
-		Flag:     opts.Flag,
-		CityPort: opts.CityPort,
-		Rigs:     opts.Rigs,
-		FS:       opts.FS,
+		Flag:        opts.Flag,
+		CityPort:    opts.CityPort,
+		CityPath:    opts.CityPath,
+		LiveResolve: opts.LiveResolve,
 	})
 }
 
@@ -364,7 +371,7 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 		return
 	}
 
-	rigPorts := protectedDoltPortsForReap(opts)
+	rigPorts := protectedDoltPortsForReap(opts, procs)
 	tempDir := opts.TempDir
 	if tempDir == "" {
 		tempDir = os.TempDir()
@@ -456,8 +463,33 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 	report.Summary.BytesFreedRSS = sumReapTargetRSS(plan.Reap, gone)
 }
 
-func protectedDoltPortsForReap(opts cleanupOptions) map[int]string {
-	ports := loadRigDoltPorts(opts.Rigs, opts.FS)
+// protectedDoltPortsForReap builds the reaper's protected port set from live
+// state (city-scale plan P1.7): the managed city dolt resolved via the live
+// chain, the ports of every discovered dolt process whose --config/--data-dir
+// argv sits under a registered rig root, and the resolved cleanup port. It
+// deliberately does NOT read <rigRoot>/.beads/dolt-server.port: that status
+// file has lied in production, and a lying file fails to protect the REAL
+// listener — live state cannot.
+func protectedDoltPortsForReap(opts cleanupOptions, procs []DoltProcInfo) map[int]string {
+	ports := map[int]string{}
+	liveResolve := opts.LiveResolve
+	if liveResolve == nil {
+		liveResolve = newLiveDoltPortResolver().resolve
+	}
+	if live, err := liveResolve(opts.CityPath); err == nil && validDoltPort(live.Port) {
+		ports[live.Port] = "managed city dolt"
+	}
+	for _, proc := range procs {
+		owner, ok := doltProcRigOwner(proc, opts.Rigs)
+		if !ok {
+			continue
+		}
+		for _, port := range proc.Ports {
+			if validDoltPort(port) {
+				ports[port] = owner
+			}
+		}
+	}
 	if opts.PortResolution.Port <= 0 {
 		return ports
 	}
@@ -543,7 +575,7 @@ func fatalPortResolutionAttempt(resolution PortResolution) (PortResolutionAttemp
 		if attempt.Status != "error" {
 			continue
 		}
-		if attempt.Source != flagDoltPortSource && attempt.Source != cityConfigDoltPortSource && !isRigPortFileSource(attempt.Source) {
+		if attempt.Source != flagDoltPortSource && attempt.Source != cityConfigDoltPortSource && !isLiveDoltPortSource(attempt.Source) {
 			continue
 		}
 		if attempt.Detail != "" {
@@ -554,8 +586,8 @@ func fatalPortResolutionAttempt(resolution PortResolution) (PortResolutionAttemp
 	return PortResolutionAttempt{}, nil
 }
 
-func isRigPortFileSource(source string) bool {
-	return filepath.Base(source) == "dolt-server.port" && filepath.Base(filepath.Dir(source)) == ".beads"
+func isLiveDoltPortSource(source string) bool {
+	return source == liveDoltHandleSource || source == liveDoltProcessSource
 }
 
 func appendProtectedPID(report *CleanupReport, pid int) {
@@ -816,14 +848,16 @@ func newDoltCleanupCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Find and remove orphaned Dolt databases (Go-side core)",
 		Long: `gc dolt-cleanup is the Go-side implementation of the operational Dolt
 cleanup tool. It resolves the Dolt server port via the AD-04 chain
-(--port > city dolt.port > <rigRoot>/.beads/dolt-server.port > 3307),
-drops stale test/agent databases, calls DOLT_PURGE_DROPPED_DATABASES
-to reclaim disk, and reaps orphaned dolt sql-server processes left
-over from leaked test harnesses. Invalid explicit ports and unreadable
-or invalid city/rig port settings fail closed before cleanup stages run;
-only absent rig port files can reach the legacy default. The legacy
-default is a connection fallback only; it does not protect port 3307
-from orphan-process reaping.
+(--port > city dolt.port > live managed dolt [runtime handle, then
+process table] > 3307); .beads/dolt-server.port is a bd compatibility
+status file and is never consulted. It drops stale test/agent
+databases, calls DOLT_PURGE_DROPPED_DATABASES to reclaim disk, and
+reaps orphaned dolt sql-server processes left over from leaked test
+harnesses. Invalid explicit ports, invalid city port settings, and
+live-resolution errors (ambiguous listeners, discovery failures) fail
+closed before cleanup stages run; only a clean live-resolution miss can
+reach the legacy default. The legacy default is a connection fallback
+only; it does not protect port 3307 from orphan-process reaping.
 
 Dry-run by default. Pass --force to actually drop, purge, and kill.
 Pass --max-orphan-dbs with --force to refuse all destructive cleanup
@@ -880,6 +914,7 @@ can still return successfully after emitting the report.`,
 				CityPort:     cfg.Dolt.Port,
 				Rigs:         rigs,
 				FS:           fsys.OSFS{},
+				CityPath:     cityPath,
 				JSON:         jsonOut,
 				Probe:        probe,
 				Force:        force,
@@ -893,7 +928,7 @@ can still return successfully after emitting the report.`,
 			// right address. Failed opens are reported by runDoltCleanup inside
 			// the typed cleanup envelope.
 			resolution := ResolveDoltPort(PortResolverInput{
-				Flag: opts.Flag, CityPort: opts.CityPort, Rigs: opts.Rigs, FS: opts.FS,
+				Flag: opts.Flag, CityPort: opts.CityPort, CityPath: opts.CityPath,
 			})
 			opts.PortResolution = resolution
 			host := opts.Host
@@ -1035,12 +1070,11 @@ func resolveRigDoltDatabase(r resolverRig, fs fsys.FS) rigDoltDatabaseResolution
 	}
 }
 
-// loadResolverRigs builds the resolver's rig list from a city config. The HQ
-// rig (the city itself) is added first so it wins the AD-04 §4.1 tie when
-// multiple <rigRoot>/.beads/dolt-server.port files exist; non-HQ rigs follow
-// in city.toml order. Paths are resolved to absolute form via
-// resolveRigPaths so the resolver's filesystem reads work regardless of how
-// the rig was registered.
+// loadResolverRigs builds the cleanup command's rig list from a city config.
+// The HQ rig (the city itself) is added first so HQ-first ordering holds for
+// rig protections; non-HQ rigs follow in city.toml order. Paths are resolved
+// to absolute form via resolveRigPaths so per-rig filesystem reads and
+// process-table path matching work regardless of how the rig was registered.
 func loadResolverRigs(cityPath string, cfg *config.City) []resolverRig {
 	rigs := make([]config.Rig, len(cfg.Rigs))
 	copy(rigs, cfg.Rigs)

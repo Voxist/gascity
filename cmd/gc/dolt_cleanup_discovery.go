@@ -9,37 +9,54 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-// loadRigDoltPorts reads each rig's <rigRoot>/.beads/dolt-server.port file and
-// returns a port→rig-name map for the reaper's protection check. Missing or
-// malformed files are silently skipped — they just won't contribute to the
-// protected set, and the reaper will fall back to its config-path filter.
+// doltProcRigOwner reports which registered rig owns a discovered dolt
+// sql-server process, matched by the process's --data-dir or --config argv
+// path sitting under the rig root. This is the live-state replacement for
+// the former <rigRoot>/.beads/dolt-server.port protection read (city-scale
+// plan P1.7): a status file can lie about a rig's port, but a live process
+// whose data lives under the rig root cannot.
 //
-// If two rigs claim the same port (pathological — operator misconfiguration),
-// the later-listed rig wins. The function is still safe: any port match
-// protects, regardless of which rig name is attributed.
-func loadRigDoltPorts(rigs []resolverRig, fs fsys.FS) map[int]string {
-	out := map[int]string{}
-	for _, rig := range rigs {
-		path := filepath.Join(rig.Path, ".beads", "dolt-server.port")
-		data, err := fs.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		text := strings.TrimSpace(string(data))
-		if text == "" {
-			continue
-		}
-		port, err := strconv.Atoi(text)
-		if err != nil || !validDoltPort(port) {
-			continue
-		}
-		out[port] = rig.Name
+// If two rigs both contain a candidate path (nested roots — operator
+// misconfiguration), the first-listed rig wins. The reaper is still safe:
+// any match protects, regardless of which rig name is attributed.
+func doltProcRigOwner(p DoltProcInfo, rigs []resolverRig) (string, bool) {
+	var candidates []string
+	if cfg := extractConfigPath(p.Argv); cfg != "" {
+		candidates = append(candidates, cfg)
 	}
-	return out
+	if dd, ok := argvFlagValue(p.Argv, "--data-dir"); ok && dd != "" {
+		candidates = append(candidates, dd)
+	}
+	if len(candidates) == 0 {
+		return "", false
+	}
+	for _, rig := range rigs {
+		root := normalizePathForCompare(strings.TrimSpace(rig.Path))
+		if root == "" || root == "." || root == string(filepath.Separator) {
+			continue
+		}
+		for _, candidate := range candidates {
+			if pathUnderRoot(candidate, root) {
+				return rig.Name, true
+			}
+		}
+	}
+	return "", false
+}
+
+// pathUnderRoot reports whether path equals root or sits underneath it,
+// using the same normalization as samePath.
+func pathUnderRoot(path, root string) bool {
+	normalized := normalizePathForCompare(path)
+	if normalized == "" {
+		return false
+	}
+	if normalized == root {
+		return true
+	}
+	return strings.HasPrefix(normalized, root+string(filepath.Separator))
 }
 
 // procEnumerationTimeout caps the per-PID I/O during /proc walks so a stuck
