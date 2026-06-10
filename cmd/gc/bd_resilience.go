@@ -1,12 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"path/filepath"
 	"strings"
 	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/resilience"
 )
 
@@ -56,8 +58,42 @@ func bdResilienceRegistryForCity(cityPath string) *resilience.Registry {
 		return reg
 	}
 	reg := resilience.NewRegistry(settings)
+	reg.SetOnStateChange(breakerStateChangeEmitter(key))
 	bdResilience.registries[key] = reg
 	return reg
+}
+
+// breakerStateChangeEmitter returns a resilience state-change callback that
+// records a typed breaker.state_changed event into the city's event log.
+// Emission is best-effort: a recorder open/marshal failure must never block
+// or panic the bd transport path that triggered the transition. The callback
+// is invoked synchronously from the state-changing call, so it stays cheap —
+// one append per transition (transitions are rare: trip, probe, recover).
+func breakerStateChangeEmitter(cityPath string) func(resilience.Transition) {
+	return func(t resilience.Transition) {
+		payload, err := json.Marshal(events.BreakerStateChangedPayload{
+			Scope:     t.Scope,
+			OpClass:   t.OpClass,
+			From:      t.From.String(),
+			To:        t.To.String(),
+			Failures:  t.Failures,
+			BackoffMs: t.Backoff.Milliseconds(),
+		})
+		if err != nil {
+			return
+		}
+		rec, err := events.NewFileRecorder(filepath.Join(cityPath, ".gc", "events.jsonl"), io.Discard)
+		if err != nil {
+			return
+		}
+		defer rec.Close() //nolint:errcheck // best-effort: emission must not surface I/O errors
+		rec.Record(events.Event{
+			Type:    events.BreakerStateChanged,
+			Actor:   eventActor(),
+			Subject: t.Scope,
+			Payload: payload,
+		})
+	}
 }
 
 // bdScopeBreaker returns the shared transport breaker for a scope root.
