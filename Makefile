@@ -83,6 +83,8 @@ install: build
 		chmod 0755 "$$tmp"; \
 		mv -f "$$tmp" "$(INSTALL_DIR)/$(BINARY)"; \
 		trap - EXIT INT TERM HUP
+	@# Deploy provenance: machine-derived build manifest next to the binary
+	@go run ./cmd/writebuildmanifest -binary "$(INSTALL_DIR)/$(BINARY)" -repo "$(CURDIR)"
 	@# Migrate from old install location: replace stale binary with symlink
 	@if [ "$(INSTALL_DIR)" != "$(HOME)/.local/bin" ]; then \
 		if [ -f "$(HOME)/.local/bin/$(BINARY)" ] || [ -L "$(HOME)/.local/bin/$(BINARY)" ]; then \
