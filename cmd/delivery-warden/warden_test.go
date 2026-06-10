@@ -291,17 +291,35 @@ func TestPhaseDwellEscalate(t *testing.T) {
 	if got.Metadata[metaKeyWardenEscalated] == "" {
 		t.Error("gc.warden_escalated not set after escalation")
 	}
-	if len(mail.Sent) != 1 {
-		t.Errorf("want 1 escalation mail, got %d", len(mail.Sent))
+
+	// Escalation must create a decision bead, not send mail.
+	escalations, err := store.ListByMetadata(map[string]string{"gc.warden_escalation": "1"}, 0)
+	if err != nil {
+		t.Fatalf("ListByMetadata: %v", err)
+	}
+	if len(escalations) != 1 {
+		t.Fatalf("want 1 escalation decision bead, got %d", len(escalations))
+	}
+	if escalations[0].Metadata["gc.warden_reason"] != "phase" {
+		t.Errorf("gc.warden_reason: got %q, want %q", escalations[0].Metadata["gc.warden_reason"], "phase")
+	}
+	if escalations[0].Metadata["gc.merge_source"] != b.ID {
+		t.Errorf("gc.merge_source: got %q, want %q", escalations[0].Metadata["gc.merge_source"], b.ID)
+	}
+	if len(mail.Sent) != 0 {
+		t.Errorf("want 0 escalation mails (decision bead used instead), got %d", len(mail.Sent))
 	}
 
-	// Second run must be a no-op.
-	mail.Sent = nil
+	// Second run must be a no-op — no additional decision beads.
 	if err := w.CheckPhaseDwell(); err != nil {
 		t.Fatalf("second CheckPhaseDwell: %v", err)
 	}
-	if len(mail.Sent) != 0 {
-		t.Errorf("second run: want 0 mails (idempotent), got %d", len(mail.Sent))
+	escalations2, err := store.ListByMetadata(map[string]string{"gc.warden_escalation": "1"}, 0)
+	if err != nil {
+		t.Fatalf("second ListByMetadata: %v", err)
+	}
+	if len(escalations2) != 1 {
+		t.Errorf("idempotency: want 1 escalation bead, got %d (second sweep must be no-op)", len(escalations2))
 	}
 }
 
@@ -330,17 +348,35 @@ func TestGlobalLifetime(t *testing.T) {
 	if got.Metadata[metaKeyWardenEscalated] != "global" {
 		t.Errorf("gc.warden_escalated: got %q, want %q", got.Metadata[metaKeyWardenEscalated], "global")
 	}
-	if len(mail.Sent) != 1 {
-		t.Errorf("want 1 escalation mail, got %d", len(mail.Sent))
+
+	// Escalation must create a decision bead, not send mail.
+	escalations, err := store.ListByMetadata(map[string]string{"gc.warden_escalation": "1"}, 0)
+	if err != nil {
+		t.Fatalf("ListByMetadata: %v", err)
+	}
+	if len(escalations) != 1 {
+		t.Fatalf("want 1 escalation decision bead, got %d", len(escalations))
+	}
+	if escalations[0].Metadata["gc.warden_reason"] != "lifetime" {
+		t.Errorf("gc.warden_reason: got %q, want %q", escalations[0].Metadata["gc.warden_reason"], "lifetime")
+	}
+	if escalations[0].Metadata["gc.merge_source"] != b.ID {
+		t.Errorf("gc.merge_source: got %q, want %q", escalations[0].Metadata["gc.merge_source"], b.ID)
+	}
+	if len(mail.Sent) != 0 {
+		t.Errorf("want 0 escalation mails (decision bead used instead), got %d", len(mail.Sent))
 	}
 
-	// Second run: idempotent — no additional mails.
-	mail.Sent = nil
+	// Second run: idempotent — no additional decision beads.
 	if err := w.CheckGlobalLifetime(); err != nil {
 		t.Fatalf("second CheckGlobalLifetime: %v", err)
 	}
-	if len(mail.Sent) != 0 {
-		t.Errorf("second run: want 0 mails (idempotent), got %d", len(mail.Sent))
+	escalations2, err := store.ListByMetadata(map[string]string{"gc.warden_escalation": "1"}, 0)
+	if err != nil {
+		t.Fatalf("second ListByMetadata: %v", err)
+	}
+	if len(escalations2) != 1 {
+		t.Errorf("idempotency: want 1 escalation bead, got %d (second sweep must be no-op)", len(escalations2))
 	}
 }
 

@@ -15,7 +15,7 @@ import (
 const (
 	metaKeyPhaseEnteredAt  = "gc.phase_entered_at" // Unix timestamp when bead entered current phase
 	metaKeyWardenRetries   = "gc.warden_retries"   // number of recovery attempts by the warden
-	metaKeyWardenEscalated = "gc.warden_escalated" // set when escalation mail has been sent
+	metaKeyWardenEscalated = "gc.warden_escalated" // set when escalation decision bead has been created
 )
 
 const maxLifetime = 24 * time.Hour
@@ -206,8 +206,9 @@ func (w *Warden) RepairZombie() error {
 // CheckPhaseDwell checks every open delivery bead for phase stalls. If a bead
 // has been in its current phase longer than the per-phase budget, it increments
 // gc.warden_retries and dispatches a recovery action (nudge reviewer or re-route
-// to executor). Once retries reach 3, it sends a single escalation mail and sets
-// gc.warden_escalated; subsequent calls are no-ops for that bead.
+// to executor). Once retries reach 3, it creates a decision bead (type=decision,
+// gc.warden_escalation=1, gc.warden_reason=phase) so gc-decision-sweep can handle
+// it autonomously, then sets gc.warden_escalated; subsequent calls are no-ops.
 func (w *Warden) CheckPhaseDwell() error {
 	open, err := w.store.ListOpen()
 	if err != nil {
@@ -251,10 +252,17 @@ func (w *Warden) CheckPhaseDwell() error {
 		retries, _ := strconv.Atoi(b.Metadata[metaKeyWardenRetries])
 
 		if retries >= 3 {
-			subject := fmt.Sprintf("stall: %s phase=%s", b.ID, phase)
-			body := fmt.Sprintf("Bead %s stalled in %s (budget %s, %d retries exhausted).", b.ID, phase, budget, retries)
-			if err := w.mail.Send("voxist-platform/voxist.warden", "voxist-platform/human", subject, body); err != nil {
-				return fmt.Errorf("CheckPhaseDwell: escalate %s: %w", b.ID, err)
+			_, err := w.store.Create(beads.Bead{
+				Title: fmt.Sprintf("warden escalation: %s stalled in %s (%d retries)", b.ID, phase, retries),
+				Type:  "decision",
+				Metadata: map[string]string{
+					"gc.warden_escalation": "1",
+					"gc.warden_reason":     "phase",
+					"gc.merge_source":      b.ID,
+				},
+			})
+			if err != nil {
+				return fmt.Errorf("CheckPhaseDwell: create escalation bead for %s: %w", b.ID, err)
 			}
 			if err := w.store.SetMetadata(b.ID, metaKeyWardenEscalated, "1"); err != nil {
 				return fmt.Errorf("CheckPhaseDwell: set escalated on %s: %w", b.ID, err)
@@ -278,9 +286,10 @@ func (w *Warden) CheckPhaseDwell() error {
 }
 
 // CheckGlobalLifetime escalates any delivery bead that has been alive for more
-// than maxLifetime (24 h) regardless of phase or retry count. The escalation
-// is idempotent: once gc.warden_escalated=global is set the bead is skipped
-// on subsequent sweeps.
+// than maxLifetime (24 h) regardless of phase or retry count. Escalation creates
+// a decision bead (gc.warden_escalation=1, gc.warden_reason=lifetime) so
+// gc-decision-sweep can handle it. Idempotent: once gc.warden_escalated=global
+// is set the bead is skipped on subsequent sweeps.
 func (w *Warden) CheckGlobalLifetime() error {
 	open, err := w.store.ListOpen()
 	if err != nil {
@@ -300,11 +309,17 @@ func (w *Warden) CheckGlobalLifetime() error {
 			continue // within lifetime budget
 		}
 
-		prURL := b.Metadata[delivery.MetaKeyPRURL]
-		subject := fmt.Sprintf("lifetime breach: %s", b.ID)
-		body := fmt.Sprintf("Bead %s is %s old (max %s). PR: %s", b.ID, now.Sub(b.CreatedAt).Round(time.Minute), maxLifetime, prURL)
-		if err := w.mail.Send("voxist-platform/voxist.warden", "voxist-platform/human", subject, body); err != nil {
-			return fmt.Errorf("CheckGlobalLifetime: escalate %s: %w", b.ID, err)
+		_, err := w.store.Create(beads.Bead{
+			Title: fmt.Sprintf("warden escalation: %s lifetime exceeded (%s old)", b.ID, now.Sub(b.CreatedAt).Round(time.Minute)),
+			Type:  "decision",
+			Metadata: map[string]string{
+				"gc.warden_escalation": "1",
+				"gc.warden_reason":     "lifetime",
+				"gc.merge_source":      b.ID,
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("CheckGlobalLifetime: create escalation bead for %s: %w", b.ID, err)
 		}
 		if err := w.store.SetMetadata(b.ID, metaKeyWardenEscalated, "global"); err != nil {
 			return fmt.Errorf("CheckGlobalLifetime: set escalated on %s: %w", b.ID, err)
