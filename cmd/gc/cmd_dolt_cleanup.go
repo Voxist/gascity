@@ -199,14 +199,14 @@ type cleanupOptions struct {
 	CityPath string
 	// LiveResolve overrides the live managed-dolt resolution chain in
 	// tests. Nil uses newLiveDoltPortResolver().resolve.
-	LiveResolve func(cityPath string) (liveDoltPortResolution, error)
-	JSON           bool
-	Probe          bool
-	Force          bool
-	Host           string
-	HomeDir        string
-	TempDir        string
-	MaxOrphanDBs   int
+	LiveResolve  func(cityPath string) (liveDoltPortResolution, error)
+	JSON         bool
+	Probe        bool
+	Force        bool
+	Host         string
+	HomeDir      string
+	TempDir      string
+	MaxOrphanDBs int
 
 	// StalePrefixes overrides defaultStaleDatabasePrefixes when non-empty.
 	// Set by tests; production passes nil and falls back to the built-in.
