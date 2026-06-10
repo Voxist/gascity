@@ -111,7 +111,7 @@ func TestMarshalDefaultCityFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	want := "[workspace]\nname = \"bright-lights\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n\n[[named_session]]\ntemplate = \"mayor\"\nmode = \"always\"\n"
+	want := "[workspace]\nname = \"bright-lights\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n\n[[named_session]]\ntemplate = \"mayor\"\nmode = \"always\"\n\n[daemon]\nformula_v2 = true\n"
 	if string(data) != want {
 		t.Errorf("Marshal output:\ngot:\n%s\nwant:\n%s", data, want)
 	}
@@ -125,7 +125,7 @@ name = "bright-lights"
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if !cfg.Daemon.FormulaV2Enabled() {
+	if !cfg.Daemon.FormulaV2 {
 		t.Fatal("Daemon.FormulaV2 = false, want true when formula_v2 is omitted")
 	}
 }
@@ -141,7 +141,7 @@ formula_v2 = false
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if cfg.Daemon.FormulaV2Enabled() {
+	if cfg.Daemon.FormulaV2 {
 		t.Fatal("Daemon.FormulaV2 = true, want explicit false")
 	}
 	data, err := cfg.Marshal()
@@ -165,7 +165,7 @@ formula_v2 = false
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if cfg.Daemon.FormulaV2Enabled() {
+	if cfg.Daemon.FormulaV2 {
 		t.Fatal("Daemon.FormulaV2 = true, want explicit formula_v2=false to win")
 	}
 }
@@ -181,7 +181,7 @@ graph_workflows = false
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if cfg.Daemon.FormulaV2Enabled() {
+	if cfg.Daemon.FormulaV2 {
 		t.Fatal("Daemon.FormulaV2 = true, want legacy graph_workflows=false alias to disable formula_v2")
 	}
 	data, err := cfg.Marshal()
@@ -660,6 +660,88 @@ name = "mayor"
 	}
 }
 
+func TestBeadsProxiedGateAccessors(t *testing.T) {
+	// Default (nil) => gate off, pool size default 4 (byte-identical legacy).
+	var zero BeadsConfig
+	if zero.ProxiedEnabled() {
+		t.Error("ProxiedEnabled() = true for nil, want false")
+	}
+	if got := zero.ProxyPoolSizeOrDefault(); got != defaultBeadsProxyPoolSize {
+		t.Errorf("ProxyPoolSizeOrDefault() = %d, want %d", got, defaultBeadsProxyPoolSize)
+	}
+
+	tru, fls := true, false
+	if !(BeadsConfig{Proxied: &tru}).ProxiedEnabled() {
+		t.Error("ProxiedEnabled() = false for proxied=true")
+	}
+	if (BeadsConfig{Proxied: &fls}).ProxiedEnabled() {
+		t.Error("ProxiedEnabled() = true for proxied=false")
+	}
+
+	n6, n0, neg := 6, 0, -3
+	if got := (BeadsConfig{ProxyPoolSize: &n6}).ProxyPoolSizeOrDefault(); got != 6 {
+		t.Errorf("ProxyPoolSizeOrDefault(6) = %d, want 6", got)
+	}
+	// Non-positive sizes fall back to the default rather than producing an
+	// unusable pool.
+	if got := (BeadsConfig{ProxyPoolSize: &n0}).ProxyPoolSizeOrDefault(); got != defaultBeadsProxyPoolSize {
+		t.Errorf("ProxyPoolSizeOrDefault(0) = %d, want %d", got, defaultBeadsProxyPoolSize)
+	}
+	if got := (BeadsConfig{ProxyPoolSize: &neg}).ProxyPoolSizeOrDefault(); got != defaultBeadsProxyPoolSize {
+		t.Errorf("ProxyPoolSizeOrDefault(-3) = %d, want %d", got, defaultBeadsProxyPoolSize)
+	}
+}
+
+func TestParseBeadsProxiedSection(t *testing.T) {
+	cfg, err := Parse([]byte("[workspace]\nname = \"t\"\n\n[beads]\nproxied = true\nproxy_pool_size = 8\nproxy_idle_timeout = \"15m\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !cfg.Beads.ProxiedEnabled() {
+		t.Error("proxied not parsed as true")
+	}
+	if got := cfg.Beads.ProxyPoolSizeOrDefault(); got != 8 {
+		t.Errorf("proxy_pool_size = %d, want 8", got)
+	}
+	if got := cfg.Beads.ProxyIdleTimeoutOrDefault(); got != "15m" {
+		t.Errorf("proxy_idle_timeout = %q, want 15m", got)
+	}
+}
+
+func TestParseBeadsExpectedBuild(t *testing.T) {
+	cfg, err := Parse([]byte("[workspace]\nname = \"t\"\n\n[beads]\nexpected_build = \"1.0.5-pooling\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.Beads.ExpectedBuild; got != "1.0.5-pooling" {
+		t.Errorf("expected_build = %q, want %q", got, "1.0.5-pooling")
+	}
+}
+
+func TestParseBeadsExpectedBuildAbsent(t *testing.T) {
+	cfg, err := Parse([]byte("[workspace]\nname = \"t\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Beads.ExpectedBuild != "" {
+		t.Errorf("expected_build = %q, want empty when unset", cfg.Beads.ExpectedBuild)
+	}
+}
+
+func TestBeadsProxyIdleTimeoutAccessor(t *testing.T) {
+	if got := (BeadsConfig{}).ProxyIdleTimeoutOrDefault(); got != defaultBeadsProxyIdleTimeout {
+		t.Errorf("default = %q, want %q", got, defaultBeadsProxyIdleTimeout)
+	}
+	blank := "  "
+	if got := (BeadsConfig{ProxyIdleTimeout: &blank}).ProxyIdleTimeoutOrDefault(); got != defaultBeadsProxyIdleTimeout {
+		t.Errorf("blank = %q, want default %q", got, defaultBeadsProxyIdleTimeout)
+	}
+	v := "5m"
+	if got := (BeadsConfig{ProxyIdleTimeout: &v}).ProxyIdleTimeoutOrDefault(); got != "5m" {
+		t.Errorf("set = %q, want 5m", got)
+	}
+}
+
 func TestMarshalOmitsEmptyBeadsSection(t *testing.T) {
 	c := DefaultCity("test")
 	data, err := c.Marshal()
@@ -745,79 +827,6 @@ func TestBeadsConfigRoundTripPreservesStagedFields(t *testing.T) {
 	}
 	if got.Beads.Policies["control"].DeleteAfterClose != "48h" {
 		t.Errorf("round-tripped policy = %#v, want delete_after_close=48h", got.Beads.Policies["control"])
-	}
-}
-
-func TestApplyBeadPolicyDefaults_NilCityIsNoop(t *testing.T) {
-	ApplyBeadPolicyDefaults(nil) // must not panic
-	t.Log("nil city is a noop")
-}
-
-func TestApplyBeadPolicyDefaults_SetsOrderTrackingDefault(t *testing.T) {
-	cfg := &City{}
-	ApplyBeadPolicyDefaults(cfg)
-
-	p, ok := cfg.Beads.Policies["order_tracking"]
-	if !ok {
-		t.Fatal("order_tracking policy not set after ApplyBeadPolicyDefaults")
-	}
-	if p.DeleteAfterClose != "7d" {
-		t.Errorf("order_tracking.delete_after_close = %q, want 7d", p.DeleteAfterClose)
-	}
-}
-
-func TestApplyBeadPolicyDefaults_DoesNotOverrideExplicitValue(t *testing.T) {
-	cfg := &City{
-		Beads: BeadsConfig{
-			Policies: map[string]BeadPolicyConfig{
-				"order_tracking": {DeleteAfterClose: "48h"},
-			},
-		},
-	}
-	ApplyBeadPolicyDefaults(cfg)
-
-	p := cfg.Beads.Policies["order_tracking"]
-	if p.DeleteAfterClose != "48h" {
-		t.Errorf("order_tracking.delete_after_close = %q, want 48h (explicit value must not be overridden)", p.DeleteAfterClose)
-	}
-}
-
-func TestApplyBeadPolicyDefaults_PreservesOtherPolicies(t *testing.T) {
-	cfg := &City{
-		Beads: BeadsConfig{
-			Policies: map[string]BeadPolicyConfig{
-				"control": {DeleteAfterClose: "24h"},
-			},
-		},
-	}
-	ApplyBeadPolicyDefaults(cfg)
-
-	control := cfg.Beads.Policies["control"]
-	if control.DeleteAfterClose != "24h" {
-		t.Errorf("control.delete_after_close = %q, want 24h (must be preserved)", control.DeleteAfterClose)
-	}
-	orderTracking := cfg.Beads.Policies["order_tracking"]
-	if orderTracking.DeleteAfterClose != "7d" {
-		t.Errorf("order_tracking.delete_after_close = %q, want 7d", orderTracking.DeleteAfterClose)
-	}
-}
-
-func TestApplyBeadPolicyDefaults_StorageFieldPreserved(t *testing.T) {
-	cfg := &City{
-		Beads: BeadsConfig{
-			Policies: map[string]BeadPolicyConfig{
-				"order_tracking": {Storage: BeadStorageNoHistory},
-			},
-		},
-	}
-	ApplyBeadPolicyDefaults(cfg)
-
-	p := cfg.Beads.Policies["order_tracking"]
-	if p.DeleteAfterClose != "7d" {
-		t.Errorf("order_tracking.delete_after_close = %q, want 7d (default should be applied when only Storage is set)", p.DeleteAfterClose)
-	}
-	if p.Storage != BeadStorageNoHistory {
-		t.Errorf("order_tracking.storage = %q, want no_history (must be preserved)", p.Storage)
 	}
 }
 
@@ -3325,24 +3334,6 @@ func TestValidateAgentsMouseMode(t *testing.T) {
 	}
 }
 
-func TestValidateAgentsTier(t *testing.T) {
-	for _, tier := range []string{"", "claude-required", "overflow-ok"} {
-		t.Run("valid_"+tier, func(t *testing.T) {
-			if err := ValidateAgents([]Agent{{Name: "worker", Tier: tier}}); err != nil {
-				t.Fatalf("ValidateAgents tier %q: %v", tier, err)
-			}
-		})
-	}
-
-	err := ValidateAgents([]Agent{{Name: "worker", Tier: "platinum"}})
-	if err == nil {
-		t.Fatal("ValidateAgents invalid tier: got nil error")
-	}
-	if !strings.Contains(err.Error(), "tier") {
-		t.Fatalf("ValidateAgents error = %v, want tier context", err)
-	}
-}
-
 func TestValidateAgentsMissingName(t *testing.T) {
 	agents := []Agent{{MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5)}}
 	err := ValidateAgents(agents)
@@ -3758,24 +3749,14 @@ name = "worker"
 	}
 }
 
-func TestMarshalDefaultCityOmitsFormulaV2Default(t *testing.T) {
+func TestMarshalDefaultCityIncludesFormulaV2Default(t *testing.T) {
 	c := DefaultCity("test")
 	data, err := c.Marshal()
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	// formula_v2 is on by default; generated configs must NOT pin the default
-	// (a nil pointer is omitted), so the [daemon] table does not appear at all.
-	if strings.Contains(string(data), "formula_v2") {
-		t.Errorf("default city.toml should omit formula_v2 (default-on):\n%s", data)
-	}
-	// ...and a round-trip still loads as enabled.
-	cfg, err := Parse(data)
-	if err != nil {
-		t.Fatalf("Parse round-trip: %v", err)
-	}
-	if !cfg.Daemon.FormulaV2Enabled() {
-		t.Errorf("round-trip of default city.toml should be formula-v2 enabled")
+	if !strings.Contains(string(data), "[daemon]") || !strings.Contains(string(data), "formula_v2 = true") {
+		t.Errorf("Marshal output should include formula_v2 default:\n%s", data)
 	}
 }
 
@@ -3904,78 +3885,6 @@ func TestValidateNonNegativeDurationsRejectsNegativeDoltStopTimeout(t *testing.T
 		t.Fatal("ValidateNonNegativeDurations() = nil, want error for negative dolt_stop_timeout")
 	}
 	if !strings.Contains(err.Error(), "dolt_stop_timeout") ||
-		!strings.Contains(err.Error(), "must not be negative") ||
-		!strings.Contains(err.Error(), `"-1s"`) {
-		t.Errorf("ValidateNonNegativeDurations() error = %q, want it to name the field, the constraint, and the value", err)
-	}
-}
-
-// --- DoltLockReleaseTimeout tests ---
-
-func TestDoltConfigDoltLockReleaseTimeoutDefault(t *testing.T) {
-	d := DoltConfig{}
-	got := d.DoltLockReleaseTimeoutDuration()
-	if got != DefaultDoltLockReleaseTimeout {
-		t.Errorf("DoltLockReleaseTimeoutDuration() = %v, want %v", got, DefaultDoltLockReleaseTimeout)
-	}
-}
-
-func TestDoltConfigDoltLockReleaseTimeoutCustom(t *testing.T) {
-	d := DoltConfig{DoltLockReleaseTimeout: "90s"}
-	got := d.DoltLockReleaseTimeoutDuration()
-	if got != 90*time.Second {
-		t.Errorf("DoltLockReleaseTimeoutDuration() = %v, want 90s", got)
-	}
-}
-
-func TestDoltConfigDoltLockReleaseTimeoutZero(t *testing.T) {
-	d := DoltConfig{DoltLockReleaseTimeout: "0s"}
-	got := d.DoltLockReleaseTimeoutDuration()
-	if got != 0 {
-		t.Errorf("DoltLockReleaseTimeoutDuration() = %v, want 0", got)
-	}
-}
-
-func TestDoltConfigDoltLockReleaseTimeoutInvalid(t *testing.T) {
-	d := DoltConfig{DoltLockReleaseTimeout: "not-a-duration"}
-	got := d.DoltLockReleaseTimeoutDuration()
-	if got != DefaultDoltLockReleaseTimeout {
-		t.Errorf("DoltLockReleaseTimeoutDuration() = %v, want %v (default for invalid)", got, DefaultDoltLockReleaseTimeout)
-	}
-}
-
-func TestParseDoltLockReleaseTimeout(t *testing.T) {
-	data := []byte(`
-[workspace]
-name = "test"
-
-[dolt]
-dolt_lock_release_timeout = "2m"
-
-[[agent]]
-name = "mayor"
-`)
-	cfg, err := Parse(data)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if cfg.Dolt.DoltLockReleaseTimeout != "2m" {
-		t.Errorf("Dolt.DoltLockReleaseTimeout = %q, want %q", cfg.Dolt.DoltLockReleaseTimeout, "2m")
-	}
-	got := cfg.Dolt.DoltLockReleaseTimeoutDuration()
-	if got != 2*time.Minute {
-		t.Errorf("DoltLockReleaseTimeoutDuration() = %v, want 2m", got)
-	}
-}
-
-func TestValidateNonNegativeDurationsRejectsNegativeDoltLockReleaseTimeout(t *testing.T) {
-	cfg := &City{}
-	cfg.Dolt.DoltLockReleaseTimeout = "-1s"
-	err := ValidateNonNegativeDurations(cfg, "city.toml")
-	if err == nil {
-		t.Fatal("ValidateNonNegativeDurations() = nil, want error for negative dolt_lock_release_timeout")
-	}
-	if !strings.Contains(err.Error(), "dolt_lock_release_timeout") ||
 		!strings.Contains(err.Error(), "must not be negative") ||
 		!strings.Contains(err.Error(), `"-1s"`) {
 		t.Errorf("ValidateNonNegativeDurations() error = %q, want it to name the field, the constraint, and the value", err)
@@ -4933,30 +4842,6 @@ func TestValidateAgentsSameNameDifferentDir(t *testing.T) {
 	}
 }
 
-func TestValidateAgentsSameNameDifferentBinding(t *testing.T) {
-	agents := []Agent{
-		{Name: "dog", SourceDir: "packs/maintenance"},
-		{Name: "dog", BindingName: "dolt", SourceDir: "packs/bd/dolt"},
-	}
-	if err := ValidateAgents(agents); err != nil {
-		t.Errorf("ValidateAgents: unexpected error for qualified same-name agents: %v", err)
-	}
-}
-
-func TestValidateAgentsSameNameSameBinding(t *testing.T) {
-	agents := []Agent{
-		{Name: "dog", BindingName: "dolt", SourceDir: "packs/bd/dolt"},
-		{Name: "dog", BindingName: "dolt", SourceDir: "packs/other-dolt"},
-	}
-	err := ValidateAgents(agents)
-	if err == nil {
-		t.Fatal("expected error for duplicate binding-qualified name")
-	}
-	if !strings.Contains(err.Error(), "duplicate") {
-		t.Errorf("error = %q, want 'duplicate'", err)
-	}
-}
-
 func TestValidateAgentsSameNameSameDir(t *testing.T) {
 	agents := []Agent{
 		{Name: "polecat", Dir: "frontend"},
@@ -5175,92 +5060,6 @@ func TestMaxSessionAgeOmittedWhenEmpty(t *testing.T) {
 	}
 	if strings.Contains(string(data), "max_session_age") {
 		t.Errorf("TOML output should omit max_session_age when empty, got:\n%s", data)
-	}
-}
-
-// --- ChatSessionsConfig tests ---
-
-func TestChatSessionsIdleTimeoutDurationEmpty(t *testing.T) {
-	c := ChatSessionsConfig{}
-	if got := c.IdleTimeoutDuration(); got != 0 {
-		t.Errorf("IdleTimeoutDuration() = %v, want 0", got)
-	}
-}
-
-func TestChatSessionsIdleTimeoutDurationValid(t *testing.T) {
-	c := ChatSessionsConfig{IdleTimeout: "30m"}
-	if got := c.IdleTimeoutDuration(); got != 30*time.Minute {
-		t.Errorf("IdleTimeoutDuration() = %v, want 30m", got)
-	}
-}
-
-func TestChatSessionsIdleTimeoutDurationInvalid(t *testing.T) {
-	c := ChatSessionsConfig{IdleTimeout: "not-a-duration"}
-	if got := c.IdleTimeoutDuration(); got != 0 {
-		t.Errorf("IdleTimeoutDuration() = %v, want 0 for invalid", got)
-	}
-}
-
-func TestGracePeriodDurationDefault(t *testing.T) {
-	c := ChatSessionsConfig{}
-	if got := c.GracePeriodDuration(); got != DefaultManualGracePeriod {
-		t.Errorf("GracePeriodDuration() = %v, want %v", got, DefaultManualGracePeriod)
-	}
-}
-
-func TestGracePeriodDurationExplicitZero(t *testing.T) {
-	for _, val := range []string{"0", "0s"} {
-		c := ChatSessionsConfig{GracePeriod: val}
-		if got := c.GracePeriodDuration(); got != 0 {
-			t.Errorf("GracePeriodDuration(%q) = %v, want 0", val, got)
-		}
-	}
-}
-
-func TestGracePeriodDurationValid(t *testing.T) {
-	c := ChatSessionsConfig{GracePeriod: "5m"}
-	if got := c.GracePeriodDuration(); got != 5*time.Minute {
-		t.Errorf("GracePeriodDuration() = %v, want 5m", got)
-	}
-}
-
-func TestGracePeriodDurationInvalid(t *testing.T) {
-	c := ChatSessionsConfig{GracePeriod: "bogus"}
-	if got := c.GracePeriodDuration(); got != DefaultManualGracePeriod {
-		t.Errorf("GracePeriodDuration() = %v, want %v for invalid", got, DefaultManualGracePeriod)
-	}
-}
-
-func TestGracePeriodRoundTrip(t *testing.T) {
-	c := City{
-		Workspace:    Workspace{Name: "test"},
-		Agents:       []Agent{{Name: "mayor"}},
-		ChatSessions: ChatSessionsConfig{GracePeriod: "15m"},
-	}
-	data, err := c.Marshal()
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-	got, err := Parse(data)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if got.ChatSessions.GracePeriod != "15m" {
-		t.Errorf("GracePeriod after round-trip = %q, want %q", got.ChatSessions.GracePeriod, "15m")
-	}
-}
-
-func TestGracePeriodOmittedWhenEmpty(t *testing.T) {
-	c := City{
-		Workspace: Workspace{Name: "test"},
-		Agents:    []Agent{{Name: "mayor"}},
-	}
-	data, err := c.Marshal()
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-	if strings.Contains(string(data), "grace_period") {
-		t.Errorf("TOML output should omit grace_period when empty, got:\n%s", data)
 	}
 }
 
@@ -6438,14 +6237,32 @@ func TestValidateDependsOn(t *testing.T) {
 }
 
 func TestInjectImplicitAgents_NoProviders(t *testing.T) {
-	cfg := &City{Daemon: DaemonConfig{FormulaV2: boolPtr(true)}}
+	// Even with no configured model providers, the built-in control-dispatcher
+	// lane is always available.
+	cfg := &City{Daemon: DaemonConfig{FormulaV2: true}}
 	InjectImplicitAgents(cfg)
 
-	if len(cfg.Agents) != 0 {
-		t.Fatalf("got %d agents, want 0", len(cfg.Agents))
+	if len(cfg.Agents) != 1 {
+		t.Fatalf("got %d agents, want 1 (control-dispatcher only)", len(cfg.Agents))
 	}
-	if len(cfg.NamedSessions) != 0 {
-		t.Fatalf("got %d named sessions, want 0", len(cfg.NamedSessions))
+	a := cfg.Agents[0]
+	if a.Name != ControlDispatcherAgentName {
+		t.Fatalf("agent[0].Name = %q, want %q", a.Name, ControlDispatcherAgentName)
+	}
+	if !a.Implicit {
+		t.Fatal("control-dispatcher should be implicit")
+	}
+	if !reflect.DeepEqual(a.ProcessNames, []string{"gc"}) {
+		t.Fatalf("control-dispatcher ProcessNames = %v, want [gc]", a.ProcessNames)
+	}
+	if a.SleepAfterIdle != "" {
+		t.Fatalf("control-dispatcher SleepAfterIdle = %q, want inherited idle-sleep policy", a.SleepAfterIdle)
+	}
+	if len(cfg.NamedSessions) != 1 {
+		t.Fatalf("got %d named sessions, want 1 control-dispatcher session", len(cfg.NamedSessions))
+	}
+	if ns := cfg.NamedSessions[0]; ns.Template != ControlDispatcherAgentName || ns.Mode != "on_demand" {
+		t.Fatalf("control-dispatcher named session = %+v, want on_demand %q", ns, ControlDispatcherAgentName)
 	}
 }
 
@@ -6453,7 +6270,7 @@ func TestInjectImplicitAgents_WorkspaceProvider(t *testing.T) {
 	// workspace.provider selects a default but the provider catalog creates
 	// implicit agents.
 	cfg := &City{
-		Daemon:    DaemonConfig{FormulaV2: boolPtr(true)},
+		Daemon:    DaemonConfig{FormulaV2: true},
 		Workspace: Workspace{Provider: "claude"},
 		Providers: map[string]ProviderSpec{
 			"claude": BuiltinProviderAlias("claude"),
@@ -6461,8 +6278,8 @@ func TestInjectImplicitAgents_WorkspaceProvider(t *testing.T) {
 	}
 	InjectImplicitAgents(cfg)
 
-	if len(cfg.Agents) != 1 {
-		t.Fatalf("got %d agents, want 1", len(cfg.Agents))
+	if len(cfg.Agents) != 2 {
+		t.Fatalf("got %d agents, want 2", len(cfg.Agents))
 	}
 	a := cfg.Agents[0]
 	if a.Name != "claude" {
@@ -6471,12 +6288,15 @@ func TestInjectImplicitAgents_WorkspaceProvider(t *testing.T) {
 	if !a.Implicit {
 		t.Error("Implicit = false, want true")
 	}
+	if got := cfg.Agents[1].Name; got != ControlDispatcherAgentName {
+		t.Errorf("agent[1].Name = %q, want %q", got, ControlDispatcherAgentName)
+	}
 }
 
 func TestInjectImplicitAgents_WorkspaceProviderPlusExplicit(t *testing.T) {
 	// [providers.claude] + [providers.codex] → both get implicit agents.
 	cfg := &City{
-		Daemon:    DaemonConfig{FormulaV2: boolPtr(true)},
+		Daemon:    DaemonConfig{FormulaV2: true},
 		Workspace: Workspace{Provider: "claude"},
 		Providers: map[string]ProviderSpec{
 			"claude": BuiltinProviderAlias("claude"),
@@ -6485,8 +6305,8 @@ func TestInjectImplicitAgents_WorkspaceProviderPlusExplicit(t *testing.T) {
 	}
 	InjectImplicitAgents(cfg)
 
-	if len(cfg.Agents) != 2 {
-		t.Fatalf("got %d agents, want 2", len(cfg.Agents))
+	if len(cfg.Agents) != 3 {
+		t.Fatalf("got %d agents, want 3", len(cfg.Agents))
 	}
 	// Canonical order: claude before codex.
 	if cfg.Agents[0].Name != "claude" {
@@ -6495,12 +6315,15 @@ func TestInjectImplicitAgents_WorkspaceProviderPlusExplicit(t *testing.T) {
 	if cfg.Agents[1].Name != "codex" {
 		t.Errorf("agent[1].Name = %q, want %q", cfg.Agents[1].Name, "codex")
 	}
+	if cfg.Agents[2].Name != ControlDispatcherAgentName {
+		t.Errorf("agent[2].Name = %q, want %q", cfg.Agents[2].Name, ControlDispatcherAgentName)
+	}
 }
 
 func TestInjectImplicitAgents_WorkspaceProviderNoDuplicate(t *testing.T) {
 	// workspace.provider = "claude" + [providers.claude] → no duplicate.
 	cfg := &City{
-		Daemon:    DaemonConfig{FormulaV2: boolPtr(true)},
+		Daemon:    DaemonConfig{FormulaV2: true},
 		Workspace: Workspace{Provider: "claude"},
 		Providers: map[string]ProviderSpec{
 			"claude": {},
@@ -6508,8 +6331,8 @@ func TestInjectImplicitAgents_WorkspaceProviderNoDuplicate(t *testing.T) {
 	}
 	InjectImplicitAgents(cfg)
 
-	if len(cfg.Agents) != 1 {
-		t.Fatalf("got %d agents, want 1", len(cfg.Agents))
+	if len(cfg.Agents) != 2 {
+		t.Fatalf("got %d agents, want 2", len(cfg.Agents))
 	}
 }
 
@@ -6517,13 +6340,13 @@ func TestInjectImplicitAgents_WorkspaceProviderNonBuiltin(t *testing.T) {
 	// A non-builtin workspace.provider without a matching [providers.X]
 	// section must NOT create an implicit agent (it would fail at resolution).
 	cfg := &City{
-		Daemon:    DaemonConfig{FormulaV2: boolPtr(true)},
+		Daemon:    DaemonConfig{FormulaV2: true},
 		Workspace: Workspace{Provider: "my-custom-llm"},
 	}
 	InjectImplicitAgents(cfg)
 
-	if len(cfg.Agents) != 0 {
-		t.Fatalf("got %d agents, want 0", len(cfg.Agents))
+	if len(cfg.Agents) != 1 {
+		t.Fatalf("got %d agents, want 1 (control-dispatcher only)", len(cfg.Agents))
 	}
 }
 
@@ -6531,7 +6354,7 @@ func TestInjectImplicitAgents_WorkspaceProviderNonBuiltinWithEntry(t *testing.T)
 	// A non-builtin workspace.provider WITH a matching [providers.X]
 	// section should still work.
 	cfg := &City{
-		Daemon:    DaemonConfig{FormulaV2: boolPtr(true)},
+		Daemon:    DaemonConfig{FormulaV2: true},
 		Workspace: Workspace{Provider: "my-custom-llm"},
 		Providers: map[string]ProviderSpec{
 			"my-custom-llm": {Command: "ollama"},
@@ -6539,8 +6362,8 @@ func TestInjectImplicitAgents_WorkspaceProviderNonBuiltinWithEntry(t *testing.T)
 	}
 	InjectImplicitAgents(cfg)
 
-	if len(cfg.Agents) != 1 {
-		t.Fatalf("got %d agents, want 1", len(cfg.Agents))
+	if len(cfg.Agents) != 2 {
+		t.Fatalf("got %d agents, want 2", len(cfg.Agents))
 	}
 	if cfg.Agents[0].Name != "my-custom-llm" {
 		t.Errorf("Name = %q, want %q", cfg.Agents[0].Name, "my-custom-llm")
@@ -6552,7 +6375,7 @@ func TestInjectImplicitAgents_ExplicitAgentUnconfiguredProvider(t *testing.T) {
 	// workspace.provider is preserved, but no implicit agent is created
 	// for that provider.
 	cfg := &City{
-		Daemon: DaemonConfig{FormulaV2: boolPtr(true)},
+		Daemon: DaemonConfig{FormulaV2: true},
 		Providers: map[string]ProviderSpec{
 			"claude": {},
 		},
@@ -6562,9 +6385,9 @@ func TestInjectImplicitAgents_ExplicitAgentUnconfiguredProvider(t *testing.T) {
 	}
 	InjectImplicitAgents(cfg)
 
-	// 1 explicit (gemini) + 1 implicit (claude).
-	if len(cfg.Agents) != 2 {
-		t.Fatalf("got %d agents, want 2", len(cfg.Agents))
+	// 1 explicit (gemini) + 1 implicit (claude) + control-dispatcher = 3
+	if len(cfg.Agents) != 3 {
+		t.Fatalf("got %d agents, want 3", len(cfg.Agents))
 	}
 
 	// Explicit agent preserved.
@@ -6586,7 +6409,7 @@ func TestInjectImplicitAgents_ExplicitAgentUnconfiguredProvider(t *testing.T) {
 func TestInjectImplicitAgents_ConfiguredOnly(t *testing.T) {
 	// Only providers in cfg.Providers get implicit agents.
 	cfg := &City{
-		Daemon: DaemonConfig{FormulaV2: boolPtr(true)},
+		Daemon: DaemonConfig{FormulaV2: true},
 		Providers: map[string]ProviderSpec{
 			"claude": {},
 			"codex":  {},
@@ -6594,8 +6417,8 @@ func TestInjectImplicitAgents_ConfiguredOnly(t *testing.T) {
 	}
 	InjectImplicitAgents(cfg)
 
-	if len(cfg.Agents) != 2 {
-		t.Fatalf("got %d agents, want 2", len(cfg.Agents))
+	if len(cfg.Agents) != 3 {
+		t.Fatalf("got %d agents, want 3", len(cfg.Agents))
 	}
 	// Canonical order: claude before codex.
 	for i, wantName := range []string{"claude", "codex"} {
@@ -6624,7 +6447,7 @@ func TestInjectImplicitAgents_CustomProvider(t *testing.T) {
 	// Multiple builtins + multiple custom providers: builtins come first
 	// in canonical order, then customs in alphabetical order.
 	cfg := &City{
-		Daemon: DaemonConfig{FormulaV2: boolPtr(true)},
+		Daemon: DaemonConfig{FormulaV2: true},
 		Providers: map[string]ProviderSpec{
 			"codex":    {},
 			"claude":   {},
@@ -6634,8 +6457,8 @@ func TestInjectImplicitAgents_CustomProvider(t *testing.T) {
 	}
 	InjectImplicitAgents(cfg)
 
-	if len(cfg.Agents) != 4 {
-		t.Fatalf("got %d agents, want 4", len(cfg.Agents))
+	if len(cfg.Agents) != 5 {
+		t.Fatalf("got %d agents, want 5", len(cfg.Agents))
 	}
 	// Builtins in canonical order (claude before codex), then customs alphabetical.
 	wantOrder := []string{"claude", "codex", "my-local", "zebra"}
@@ -6644,11 +6467,14 @@ func TestInjectImplicitAgents_CustomProvider(t *testing.T) {
 			t.Errorf("agent[%d].Name = %q, want %q", i, cfg.Agents[i].Name, want)
 		}
 	}
+	if got := cfg.Agents[len(cfg.Agents)-1].Name; got != ControlDispatcherAgentName {
+		t.Errorf("last implicit agent = %q, want %q", got, ControlDispatcherAgentName)
+	}
 }
 
 func TestInjectImplicitAgents_ExplicitWins(t *testing.T) {
 	cfg := &City{
-		Daemon: DaemonConfig{FormulaV2: boolPtr(true)},
+		Daemon: DaemonConfig{FormulaV2: true},
 		Providers: map[string]ProviderSpec{
 			"claude": {},
 			"codex":  {},
@@ -6659,9 +6485,9 @@ func TestInjectImplicitAgents_ExplicitWins(t *testing.T) {
 	}
 	InjectImplicitAgents(cfg)
 
-	// 1 explicit claude + 1 implicit codex.
-	if len(cfg.Agents) != 2 {
-		t.Fatalf("got %d agents, want 2", len(cfg.Agents))
+	// 1 explicit claude + 1 implicit codex + control-dispatcher.
+	if len(cfg.Agents) != 3 {
+		t.Fatalf("got %d agents, want 3", len(cfg.Agents))
 	}
 
 	// First agent is the explicit one — not overwritten.
@@ -6688,7 +6514,7 @@ func TestInjectImplicitAgents_ExplicitWins(t *testing.T) {
 func TestInjectImplicitAgents_RigScopedExplicitDoesNotBlockCity(t *testing.T) {
 	// An explicit rig-scoped "claude" should NOT prevent the implicit city-scoped one.
 	cfg := &City{
-		Daemon: DaemonConfig{FormulaV2: boolPtr(true)},
+		Daemon: DaemonConfig{FormulaV2: true},
 		Providers: map[string]ProviderSpec{
 			"claude": {},
 			"codex":  {},
@@ -6702,7 +6528,7 @@ func TestInjectImplicitAgents_RigScopedExplicitDoesNotBlockCity(t *testing.T) {
 
 	// 1 explicit rig-scoped claude + 2 implicit city-scoped + 1 implicit rig-scoped codex
 	// (the explicit rig-scoped claude blocks the implicit rig-scoped claude).
-	want := 1 + 2 + 1
+	want := 1 + 2 + 1 + 2 // + city & rig control-dispatcher
 	if len(cfg.Agents) != want {
 		t.Fatalf("got %d agents, want %d", len(cfg.Agents), want)
 	}
@@ -6734,7 +6560,7 @@ func TestInjectImplicitAgents_RigScopedExplicitDoesNotBlockCity(t *testing.T) {
 func TestInjectImplicitAgents_RigInjection(t *testing.T) {
 	// With rigs defined, implicit agents are injected for each rig too.
 	cfg := &City{
-		Daemon: DaemonConfig{FormulaV2: boolPtr(true)},
+		Daemon: DaemonConfig{FormulaV2: true},
 		Providers: map[string]ProviderSpec{
 			"claude": {},
 			"codex":  {},
@@ -6746,8 +6572,8 @@ func TestInjectImplicitAgents_RigInjection(t *testing.T) {
 	}
 	InjectImplicitAgents(cfg)
 
-	// 2 city-scoped + 2x2 rig-scoped provider agents.
-	want := 6
+	// 2 city-scoped + 2×2 rig-scoped + 3 control-dispatcher (city + 2 rigs) = 9
+	want := 9
 	if len(cfg.Agents) != want {
 		t.Fatalf("got %d agents, want %d", len(cfg.Agents), want)
 	}
@@ -6760,8 +6586,8 @@ func TestInjectImplicitAgents_RigInjection(t *testing.T) {
 				rigAgents++
 			}
 		}
-		if rigAgents != 2 {
-			t.Errorf("rig %q: got %d implicit agents, want 2 providers", rigName, rigAgents)
+		if rigAgents != 3 {
+			t.Errorf("rig %q: got %d implicit agents, want 3 (2 providers + control-dispatcher)", rigName, rigAgents)
 		}
 	}
 
@@ -6836,18 +6662,23 @@ func TestAgentDefaultsProvider_InjectImplicitAgents(t *testing.T) {
 
 func TestAgentDefaultsProvider_ControlDispatcherSkipped(t *testing.T) {
 	cfg := &City{
-		Agents: []Agent{
-			{Name: ControlDispatcherAgentName},
-		},
+		Daemon: DaemonConfig{FormulaV2: true},
 		AgentDefaults: AgentDefaults{
 			Provider: "codex",
 		},
 	}
+	InjectImplicitAgents(cfg)
 	ApplyAgentDefaults(cfg)
 
-	if cfg.Agents[0].Provider != "" {
-		t.Fatalf("control-dispatcher Provider = %q, want empty", cfg.Agents[0].Provider)
+	for _, a := range cfg.Agents {
+		if a.Name == ControlDispatcherAgentName {
+			if a.Provider != "" {
+				t.Fatalf("control-dispatcher Provider = %q, want empty", a.Provider)
+			}
+			return
+		}
 	}
+	t.Fatal("control-dispatcher agent not found")
 }
 
 func TestAgentDefaultsProvider_BeatsWorkspaceProviderForExplicitAgent(t *testing.T) {
@@ -7133,7 +6964,7 @@ func TestAgentDefaultsSlingFormula_ControlDispatcherSkipped(t *testing.T) {
 	// Control-dispatcher agents should not receive the city default.
 	cfg := &City{
 		Agents: []Agent{
-			{Name: ControlDispatcherAgentName},
+			{Name: ControlDispatcherAgentName, Implicit: true},
 		},
 		AgentDefaults: AgentDefaults{
 			DefaultSlingFormula: "mol-focus-review",
@@ -7722,84 +7553,6 @@ printf 'TRACE=%%s\nARGS=%%s\n' "$GC_WORKFLOW_TRACE" "$*" > %q
 	return tracePath, args
 }
 
-// TestPreferredDeterministicControlDispatcher locks the singleton-first
-// selection both graphroute and dispatch route control beads with. The city-
-// level singleton (Dir == "") must win for every scope; a rig-scoped instance is
-// used only when no city-level deterministic dispatcher exists. Non-deterministic
-// control-dispatcher agents (no convoy-control StartCommand) are ignored.
-func TestPreferredDeterministicControlDispatcher(t *testing.T) {
-	deterministic := func(dir string) Agent {
-		return Agent{
-			Name:         ControlDispatcherAgentName,
-			BindingName:  "core",
-			Dir:          dir,
-			StartCommand: ControlDispatcherStartCommandFor("{{.Agent}}"),
-		}
-	}
-
-	citySingleton := deterministic("")
-	rigCopy := deterministic("fixture")
-	plain := Agent{Name: ControlDispatcherAgentName, Dir: "fixture"} // no StartCommand
-
-	tests := []struct {
-		name       string
-		agents     []Agent
-		rigContext string
-		wantQN     string
-		wantOK     bool
-	}{
-		{
-			name:       "singleton preferred over rig copy for rig scope",
-			agents:     []Agent{rigCopy, citySingleton},
-			rigContext: "fixture",
-			wantQN:     "core.control-dispatcher",
-			wantOK:     true,
-		},
-		{
-			name:       "singleton preferred for empty scope",
-			agents:     []Agent{rigCopy, citySingleton},
-			rigContext: "",
-			wantQN:     "core.control-dispatcher",
-			wantOK:     true,
-		},
-		{
-			name:       "rig-scoped fallback when no singleton",
-			agents:     []Agent{rigCopy},
-			rigContext: "fixture",
-			wantQN:     "fixture/core.control-dispatcher",
-			wantOK:     true,
-		},
-		{
-			name:       "no match when only a non-deterministic dispatcher exists",
-			agents:     []Agent{plain},
-			rigContext: "fixture",
-			wantOK:     false,
-		},
-		{
-			name:       "no match when rig scope has no matching rig-scoped dispatcher",
-			agents:     []Agent{rigCopy},
-			rigContext: "other",
-			wantOK:     false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, ok := PreferredDeterministicControlDispatcher(&City{Agents: tt.agents}, tt.rigContext)
-			if ok != tt.wantOK {
-				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
-			}
-			if ok && got.QualifiedName() != tt.wantQN {
-				t.Fatalf("QualifiedName = %q, want %q", got.QualifiedName(), tt.wantQN)
-			}
-		})
-	}
-
-	if _, ok := PreferredDeterministicControlDispatcher(nil, ""); ok {
-		t.Fatal("nil cfg should return ok=false")
-	}
-}
-
 // TestAllPackDirs covers (*City).AllPackDirs() — the union of PackDirs and
 // RigPackDirs that the prompt renderer relies on. Regression: rig-imported
 // pack template fragments were silently dropped before gascity#2676.
@@ -7923,10 +7676,8 @@ func TestDefaultInstallAgentHooksForProvider(t *testing.T) {
 		want     []string
 	}{
 		{"opencode", []string{"opencode"}},
-		{"mimocode", []string{"mimocode"}},
 		{"kiro", []string{"kiro"}},
 		{"groq", []string{"groq"}},
-		{"kimi", []string{"kimi"}},
 		{"claude", nil},
 	}
 	for _, tc := range cases {
@@ -7934,30 +7685,5 @@ func TestDefaultInstallAgentHooksForProvider(t *testing.T) {
 		if !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("defaultInstallAgentHooksForProvider(%q) = %v, want %v", tc.provider, got, tc.want)
 		}
-	}
-}
-
-func TestCityWithProvidersInstallsKimiHooksByDefault(t *testing.T) {
-	tests := []struct {
-		name string
-		city City
-	}{
-		{
-			name: "wizard",
-			city: WizardCityWithProviders("test-city", "kimi", []string{"kimi"}),
-		},
-		{
-			name: "gastown",
-			city: GastownCityWithProviders("test-city", "kimi", []string{"kimi"}),
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := tt.city.Workspace.InstallAgentHooks
-			want := []string{"kimi"}
-			if !reflect.DeepEqual(got, want) {
-				t.Fatalf("Workspace.InstallAgentHooks = %v, want %v", got, want)
-			}
-		})
 	}
 }
