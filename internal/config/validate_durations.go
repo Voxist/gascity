@@ -88,6 +88,11 @@ func ValidateDurations(cfg *City, source string) []string {
 		}
 	}
 
+	// Beads resilience (circuit breaker) durations.
+	check("[beads.resilience]", "open_base", cfg.Beads.Resilience.OpenBase)
+	check("[beads.resilience]", "open_max", cfg.Beads.Resilience.OpenMax)
+	check("[beads.resilience]", "half_open_interval", cfg.Beads.Resilience.HalfOpenInterval)
+
 	// Chat sessions config durations.
 	check("[chat_sessions]", "idle_timeout", cfg.ChatSessions.IdleTimeout)
 	check("[chat_sessions]", "grace_period", cfg.ChatSessions.GracePeriod)
