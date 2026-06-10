@@ -329,7 +329,7 @@ func peekBeadsBackend(tomlPath string) string {
 //
 // Used by gc event emit (called from bd hooks on every bead write) to avoid
 // the full loadCityConfig path, which resolves [imports] and runs
-// `git status --porcelain --ignored` against every cached pack-source repo
+// `git status --porcelain` against every cached pack-source repo
 // — slow on hosts where a pack source is a large monorepo, and fan-out
 // concurrent across a bd-write burst (see gastownhall/gascity#2099).
 //
