@@ -16,7 +16,6 @@ import (
 
 	gcapi "github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads/contract"
-	"github.com/gastownhall/gascity/internal/doltpool"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/spf13/cobra"
@@ -496,20 +495,11 @@ func formatLegacyL2L3MismatchError(l2, l3 string) error {
 // NOT Close it. The previous per-call sql.Open+Close pattern here was the
 // 2,618-TIME_WAIT hotspot (city-scale plan item 1.2).
 func managedDoltOpenDatabase(host, port, user, database string) (*sql.DB, error) {
-	host = managedDoltConnectHost(host)
-	port = strings.TrimSpace(port)
-	if port == "" {
-		return nil, fmt.Errorf("missing port")
-	}
-	user = strings.TrimSpace(user)
-	if user == "" {
-		user = "root"
-	}
 	database = strings.TrimSpace(database)
 	if database == "" {
 		return nil, fmt.Errorf("missing database")
 	}
-	return doltpool.Open(host, port, user, managedDoltPassword(), database)
+	return openManagedDoltPooled(host, port, user, database)
 }
 
 func readManagedMetadataProjectID(metadataPath string) (string, error) {

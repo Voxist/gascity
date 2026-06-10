@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/resilience"
 )
@@ -82,7 +83,7 @@ func breakerStateChangeEmitter(cityPath string) func(resilience.Transition) {
 		if err != nil {
 			return
 		}
-		rec, err := events.NewFileRecorder(filepath.Join(cityPath, ".gc", "events.jsonl"), io.Discard)
+		rec, err := events.NewFileRecorder(filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl"), io.Discard)
 		if err != nil {
 			return
 		}

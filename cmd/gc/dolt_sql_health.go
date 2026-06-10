@@ -263,10 +263,13 @@ func managedDoltPassword() string {
 	return strings.TrimSpace(os.Getenv("GC_DOLT_PASSWORD"))
 }
 
-// managedDoltOpenDB returns the shared pooled server-level *sql.DB (no
-// database selected) for a managed Dolt endpoint. The handle is owned by
-// internal/doltpool — callers must NOT Close it.
-func managedDoltOpenDB(host, port, user string) (*sql.DB, error) {
+// openManagedDoltPooled returns the shared pooled *sql.DB for a managed Dolt
+// endpoint, applying the connection validation shared by the database-scoped
+// and server-level openers: the host is normalized via managedDoltConnectHost,
+// the port is required (empty is an error), and an empty user defaults to root.
+// An empty database selects no database (server-level handle). The handle is
+// owned by internal/doltpool — callers must NOT Close it.
+func openManagedDoltPooled(host, port, user, database string) (*sql.DB, error) {
 	host = managedDoltConnectHost(host)
 	port = strings.TrimSpace(port)
 	if port == "" {
@@ -276,7 +279,14 @@ func managedDoltOpenDB(host, port, user string) (*sql.DB, error) {
 	if user == "" {
 		user = "root"
 	}
-	return doltpool.Open(host, port, user, managedDoltPassword(), "")
+	return doltpool.Open(host, port, user, managedDoltPassword(), database)
+}
+
+// managedDoltOpenDB returns the shared pooled server-level *sql.DB (no
+// database selected) for a managed Dolt endpoint. The handle is owned by
+// internal/doltpool — callers must NOT Close it.
+func managedDoltOpenDB(host, port, user string) (*sql.DB, error) {
+	return openManagedDoltPooled(host, port, user, "")
 }
 
 func managedDoltQueryProbeDirect(host, port, user string) error {
