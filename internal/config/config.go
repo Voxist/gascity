@@ -1270,6 +1270,13 @@ type BeadsConfig struct {
 	// want gc to relinquish that ownership can set a finite Go duration string.
 	// Read by bd as BEADS_PROXY_IDLE_TIMEOUT.
 	ProxyIdleTimeout *string `toml:"proxy_idle_timeout,omitempty" jsonschema:"default=0"`
+	// ExpectedBuild pins the bd build this city expects: a token (version or
+	// build identifier) that must appear verbatim in `bd --version` output.
+	// The beads-expected-build doctor check compares them so a brew upgrade
+	// or a rebuild from the wrong branch clobbering a custom bd is caught at
+	// doctor cadence instead of as a runtime mystery. Empty disables the
+	// check.
+	ExpectedBuild string `toml:"expected_build,omitempty"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.

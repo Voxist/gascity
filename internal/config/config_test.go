@@ -708,6 +708,26 @@ func TestParseBeadsProxiedSection(t *testing.T) {
 	}
 }
 
+func TestParseBeadsExpectedBuild(t *testing.T) {
+	cfg, err := Parse([]byte("[workspace]\nname = \"t\"\n\n[beads]\nexpected_build = \"1.0.5-pooling\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.Beads.ExpectedBuild; got != "1.0.5-pooling" {
+		t.Errorf("expected_build = %q, want %q", got, "1.0.5-pooling")
+	}
+}
+
+func TestParseBeadsExpectedBuildAbsent(t *testing.T) {
+	cfg, err := Parse([]byte("[workspace]\nname = \"t\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Beads.ExpectedBuild != "" {
+		t.Errorf("expected_build = %q, want empty when unset", cfg.Beads.ExpectedBuild)
+	}
+}
+
 func TestBeadsProxyIdleTimeoutAccessor(t *testing.T) {
 	if got := (BeadsConfig{}).ProxyIdleTimeoutOrDefault(); got != defaultBeadsProxyIdleTimeout {
 		t.Errorf("default = %q, want %q", got, defaultBeadsProxyIdleTimeout)
