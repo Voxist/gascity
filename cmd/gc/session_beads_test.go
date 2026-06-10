@@ -8081,3 +8081,223 @@ func TestPendingPoolSessionName_SanitizesDottedTemplate(t *testing.T) {
 		})
 	}
 }
+
+func TestReapPhantomSessionBeads(t *testing.T) {
+	newPhantomBead := func(name, state, lastWokeAt string, named bool) beads.Bead {
+		meta := map[string]string{
+			"session_name": name,
+			"state":        state,
+		}
+		if lastWokeAt != "" {
+			meta["last_woke_at"] = lastWokeAt
+		}
+		if named {
+			meta["configured_named_session"] = "true"
+		}
+		return beads.Bead{
+			Status:   "open",
+			Type:     sessionBeadType,
+			Labels:   []string{sessionBeadLabel},
+			Metadata: meta,
+		}
+	}
+
+	tests := []struct {
+		name          string
+		beads         []beads.Bead
+		running       []string // session names present in the runtime (ListRunning returns these)
+		drainingIndex []int    // indices into beads slice with active drain entries
+		listErr       error    // injected ListRunning error (nil = success)
+		nilStore      bool
+		nilSP         bool
+		wantReaped    int
+		wantOpen      int
+	}{
+		{
+			name: "reaps_asleep_never_woken_not_visible",
+			beads: []beads.Bead{
+				newPhantomBead("worker-1", "asleep", "", false),
+			},
+			running:    nil,
+			wantReaped: 1,
+			wantOpen:   0,
+		},
+		{
+			name: "keeps_asleep_was_woken_once",
+			beads: []beads.Bead{
+				newPhantomBead("worker-1", "asleep", "2026-01-01T00:00:00Z", false),
+			},
+			running:    nil,
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "keeps_creating_state",
+			beads: []beads.Bead{
+				newPhantomBead("worker-1", "creating", "", false),
+			},
+			running:    nil,
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "keeps_awake_state",
+			beads: []beads.Bead{
+				newPhantomBead("worker-1", "awake", "", false),
+			},
+			running:    nil,
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "keeps_named_session_bead",
+			beads: []beads.Bead{
+				newPhantomBead("mayor", "asleep", "", true),
+			},
+			running:    nil,
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "keeps_draining_bead",
+			beads: []beads.Bead{
+				newPhantomBead("worker-1", "asleep", "", false),
+			},
+			running:       nil,
+			drainingIndex: []int{0},
+			wantReaped:    0,
+			wantOpen:      1,
+		},
+		{
+			name: "keeps_bead_visible_in_runtime",
+			beads: []beads.Bead{
+				newPhantomBead("worker-1", "asleep", "", false),
+			},
+			running:    []string{"worker-1"},
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "skips_on_partial_list_error",
+			beads: []beads.Bead{
+				newPhantomBead("worker-1", "asleep", "", false),
+			},
+			running:    nil,
+			listErr:    &runtime.PartialListError{Err: errors.New("remote backend down")},
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "skips_on_hard_list_error",
+			beads: []beads.Bead{
+				newPhantomBead("worker-1", "asleep", "", false),
+			},
+			running:    nil,
+			listErr:    errors.New("tmux unreachable"),
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name:       "nil_store_returns_zero",
+			nilStore:   true,
+			wantReaped: 0,
+		},
+		{
+			name:       "nil_sp_returns_zero",
+			nilSP:      true,
+			wantReaped: 0,
+		},
+		{
+			name: "reaps_only_asleep_never_woken_among_mixed_beads",
+			beads: []beads.Bead{
+				newPhantomBead("worker-1", "asleep", "", false),    // phantom → reap
+				newPhantomBead("worker-2", "asleep", "now", false), // was woken → keep
+				newPhantomBead("worker-3", "creating", "", false),  // wrong domain → keep
+				newPhantomBead("worker-4", "asleep", "", false),    // in visible set → keep
+			},
+			running:    []string{"worker-4"},
+			wantReaped: 1,
+			wantOpen:   3,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var store beads.Store
+			var createdIDs []string
+			if !tc.nilStore {
+				ms := beads.NewMemStore()
+				for _, b := range tc.beads {
+					created, err := ms.Create(b)
+					if err != nil {
+						t.Fatalf("setup: create bead: %v", err)
+					}
+					createdIDs = append(createdIDs, created.ID)
+				}
+				store = ms
+			}
+
+			var sp runtime.Provider
+			if !tc.nilSP {
+				sp = newPhantomTestProvider(tc.running, tc.listErr)
+			}
+
+			dt := newDrainTracker()
+			for _, idx := range tc.drainingIndex {
+				if idx < len(createdIDs) {
+					dt.set(createdIDs[idx], &drainState{reason: "user"})
+				}
+			}
+
+			var stderr bytes.Buffer
+			got := reapPhantomSessionBeads(store, sp, dt, clock.Real{}, &stderr)
+			if got != tc.wantReaped {
+				t.Errorf("reapPhantomSessionBeads() = %d, want %d; stderr=%q", got, tc.wantReaped, stderr.String())
+			}
+
+			if store == nil {
+				return
+			}
+			open, err := loadSessionBeads(store)
+			if err != nil {
+				t.Fatalf("loadSessionBeads: %v", err)
+			}
+			if len(open) != tc.wantOpen {
+				t.Errorf("open beads = %d, want %d", len(open), tc.wantOpen)
+			}
+		})
+	}
+}
+
+// phantomTestProvider is a minimal provider for TestReapPhantomSessionBeads that
+// supports configurable ListRunning results and errors.
+type phantomTestProvider struct {
+	*runtime.Fake
+	listErr error
+	visible map[string]bool
+}
+
+func newPhantomTestProvider(running []string, listErr error) *phantomTestProvider {
+	p := &phantomTestProvider{
+		Fake:    runtime.NewFake(),
+		listErr: listErr,
+		visible: make(map[string]bool, len(running)),
+	}
+	for _, name := range running {
+		p.visible[name] = true
+	}
+	return p
+}
+
+func (p *phantomTestProvider) ListRunning(prefix string) ([]string, error) {
+	if p.listErr != nil {
+		return nil, p.listErr
+	}
+	var names []string
+	for name := range p.visible {
+		if strings.HasPrefix(name, prefix) {
+			names = append(names, name)
+		}
+	}
+	return names, nil
+}

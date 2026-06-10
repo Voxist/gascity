@@ -1908,6 +1908,83 @@ func reapStaleSessionBeads(
 	return reaped
 }
 
+// reapPhantomSessionBeads closes open session beads that are phantom asleep
+// records — sessions the controller spawned but that were never adopted by a
+// real tmux session. A bead is a reapable phantom when:
+//   - state == "asleep" (visible as an idle pool slot)
+//   - last_woke_at == "" (never reached preWakeCommit, so it holds no claims)
+//   - session name NOT in the runtime visible set (no live tmux session)
+//   - NOT a configured named-session bead
+//   - NOT under active drain
+//
+// This is NOT reapStaleSessionBeads' domain: that function targets creating
+// state; this function targets asleep state. The two are complementary.
+//
+// Safety: if ListRunning returns any error (partial or hard), the GC pass is
+// skipped entirely — we do not reap under uncertainty.
+//
+// Returns the number of beads reaped.
+func reapPhantomSessionBeads(
+	store beads.Store,
+	sp runtime.Provider,
+	dt *drainTracker,
+	clk clock.Clock,
+	stderr io.Writer,
+) int {
+	if store == nil || sp == nil {
+		return 0
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	// O(1) list instead of O(n) per-session IsRunning calls. Any error
+	// (partial or hard) means we cannot trust the visible set — skip the
+	// pass entirely rather than reaping under uncertainty.
+	listed, listErr := sp.ListRunning("")
+	if listErr != nil {
+		return 0
+	}
+	visibleSet := make(map[string]bool, len(listed))
+	for _, sn := range listed {
+		sn = strings.TrimSpace(sn)
+		if sn != "" {
+			visibleSet[sn] = true
+		}
+	}
+
+	open, err := loadSessionBeads(store)
+	if err != nil {
+		fmt.Fprintf(stderr, "reapPhantomSessionBeads: %v\n", err) //nolint:errcheck
+		return 0
+	}
+	now := clk.Now()
+	reaped := 0
+	for _, b := range open {
+		state := strings.TrimSpace(b.Metadata["state"])
+		if state != "asleep" {
+			continue
+		}
+		if strings.TrimSpace(b.Metadata["last_woke_at"]) != "" {
+			continue
+		}
+		if isNamedSessionBead(b) {
+			continue
+		}
+		if dt != nil && dt.get(b.ID) != nil {
+			continue
+		}
+		sn := strings.TrimSpace(b.Metadata["session_name"])
+		if sn == "" || visibleSet[sn] {
+			continue
+		}
+		if closeBead(store, b.ID, "phantom-session", now.UTC(), stderr) {
+			fmt.Fprintf(stderr, "WARN: reconciler: reaped phantom session bead %s — tmux session %q never adopted\n", b.ID, sn) //nolint:errcheck
+			reaped++
+		}
+	}
+	return reaped
+}
+
 func cleanupDeadRuntimeSessionCorpses(
 	store beads.Store,
 	_ map[string]beads.Store,
