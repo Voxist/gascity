@@ -256,6 +256,7 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		ResumeCommand:        src.ResumeCommand,
 		WakeMode:             src.WakeMode,
 		MouseMode:            src.MouseMode,
+		Tier:                 src.Tier,
 		PoolName:             src.QualifiedName(),
 		Implicit:             src.Implicit,
 		ScaleCheck:           src.ScaleCheck,

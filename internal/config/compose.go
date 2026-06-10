@@ -1143,6 +1143,16 @@ func deepMergeProvider(base, frag ProviderSpec, name string, fragMeta toml.MetaD
 			func() bool { return base.AcceptStartupDialogs != nil },
 			func() { result.AcceptStartupDialogs = cloneBoolPtr(frag.AcceptStartupDialogs) },
 		},
+		{
+			"quota_monitor",
+			func() bool { return base.QuotaMonitor != nil },
+			func() { result.QuotaMonitor = cloneBoolPtr(frag.QuotaMonitor) },
+		},
+		{
+			"monitor_config_dir",
+			func() bool { return base.MonitorConfigDir != "" },
+			func() { result.MonitorConfigDir = frag.MonitorConfigDir },
+		},
 	}
 	for _, sf := range scalars {
 		if fragMeta.IsDefined("providers", name, sf.key) {

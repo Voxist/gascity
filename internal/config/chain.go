@@ -408,6 +408,8 @@ func recordScalarProvenance(spec ProviderSpec, layer string, into map[string]str
 	set("title_model", spec.TitleModel)
 	set("options_schema_merge", spec.OptionsSchemaMerge)
 	setSlice("print_args", spec.PrintArgs)
+	setBool("quota_monitor", spec.QuotaMonitor)
+	set("monitor_config_dir", spec.MonitorConfigDir)
 }
 
 // recordMapProvenance marks each key of each additive map as sourced

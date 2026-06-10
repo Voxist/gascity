@@ -107,6 +107,7 @@ export type AgentPatch = {
     SleepAfterIdle: string | null;
     StartCommand: string | null;
     Suspended: boolean | null;
+    Tier: string | null;
     TmuxAlias: string | null;
     WakeMode: string | null;
     WorkDir: string | null;
@@ -799,7 +800,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionSubmitSucceededPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | UnboundEventPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | QuotaObservedPayload | QuotaPollFailedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionSubmitSucceededPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | UnboundEventPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -2322,6 +2323,21 @@ export type PublishReceipt = {
     RetryAfter: number;
 };
 
+export type QuotaObservedPayload = {
+    five_hour_resets_at?: string;
+    five_hour_util: number;
+    opus_util?: number;
+    provider: string;
+    seven_day_resets_at?: string;
+    seven_day_util: number;
+    sonnet_util?: number;
+};
+
+export type QuotaPollFailedPayload = {
+    provider: string;
+    reason_class: string;
+};
+
 export type ReadinessItem = {
     detail?: string;
     display_name: string;
@@ -3469,6 +3485,10 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopePgCredentialResolved) | ({
     type: 'project.identity.stamped';
 } & TypedEventStreamEnvelopeProjectIdentityStamped) | ({
+    type: 'provider.quota_observed';
+} & TypedEventStreamEnvelopeProviderQuotaObserved) | ({
+    type: 'provider.quota_poll_failed';
+} & TypedEventStreamEnvelopeProviderQuotaPollFailed) | ({
     type: 'provider.swapped';
 } & TypedEventStreamEnvelopeProviderSwapped) | ({
     type: 'request.failed';
@@ -4071,6 +4091,34 @@ export type TypedEventStreamEnvelopeProjectIdentityStamped = {
 };
 
 /**
+ * TypedEventStreamEnvelope provider.quota_observed
+ */
+export type TypedEventStreamEnvelopeProviderQuotaObserved = {
+    actor: string;
+    message?: string;
+    payload: QuotaObservedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'provider.quota_observed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope provider.quota_poll_failed
+ */
+export type TypedEventStreamEnvelopeProviderQuotaPollFailed = {
+    actor: string;
+    message?: string;
+    payload: QuotaPollFailedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'provider.quota_poll_failed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope provider.swapped
  */
 export type TypedEventStreamEnvelopeProviderSwapped = {
@@ -4516,6 +4564,10 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopePgCredentialResolved) | ({
     type: 'project.identity.stamped';
 } & TypedTaggedEventStreamEnvelopeProjectIdentityStamped) | ({
+    type: 'provider.quota_observed';
+} & TypedTaggedEventStreamEnvelopeProviderQuotaObserved) | ({
+    type: 'provider.quota_poll_failed';
+} & TypedTaggedEventStreamEnvelopeProviderQuotaPollFailed) | ({
     type: 'provider.swapped';
 } & TypedTaggedEventStreamEnvelopeProviderSwapped) | ({
     type: 'request.failed';
@@ -5153,6 +5205,36 @@ export type TypedTaggedEventStreamEnvelopeProjectIdentityStamped = {
     subject?: string;
     ts: string;
     type: 'project.identity.stamped';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope provider.quota_observed
+ */
+export type TypedTaggedEventStreamEnvelopeProviderQuotaObserved = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: QuotaObservedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'provider.quota_observed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope provider.quota_poll_failed
+ */
+export type TypedTaggedEventStreamEnvelopeProviderQuotaPollFailed = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: QuotaPollFailedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'provider.quota_poll_failed';
     workflow?: WorkflowEventProjection;
 };
 
@@ -11378,6 +11460,10 @@ export type GetV0CityByCityNameStatusData = {
          * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
          */
         wait?: string;
+        /**
+         * When true, omit the expensive store-health, session-count, and work-count blocks for low-cost dashboard polls.
+         */
+        lite?: boolean;
     };
     url: '/v0/city/{cityName}/status';
 };

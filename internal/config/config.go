@@ -686,6 +686,9 @@ type AgentOverride struct {
 	WakeMode *string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
 	// MouseMode overrides whether tmux mouse mode is preserved ("on" or "off").
 	MouseMode *string `toml:"mouse_mode,omitempty" jsonschema:"enum=on,enum=off"`
+	// Tier overrides the agent's provider-governor tier classification
+	// ("claude-required" or "overflow-ok").
+	Tier *string `toml:"tier,omitempty" jsonschema:"enum=claude-required,enum=overflow-ok"`
 	// InjectFragmentsAppend appends to the agent's inject_fragments list.
 	InjectFragmentsAppend []string `toml:"inject_fragments_append,omitempty"`
 	// MaxActiveSessions overrides the agent-level cap on concurrent sessions.
@@ -2982,6 +2985,17 @@ const (
 	AgentLifecycleOneShot = "one_shot"
 )
 
+const (
+	// AgentTierClaudeRequired marks an agent whose work needs Claude-class
+	// model quality; the provider governor serves it from the governed
+	// Claude account pool (alternation / model-degrade / cascade).
+	AgentTierClaudeRequired = "claude-required"
+	// AgentTierOverflowOK marks an agent whose work tolerates overflow
+	// vendors; the governor always routes it to the configured overflow
+	// pool, preserving the Claude weekly cap for claude-required work.
+	AgentTierOverflowOK = "overflow-ok"
+)
+
 // Agent defines a configured agent in the city.
 type Agent struct {
 	// Name is the unique identifier for this agent.
@@ -3276,6 +3290,14 @@ type Agent struct {
 	// sessions; "off" or empty preserves the SDK's default mouse-off startup
 	// behavior for headless sessions.
 	MouseMode string `toml:"mouse_mode,omitempty" jsonschema:"enum=on,enum=off"`
+	// Tier classifies this agent's provider-quality requirement for the
+	// provider governor (internal/providergov). "claude-required" agents
+	// are served from the governed Claude account pool; "overflow-ok"
+	// agents always run on the configured overflow vendor pool, which
+	// stretches the Claude weekly cap. Empty means unclassified: the
+	// governor does not steer this agent and its configured provider
+	// applies unchanged.
+	Tier string `toml:"tier,omitempty" jsonschema:"enum=claude-required,enum=overflow-ok"`
 	// SleepAfterIdleSource records which config layer supplied SleepAfterIdle.
 	// Runtime-only — not persisted to TOML or JSON.
 	SleepAfterIdleSource string `toml:"-" json:"-"`
@@ -4503,6 +4525,14 @@ func ValidateAgents(agents []Agent) error {
 			// valid
 		default:
 			return fmt.Errorf("agent %q: mouse_mode must be \"on\", \"off\", or empty, got %q", a.QualifiedName(), a.MouseMode)
+		}
+		// Tier enum.
+		switch a.Tier {
+		case "", AgentTierClaudeRequired, AgentTierOverflowOK:
+			// valid
+		default:
+			return fmt.Errorf("agent %q: tier must be %q, %q, or empty, got %q",
+				a.QualifiedName(), AgentTierClaudeRequired, AgentTierOverflowOK, a.Tier)
 		}
 		if a.MinActiveSessions != nil && *a.MinActiveSessions < 0 {
 			return fmt.Errorf("agent %q: min_active_sessions must be >= 0", a.Name)
