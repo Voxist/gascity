@@ -330,6 +330,12 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 
 	// Custom types check — city store.
 	register(doctor.NewCustomTypesCheck(cityPath, "city"))
+	// Custom-types preflight — data-gates any native-store (dolt_mode_safe)
+	// flip by reading the city store's fully-resolved registered type set.
+	// Skipped in GC_DOLT=skip environments, matching the sibling Dolt checks.
+	if !gcDoltSkip() {
+		register(doctor.NewCustomTypesPreflightCheck(cityPath, "city"))
+	}
 
 	// Per-rig checks. Skip effectively-suspended rigs — opening their
 	// bead store triggers bd auto-start of orphan Dolt servers (ga-wzk).
@@ -350,6 +356,12 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || gcDoltSkip()))
 			// Custom types check — rig store.
 			register(doctor.NewCustomTypesCheck(rig.Path, rig.Name))
+			// Custom-types preflight — data-gates a native-store flip for
+			// this rig scope; skipped for non-managed-bdstore rigs and in
+			// GC_DOLT=skip environments, matching the sibling Dolt checks.
+			if rigUsesManagedBdStoreContract(cityPath, rig) && !gcDoltSkip() {
+				register(doctor.NewCustomTypesPreflightCheck(rig.Path, rig.Name))
+			}
 			// Dolt-backup registration catches the silent gap left by
 			// `gc rig add` before the rig is eligible for mol-dog backup
 			// automation. Gated to match the sibling dolt-server check:
