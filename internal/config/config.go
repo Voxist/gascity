@@ -1334,6 +1334,15 @@ type BeadsResilienceConfig struct {
 	// MaxInflightGlobal bounds concurrent bd subprocesses across all scopes
 	// in the city. Defaults to 16. Non-positive disables the global cap.
 	MaxInflightGlobal int `toml:"max_inflight_global,omitempty" jsonschema:"default=16"`
+	// MaxAdmissionWait bounds how long the admission semaphore waits for a
+	// free slot before failing fast, as a duration string. When the caps are
+	// saturated by bd subprocesses wedged on a backend transport timeout, a
+	// bounded wait prevents reconcile fan-out from blocking the controller
+	// tick indefinitely: an admission that cannot be granted within this
+	// window fails like an open breaker (typed ErrStoreUnavailable, zero
+	// subprocesses). Defaults to "30s". A non-positive value (e.g. "0s")
+	// restores the pre-bound behavior of blocking forever.
+	MaxAdmissionWait string `toml:"max_admission_wait,omitempty" jsonschema:"default=30s"`
 }
 
 // EnabledOrDefault reports whether the breaker is enabled (default true).
@@ -1393,6 +1402,22 @@ func (r BeadsResilienceConfig) MaxInflightGlobalOrDefault() int {
 		return 16
 	}
 	return r.MaxInflightGlobal
+}
+
+// MaxAdmissionWaitOrDefault returns the parsed MaxAdmissionWait, falling
+// back to 30s when unset or unparseable. A non-positive value (e.g. "0s" or
+// a negative duration) is preserved verbatim to mean "block forever",
+// disabling the bounded-wait fail-fast. Unparseable values surface as
+// warnings from ValidateDurations at load time.
+func (r BeadsResilienceConfig) MaxAdmissionWaitOrDefault() time.Duration {
+	if r.MaxAdmissionWait == "" {
+		return 30 * time.Second
+	}
+	v, err := time.ParseDuration(r.MaxAdmissionWait)
+	if err != nil {
+		return 30 * time.Second
+	}
+	return v
 }
 
 // positiveDurationOrDefault parses value as a Go duration, returning def

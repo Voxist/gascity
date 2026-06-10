@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // bdAdmissionScope resolves the admission-semaphore scope key for a bd call,
@@ -35,6 +36,10 @@ type bdAdmission struct {
 	cityPath string
 	perScope int
 	global   int
+	// maxWait bounds how long acquire blocks for a free slot before failing
+	// fast. A non-positive value means "block forever" (the pre-bound
+	// behavior, opt-in via config). See acquire.
+	maxWait  time.Duration
 	globalCh chan struct{}
 	scopeChs map[string]chan struct{}
 	inflight atomic.Int64
@@ -60,36 +65,39 @@ func bdAdmissionForCity(cityPath string) *bdAdmission {
 	}
 	bdAdmissionRegistry.mu.Unlock()
 
-	perScope, global := bdAdmissionCapsForCity(key)
+	perScope, global, wait := bdAdmissionCapsForCity(key)
 	bdAdmissionRegistry.mu.Lock()
 	defer bdAdmissionRegistry.mu.Unlock()
 	if a, ok := bdAdmissionRegistry.controllers[key]; ok {
 		return a
 	}
-	a := newBdAdmission(key, perScope, global)
+	a := newBdAdmission(key, perScope, global, wait)
 	bdAdmissionRegistry.controllers[key] = a
 	return a
 }
 
 // bdAdmissionCapsForCity resolves the per-scope and global bd inflight caps
-// from the city's [beads.resilience] config, falling back to the defaults
-// (4 and 16) when the config cannot be loaded.
-func bdAdmissionCapsForCity(cityPath string) (perScope, global int) {
+// plus the bounded admission wait from the city's [beads.resilience] config,
+// falling back to the defaults (4, 16, and 30s) when the config cannot be
+// loaded.
+func bdAdmissionCapsForCity(cityPath string) (perScope, global int, maxWait time.Duration) {
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil || cfg == nil {
-		return 4, 16
+		return 4, 16, 30 * time.Second
 	}
 	r := cfg.Beads.Resilience
-	return r.MaxInflightPerScopeOrDefault(), r.MaxInflightGlobalOrDefault()
+	return r.MaxInflightPerScopeOrDefault(), r.MaxInflightGlobalOrDefault(), r.MaxAdmissionWaitOrDefault()
 }
 
 // newBdAdmission constructs an admission controller. A non-positive cap
-// leaves the corresponding semaphore nil (unbounded).
-func newBdAdmission(cityPath string, perScope, global int) *bdAdmission {
+// leaves the corresponding semaphore nil (unbounded). A non-positive maxWait
+// makes acquire block forever (the pre-bound behavior).
+func newBdAdmission(cityPath string, perScope, global int, maxWait time.Duration) *bdAdmission {
 	a := &bdAdmission{
 		cityPath: cityPath,
 		perScope: perScope,
 		global:   global,
+		maxWait:  maxWait,
 		scopeChs: make(map[string]chan struct{}),
 	}
 	if global > 0 {
@@ -115,21 +123,35 @@ func (a *bdAdmission) scopeChannel(scope string) chan struct{} {
 	return ch
 }
 
-// acquire admits one bd call for a scope, blocking until both the global
-// and the per-scope semaphore have a free slot. It returns a release func
-// the caller MUST invoke (typically via defer) when the call returns.
-// Acquisition order is global-then-scope; release is scope-then-global,
-// the reverse order, so the two semaphores cannot deadlock against each
-// other. The inflight gauge is incremented between the two acquisitions so
-// it reflects admitted-and-running calls.
-func (a *bdAdmission) acquire(scope string) func() {
+// acquire admits one bd call for a scope. It returns (release, true) when
+// both the global and the per-scope semaphore granted a slot, where release
+// is a func the caller MUST invoke (typically via defer) when the call
+// returns. It returns (nil, false) when admission could not be granted
+// within the bounded wait, so the caller can fail fast exactly like an open
+// breaker instead of blocking the controller tick on a saturated, wedged
+// backend.
+//
+// Acquisition order is global-then-scope; release is scope-then-global, the
+// reverse order, so the two semaphores cannot deadlock against each other.
+// Each send waits at most a.maxWait for a free slot; if the GLOBAL slot is
+// granted but the per-scope slot times out, the already-acquired global slot
+// is released before returning failure so no slot leaks. A non-positive
+// a.maxWait blocks forever (the pre-bound opt-out). The inflight gauge is
+// incremented only AFTER both acquisitions succeed, so it reflects
+// admitted-and-running calls and never counts a timed-out attempt.
+func (a *bdAdmission) acquire(scope string) (func(), bool) {
 	globalCh := a.globalCh
 	scopeCh := a.scopeChannel(scope)
-	if globalCh != nil {
-		globalCh <- struct{}{}
+	if !a.send(globalCh) {
+		return nil, false
 	}
-	if scopeCh != nil {
-		scopeCh <- struct{}{}
+	if !a.send(scopeCh) {
+		// Scope slot timed out after the global slot was granted: release
+		// the global slot so it does not leak, then signal not-admitted.
+		if globalCh != nil {
+			<-globalCh
+		}
+		return nil, false
 	}
 	a.inflight.Add(1)
 	return func() {
@@ -140,6 +162,27 @@ func (a *bdAdmission) acquire(scope string) func() {
 		if globalCh != nil {
 			<-globalCh
 		}
+	}, true
+}
+
+// send acquires one slot on ch, returning true on success. A nil channel
+// (disabled cap) always succeeds. With a positive a.maxWait the send fails
+// fast after the wait elapses; with a non-positive wait it blocks forever.
+func (a *bdAdmission) send(ch chan struct{}) bool {
+	if ch == nil {
+		return true
+	}
+	if a.maxWait <= 0 {
+		ch <- struct{}{}
+		return true
+	}
+	timer := time.NewTimer(a.maxWait)
+	defer timer.Stop()
+	select {
+	case ch <- struct{}{}:
+		return true
+	case <-timer.C:
+		return false
 	}
 }
 

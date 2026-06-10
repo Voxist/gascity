@@ -4,14 +4,20 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
+
+// admissionTestWait is the bounded wait used by the concurrency tests. It is
+// generous enough that a free slot is granted promptly under -race yet short
+// enough that the saturation test fails fast.
+const admissionTestWait = 5 * time.Second
 
 // TestBdAdmissionGlobalCapBoundsConcurrency asserts the global semaphore
 // never admits more than its cap concurrently, even under a flood of
 // goroutines across many scopes. Run with -race.
 func TestBdAdmissionGlobalCapBoundsConcurrency(t *testing.T) {
 	const global = 4
-	a := newBdAdmission("/city", 0 /* per-scope disabled */, global)
+	a := newBdAdmission("/city", 0 /* per-scope disabled */, global, admissionTestWait)
 
 	var concurrent atomic.Int64
 	var peak atomic.Int64
@@ -21,7 +27,11 @@ func TestBdAdmissionGlobalCapBoundsConcurrency(t *testing.T) {
 		go func(n int) {
 			defer wg.Done()
 			scope := "/city/rig" + string(rune('a'+n%8))
-			release := a.acquire(scope)
+			release, ok := a.acquire(scope)
+			if !ok {
+				t.Errorf("acquire timed out under load with a generous wait")
+				return
+			}
 			cur := concurrent.Add(1)
 			for {
 				old := peak.Load()
@@ -47,7 +57,7 @@ func TestBdAdmissionGlobalCapBoundsConcurrency(t *testing.T) {
 // semaphore independently bounds concurrency to the per-scope cap.
 func TestBdAdmissionPerScopeCapBoundsConcurrency(t *testing.T) {
 	const perScope = 2
-	a := newBdAdmission("/city", perScope, 0 /* global disabled */)
+	a := newBdAdmission("/city", perScope, 0 /* global disabled */, admissionTestWait)
 
 	peaks := make(map[string]*atomic.Int64)
 	curs := make(map[string]*atomic.Int64)
@@ -63,7 +73,11 @@ func TestBdAdmissionPerScopeCapBoundsConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func(scope string) {
 			defer wg.Done()
-			release := a.acquire(scope)
+			release, ok := a.acquire(scope)
+			if !ok {
+				t.Errorf("acquire timed out under load with a generous wait")
+				return
+			}
 			cur := curs[scope].Add(1)
 			for {
 				old := peaks[scope].Load()
@@ -87,10 +101,14 @@ func TestBdAdmissionPerScopeCapBoundsConcurrency(t *testing.T) {
 // TestBdAdmissionUnboundedWhenCapsDisabled asserts that non-positive caps
 // admit everything without blocking (the breaker-disabled equivalent).
 func TestBdAdmissionUnboundedWhenCapsDisabled(t *testing.T) {
-	a := newBdAdmission("/city", 0, 0)
+	a := newBdAdmission("/city", 0, 0, admissionTestWait)
 	releases := make([]func(), 0, 50)
 	for i := 0; i < 50; i++ {
-		releases = append(releases, a.acquire("/city/rig"))
+		release, ok := a.acquire("/city/rig")
+		if !ok {
+			t.Fatalf("acquire %d not admitted with caps disabled", i)
+		}
+		releases = append(releases, release)
 	}
 	if got := a.inflightCount(); got != 50 {
 		t.Fatalf("inflightCount() = %d with caps disabled, want 50 (all admitted)", got)
@@ -108,5 +126,119 @@ func TestBdAdmissionUnboundedWhenCapsDisabled(t *testing.T) {
 func TestBdInflightForCityUnknownCityIsZero(t *testing.T) {
 	if got := bdInflightForCity("/no/such/city/ever"); got != 0 {
 		t.Fatalf("bdInflightForCity(unknown) = %d, want 0", got)
+	}
+}
+
+// TestBdAdmissionFailsFastUnderSaturation asserts that once the global cap is
+// saturated by callers that never release (simulating bd subprocesses wedged
+// on a transport timeout), the next acquire returns not-admitted within ~the
+// bounded wait rather than blocking the controller tick forever.
+func TestBdAdmissionFailsFastUnderSaturation(t *testing.T) {
+	const global = 2
+	wait := 50 * time.Millisecond
+	a := newBdAdmission("/city", 0 /* per-scope disabled */, global, wait)
+
+	// Saturate the global cap and hold the slots (never release).
+	for i := 0; i < global; i++ {
+		if _, ok := a.acquire("/city/rig"); !ok {
+			t.Fatalf("acquire %d should be admitted before saturation", i)
+		}
+	}
+
+	start := time.Now()
+	release, ok := a.acquire("/city/rig")
+	elapsed := time.Since(start)
+	if ok {
+		release()
+		t.Fatalf("acquire should fail fast under saturation, but was admitted")
+	}
+	if elapsed < wait {
+		t.Fatalf("acquire returned in %v, before the bounded wait %v elapsed", elapsed, wait)
+	}
+	if elapsed > 10*wait {
+		t.Fatalf("acquire took %v, far longer than the bounded wait %v (did it block?)", elapsed, wait)
+	}
+	if got := a.inflightCount(); got != global {
+		t.Fatalf("inflightCount() = %d after a timed-out acquire, want %d (timeout must not count)", got, global)
+	}
+}
+
+// TestBdAdmissionReleasesGlobalOnScopeTimeout asserts that when the global
+// slot is granted but the per-scope slot times out, the already-acquired
+// global slot is released so it does not leak.
+func TestBdAdmissionReleasesGlobalOnScopeTimeout(t *testing.T) {
+	const global = 4
+	const perScope = 1
+	wait := 50 * time.Millisecond
+	a := newBdAdmission("/city", perScope, global, wait)
+
+	// Saturate the per-scope cap for one scope, holding the slot.
+	if _, ok := a.acquire("/city/rig-a"); !ok {
+		t.Fatalf("first acquire on rig-a should be admitted")
+	}
+
+	// A second acquire on the same scope grabs a global slot, then times out
+	// on the saturated per-scope slot. The global slot must be released.
+	release, ok := a.acquire("/city/rig-a")
+	if ok {
+		release()
+		t.Fatalf("second acquire on the saturated scope should time out")
+	}
+
+	// All global slots except the one held by the first acquire must be free:
+	// a different, uncontended scope must be admittable immediately.
+	got := make(chan bool, 1)
+	go func() {
+		r, ok := a.acquire("/city/rig-b")
+		if ok {
+			r()
+		}
+		got <- ok
+	}()
+	select {
+	case ok := <-got:
+		if !ok {
+			t.Fatalf("rig-b acquire not admitted: a global slot leaked on the scope timeout")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("rig-b acquire blocked: a global slot leaked on the scope timeout")
+	}
+}
+
+// TestBdAdmissionBlocksForeverWhenWaitNonPositive asserts that a non-positive
+// maxWait preserves the pre-bound opt-out: acquire blocks until a slot frees
+// rather than failing fast.
+func TestBdAdmissionBlocksForeverWhenWaitNonPositive(t *testing.T) {
+	const global = 1
+	a := newBdAdmission("/city", 0, global, 0 /* block forever */)
+
+	release, ok := a.acquire("/city/rig")
+	if !ok {
+		t.Fatalf("first acquire should be admitted")
+	}
+
+	admitted := make(chan struct{})
+	go func() {
+		r, ok := a.acquire("/city/rig")
+		if ok {
+			r()
+		}
+		close(admitted)
+	}()
+
+	// The second acquire must still be blocked after a wait that would have
+	// tripped any bounded timeout.
+	select {
+	case <-admitted:
+		t.Fatalf("acquire returned while saturated; non-positive wait must block forever")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// Freeing the held slot lets the blocked acquire proceed.
+	release()
+	select {
+	case <-admitted:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("acquire did not proceed after the slot was freed")
 	}
 }
