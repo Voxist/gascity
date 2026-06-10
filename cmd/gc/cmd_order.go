@@ -1032,8 +1032,13 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 			}
 			check := orders.CheckTriggerWithOptions(a, now, lastRunFn, ep, cursorFn, triggerOpts)
 			if lastRunErr != nil {
-				fmt.Fprintf(stderr, "gc order check: reading last run for %s: %v\n", a.ScopedName(), lastRunErr) //nolint:errcheck // best-effort stderr
-				return 1
+				// A transient store blip reading ONE order's last-run must not
+				// abort the entire dispatch pass — doing so previously starved
+				// cold-pool-spawner (and every other order) whenever a bd query
+				// timed out under fleet load. Skip this order this tick; it
+				// retries on the next dispatch with no lasting effect.
+				fmt.Fprintf(stderr, "gc order check: last-run for %s unavailable, skipping this tick: %v\n", a.ScopedName(), lastRunErr) //nolint:errcheck // best-effort stderr
+				continue
 			}
 			if check.Due {
 				result.AnyDue = true
