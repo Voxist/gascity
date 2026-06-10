@@ -195,6 +195,9 @@ var KnownEventTypes = []string{
 	StoreMaintenanceDone, StoreMaintenanceFailed,
 	StoreDiskWarn, StoreDiskCritical,
 	PostgresCredentialResolved,
+	StoreDegraded, StoreRecovered, StoreProbeFailed,
+	ProxyReaped, BreakerStateChanged,
+	ControllerTickCompleted, DoctorAlert,
 	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
 	// The event is emitted by the reconciler but its typed SSE payload is not
 	// yet registered in internal/api (the payload registration lives in a
