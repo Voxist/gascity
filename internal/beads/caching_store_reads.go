@@ -17,6 +17,12 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
+	// Breaker open: serve last-good cached data (tagged degraded via
+	// Degraded()/DegradedReads) instead of dialing an unreachable store.
+	// An unprimed cache returns ErrStoreUnavailable — never empty.
+	if c.servingDegraded() {
+		return c.listLastGood(query)
+	}
 	if query.Live || query.ParentID != "" {
 		c.mu.RLock()
 		startSeq := c.mutationSeq
@@ -382,6 +388,11 @@ func (c *CachingStore) ListOpen(status ...string) ([]Bead, error) {
 
 // Get returns a single bead by ID from the cache or backing store.
 func (c *CachingStore) Get(id string) (Bead, error) {
+	// Breaker open: serve the last-good cached bead; an uncached ID is
+	// ErrStoreUnavailable because the cache cannot prove absence.
+	if c.servingDegraded() {
+		return c.getLastGood(id)
+	}
 	c.mu.RLock()
 	if _, deleted := c.deletedSeq[id]; deleted {
 		c.mu.RUnlock()
