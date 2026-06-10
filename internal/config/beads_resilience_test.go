@@ -47,6 +47,46 @@ func TestBeadsResilienceDefaults(t *testing.T) {
 	if got := r.MaxInflightGlobalOrDefault(); got != 16 {
 		t.Errorf("MaxInflightGlobalOrDefault() = %d, want 16", got)
 	}
+	if got := r.MaxAdmissionWaitOrDefault(); got != 30*time.Second {
+		t.Errorf("MaxAdmissionWaitOrDefault() = %v, want 30s", got)
+	}
+}
+
+func TestBeadsResilienceMaxAdmissionWait(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  time.Duration
+	}{
+		{"unset uses default", "", 30 * time.Second},
+		{"explicit positive", "45s", 45 * time.Second},
+		{"unparseable uses default", "not-a-duration", 30 * time.Second},
+		{"zero blocks forever", "0s", 0},
+		{"negative blocks forever", "-1s", -time.Second},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := BeadsResilienceConfig{MaxAdmissionWait: tc.value}
+			if got := r.MaxAdmissionWaitOrDefault(); got != tc.want {
+				t.Errorf("MaxAdmissionWaitOrDefault() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBeadsResilienceMaxAdmissionWaitValidated(t *testing.T) {
+	cfg := &City{}
+	cfg.Beads.Resilience.MaxAdmissionWait = "5mins"
+	warnings := ValidateDurations(cfg, "city.toml")
+	found := false
+	for _, w := range warnings {
+		if strings.Contains(w, "[beads.resilience]") && strings.Contains(w, "max_admission_wait") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("ValidateDurations warnings = %v, want a [beads.resilience] max_admission_wait warning", warnings)
+	}
 }
 
 func TestBeadsResilienceInflightCaps(t *testing.T) {

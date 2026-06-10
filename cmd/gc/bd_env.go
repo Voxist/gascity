@@ -1098,7 +1098,17 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 			// pile up unbounded processes. Acquired after the breaker admits
 			// (an open breaker fails fast above, never queueing) and released
 			// when this invocation — including any managed retry — returns.
-			release := bdAdmissionForCity(cityPath).acquire(bdAdmissionScope(cityPath, dir))
+			// Admission is bounded: when the caps are saturated by bd calls
+			// wedged on a transport timeout, acquire fails fast rather than
+			// blocking the controller tick. A timed-out admission is treated
+			// exactly like an open breaker (typed ErrStoreUnavailable, zero
+			// subprocesses) and is NOT recorded as a breaker failure — it is
+			// backpressure, not a transport fault.
+			release, admitted := bdAdmissionForCity(cityPath).acquire(bdAdmissionScope(cityPath, dir))
+			if !admitted {
+				return nil, fmt.Errorf("bd %s: scope %s: admission saturated, failing fast to protect the controller tick: %w",
+					strings.Join(args, " "), dir, beads.ErrStoreUnavailable)
+			}
 			defer release()
 		}
 		out, err := runner(dir, name, args...)
