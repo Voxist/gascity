@@ -63,6 +63,11 @@ func pathUnderRoot(path, root string) bool {
 // kernel thread or hung process can't make the reaper hang.
 const procEnumerationTimeout = 2 * time.Second
 
+// psEnumerationTimeout caps the full-process-table scan on hosts without /proc
+// (Darwin/macOS). ps -ax enumerates every process; on machines with many
+// processes this routinely exceeds 2 s, so we use a separate, larger timeout.
+const psEnumerationTimeout = 30 * time.Second
+
 // discoverDoltProcesses finds live `dolt sql-server` processes and reports
 // their argv and listening ports. Linux uses /proc for argv, ports, RSS, and
 // start ticks. Hosts without /proc (including Darwin/macOS) fall back to ps for
@@ -294,7 +299,7 @@ func readDoltSQLServerArgv(pid int) ([]string, bool) {
 }
 
 func psLStartCommandLines() ([]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), procEnumerationTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), psEnumerationTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "ps", "-ax", "-o", "pid=,rss=,lstart=,command=")
 	out, err := cmd.Output()
