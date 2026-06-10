@@ -110,6 +110,14 @@ type scopeState struct {
 	mu sync.Mutex
 	// consecutiveTransportFails counts consecutive A-fail∧B-ok cycles.
 	consecutiveTransportFails int
+	// confirmed reports whether the current transport-poison episode has
+	// already crossed the confirm threshold. Once true, subsequent poison
+	// ticks skip the once-per-episode side effects (forensics capture,
+	// breaker trip, degraded emission) — the breaker is already open and the
+	// degraded event already emitted — and only keep the per-tick breadcrumb
+	// and the rate-limited reap. It resets on the healthy transition so a
+	// genuine recovery followed by a re-poison re-captures forensics.
+	confirmed bool
 	// degraded is the current degradation class, or "" when healthy.
 	degraded DegradeClass
 	// lastReapAt is when the most recent reap fired (zero = never), used
@@ -167,6 +175,9 @@ func (p *ScopePatrol) onHealthy(ctx context.Context) {
 	p.st.mu.Lock()
 	wasDegraded := p.st.degraded
 	p.st.consecutiveTransportFails = 0
+	// End any active transport-poison episode so a genuine recovery followed
+	// by a re-poison re-captures forensics and re-emits degraded.
+	p.st.confirmed = false
 	// A transport recovery clears the transport class; a write-rejection
 	// degradation only clears when the write probe passes (below).
 	if p.st.degraded == ClassTransport || p.st.degraded == ClassBackend {
@@ -182,40 +193,76 @@ func (p *ScopePatrol) onHealthy(ctx context.Context) {
 }
 
 // onTransportPoison handles A-fail∧B-ok: the proxy poison signature. It
-// counts toward the confirm threshold and, once reached, captures
-// forensics, reaps (rate-limited), trips the breaker, and emits.
+// counts toward the confirm threshold and, once reached, captures forensics,
+// reaps (rate-limited), trips the breaker, and emits — but only ONCE per
+// poison episode.
+//
+// The probe-failed breadcrumb is emitted every cycle so the per-tick signal
+// survives. The forensics capture, breaker trip, and degraded emission run
+// only on the cycle that first confirms the episode: once confirmed, the
+// breaker is already open and the degraded event already emitted, so
+// re-running them every 30s tick over a multi-hour outage would only produce
+// hundreds of duplicate quarantine captures and events. The rate-limited reap
+// keeps running so a still-poisoned proxy is retried after the cooldown. The
+// episode flag resets on the healthy transition (see onHealthy), so a genuine
+// recovery followed by a re-poison re-captures forensics.
 func (p *ScopePatrol) onTransportPoison(ctx context.Context, reason string) {
 	p.hooks.EmitProbeFailed("routed", reason)
 
 	p.st.mu.Lock()
 	p.st.consecutiveTransportFails++
 	count := p.st.consecutiveTransportFails
-	confirmed := count >= p.cfg.ConsecutiveFails
+	reached := count >= p.cfg.ConsecutiveFails
+	firstConfirm := reached && !p.st.confirmed
 	p.st.mu.Unlock()
 
-	if !confirmed {
+	if !reached {
 		return
 	}
 
-	// Forensics FIRST, always — even when the reap is rate-limited — so the
-	// trigger stays diagnosable (reap-only destroys the evidence each
-	// cycle, the rejected alternative in the plan).
-	dir, _ := p.hooks.CaptureForensics(ctx)
+	if firstConfirm {
+		// First confirmation of this episode: capture forensics, mark the
+		// scope degraded, trip the breaker, and emit — once.
+		dir, _ := p.hooks.CaptureForensics(ctx)
 
+		p.st.mu.Lock()
+		p.st.confirmed = true
+		p.st.degraded = ClassTransport
+		withinCooldown := !p.st.lastReapAt.IsZero() && p.now().Sub(p.st.lastReapAt) < p.cfg.ReapCooldown
+		p.st.mu.Unlock()
+
+		p.hooks.TripBreaker()
+		p.hooks.EmitDegraded(ClassTransport, reason, count)
+
+		p.reap(ctx, dir, withinCooldown)
+		return
+	}
+
+	// Already confirmed for this episode: the breaker is open and degraded is
+	// emitted, and forensics were captured at first confirmation. Skip the
+	// once-per-episode work (forensics/trip/degraded) entirely; keep retrying
+	// the reap subject to the cooldown so a still-poisoned proxy is reaped once
+	// the window elapses. The episode's forensics dir is not re-captured, so
+	// the post-confirmation reap carries no quarantine dir.
 	p.st.mu.Lock()
 	withinCooldown := !p.st.lastReapAt.IsZero() && p.now().Sub(p.st.lastReapAt) < p.cfg.ReapCooldown
-	p.st.degraded = ClassTransport
 	p.st.mu.Unlock()
-
-	p.hooks.TripBreaker()
-	p.hooks.EmitDegraded(ClassTransport, reason, count)
-
 	if withinCooldown {
-		// A second poison inside the window: alert-only, keep forensics.
+		return
+	}
+	p.reap(ctx, "", false)
+}
+
+// reap performs the rate-limited proxy reap for a confirmed poison episode.
+// When withinCooldown is true the reap is suppressed (alert-only, forensics
+// kept); otherwise it reaps and records the reap time. dir is the forensics
+// quarantine directory carried on the proxy.reaped event.
+func (p *ScopePatrol) reap(ctx context.Context, dir string, withinCooldown bool) {
+	if withinCooldown {
+		// A poison inside the window: alert-only, keep forensics.
 		p.hooks.EmitProxyReaped(dir, 0, true)
 		return
 	}
-
 	pids, _ := p.hooks.ReapProxy(ctx)
 	p.st.mu.Lock()
 	p.st.lastReapAt = p.now()
@@ -223,17 +270,30 @@ func (p *ScopePatrol) onTransportPoison(ctx context.Context, reason string) {
 	p.hooks.EmitProxyReaped(dir, pids, false)
 }
 
+// onBackendClassDegradation applies the shared backend-class degradation: it
+// resets the transport poison counter (the failure cannot be attributed to the
+// proxy), marks the scope backend-degraded, trips the breaker, and emits the
+// degraded event. Callers own their distinctive probe-failed and doctor-alert
+// emissions around it. reason is the human-readable cause carried on the
+// degraded event.
+func (p *ScopePatrol) onBackendClassDegradation(reason string) {
+	p.st.mu.Lock()
+	p.st.consecutiveTransportFails = 0
+	// A backend-class degradation supersedes any transport-poison episode:
+	// clear the episode flag so a later transport poison re-captures.
+	p.st.confirmed = false
+	p.st.degraded = ClassBackend
+	p.st.mu.Unlock()
+	p.hooks.TripBreaker()
+	p.hooks.EmitDegraded(ClassBackend, reason, 0)
+}
+
 // onBackendFault handles A-ok∧B-fail: the sql-server itself is unreachable
 // or read-only. Trip the breaker and alert, but NEVER auto-kill the
 // sql-server. Reset the transport counter (the proxy path is fine).
 func (p *ScopePatrol) onBackendFault(reason string) {
 	p.hooks.EmitProbeFailed("backend", reason)
-	p.st.mu.Lock()
-	p.st.consecutiveTransportFails = 0
-	p.st.degraded = ClassBackend
-	p.st.mu.Unlock()
-	p.hooks.TripBreaker()
-	p.hooks.EmitDegraded(ClassBackend, reason, 0)
+	p.onBackendClassDegradation(reason)
 	p.hooks.EmitDoctorAlert("managed dolt backend probe failed (A-ok, B-fail); sql-server not auto-killed: " + reason)
 }
 
@@ -245,12 +305,7 @@ func (p *ScopePatrol) onBackendFault(reason string) {
 func (p *ScopePatrol) onBothFail(reasonA, reasonB string) {
 	p.hooks.EmitProbeFailed("routed", reasonA)
 	p.hooks.EmitProbeFailed("backend", reasonB)
-	p.st.mu.Lock()
-	p.st.consecutiveTransportFails = 0
-	p.st.degraded = ClassBackend
-	p.st.mu.Unlock()
-	p.hooks.TripBreaker()
-	p.hooks.EmitDegraded(ClassBackend, reasonB, 0)
+	p.onBackendClassDegradation(reasonB)
 	p.hooks.EmitDoctorAlert("both store probes failed (A-fail, B-fail); sql-server not auto-killed")
 }
 
