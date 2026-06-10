@@ -34,6 +34,7 @@ City is the top-level configuration for a Gas City instance.
 | `session_sleep` | SessionSleepConfig |  |  | SessionSleep configures idle sleep policy defaults for managed sessions. |
 | `convergence` | ConvergenceConfig |  |  | Convergence configures convergence loop limits. |
 | `doctor` | DoctorConfig |  |  | Doctor configures gc doctor thresholds and policy toggles (worktree size warnings, nested-worktree auto-prune). |
+| `storehealth` | StoreHealthConfig |  |  | StoreHealth configures the controller-internal store health patrol (probe matrix, reap rate-limit, write-path conformance probe). |
 | `maintenance` | MaintenanceConfig |  |  | Maintenance configures periodic store-maintenance loops. |
 | `service` | []Service |  |  | Services declares workspace-owned HTTP services mounted on the controller edge under /svc/&#123;name&#125;. |
 | `github` | GitHubConfig |  |  | GitHub configures GitHub-facing repository monitors. |
@@ -283,6 +284,8 @@ BeadsResilienceConfig holds circuit breaker settings for transport-class bead st
 | `open_base` | string |  | `1s` | OpenBase is the initial open-state backoff cap as a duration string. Defaults to "1s". |
 | `open_max` | string |  | `60s` | OpenMax caps the open-state backoff as a duration string. Defaults to "60s". |
 | `half_open_interval` | string |  | `15s` | HalfOpenInterval is the minimum spacing between recovery probes while half-open, as a duration string. Defaults to "15s". |
+| `max_inflight_per_scope` | integer |  | `4` | MaxInflightPerScope bounds concurrent bd subprocesses per scope. The admission semaphore blocks the (n+1)th bd call for a scope until one in flight returns, capping the subprocess amplifier (plan item 1.9). Defaults to 4. Non-positive disables the per-scope cap. |
+| `max_inflight_global` | integer |  | `16` | MaxInflightGlobal bounds concurrent bd subprocesses across all scopes in the city. Defaults to 16. Non-positive disables the global cap. |
 
 ## ChatSessionsConfig
 
@@ -342,6 +345,7 @@ DoctorConfig holds settings for the gc doctor surface.
 | `worktree_rig_error_size` | string |  | `50GB` | WorktreeRigErrorSize is the per-rig error threshold. When any rig exceeds this, the worktree-disk-size check reports an error rather than a warning. Empty or unparseable falls back to the default (50 GB). |
 | `nested_worktree_prune` | boolean |  | `false` | NestedWorktreePrune escalates the nested-worktree-prune check from warning to error severity when safely-prunable nested worktrees are present, so CI / scripted doctor runs fail until the operator runs `gc doctor --fix`. Actual removal still requires --fix; this flag does not auto-prune. Safety is enforced by mechanical checks (no uncommitted changes, no unpushed commits, no stashes) — never by role identity. |
 | `check` | []LocalDoctorCheck |  |  | Checks holds city-local inline doctor checks declared via [[doctor.check]] in city.toml. |
+| `supervisor_interval` | string |  | `10m` | SupervisorInterval is the cadence at which the supervisor evaluates the cheap doctor subset (tick-age, agent_config_isolation, S6 ceiling, plus any registered provenance/port-consistency checks) and publishes doctor.alert on red. Duration string. Defaults to "10m". Without this, every doctor-based retirement is detection at human cadence — the exact vigilance gap that produced incidents 5 and 11. |
 
 ## DoltConfig
 
@@ -790,6 +794,18 @@ SessionSleepConfig configures default idle sleep policies by session class.
 | `interactive_resume` | string |  |  | InteractiveResume applies to attachable sessions using wake_mode=resume. Accepts a duration string or "off". |
 | `interactive_fresh` | string |  |  | InteractiveFresh applies to attachable sessions using wake_mode=fresh. Accepts a duration string or "off". |
 | `noninteractive` | string |  |  | NonInteractive applies to sessions with attach=false. Accepts a duration string or "off". |
+
+## StoreHealthConfig
+
+StoreHealthConfig configures the controller-internal store health patrol (city-scale architecture plan item 1.5).
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | boolean |  | `true` | Enabled toggles the patrol. Defaults to true. Disabling restores the pre-patrol behavior (no two-probe matrix, no auto-reap). |
+| `interval` | string |  | `30s` | Interval is the per-scope probe cadence as a duration string. Defaults to "30s". |
+| `consecutive_fails` | integer |  | `3` | ConsecutiveFails is how many consecutive A-fail∧B-ok cycles confirm a proxy poison before forensics + reap. Defaults to 3. |
+| `reap_cooldown` | string |  | `10m` | ReapCooldown is the minimum spacing between reaps for one scope as a duration string. A second poison inside the window is alert-only with forensics kept. Defaults to "10m". |
+| `write_probe_interval` | string |  | `10m` | WriteProbeInterval is the cadence of the write-path conformance probe (create+close one ephemeral bead of each RequiredCustomType) as a duration string. Defaults to "10m". |
 
 ## Tier
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -107,6 +108,13 @@ type CityRuntime struct {
 
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
+
+	// tickCount counts completed reconcile ticks for the controller
+	// heartbeat. controller.tick_completed is emitted at a patrol multiple
+	// (every tickHeartbeatEvery ticks) or when a tick's duration breaches
+	// tickHeartbeatSlowThreshold — never on every tick. Single-goroutine
+	// (the reconcile loop owns it); no synchronization needed.
+	tickCount uint64
 
 	convScopes          map[string]*convergenceScope // nil until bead store available; keyed by rig name ("" = city/HQ)
 	convergenceReqCh    chan convergenceRequest      // receives CLI commands from controller.sock
@@ -630,9 +638,11 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		// previous value on exit so nested ticks don't lose context.
 		prev := beads.SetReconcilerTickTrigger(trigger)
 		defer beads.RestoreReconcilerTickTrigger(prev)
+		tickStart := time.Now()
 		cr.safeTick(func() {
 			cr.tick(ctx, dirty, &lastProviderName, cityRoot, &prevPoolRunning, trigger)
 		}, trigger)
+		cr.recordTickHeartbeat(trigger, time.Since(tickStart))
 	}
 	if dirty.Load() {
 		runTick("startup-poke")
@@ -773,6 +783,49 @@ func (cr *CityRuntime) safeTick(fn func(), trigger string) (panicked bool) {
 	}()
 	fn()
 	return false
+}
+
+// Controller heartbeat cadence. The tick_completed event is the
+// supervisor doctor's tick-age signal; emitting it every tick would make
+// the event log a hot path, so it fires on a patrol multiple or when a
+// tick runs slow.
+const (
+	// tickHeartbeatEvery emits one heartbeat per this many completed ticks.
+	tickHeartbeatEvery = 10
+	// tickHeartbeatSlowThreshold forces an out-of-cadence heartbeat when a
+	// single tick exceeds it, so a degrading controller surfaces before the
+	// next scheduled heartbeat.
+	tickHeartbeatSlowThreshold = 5 * time.Second
+)
+
+// recordTickHeartbeat emits a controller.tick_completed event at a patrol
+// multiple or on a duration-threshold breach. It is the controller
+// heartbeat the supervisor-cadence doctor reads to compute tick age
+// (plan item 1.9). Best-effort: a nil recorder is a no-op.
+func (cr *CityRuntime) recordTickHeartbeat(trigger string, dur time.Duration) {
+	cr.tickCount++
+	breach := dur >= tickHeartbeatSlowThreshold
+	onMultiple := cr.tickCount%tickHeartbeatEvery == 0
+	if !breach && !onMultiple {
+		return
+	}
+	if cr.rec == nil {
+		return
+	}
+	payload, err := json.Marshal(events.ControllerTickCompletedPayload{
+		DurationMs:      dur.Milliseconds(),
+		Phase:           trigger,
+		ThresholdBreach: breach,
+	})
+	if err != nil {
+		return
+	}
+	cr.rec.Record(events.Event{
+		Type:    events.ControllerTickCompleted,
+		Actor:   eventActor(),
+		Subject: cr.cityName,
+		Payload: payload,
+	})
 }
 
 // startupReadinessWatchdog emits a warning + goroutine dump to stderr

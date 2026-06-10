@@ -1052,6 +1052,13 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 				return nil, fmt.Errorf("bd %s: scope %s: circuit breaker open after consecutive transport failures: %w",
 					strings.Join(args, " "), dir, beads.ErrStoreUnavailable)
 			}
+			// Subprocess admission semaphore (plan item 1.9): bound concurrent
+			// bd subprocesses per scope and city-wide so the amplifier cannot
+			// pile up unbounded processes. Acquired after the breaker admits
+			// (an open breaker fails fast above, never queueing) and released
+			// when this invocation — including any managed retry — returns.
+			release := bdAdmissionForCity(cityPath).acquire(bdAdmissionScope(cityPath, dir))
+			defer release()
 		}
 		out, err := runner(dir, name, args...)
 		if name != "bd" {

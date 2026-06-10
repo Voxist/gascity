@@ -222,6 +222,9 @@ type City struct {
 	// Doctor configures gc doctor thresholds and policy toggles
 	// (worktree size warnings, nested-worktree auto-prune).
 	Doctor DoctorConfig `toml:"doctor,omitempty"`
+	// StoreHealth configures the controller-internal store health patrol
+	// (probe matrix, reap rate-limit, write-path conformance probe).
+	StoreHealth StoreHealthConfig `toml:"storehealth,omitempty"`
 	// Maintenance configures periodic store-maintenance loops.
 	Maintenance MaintenanceConfig `toml:"maintenance,omitempty"`
 	// Services declares workspace-owned HTTP services mounted on the
@@ -1300,6 +1303,14 @@ type BeadsResilienceConfig struct {
 	// HalfOpenInterval is the minimum spacing between recovery probes
 	// while half-open, as a duration string. Defaults to "15s".
 	HalfOpenInterval string `toml:"half_open_interval,omitempty" jsonschema:"default=15s"`
+	// MaxInflightPerScope bounds concurrent bd subprocesses per scope. The
+	// admission semaphore blocks the (n+1)th bd call for a scope until one
+	// in flight returns, capping the subprocess amplifier (plan item 1.9).
+	// Defaults to 4. Non-positive disables the per-scope cap.
+	MaxInflightPerScope int `toml:"max_inflight_per_scope,omitempty" jsonschema:"default=4"`
+	// MaxInflightGlobal bounds concurrent bd subprocesses across all scopes
+	// in the city. Defaults to 16. Non-positive disables the global cap.
+	MaxInflightGlobal int `toml:"max_inflight_global,omitempty" jsonschema:"default=16"`
 }
 
 // EnabledOrDefault reports whether the breaker is enabled (default true).
@@ -1333,6 +1344,32 @@ func (r BeadsResilienceConfig) OpenMaxOrDefault() time.Duration {
 // back to 15s when unset, unparseable, or non-positive.
 func (r BeadsResilienceConfig) HalfOpenIntervalOrDefault() time.Duration {
 	return positiveDurationOrDefault(r.HalfOpenInterval, 15*time.Second)
+}
+
+// MaxInflightPerScopeOrDefault returns the per-scope bd admission limit,
+// falling back to 4 when unset. A negative value disables the cap (returns
+// 0); an explicit 0 also disables it.
+func (r BeadsResilienceConfig) MaxInflightPerScopeOrDefault() int {
+	if r.MaxInflightPerScope < 0 {
+		return 0
+	}
+	if r.MaxInflightPerScope == 0 {
+		return 4
+	}
+	return r.MaxInflightPerScope
+}
+
+// MaxInflightGlobalOrDefault returns the global bd admission limit, falling
+// back to 16 when unset. A negative value disables the cap (returns 0); an
+// explicit 0 also disables it.
+func (r BeadsResilienceConfig) MaxInflightGlobalOrDefault() int {
+	if r.MaxInflightGlobal < 0 {
+		return 0
+	}
+	if r.MaxInflightGlobal == 0 {
+		return 16
+	}
+	return r.MaxInflightGlobal
 }
 
 // positiveDurationOrDefault parses value as a Go duration, returning def
@@ -2086,6 +2123,20 @@ type DoctorConfig struct {
 	// Checks holds city-local inline doctor checks declared via
 	// [[doctor.check]] in city.toml.
 	Checks []LocalDoctorCheck `toml:"check,omitempty"`
+
+	// SupervisorInterval is the cadence at which the supervisor evaluates
+	// the cheap doctor subset (tick-age, agent_config_isolation, S6
+	// ceiling, plus any registered provenance/port-consistency checks) and
+	// publishes doctor.alert on red. Duration string. Defaults to "10m".
+	// Without this, every doctor-based retirement is detection at human
+	// cadence — the exact vigilance gap that produced incidents 5 and 11.
+	SupervisorInterval string `toml:"supervisor_interval,omitempty" jsonschema:"default=10m"`
+}
+
+// SupervisorIntervalOrDefault returns the parsed supervisor-cadence doctor
+// interval, falling back to 10m when unset, unparseable, or non-positive.
+func (c DoctorConfig) SupervisorIntervalOrDefault() time.Duration {
+	return positiveDurationOrDefault(c.SupervisorInterval, 10*time.Minute)
 }
 
 const (
@@ -2118,6 +2169,61 @@ func (c DoctorConfig) WorktreeRigErrorBytes() int64 {
 		return warn
 	}
 	return n
+}
+
+// StoreHealthConfig configures the controller-internal store health patrol
+// (city-scale architecture plan item 1.5). Every threshold is mechanical
+// (durations and counts) so the patrol holds no judgment calls in Go.
+type StoreHealthConfig struct {
+	// Enabled toggles the patrol. Defaults to true. Disabling restores the
+	// pre-patrol behavior (no two-probe matrix, no auto-reap).
+	Enabled *bool `toml:"enabled,omitempty" jsonschema:"default=true"`
+	// Interval is the per-scope probe cadence as a duration string.
+	// Defaults to "30s".
+	Interval string `toml:"interval,omitempty" jsonschema:"default=30s"`
+	// ConsecutiveFails is how many consecutive A-fail∧B-ok cycles confirm a
+	// proxy poison before forensics + reap. Defaults to 3.
+	ConsecutiveFails int `toml:"consecutive_fails,omitempty" jsonschema:"default=3"`
+	// ReapCooldown is the minimum spacing between reaps for one scope as a
+	// duration string. A second poison inside the window is alert-only with
+	// forensics kept. Defaults to "10m".
+	ReapCooldown string `toml:"reap_cooldown,omitempty" jsonschema:"default=10m"`
+	// WriteProbeInterval is the cadence of the write-path conformance probe
+	// (create+close one ephemeral bead of each RequiredCustomType) as a
+	// duration string. Defaults to "10m".
+	WriteProbeInterval string `toml:"write_probe_interval,omitempty" jsonschema:"default=10m"`
+}
+
+// StoreHealthEnabledOrDefault reports whether the patrol is enabled
+// (default true).
+func (c StoreHealthConfig) StoreHealthEnabledOrDefault() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// IntervalOrDefault returns the parsed probe interval, falling back to 30s.
+func (c StoreHealthConfig) IntervalOrDefault() time.Duration {
+	return positiveDurationOrDefault(c.Interval, 30*time.Second)
+}
+
+// ConsecutiveFailsOrDefault returns the confirm threshold, falling back to
+// 3 when unset or non-positive.
+func (c StoreHealthConfig) ConsecutiveFailsOrDefault() int {
+	if c.ConsecutiveFails > 0 {
+		return c.ConsecutiveFails
+	}
+	return 3
+}
+
+// ReapCooldownOrDefault returns the parsed reap cooldown, falling back to
+// 10m.
+func (c StoreHealthConfig) ReapCooldownOrDefault() time.Duration {
+	return positiveDurationOrDefault(c.ReapCooldown, 10*time.Minute)
+}
+
+// WriteProbeIntervalOrDefault returns the parsed write-probe interval,
+// falling back to 10m.
+func (c StoreHealthConfig) WriteProbeIntervalOrDefault() time.Duration {
+	return positiveDurationOrDefault(c.WriteProbeInterval, 10*time.Minute)
 }
 
 // parseHumanSize parses sizes like "10GB", "500 MB", "1024" (bytes
