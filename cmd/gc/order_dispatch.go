@@ -561,10 +561,15 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		if lastRunFromCache && orderTriggerUsesLastRun(a) {
 			refreshedLastRun, err := baseLastRunFn(a.ScopedName())
 			if err != nil {
-				logDispatchError(m.stderr, "gc: order dispatch: refreshing last run for %s: %v", a.ScopedName(), err)
-				continue
-			}
-			if refreshedLastRun.After(result.LastRun) {
+				// The refresh is a best-effort double-check for a more-recent run
+				// recorded in another store. On a transient bd/store timeout under
+				// load it must NOT skip the order — that previously made a due
+				// order (notably cold-pool-spawner) never run while the store was
+				// busy, so cold pools never cold-started from routed gc.routed_to
+				// demand. Proceed with the already-Due cached last-run result;
+				// order actions are idempotent so a rare double-run is harmless.
+				logDispatchError(m.stderr, "gc: order dispatch: refreshing last run for %s failed, proceeding with cached last-run: %v", a.ScopedName(), err)
+			} else if refreshedLastRun.After(result.LastRun) {
 				m.rememberLastRun(a.ScopedName(), storeKeysForGate, refreshedLastRun)
 				refreshedLastRunFn := func(string) (time.Time, error) {
 					return refreshedLastRun, nil
