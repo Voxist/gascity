@@ -270,6 +270,19 @@ BeadsConfig holds bead store settings.
 | `proxy_pool_size` | integer |  | `4` | ProxyPoolSize is the warm backend-connection pool size the db-proxy keeps per (capabilities, database) key when Proxied is true. Defaults to 4. The proxy is shared per workspace root, so all agents of a scope share one warm pool; the size is frozen by the first bd invocation that spawns the proxy (changing it requires restarting the db-proxy-child). |
 | `proxy_idle_timeout` | string |  | `0` | ProxyIdleTimeout is how long a db-proxy-child stays alive with no active client before it shuts down. The bd default (30s) is tuned for one busy workspace; gascity touches many scopes sparsely (controller patrol probes every rig once per interval), starving any finite timeout so the proxy spawns, serves one op, idle-dies, and respawns on the next touch — pure churn that never reaches the warm-pool steady state. gascity therefore defaults to "0" (never idle) and owns the proxy lifecycle: proxies stay warm for the city's lifetime and are reaped on `gc stop`. Operators who want gc to relinquish that ownership can set a finite Go duration string. Read by bd as BEADS_PROXY_IDLE_TIMEOUT. |
 | `policies` | map[string]BeadPolicyConfig |  |  | Policies defines per-bead-use storage and garbage-collection defaults. Policy names are interpreted by higher-level systems; unknown names are preserved so packs can stage future policy classes without breaking load. |
+| `resilience` | BeadsResilienceConfig |  |  | Resilience configures the transport circuit breaker that guards bd subprocess and store operations ([beads.resilience]). |
+
+## BeadsResilienceConfig
+
+BeadsResilienceConfig holds circuit breaker settings for transport-class bead store failures.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | boolean |  | `true` | Enabled toggles the breaker. Defaults to true. |
+| `consecutive_failures` | integer |  | `3` | ConsecutiveFailures is how many consecutive transport-class failures trip the breaker. Defaults to 3. |
+| `open_base` | string |  | `1s` | OpenBase is the initial open-state backoff cap as a duration string. Defaults to "1s". |
+| `open_max` | string |  | `60s` | OpenMax caps the open-state backoff as a duration string. Defaults to "60s". |
+| `half_open_interval` | string |  | `15s` | HalfOpenInterval is the minimum spacing between recovery probes while half-open, as a duration string. Defaults to "15s". |
 
 ## ChatSessionsConfig
 
