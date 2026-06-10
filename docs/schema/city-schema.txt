@@ -326,6 +326,14 @@
             "off"
           ],
           "description": "MouseMode controls whether tmux mouse mode is preserved for this agent.\n\"on\" leaves the session's mouse setting alone for human-attached\nsessions; \"off\" or empty preserves the SDK's default mouse-off startup\nbehavior for headless sessions."
+        },
+        "tier": {
+          "type": "string",
+          "enum": [
+            "claude-required",
+            "overflow-ok"
+          ],
+          "description": "Tier classifies this agent's provider-quality requirement for the\nprovider governor (internal/providergov). \"claude-required\" agents\nare served from the governed Claude account pool; \"overflow-ok\"\nagents always run on the configured overflow vendor pool, which\nstretches the Claude weekly cap. Empty means unclassified: the\ngovernor does not steer this agent and its configured provider\napplies unchanged."
         }
       },
       "additionalProperties": false,
@@ -633,6 +641,14 @@
           ],
           "description": "MouseMode overrides whether tmux mouse mode is preserved (\"on\" or \"off\")."
         },
+        "tier": {
+          "type": "string",
+          "enum": [
+            "claude-required",
+            "overflow-ok"
+          ],
+          "description": "Tier overrides the agent's provider-governor tier classification\n(\"claude-required\" or \"overflow-ok\")."
+        },
         "inject_fragments_append": {
           "items": {
             "type": "string"
@@ -875,6 +891,14 @@
           ],
           "description": "MouseMode overrides whether tmux mouse mode is preserved (\"on\" or \"off\")."
         },
+        "tier": {
+          "type": "string",
+          "enum": [
+            "claude-required",
+            "overflow-ok"
+          ],
+          "description": "Tier overrides the agent's provider-governor tier classification\n(\"claude-required\" or \"overflow-ok\")."
+        },
         "pre_start_append": {
           "items": {
             "type": "string"
@@ -997,17 +1021,79 @@
           "description": "ProxyIdleTimeout is how long a db-proxy-child stays alive with no active\nclient before it shuts down. The bd default (30s) is tuned for one busy\nworkspace; gascity touches many scopes sparsely (controller patrol probes\nevery rig once per interval), starving any finite timeout so the proxy\nspawns, serves one op, idle-dies, and respawns on the next touch — pure\nchurn that never reaches the warm-pool steady state. gascity therefore\ndefaults to \"0\" (never idle) and owns the proxy lifecycle: proxies stay\nwarm for the city's lifetime and are reaped on `gc stop`. Operators who\nwant gc to relinquish that ownership can set a finite Go duration string.\nRead by bd as BEADS_PROXY_IDLE_TIMEOUT.",
           "default": "0"
         },
+        "expected_build": {
+          "type": "string",
+          "description": "ExpectedBuild pins the bd build this city expects: a token (version or\nbuild identifier) that must appear verbatim in `bd --version` output.\nThe beads-expected-build doctor check compares them so a brew upgrade\nor a rebuild from the wrong branch clobbering a custom bd is caught at\ndoctor cadence instead of as a runtime mystery. Empty disables the\ncheck."
+        },
         "policies": {
           "additionalProperties": {
             "$ref": "#/$defs/BeadPolicyConfig"
           },
           "type": "object",
           "description": "Policies defines per-bead-use storage and garbage-collection defaults.\nPolicy names are interpreted by higher-level systems; unknown names are\npreserved so packs can stage future policy classes without breaking load."
+        },
+        "resilience": {
+          "$ref": "#/$defs/BeadsResilienceConfig",
+          "description": "Resilience configures the transport circuit breaker that guards bd\nsubprocess and store operations ([beads.resilience])."
+        },
+        "native_store_canary_scopes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "NativeStoreCanaryScopes lists the scope names (city name or rig names) for\nwhich the in-process NativeDoltStore is canaried, scope by scope, without\nflipping any global store mode. It is the P2.3 env-projection canary lever:\nwhen a scope is listed, the gc beads env projection ensures the native\nserver-mode Dolt keys (BEADS_DOLT_SERVER_MODE/HOST/PORT) are projected from\nthe managed-server live handle so the scope can open the native store, and\nthe post-open identity assertion guarantees a silent-empty or misrouted DB\nis detected immediately. Defaults to empty (OFF) and is purely additive: an\nunlisted scope's env projection is byte-for-byte unchanged. The operator\ncan layer additional scopes at runtime without editing committed config via\nthe GC_BEADS_NATIVE_STORE_CANARY environment variable (comma-separated\nscope names); env entries union with this list."
         }
       },
       "additionalProperties": false,
       "type": "object",
       "description": "BeadsConfig holds bead store settings."
+    },
+    "BeadsResilienceConfig": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enabled toggles the breaker. Defaults to true.",
+          "default": true
+        },
+        "consecutive_failures": {
+          "type": "integer",
+          "description": "ConsecutiveFailures is how many consecutive transport-class failures\ntrip the breaker. Defaults to 3.",
+          "default": 3
+        },
+        "open_base": {
+          "type": "string",
+          "description": "OpenBase is the initial open-state backoff cap as a duration string.\nDefaults to \"1s\".",
+          "default": "1s"
+        },
+        "open_max": {
+          "type": "string",
+          "description": "OpenMax caps the open-state backoff as a duration string. Defaults\nto \"60s\".",
+          "default": "60s"
+        },
+        "half_open_interval": {
+          "type": "string",
+          "description": "HalfOpenInterval is the minimum spacing between recovery probes\nwhile half-open, as a duration string. Defaults to \"15s\".",
+          "default": "15s"
+        },
+        "max_inflight_per_scope": {
+          "type": "integer",
+          "description": "MaxInflightPerScope bounds concurrent bd subprocesses per scope. The\nadmission semaphore blocks the (n+1)th bd call for a scope until one\nin flight returns, capping the subprocess amplifier (plan item 1.9).\nDefaults to 4. Non-positive disables the per-scope cap.",
+          "default": 4
+        },
+        "max_inflight_global": {
+          "type": "integer",
+          "description": "MaxInflightGlobal bounds concurrent bd subprocesses across all scopes\nin the city. Defaults to 16. Non-positive disables the global cap.",
+          "default": 16
+        },
+        "max_admission_wait": {
+          "type": "string",
+          "description": "MaxAdmissionWait bounds how long the admission semaphore waits for a\nfree slot before failing fast, as a duration string. When the caps are\nsaturated by bd subprocesses wedged on a backend transport timeout, a\nbounded wait prevents reconcile fan-out from blocking the controller\ntick indefinitely: an admission that cannot be granted within this\nwindow fails like an open breaker (typed ErrStoreUnavailable, zero\nsubprocesses). Defaults to \"30s\". A non-positive value (e.g. \"0s\")\nrestores the pre-bound behavior of blocking forever.",
+          "default": "30s"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "BeadsResilienceConfig holds circuit breaker settings for transport-class bead store failures."
     },
     "ChatSessionsConfig": {
       "properties": {
@@ -1127,6 +1213,10 @@
         "doctor": {
           "$ref": "#/$defs/DoctorConfig",
           "description": "Doctor configures gc doctor thresholds and policy toggles\n(worktree size warnings, nested-worktree auto-prune)."
+        },
+        "storehealth": {
+          "$ref": "#/$defs/StoreHealthConfig",
+          "description": "StoreHealth configures the controller-internal store health patrol\n(probe matrix, reap rate-limit, write-path conformance probe)."
         },
         "maintenance": {
           "$ref": "#/$defs/MaintenanceConfig",
@@ -1329,6 +1419,11 @@
           },
           "type": "array",
           "description": "Checks holds city-local inline doctor checks declared via\n[[doctor.check]] in city.toml."
+        },
+        "supervisor_interval": {
+          "type": "string",
+          "description": "SupervisorInterval is the cadence at which the supervisor evaluates\nthe cheap doctor subset (tick-age, agent_config_isolation, S6\nceiling, plus any registered provenance/port-consistency checks) and\npublishes doctor.alert on red. Duration string. Defaults to \"10m\".\nWithout this, every doctor-based retirement is detection at human\ncadence — the exact vigilance gap that produced incidents 5 and 11.",
+          "default": "10m"
         }
       },
       "additionalProperties": false,
@@ -2337,6 +2432,14 @@
           },
           "type": "array",
           "description": "ACPArgs overrides Args when the session transport is ACP.\nWhen nil, Args is used for both tmux and ACP transports."
+        },
+        "quota_monitor": {
+          "type": "boolean",
+          "description": "QuotaMonitor enables controller-side subscription-usage polling for\nthe account behind this provider (the provider-governor quota\npoller, internal/providergov). Tri-state: nil = inherit, \u0026true =\nenable, \u0026false = explicit disable. Requires MonitorConfigDir."
+        },
+        "monitor_config_dir": {
+          "type": "string",
+          "description": "MonitorConfigDir is the config directory holding this account's\nmonitoring credential: a full OAuth login (scope user:profile)\nwritten by `CLAUDE_CONFIG_DIR=\u003cdir\u003e claude login` into\n\u003cdir\u003e/.credentials.json. Separate from the agents' inference auth —\nagent setup-tokens (scope user:inference) cannot read the usage\nendpoint. Supports a leading \"~/\" expanded against the home dir."
         }
       },
       "additionalProperties": false,
@@ -2629,6 +2732,11 @@
           "type": "string",
           "description": "ProgressStallTimeout, when set, enables progress-aware session recycling:\na desired, alive, claim-less session on a healthy provider whose last\nprovider-reported activity is older than this duration is restarted fresh.\nSuch a session has likely parked (e.g. its turn ended on a provider auth\nerror) and will not self-recover. Set this above the longest legitimate\nalive-idle period for the city; values below 5m are clamped to 5m.\nDuration string (e.g. \"30m\"). Unset/zero disables it."
         },
+        "pending_create_ttl": {
+          "type": "string",
+          "description": "PendingCreateTTL bounds how long a start-pending session bead may wait\nfor its runtime to be created and adopted. The controller reaps open\nstart-pending beads older than this TTL whose session name has no live\nruntime, preventing duplicate pending records from jamming adoption.\nDuration string (e.g., \"30m\", \"1h\"). Defaults to \"30m\".",
+          "default": "30m"
+        },
         "socket": {
           "type": "string",
           "description": "Socket specifies the tmux socket name for per-city isolation.\nWhen set, all tmux commands use \"tmux -L \u003csocket\u003e\" to connect to\na dedicated server. When empty, defaults to the city name\n(workspace.name) — giving every city its own tmux server\nautomatically. Set explicitly to override."
@@ -2660,6 +2768,38 @@
       "additionalProperties": false,
       "type": "object",
       "description": "SessionSleepConfig configures default idle sleep policies by session class."
+    },
+    "StoreHealthConfig": {
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enabled toggles the patrol. Defaults to true. Disabling restores the\npre-patrol behavior (no two-probe matrix, no auto-reap).",
+          "default": true
+        },
+        "interval": {
+          "type": "string",
+          "description": "Interval is the per-scope probe cadence as a duration string.\nDefaults to \"30s\".",
+          "default": "30s"
+        },
+        "consecutive_fails": {
+          "type": "integer",
+          "description": "ConsecutiveFails is how many consecutive A-fail∧B-ok cycles confirm a\nproxy poison before forensics + reap. Defaults to 3.",
+          "default": 3
+        },
+        "reap_cooldown": {
+          "type": "string",
+          "description": "ReapCooldown is the minimum spacing between reaps for one scope as a\nduration string. A second poison inside the window is alert-only with\nforensics kept. Defaults to \"10m\".",
+          "default": "10m"
+        },
+        "write_probe_interval": {
+          "type": "string",
+          "description": "WriteProbeInterval is the cadence of the write-path conformance probe\n(create+close one ephemeral bead of each RequiredCustomType) as a\nduration string. Defaults to \"10m\".",
+          "default": "10m"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "StoreHealthConfig configures the controller-internal store health patrol (city-scale architecture plan item 1.5)."
     },
     "Tier": {
       "properties": {

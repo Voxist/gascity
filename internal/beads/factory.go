@@ -39,6 +39,16 @@ type BeadsDiagnostic struct {
 	NativeStoreEligible bool   `json:"native_store_eligible"`
 	PreflightGate       string `json:"preflight_gate,omitempty"`
 	PreflightReason     string `json:"preflight_reason,omitempty"`
+	// Degraded reports the scope's CachingStore is serving last-good
+	// cached data because the backing store is unreachable (transport
+	// circuit breaker open) or the cache itself has degraded. Computed
+	// at read time, not at store-open time.
+	Degraded bool `json:"degraded,omitempty"`
+	// BdInflight is the number of bd subprocesses currently admitted by
+	// the city's subprocess admission semaphore (gc_bd_inflight gauge,
+	// plan item 1.9). Computed at read time. Zero when no admission
+	// controller exists yet or no bd calls are in flight.
+	BdInflight int `json:"gc_bd_inflight,omitempty"`
 }
 
 // StoreOpenOptions holds dependencies for opening a beads Store.

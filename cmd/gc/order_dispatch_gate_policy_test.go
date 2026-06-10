@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -47,7 +48,8 @@ func TestOrderDispatchIdempotentFailsOpenOnGateTimeout(t *testing.T) {
 		{Name: "unrouted-feeder", Trigger: "cooldown", Interval: "1m", Exec: "true", Idempotent: true},
 		{Name: "merge-loop-sweep", Trigger: "cooldown", Interval: "1m", Exec: "true", Idempotent: false},
 	}
-	ad := buildOrderDispatcherFromListExec(aa, store, nil, successfulExec, nil)
+	rec := events.NewFake()
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, successfulExec, rec)
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
 	}
@@ -59,6 +61,21 @@ func TestOrderDispatchIdempotentFailsOpenOnGateTimeout(t *testing.T) {
 	}
 	if got := trackingBeads(t, store, "order-run:merge-loop-sweep"); len(got) != 0 {
 		t.Errorf("non-idempotent order should fail CLOSED on gate timeout and skip; got %d tracking beads", len(got))
+	}
+
+	// Every fail-open must be counted via the typed tripwire event — for the
+	// idempotent order that dispatched, and ONLY for it (P1.3/P1.10).
+	var failOpens []events.Event
+	for _, e := range rec.Events {
+		if e.Type == events.OrderGateTimeoutFailOpen {
+			failOpens = append(failOpens, e)
+		}
+	}
+	if len(failOpens) != 1 {
+		t.Fatalf("want exactly 1 %s event through the dispatch path, got %d", events.OrderGateTimeoutFailOpen, len(failOpens))
+	}
+	if failOpens[0].Subject != "unrouted-feeder" {
+		t.Errorf("fail-open event subject = %q, want %q", failOpens[0].Subject, "unrouted-feeder")
 	}
 }
 

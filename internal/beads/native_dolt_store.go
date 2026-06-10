@@ -113,10 +113,11 @@ func restoreNativeDoltOpenEnv(previous map[string]*string) {
 // library over Dolt. It is constructed by the store factory after native-store
 // preflight gates pass.
 type NativeDoltStore struct {
-	mu       sync.RWMutex
-	storage  beadslib.Storage
-	actor    string
-	idPrefix string
+	mu        sync.RWMutex
+	storage   beadslib.Storage
+	actor     string
+	idPrefix  string
+	projectID string
 }
 
 var (
@@ -163,7 +164,14 @@ func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[stri
 		_ = storage.Close()
 		return nil, fmt.Errorf("reading native issue prefix: %w", err)
 	}
-	return newNativeDoltStoreWithStorageAndPrefix(storage, nativeDoltStoreActor, prefix), nil
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, nativeDoltStoreActor, prefix)
+	// project_id is best-effort: an opened-but-typeless embedded DB (the
+	// silent-misroute signature) returns an empty value here rather than an
+	// error, which the post-open identity assertion surfaces as opened-empty.
+	if projectID, projectErr := storage.GetConfig(ctx, "project_id"); projectErr == nil {
+		store.projectID = strings.TrimSpace(projectID)
+	}
+	return store, nil
 }
 
 func newNativeDoltStoreForTest(storage beadslib.Storage) *NativeDoltStore {

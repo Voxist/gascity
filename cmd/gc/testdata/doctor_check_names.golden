@@ -17,6 +17,7 @@ implicit-import-cache
 deprecated-attachment-fields
 dolt-topology
 dolt-drift
+port-file-consistency
 config-valid
 legacy-suspended-field
 config-refs
@@ -33,6 +34,8 @@ skill-collision
 order-firing-current
 codex-hooks-drift
 beads-proxied-capability
+beads-expected-build
+native-store-canary-identity
 rig-pack-coverage
 mcp-config
 mcp-shared-target
@@ -43,7 +46,9 @@ git-binary
 jq-binary
 pgrep-binary
 lsof-binary
+deploy-provenance
 beads-role
+bd-context-probe
 controller
 agent-sessions
 zombie-sessions

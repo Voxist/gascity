@@ -708,6 +708,26 @@ func TestParseBeadsProxiedSection(t *testing.T) {
 	}
 }
 
+func TestParseBeadsExpectedBuild(t *testing.T) {
+	cfg, err := Parse([]byte("[workspace]\nname = \"t\"\n\n[beads]\nexpected_build = \"1.0.5-pooling\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.Beads.ExpectedBuild; got != "1.0.5-pooling" {
+		t.Errorf("expected_build = %q, want %q", got, "1.0.5-pooling")
+	}
+}
+
+func TestParseBeadsExpectedBuildAbsent(t *testing.T) {
+	cfg, err := Parse([]byte("[workspace]\nname = \"t\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Beads.ExpectedBuild != "" {
+		t.Errorf("expected_build = %q, want empty when unset", cfg.Beads.ExpectedBuild)
+	}
+}
+
 func TestBeadsProxyIdleTimeoutAccessor(t *testing.T) {
 	if got := (BeadsConfig{}).ProxyIdleTimeoutOrDefault(); got != defaultBeadsProxyIdleTimeout {
 		t.Errorf("default = %q, want %q", got, defaultBeadsProxyIdleTimeout)
@@ -3314,6 +3334,24 @@ func TestValidateAgentsMouseMode(t *testing.T) {
 	}
 }
 
+func TestValidateAgentsTier(t *testing.T) {
+	for _, tier := range []string{"", "claude-required", "overflow-ok"} {
+		t.Run("valid_"+tier, func(t *testing.T) {
+			if err := ValidateAgents([]Agent{{Name: "worker", Tier: tier}}); err != nil {
+				t.Fatalf("ValidateAgents tier %q: %v", tier, err)
+			}
+		})
+	}
+
+	err := ValidateAgents([]Agent{{Name: "worker", Tier: "platinum"}})
+	if err == nil {
+		t.Fatal("ValidateAgents invalid tier: got nil error")
+	}
+	if !strings.Contains(err.Error(), "tier") {
+		t.Fatalf("ValidateAgents error = %v, want tier context", err)
+	}
+}
+
 func TestValidateAgentsMissingName(t *testing.T) {
 	agents := []Agent{{MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5)}}
 	err := ValidateAgents(agents)
@@ -5437,6 +5475,50 @@ func TestSessionSetupTimeoutInvalid(t *testing.T) {
 	got := s.SetupTimeoutDuration()
 	if got != 10*time.Second {
 		t.Errorf("SetupTimeoutDuration() = %v, want 10s (default for invalid)", got)
+	}
+}
+
+func TestSessionPendingCreateTTLDefault(t *testing.T) {
+	s := SessionConfig{}
+	got := s.PendingCreateTTLDuration()
+	if got != 30*time.Minute {
+		t.Errorf("PendingCreateTTLDuration() = %v, want 30m", got)
+	}
+}
+
+func TestSessionPendingCreateTTLCustom(t *testing.T) {
+	s := SessionConfig{PendingCreateTTL: "45m"}
+	got := s.PendingCreateTTLDuration()
+	if got != 45*time.Minute {
+		t.Errorf("PendingCreateTTLDuration() = %v, want 45m", got)
+	}
+}
+
+func TestSessionPendingCreateTTLInvalid(t *testing.T) {
+	s := SessionConfig{PendingCreateTTL: "not-a-duration"}
+	got := s.PendingCreateTTLDuration()
+	if got != 30*time.Minute {
+		t.Errorf("PendingCreateTTLDuration() = %v, want 30m (default for invalid)", got)
+	}
+}
+
+func TestParseSessionPendingCreateTTL(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test-city"
+
+[session]
+pending_create_ttl = "1h"
+
+[[agent]]
+name = "mayor"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.Session.PendingCreateTTLDuration(); got != time.Hour {
+		t.Errorf("PendingCreateTTLDuration() = %v, want 1h", got)
 	}
 }
 

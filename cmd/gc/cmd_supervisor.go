@@ -1227,11 +1227,31 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		reconcileCities(reg, registry, supCfg.Publication, stdout, stderr)
 	}
 
-	// Initial reconcile.
+	// safeDoctorSubset wraps the supervisor-cadence doctor subset with
+	// panic recovery (plan item 1.9). It runs independently of the store
+	// path so it can detect failures an in-band sentinel cannot.
+	safeDoctorSubset := func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(stderr, "gc supervisor: doctor subset panicked: %v\n", r) //nolint:errcheck
+			}
+		}()
+		runSupervisorDoctorSubset(registry, stderr)
+	}
+
+	// Doctor cadence runs on its own ticker so a slow reconcile cannot
+	// starve detection and vice versa.
+	doctorTicker := time.NewTicker(supervisorDoctorIntervalFor(registry))
+	defer doctorTicker.Stop()
+
+	// Initial reconcile + doctor pass on startup.
 	safeReconcile()
+	safeDoctorSubset()
 
 	for {
 		select {
+		case <-doctorTicker.C:
+			safeDoctorSubset()
 		case <-ticker.C:
 			safeReconcile()
 		case req := <-reconcileCh:
@@ -1813,6 +1833,7 @@ func reconcileCities(
 		cityRuntime.setControllerState(cs)
 		cs.startBeadEventWatcher(cityCtx)
 		cs.startMaintenanceLoop(cityCtx)
+		cs.startStoreHealthPatrol(cityCtx)
 
 		// Run pool on_boot hooks (same as runController does).
 		if err := runPostPrepareStep("running_pool_on_boot", func() error {

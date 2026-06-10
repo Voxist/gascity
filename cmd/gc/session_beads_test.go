@@ -7142,6 +7142,32 @@ func TestControllerRuntimeSweepsProcessTableOrphansAfterClosedBeadReap(t *testin
 	}
 }
 
+func TestControllerRuntimeReapsPhantomSessionBeadsAfterStaleSessionReap(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(".", "city_runtime.go"))
+	if err != nil {
+		t.Fatalf("read city_runtime.go: %v", err)
+	}
+	lines := strings.Split(string(data), "\n")
+	staleReapCalls := 0
+	for i, line := range lines {
+		if !strings.Contains(line, "reapStaleSessionBeads(") {
+			continue
+		}
+		staleReapCalls++
+		phantomLine := nextLineContaining(lines, i, "reapPhantomSessionBeads(")
+		if phantomLine == -1 {
+			t.Errorf("city_runtime.go:%d reapStaleSessionBeads is not followed by reapPhantomSessionBeads", i+1)
+		}
+		expiredPendingLine := nextLineContaining(lines, i, "reapExpiredStartPendingSessionBeads(")
+		if expiredPendingLine == -1 {
+			t.Errorf("city_runtime.go:%d reapStaleSessionBeads is not followed by reapExpiredStartPendingSessionBeads", i+1)
+		}
+	}
+	if staleReapCalls == 0 {
+		t.Fatal("city_runtime.go contains no reapStaleSessionBeads calls")
+	}
+}
+
 func terminatedSessionIDs(runtimes []runtime.LiveRuntime) string {
 	ids := make([]string, 0, len(runtimes))
 	for _, live := range runtimes {
@@ -8079,5 +8105,465 @@ func TestPendingPoolSessionName_SanitizesDottedTemplate(t *testing.T) {
 					tc.template, tc.token, got)
 			}
 		})
+	}
+}
+
+func TestReapPhantomSessionBeads(t *testing.T) {
+	newPhantomBead := func(name, state, lastWokeAt string, named bool) beads.Bead {
+		meta := map[string]string{
+			"session_name": name,
+			"state":        state,
+		}
+		if lastWokeAt != "" {
+			meta["last_woke_at"] = lastWokeAt
+		}
+		if named {
+			meta["configured_named_session"] = "true"
+		}
+		return beads.Bead{
+			Status:   "open",
+			Type:     sessionBeadType,
+			Labels:   []string{sessionBeadLabel},
+			Metadata: meta,
+		}
+	}
+
+	tests := []struct {
+		name          string
+		beads         []beads.Bead
+		running       []string // session names present in the runtime (ListRunning returns these)
+		drainingIndex []int    // indices into beads slice with active drain entries
+		listErr       error    // injected ListRunning error (nil = success)
+		nilStore      bool
+		nilSP         bool
+		wantReaped    int
+		wantOpen      int
+	}{
+		{
+			name: "reaps_asleep_never_woken_not_visible",
+			beads: []beads.Bead{
+				newPhantomBead("worker-1", "asleep", "", false),
+			},
+			running:    nil,
+			wantReaped: 1,
+			wantOpen:   0,
+		},
+		{
+			name: "keeps_asleep_was_woken_once",
+			beads: []beads.Bead{
+				newPhantomBead("worker-1", "asleep", "2026-01-01T00:00:00Z", false),
+			},
+			running:    nil,
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "keeps_creating_state",
+			beads: []beads.Bead{
+				newPhantomBead("worker-1", "creating", "", false),
+			},
+			running:    nil,
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "keeps_awake_state",
+			beads: []beads.Bead{
+				newPhantomBead("worker-1", "awake", "", false),
+			},
+			running:    nil,
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "keeps_named_session_bead",
+			beads: []beads.Bead{
+				newPhantomBead("mayor", "asleep", "", true),
+			},
+			running:    nil,
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "keeps_draining_bead",
+			beads: []beads.Bead{
+				newPhantomBead("worker-1", "asleep", "", false),
+			},
+			running:       nil,
+			drainingIndex: []int{0},
+			wantReaped:    0,
+			wantOpen:      1,
+		},
+		{
+			name: "keeps_bead_visible_in_runtime",
+			beads: []beads.Bead{
+				newPhantomBead("worker-1", "asleep", "", false),
+			},
+			running:    []string{"worker-1"},
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "skips_on_partial_list_error",
+			beads: []beads.Bead{
+				newPhantomBead("worker-1", "asleep", "", false),
+			},
+			running:    nil,
+			listErr:    &runtime.PartialListError{Err: errors.New("remote backend down")},
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "skips_on_hard_list_error",
+			beads: []beads.Bead{
+				newPhantomBead("worker-1", "asleep", "", false),
+			},
+			running:    nil,
+			listErr:    errors.New("tmux unreachable"),
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name:       "nil_store_returns_zero",
+			nilStore:   true,
+			wantReaped: 0,
+		},
+		{
+			name:       "nil_sp_returns_zero",
+			nilSP:      true,
+			wantReaped: 0,
+		},
+		{
+			name: "reaps_only_asleep_never_woken_among_mixed_beads",
+			beads: []beads.Bead{
+				newPhantomBead("worker-1", "asleep", "", false),    // phantom → reap
+				newPhantomBead("worker-2", "asleep", "now", false), // was woken → keep
+				newPhantomBead("worker-3", "creating", "", false),  // wrong domain → keep
+				newPhantomBead("worker-4", "asleep", "", false),    // in visible set → keep
+			},
+			running:    []string{"worker-4"},
+			wantReaped: 1,
+			wantOpen:   3,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var store beads.Store
+			var createdIDs []string
+			if !tc.nilStore {
+				ms := beads.NewMemStore()
+				for _, b := range tc.beads {
+					created, err := ms.Create(b)
+					if err != nil {
+						t.Fatalf("setup: create bead: %v", err)
+					}
+					createdIDs = append(createdIDs, created.ID)
+				}
+				store = ms
+			}
+
+			var sp runtime.Provider
+			if !tc.nilSP {
+				sp = newPhantomTestProvider(tc.running, tc.listErr)
+			}
+
+			dt := newDrainTracker()
+			for _, idx := range tc.drainingIndex {
+				if idx < len(createdIDs) {
+					dt.set(createdIDs[idx], &drainState{reason: "user"})
+				}
+			}
+
+			var stderr bytes.Buffer
+			got := reapPhantomSessionBeads(store, sp, dt, clock.Real{}, &stderr)
+			if got != tc.wantReaped {
+				t.Errorf("reapPhantomSessionBeads() = %d, want %d; stderr=%q", got, tc.wantReaped, stderr.String())
+			}
+
+			if store == nil {
+				return
+			}
+			open, err := loadSessionBeads(store)
+			if err != nil {
+				t.Fatalf("loadSessionBeads: %v", err)
+			}
+			if len(open) != tc.wantOpen {
+				t.Errorf("open beads = %d, want %d", len(open), tc.wantOpen)
+			}
+		})
+	}
+}
+
+// phantomTestProvider is a minimal provider for TestReapPhantomSessionBeads that
+// supports configurable ListRunning results and errors.
+type phantomTestProvider struct {
+	*runtime.Fake
+	listErr error
+	visible map[string]bool
+}
+
+func newPhantomTestProvider(running []string, listErr error) *phantomTestProvider {
+	p := &phantomTestProvider{
+		Fake:    runtime.NewFake(),
+		listErr: listErr,
+		visible: make(map[string]bool, len(running)),
+	}
+	for _, name := range running {
+		p.visible[name] = true
+	}
+	return p
+}
+
+func (p *phantomTestProvider) ListRunning(prefix string) ([]string, error) {
+	if p.listErr != nil {
+		return nil, p.listErr
+	}
+	var names []string
+	for name := range p.visible {
+		if strings.HasPrefix(name, prefix) {
+			names = append(names, name)
+		}
+	}
+	return names, nil
+}
+
+func TestReapExpiredStartPendingSessionBeads(t *testing.T) {
+	now := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	const ttl = 30 * time.Minute
+	startedAt := func(age time.Duration) string {
+		return now.Add(-age).Format(time.RFC3339)
+	}
+
+	newPendingBead := func(name, state, pendingStartedAt string, named bool) beads.Bead {
+		meta := map[string]string{
+			"state":                "start-pending",
+			"pending_create_claim": "true",
+		}
+		if name != "" {
+			meta["session_name"] = name
+		}
+		if state != "" {
+			meta["state"] = state
+		}
+		if pendingStartedAt != "" {
+			meta["pending_create_started_at"] = pendingStartedAt
+		}
+		if named {
+			meta["configured_named_session"] = "true"
+		}
+		return beads.Bead{
+			Status:   "open",
+			Type:     sessionBeadType,
+			Labels:   []string{sessionBeadLabel},
+			Metadata: meta,
+		}
+	}
+
+	tests := []struct {
+		name          string
+		beads         []beads.Bead
+		running       []string
+		drainingIndex []int
+		listErr       error
+		nilStore      bool
+		nilSP         bool
+		clockAt       time.Time // zero = `now`
+		wantReaped    int
+		wantOpen      int
+	}{
+		{
+			name: "reaps_expired_pending_no_runtime",
+			beads: []beads.Bead{
+				newPendingBead("claude-pending-abc", "", startedAt(ttl+time.Minute), false),
+			},
+			wantReaped: 1,
+			wantOpen:   0,
+		},
+		{
+			name: "keeps_pending_within_ttl",
+			beads: []beads.Bead{
+				newPendingBead("claude-pending-abc", "", startedAt(ttl-time.Minute), false),
+			},
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "keeps_expired_pending_with_live_runtime",
+			beads: []beads.Bead{
+				newPendingBead("claude-pending-abc", "", startedAt(ttl+time.Minute), false),
+			},
+			running:    []string{"claude-pending-abc"},
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "keeps_named_session_bead",
+			beads: []beads.Bead{
+				newPendingBead("mayor", "", startedAt(ttl+time.Minute), true),
+			},
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "keeps_draining_bead",
+			beads: []beads.Bead{
+				newPendingBead("claude-pending-abc", "", startedAt(ttl+time.Minute), false),
+			},
+			drainingIndex: []int{0},
+			wantReaped:    0,
+			wantOpen:      1,
+		},
+		{
+			name: "keeps_non_start_pending_states",
+			beads: []beads.Bead{
+				newPendingBead("claude-pending-a", "creating", startedAt(ttl+time.Minute), false),
+				newPendingBead("claude-pending-b", "asleep", startedAt(ttl+time.Minute), false),
+				newPendingBead("claude-pending-c", "active", startedAt(ttl+time.Minute), false),
+			},
+			wantReaped: 0,
+			wantOpen:   3,
+		},
+		{
+			name: "keeps_empty_session_name",
+			beads: []beads.Bead{
+				newPendingBead("", "", startedAt(ttl+time.Minute), false),
+			},
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "unparseable_started_at_falls_back_to_fresh_created_at",
+			beads: []beads.Bead{
+				newPendingBead("claude-pending-abc", "", "not-a-timestamp", false),
+			},
+			clockAt:    time.Now(), // CreatedAt is stamped by MemStore at real now — within TTL
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "missing_started_at_falls_back_to_expired_created_at",
+			beads: []beads.Bead{
+				newPendingBead("claude-pending-abc", "", "", false),
+			},
+			clockAt:    time.Now().Add(ttl + time.Minute),
+			wantReaped: 1,
+			wantOpen:   0,
+		},
+		{
+			name: "skips_on_partial_list_error",
+			beads: []beads.Bead{
+				newPendingBead("claude-pending-abc", "", startedAt(ttl+time.Minute), false),
+			},
+			listErr:    &runtime.PartialListError{Err: errors.New("remote backend down")},
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name: "skips_on_hard_list_error",
+			beads: []beads.Bead{
+				newPendingBead("claude-pending-abc", "", startedAt(ttl+time.Minute), false),
+			},
+			listErr:    errors.New("tmux unreachable"),
+			wantReaped: 0,
+			wantOpen:   1,
+		},
+		{
+			name:       "nil_store_returns_zero",
+			nilStore:   true,
+			wantReaped: 0,
+		},
+		{
+			name:       "nil_sp_returns_zero",
+			nilSP:      true,
+			wantReaped: 0,
+		},
+		{
+			name: "reaps_only_expired_unadopted_among_mixed_beads",
+			beads: []beads.Bead{
+				newPendingBead("claude-pending-a", "", startedAt(ttl+time.Minute), false), // expired → reap
+				newPendingBead("claude-pending-b", "", startedAt(time.Minute), false),     // fresh → keep
+				newPendingBead("claude-pending-c", "", startedAt(ttl+time.Minute), false), // visible → keep
+				newPendingBead("claude-pending-d", "creating", startedAt(ttl+time.Minute), false),
+			},
+			running:    []string{"claude-pending-c"},
+			wantReaped: 1,
+			wantOpen:   3,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var store beads.Store
+			var createdIDs []string
+			if !tc.nilStore {
+				ms := beads.NewMemStore()
+				for _, b := range tc.beads {
+					created, err := ms.Create(b)
+					if err != nil {
+						t.Fatalf("setup: create bead: %v", err)
+					}
+					createdIDs = append(createdIDs, created.ID)
+				}
+				store = ms
+			}
+
+			var sp runtime.Provider
+			if !tc.nilSP {
+				sp = newPhantomTestProvider(tc.running, tc.listErr)
+			}
+
+			dt := newDrainTracker()
+			for _, idx := range tc.drainingIndex {
+				if idx < len(createdIDs) {
+					dt.set(createdIDs[idx], &drainState{reason: "user"})
+				}
+			}
+
+			clockAt := tc.clockAt
+			if clockAt.IsZero() {
+				clockAt = now
+			}
+			clk := &clock.Fake{Time: clockAt}
+
+			var stderr bytes.Buffer
+			got := reapExpiredStartPendingSessionBeads(store, sp, dt, ttl, clk, &stderr)
+			if got != tc.wantReaped {
+				t.Errorf("reapExpiredStartPendingSessionBeads() = %d, want %d; stderr=%q", got, tc.wantReaped, stderr.String())
+			}
+
+			if store == nil {
+				return
+			}
+			open, err := loadSessionBeads(store)
+			if err != nil {
+				t.Fatalf("loadSessionBeads: %v", err)
+			}
+			if len(open) != tc.wantOpen {
+				t.Errorf("open beads = %d, want %d", len(open), tc.wantOpen)
+			}
+		})
+	}
+}
+
+func TestReapExpiredStartPendingSessionBeadsZeroTTLDisables(t *testing.T) {
+	ms := beads.NewMemStore()
+	if _, err := ms.Create(beads.Bead{
+		Status: "open",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":              "claude-pending-abc",
+			"state":                     "start-pending",
+			"pending_create_claim":      "true",
+			"pending_create_started_at": "2020-01-01T00:00:00Z",
+		},
+	}); err != nil {
+		t.Fatalf("setup: create bead: %v", err)
+	}
+	sp := newPhantomTestProvider(nil, nil)
+	var stderr bytes.Buffer
+	if got := reapExpiredStartPendingSessionBeads(ms, sp, newDrainTracker(), 0, clock.Real{}, &stderr); got != 0 {
+		t.Errorf("reapExpiredStartPendingSessionBeads(ttl=0) = %d, want 0; stderr=%q", got, stderr.String())
 	}
 }

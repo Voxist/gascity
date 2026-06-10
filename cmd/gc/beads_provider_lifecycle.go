@@ -656,11 +656,11 @@ var verifyManagedDoltDatabaseExistsAfterInit = func(cityPath, dir, dbName string
 
 var managedDoltListUserDatabasesAfterInit = func(port string) ([]string, error) {
 	host, user := managedDoltConnectHost(""), "root"
+	// Pooled handle owned by internal/doltpool; do not Close.
 	db, err := managedDoltOpenDB(host, port, user)
 	if err != nil {
 		return nil, fmt.Errorf("connect to managed Dolt at %s:%s: %w", host, port, err)
 	}
-	defer db.Close() //nolint:errcheck
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -1359,6 +1359,16 @@ func doltPortReachable(port string) bool {
 // operators can see that their on-disk port file is being reconciled to the
 // canonical managed port. scopeLabel may be empty for silent callers; warn may
 // be nil or io.Discard to suppress warnings entirely.
+//
+// TODO(scale-P1.7): root-cause the surviving port-file writer. bd owns the
+// authoritative writes to .beads/dolt-server.port (gc only mirrors the
+// managed port here), and a writer that outlived the vp-w7tc pooling fix has
+// clobbered the file with a proxy's ephemeral port in production (incident
+// class 4). gc no longer reads this file for endpoint resolution anywhere —
+// resolution is live-state only (dolt_port_live.go) and the
+// port-file-consistency doctor check hard-fails on any mismatch — so the
+// file survives purely as a raw-bd compatibility mirror. Schedule its
+// removal once bd's direct-mode discovery resolves endpoints without it.
 func writeDoltPortFile(dir, port, scopeLabel string, warn io.Writer) {
 	if dir == "" || port == "" {
 		return

@@ -34,6 +34,7 @@ City is the top-level configuration for a Gas City instance.
 | `session_sleep` | SessionSleepConfig |  |  | SessionSleep configures idle sleep policy defaults for managed sessions. |
 | `convergence` | ConvergenceConfig |  |  | Convergence configures convergence loop limits. |
 | `doctor` | DoctorConfig |  |  | Doctor configures gc doctor thresholds and policy toggles (worktree size warnings, nested-worktree auto-prune). |
+| `storehealth` | StoreHealthConfig |  |  | StoreHealth configures the controller-internal store health patrol (probe matrix, reap rate-limit, write-path conformance probe). |
 | `maintenance` | MaintenanceConfig |  |  | Maintenance configures periodic store-maintenance loops. |
 | `service` | []Service |  |  | Services declares workspace-owned HTTP services mounted on the controller edge under /svc/&#123;name&#125;. |
 | `github` | GitHubConfig |  |  | GitHub configures GitHub-facing repository monitors. |
@@ -120,6 +121,7 @@ Agent defines a configured agent in the city.
 | `resume_command` | string |  |  | ResumeCommand is the full shell command to run when resuming this agent. Supports &#123;&#123;.SessionKey&#125;&#125; template variable. When set, takes precedence over the provider's ResumeFlag/ResumeStyle. Example:   "claude --resume &#123;&#123;.SessionKey&#125;&#125; --dangerously-skip-permissions" |
 | `wake_mode` | string |  |  | WakeMode controls context freshness across sleep/wake cycles. "resume" (default): reuse provider session key for conversation continuity. "fresh": start a new provider session on every wake (polecat pattern). Enum: `resume`, `fresh` |
 | `mouse_mode` | string |  |  | MouseMode controls whether tmux mouse mode is preserved for this agent. "on" leaves the session's mouse setting alone for human-attached sessions; "off" or empty preserves the SDK's default mouse-off startup behavior for headless sessions. Enum: `on`, `off` |
+| `tier` | string |  |  | Tier classifies this agent's provider-quality requirement for the provider governor (internal/providergov). "claude-required" agents are served from the governed Claude account pool; "overflow-ok" agents always run on the configured overflow vendor pool, which stretches the Claude weekly cap. Empty means unclassified: the governor does not steer this agent and its configured provider applies unchanged. Enum: `claude-required`, `overflow-ok` |
 
 ## AgentDefaults
 
@@ -186,6 +188,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `resume_command` | string |  |  | ResumeCommand overrides the agent's resume_command template. |
 | `wake_mode` | string |  |  | WakeMode overrides the agent's wake mode ("resume" or "fresh"). Enum: `resume`, `fresh` |
 | `mouse_mode` | string |  |  | MouseMode overrides whether tmux mouse mode is preserved ("on" or "off"). Enum: `on`, `off` |
+| `tier` | string |  |  | Tier overrides the agent's provider-governor tier classification ("claude-required" or "overflow-ok"). Enum: `claude-required`, `overflow-ok` |
 | `inject_fragments_append` | []string |  |  | InjectFragmentsAppend appends to the agent's inject_fragments list. |
 | `max_active_sessions` | integer |  |  | MaxActiveSessions overrides the agent-level cap on concurrent sessions. |
 | `min_active_sessions` | integer |  |  | MinActiveSessions overrides the minimum number of sessions to keep alive. |
@@ -237,6 +240,7 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `resume_command` | string |  |  | ResumeCommand overrides the agent's resume_command template. |
 | `wake_mode` | string |  |  | WakeMode overrides the agent's wake mode ("resume" or "fresh"). Enum: `resume`, `fresh` |
 | `mouse_mode` | string |  |  | MouseMode overrides whether tmux mouse mode is preserved ("on" or "off"). Enum: `on`, `off` |
+| `tier` | string |  |  | Tier overrides the agent's provider-governor tier classification ("claude-required" or "overflow-ok"). Enum: `claude-required`, `overflow-ok` |
 | `pre_start_append` | []string |  |  | PreStartAppend appends commands to the agent's pre_start list (instead of replacing). Applied after PreStart if both are set. |
 | `session_setup_append` | []string |  |  | SessionSetupAppend appends commands to the agent's session_setup list. |
 | `session_live_append` | []string |  |  | SessionLiveAppend appends commands to the agent's session_live list. |
@@ -269,7 +273,25 @@ BeadsConfig holds bead store settings.
 | `proxied` | boolean |  | `false` | Proxied routes bd through the pooling db-proxy (ProxiedServerMode, external backend) instead of direct ServerMode, eliminating the per-call bd→dolt connection churn (#1978: ~71 new connections/sec to the managed dolt server). Defaults to false = current direct ServerMode, byte-for-byte identical, so existing cities are unaffected. Requires a bd build that supports `bd init --proxied-server` (external); when the resolved bd lacks it, gascity falls back to server mode and a doctor check flags it, so a city paired with a standard bd never breaks. |
 | `proxy_pool_size` | integer |  | `4` | ProxyPoolSize is the warm backend-connection pool size the db-proxy keeps per (capabilities, database) key when Proxied is true. Defaults to 4. The proxy is shared per workspace root, so all agents of a scope share one warm pool; the size is frozen by the first bd invocation that spawns the proxy (changing it requires restarting the db-proxy-child). |
 | `proxy_idle_timeout` | string |  | `0` | ProxyIdleTimeout is how long a db-proxy-child stays alive with no active client before it shuts down. The bd default (30s) is tuned for one busy workspace; gascity touches many scopes sparsely (controller patrol probes every rig once per interval), starving any finite timeout so the proxy spawns, serves one op, idle-dies, and respawns on the next touch — pure churn that never reaches the warm-pool steady state. gascity therefore defaults to "0" (never idle) and owns the proxy lifecycle: proxies stay warm for the city's lifetime and are reaped on `gc stop`. Operators who want gc to relinquish that ownership can set a finite Go duration string. Read by bd as BEADS_PROXY_IDLE_TIMEOUT. |
+| `expected_build` | string |  |  | ExpectedBuild pins the bd build this city expects: a token (version or build identifier) that must appear verbatim in `bd --version` output. The beads-expected-build doctor check compares them so a brew upgrade or a rebuild from the wrong branch clobbering a custom bd is caught at doctor cadence instead of as a runtime mystery. Empty disables the check. |
 | `policies` | map[string]BeadPolicyConfig |  |  | Policies defines per-bead-use storage and garbage-collection defaults. Policy names are interpreted by higher-level systems; unknown names are preserved so packs can stage future policy classes without breaking load. |
+| `resilience` | BeadsResilienceConfig |  |  | Resilience configures the transport circuit breaker that guards bd subprocess and store operations ([beads.resilience]). |
+| `native_store_canary_scopes` | []string |  |  | NativeStoreCanaryScopes lists the scope names (city name or rig names) for which the in-process NativeDoltStore is canaried, scope by scope, without flipping any global store mode. It is the P2.3 env-projection canary lever: when a scope is listed, the gc beads env projection ensures the native server-mode Dolt keys (BEADS_DOLT_SERVER_MODE/HOST/PORT) are projected from the managed-server live handle so the scope can open the native store, and the post-open identity assertion guarantees a silent-empty or misrouted DB is detected immediately. Defaults to empty (OFF) and is purely additive: an unlisted scope's env projection is byte-for-byte unchanged. The operator can layer additional scopes at runtime without editing committed config via the GC_BEADS_NATIVE_STORE_CANARY environment variable (comma-separated scope names); env entries union with this list. |
+
+## BeadsResilienceConfig
+
+BeadsResilienceConfig holds circuit breaker settings for transport-class bead store failures.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | boolean |  | `true` | Enabled toggles the breaker. Defaults to true. |
+| `consecutive_failures` | integer |  | `3` | ConsecutiveFailures is how many consecutive transport-class failures trip the breaker. Defaults to 3. |
+| `open_base` | string |  | `1s` | OpenBase is the initial open-state backoff cap as a duration string. Defaults to "1s". |
+| `open_max` | string |  | `60s` | OpenMax caps the open-state backoff as a duration string. Defaults to "60s". |
+| `half_open_interval` | string |  | `15s` | HalfOpenInterval is the minimum spacing between recovery probes while half-open, as a duration string. Defaults to "15s". |
+| `max_inflight_per_scope` | integer |  | `4` | MaxInflightPerScope bounds concurrent bd subprocesses per scope. The admission semaphore blocks the (n+1)th bd call for a scope until one in flight returns, capping the subprocess amplifier (plan item 1.9). Defaults to 4. Non-positive disables the per-scope cap. |
+| `max_inflight_global` | integer |  | `16` | MaxInflightGlobal bounds concurrent bd subprocesses across all scopes in the city. Defaults to 16. Non-positive disables the global cap. |
+| `max_admission_wait` | string |  | `30s` | MaxAdmissionWait bounds how long the admission semaphore waits for a free slot before failing fast, as a duration string. When the caps are saturated by bd subprocesses wedged on a backend transport timeout, a bounded wait prevents reconcile fan-out from blocking the controller tick indefinitely: an admission that cannot be granted within this window fails like an open breaker (typed ErrStoreUnavailable, zero subprocesses). Defaults to "30s". A non-positive value (e.g. "0s") restores the pre-bound behavior of blocking forever. |
 
 ## ChatSessionsConfig
 
@@ -329,6 +351,7 @@ DoctorConfig holds settings for the gc doctor surface.
 | `worktree_rig_error_size` | string |  | `50GB` | WorktreeRigErrorSize is the per-rig error threshold. When any rig exceeds this, the worktree-disk-size check reports an error rather than a warning. Empty or unparseable falls back to the default (50 GB). |
 | `nested_worktree_prune` | boolean |  | `false` | NestedWorktreePrune escalates the nested-worktree-prune check from warning to error severity when safely-prunable nested worktrees are present, so CI / scripted doctor runs fail until the operator runs `gc doctor --fix`. Actual removal still requires --fix; this flag does not auto-prune. Safety is enforced by mechanical checks (no uncommitted changes, no unpushed commits, no stashes) — never by role identity. |
 | `check` | []LocalDoctorCheck |  |  | Checks holds city-local inline doctor checks declared via [[doctor.check]] in city.toml. |
+| `supervisor_interval` | string |  | `10m` | SupervisorInterval is the cadence at which the supervisor evaluates the cheap doctor subset (tick-age, agent_config_isolation, S6 ceiling, plus any registered provenance/port-consistency checks) and publishes doctor.alert on red. Duration string. Defaults to "10m". Without this, every doctor-based retirement is detection at human cadence — the exact vigilance gap that produced incidents 5 and 11. |
 
 ## DoltConfig
 
@@ -668,6 +691,8 @@ ProviderSpec defines a named provider's startup parameters.
 | `title_model` | string |  |  | TitleModel is the OptionsSchema model key used for title generation. Resolved via the "model" option in OptionsSchema to get FlagArgs. Defaults to the cheapest/fastest model for each provider. Examples: "haiku" (claude), "o4-mini" (codex), "gemini-2.5-flash" (gemini) |
 | `acp_command` | string |  |  | ACPCommand overrides Command when the session transport is ACP. When empty, Command is used for both tmux and ACP transports. |
 | `acp_args` | []string |  |  | ACPArgs overrides Args when the session transport is ACP. When nil, Args is used for both tmux and ACP transports. |
+| `quota_monitor` | boolean |  |  | QuotaMonitor enables controller-side subscription-usage polling for the account behind this provider (the provider-governor quota poller, internal/providergov). Tri-state: nil = inherit, &true = enable, &false = explicit disable. Requires MonitorConfigDir. |
+| `monitor_config_dir` | string |  |  | MonitorConfigDir is the config directory holding this account's monitoring credential: a full OAuth login (scope user:profile) written by `CLAUDE_CONFIG_DIR=&lt;dir&gt; claude login` into &lt;dir&gt;/.credentials.json. Separate from the agents' inference auth — agent setup-tokens (scope user:inference) cannot read the usage endpoint. Supports a leading "~/" expanded against the home dir. |
 
 ## Rig
 
@@ -765,6 +790,7 @@ SessionConfig holds session provider settings.
 | `display_ms` | integer |  | `5000` | DisplayMs is the default display duration in milliseconds for status messages. Defaults to 5000. |
 | `startup_timeout` | string |  | `60s` | StartupTimeout is how long to wait for each agent's Start() call before treating it as failed. Duration string (e.g., "60s", "2m"). Defaults to "60s". |
 | `progress_stall_timeout` | string |  |  | ProgressStallTimeout, when set, enables progress-aware session recycling: a desired, alive, claim-less session on a healthy provider whose last provider-reported activity is older than this duration is restarted fresh. Such a session has likely parked (e.g. its turn ended on a provider auth error) and will not self-recover. Set this above the longest legitimate alive-idle period for the city; values below 5m are clamped to 5m. Duration string (e.g. "30m"). Unset/zero disables it. |
+| `pending_create_ttl` | string |  | `30m` | PendingCreateTTL bounds how long a start-pending session bead may wait for its runtime to be created and adopted. The controller reaps open start-pending beads older than this TTL whose session name has no live runtime, preventing duplicate pending records from jamming adoption. Duration string (e.g., "30m", "1h"). Defaults to "30m". |
 | `socket` | string |  |  | Socket specifies the tmux socket name for per-city isolation. When set, all tmux commands use "tmux -L &lt;socket&gt;" to connect to a dedicated server. When empty, defaults to the city name (workspace.name) — giving every city its own tmux server automatically. Set explicitly to override. |
 | `remote_match` | string |  |  | RemoteMatch is a substring pattern for the hybrid provider to route sessions to the remote (K8s) backend. Sessions whose names contain this pattern go to K8s; all others stay local (tmux). Overridden by the GC_HYBRID_REMOTE_MATCH env var if set. |
 
@@ -777,6 +803,18 @@ SessionSleepConfig configures default idle sleep policies by session class.
 | `interactive_resume` | string |  |  | InteractiveResume applies to attachable sessions using wake_mode=resume. Accepts a duration string or "off". |
 | `interactive_fresh` | string |  |  | InteractiveFresh applies to attachable sessions using wake_mode=fresh. Accepts a duration string or "off". |
 | `noninteractive` | string |  |  | NonInteractive applies to sessions with attach=false. Accepts a duration string or "off". |
+
+## StoreHealthConfig
+
+StoreHealthConfig configures the controller-internal store health patrol (city-scale architecture plan item 1.5).
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | boolean |  | `true` | Enabled toggles the patrol. Defaults to true. Disabling restores the pre-patrol behavior (no two-probe matrix, no auto-reap). |
+| `interval` | string |  | `30s` | Interval is the per-scope probe cadence as a duration string. Defaults to "30s". |
+| `consecutive_fails` | integer |  | `3` | ConsecutiveFails is how many consecutive A-fail∧B-ok cycles confirm a proxy poison before forensics + reap. Defaults to 3. |
+| `reap_cooldown` | string |  | `10m` | ReapCooldown is the minimum spacing between reaps for one scope as a duration string. A second poison inside the window is alert-only with forensics kept. Defaults to "10m". |
+| `write_probe_interval` | string |  | `10m` | WriteProbeInterval is the cadence of the write-path conformance probe (create+close one ephemeral bead of each RequiredCustomType) as a duration string. Defaults to "10m". |
 
 ## Tier
 

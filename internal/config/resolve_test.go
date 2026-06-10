@@ -2069,6 +2069,8 @@ func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
 		TitleModel:             "haiku",
 		ACPCommand:             "custom-acp",
 		ACPArgs:                []string{"acp-mode"},
+		QuotaMonitor:           boolPtr(true),
+		MonitorConfigDir:       "~/.gc/monitor-custom",
 	}
 
 	// Verify every field on city is non-zero (catches new fields not added to test data).

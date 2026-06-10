@@ -106,12 +106,32 @@ const (
 
 	// Non-terminal city lifecycle events recorded in the per-city
 	// event log during init/unregister for diagnostics.
-	CityCreated                     = "city.created"
-	CityUnregisterRequested         = "city.unregister_requested"
-	OrderFired                      = "order.fired"
-	OrderCompleted                  = "order.completed"
-	OrderFailed                     = "order.failed"
-	ProviderSwapped                 = "provider.swapped"
+	CityCreated             = "city.created"
+	CityUnregisterRequested = "city.unregister_requested"
+	OrderFired              = "order.fired"
+	OrderCompleted          = "order.completed"
+	OrderFailed             = "order.failed"
+	ProviderSwapped         = "provider.swapped"
+	// ProviderQuotaObserved fires each time the provider governor's quota
+	// poller successfully reads a Claude account's subscription usage from
+	// the OAuth usage endpoint (GET /api/oauth/usage). The typed payload
+	// (internal/providergov.QuotaObservedPayload) carries per-window
+	// utilization percentages and reset timestamps. Polling reads usage
+	// metadata only — zero model tokens are consumed.
+	ProviderQuotaObserved = "provider.quota_observed"
+	// ProviderQuotaPollFailed fires when one quota poll attempt for an
+	// account fails. The typed payload's ReasonClass is a mechanical
+	// classification of the failure mode (credential / auth / timeout /
+	// network / http_error / decode); the envelope Message carries the
+	// human-readable cause. A failing account is unknown, never dark —
+	// consumers must not treat poll failure as window exhaustion.
+	ProviderQuotaPollFailed = "provider.quota_poll_failed"
+	// OrderGateTimeoutFailOpen fires when an idempotent order's bounded
+	// open-work gate times out and the dispatcher fails OPEN — dispatching
+	// without having proven single-flight. Each emission is one fail-open;
+	// a rising count is the early-warning tripwire that store contention
+	// is degrading gate evaluation (incident 12 / #2893).
+	OrderGateTimeoutFailOpen        = "order.gate_timeout_fail_open"
 	WorkerOperation                 = "worker.operation"
 	ProjectIdentityStamped          = "project.identity.stamped"
 	SupervisorFSPressureSkippedTick = "supervisor.fs_pressure.skipped_tick"
@@ -185,8 +205,9 @@ var KnownEventTypes = []string{
 	RequestResultSessionCreate, RequestResultSessionMessage,
 	RequestResultSessionSubmit, RequestFailed,
 	CityCreated, CityUnregisterRequested,
-	OrderFired, OrderCompleted, OrderFailed,
-	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
+	OrderFired, OrderCompleted, OrderFailed, OrderGateTimeoutFailOpen,
+	ProviderSwapped, ProviderQuotaObserved, ProviderQuotaPollFailed,
+	WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
 	SupervisorShutdownRequested, SupervisorRequest,
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
 	ExtMsgAdapterAdded, ExtMsgAdapterRemoved,
@@ -195,6 +216,9 @@ var KnownEventTypes = []string{
 	StoreMaintenanceDone, StoreMaintenanceFailed,
 	StoreDiskWarn, StoreDiskCritical,
 	PostgresCredentialResolved,
+	StoreDegraded, StoreRecovered, StoreProbeFailed,
+	ProxyReaped, BreakerStateChanged,
+	ControllerTickCompleted, DoctorAlert,
 	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
 	// The event is emitted by the reconciler but its typed SSE payload is not
 	// yet registered in internal/api (the payload registration lives in a

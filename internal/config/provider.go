@@ -150,6 +150,18 @@ type ProviderSpec struct {
 	// ACPArgs overrides Args when the session transport is ACP.
 	// When nil, Args is used for both tmux and ACP transports.
 	ACPArgs []string `toml:"acp_args,omitempty"`
+	// QuotaMonitor enables controller-side subscription-usage polling for
+	// the account behind this provider (the provider-governor quota
+	// poller, internal/providergov). Tri-state: nil = inherit, &true =
+	// enable, &false = explicit disable. Requires MonitorConfigDir.
+	QuotaMonitor *bool `toml:"quota_monitor,omitempty"`
+	// MonitorConfigDir is the config directory holding this account's
+	// monitoring credential: a full OAuth login (scope user:profile)
+	// written by `CLAUDE_CONFIG_DIR=<dir> claude login` into
+	// <dir>/.credentials.json. Separate from the agents' inference auth —
+	// agent setup-tokens (scope user:inference) cannot read the usage
+	// endpoint. Supports a leading "~/" expanded against the home dir.
+	MonitorConfigDir string `toml:"monitor_config_dir,omitempty"`
 }
 
 // Reserved prefixes for the Base field.

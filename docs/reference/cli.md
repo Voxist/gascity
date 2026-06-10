@@ -53,6 +53,7 @@ gc [flags]
 | [gc pack](#gc-pack) | Manage remote pack sources |
 | [gc prime](#gc-prime) | Output the behavioral prompt for an agent |
 | [gc prompt](#gc-prompt) | Author and inspect agent prompt templates |
+| [gc provider](#gc-provider) | Provider governor utilities |
 | [gc register](#gc-register) | Register a city with the machine-wide supervisor |
 | [gc reload](#gc-reload) | Reload the current city's config without restarting the city/controller |
 | [gc restart](#gc-restart) | Restart all agent sessions in the city |
@@ -1163,14 +1164,16 @@ gc doctor
 
 gc dolt-cleanup is the Go-side implementation of the operational Dolt
 cleanup tool. It resolves the Dolt server port via the AD-04 chain
-(--port &gt; city dolt.port &gt; &lt;rigRoot&gt;/.beads/dolt-server.port &gt; 3307),
-drops stale test/agent databases, calls DOLT_PURGE_DROPPED_DATABASES
-to reclaim disk, and reaps orphaned dolt sql-server processes left
-over from leaked test harnesses. Invalid explicit ports and unreadable
-or invalid city/rig port settings fail closed before cleanup stages run;
-only absent rig port files can reach the legacy default. The legacy
-default is a connection fallback only; it does not protect port 3307
-from orphan-process reaping.
+(--port &gt; city dolt.port &gt; live managed dolt [runtime handle, then
+process table] &gt; 3307); .beads/dolt-server.port is a bd compatibility
+status file and is never consulted. It drops stale test/agent
+databases, calls DOLT_PURGE_DROPPED_DATABASES to reclaim disk, and
+reaps orphaned dolt sql-server processes left over from leaked test
+harnesses. Invalid explicit ports, invalid city port settings, and
+live-resolution errors (ambiguous listeners, discovery failures) fail
+closed before cleanup stages run; only a clean live-resolution miss can
+reach the legacy default. The legacy default is a connection fallback
+only; it does not protect port 3307 from orphan-process reaping.
 
 Dry-run by default. Pass --force to actually drop, purge, and kill.
 Pass --max-orphan-dbs with --force to refuse all destructive cleanup
@@ -1580,6 +1583,7 @@ gc import
 | [gc import check](#gc-import-check) | Validate installed pack import state |
 | [gc import install](#gc-import-install) | Install imports from pack.toml and packs.lock |
 | [gc import list](#gc-import-list) | List imported packs |
+| [gc import prune](#gc-import-prune) | Remove unreferenced clones from the global pack cache |
 | [gc import remove](#gc-import-remove) | Remove a pack import |
 | [gc import upgrade](#gc-import-upgrade) | Upgrade imported packs within their constraints |
 | [gc import why](#gc-import-why) | Explain why an import is present |
@@ -1650,6 +1654,32 @@ gc import list [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--tree` | bool |  | Show the import dependency tree |
+
+## gc import prune
+
+Remove unreferenced clones from the machine-wide pack cache.
+
+The pack cache (~/.gc/cache/repos) is shared by every city on the machine and
+is keyed by (source, commit), so commit churn accumulates stale clones over
+time. A clone is "referenced" when some city's packs.lock still pins it; prune
+keeps every referenced clone and removes only the rest.
+
+By default prune considers every city in the supervisor registry plus the city
+resolved from the current directory; pass --all-cities to reference the full
+registry set and ignore the current directory. Prune is a dry run unless
+--apply is given. The --keep-days guard never removes an unreferenced clone
+whose directory was modified more recently than N days ago, protecting
+in-flight installs from a race.
+
+```
+gc import prune [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--all-cities` | bool |  | Reference every city in the supervisor registry, ignoring the current directory |
+| `--apply` | bool |  | Delete unreferenced clones (default: dry run) |
+| `--keep-days` | int | `7` | Never prune unreferenced clones modified within this many days |
 
 ## gc import remove
 
@@ -2502,6 +2532,50 @@ gc prompt synth [flags]
 | `--wait-timeout` | duration | `10m0s` | in slingued mode with --wait, abort after this duration |
 | `--write` | bool |  | write to &lt;city&gt;/agents/&lt;role&gt;/prompt.template.md instead of stdout (direct mode only; slingued mode always writes) |
 | `--writer-agent` | string |  | Gas City agent to delegate the synth to via mol-prompt-synth (default: empty = direct mode, no agent) |
+
+## gc provider
+
+Provider governor utilities.
+
+The provider governor reads each Claude account's subscription usage
+(quota) and resolves which provider should serve each agent tier.
+Accounts are configured per provider in city.toml:
+
+    [providers.claude]
+    quota_monitor      = true
+    monitor_config_dir = "~/.gc/monitor-claude"
+
+The monitoring credential is a full OAuth login (scope user:profile)
+created once per account with:
+
+    CLAUDE_CONFIG_DIR=~/.gc/monitor-claude claude login
+
+```
+gc provider
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc provider quota](#gc-provider-quota) | Show Claude account quota states and per-tier provider decisions |
+
+## gc provider quota
+
+Show Claude account quota states and per-tier provider decisions
+
+```
+gc provider quota [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--active` | string |  | provider name of the currently-active Claude account (alternation stay/flip input) |
+| `--base-url` | string | `https://api.anthropic.com` | API origin serving /api/oauth/usage |
+| `--flip-threshold` | float64 | `85` | five-hour utilization percent above which the active account flips to its sibling |
+| `--interval` | duration | `2m0s` | poll interval used with --poll |
+| `--json` | bool |  | output as JSON |
+| `--overflow` | stringSlice |  | overflow vendor pool in priority order (e.g. zai,openrouter) |
+| `--poll` | bool |  | keep polling on an interval, recording provider.* events to the city event log |
+| `--timeout` | duration | `10s` | per-account usage request timeout |
 
 ## gc register
 

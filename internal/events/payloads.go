@@ -66,6 +66,39 @@ func (BeadWorktreeReapSkippedPayload) IsEventPayload() {}
 func init() {
 	RegisterPayload(BeadWorktreeReaped, BeadWorktreeReapedPayload{})
 	RegisterPayload(BeadWorktreeReapSkipped, BeadWorktreeReapSkippedPayload{})
+	RegisterPayload(OrderGateTimeoutFailOpen, OrderGateTimeoutFailOpenPayload{})
+}
+
+// OrderGateTimeoutFailOpenPayload is the typed payload for
+// order.gate_timeout_fail_open events. The order dispatcher emits one per
+// fail-open: an idempotent order whose bounded open-work gate timed out was
+// dispatched anyway (single-flight unproven). Operators count these as the
+// incident-12 tripwire — a rising rate means store contention is degrading
+// gate evaluation and the flat-membership path (or the store) needs
+// attention before silent fail-opens amplify.
+type OrderGateTimeoutFailOpenPayload struct {
+	// Order is the order's bare name without rig qualification.
+	Order string `json:"order"`
+	// Scope is the rig name the order is scoped to; empty for city-level
+	// orders.
+	Scope string `json:"scope,omitempty"`
+	// ElapsedSeconds is how long the gate ran before the per-order bound
+	// elapsed; 0 when the emitter could not measure it.
+	ElapsedSeconds float64 `json:"elapsed_s"`
+}
+
+// IsEventPayload marks OrderGateTimeoutFailOpenPayload as an events.Payload variant.
+func (OrderGateTimeoutFailOpenPayload) IsEventPayload() {}
+
+// OrderGateTimeoutFailOpenPayloadJSON builds the JSON wire form for
+// attachment to an Event.Payload field.
+func OrderGateTimeoutFailOpenPayloadJSON(order, scope string, elapsedSeconds float64) json.RawMessage {
+	b, _ := json.Marshal(OrderGateTimeoutFailOpenPayload{
+		Order:          order,
+		Scope:          scope,
+		ElapsedSeconds: elapsedSeconds,
+	})
+	return b
 }
 
 // StoreDiskWarnPayload is the typed payload for gc.store.disk_warn events.

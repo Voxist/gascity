@@ -134,6 +134,7 @@ func newControllerState(
 	} else {
 		store := opened.Store
 		cs.cityBeadStore = wrapWithCachingStore(ctx, store, ep, true)
+		wireStoreAvailabilityGate(cs.cityBeadStore, cityPath, cityPath)
 		cs.cityBeadsDiagnostic = diagnosticPtr(opened.Diagnostic)
 		cs.cityMailProv = newMailProvider(cs.cityBeadStore)
 		svc := extmsg.NewServices(cs.cityBeadStore)
@@ -260,6 +261,7 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 		}
 		store = cs.openRigStore(scopeProvider, rig.Name, scopeRoot, rig.EffectivePrefix(), cfg)
 		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv, rigStoreBackgroundRefresh(suspState, rig))
+		wireStoreAvailabilityGate(stores[rig.Name], cs.cityPath, scopeRoot)
 	}
 	return stores
 }
@@ -335,7 +337,7 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 			if err != nil {
 				return nil, fmt.Errorf("project native rig store env %s: %w", scopeRoot, err)
 			}
-			return beads.OpenNativeDoltStoreAt(context.Background(), scopeRoot, env)
+			return openNativeStoreWithIdentityAssertion(context.Background(), scopeRoot, env, nil)
 		},
 	})
 	if err != nil {
@@ -516,6 +518,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	var extSvc *extmsg.Services
 	if cityStore != nil {
 		cityStore = wrapWithCachingStore(cs.cacheCtx, cityStore, cs.eventProv, true)
+		wireStoreAvailabilityGate(cityStore, cs.cityPath, cs.cityPath)
 		cityMailProv = newMailProvider(cityStore)
 		svc := extmsg.NewServices(cityStore)
 		extSvc = &svc
@@ -1007,6 +1010,8 @@ func (cs *controllerState) CityBeadStore() beads.Store {
 }
 
 // CityBeadsDiagnostic returns the city-level bead store selection diagnostic.
+// Degraded is computed at read time from the live caching store so status
+// surfaces reflect the current breaker/cache state, not the open-time state.
 func (cs *controllerState) CityBeadsDiagnostic() *beads.BeadsDiagnostic {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
@@ -1014,7 +1019,23 @@ func (cs *controllerState) CityBeadsDiagnostic() *beads.BeadsDiagnostic {
 		return nil
 	}
 	diag := *cs.cityBeadsDiagnostic
+	diag.Degraded = storeReportsDegraded(cs.cityBeadStore)
+	diag.BdInflight = bdInflightForCity(cs.cityPath)
 	return &diag
+}
+
+// storeReportsDegraded reports whether the (possibly policy-wrapped) store
+// currently serves degraded last-good data. Stores without a degraded
+// signal report false.
+func storeReportsDegraded(store beads.Store) bool {
+	if store == nil {
+		return false
+	}
+	base, _, _ := unwrapBeadPolicyStore(store)
+	if d, ok := base.(interface{ Degraded() bool }); ok {
+		return d.Degraded()
+	}
+	return false
 }
 
 // Orders scans formula layers and returns active orders.
