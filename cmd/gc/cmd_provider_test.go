@@ -191,4 +191,17 @@ func TestProviderQuotaReportJSONShape(t *testing.T) {
 	if decoded["accounts"] == nil || decoded["decisions"] == nil {
 		t.Errorf("JSON missing accounts/decisions keys: %s", data)
 	}
+	if decoded["schema_version"] != "1" {
+		t.Errorf("schema_version = %v, want \"1\"", decoded["schema_version"])
+	}
+
+	// Empty report still serializes accounts as [] (not null) so the
+	// declared result schema's array type holds.
+	empty, err := json.Marshal(buildProviderQuotaReport(nil, "", providergov.DefaultPolicy()))
+	if err != nil {
+		t.Fatalf("marshal empty: %v", err)
+	}
+	if !strings.Contains(string(empty), `"accounts": []`) && !strings.Contains(string(empty), `"accounts":[]`) {
+		t.Errorf("empty report accounts not []: %s", empty)
+	}
 }
