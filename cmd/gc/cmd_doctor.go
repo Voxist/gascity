@@ -231,6 +231,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		// bd build pin: `bd --version` must contain [beads] expected_build
 		// (brew-clobber class). No-op when the pin is unset.
 		register(doctor.NewBeadsExpectedBuildCheck(cfg.Beads.ExpectedBuild))
+		register(newNativeStoreCanaryIdentityCheck(cityPath, cfg))
 		register(doctor.NewRigPackCoverageCheck(cfg, cityPath))
 		register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
 		register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
