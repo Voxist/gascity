@@ -7142,6 +7142,28 @@ func TestControllerRuntimeSweepsProcessTableOrphansAfterClosedBeadReap(t *testin
 	}
 }
 
+func TestControllerRuntimeReapsPhantomSessionBeadsAfterStaleSessionReap(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(".", "city_runtime.go"))
+	if err != nil {
+		t.Fatalf("read city_runtime.go: %v", err)
+	}
+	lines := strings.Split(string(data), "\n")
+	staleReapCalls := 0
+	for i, line := range lines {
+		if !strings.Contains(line, "reapStaleSessionBeads(") {
+			continue
+		}
+		staleReapCalls++
+		phantomLine := nextLineContaining(lines, i, "reapPhantomSessionBeads(")
+		if phantomLine == -1 {
+			t.Errorf("city_runtime.go:%d reapStaleSessionBeads is not followed by reapPhantomSessionBeads", i+1)
+		}
+	}
+	if staleReapCalls == 0 {
+		t.Fatal("city_runtime.go contains no reapStaleSessionBeads calls")
+	}
+}
+
 func terminatedSessionIDs(runtimes []runtime.LiveRuntime) string {
 	ids := make([]string, 0, len(runtimes))
 	for _, live := range runtimes {
