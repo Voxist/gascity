@@ -1035,6 +1035,13 @@
         "resilience": {
           "$ref": "#/$defs/BeadsResilienceConfig",
           "description": "Resilience configures the transport circuit breaker that guards bd\nsubprocess and store operations ([beads.resilience])."
+        },
+        "native_store_canary_scopes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "NativeStoreCanaryScopes lists the scope names (city name or rig names) for\nwhich the in-process NativeDoltStore is canaried, scope by scope, without\nflipping any global store mode. It is the P2.3 env-projection canary lever:\nwhen a scope is listed, the gc beads env projection ensures the native\nserver-mode Dolt keys (BEADS_DOLT_SERVER_MODE/HOST/PORT) are projected from\nthe managed-server live handle so the scope can open the native store, and\nthe post-open identity assertion guarantees a silent-empty or misrouted DB\nis detected immediately. Defaults to empty (OFF) and is purely additive: an\nunlisted scope's env projection is byte-for-byte unchanged. The operator\ncan layer additional scopes at runtime without editing committed config via\nthe GC_BEADS_NATIVE_STORE_CANARY environment variable (comma-separated\nscope names); env entries union with this list."
         }
       },
       "additionalProperties": false,
