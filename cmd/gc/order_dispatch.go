@@ -1423,39 +1423,15 @@ func listCanonicalOpenOrderTrackingBeads(store beads.Store) ([]beads.Bead, error
 // cooldown gate from pouring duplicate wisps when the pool stalls
 // (tr-kds01, where 24h-interval digest wisps accumulated because the
 // pool never picked them up).
+//
+// Descendant reasoning is delegated to the flat-membership evaluation
+// (hasOpenOrderWorkFlat): a bounded number of List calls plus in-memory set
+// operations, never the historical O(tree) per-node walk whose subprocess
+// cost blew the per-order gate bound under store contention (incident 12 /
+// #2893). Lingering transient nudge/mail chores are excluded via
+// isTransientNotificationBead (#2893 #3).
 func (m *memoryOrderDispatcher) hasOpenWorkStrict(store beads.Store, scopedName string) (bool, error) {
-	results, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
-		Label: "order-run:" + scopedName,
-		Sort:  beads.SortCreatedDesc,
-		// Tracking beads are ephemeral while wisp roots are issue-tier, so
-		// the authoritative single-flight gate must union both tiers.
-		TierMode: beads.TierBoth,
-	})
-	if err != nil {
-		return false, fmt.Errorf("listing order work beads: %w", err)
-	}
-	for _, b := range results {
-		if b.Status == "closed" {
-			continue
-		}
-		if beadLabelsContain(b.Labels, labelOrderTracking) {
-			return true, nil
-		}
-		if !isOrderWispRootCandidate(b) {
-			continue
-		}
-		if isOrderRootOnlyWispCandidate(b) {
-			return true, nil
-		}
-		hasOpenDescendants, err := storeHasOpenDescendants(store, b.ID, isTransientNotificationBead)
-		if err != nil {
-			return false, fmt.Errorf("checking open descendants of wisp %s: %w", b.ID, err)
-		}
-		if hasOpenDescendants {
-			return true, nil
-		}
-	}
-	return false, nil
+	return hasOpenOrderWorkFlat(store, scopedName, isTransientNotificationBead)
 }
 
 func isOrderWispRootCandidate(b beads.Bead) bool {
@@ -1720,6 +1696,17 @@ var orderGateTimeout = 8 * time.Second
 // genuine store-read error. Only this case fails open for idempotent orders.
 var errGateTimeout = errors.New("open-work gate timed out")
 
+// gateTimeoutError carries the measured gate runtime for the typed
+// order.gate_timeout_fail_open event. It unwraps to errGateTimeout so the
+// existing errors.Is policy checks in gateFailClosed keep working.
+type gateTimeoutError struct {
+	elapsed time.Duration
+}
+
+func (e *gateTimeoutError) Error() string { return errGateTimeout.Error() }
+
+func (e *gateTimeoutError) Unwrap() error { return errGateTimeout }
+
 // gateOpenWorkBounded runs the open-work gate under a per-order timeout that
 // also honors the dispatch context. On timeout (or cancellation) it returns an
 // error; the caller resolves that error through gateFailClosed, which applies
@@ -1734,6 +1721,7 @@ func gateOpenWorkBounded(ctx context.Context, timeout time.Duration, scoped stri
 		err error
 	}
 	done := make(chan gateResult, 1)
+	start := time.Now()
 	go func() {
 		has, err := gate()
 		done <- gateResult{has: has, err: err}
@@ -1744,7 +1732,7 @@ func gateOpenWorkBounded(ctx context.Context, timeout time.Duration, scoped stri
 	case r := <-done:
 		return r.has, r.err
 	case <-timer.C:
-		return false, fmt.Errorf("open-work gate for %s timed out after %s; skipping this order so later orders still dispatch (see #2893): %w", scoped, timeout, errGateTimeout)
+		return false, fmt.Errorf("open-work gate for %s timed out after %s; skipping this order so later orders still dispatch (see #2893): %w", scoped, timeout, &gateTimeoutError{elapsed: time.Since(start)})
 	case <-ctx.Done():
 		return false, fmt.Errorf("open-work gate for %s aborted: %w", scoped, ctx.Err())
 	}
@@ -1780,9 +1768,34 @@ func (m *memoryOrderDispatcher) gateFailClosed(ctx context.Context, a orders.Ord
 	}
 	if a.Idempotent && errors.Is(err, errGateTimeout) {
 		logDispatchError(m.stderr, "gc: order dispatch: %s open-work gate failed but order is idempotent; dispatching anyway (#2893)", scoped)
+		m.recordGateTimeoutFailOpen(a, scoped, err)
 		return false
 	}
 	return true
+}
+
+// recordGateTimeoutFailOpen emits the typed order.gate_timeout_fail_open
+// event for every fail-open: an idempotent order dispatched after its
+// bounded open-work gate timed out, with single-flight unproven. The
+// per-emission count is the incident-12 tripwire — fail-opens are deliberate
+// but must never be silent, because their frequency rises with exactly the
+// store contention that degrades gate evaluation.
+func (m *memoryOrderDispatcher) recordGateTimeoutFailOpen(a orders.Order, scoped string, err error) {
+	if m.rec == nil {
+		return
+	}
+	var elapsed time.Duration
+	var te *gateTimeoutError
+	if errors.As(err, &te) {
+		elapsed = te.elapsed
+	}
+	m.rec.Record(events.Event{
+		Type:    events.OrderGateTimeoutFailOpen,
+		Actor:   "controller",
+		Subject: scoped,
+		Message: fmt.Sprintf("open-work gate timed out after %s; idempotent order dispatched fail-open (#2893)", elapsed.Round(time.Millisecond)),
+		Payload: events.OrderGateTimeoutFailOpenPayloadJSON(a.Name, a.Rig, elapsed.Seconds()),
+	})
 }
 
 // sweepOrphanedOrderTracking closes any open order-tracking beads left

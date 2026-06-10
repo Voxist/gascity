@@ -2183,6 +2183,9 @@
             "$ref": "#/components/schemas/NoPayload"
           },
           {
+            "$ref": "#/components/schemas/OrderGateTimeoutFailOpenPayload"
+          },
+          {
             "$ref": "#/components/schemas/OutboundEventPayload"
           },
           {
@@ -4479,6 +4482,26 @@
           "scoped_name",
           "due",
           "reason"
+        ],
+        "type": "object"
+      },
+      "OrderGateTimeoutFailOpenPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "elapsed_s": {
+            "format": "double",
+            "type": "number"
+          },
+          "order": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "order",
+          "elapsed_s"
         ],
         "type": "object"
       },
@@ -7881,6 +7904,7 @@
             "order.completed": "#/components/schemas/TypedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedEventStreamEnvelopeOrderFired",
+            "order.gate_timeout_fail_open": "#/components/schemas/TypedEventStreamEnvelopeOrderGateTimeoutFailOpen",
             "pg.credential_resolved": "#/components/schemas/TypedEventStreamEnvelopePgCredentialResolved",
             "project.identity.stamped": "#/components/schemas/TypedEventStreamEnvelopeProjectIdentityStamped",
             "provider.quota_observed": "#/components/schemas/TypedEventStreamEnvelopeProviderQuotaObserved",
@@ -8022,6 +8046,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderFired"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderGateTimeoutFailOpen"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopePgCredentialResolved"
@@ -8777,6 +8804,7 @@
                 "order.fired",
                 "order.completed",
                 "order.failed",
+                "order.gate_timeout_fail_open",
                 "provider.swapped",
                 "provider.quota_observed",
                 "provider.quota_poll_failed",
@@ -9738,6 +9766,48 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope order.fired",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeOrderGateTimeoutFailOpen": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/OrderGateTimeoutFailOpenPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "order.gate_timeout_fail_open",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope order.gate_timeout_fail_open",
         "type": "object"
       },
       "TypedEventStreamEnvelopePgCredentialResolved": {
@@ -11040,6 +11110,7 @@
             "order.completed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFired",
+            "order.gate_timeout_fail_open": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen",
             "pg.credential_resolved": "#/components/schemas/TypedTaggedEventStreamEnvelopePgCredentialResolved",
             "project.identity.stamped": "#/components/schemas/TypedTaggedEventStreamEnvelopeProjectIdentityStamped",
             "provider.quota_observed": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderQuotaObserved",
@@ -11181,6 +11252,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFired"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopePgCredentialResolved"
@@ -11995,6 +12069,7 @@
                 "order.fired",
                 "order.completed",
                 "order.failed",
+                "order.gate_timeout_fail_open",
                 "provider.swapped",
                 "provider.quota_observed",
                 "provider.quota_poll_failed",
@@ -13045,6 +13120,52 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope order.fired",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/OrderGateTimeoutFailOpenPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "order.gate_timeout_fail_open",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope order.gate_timeout_fail_open",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopePgCredentialResolved": {

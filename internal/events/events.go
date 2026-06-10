@@ -125,7 +125,13 @@ const (
 	// network / http_error / decode); the envelope Message carries the
 	// human-readable cause. A failing account is unknown, never dark —
 	// consumers must not treat poll failure as window exhaustion.
-	ProviderQuotaPollFailed         = "provider.quota_poll_failed"
+	ProviderQuotaPollFailed = "provider.quota_poll_failed"
+	// OrderGateTimeoutFailOpen fires when an idempotent order's bounded
+	// open-work gate times out and the dispatcher fails OPEN — dispatching
+	// without having proven single-flight. Each emission is one fail-open;
+	// a rising count is the early-warning tripwire that store contention
+	// is degrading gate evaluation (incident 12 / #2893).
+	OrderGateTimeoutFailOpen        = "order.gate_timeout_fail_open"
 	WorkerOperation                 = "worker.operation"
 	ProjectIdentityStamped          = "project.identity.stamped"
 	SupervisorFSPressureSkippedTick = "supervisor.fs_pressure.skipped_tick"
@@ -199,7 +205,7 @@ var KnownEventTypes = []string{
 	RequestResultSessionCreate, RequestResultSessionMessage,
 	RequestResultSessionSubmit, RequestFailed,
 	CityCreated, CityUnregisterRequested,
-	OrderFired, OrderCompleted, OrderFailed,
+	OrderFired, OrderCompleted, OrderFailed, OrderGateTimeoutFailOpen,
 	ProviderSwapped, ProviderQuotaObserved, ProviderQuotaPollFailed,
 	WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
 	SupervisorShutdownRequested, SupervisorRequest,
