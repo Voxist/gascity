@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -42,10 +44,9 @@ With --claim: runs the standard startup claim protocol for one work item.
 				DrainAck:   drainAck,
 				JSON:       jsonOut,
 			}
-			if cmdHookWithOptions(args, opts, stdout, stderr) != 0 {
-				return errExit
-			}
-			return nil
+			// exitForCode preserves the exit-2 store-unavailable signal
+			// (vs exit-1 no-work) for runtime hook consumers.
+			return exitForCode(cmdHookWithOptions(args, opts, stdout, stderr))
 		},
 	}
 	cmd.Flags().BoolVar(&inject, "inject", false, "silent legacy Stop-hook compatibility; skip work query and exit 0")
@@ -373,10 +374,36 @@ func workQueryEnvForDir(env []string, dir string) []string {
 	return append(out, "PWD="+dir)
 }
 
+// hookStoreUnavailableToken is the distinct stderr token gc hook emits
+// (with exit code 2) when the bead store is unreachable. Runtime hook
+// consumers match on it to distinguish "store down" from exit-1 no-work —
+// rendering an unreachable store as no-work is the chronic
+// idle-agents-with-work-waiting dead-drop (R-INV, plan item 1.3).
+const hookStoreUnavailableToken = "GC_HOOK_STORE_UNAVAILABLE"
+
+// classifyWorkQueryStoreUnavailable wraps transport-class work-query
+// failures with beads.ErrStoreUnavailable. Work queries shell out to bd,
+// so an unreachable store surfaces as exec stderr text; classification
+// rides the pinned bdTransportRetryableMarkers compatibility surface.
+// Non-transport errors pass through unchanged.
+func classifyWorkQueryStoreUnavailable(err error) error {
+	if err == nil || errors.Is(err, beads.ErrStoreUnavailable) {
+		return err
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range bdTransportRetryableMarkers {
+		if strings.Contains(msg, marker) {
+			return fmt.Errorf("%w: %w", beads.ErrStoreUnavailable, err)
+		}
+	}
+	return err
+}
+
 // doHook is the pure logic for gc hook. Runs the work query and outputs
 // results based on mode. Without inject: prints normalized ready-only output,
-// returns 0 if work exists, 1 if empty. With inject: skips the work query and
-// returns 0.
+// returns 0 if work exists, 1 if empty, 2 if the bead store is unreachable
+// (typed unavailable, never rendered as no-work). With inject: skips the
+// work query and returns 0.
 func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, stderr io.Writer) int {
 	if inject {
 		return 0
@@ -384,6 +411,10 @@ func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, 
 
 	output, err := runner(workQuery, dir)
 	if err != nil {
+		if classified := classifyWorkQueryStoreUnavailable(err); errors.Is(classified, beads.ErrStoreUnavailable) {
+			fmt.Fprintf(stderr, "gc hook: %s: %v\n", hookStoreUnavailableToken, classified) //nolint:errcheck // best-effort stderr
+			return 2
+		}
 		if normalized := normalizeWorkQueryOutput(strings.TrimSpace(output)); normalized != "" {
 			fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
 		}
