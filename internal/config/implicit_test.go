@@ -85,6 +85,32 @@ scope = "city"
 	}
 }
 
+func TestRepoCacheRootHonorsGCHome(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	got := RepoCacheRoot()
+	want := filepath.Join(gcHome, "cache", "repos")
+	if got != want {
+		t.Fatalf("RepoCacheRoot() = %q, want %q", got, want)
+	}
+}
+
+func TestRepoCacheRootFallsBackToUserHome(t *testing.T) {
+	// With GC_HOME unset, the root must resolve under the user home's .gc —
+	// never the empty go-test path — so production behavior is byte-identical
+	// to the legacy ~/.gc/cache/repos computation.
+	t.Setenv("GC_HOME", "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	got := RepoCacheRoot()
+	want := filepath.Join(home, ".gc", "cache", "repos")
+	if got != want {
+		t.Fatalf("RepoCacheRoot() = %q, want %q", got, want)
+	}
+}
+
 func TestGlobalRepoCacheDirNameUsesCanonicalRepoCacheKey(t *testing.T) {
 	source := "file:///tmp/repo.git//packs/base"
 	commit := "abc123"

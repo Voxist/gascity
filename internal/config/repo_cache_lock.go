@@ -63,9 +63,10 @@ func repoCacheRootCandidates() []string {
 		}
 		roots = append(roots, abs)
 	}
-	if gcHome := ImplicitGCHome(); gcHome != "" {
-		add(filepath.Join(gcHome, "cache", "repos"))
-	}
+	// RepoCacheRoot is the canonical computation (GC_HOME → ~/.gc), and it
+	// always resolves to a usable path so the lock root tracks the cache root
+	// that writers actually use — including under tests that set GC_HOME.
+	add(RepoCacheRoot())
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		add(filepath.Join(home, ".gc", "cache", "repos"))
 	}

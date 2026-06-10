@@ -16,6 +16,7 @@ func TestSyncLockFromLockWalksTransitiveImports(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	stubCachedPackGit(t)
 
 	lock := &Lockfile{
@@ -58,6 +59,7 @@ func TestSyncLockHonorsTransitiveFalse(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	stubCachedPackGit(t)
 
 	lock := &Lockfile{
@@ -100,6 +102,7 @@ func TestSyncLockExpandsRepeatedSourceWhenAnyImportIsTransitive(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	stubCachedPackGit(t)
 
 	lock := &Lockfile{
@@ -143,6 +146,7 @@ func TestSyncLockResolveIfNeededResolvesAndCaches(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	prev := runGit
 	runGit = func(dir string, args ...string) (string, error) {
@@ -194,6 +198,7 @@ func TestInstallLockedEnsuresEveryLockedRepo(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	if err := WriteLockfile(fsys.OSFS{}, city, &Lockfile{
 		Schema: LockfileSchema,
@@ -242,6 +247,7 @@ func TestInstallLockedEnsuresEveryLockedRepo(t *testing.T) {
 func TestReadCachedPackImportsUsesSubpath(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	stubCachedPackGit(t)
 
 	source := "file:///tmp/repo.git//packs/base"
@@ -280,6 +286,7 @@ source = "https://example.com/inner.git"
 func TestReadCachedPackImportsRejectsMissingGitHead(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	source := "file:///tmp/repo.git//packs/base"
 	commit := "abc123"
@@ -310,6 +317,7 @@ func TestSyncLockConflictingPinnedVersionsError(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	_, err := SyncLock(city, map[string]config.Import{
 		"a": {Source: "https://example.com/a.git", Version: "sha:aaaa"},
@@ -327,6 +335,7 @@ func TestSyncLockMergesCompatibleDirectConstraints(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	prev := runGit
 	runGit = func(dir string, args ...string) (string, error) {
@@ -376,6 +385,7 @@ func TestSyncLockSelectiveUpgradeMergesSameSourceConstraints(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	prev := runGit
 	runGit = func(dir string, args ...string) (string, error) {
@@ -427,6 +437,7 @@ func TestSyncLockMergesDirectAndTransitiveConstraintsBeforeResolution(t *testing
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	stubCachedPackGit(t)
 
 	if err := WriteLockfile(fsys.OSFS{}, city, &Lockfile{
@@ -470,6 +481,7 @@ func TestSyncLockInstallUpgradeReconcilesCompatibleConstraintsAcrossScopes(t *te
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	if err := WriteLockfile(fsys.OSFS{}, city, &Lockfile{
 		Schema: LockfileSchema,
@@ -543,6 +555,7 @@ func TestSyncLockConvergesForDeepTransitiveChains(t *testing.T) {
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 	stubCachedPackGit(t)
 
 	lock := &Lockfile{
@@ -583,6 +596,7 @@ func TestSyncLockAllowsMultipleSubpathsFromSameRepoWithSharedClone(t *testing.T)
 	home := t.TempDir()
 	city := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
 
 	cloneCount := 0
 	prev := runGit
