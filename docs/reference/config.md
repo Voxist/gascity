@@ -271,6 +271,19 @@ BeadsConfig holds bead store settings.
 | `event_hooks` | boolean |  | `true` | EventHooks controls installation of the bead event-forwarding hooks (.beads/hooks/on_create,on_update,on_close) that shell out to `gc event emit` on every bead write. Defaults to true. Set to false once the controller's native cache-events already observe bead changes (the bd_hooks doctor gate): the lifecycle then removes the event hooks (leaving git hooks untouched) and stops reinstalling them, clearing the per-write churn and the native-store gate. |
 | `bd_compatibility` | string |  |  | BDCompatibility selects the bd CLI semantics Gas City may rely on. Empty defaults to "bd-1.0.4", which keeps claimable work history-backed and avoids bd ready/list flags that are unavailable or incomplete in bd 1.0.4. Enum: `bd-1.0.4`, `bd-1.0.5` |
 | `policies` | map[string]BeadPolicyConfig |  |  | Policies defines per-bead-use storage and garbage-collection defaults. Policy names are interpreted by higher-level systems; unknown names are preserved so packs can stage future policy classes without breaking load. |
+| `resilience` | BeadsResilienceConfig |  |  | Resilience configures the transport circuit breaker that guards bd subprocess and store operations ([beads.resilience]). |
+
+## BeadsResilienceConfig
+
+BeadsResilienceConfig holds circuit breaker settings for transport-class bead store failures.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | boolean |  | `true` | Enabled toggles the breaker. Defaults to true. |
+| `consecutive_failures` | integer |  | `3` | ConsecutiveFailures is how many consecutive transport-class failures trip the breaker. Defaults to 3. |
+| `open_base` | string |  | `1s` | OpenBase is the initial open-state backoff cap as a duration string. Defaults to "1s". |
+| `open_max` | string |  | `60s` | OpenMax caps the open-state backoff as a duration string. Defaults to "60s". |
+| `half_open_interval` | string |  | `15s` | HalfOpenInterval is the minimum spacing between recovery probes while half-open, as a duration string. Defaults to "15s". |
 
 ## ChatSessionsConfig
 
