@@ -202,6 +202,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		ResumeCommand:           strVal("claude --resume {{.SessionKey}}"),
 		WakeMode:                strVal("fresh"),
 		MouseMode:               strVal("on"),
+		Tier:                    strVal("claude-required"),
 		PreStartAppend:          []string{"pre-append"},
 		SessionSetupAppend:      []string{"setup-append"},
 		SessionLiveAppend:       []string{"live-append"},
@@ -357,6 +358,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 		ResumeCommand:           strVal("claude --resume {{.SessionKey}}"),
 		WakeMode:                strVal("fresh"),
 		MouseMode:               strVal("on"),
+		Tier:                    strVal("overflow-ok"),
 		PreStartAppend:          []string{"pre-append"},
 		SessionSetupAppend:      []string{"setup-append"},
 		SessionLiveAppend:       []string{"live-append"},
@@ -475,6 +477,8 @@ func TestProviderFieldSync(t *testing.T) {
 		"ForkFlag":               "internal fork-launch config (claude-only), not patched",
 		"PrintArgs":              "internal print-mode args, not patched",
 		"TitleModel":             "internal title-model key, not patched",
+		"QuotaMonitor":           "controller-side governor monitoring switch, set per account in city.toml, not patched",
+		"MonitorConfigDir":       "controller-side monitoring credential dir, set per account in city.toml, not patched",
 	}
 
 	// Fields on ProviderPatch that don't map 1:1 to ProviderSpec.
