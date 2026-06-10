@@ -354,11 +354,9 @@ func (cr *CityRuntime) crashTrack() crashTracker {
 func (cr *CityRuntime) run(ctx context.Context) {
 	defer cr.shutdown()
 
+	// configDirty is always non-nil: newCityRuntime (the sole constructor)
+	// substitutes a fresh *atomic.Bool when the caller passes none.
 	dirty := cr.configDirty
-	if dirty == nil {
-		dirty = &atomic.Bool{}
-		cr.configDirty = dirty
-	}
 
 	if cr.tomlPath != "" {
 		cr.restartConfigWatcher()

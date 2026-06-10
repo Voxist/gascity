@@ -1602,9 +1602,12 @@ func partitionReadyByAssignee(ready []beads.Bead, assignees []string, perLimit i
 	if len(ready) == 0 || len(assignees) == 0 {
 		return nil
 	}
+	trimmed := make([]string, len(assignees))
 	wanted := make(map[string]struct{}, len(assignees))
-	for _, a := range assignees {
-		if a = strings.TrimSpace(a); a != "" {
+	for i, a := range assignees {
+		a = strings.TrimSpace(a)
+		trimmed[i] = a
+		if a != "" {
 			wanted[a] = struct{}{}
 		}
 	}
@@ -1626,8 +1629,8 @@ func partitionReadyByAssignee(ready []beads.Bead, assignees []string, perLimit i
 		byAssignee[assignee] = append(byAssignee[assignee], b)
 	}
 	out := make([]beads.Bead, 0, len(ready))
-	for _, assignee := range assignees {
-		out = append(out, byAssignee[strings.TrimSpace(assignee)]...)
+	for _, assignee := range trimmed {
+		out = append(out, byAssignee[assignee]...)
 	}
 	return out
 }
