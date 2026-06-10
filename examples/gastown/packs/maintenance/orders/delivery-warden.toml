@@ -2,6 +2,23 @@
 # repairs orphaned/zombie PRs, escalates stalled phases, and writes a heartbeat
 # for the supervisor liveness check. Idempotent: safe to dispatch in parallel or
 # on retry without side-effects.
+#
+# Required env vars:
+#   GITHUB_TOKEN               — GitHub PAT with repo read access
+#   GC_WARDEN_REPOS            — comma-separated owner/repo pairs to scan
+#                                (supplements --repo flags)
+#
+# Optional env vars:
+#   GC_WARDEN_RECOVERY_TARGETS — comma-separated phase=rig/pool overrides for
+#                                recovery nudges, e.g.:
+#                                  review-pending=voxist-web/voxist.reviewer
+#                                  building=voxist-web/voxist.executor
+#                                Phases not listed fall back to the built-in
+#                                voxist-platform/* defaults.  Use this when
+#                                deploying the warden for a non-platform rig so
+#                                stalled beads are nudged to the owning rig's
+#                                agent pools instead of voxist-platform/*.
+#   BEADS_DIR                  — path to beads store root (default: cwd)
 [order]
 description = "Reconcile GitHub PR state with delivery beads (orphan/zombie/dwell/lifetime)"
 trigger     = "cooldown"

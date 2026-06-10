@@ -42,16 +42,49 @@ func (r *repoFlag) Set(v string) error {
 	return nil
 }
 
+// recoveryTargetFlag accumulates repeated --recovery-target=phase=rig/pool flags.
+type recoveryTargetFlag map[string]string
+
+func (f *recoveryTargetFlag) String() string {
+	parts := make([]string, 0, len(*f))
+	for phase, target := range *f {
+		parts = append(parts, phase+"="+target)
+	}
+	return strings.Join(parts, ",")
+}
+
+func (f *recoveryTargetFlag) Set(v string) error {
+	phase, target, ok := strings.Cut(v, "=")
+	if !ok || phase == "" || target == "" {
+		return fmt.Errorf("recovery-target must be phase=rig/pool, got %q", v)
+	}
+	if *f == nil {
+		*f = make(map[string]string)
+	}
+	(*f)[phase] = target
+	return nil
+}
+
 func run() error {
 	var repos repoFlag
+	var recoveryTargets recoveryTargetFlag
 	heartbeatFile := flag.String("heartbeat-file", "", "heartbeat file path (default: /tmp/gc-delivery-warden.heartbeat)")
 	flag.Var(&repos, "repo", "owner/repo pair to scan (repeatable)")
+	flag.Var(&recoveryTargets, "recovery-target", "phase=rig/pool override for recovery nudges (repeatable); falls back to voxist-platform/* defaults")
 	flag.Parse()
 
 	// Supplement --repo flags with GC_WARDEN_REPOS env var (comma-separated).
 	if envRepos := os.Getenv("GC_WARDEN_REPOS"); envRepos != "" {
 		for _, item := range strings.Split(envRepos, ",") {
 			_ = repos.Set(strings.TrimSpace(item))
+		}
+	}
+
+	// Supplement --recovery-target flags with GC_WARDEN_RECOVERY_TARGETS env var
+	// (comma-separated phase=rig/pool items, e.g. "review-pending=voxist-web/voxist.reviewer").
+	if envTargets := os.Getenv("GC_WARDEN_RECOVERY_TARGETS"); envTargets != "" {
+		for _, item := range strings.Split(envTargets, ",") {
+			_ = recoveryTargets.Set(strings.TrimSpace(item))
 		}
 	}
 
@@ -73,6 +106,9 @@ func run() error {
 	gh := newGitHubClient(token)
 	mail := &gcMailSender{}
 	w := NewWarden(store, gh, mail)
+	if len(recoveryTargets) > 0 {
+		w.SetRecoveryTargets(map[string]string(recoveryTargets))
+	}
 	return w.Sweep([][2]string(repos), *heartbeatFile)
 }
 

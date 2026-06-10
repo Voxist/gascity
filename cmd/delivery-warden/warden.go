@@ -66,15 +66,37 @@ type MailSender interface {
 
 // Warden reconciles GitHub PR state against the bead store on each sweep.
 type Warden struct {
-	store  beads.Store
-	github GitHubClient
-	mail   MailSender
-	clock  func() time.Time // injectable for tests; defaults to time.Now
+	store           beads.Store
+	github          GitHubClient
+	mail            MailSender
+	clock           func() time.Time  // injectable for tests; defaults to time.Now
+	recoveryTargets map[string]string // phase → rig/pool overrides (nil = use package defaults)
 }
 
 // NewWarden creates a Warden backed by the given store, GitHub client, and mail sender.
 func NewWarden(store beads.Store, gh GitHubClient, mail MailSender) *Warden {
 	return &Warden{store: store, github: gh, mail: mail, clock: time.Now}
+}
+
+// SetRecoveryTargets overrides per-phase recovery nudge targets.
+// Only phases listed in targets are overridden; others fall back to
+// the package-level recoveryTarget defaults.
+func (w *Warden) SetRecoveryTargets(targets map[string]string) {
+	w.recoveryTargets = targets
+}
+
+// resolveTarget returns the recovery target for phase, preferring any
+// per-instance override set via SetRecoveryTargets over the defaults.
+func (w *Warden) resolveTarget(phase string) string {
+	if w.recoveryTargets != nil {
+		if t, ok := w.recoveryTargets[phase]; ok {
+			return t
+		}
+	}
+	if t, ok := recoveryTarget[phase]; ok {
+		return t
+	}
+	return "voxist-platform/voxist.reviewer"
 }
 
 // now returns the current time via the injectable clock.
@@ -260,10 +282,7 @@ func (w *Warden) CheckPhaseDwell() error {
 				return fmt.Errorf("CheckPhaseDwell: set escalated on %s: %w", b.ID, err)
 			}
 		} else {
-			target, ok := recoveryTarget[phase]
-			if !ok {
-				target = "voxist-platform/voxist.reviewer"
-			}
+			target := w.resolveTarget(phase)
 			subject := fmt.Sprintf("phase stall: %s phase=%s (retry %d)", b.ID, phase, retries+1)
 			body := fmt.Sprintf("Bead %s stalled in %s for >%s.", b.ID, phase, budget)
 			if err := w.mail.Send("voxist-platform/voxist.warden", target, subject, body); err != nil {

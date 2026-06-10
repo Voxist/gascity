@@ -226,9 +226,9 @@ func TestRepairZombie_Closed(t *testing.T) {
 	}
 }
 
-// newDeliveryBeadWithPhaseEnteredAt creates a delivery bead with gc.phase_entered_at set.
-func newDeliveryBeadWithPhaseEnteredAt(store beads.Store, prURL, phase string, enteredAt time.Time) beads.Bead {
-	b := newDeliveryBead(store, prURL, phase)
+// newDeliveryBeadWithPhaseEnteredAt creates a review-pending delivery bead with gc.phase_entered_at set.
+func newDeliveryBeadWithPhaseEnteredAt(store beads.Store, prURL string, enteredAt time.Time) beads.Bead {
+	b := newDeliveryBead(store, prURL, delivery.PhaseReviewPending)
 	if err := store.SetMetadata(b.ID, metaKeyPhaseEnteredAt, strconv.FormatInt(enteredAt.Unix(), 10)); err != nil {
 		panic(err)
 	}
@@ -244,7 +244,7 @@ func TestPhaseDwellRetry(t *testing.T) {
 
 	// Bead in review-pending for 65 min — past the 60-min budget.
 	enteredAt := time.Now().Add(-65 * time.Minute)
-	b := newDeliveryBeadWithPhaseEnteredAt(store, "https://github.com/org/repo/pull/10", delivery.PhaseReviewPending, enteredAt)
+	b := newDeliveryBeadWithPhaseEnteredAt(store, "https://github.com/org/repo/pull/10", enteredAt)
 
 	gh := &FakeGitHub{}
 	mail := &FakeMail{}
@@ -271,7 +271,7 @@ func TestPhaseDwellEscalate(t *testing.T) {
 
 	// Bead in review-pending 65 min, already retried 3 times → escalation path.
 	enteredAt := time.Now().Add(-65 * time.Minute)
-	b := newDeliveryBeadWithPhaseEnteredAt(store, "https://github.com/org/repo/pull/20", delivery.PhaseReviewPending, enteredAt)
+	b := newDeliveryBeadWithPhaseEnteredAt(store, "https://github.com/org/repo/pull/20", enteredAt)
 	if err := store.SetMetadata(b.ID, metaKeyWardenRetries, "3"); err != nil {
 		t.Fatalf("set retries: %v", err)
 	}
@@ -406,4 +406,56 @@ func TestWardenNoop(t *testing.T) {
 	if len(mail.Sent) != 0 {
 		t.Errorf("want 0 mails, got %d", len(mail.Sent))
 	}
+}
+
+func TestPhaseDwellCustomRecoveryTarget(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// Bead in review-pending for 65 min — past the 60-min budget.
+	enteredAt := time.Now().Add(-65 * time.Minute)
+	b := newDeliveryBeadWithPhaseEnteredAt(store, "https://github.com/org/repo/pull/40", enteredAt)
+
+	gh := &FakeGitHub{}
+	mail := &FakeMail{}
+	w := NewWarden(store, gh, mail)
+	// Override review-pending → voxist-web rig instead of the default voxist-platform.
+	w.SetRecoveryTargets(map[string]string{
+		delivery.PhaseReviewPending: "voxist-web/voxist.reviewer",
+	})
+
+	if err := w.CheckPhaseDwell(); err != nil {
+		t.Fatalf("CheckPhaseDwell: %v", err)
+	}
+
+	if len(mail.Sent) == 0 {
+		t.Fatal("want recovery nudge sent, got none")
+	}
+	if mail.Sent[0].To != "voxist-web/voxist.reviewer" {
+		t.Errorf("recovery nudge target: got %q, want %q", mail.Sent[0].To, "voxist-web/voxist.reviewer")
+	}
+	_ = b
+}
+
+func TestPhaseDwellDefaultTargetUnchanged(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// No custom targets set — nudge should go to the default.
+	enteredAt := time.Now().Add(-65 * time.Minute)
+	b := newDeliveryBeadWithPhaseEnteredAt(store, "https://github.com/org/repo/pull/41", enteredAt)
+
+	gh := &FakeGitHub{}
+	mail := &FakeMail{}
+	w := NewWarden(store, gh, mail)
+
+	if err := w.CheckPhaseDwell(); err != nil {
+		t.Fatalf("CheckPhaseDwell: %v", err)
+	}
+
+	if len(mail.Sent) == 0 {
+		t.Fatal("want recovery nudge sent, got none")
+	}
+	if mail.Sent[0].To != "voxist-platform/voxist.reviewer" {
+		t.Errorf("default target: got %q, want %q", mail.Sent[0].To, "voxist-platform/voxist.reviewer")
+	}
+	_ = b
 }
