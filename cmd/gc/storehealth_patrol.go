@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/events"
@@ -171,16 +172,22 @@ func (cs *controllerState) storeHealthHooks(cityPath string, cfg *config.City, s
 	}
 }
 
+// bdRunnerForScope returns the bd command runner for a scope: the rig runner
+// for a bound-rig scope, or the city runner when the scope is the city root.
+func bdRunnerForScope(cityPath string, cfg *config.City, scope string) beads.CommandRunner {
+	if samePath(scope, cityPath) {
+		return bdCommandRunnerForCity(cityPath)
+	}
+	return bdCommandRunnerForRig(cityPath, cfg, scope)
+}
+
 // storeHealthProbeRoutedFresh runs probe A: a one-shot `bd list --limit 1`
 // against the scope. A fresh subprocess forces a fresh backend connection
 // (the HQ poison hit new opens only). It deliberately bypasses the scope
 // breaker gate so it can serve as the recovery probe even while the breaker
 // is open; a success records on the breaker, closing it.
 func storeHealthProbeRoutedFresh(_ context.Context, cityPath string, cfg *config.City, scope string) storehealth.ProbeResult {
-	runner := bdCommandRunnerForRig(cityPath, cfg, scope)
-	if samePath(scope, cityPath) {
-		runner = bdCommandRunnerForCity(cityPath)
-	}
+	runner := bdRunnerForScope(cityPath, cfg, scope)
 	out, err := runner(scope, "bd", "list", "--limit", "1")
 	if err != nil {
 		// A breaker-open error is itself the degraded signal the patrol is
@@ -224,10 +231,7 @@ func storeHealthProbeBackendDirect(_ context.Context, cityPath string) storeheal
 // type; a transport error is NOT a write rejection (the transport breaker
 // owns that), so it returns Ok=true to avoid double-counting.
 func storeHealthWriteProbe(_ context.Context, cityPath string, cfg *config.City, scope string) storehealth.ProbeResult {
-	runner := bdCommandRunnerForRig(cityPath, cfg, scope)
-	if samePath(scope, cityPath) {
-		runner = bdCommandRunnerForCity(cityPath)
-	}
+	runner := bdRunnerForScope(cityPath, cfg, scope)
 	for _, typ := range requiredCustomTypeNames() {
 		out, err := runner(scope, "bd", "create",
 			"--type", typ,

@@ -105,7 +105,10 @@ func evaluateCityDoctorSubset(state api.State, stderr io.Writer) {
 	}
 
 	// S6 connection ceiling: scopes × (pool+1) ≤ 0.8 × max_connections.
-	scopes := len(storeHealthScopeRoots(cityPath, cfg))
+	// collectStage1ScopeRoots dedups colliding rig paths, so the count never
+	// over-estimates the connection ceiling when two rigs resolve to the same
+	// scope root (the patrol's own enumeration keeps duplicates intentionally).
+	scopes := len(collectStage1ScopeRoots(cityPath, cfg))
 	if a := supervisordoctor.CheckS6ConnectionCeiling(supervisordoctor.S6Input{
 		City:           cityName,
 		Scopes:         scopes,
