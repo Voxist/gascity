@@ -123,7 +123,13 @@ const (
 	OrderFired              = "order.fired"
 	OrderCompleted          = "order.completed"
 	OrderFailed             = "order.failed"
-	ProviderSwapped         = "provider.swapped"
+	// OrderGateTimeoutFailOpen fires when an idempotent order's bounded
+	// open-work gate times out and the dispatcher fails OPEN — dispatching
+	// without having proven single-flight. Each emission is one fail-open;
+	// a rising count is the early-warning tripwire that store contention
+	// is degrading gate evaluation (incident 12 / #2893).
+	OrderGateTimeoutFailOpen = "order.gate_timeout_fail_open"
+	ProviderSwapped          = "provider.swapped"
 	// ProviderQuotaObserved fires each time the provider governor's quota
 	// poller successfully reads a Claude account's subscription usage from
 	// the OAuth usage endpoint (GET /api/oauth/usage). The typed payload
@@ -234,7 +240,7 @@ var KnownEventTypes = []string{
 	RequestResultSessionCreate, RequestResultSessionMessage,
 	RequestResultSessionSubmit, RequestFailed,
 	CityCreated, CityUnregisterRequested,
-	OrderFired, OrderCompleted, OrderFailed,
+	OrderFired, OrderCompleted, OrderFailed, OrderGateTimeoutFailOpen,
 	ProviderSwapped, ProviderQuotaObserved, ProviderQuotaPollFailed,
 	WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
 	MoleculeResolved,
