@@ -284,6 +284,29 @@ func (b *Breaker) RecordFailure() {
 	}
 }
 
+// Trip forces the breaker open immediately, without waiting for the failure
+// threshold, and arms the standard backoff. Out-of-band health signals (e.g. a
+// store-health probe that has already determined the backing store is
+// unavailable) use this instead of synthesising repeated RecordFailure calls,
+// so the caller needs no knowledge of the configured threshold. It is a no-op
+// while disabled or already open, mirroring RecordFailure.
+func (b *Breaker) Trip() {
+	if !b.settings.Enabled {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	switch b.state {
+	case StateOpen:
+		return
+	case StateHalfOpen:
+		b.trips++
+	default: // closed
+		b.trips = 1
+	}
+	b.openLocked(b.now())
+}
+
 // State returns the current breaker state without mutating it.
 func (b *Breaker) State() State {
 	if !b.settings.Enabled {

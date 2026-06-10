@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -166,7 +167,7 @@ func agentConfigDirRoots(cityPath string) []string {
 		gcDir := filepath.Join(home, ".gc")
 		if entries, err := os.ReadDir(gcDir); err == nil {
 			for _, e := range entries {
-				if e.IsDir() && len(e.Name()) > len("agent-") && e.Name()[:len("agent-")] == "agent-" {
+				if e.IsDir() && strings.HasPrefix(e.Name(), "agent-") && e.Name() != "agent-" {
 					roots = append(roots, filepath.Join(gcDir, e.Name()))
 				}
 			}

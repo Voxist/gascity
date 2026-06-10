@@ -133,12 +133,8 @@ func (cs *controllerState) storeHealthHooks(cityPath string, cfg *config.City, s
 		},
 		TripBreaker: func() {
 			// Open the scope breaker so subsequent bd calls fail fast with
-			// ErrStoreUnavailable until a routed probe passes. Recording the
-			// configured number of consecutive transport failures crosses the
-			// trip threshold deterministically.
-			for i := 0; i < cfg.Beads.Resilience.ConsecutiveFailuresOrDefault(); i++ {
-				breaker.RecordFailure()
-			}
+			// ErrStoreUnavailable until a routed probe passes.
+			breaker.Trip()
 		},
 		EmitDegraded: func(class storehealth.DegradeClass, reason string, consecutive int) {
 			emit(events.StoreDegraded, scope, events.StoreDegradedPayload{
@@ -316,8 +312,11 @@ func captureStoreHealthForensics(cityPath string, cfg *config.City, scope string
 }
 
 // captureLsofForPID writes `lsof -p <pid>` output into the quarantine dir.
+// It reuses lsofOutput so the forensics probe inherits the shared timeout,
+// process-group isolation, and SIGKILL-on-cancel guards — a hung lsof against
+// a dead process must not stall the patrol.
 func captureLsofForPID(dir string, pid int) {
-	out, err := exec.Command("lsof", "-n", "-P", "-p", fmt.Sprintf("%d", pid)).CombinedOutput() //nolint:gosec // fixed argv
+	out, err := lsofOutput("-n", "-P", "-p", fmt.Sprintf("%d", pid))
 	if err != nil && len(out) == 0 {
 		return
 	}

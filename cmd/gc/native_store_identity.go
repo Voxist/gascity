@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"path/filepath"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -67,13 +66,11 @@ func logIdentityAlertSink(logger *slog.Logger) IdentityAlertSink {
 // rather than crashing the assertion.
 func configuredScopeIdentity(scopeRoot string) identity.ScopeIdentity {
 	scopeIdentity := identity.ScopeIdentity{}
+	// Only a successful read populates ProjectID; any failure (missing file or a
+	// parse error) leaves it empty so the compare reports configured-empty
+	// (degraded) rather than silently passing.
 	if projectID, err := readManagedMetadataProjectID(scopeMetadataJSONPath(scopeRoot)); err == nil {
 		scopeIdentity.ProjectID = projectID
-	} else if !errors.Is(err, os.ErrNotExist) {
-		// A parse failure must not mask the assertion: leave ProjectID empty so
-		// the compare reports configured-empty (degraded) rather than silently
-		// passing.
-		scopeIdentity.ProjectID = ""
 	}
 	configPath := filepath.Join(scopeRoot, ".beads", "config.yaml")
 	if prefix, ok, err := contract.ReadIssuePrefix(fsys.OSFS{}, configPath); err == nil && ok {

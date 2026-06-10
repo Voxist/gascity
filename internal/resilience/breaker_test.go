@@ -75,6 +75,45 @@ func TestBreakerTripsAfterConsecutiveFailures(t *testing.T) {
 	}
 }
 
+func TestBreakerTripOpensImmediately(t *testing.T) {
+	clock := newTestClock()
+	b := newTestBreaker(t, Settings{Enabled: true, ConsecutiveFailures: 3}, clock, nil)
+
+	// Trip opens without crossing the failure threshold.
+	b.Trip()
+	if got := b.State(); got != StateOpen {
+		t.Fatalf("State() after Trip = %v, want %v", got, StateOpen)
+	}
+	if b.Allow() {
+		t.Fatal("Allow() = true immediately after Trip, want false")
+	}
+
+	// A success closes it, and a single Trip reopens it.
+	b.RecordSuccess()
+	if got := b.State(); got != StateClosed {
+		t.Fatalf("State() after success = %v, want %v", got, StateClosed)
+	}
+	b.Trip()
+	if got := b.State(); got != StateOpen {
+		t.Fatalf("State() after second Trip = %v, want %v", got, StateOpen)
+	}
+	// Trip while already open is a no-op (does not extend the deadline).
+	deadline := b.deadline
+	b.Trip()
+	if b.deadline != deadline {
+		t.Fatalf("Trip while open changed deadline %v -> %v, want no-op", deadline, b.deadline)
+	}
+}
+
+func TestBreakerTripDisabledIsNoOp(t *testing.T) {
+	clock := newTestClock()
+	b := newTestBreaker(t, Settings{Enabled: false}, clock, nil)
+	b.Trip()
+	if got := b.State(); got != StateClosed {
+		t.Fatalf("State() after Trip on disabled breaker = %v, want %v", got, StateClosed)
+	}
+}
+
 func TestBreakerSuccessResetsConsecutiveCount(t *testing.T) {
 	clock := newTestClock()
 	b := newTestBreaker(t, Settings{Enabled: true, ConsecutiveFailures: 3}, clock, nil)
