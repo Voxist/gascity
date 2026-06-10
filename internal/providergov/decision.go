@@ -139,7 +139,11 @@ func SelectProvider(tier string, accounts []AccountState, policy Policy) (Decisi
 	}
 
 	candidates := make([]AccountState, 0, len(accounts))
+	hadActive := false
 	for _, acc := range accounts {
+		if acc.Active {
+			hadActive = true
+		}
 		if !isDark(acc, policy) {
 			candidates = append(candidates, acc)
 		}
@@ -157,14 +161,6 @@ func SelectProvider(tier string, accounts []AccountState, policy Policy) (Decisi
 	// Deterministic order: by name, so score ties and the multi-active
 	// edge case resolve identically across runs.
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Name < candidates[j].Name })
-
-	hadActive := false
-	for _, acc := range accounts {
-		if acc.Active {
-			hadActive = true
-			break
-		}
-	}
 
 	// Stay on the active account while it is under the flip threshold.
 	for _, acc := range candidates {

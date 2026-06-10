@@ -112,18 +112,13 @@ func (p *Poller) Run(ctx context.Context) {
 // mechanical reason class on failure.
 func (p *Poller) PollOnce(ctx context.Context) {
 	for _, acc := range p.accounts {
-		snap, err := p.pollAccount(ctx, acc)
+		snap, err := PollAccount(ctx, p.client, p.baseURL, acc)
 		if err != nil {
 			p.recordFailure(acc, err)
 			continue
 		}
 		p.recordObserved(acc, snap)
 	}
-}
-
-// pollAccount delegates to PollAccount with the poller's client and base URL.
-func (p *Poller) pollAccount(ctx context.Context, acc Account) (UsageSnapshot, error) {
-	return PollAccount(ctx, p.client, p.baseURL, acc)
 }
 
 // PollAccount reads one account's monitoring credential and fetches its
