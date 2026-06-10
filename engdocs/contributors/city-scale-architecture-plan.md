@@ -66,6 +66,108 @@ owner.
 
 ---
 
+## Provider Governor — quota-aware, capability-aware multi-account scheduling
+
+**Why (corrects the original "partition"):** the two Claude accounts are
+**alternating** capacity, not parallel. Running `claude`+`claude2` at once
+doubles burn and co-exhausts both 5h windows *and* the weekly cap →
+simultaneous fleet-wide blackout. There is no single knob: there are **four
+signals** against **three constraints** plus a **quality** axis —
+
+| Constraint | Signal | Right response | Strategy that attacks it |
+|---|---|---|---|
+| per-minute **rate** (load) | transient 429, recovers s–min | backoff, **stay on the account** | request-rate smoothing |
+| **5-hour** rolling window | `five_hour` maxed up to 5h | **flip to the sibling Claude account** | **alternation** |
+| **7-day** "weekly" cap | `seven_day` maxed for days | nothing recovers it short-term | **tiering** (fewer Claude tokens/work) |
+| global **outage** | vendor down | **cascade to zai/others** | multi-vendor fallback |
+| (cross-cut) **quality** | GLM/Qwen < Claude on hard work | reserve Claude for work that needs it | capability-aware routing |
+
+### Validated capture (live, 2026-06-10)
+
+Claude Code exposes authoritative subscription usage at
+**`GET https://api.anthropic.com/api/oauth/usage`** (header
+`anthropic-beta: oauth-2025-04-20`; internal fn `fetchUtilization`). Live shape:
+
+```json
+{ "five_hour":        { "utilization": 42.0, "resets_at": "2026-06-10T02:40:00Z" },
+  "seven_day":        { "utilization":  8.0, "resets_at": "2026-06-15T20:00:00Z" },
+  "seven_day_opus":   null,
+  "seven_day_sonnet": { "utilization":  0.0, "resets_at": null },
+  "extra_usage":      { "is_enabled": false, "used_credits": null, ... } }
+```
+
+`utilization` = %-of-cap used per bucket; `remaining = 100 − utilization`;
+`resets_at` = exact window-reset time. **Separate weekly buckets for Opus and
+Sonnet** are a model-tier lever (degrade Opus→Sonnet on the same account before
+switching accounts). `extra_usage` = overage credits.
+
+**Auth constraint (load-bearing finding):** the agents' setup-tokens
+(`sk-ant-oat…`, scope `user:inference`) are **403-rejected** —
+`OAuth token does not meet scope requirement user:profile`. Only a full OAuth
+*login* credential carries `user:profile` (verified: agent setup-token 403s,
+the keychain `Claude Code-credentials` login returns the JSON above). So the
+governor needs a **per-account monitoring credential**: one `claude` OAuth
+login per Claude account into a dedicated `~/.gc/monitor-<acct>/` config dir
+(full login, not setup-token), which the poller refreshes (`refreshOAuth`).
+This is a one-time auth setup, **separate from the agents' inference auth**.
+
+### Governor design (controller-driven, ZFC-clean — measured state, not heuristics)
+
+- **Quota poller** (controller-side): holds each account's monitoring
+  credential; polls `/api/oauth/usage` every ~60–120s per Claude account
+  (cheap — usage metadata, **zero model tokens**); emits typed
+  `provider.quota_observed{account, five_hour_util, seven_day_util,
+  seven_day_opus_util, seven_day_sonnet_util, extra_usage, resets_at}`.
+- **Reactive floor** (no extra auth, always works): the existing
+  session-output scan classifies the CLI's limit messages (`session limit` /
+  `weekly limit` / `Opus limit` / `Sonnet limit` + "resets at …") into typed
+  `provider.window_exhausted{account, type, reset}` — the backstop between
+  polls or if a monitoring credential is unavailable.
+- **Decision policy (declarative config; governor resolves
+  `provider = f(tier, measured state, policy)` at session (re)spawn):**
+  - **Tiering** (attacks the *weekly* cap): per-template `tier` —
+    `claude-required` vs `overflow-ok`; `overflow-ok` → zai/dashscope/openrouter
+    always → stretches `seven_day` ~`1/(1−overflow_fraction)`.
+  - **Alternation** (attacks the *5h* window): `claude`+`claude2` = one logical
+    pool, ONE active account; serve `claude-required` from the account with
+    lower `max(five_hour_util, weighted seven_day_util)`; flip to the sibling
+    when active crosses a threshold (e.g. `five_hour_util > 85`); **never both
+    flat-out** unless demand exceeds one account's sustainable rate.
+  - **Model-tier degrade** (new lever): `seven_day_opus` near cap but
+    `seven_day_sonnet` has headroom ⇒ route `claude-required` to a Sonnet model
+    on the same account before switching accounts.
+  - **Cascade** (last resort): `claude-required` → overflow pool only when
+    BOTH Claude accounts are window/quota-dark or Claude is globally down —
+    degrade quality rather than stop.
+  - **Load smoothing** (the original 429, *separate from quota*): cap
+    requests/min per account below the rate limit + stagger spawns; a
+    `provider.rate_limited` signal ⇒ backoff on the SAME account, **not** a flip.
+- **Mechanism:** operates at the **session lifecycle** (a running `claude`
+  session's provider env is fixed at spawn — "switching" a live agent = recycle
+  it). `overflow-ok` agents spawn on the vendor pool and stay; `claude-required`
+  agents recycle onto the sibling account **at natural boundaries** (idle/turn
+  end, not mid-task) when the poller or a `window_exhausted` event marks the
+  active account dark; a maxed account's `resets_at` schedules its automatic
+  re-activation.
+
+### Phase placement
+
+P0.3 = the **tiering** config (immediate weekly-cap relief, outside the managed
+block). P1 = quota poller + typed `provider.*` signals + request smoothing.
+P2 = the alternation/model-degrade governor + recycle-on-dark at boundaries.
+P3.2 = cascade + cross-vendor failover as the governor's last arm.
+**Open setup task:** provision the per-account `user:profile` monitoring
+credential (one OAuth login per Claude account) — the proactive path depends on
+it; the reactive floor works without it.
+
+### Success metrics this unlocks (data-tunable, not guessed)
+
+Per-account `five_hour_util` / `seven_day_util` gauges; Claude-token-spend/hour
+**by tier**; %-of-agent-hours on overflow (the tiering lever); time-to-both-
+accounts-dark (target: never); fleet-wide-429 (target 0).
+
+---
+
 ## Phase 0 — Tactical stabilization (days; config + ops, plus ONE idempotent data write in 0.6)
 
 **0.1 — Proxied stance: KEEP `proxied=true`, with an honest tripwire and a
@@ -103,14 +205,22 @@ P3.1 elasticity lands.
 **every rig with ready work holds ≥1 active session within one tick**.
 Rollback: unset keys / restore floors.*
 
-**0.3 — Provider partition that survives the provider-switch tool.**
-Split rigs across the 5 configured accounts (vp,vw→claude2; vct,vl→claude;
-vg,vr→zai; va→openrouter; dashscope spillover) — but **outside the
-`gc-provider-switch` managed block** (verified: the managed block rewrites
-fleet-wide and would silently clobber a hand partition on its next run), or
-extend the tool to be partition-aware. Add a doctor check: managed block must
-not pin >N rigs to one account. *Gate: zero fleet-wide 429. Contains
-incident 10 (full retirement P3.2).*
+**0.3 — Capability tiering (the Phase-0 slice of the Provider Governor).**
+*Static rig→account "partition" was rejected (see the Provider Governor
+section): the two Claude accounts are **alternating**, not parallel, capacity —
+running both at once co-exhausts their 5h windows + the weekly cap →
+simultaneous fleet-wide blackout.* The Phase-0, config-only action is the
+**tiering** half: label each agent *template* with a `tier` and route the
+`overflow-ok` tier (librarian, routing/dispatch, status/doc, mechanical chores,
+first-pass triage) onto the zai/dashscope/openrouter pool **all the time** —
+written **outside the `gc-provider-switch` managed block** (verified: that
+block is rewritten fleet-wide by the switch tool and would clobber hand edits)
++ a doctor check that the managed block never pins all `claude-required`
+templates to one account. This immediately stretches the Claude weekly cap by
+the overflow fraction. The alternation + quota-poller machinery lands in P1/P2.
+*Gate: `overflow-ok` agents show `gc.provider` ∈ {zai,dashscope,openrouter};
+Claude token-spend/hour drops by ~the overflow fraction. Contains incident 10;
+full retirement P3.2.*
 
 **0.4 — MCP isolation: root-cause, then repair.** The
 `~/.gc/agent-*/plugins → ~/.claude/plugins` symlink is **live again** — it
@@ -139,10 +249,13 @@ written event-coverage note (vp-tz6r precondition).
 *Gate: `gc status` green; `SELECT name FROM <db>.custom_types ⊇
 RequiredCustomTypes` for all 8 DBs.*
 
-**0.7 — Provider quota paper exercise.** Tokens/session-hour from existing
-usage × the 0.2 cap, vs each account's quota and price. This may change the
-0.3 partition map and the session cap **before any code is written**; the
-output feeds the P3 capacity drill's quota-budget pass.
+**0.7 — Provider quota budget, from LIVE data (not a paper estimate).**
+Poll `/api/oauth/usage` per account (the validated capture) to read real
+`five_hour`/`seven_day` utilization vs the 0.2 session cap and the 0.3 tier
+split; size how many `claude-required` always-on sessions the alternating
+Claude pool sustains without weekly-cap exhaustion, and which templates MUST be
+`overflow-ok` to stay inside it. This both sizes the cap and seeds the Provider
+Governor's thresholds; output feeds the P3 capacity drill's quota-budget pass.
 
 ---
 
@@ -229,7 +342,7 @@ type acceptance on real data before flipping.
 | # | Item | Size | Owner | Retires |
 |---|---|---|---|---|
 | 3.1 | **Elasticity stack:** land feat/scale-from-zero (7e72f8ac0) + cold-wake PR #3175 + consolidate the 3 cross-store delivery branches into ONE landable series (cross-store claim-write, route-guard exemption, read→claim pipeline test) + demand-driven controller (vp-p3c6); then set rig pool floors to 0 (superseding the 0.2 floor reduction). Routing validates target-store visibility at route time. The demand controller **consumes the THROTTLED provider state as backpressure** (not just failover). Retires the idle-pool-nudger stopgap | L | gastownhall/gascity (one series) | **14** |
-| 3.2 | **Provider resilience:** vp-m01x (jittered backoff, Retry-After, THROTTLED health state — today "rate-limited" classifies HEALTHY ⇒ lockstep respawn) + vp-546v failover chain; failover targets **sessions**, not in_progress beads (fixes the startup-429 chicken-and-egg). Per-account quota-utilization telemetry (from 1.9's throttle events) | M | gastownhall/gascity | **10** |
+| 3.2 | **Provider Governor — cascade/failover arm** (composes vp-m01x jittered backoff/Retry-After + vp-546v): failover targets **sessions**, not in_progress beads (fixes the startup-429 chicken-and-egg). Consumes the P1 quota poller (`five_hour`/`seven_day` utilization + `resets_at`) + typed `provider.*` signals so failover fires on the right cause; degrade-quality cascade only when BOTH Claude accounts dark. The alternation + tiering (P0.3/P2) keep this arm rarely-needed | M | gastownhall/gascity | **10** |
 | 3.3 | **Delivery pipeline:** vp-krai M2 delivery-warden (upstream #3203) + M7 doctor PR-delivery view (vp-fqoo). *Pull forward into Phase 2 if its exit-gate drain-rate measurement degrades* | M | gastownhall/gascity | **15** |
 | 3.4 | **Shared proxy** (cstar #4 + selection bead ga-mozik): 8 children → 1, ~1GB RAM back. **Entry-gated on: proxy-poison trigger root-caused (from 1.5/2.1 forensics + repro) OR a written risk acceptance** — consolidating an unknown-trigger failure across all agent CLI is otherwise a new single point of failure | M | cstar line + gascity | shrinks 7/9 surface |
 | 3.5 | **Idle-fleet classifier:** vp-evof Go port (`gc beads state`) + `checks_idle_fleet` supervisor-doctor check composing breaker/provider/hook/phantom signals into a NAMED diagnosis in `gc status` | M | gastownhall/gascity | archaeology cost of every future "agents idle" |
@@ -259,7 +372,7 @@ order deleted; fork delta ≤ pooling + CI files.
 | 7 | Proxy wedge + conn leak | v2 S1–S5 | **P1.2** breaker + **P2** controller off proxy (+3.4) |
 | 8 | proxy.log flood | manual truncation | **P1.8** rotation/throttle + P0.5 exclusion (+ reconciler-trace in the same budget) |
 | 9 | HQ wedge, no-backoff city KO | gc stop/start | **CONTAINED, not retired**: P1.2+1.5 auto-heal ≤2min with forensics; P2 removes controller exposure; **root cause stays an open standing item** (2.1 poison-repro + 1.5 quarantine artifacts feed vp-2rfp); P3.6 contingency |
-| 10 | Provider 429 fleet idle | **P0.3** partition (switch-tool-safe) | **P3.2** THROTTLED state + session-targeted failover + quota telemetry |
+| 10 | Provider 429 fleet idle | **P0.3** capability tiering (overflow off Claude) | **Provider Governor**: P1 quota poller (`/api/oauth/usage` five_hour+seven_day) + typed signals, P2 alternation/model-degrade, P3.2 cascade/failover. *Distinguishes load-429 (backoff) from window-exhaustion (flip account) from weekly-cap (tier harder) from outage (cascade) — today all flatten to "healthy"* |
 | 11 | MCP fleet bloat | **P0.4** (creator root-caused first) | **P1.9** isolation check at supervisor cadence |
 | 12 | Order-gate O(tree) hang | fail-open (silently passes gates!) | **P1.10** flat-membership evaluation + P1.3 fail-open counter |
 | 13 | Pack re-expansion thrash | **P0.6** hygiene | **P2.10** dirt-tolerant hash |
