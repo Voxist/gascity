@@ -93,6 +93,11 @@ func ValidateDurations(cfg *City, source string) []string {
 	check("[beads.resilience]", "open_max", cfg.Beads.Resilience.OpenMax)
 	check("[beads.resilience]", "half_open_interval", cfg.Beads.Resilience.HalfOpenInterval)
 
+	// Store health patrol durations.
+	check("[storehealth]", "interval", cfg.StoreHealth.Interval)
+	check("[storehealth]", "reap_cooldown", cfg.StoreHealth.ReapCooldown)
+	check("[storehealth]", "write_probe_interval", cfg.StoreHealth.WriteProbeInterval)
+
 	// Chat sessions config durations.
 	check("[chat_sessions]", "idle_timeout", cfg.ChatSessions.IdleTimeout)
 	check("[chat_sessions]", "grace_period", cfg.ChatSessions.GracePeriod)
