@@ -544,6 +544,9 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		if reapPhantomSessionBeads(cr.cityBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) > 0 {
 			sessionBeads = cr.loadSessionBeadSnapshot()
 		}
+		if reapExpiredStartPendingSessionBeads(cr.cityBeadStore(), cr.sp, cr.sessionDrains, cr.cfg.Session.PendingCreateTTLDuration(), clock.Real{}, cr.stderr) > 0 {
+			sessionBeads = cr.loadSessionBeadSnapshot()
+		}
 		result := cr.buildDesiredState(sessionBeads, startupTrace)
 		sessionBeads = cr.loadSessionBeadSnapshot()
 		result = refreshDesiredStateWithSessionBeads(
@@ -1080,6 +1083,14 @@ func (cr *CityRuntime) tick(
 		phaseStart = time.Now()
 		sessionBeads = cr.loadSessionBeadSnapshot()
 		recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.after_phantom_reap", phaseStart, traceSessionSnapshotFields(sessionBeads))
+	}
+	phaseStart = time.Now()
+	reapedExpiredPending := reapExpiredStartPendingSessionBeads(cr.cityBeadStore(), cr.sp, cr.sessionDrains, cr.cfg.Session.PendingCreateTTLDuration(), clock.Real{}, cr.stderr)
+	recordPhase(TraceSiteControllerTickPhase, "reap_expired_start_pending_session_beads", phaseStart, map[string]any{"reaped": reapedExpiredPending})
+	if reapedExpiredPending > 0 {
+		phaseStart = time.Now()
+		sessionBeads = cr.loadSessionBeadSnapshot()
+		recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.after_expired_pending_reap", phaseStart, traceSessionSnapshotFields(sessionBeads))
 	}
 	if cr.cfg.Daemon.AutoReapClosedBeadWorktreesEnabled() {
 		phaseStart = time.Now()

@@ -1985,6 +1985,100 @@ func reapPhantomSessionBeads(
 	return reaped
 }
 
+// reapExpiredStartPendingSessionBeads closes open session beads stuck in
+// start-pending past the configured TTL ([session] pending_create_ttl,
+// default 30m) whose session name has no live runtime. These are pending
+// pool-slot records whose create was planned but never completed — the
+// duplicate-accumulation class that jams controller adoption when hundreds
+// pile up per pool slot.
+//
+// A bead is reapable when ALL of:
+//   - state == "start-pending"
+//   - last_woke_at == "" (never reached preWakeCommit, so it holds no claims)
+//   - its pending_create_started_at (CreatedAt fallback) is older than ttl
+//   - session name is set and NOT in the runtime visible set
+//   - NOT a configured named-session bead
+//   - NOT under active drain
+//
+// The TTL is deliberately far above pendingCreateNeverStartedTimeout (10m),
+// so an expired bead is never inside an active reconciler start lease.
+//
+// Safety: if ListRunning returns any error (partial or hard), the pass is
+// skipped entirely — we do not reap under uncertainty. A non-positive ttl
+// disables the pass.
+//
+// Returns the number of beads reaped.
+func reapExpiredStartPendingSessionBeads(
+	store beads.Store,
+	sp runtime.Provider,
+	dt *drainTracker,
+	ttl time.Duration,
+	clk clock.Clock,
+	stderr io.Writer,
+) int {
+	if store == nil || sp == nil || ttl <= 0 {
+		return 0
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	// O(1) list instead of O(n) per-session IsRunning calls. Any error
+	// (partial or hard) means we cannot trust the visible set — skip the
+	// pass entirely rather than reaping under uncertainty.
+	listed, listErr := sp.ListRunning("")
+	if listErr != nil {
+		return 0
+	}
+	visibleSet := make(map[string]bool, len(listed))
+	for _, sn := range listed {
+		sn = strings.TrimSpace(sn)
+		if sn != "" {
+			visibleSet[sn] = true
+		}
+	}
+
+	open, err := loadSessionBeads(store)
+	if err != nil {
+		fmt.Fprintf(stderr, "reapExpiredStartPendingSessionBeads: %v\n", err) //nolint:errcheck
+		return 0
+	}
+	now := clk.Now()
+	reaped := 0
+	for _, b := range open {
+		if strings.TrimSpace(b.Metadata["state"]) != string(session.StateStartPending) {
+			continue
+		}
+		if strings.TrimSpace(b.Metadata["last_woke_at"]) != "" {
+			continue
+		}
+		if isNamedSessionBead(b) {
+			continue
+		}
+		if dt != nil && dt.get(b.ID) != nil {
+			continue
+		}
+		// Anchor on the latest pending-create start; CreatedAt is the legacy
+		// fallback (mirrors pendingCreateNeverStartedLeaseExpired). Zero
+		// anchor means unknown age — skip conservatively.
+		anchor := b.CreatedAt
+		if started, ok := parseRFC3339Metadata(b.Metadata["pending_create_started_at"]); ok {
+			anchor = started
+		}
+		if anchor.IsZero() || now.Sub(anchor) < ttl {
+			continue
+		}
+		sn := strings.TrimSpace(b.Metadata["session_name"])
+		if sn == "" || visibleSet[sn] {
+			continue
+		}
+		if closeBead(store, b.ID, "expired-start-pending", now.UTC(), stderr) {
+			fmt.Fprintf(stderr, "WARN: reconciler: reaped expired start-pending session bead %s — pending since %s with no runtime %q\n", b.ID, anchor.UTC().Format(time.RFC3339), sn) //nolint:errcheck
+			reaped++
+		}
+	}
+	return reaped
+}
+
 func cleanupDeadRuntimeSessionCorpses(
 	store beads.Store,
 	_ map[string]beads.Store,

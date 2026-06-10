@@ -2629,6 +2629,11 @@
           "type": "string",
           "description": "ProgressStallTimeout, when set, enables progress-aware session recycling:\na desired, alive, claim-less session on a healthy provider whose last\nprovider-reported activity is older than this duration is restarted fresh.\nSuch a session has likely parked (e.g. its turn ended on a provider auth\nerror) and will not self-recover. Set this above the longest legitimate\nalive-idle period for the city; values below 5m are clamped to 5m.\nDuration string (e.g. \"30m\"). Unset/zero disables it."
         },
+        "pending_create_ttl": {
+          "type": "string",
+          "description": "PendingCreateTTL bounds how long a start-pending session bead may wait\nfor its runtime to be created and adopted. The controller reaps open\nstart-pending beads older than this TTL whose session name has no live\nruntime, preventing duplicate pending records from jamming adoption.\nDuration string (e.g., \"30m\", \"1h\"). Defaults to \"30m\".",
+          "default": "30m"
+        },
         "socket": {
           "type": "string",
           "description": "Socket specifies the tmux socket name for per-city isolation.\nWhen set, all tmux commands use \"tmux -L \u003csocket\u003e\" to connect to\na dedicated server. When empty, defaults to the city name\n(workspace.name) — giving every city its own tmux server\nautomatically. Set explicitly to override."

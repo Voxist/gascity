@@ -1457,6 +1457,12 @@ type SessionConfig struct {
 	// alive-idle period for the city; values below 5m are clamped to 5m.
 	// Duration string (e.g. "30m"). Unset/zero disables it.
 	ProgressStallTimeout string `toml:"progress_stall_timeout,omitempty"`
+	// PendingCreateTTL bounds how long a start-pending session bead may wait
+	// for its runtime to be created and adopted. The controller reaps open
+	// start-pending beads older than this TTL whose session name has no live
+	// runtime, preventing duplicate pending records from jamming adoption.
+	// Duration string (e.g., "30m", "1h"). Defaults to "30m".
+	PendingCreateTTL string `toml:"pending_create_ttl,omitempty" jsonschema:"default=30m"`
 	// Socket specifies the tmux socket name for per-city isolation.
 	// When set, all tmux commands use "tmux -L <socket>" to connect to
 	// a dedicated server. When empty, defaults to the city name
@@ -1531,6 +1537,19 @@ func (s *SessionConfig) StartupTimeoutDuration() time.Duration {
 	d, err := time.ParseDuration(s.StartupTimeout)
 	if err != nil {
 		return 60 * time.Second
+	}
+	return d
+}
+
+// PendingCreateTTLDuration returns the start-pending session bead TTL as a
+// time.Duration. Defaults to 30m if empty or unparseable.
+func (s *SessionConfig) PendingCreateTTLDuration() time.Duration {
+	if s.PendingCreateTTL == "" {
+		return 30 * time.Minute
+	}
+	d, err := time.ParseDuration(s.PendingCreateTTL)
+	if err != nil {
+		return 30 * time.Minute
 	}
 	return d
 }
