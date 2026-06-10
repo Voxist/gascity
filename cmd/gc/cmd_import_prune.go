@@ -5,6 +5,7 @@ import (
 	"io"
 	"sort"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -24,17 +25,17 @@ func newImportPruneCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Remove unreferenced clones from the global pack cache",
 		Long: `Remove unreferenced clones from the machine-wide pack cache.
 
-The pack cache (~/.gc/cache/repos) is shared by every city on the machine and
-is keyed by (source, commit), so commit churn accumulates stale clones over
+The pack cache (<GC_HOME>/cache/repos) is shared by every city on the machine
+and is keyed by (source, commit), so commit churn accumulates stale clones over
 time. A clone is "referenced" when some city's packs.lock still pins it; prune
 keeps every referenced clone and removes only the rest.
 
 By default prune considers every city in the supervisor registry plus the city
-resolved from the current directory; pass --all-cities to reference the full
-registry set and ignore the current directory. Prune is a dry run unless
---apply is given. The --keep-days guard never removes an unreferenced clone
-whose directory was modified more recently than N days ago, protecting
-in-flight installs from a race.`,
+resolved from the current directory; pass --city to scope to one city or
+--all-cities to force the full registry set. Prune is a dry run unless --apply
+is given. The --keep-days guard never removes an unreferenced clone whose
+directory was modified more recently than N days ago, protecting in-flight
+installs from a race.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if doImportPrune(allCities, apply, keepDays, stdout, stderr) != 0 {
@@ -67,14 +68,7 @@ func doImportPrune(allCities, apply bool, keepDays int, stdout, stderr io.Writer
 		return 1
 	}
 
-	// Cache root resolves via the production helper (os.UserHomeDir-based), the
-	// same computation pack_include.go uses. It deliberately ignores GC_HOME.
-	cacheRoot, err := packman.RepoCacheRoot()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc import prune: %v\n", err) //nolint:errcheck
-		return 1
-	}
-
+	cacheRoot := config.RepoCacheRoot()
 	result, err := packman.Prune(cacheRoot, referenced, keepDays, apply)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc import prune: %v\n", err) //nolint:errcheck
@@ -85,7 +79,8 @@ func doImportPrune(allCities, apply bool, keepDays int, stdout, stderr io.Writer
 	if result.Applied {
 		mode = "applied"
 	}
-	fmt.Fprintf(stdout, "%d referenced, %d unreferenced (%s) [%s]\n", len(result.Kept), len(result.Pruned), formatBytes(result.FreedBytes), mode) //nolint:errcheck
+	fmt.Fprintf(stdout, "%d referenced, %d unreferenced (%s) [%s]\n",
+		len(result.Kept), len(result.Pruned), formatBytes(result.FreedBytes), mode) //nolint:errcheck
 	for _, e := range result.Pruned {
 		fmt.Fprintf(stdout, "  %s %s\n", e.Name, formatBytes(e.Bytes)) //nolint:errcheck
 	}
@@ -95,8 +90,8 @@ func doImportPrune(allCities, apply bool, keepDays int, stdout, stderr io.Writer
 // pruneReferenceCityRoots returns the set of city roots whose packs.lock files
 // define the referenced set. When allCities is false the current city (resolved
 // from cwd or --city) is always included alongside the registry; when no city
-// resolves and the registry is empty, prune errors so it never deletes clones a
-// city outside the registry still pins.
+// resolves and the registry is empty, the current directory alone is the
+// fallback so prune still does something sensible outside a registered city.
 func pruneReferenceCityRoots(allCities bool) ([]string, error) {
 	seen := make(map[string]bool)
 	var roots []string

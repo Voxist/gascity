@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
@@ -28,25 +29,9 @@ func writePruneCacheClone(t *testing.T, cacheRoot, name string, mtime time.Time)
 	return dir
 }
 
-// pruneTestCacheRoot isolates the os.UserHomeDir-based pack cache into a temp
-// HOME and returns the resolved cache root, creating it. clearGCEnv must already
-// have run so GC_HOME (the supervisor registry home) is isolated separately.
-func pruneTestCacheRoot(t *testing.T) string {
-	t.Helper()
-	t.Setenv("HOME", t.TempDir())
-	root, err := packman.RepoCacheRoot()
-	if err != nil {
-		t.Fatalf("RepoCacheRoot: %v", err)
-	}
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		t.Fatalf("MkdirAll(%q): %v", root, err)
-	}
-	return root
-}
-
 // registerPruneCity writes a minimal city with a packs.lock pinning source@commit
 // and registers it in the supervisor registry.
-func registerPruneCity(t *testing.T, name, source, commit string) {
+func registerPruneCity(t *testing.T, name, source, commit string) string {
 	t.Helper()
 	cityDir := filepath.Join(t.TempDir(), name)
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
@@ -63,16 +48,17 @@ func registerPruneCity(t *testing.T, name, source, commit string) {
 	if err := reg.Register(cityDir, name); err != nil {
 		t.Fatalf("Register(%q): %v", name, err)
 	}
+	return cityDir
 }
 
 func TestDoImportPruneDryRunReportsWithoutDeleting(t *testing.T) {
 	clearGCEnv(t)
-	cacheRoot := pruneTestCacheRoot(t)
 
 	source := "https://github.com/example/repo"
 	commit := "abc123"
 	registerPruneCity(t, "alpha", source, commit)
 
+	cacheRoot := config.RepoCacheRoot()
 	old := time.Now().Add(-30 * 24 * time.Hour)
 	refDir := writePruneCacheClone(t, cacheRoot, packman.RepoCacheKey(source, commit), old)
 	orphanDir := writePruneCacheClone(t, cacheRoot, "orphankey0000", old)
@@ -98,12 +84,12 @@ func TestDoImportPruneDryRunReportsWithoutDeleting(t *testing.T) {
 
 func TestDoImportPruneApplyRemovesUnreferencedOnly(t *testing.T) {
 	clearGCEnv(t)
-	cacheRoot := pruneTestCacheRoot(t)
 
 	source := "https://github.com/example/repo"
 	commit := "abc123"
 	registerPruneCity(t, "beta", source, commit)
 
+	cacheRoot := config.RepoCacheRoot()
 	now := time.Now()
 	old := now.Add(-30 * 24 * time.Hour)
 	recent := now.Add(-1 * time.Hour)
