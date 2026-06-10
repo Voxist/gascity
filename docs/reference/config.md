@@ -345,6 +345,7 @@ DoctorConfig holds settings for the gc doctor surface.
 | `worktree_rig_error_size` | string |  | `50GB` | WorktreeRigErrorSize is the per-rig error threshold. When any rig exceeds this, the worktree-disk-size check reports an error rather than a warning. Empty or unparseable falls back to the default (50 GB). |
 | `nested_worktree_prune` | boolean |  | `false` | NestedWorktreePrune escalates the nested-worktree-prune check from warning to error severity when safely-prunable nested worktrees are present, so CI / scripted doctor runs fail until the operator runs `gc doctor --fix`. Actual removal still requires --fix; this flag does not auto-prune. Safety is enforced by mechanical checks (no uncommitted changes, no unpushed commits, no stashes) — never by role identity. |
 | `check` | []LocalDoctorCheck |  |  | Checks holds city-local inline doctor checks declared via [[doctor.check]] in city.toml. |
+| `supervisor_interval` | string |  | `10m` | SupervisorInterval is the cadence at which the supervisor evaluates the cheap doctor subset (tick-age, agent_config_isolation, S6 ceiling, plus any registered provenance/port-consistency checks) and publishes doctor.alert on red. Duration string. Defaults to "10m". Without this, every doctor-based retirement is detection at human cadence — the exact vigilance gap that produced incidents 5 and 11. |
 
 ## DoltConfig
 

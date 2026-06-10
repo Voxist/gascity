@@ -2123,6 +2123,20 @@ type DoctorConfig struct {
 	// Checks holds city-local inline doctor checks declared via
 	// [[doctor.check]] in city.toml.
 	Checks []LocalDoctorCheck `toml:"check,omitempty"`
+
+	// SupervisorInterval is the cadence at which the supervisor evaluates
+	// the cheap doctor subset (tick-age, agent_config_isolation, S6
+	// ceiling, plus any registered provenance/port-consistency checks) and
+	// publishes doctor.alert on red. Duration string. Defaults to "10m".
+	// Without this, every doctor-based retirement is detection at human
+	// cadence — the exact vigilance gap that produced incidents 5 and 11.
+	SupervisorInterval string `toml:"supervisor_interval,omitempty" jsonschema:"default=10m"`
+}
+
+// SupervisorIntervalOrDefault returns the parsed supervisor-cadence doctor
+// interval, falling back to 10m when unset, unparseable, or non-positive.
+func (c DoctorConfig) SupervisorIntervalOrDefault() time.Duration {
+	return positiveDurationOrDefault(c.SupervisorInterval, 10*time.Minute)
 }
 
 const (

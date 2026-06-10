@@ -93,6 +93,9 @@ func ValidateDurations(cfg *City, source string) []string {
 	check("[beads.resilience]", "open_max", cfg.Beads.Resilience.OpenMax)
 	check("[beads.resilience]", "half_open_interval", cfg.Beads.Resilience.HalfOpenInterval)
 
+	// Doctor (supervisor-cadence) durations.
+	check("[doctor]", "supervisor_interval", cfg.Doctor.SupervisorInterval)
+
 	// Store health patrol durations.
 	check("[storehealth]", "interval", cfg.StoreHealth.Interval)
 	check("[storehealth]", "reap_cooldown", cfg.StoreHealth.ReapCooldown)
