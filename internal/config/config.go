@@ -1298,6 +1298,14 @@ type BeadsResilienceConfig struct {
 	// HalfOpenInterval is the minimum spacing between recovery probes
 	// while half-open, as a duration string. Defaults to "15s".
 	HalfOpenInterval string `toml:"half_open_interval,omitempty" jsonschema:"default=15s"`
+	// MaxInflightPerScope bounds concurrent bd subprocesses per scope. The
+	// admission semaphore blocks the (n+1)th bd call for a scope until one
+	// in flight returns, capping the subprocess amplifier (plan item 1.9).
+	// Defaults to 4. Non-positive disables the per-scope cap.
+	MaxInflightPerScope int `toml:"max_inflight_per_scope,omitempty" jsonschema:"default=4"`
+	// MaxInflightGlobal bounds concurrent bd subprocesses across all scopes
+	// in the city. Defaults to 16. Non-positive disables the global cap.
+	MaxInflightGlobal int `toml:"max_inflight_global,omitempty" jsonschema:"default=16"`
 }
 
 // EnabledOrDefault reports whether the breaker is enabled (default true).
@@ -1331,6 +1339,32 @@ func (r BeadsResilienceConfig) OpenMaxOrDefault() time.Duration {
 // back to 15s when unset, unparseable, or non-positive.
 func (r BeadsResilienceConfig) HalfOpenIntervalOrDefault() time.Duration {
 	return positiveDurationOrDefault(r.HalfOpenInterval, 15*time.Second)
+}
+
+// MaxInflightPerScopeOrDefault returns the per-scope bd admission limit,
+// falling back to 4 when unset. A negative value disables the cap (returns
+// 0); an explicit 0 also disables it.
+func (r BeadsResilienceConfig) MaxInflightPerScopeOrDefault() int {
+	if r.MaxInflightPerScope < 0 {
+		return 0
+	}
+	if r.MaxInflightPerScope == 0 {
+		return 4
+	}
+	return r.MaxInflightPerScope
+}
+
+// MaxInflightGlobalOrDefault returns the global bd admission limit, falling
+// back to 16 when unset. A negative value disables the cap (returns 0); an
+// explicit 0 also disables it.
+func (r BeadsResilienceConfig) MaxInflightGlobalOrDefault() int {
+	if r.MaxInflightGlobal < 0 {
+		return 0
+	}
+	if r.MaxInflightGlobal == 0 {
+		return 16
+	}
+	return r.MaxInflightGlobal
 }
 
 // positiveDurationOrDefault parses value as a Go duration, returning def

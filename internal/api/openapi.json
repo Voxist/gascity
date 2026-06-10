@@ -1170,6 +1170,10 @@
           "degraded": {
             "type": "boolean"
           },
+          "gc_bd_inflight": {
+            "format": "int64",
+            "type": "integer"
+          },
           "native_store_eligible": {
             "type": "boolean"
           },

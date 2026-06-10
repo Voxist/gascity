@@ -714,6 +714,7 @@ type BeadWorktreeReapedPayload struct {
 type BeadsDiagnostic struct {
 	BeadsStore          string  `json:"beads_store"`
 	Degraded            *bool   `json:"degraded,omitempty"`
+	GcBdInflight        *int64  `json:"gc_bd_inflight,omitempty"`
 	NativeStoreEligible bool    `json:"native_store_eligible"`
 	PreflightGate       *string `json:"preflight_gate,omitempty"`
 	PreflightReason     *string `json:"preflight_reason,omitempty"`

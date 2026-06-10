@@ -2334,6 +2334,8 @@ export interface components {
         BeadsDiagnostic: {
             beads_store: string;
             degraded?: boolean;
+            /** Format: int64 */
+            gc_bd_inflight?: number;
             native_store_eligible: boolean;
             preflight_gate?: string;
             preflight_reason?: string;
