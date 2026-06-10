@@ -91,7 +91,7 @@ func applyProxiedPoolEnv(env map[string]string, cityPath string) {
 	if env == nil {
 		return
 	}
-	active, n, idle := resolveProxiedGate(cityPath)
+	active, n, idle, shared := resolveProxiedGate(cityPath)
 	if !active {
 		return
 	}
@@ -101,6 +101,14 @@ func applyProxiedPoolEnv(env map[string]string, cityPath string) {
 	// Keep proxies warm across sparse controller probes (kills respawn churn).
 	env["GC_BEADS_PROXY_IDLE_TIMEOUT"] = idle
 	env["BEADS_PROXY_IDLE_TIMEOUT"] = idle
+	// Collapse every proxied scope onto one shared db-proxy-child when the
+	// operator gate is on (default off; a separate gate, never implied by
+	// proxied). GC_* is forwarded by gc-beads-bd.sh; the bare key is read by
+	// Go-launched (controller) bd directly.
+	if shared {
+		env["GC_BEADS_SHARED_PROXY"] = "1"
+		env["BEADS_SHARED_PROXY"] = "1"
+	}
 }
 
 // proxiedGateCache memoizes the [beads] proxied gate per city, keyed by
@@ -116,21 +124,22 @@ type proxiedGateEntry struct {
 	active   bool
 	poolSize string
 	idle     string
+	shared   bool
 }
 
 // resolveProxiedGate reports whether the city opts into proxied mode (and bd
 // supports it), plus the pool size and idle timeout, parsing only city.toml's
 // [beads] section and memoizing by city.toml mtime.
-func resolveProxiedGate(cityPath string) (active bool, poolSize, idle string) {
+func resolveProxiedGate(cityPath string) (active bool, poolSize, idle string, shared bool) {
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	fi, err := os.Stat(tomlPath)
 	if err != nil {
-		return false, "", ""
+		return false, "", "", false
 	}
 	mt := fi.ModTime().UnixNano()
 	if v, ok := proxiedGateCache.Load(cityPath); ok {
 		if e := v.(proxiedGateEntry); e.mtime == mt {
-			return e.active, e.poolSize, e.idle
+			return e.active, e.poolSize, e.idle, e.shared
 		}
 	}
 	entry := proxiedGateEntry{mtime: mt}
@@ -139,10 +148,11 @@ func resolveProxiedGate(cityPath string) (active bool, poolSize, idle string) {
 			entry.active = true
 			entry.poolSize = strconv.Itoa(cfg.Beads.ProxyPoolSizeOrDefault())
 			entry.idle = cfg.Beads.ProxyIdleTimeoutOrDefault()
+			entry.shared = cfg.Beads.SharedProxyEnabled()
 		}
 	}
 	proxiedGateCache.Store(cityPath, entry)
-	return entry.active, entry.poolSize, entry.idle
+	return entry.active, entry.poolSize, entry.idle, entry.shared
 }
 
 // applyProxiedServerScopeOverlay reconciles a scope's proxied-server state.

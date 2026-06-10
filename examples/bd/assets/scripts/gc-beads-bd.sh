@@ -2228,6 +2228,10 @@ run_bd_pinned() {
             # Do NOT export BEADS_DOLT_SERVER_*: they select direct ServerMode and
             # would shadow proxied mode. Pass the pool size + external password.
             export BEADS_PROXY_POOL_SIZE="${GC_BEADS_PROXY_POOL_SIZE:-4}"
+            # Collapse all proxied scopes onto one shared db-proxy-child when the
+            # gascity gate is on. Empty default => the Go overlay is the single
+            # source of truth; the script never enables the collapse on its own.
+            export BEADS_SHARED_PROXY="${GC_BEADS_SHARED_PROXY:-}"
             # Keep the proxy warm across sparse controller probes (anti-respawn).
             [ -n "${GC_BEADS_PROXY_IDLE_TIMEOUT:-}" ] && export BEADS_PROXY_IDLE_TIMEOUT="$GC_BEADS_PROXY_IDLE_TIMEOUT"
             [ -n "$DOLT_PASSWORD" ] && export BEADS_PROXIED_SERVER_EXTERNAL_PASSWORD="$DOLT_PASSWORD"

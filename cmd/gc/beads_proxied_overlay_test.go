@@ -119,6 +119,7 @@ func writeProxiedCityTOML(t *testing.T, body string) string {
 func TestApplyProxiedPoolEnvInjectsOnlyWhenGateOnAndBDCapable(t *testing.T) {
 	const tomlOn = "[workspace]\nname = \"t\"\n\n[beads]\nproxied = true\nproxy_pool_size = 6\n"
 	const tomlOff = "[workspace]\nname = \"t\"\n\n[beads]\nproxied = false\n"
+	const tomlShared = "[workspace]\nname = \"t\"\n\n[beads]\nproxied = true\nproxy_pool_size = 6\nshared_proxy = true\n"
 
 	t.Run("gate on + bd capable -> injected", func(t *testing.T) {
 		setProxiedProbe(t, true)
@@ -132,6 +133,14 @@ func TestApplyProxiedPoolEnvInjectsOnlyWhenGateOnAndBDCapable(t *testing.T) {
 		// lifecycle and reaps on stop, so proxies stay warm with no churn.
 		if env["BEADS_PROXY_IDLE_TIMEOUT"] != "0" || env["GC_BEADS_PROXY_IDLE_TIMEOUT"] != "0" {
 			t.Fatalf("env = %v, want idle_timeout=0", env)
+		}
+		// shared_proxy is OFF in tomlOn — the collapse keys must be absent
+		// (the gate is separate from proxied; default off).
+		if _, ok := env["BEADS_SHARED_PROXY"]; ok {
+			t.Fatalf("BEADS_SHARED_PROXY set with shared_proxy off: %v", env)
+		}
+		if _, ok := env["GC_BEADS_SHARED_PROXY"]; ok {
+			t.Fatalf("GC_BEADS_SHARED_PROXY set with shared_proxy off: %v", env)
 		}
 	})
 
@@ -152,6 +161,22 @@ func TestApplyProxiedPoolEnvInjectsOnlyWhenGateOnAndBDCapable(t *testing.T) {
 		applyProxiedPoolEnv(env, cityPath)
 		if len(env) != 0 {
 			t.Fatalf("env injected with gate off: %v", env)
+		}
+	})
+
+	t.Run("shared_proxy gate on -> shared-proxy env injected", func(t *testing.T) {
+		setProxiedProbe(t, true)
+		cityPath := writeProxiedCityTOML(t, tomlShared)
+		env := map[string]string{}
+		applyProxiedPoolEnv(env, cityPath)
+		// Pool env still present (shared rides alongside, does not replace it)...
+		if env["GC_BEADS_PROXIED"] != "1" || env["BEADS_PROXY_POOL_SIZE"] != "6" {
+			t.Fatalf("env = %v, want proxied=1 pool=6", env)
+		}
+		// ...plus the collapse keys for both the controller (BEADS_SHARED_PROXY)
+		// and script-forwarded (GC_BEADS_SHARED_PROXY) bd paths.
+		if env["BEADS_SHARED_PROXY"] != "1" || env["GC_BEADS_SHARED_PROXY"] != "1" {
+			t.Fatalf("env = %v, want BEADS_SHARED_PROXY=1 and GC_BEADS_SHARED_PROXY=1", env)
 		}
 	})
 }

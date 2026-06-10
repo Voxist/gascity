@@ -1203,6 +1203,16 @@ type BeadsConfig struct {
 	// it, gascity falls back to server mode and a doctor check flags it, so a
 	// city paired with a standard bd never breaks.
 	Proxied *bool `toml:"proxied,omitempty" jsonschema:"default=false"`
+	// SharedProxy collapses every proxied scope onto ONE shared db-proxy-child:
+	// each scope resolves its proxy rootDir to doltserver.SharedProxyRootDir()
+	// (BEADS_SHARED_PROXY) instead of its per-scope .beads/proxieddb, so N+1
+	// per-scope children become 1 fronting the same managed dolt. Requires
+	// Proxied=true AND a bd that supports the BEADS_SHARED_PROXY opt-in. Defaults
+	// to false and is a SEPARATE gate, never implied by Proxied: an always-on
+	// collapse would fold the live fleet's proxies the moment a capable bd is
+	// pinned, so the flip stays an explicit operator decision, validated on a
+	// throwaway city before touching production.
+	SharedProxy *bool `toml:"shared_proxy,omitempty" jsonschema:"default=false"`
 	// ProxyPoolSize is the warm backend-connection pool size the db-proxy keeps
 	// per (capabilities, database) key when Proxied is true. Defaults to 4.
 	// The proxy is shared per workspace root, so all agents of a scope share one
@@ -1236,6 +1246,14 @@ func (b BeadsConfig) EventHooksEnabled() bool {
 // Unset preserves the current default of direct ServerMode (false).
 func (b BeadsConfig) ProxiedEnabled() bool {
 	return b.Proxied != nil && *b.Proxied
+}
+
+// SharedProxyEnabled reports whether proxied scopes should collapse onto one
+// shared db-proxy-child (projected as BEADS_SHARED_PROXY). A separate gate from
+// ProxiedEnabled: unset preserves per-scope proxies (false), and the collapse is
+// only meaningful when ProxiedEnabled() is also true.
+func (b BeadsConfig) SharedProxyEnabled() bool {
+	return b.SharedProxy != nil && *b.SharedProxy
 }
 
 // defaultBeadsProxyPoolSize is the warm pool size used when Proxied is on and
