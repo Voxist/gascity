@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -96,13 +95,7 @@ func newProviderQuotaCmd(stdout, stderr io.Writer) *cobra.Command {
 			rows := collectAccountQuota(context.Background(), http.DefaultClient, baseURL, accounts, timeout)
 			report := buildProviderQuotaReport(rows, active, policy)
 			if jsonOutput {
-				enc := json.NewEncoder(stdout)
-				enc.SetIndent("", "  ")
-				if err := enc.Encode(report); err != nil {
-					fmt.Fprintf(stderr, "gc provider quota: encoding report: %v\n", err) //nolint:errcheck
-					return errExit
-				}
-				return nil
+				return writeCLIJSONLineOrErr(stdout, stderr, "gc provider quota", report)
 			}
 			renderProviderQuotaText(stdout, report)
 			return nil
@@ -197,17 +190,23 @@ type providerQuotaDecisionReport struct {
 	Error        string `json:"error,omitempty"`
 }
 
-// providerQuotaReport is the full `gc provider quota` report.
+// providerQuotaReport is the full `gc provider quota` report. The JSON
+// contract (schemas/provider/quota/result.schema.json) adds the
+// top-level ok:true discriminator at write time.
 type providerQuotaReport struct {
-	Accounts  []providerQuotaAccountReport  `json:"accounts"`
-	Decisions []providerQuotaDecisionReport `json:"decisions"`
+	SchemaVersion string                        `json:"schema_version"`
+	Accounts      []providerQuotaAccountReport  `json:"accounts"`
+	Decisions     []providerQuotaDecisionReport `json:"decisions"`
 }
 
 // buildProviderQuotaReport assembles account rows and per-tier
 // decisions. Only successfully-polled accounts feed SelectProvider —
 // an unreachable account is unknown, not zero-utilization.
 func buildProviderQuotaReport(rows []accountQuotaRow, active string, policy providergov.Policy) providerQuotaReport {
-	report := providerQuotaReport{}
+	report := providerQuotaReport{
+		SchemaVersion: "1",
+		Accounts:      []providerQuotaAccountReport{},
+	}
 	var states []providergov.AccountState
 	for _, row := range rows {
 		if row.Err != nil {
