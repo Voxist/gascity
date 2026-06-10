@@ -591,6 +591,19 @@ func supervisorServiceEnvMap(vars []supervisorServiceEnvVar) map[string]string {
 	return m
 }
 
+// TestSupervisorServiceExtraEnvForcesPythonDontWriteBytecode asserts the
+// generated supervisor plist always carries PYTHONDONTWRITEBYTECODE=1, so a
+// plist regeneration (e.g. on `gc start` / `gc supervisor install`) can never
+// silently drop it and let Python repopulate __pycache__ into import caches
+// (vp-gny3).
+func TestSupervisorServiceExtraEnvForcesPythonDontWriteBytecode(t *testing.T) {
+	t.Setenv("GC_SUPERVISOR_ENV", "")
+	env := supervisorServiceEnvMap(supervisorServiceExtraEnv())
+	if got := env["PYTHONDONTWRITEBYTECODE"]; got != "1" {
+		t.Fatalf("PYTHONDONTWRITEBYTECODE = %q, want \"1\"", got)
+	}
+}
+
 // writeSupervisorSecretsEnvFile writes dotenv content to ${GC_HOME}/secrets.env,
 // creating GC_HOME if needed. GC_HOME must already be set in the environment.
 func writeSupervisorSecretsEnvFile(t *testing.T, content string) {
