@@ -41,6 +41,35 @@ func TestBeadsResilienceDefaults(t *testing.T) {
 	if got := r.HalfOpenIntervalOrDefault(); got != 15*time.Second {
 		t.Errorf("HalfOpenIntervalOrDefault() = %v, want 15s", got)
 	}
+	if got := r.MaxInflightPerScopeOrDefault(); got != 4 {
+		t.Errorf("MaxInflightPerScopeOrDefault() = %d, want 4", got)
+	}
+	if got := r.MaxInflightGlobalOrDefault(); got != 16 {
+		t.Errorf("MaxInflightGlobalOrDefault() = %d, want 16", got)
+	}
+}
+
+func TestBeadsResilienceInflightCaps(t *testing.T) {
+	tests := []struct {
+		name             string
+		perScope, global int
+		wantPer, wantGlb int
+	}{
+		{"zero uses defaults", 0, 0, 4, 16},
+		{"explicit positive", 8, 32, 8, 32},
+		{"negative disables", -1, -1, 0, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := BeadsResilienceConfig{MaxInflightPerScope: tc.perScope, MaxInflightGlobal: tc.global}
+			if got := r.MaxInflightPerScopeOrDefault(); got != tc.wantPer {
+				t.Errorf("MaxInflightPerScopeOrDefault() = %d, want %d", got, tc.wantPer)
+			}
+			if got := r.MaxInflightGlobalOrDefault(); got != tc.wantGlb {
+				t.Errorf("MaxInflightGlobalOrDefault() = %d, want %d", got, tc.wantGlb)
+			}
+		})
+	}
 }
 
 func TestBeadsResilienceParsesFromTOML(t *testing.T) {

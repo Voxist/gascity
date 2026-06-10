@@ -159,15 +159,6 @@
               "null"
             ]
           },
-          "Args": {
-            "items": {
-              "type": "string"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
           "Attach": {
             "type": [
               "boolean",
@@ -479,12 +470,6 @@
               "null"
             ]
           },
-          "Upstream": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "WakeMode": {
             "type": [
               "string",
@@ -512,8 +497,6 @@
           "PromptTemplate",
           "Session",
           "Provider",
-          "Upstream",
-          "Args",
           "StartCommand",
           "Lifecycle",
           "Nudge",
@@ -859,9 +842,6 @@
           "id": {
             "type": "string"
           },
-          "is_blocked": {
-            "type": "boolean"
-          },
           "issue_type": {
             "type": "string"
           },
@@ -930,26 +910,6 @@
             "type": "string"
           }
         },
-        "type": "object"
-      },
-      "BeadClaimRejectedPayload": {
-        "additionalProperties": false,
-        "properties": {
-          "attempted_claimant": {
-            "type": "string"
-          },
-          "bead_id": {
-            "type": "string"
-          },
-          "existing_claimant": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "bead_id",
-          "existing_claimant",
-          "attempted_claimant"
-        ],
         "type": "object"
       },
       "BeadCreateInputBody": {
@@ -1197,6 +1157,10 @@
           "degraded": {
             "type": "boolean"
           },
+          "gc_bd_inflight": {
+            "format": "int64",
+            "type": "integer"
+          },
           "native_store_eligible": {
             "type": "boolean"
           },
@@ -1224,9 +1188,6 @@
       "BoundEventPayload": {
         "additionalProperties": false,
         "properties": {
-          "agent_name": {
-            "type": "string"
-          },
           "conversation_id": {
             "type": "string"
           },
@@ -1241,6 +1202,44 @@
           "provider",
           "conversation_id",
           "session_id"
+        ],
+        "type": "object"
+      },
+      "BreakerStateChangedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "backoff_ms": {
+            "description": "Open-state backoff chosen for this episode, in milliseconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "failures": {
+            "description": "Consecutive transport-failure count at the change.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "from": {
+            "description": "Breaker state before the transition.",
+            "type": "string"
+          },
+          "op_class": {
+            "description": "Operation class, e.g. bd.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "Store scope (canonical scope root path).",
+            "type": "string"
+          },
+          "to": {
+            "description": "Breaker state after the transition.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "op_class",
+          "from",
+          "to"
         ],
         "type": "object"
       },
@@ -1656,6 +1655,29 @@
         ],
         "type": "object"
       },
+      "ControllerTickCompletedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "duration_ms": {
+            "description": "Wall-clock duration of the completed tick, in milliseconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "phase": {
+            "description": "Tick trigger phase: patrol, poke, control-dispatcher, etc.",
+            "type": "string"
+          },
+          "threshold_breach": {
+            "description": "True when emitted due to a duration-threshold breach rather than the patrol multiple.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "duration_ms",
+          "phase"
+        ],
+        "type": "object"
+      },
       "ConversationGroupParticipant": {
         "additionalProperties": false,
         "properties": {
@@ -1679,9 +1701,6 @@
           },
           "SessionID": {
             "type": "string"
-          },
-          "SessionName": {
-            "type": "string"
           }
         },
         "required": [
@@ -1689,7 +1708,6 @@
           "GroupID",
           "Handle",
           "SessionID",
-          "SessionName",
           "Public",
           "Metadata"
         ],
@@ -2063,6 +2081,32 @@
         ],
         "type": "object"
       },
+      "DoctorAlertPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "check": {
+            "description": "Name of the doctor check that went red.",
+            "type": "string"
+          },
+          "city": {
+            "description": "City name the check evaluated, when scoped to a city.",
+            "type": "string"
+          },
+          "detail": {
+            "description": "Human-readable description of the red condition.",
+            "type": "string"
+          },
+          "subject": {
+            "description": "Optional subject identifier (scope, path) the alert concerns.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "check",
+          "detail"
+        ],
+        "type": "object"
+      },
       "ErrorDetail": {
         "additionalProperties": false,
         "properties": {
@@ -2193,9 +2237,6 @@
             "$ref": "#/components/schemas/AdapterEventPayload"
           },
           {
-            "$ref": "#/components/schemas/BeadClaimRejectedPayload"
-          },
-          {
             "$ref": "#/components/schemas/BeadEventPayload"
           },
           {
@@ -2208,6 +2249,9 @@
             "$ref": "#/components/schemas/BoundEventPayload"
           },
           {
+            "$ref": "#/components/schemas/BreakerStateChangedPayload"
+          },
+          {
             "$ref": "#/components/schemas/CityCreateSucceededPayload"
           },
           {
@@ -2215,6 +2259,12 @@
           },
           {
             "$ref": "#/components/schemas/CityUnregisterSucceededPayload"
+          },
+          {
+            "$ref": "#/components/schemas/ControllerTickCompletedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/DoctorAlertPayload"
           },
           {
             "$ref": "#/components/schemas/GroupCreatedEventPayload"
@@ -2226,13 +2276,7 @@
             "$ref": "#/components/schemas/MailEventPayload"
           },
           {
-            "$ref": "#/components/schemas/MoleculeResolvedPayload"
-          },
-          {
             "$ref": "#/components/schemas/NoPayload"
-          },
-          {
-            "$ref": "#/components/schemas/OutboundChannelMismatchPayload"
           },
           {
             "$ref": "#/components/schemas/OutboundEventPayload"
@@ -2244,7 +2288,7 @@
             "$ref": "#/components/schemas/ProjectIdentityStampedPayload"
           },
           {
-            "$ref": "#/components/schemas/Record"
+            "$ref": "#/components/schemas/ProxyReapedPayload"
           },
           {
             "$ref": "#/components/schemas/RequestFailedPayload"
@@ -2268,10 +2312,10 @@
             "$ref": "#/components/schemas/SessionResetStalledPayload"
           },
           {
-            "$ref": "#/components/schemas/SessionStrandedPayload"
+            "$ref": "#/components/schemas/SessionSubmitSucceededPayload"
           },
           {
-            "$ref": "#/components/schemas/SessionSubmitSucceededPayload"
+            "$ref": "#/components/schemas/StoreDegradedPayload"
           },
           {
             "$ref": "#/components/schemas/StoreDiskCriticalPayload"
@@ -2286,6 +2330,12 @@
             "$ref": "#/components/schemas/StoreMaintenanceFailedPayload"
           },
           {
+            "$ref": "#/components/schemas/StoreProbeFailedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/StoreRecoveredPayload"
+          },
+          {
             "$ref": "#/components/schemas/SupervisorFSPressureSkippedTickPayload"
           },
           {
@@ -2293,9 +2343,6 @@
           },
           {
             "$ref": "#/components/schemas/SupervisorShutdownPayload"
-          },
-          {
-            "$ref": "#/components/schemas/SupervisorStartedPayload"
           },
           {
             "$ref": "#/components/schemas/UnboundEventPayload"
@@ -2520,10 +2567,6 @@
       "ExtMsgBindInputBody": {
         "additionalProperties": false,
         "properties": {
-          "agent_name": {
-            "description": "Configured agent identity to bind; its live session is resolved at delivery time, cold-waking one when none is live (mutually exclusive with session_id).",
-            "type": "string"
-          },
           "conversation": {
             "$ref": "#/components/schemas/ConversationRef",
             "description": "Conversation to bind."
@@ -2540,10 +2583,14 @@
             "type": "boolean"
           },
           "session_id": {
-            "description": "Session ID to bind (mutually exclusive with agent_name).",
+            "description": "Session ID to bind.",
+            "minLength": 1,
             "type": "string"
           }
         },
+        "required": [
+          "session_id"
+        ],
         "type": "object"
       },
       "ExtMsgGroupEnsureInputBody": {
@@ -2726,19 +2773,19 @@
       "ExtMsgUnbindInputBody": {
         "additionalProperties": false,
         "properties": {
-          "agent_name": {
-            "description": "Configured agent identity to unbind.",
-            "type": "string"
-          },
           "conversation": {
             "$ref": "#/components/schemas/ConversationRef",
-            "description": "Conversation to unbind (nil = filter by session_id/agent_name)."
+            "description": "Conversation to unbind (nil = all)."
           },
           "session_id": {
             "description": "Session ID to unbind.",
+            "minLength": 1,
             "type": "string"
           }
         },
+        "required": [
+          "session_id"
+        ],
         "type": "object"
       },
       "ExternalActor": {
@@ -3000,7 +3047,7 @@
             "type": "string"
           },
           "target": {
-            "description": "Preview target: a bead or convoy ID, or a configured agent identity (for example a workflow root's gc.routed_to value).",
+            "description": "Target agent for preview compilation.",
             "minLength": 1,
             "type": "string"
           },
@@ -3398,9 +3445,6 @@
           "provider": {
             "type": "string"
           },
-          "target_agent": {
-            "type": "string"
-          },
           "target_session": {
             "type": "string"
           }
@@ -3425,9 +3469,6 @@
           "Message": {
             "$ref": "#/components/schemas/ExternalInboundMessage"
           },
-          "TargetAgentName": {
-            "type": "string"
-          },
           "TargetSessionID": {
             "type": "string"
           },
@@ -3440,8 +3481,7 @@
           "Binding",
           "GroupRoute",
           "TranscriptEntry",
-          "TargetSessionID",
-          "TargetAgentName"
+          "TargetSessionID"
         ],
         "type": "object"
       },
@@ -4369,56 +4409,6 @@
         ],
         "type": "object"
       },
-      "MoleculeResolvedPayload": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "description": "Identity that triggered the close (eventActor).",
-            "type": "string"
-          },
-          "close_reason": {
-            "description": "close_reason stamped on the root.",
-            "type": "string"
-          },
-          "from_status": {
-            "description": "Root status captured before the close mutated it.",
-            "type": "string"
-          },
-          "issue_id": {
-            "description": "Molecule root bead ID that resolved.",
-            "type": "string"
-          },
-          "session_id": {
-            "description": "Resolving session ID from gc.session_id. Empty if unstamped.",
-            "type": "string"
-          },
-          "session_name": {
-            "description": "Resolving session name from gc.session_name. Empty if unstamped.",
-            "type": "string"
-          },
-          "to_status": {
-            "description": "Terminal status after resolution. Always \"closed\".",
-            "type": "string"
-          },
-          "ts": {
-            "description": "Resolution timestamp (UTC).",
-            "format": "date-time",
-            "type": "string"
-          },
-          "work_dir": {
-            "description": "Resolving session work dir from gc.work_dir. Empty if unstamped.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "issue_id",
-          "from_status",
-          "to_status",
-          "actor",
-          "ts"
-        ],
-        "type": "object"
-      },
       "MonitorFeedItemResponse": {
         "additionalProperties": false,
         "properties": {
@@ -4838,30 +4828,6 @@
         "required": [
           "items",
           "partial"
-        ],
-        "type": "object"
-      },
-      "OutboundChannelMismatchPayload": {
-        "additionalProperties": false,
-        "properties": {
-          "conversation_id": {
-            "type": "string"
-          },
-          "owner_session": {
-            "type": "string"
-          },
-          "posting_session": {
-            "type": "string"
-          },
-          "provider": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "provider",
-          "conversation_id",
-          "posting_session",
-          "owner_session"
         ],
         "type": "object"
       },
@@ -5803,6 +5769,34 @@
         },
         "type": "object"
       },
+      "ProxyReapedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "pids_signaled": {
+            "description": "Number of db-proxy-child PIDs signaled.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "quarantine_dir": {
+            "description": "Directory holding the pre-reap forensic artifacts.",
+            "type": "string"
+          },
+          "rate_limited": {
+            "description": "True when a second poison inside the window suppressed the reap (forensics kept, alert-only).",
+            "type": "boolean"
+          },
+          "scope": {
+            "description": "Canonical scope root path whose db-proxy child was reaped.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "quarantine_dir",
+          "pids_signaled"
+        ],
+        "type": "object"
+      },
       "PublishReceipt": {
         "additionalProperties": false,
         "properties": {
@@ -5878,54 +5872,6 @@
         },
         "required": [
           "items"
-        ],
-        "type": "object"
-      },
-      "Record": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "created_at": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "hostname": {
-            "type": "string"
-          },
-          "id": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "metadata": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "type": "object"
-          },
-          "ref_bead": {
-            "type": "string"
-          },
-          "severity": {
-            "type": "string"
-          },
-          "source_path": {
-            "type": "string"
-          },
-          "source_pid": {
-            "format": "int64",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "id",
-          "severity",
-          "actor",
-          "message",
-          "created_at"
         ],
         "type": "object"
       },
@@ -6317,9 +6263,6 @@
       "SessionBindingRecord": {
         "additionalProperties": false,
         "properties": {
-          "AgentName": {
-            "type": "string"
-          },
           "BindingGeneration": {
             "format": "int64",
             "type": "integer"
@@ -6354,9 +6297,6 @@
           "SessionID": {
             "type": "string"
           },
-          "SessionName": {
-            "type": "string"
-          },
           "Status": {
             "$ref": "#/components/schemas/BindingStatus"
           }
@@ -6366,8 +6306,6 @@
           "SchemaVersion",
           "Conversation",
           "SessionID",
-          "SessionName",
-          "AgentName",
           "Status",
           "BoundAt",
           "ExpiresAt",
@@ -6775,9 +6713,6 @@
           },
           "title": {
             "type": "string"
-          },
-          "work_dir": {
-            "type": "string"
           }
         },
         "required": [
@@ -6790,37 +6725,6 @@
           "created_at",
           "attached",
           "running"
-        ],
-        "type": "object"
-      },
-      "SessionStrandedPayload": {
-        "additionalProperties": false,
-        "properties": {
-          "session_id": {
-            "description": "Canonical session bead ID for the stranded pool session (also the envelope Subject).",
-            "type": "string"
-          },
-          "session_name": {
-            "description": "Runtime session name from the session bead metadata, when set.",
-            "type": "string"
-          },
-          "template": {
-            "description": "Pool template name when known at the emission site.",
-            "type": "string"
-          },
-          "work_bead_ids": {
-            "description": "IDs of the open/in-progress work beads still assigned to the session. Never truncated, unlike the envelope Message. Empty when the work-collection query failed at emission time.",
-            "items": {
-              "type": "string"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "session_id"
         ],
         "type": "object"
       },
@@ -7576,6 +7480,33 @@
         ],
         "type": "object"
       },
+      "StoreDegradedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "class": {
+            "description": "Degradation class: transport, backend, or write-rejection.",
+            "type": "string"
+          },
+          "consecutive_fails": {
+            "description": "Consecutive failed probe cycles at the trip.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "reason": {
+            "description": "Human-readable cause from the failing probe.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "Canonical scope root path whose store degraded.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "class"
+        ],
+        "type": "object"
+      },
       "StoreDiskCriticalPayload": {
         "additionalProperties": false,
         "properties": {
@@ -7673,6 +7604,45 @@
           "stage",
           "error_msg",
           "duration_s"
+        ],
+        "type": "object"
+      },
+      "StoreProbeFailedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "probe": {
+            "description": "Which probe failed: routed (probe A) or backend (probe B).",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Human-readable cause from the failing probe.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "Canonical scope root path of the failing probe.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "probe"
+        ],
+        "type": "object"
+      },
+      "StoreRecoveredPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "class": {
+            "description": "Degradation class that recovered, if known.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "Canonical scope root path whose store recovered.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope"
         ],
         "type": "object"
       },
@@ -7812,10 +7782,6 @@
             "format": "int64",
             "type": "integer"
           },
-          "packs_lock_sha256": {
-            "description": "SHA-256 hex digest of the first managed city's packs.lock contents, for single-city deployments (mirrors the startup field's first-city semantics). Drift checkers compare this against the committed lockfile copy. Omitted when no city is registered, the city has no packs.lock, or the lockfile is unreadable (read error logged server-side) — treat absence as unknown, not as proof there is no lockfile.",
-            "type": "string"
-          },
           "startup": {
             "$ref": "#/components/schemas/SupervisorStartup",
             "description": "First-city startup info for single-city deployments."
@@ -7937,24 +7903,6 @@
         ],
         "type": "object"
       },
-      "SupervisorStartedPayload": {
-        "additionalProperties": false,
-        "properties": {
-          "previous_exit": {
-            "description": "How the previous supervisor instance exited: clean (it completed its STOPPING path and left the shutdown handoff token), crash (a prior instance ran but left no token), or unknown (no evidence of a prior instance).",
-            "enum": [
-              "clean",
-              "crash",
-              "unknown"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "previous_exit"
-        ],
-        "type": "object"
-      },
       "SupervisorStartup": {
         "additionalProperties": false,
         "properties": {
@@ -8045,23 +7993,23 @@
         "description": "Discriminated union of city event stream envelopes. Each variant constrains the envelope type and payload schema together.",
         "discriminator": {
           "mapping": {
-            "bead.claim_rejected": "#/components/schemas/TypedEventStreamEnvelopeBeadClaimRejected",
             "bead.closed": "#/components/schemas/TypedEventStreamEnvelopeBeadClosed",
             "bead.created": "#/components/schemas/TypedEventStreamEnvelopeBeadCreated",
             "bead.deleted": "#/components/schemas/TypedEventStreamEnvelopeBeadDeleted",
             "bead.updated": "#/components/schemas/TypedEventStreamEnvelopeBeadUpdated",
             "bead.worktree.reap_skipped": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReapSkipped",
             "bead.worktree.reaped": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReaped",
+            "breaker.state_changed": "#/components/schemas/TypedEventStreamEnvelopeBreakerStateChanged",
             "city.created": "#/components/schemas/TypedEventStreamEnvelopeCityCreated",
             "city.resumed": "#/components/schemas/TypedEventStreamEnvelopeCityResumed",
             "city.suspended": "#/components/schemas/TypedEventStreamEnvelopeCitySuspended",
             "city.unregister_requested": "#/components/schemas/TypedEventStreamEnvelopeCityUnregisterRequested",
             "controller.started": "#/components/schemas/TypedEventStreamEnvelopeControllerStarted",
             "controller.stopped": "#/components/schemas/TypedEventStreamEnvelopeControllerStopped",
+            "controller.tick_completed": "#/components/schemas/TypedEventStreamEnvelopeControllerTickCompleted",
             "convoy.closed": "#/components/schemas/TypedEventStreamEnvelopeConvoyClosed",
             "convoy.created": "#/components/schemas/TypedEventStreamEnvelopeConvoyCreated",
-            "emergency.acked": "#/components/schemas/TypedEventStreamEnvelopeEmergencyAcked",
-            "emergency.signaled": "#/components/schemas/TypedEventStreamEnvelopeEmergencySignaled",
+            "doctor.alert": "#/components/schemas/TypedEventStreamEnvelopeDoctorAlert",
             "events.rotated": "#/components/schemas/TypedEventStreamEnvelopeEventsRotated",
             "extmsg.adapter_added": "#/components/schemas/TypedEventStreamEnvelopeExtmsgAdapterAdded",
             "extmsg.adapter_removed": "#/components/schemas/TypedEventStreamEnvelopeExtmsgAdapterRemoved",
@@ -8069,7 +8017,6 @@
             "extmsg.group_created": "#/components/schemas/TypedEventStreamEnvelopeExtmsgGroupCreated",
             "extmsg.inbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgInbound",
             "extmsg.outbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutbound",
-            "extmsg.outbound_channel_mismatch": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch",
             "extmsg.unbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgUnbound",
             "gc.store.disk_critical": "#/components/schemas/TypedEventStreamEnvelopeGcStoreDiskCritical",
             "gc.store.disk_warn": "#/components/schemas/TypedEventStreamEnvelopeGcStoreDiskWarn",
@@ -8082,13 +8029,13 @@
             "mail.read": "#/components/schemas/TypedEventStreamEnvelopeMailRead",
             "mail.replied": "#/components/schemas/TypedEventStreamEnvelopeMailReplied",
             "mail.sent": "#/components/schemas/TypedEventStreamEnvelopeMailSent",
-            "molecule.resolved": "#/components/schemas/TypedEventStreamEnvelopeMoleculeResolved",
             "order.completed": "#/components/schemas/TypedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedEventStreamEnvelopeOrderFired",
             "pg.credential_resolved": "#/components/schemas/TypedEventStreamEnvelopePgCredentialResolved",
             "project.identity.stamped": "#/components/schemas/TypedEventStreamEnvelopeProjectIdentityStamped",
             "provider.swapped": "#/components/schemas/TypedEventStreamEnvelopeProviderSwapped",
+            "proxy.reaped": "#/components/schemas/TypedEventStreamEnvelopeProxyReaped",
             "request.failed": "#/components/schemas/TypedEventStreamEnvelopeRequestFailed",
             "request.result.city.create": "#/components/schemas/TypedEventStreamEnvelopeRequestResultCityCreate",
             "request.result.city.unregister": "#/components/schemas/TypedEventStreamEnvelopeRequestResultCityUnregister",
@@ -8110,18 +8057,17 @@
             "session.updated": "#/components/schemas/TypedEventStreamEnvelopeSessionUpdated",
             "session.woke": "#/components/schemas/TypedEventStreamEnvelopeSessionWoke",
             "session.work_query_failed": "#/components/schemas/TypedEventStreamEnvelopeSessionWorkQueryFailed",
+            "store.degraded": "#/components/schemas/TypedEventStreamEnvelopeStoreDegraded",
+            "store.probe_failed": "#/components/schemas/TypedEventStreamEnvelopeStoreProbeFailed",
+            "store.recovered": "#/components/schemas/TypedEventStreamEnvelopeStoreRecovered",
             "supervisor.fs_pressure.skipped_tick": "#/components/schemas/TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick",
             "supervisor.request": "#/components/schemas/TypedEventStreamEnvelopeSupervisorRequest",
             "supervisor.shutdown_requested": "#/components/schemas/TypedEventStreamEnvelopeSupervisorShutdownRequested",
-            "supervisor.started": "#/components/schemas/TypedEventStreamEnvelopeSupervisorStarted",
             "worker.operation": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
           },
           "propertyName": "type"
         },
         "oneOf": [
-          {
-            "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadClaimRejected"
-          },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadClosed"
           },
@@ -8139,6 +8085,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReaped"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeBreakerStateChanged"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeCityCreated"
@@ -8159,16 +8108,16 @@
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeControllerStopped"
           },
           {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeControllerTickCompleted"
+          },
+          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeConvoyClosed"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeConvoyCreated"
           },
           {
-            "$ref": "#/components/schemas/TypedEventStreamEnvelopeEmergencyAcked"
-          },
-          {
-            "$ref": "#/components/schemas/TypedEventStreamEnvelopeEmergencySignaled"
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeDoctorAlert"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeEventsRotated"
@@ -8190,9 +8139,6 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutbound"
-          },
-          {
-            "$ref": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExtmsgUnbound"
@@ -8231,9 +8177,6 @@
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeMailSent"
           },
           {
-            "$ref": "#/components/schemas/TypedEventStreamEnvelopeMoleculeResolved"
-          },
-          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderCompleted"
           },
           {
@@ -8250,6 +8193,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeProviderSwapped"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeProxyReaped"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeRequestFailed"
@@ -8315,6 +8261,15 @@
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionWorkQueryFailed"
           },
           {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeStoreDegraded"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeStoreProbeFailed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeStoreRecovered"
+          },
+          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick"
           },
           {
@@ -8324,9 +8279,6 @@
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSupervisorShutdownRequested"
           },
           {
-            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSupervisorStarted"
-          },
-          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
           },
           {
@@ -8334,48 +8286,6 @@
           }
         ],
         "title": "Typed city event stream envelope"
-      },
-      "TypedEventStreamEnvelopeBeadClaimRejected": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "payload": {
-            "$ref": "#/components/schemas/BeadClaimRejectedPayload"
-          },
-          "seq": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "ts": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": {
-            "const": "bead.claim_rejected",
-            "type": "string"
-          },
-          "workflow": {
-            "$ref": "#/components/schemas/WorkflowEventProjection"
-          }
-        },
-        "required": [
-          "seq",
-          "type",
-          "ts",
-          "actor",
-          "payload"
-        ],
-        "title": "TypedEventStreamEnvelope bead.claim_rejected",
-        "type": "object"
       },
       "TypedEventStreamEnvelopeBeadClosed": {
         "additionalProperties": false,
@@ -8627,6 +8537,48 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope bead.worktree.reaped",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeBreakerStateChanged": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BreakerStateChangedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "breaker.state_changed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope breaker.state_changed",
         "type": "object"
       },
       "TypedEventStreamEnvelopeCityCreated": {
@@ -8881,6 +8833,48 @@
         "title": "TypedEventStreamEnvelope controller.stopped",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeControllerTickCompleted": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ControllerTickCompletedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "controller.tick_completed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope controller.tick_completed",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeConvoyClosed": {
         "additionalProperties": false,
         "properties": {
@@ -9011,7 +9005,6 @@
                 "bead.updated",
                 "bead.worktree.reaped",
                 "bead.worktree.reap_skipped",
-                "bead.claim_rejected",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",
@@ -9040,8 +9033,6 @@
                 "worker.operation",
                 "project.identity.stamped",
                 "supervisor.fs_pressure.skipped_tick",
-                "molecule.resolved",
-                "supervisor.started",
                 "supervisor.shutdown_requested",
                 "supervisor.request",
                 "extmsg.bound",
@@ -9051,15 +9042,19 @@
                 "extmsg.adapter_removed",
                 "extmsg.inbound",
                 "extmsg.outbound",
-                "extmsg.outbound_channel_mismatch",
                 "events.rotated",
                 "gc.store.maintenance.done",
                 "gc.store.maintenance.failed",
                 "gc.store.disk_warn",
                 "gc.store.disk_critical",
                 "pg.credential_resolved",
-                "emergency.signaled",
-                "emergency.acked"
+                "store.degraded",
+                "store.recovered",
+                "store.probe_failed",
+                "proxy.reaped",
+                "breaker.state_changed",
+                "controller.tick_completed",
+                "doctor.alert"
               ]
             },
             "type": "string"
@@ -9078,7 +9073,7 @@
         "title": "TypedEventStreamEnvelope custom",
         "type": "object"
       },
-      "TypedEventStreamEnvelopeEmergencyAcked": {
+      "TypedEventStreamEnvelopeDoctorAlert": {
         "additionalProperties": false,
         "properties": {
           "actor": {
@@ -9088,7 +9083,7 @@
             "type": "string"
           },
           "payload": {
-            "$ref": "#/components/schemas/Record"
+            "$ref": "#/components/schemas/DoctorAlertPayload"
           },
           "seq": {
             "format": "int64",
@@ -9103,7 +9098,7 @@
             "type": "string"
           },
           "type": {
-            "const": "emergency.acked",
+            "const": "doctor.alert",
             "type": "string"
           },
           "workflow": {
@@ -9117,49 +9112,7 @@
           "actor",
           "payload"
         ],
-        "title": "TypedEventStreamEnvelope emergency.acked",
-        "type": "object"
-      },
-      "TypedEventStreamEnvelopeEmergencySignaled": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "payload": {
-            "$ref": "#/components/schemas/Record"
-          },
-          "seq": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "ts": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": {
-            "const": "emergency.signaled",
-            "type": "string"
-          },
-          "workflow": {
-            "$ref": "#/components/schemas/WorkflowEventProjection"
-          }
-        },
-        "required": [
-          "seq",
-          "type",
-          "ts",
-          "actor",
-          "payload"
-        ],
-        "title": "TypedEventStreamEnvelope emergency.signaled",
+        "title": "TypedEventStreamEnvelope doctor.alert",
         "type": "object"
       },
       "TypedEventStreamEnvelopeEventsRotated": {
@@ -9454,48 +9407,6 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope extmsg.outbound",
-        "type": "object"
-      },
-      "TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "payload": {
-            "$ref": "#/components/schemas/OutboundChannelMismatchPayload"
-          },
-          "seq": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "ts": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": {
-            "const": "extmsg.outbound_channel_mismatch",
-            "type": "string"
-          },
-          "workflow": {
-            "$ref": "#/components/schemas/WorkflowEventProjection"
-          }
-        },
-        "required": [
-          "seq",
-          "type",
-          "ts",
-          "actor",
-          "payload"
-        ],
-        "title": "TypedEventStreamEnvelope extmsg.outbound_channel_mismatch",
         "type": "object"
       },
       "TypedEventStreamEnvelopeExtmsgUnbound": {
@@ -10002,48 +9913,6 @@
         "title": "TypedEventStreamEnvelope mail.sent",
         "type": "object"
       },
-      "TypedEventStreamEnvelopeMoleculeResolved": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "payload": {
-            "$ref": "#/components/schemas/MoleculeResolvedPayload"
-          },
-          "seq": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "ts": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": {
-            "const": "molecule.resolved",
-            "type": "string"
-          },
-          "workflow": {
-            "$ref": "#/components/schemas/WorkflowEventProjection"
-          }
-        },
-        "required": [
-          "seq",
-          "type",
-          "ts",
-          "actor",
-          "payload"
-        ],
-        "title": "TypedEventStreamEnvelope molecule.resolved",
-        "type": "object"
-      },
       "TypedEventStreamEnvelopeOrderCompleted": {
         "additionalProperties": false,
         "properties": {
@@ -10294,6 +10163,48 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope provider.swapped",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeProxyReaped": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ProxyReapedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "proxy.reaped",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope proxy.reaped",
         "type": "object"
       },
       "TypedEventStreamEnvelopeRequestFailed": {
@@ -10936,7 +10847,7 @@
             "type": "string"
           },
           "payload": {
-            "$ref": "#/components/schemas/SessionStrandedPayload"
+            "$ref": "#/components/schemas/NoPayload"
           },
           "seq": {
             "format": "int64",
@@ -11178,6 +11089,132 @@
         "title": "TypedEventStreamEnvelope session.work_query_failed",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeStoreDegraded": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StoreDegradedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "store.degraded",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope store.degraded",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeStoreProbeFailed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StoreProbeFailedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "store.probe_failed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope store.probe_failed",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeStoreRecovered": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StoreRecoveredPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "store.recovered",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope store.recovered",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick": {
         "additionalProperties": false,
         "properties": {
@@ -11304,48 +11341,6 @@
         "title": "TypedEventStreamEnvelope supervisor.shutdown_requested",
         "type": "object"
       },
-      "TypedEventStreamEnvelopeSupervisorStarted": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "payload": {
-            "$ref": "#/components/schemas/SupervisorStartedPayload"
-          },
-          "seq": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "ts": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": {
-            "const": "supervisor.started",
-            "type": "string"
-          },
-          "workflow": {
-            "$ref": "#/components/schemas/WorkflowEventProjection"
-          }
-        },
-        "required": [
-          "seq",
-          "type",
-          "ts",
-          "actor",
-          "payload"
-        ],
-        "title": "TypedEventStreamEnvelope supervisor.started",
-        "type": "object"
-      },
       "TypedEventStreamEnvelopeWorkerOperation": {
         "additionalProperties": false,
         "properties": {
@@ -11392,23 +11387,23 @@
         "description": "Discriminated union of supervisor event stream envelopes. Each variant constrains the envelope type and payload schema together and includes the source city.",
         "discriminator": {
           "mapping": {
-            "bead.claim_rejected": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClaimRejected",
             "bead.closed": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClosed",
             "bead.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadCreated",
             "bead.deleted": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadDeleted",
             "bead.updated": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadUpdated",
             "bead.worktree.reap_skipped": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped",
             "bead.worktree.reaped": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReaped",
+            "breaker.state_changed": "#/components/schemas/TypedTaggedEventStreamEnvelopeBreakerStateChanged",
             "city.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityCreated",
             "city.resumed": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityResumed",
             "city.suspended": "#/components/schemas/TypedTaggedEventStreamEnvelopeCitySuspended",
             "city.unregister_requested": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityUnregisterRequested",
             "controller.started": "#/components/schemas/TypedTaggedEventStreamEnvelopeControllerStarted",
             "controller.stopped": "#/components/schemas/TypedTaggedEventStreamEnvelopeControllerStopped",
+            "controller.tick_completed": "#/components/schemas/TypedTaggedEventStreamEnvelopeControllerTickCompleted",
             "convoy.closed": "#/components/schemas/TypedTaggedEventStreamEnvelopeConvoyClosed",
             "convoy.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeConvoyCreated",
-            "emergency.acked": "#/components/schemas/TypedTaggedEventStreamEnvelopeEmergencyAcked",
-            "emergency.signaled": "#/components/schemas/TypedTaggedEventStreamEnvelopeEmergencySignaled",
+            "doctor.alert": "#/components/schemas/TypedTaggedEventStreamEnvelopeDoctorAlert",
             "events.rotated": "#/components/schemas/TypedTaggedEventStreamEnvelopeEventsRotated",
             "extmsg.adapter_added": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgAdapterAdded",
             "extmsg.adapter_removed": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgAdapterRemoved",
@@ -11416,7 +11411,6 @@
             "extmsg.group_created": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgGroupCreated",
             "extmsg.inbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgInbound",
             "extmsg.outbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutbound",
-            "extmsg.outbound_channel_mismatch": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch",
             "extmsg.unbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgUnbound",
             "gc.store.disk_critical": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreDiskCritical",
             "gc.store.disk_warn": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreDiskWarn",
@@ -11429,13 +11423,13 @@
             "mail.read": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailRead",
             "mail.replied": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailReplied",
             "mail.sent": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailSent",
-            "molecule.resolved": "#/components/schemas/TypedTaggedEventStreamEnvelopeMoleculeResolved",
             "order.completed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFired",
             "pg.credential_resolved": "#/components/schemas/TypedTaggedEventStreamEnvelopePgCredentialResolved",
             "project.identity.stamped": "#/components/schemas/TypedTaggedEventStreamEnvelopeProjectIdentityStamped",
             "provider.swapped": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderSwapped",
+            "proxy.reaped": "#/components/schemas/TypedTaggedEventStreamEnvelopeProxyReaped",
             "request.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestFailed",
             "request.result.city.create": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultCityCreate",
             "request.result.city.unregister": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultCityUnregister",
@@ -11457,18 +11451,17 @@
             "session.updated": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionUpdated",
             "session.woke": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionWoke",
             "session.work_query_failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed",
+            "store.degraded": "#/components/schemas/TypedTaggedEventStreamEnvelopeStoreDegraded",
+            "store.probe_failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeStoreProbeFailed",
+            "store.recovered": "#/components/schemas/TypedTaggedEventStreamEnvelopeStoreRecovered",
             "supervisor.fs_pressure.skipped_tick": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick",
             "supervisor.request": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorRequest",
             "supervisor.shutdown_requested": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested",
-            "supervisor.started": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorStarted",
             "worker.operation": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
           },
           "propertyName": "type"
         },
         "oneOf": [
-          {
-            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClaimRejected"
-          },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadClosed"
           },
@@ -11486,6 +11479,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReaped"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBreakerStateChanged"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityCreated"
@@ -11506,16 +11502,16 @@
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeControllerStopped"
           },
           {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeControllerTickCompleted"
+          },
+          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeConvoyClosed"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeConvoyCreated"
           },
           {
-            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeEmergencyAcked"
-          },
-          {
-            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeEmergencySignaled"
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeDoctorAlert"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeEventsRotated"
@@ -11537,9 +11533,6 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutbound"
-          },
-          {
-            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgUnbound"
@@ -11578,9 +11571,6 @@
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailSent"
           },
           {
-            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeMoleculeResolved"
-          },
-          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderCompleted"
           },
           {
@@ -11597,6 +11587,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderSwapped"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeProxyReaped"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestFailed"
@@ -11662,6 +11655,15 @@
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed"
           },
           {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeStoreDegraded"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeStoreProbeFailed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeStoreRecovered"
+          },
+          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick"
           },
           {
@@ -11671,9 +11673,6 @@
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested"
           },
           {
-            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorStarted"
-          },
-          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
           },
           {
@@ -11681,52 +11680,6 @@
           }
         ],
         "title": "Typed supervisor event stream envelope"
-      },
-      "TypedTaggedEventStreamEnvelopeBeadClaimRejected": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "city": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "payload": {
-            "$ref": "#/components/schemas/BeadClaimRejectedPayload"
-          },
-          "seq": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "ts": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": {
-            "const": "bead.claim_rejected",
-            "type": "string"
-          },
-          "workflow": {
-            "$ref": "#/components/schemas/WorkflowEventProjection"
-          }
-        },
-        "required": [
-          "seq",
-          "type",
-          "ts",
-          "actor",
-          "payload",
-          "city"
-        ],
-        "title": "TypedTaggedEventStreamEnvelope bead.claim_rejected",
-        "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeBeadClosed": {
         "additionalProperties": false,
@@ -12002,6 +11955,52 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope bead.worktree.reaped",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeBreakerStateChanged": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BreakerStateChangedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "breaker.state_changed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope breaker.state_changed",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeCityCreated": {
@@ -12280,6 +12279,52 @@
         "title": "TypedTaggedEventStreamEnvelope controller.stopped",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeControllerTickCompleted": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ControllerTickCompletedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "controller.tick_completed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope controller.tick_completed",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeConvoyClosed": {
         "additionalProperties": false,
         "properties": {
@@ -12421,7 +12466,6 @@
                 "bead.updated",
                 "bead.worktree.reaped",
                 "bead.worktree.reap_skipped",
-                "bead.claim_rejected",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",
@@ -12450,8 +12494,6 @@
                 "worker.operation",
                 "project.identity.stamped",
                 "supervisor.fs_pressure.skipped_tick",
-                "molecule.resolved",
-                "supervisor.started",
                 "supervisor.shutdown_requested",
                 "supervisor.request",
                 "extmsg.bound",
@@ -12461,15 +12503,19 @@
                 "extmsg.adapter_removed",
                 "extmsg.inbound",
                 "extmsg.outbound",
-                "extmsg.outbound_channel_mismatch",
                 "events.rotated",
                 "gc.store.maintenance.done",
                 "gc.store.maintenance.failed",
                 "gc.store.disk_warn",
                 "gc.store.disk_critical",
                 "pg.credential_resolved",
-                "emergency.signaled",
-                "emergency.acked"
+                "store.degraded",
+                "store.recovered",
+                "store.probe_failed",
+                "proxy.reaped",
+                "breaker.state_changed",
+                "controller.tick_completed",
+                "doctor.alert"
               ]
             },
             "type": "string"
@@ -12489,7 +12535,7 @@
         "title": "TypedTaggedEventStreamEnvelope custom",
         "type": "object"
       },
-      "TypedTaggedEventStreamEnvelopeEmergencyAcked": {
+      "TypedTaggedEventStreamEnvelopeDoctorAlert": {
         "additionalProperties": false,
         "properties": {
           "actor": {
@@ -12502,7 +12548,7 @@
             "type": "string"
           },
           "payload": {
-            "$ref": "#/components/schemas/Record"
+            "$ref": "#/components/schemas/DoctorAlertPayload"
           },
           "seq": {
             "format": "int64",
@@ -12517,7 +12563,7 @@
             "type": "string"
           },
           "type": {
-            "const": "emergency.acked",
+            "const": "doctor.alert",
             "type": "string"
           },
           "workflow": {
@@ -12532,53 +12578,7 @@
           "payload",
           "city"
         ],
-        "title": "TypedTaggedEventStreamEnvelope emergency.acked",
-        "type": "object"
-      },
-      "TypedTaggedEventStreamEnvelopeEmergencySignaled": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "city": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "payload": {
-            "$ref": "#/components/schemas/Record"
-          },
-          "seq": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "ts": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": {
-            "const": "emergency.signaled",
-            "type": "string"
-          },
-          "workflow": {
-            "$ref": "#/components/schemas/WorkflowEventProjection"
-          }
-        },
-        "required": [
-          "seq",
-          "type",
-          "ts",
-          "actor",
-          "payload",
-          "city"
-        ],
-        "title": "TypedTaggedEventStreamEnvelope emergency.signaled",
+        "title": "TypedTaggedEventStreamEnvelope doctor.alert",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeEventsRotated": {
@@ -12901,52 +12901,6 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope extmsg.outbound",
-        "type": "object"
-      },
-      "TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "city": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "payload": {
-            "$ref": "#/components/schemas/OutboundChannelMismatchPayload"
-          },
-          "seq": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "ts": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": {
-            "const": "extmsg.outbound_channel_mismatch",
-            "type": "string"
-          },
-          "workflow": {
-            "$ref": "#/components/schemas/WorkflowEventProjection"
-          }
-        },
-        "required": [
-          "seq",
-          "type",
-          "ts",
-          "actor",
-          "payload",
-          "city"
-        ],
-        "title": "TypedTaggedEventStreamEnvelope extmsg.outbound_channel_mismatch",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeExtmsgUnbound": {
@@ -13501,52 +13455,6 @@
         "title": "TypedTaggedEventStreamEnvelope mail.sent",
         "type": "object"
       },
-      "TypedTaggedEventStreamEnvelopeMoleculeResolved": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "city": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "payload": {
-            "$ref": "#/components/schemas/MoleculeResolvedPayload"
-          },
-          "seq": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "ts": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": {
-            "const": "molecule.resolved",
-            "type": "string"
-          },
-          "workflow": {
-            "$ref": "#/components/schemas/WorkflowEventProjection"
-          }
-        },
-        "required": [
-          "seq",
-          "type",
-          "ts",
-          "actor",
-          "payload",
-          "city"
-        ],
-        "title": "TypedTaggedEventStreamEnvelope molecule.resolved",
-        "type": "object"
-      },
       "TypedTaggedEventStreamEnvelopeOrderCompleted": {
         "additionalProperties": false,
         "properties": {
@@ -13821,6 +13729,52 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope provider.swapped",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeProxyReaped": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ProxyReapedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "proxy.reaped",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope proxy.reaped",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeRequestFailed": {
@@ -14526,7 +14480,7 @@
             "type": "string"
           },
           "payload": {
-            "$ref": "#/components/schemas/SessionStrandedPayload"
+            "$ref": "#/components/schemas/NoPayload"
           },
           "seq": {
             "format": "int64",
@@ -14789,6 +14743,144 @@
         "title": "TypedTaggedEventStreamEnvelope session.work_query_failed",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeStoreDegraded": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StoreDegradedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "store.degraded",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope store.degraded",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeStoreProbeFailed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StoreProbeFailedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "store.probe_failed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope store.probe_failed",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeStoreRecovered": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StoreRecoveredPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "store.recovered",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope store.recovered",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick": {
         "additionalProperties": false,
         "properties": {
@@ -14925,52 +15017,6 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope supervisor.shutdown_requested",
-        "type": "object"
-      },
-      "TypedTaggedEventStreamEnvelopeSupervisorStarted": {
-        "additionalProperties": false,
-        "properties": {
-          "actor": {
-            "type": "string"
-          },
-          "city": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "payload": {
-            "$ref": "#/components/schemas/SupervisorStartedPayload"
-          },
-          "seq": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "subject": {
-            "type": "string"
-          },
-          "ts": {
-            "format": "date-time",
-            "type": "string"
-          },
-          "type": {
-            "const": "supervisor.started",
-            "type": "string"
-          },
-          "workflow": {
-            "$ref": "#/components/schemas/WorkflowEventProjection"
-          }
-        },
-        "required": [
-          "seq",
-          "type",
-          "ts",
-          "actor",
-          "payload",
-          "city"
-        ],
-        "title": "TypedTaggedEventStreamEnvelope supervisor.started",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeWorkerOperation": {
@@ -15118,10 +15164,6 @@
           "result": {
             "type": "string"
           },
-          "run_id": {
-            "description": "Run-root identifier for rolling this operation up to a workflow/molecule/chat run (best-effort).",
-            "type": "string"
-          },
           "session_id": {
             "type": "string"
           },
@@ -15137,10 +15179,6 @@
           },
           "transport": {
             "type": "string"
-          },
-          "unpriced": {
-            "description": "True when tokens were observed but no price resolved (best-effort tri-state; absent = not evaluated).",
-            "type": "boolean"
           }
         },
         "required": [
@@ -20652,13 +20690,13 @@
             }
           },
           {
-            "description": "Preview target: a bead or convoy ID, or a configured agent identity (for example a workflow root's gc.routed_to value).",
+            "description": "Target agent for preview compilation.",
             "explode": false,
             "in": "query",
             "name": "target",
             "required": true,
             "schema": {
-              "description": "Preview target: a bead or convoy ID, or a configured agent identity (for example a workflow root's gc.routed_to value).",
+              "description": "Target agent for preview compilation.",
               "type": "string"
             }
           }
@@ -20901,13 +20939,13 @@
             }
           },
           {
-            "description": "Preview target: a bead or convoy ID, or a configured agent identity (for example a workflow root's gc.routed_to value).",
+            "description": "Target agent for preview compilation.",
             "explode": false,
             "in": "query",
             "name": "target",
             "required": true,
             "schema": {
-              "description": "Preview target: a bead or convoy ID, or a configured agent identity (for example a workflow root's gc.routed_to value).",
+              "description": "Target agent for preview compilation.",
               "type": "string"
             }
           }

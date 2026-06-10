@@ -1116,6 +1116,7 @@ func (cs *controllerState) CityBeadsDiagnostic() *beads.BeadsDiagnostic {
 	}
 	diag := *cs.cityBeadsDiagnostic
 	diag.Degraded = storeReportsDegraded(cs.cityBeadStore)
+	diag.BdInflight = bdInflightForCity(cs.cityPath)
 	return &diag
 }
 
