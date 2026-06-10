@@ -326,7 +326,10 @@ func (b *Breaker) openLocked(now time.Time) {
 }
 
 // backoffCapLocked returns min(OpenMax, OpenBase << (trips-1)) with
-// overflow protection. Caller must hold b.mu.
+// overflow protection. Caller must hold b.mu. The initial cap is OpenBase,
+// which withDefaults guarantees is ≤ OpenMax, and each doubling that reaches
+// or exceeds OpenMax returns OpenMax immediately — so the loop never exits
+// with cap > OpenMax and no post-loop clamp is needed.
 func (b *Breaker) backoffCapLocked() time.Duration {
 	cap := b.settings.OpenBase
 	for i := 1; i < b.trips; i++ {
@@ -334,9 +337,6 @@ func (b *Breaker) backoffCapLocked() time.Duration {
 		if cap >= b.settings.OpenMax || cap <= 0 {
 			return b.settings.OpenMax
 		}
-	}
-	if cap > b.settings.OpenMax {
-		return b.settings.OpenMax
 	}
 	return cap
 }
