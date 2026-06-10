@@ -1020,6 +1020,8 @@ func (cs *controllerState) CityBeadStore() beads.Store {
 }
 
 // CityBeadsDiagnostic returns the city-level bead store selection diagnostic.
+// Degraded is computed at read time from the live caching store so status
+// surfaces reflect the current breaker/cache state, not the open-time state.
 func (cs *controllerState) CityBeadsDiagnostic() *beads.BeadsDiagnostic {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
@@ -1027,7 +1029,22 @@ func (cs *controllerState) CityBeadsDiagnostic() *beads.BeadsDiagnostic {
 		return nil
 	}
 	diag := *cs.cityBeadsDiagnostic
+	diag.Degraded = storeReportsDegraded(cs.cityBeadStore)
 	return &diag
+}
+
+// storeReportsDegraded reports whether the (possibly policy-wrapped) store
+// currently serves degraded last-good data. Stores without a degraded
+// signal report false.
+func storeReportsDegraded(store beads.Store) bool {
+	if store == nil {
+		return false
+	}
+	base, _, _ := unwrapBeadPolicyStore(store)
+	if d, ok := base.(interface{ Degraded() bool }); ok {
+		return d.Degraded()
+	}
+	return false
 }
 
 // Orders scans formula layers and returns active orders.
