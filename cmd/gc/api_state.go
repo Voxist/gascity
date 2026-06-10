@@ -134,6 +134,7 @@ func newControllerState(
 	} else {
 		store := opened.Store
 		cs.cityBeadStore = wrapWithCachingStore(ctx, store, ep, true)
+		wireStoreAvailabilityGate(cs.cityBeadStore, cityPath, cityPath)
 		cs.cityBeadsDiagnostic = diagnosticPtr(opened.Diagnostic)
 		cs.cityMailProv = newMailProvider(cs.cityBeadStore)
 		svc := extmsg.NewServices(cs.cityBeadStore)
@@ -260,6 +261,7 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 		}
 		store = cs.openRigStore(scopeProvider, rig.Name, scopeRoot, rig.EffectivePrefix(), cfg)
 		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv, rigStoreBackgroundRefresh(suspState, rig))
+		wireStoreAvailabilityGate(stores[rig.Name], cs.cityPath, scopeRoot)
 	}
 	return stores
 }
@@ -516,6 +518,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	var extSvc *extmsg.Services
 	if cityStore != nil {
 		cityStore = wrapWithCachingStore(cs.cacheCtx, cityStore, cs.eventProv, true)
+		wireStoreAvailabilityGate(cityStore, cs.cityPath, cs.cityPath)
 		cityMailProv = newMailProvider(cityStore)
 		svc := extmsg.NewServices(cityStore)
 		extSvc = &svc

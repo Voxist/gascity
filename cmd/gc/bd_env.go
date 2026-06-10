@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pgauth"
+	"github.com/gastownhall/gascity/internal/resilience"
 )
 
 const defaultManagedDoltHost = "127.0.0.1"
@@ -955,37 +956,54 @@ const (
 	bdSilentFallbackMarkerEmptyDB = "into empty database"
 )
 
+// bdTransportRetryableMarkers is the bd stderr/error string table gc uses
+// to classify transport-class failures (managed retry, circuit breaker
+// recording, and gc hook's store-unavailable signal all flow through it).
+// It is an explicit, tested compatibility surface with the bd CLI —
+// pinned by TestBdTransportRetryableMarkersArePinned — and remains the
+// classification mechanism until bd ships a typed machine-readable error
+// envelope (a reserved exit-code contract distinguishing transport from
+// application failures; bd currently exits 1 for both, so exit codes
+// carry no transport signal today). Change it deliberately, in one place,
+// together with the pin test.
+var bdTransportRetryableMarkers = []string{
+	"server unreachable",
+	"dial tcp",
+	"connection refused",
+	"broken pipe",
+	"unexpected eof",
+	"bad connection",
+	"use of closed network connection",
+	// bd silently falls back to opening the on-disk store when it cannot
+	// reach the managed Dolt server. On an empty .beads/dolt/ that fallback
+	// triggers a JSONL auto-import, which presents as a 2m command timeout
+	// rather than a network error. Treat the auto-import marker as a
+	// transport failure so the managed-retry path republishes the correct
+	// port and retries against the live server. See gastownhall/gascity#1930.
+	bdSilentFallbackMarkerImport,
+	bdSilentFallbackMarkerEmptyDB,
+}
+
+// bdTransportRecoverableMarkers is the subset of transport failures where
+// republishing the managed Dolt port (recoverManagedBDCommand) can unstick
+// the next attempt. Pinned alongside bdTransportRetryableMarkers.
+var bdTransportRecoverableMarkers = []string{
+	"server unreachable",
+	"dial tcp",
+	"connection refused",
+	// When bd auto-imports into an empty on-disk store it has lost the
+	// managed Dolt server; republishing the port via the recovery path
+	// is what unsticks the next attempt. See gastownhall/gascity#1930.
+	bdSilentFallbackMarkerImport,
+	bdSilentFallbackMarkerEmptyDB,
+}
+
 func bdTransportRetryableError(cityPath, scopeRoot string, env map[string]string, err error) bool {
-	return bdTransportErrorMatches(cityPath, scopeRoot, env, err, []string{
-		"server unreachable",
-		"dial tcp",
-		"connection refused",
-		"broken pipe",
-		"unexpected eof",
-		"bad connection",
-		"use of closed network connection",
-		// bd silently falls back to opening the on-disk store when it cannot
-		// reach the managed Dolt server. On an empty .beads/dolt/ that fallback
-		// triggers a JSONL auto-import, which presents as a 2m command timeout
-		// rather than a network error. Treat the auto-import marker as a
-		// transport failure so the managed-retry path republishes the correct
-		// port and retries against the live server. See gastownhall/gascity#1930.
-		bdSilentFallbackMarkerImport,
-		bdSilentFallbackMarkerEmptyDB,
-	})
+	return bdTransportErrorMatches(cityPath, scopeRoot, env, err, bdTransportRetryableMarkers)
 }
 
 func bdTransportRecoverableError(cityPath, scopeRoot string, env map[string]string, err error) bool {
-	return bdTransportErrorMatches(cityPath, scopeRoot, env, err, []string{
-		"server unreachable",
-		"dial tcp",
-		"connection refused",
-		// When bd auto-imports into an empty on-disk store it has lost the
-		// managed Dolt server; republishing the port via the recovery path
-		// is what unsticks the next attempt. See gastownhall/gascity#1930.
-		bdSilentFallbackMarkerImport,
-		bdSilentFallbackMarkerEmptyDB,
-	})
+	return bdTransportErrorMatches(cityPath, scopeRoot, env, err, bdTransportRecoverableMarkers)
 }
 
 // bdOutputIndicatesSilentFallback reports whether the given bd output
@@ -1022,6 +1040,19 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		ensureProjectedDoltEnvExplicit(env)
 		ensureProjectedPostgresEnvExplicit(env)
 		runner := beadsExecCommandRunnerWithEnv(env)
+		// Scope transport breaker (chokepoint a, plan item 1.2): an open
+		// breaker fails fast with the typed ErrStoreUnavailable and spawns
+		// ZERO subprocesses, so a wedged backend cannot pile up bd
+		// processes and dial timeouts. The admitted call after the backoff
+		// deadline doubles as the recovery probe.
+		var breaker *resilience.Breaker
+		if name == "bd" {
+			breaker = bdScopeBreaker(cityPath, dir)
+			if !breaker.Allow() {
+				return nil, fmt.Errorf("bd %s: scope %s: circuit breaker open after consecutive transport failures: %w",
+					strings.Join(args, " "), dir, beads.ErrStoreUnavailable)
+			}
+		}
 		out, err := runner(dir, name, args...)
 		if name != "bd" {
 			return out, err
@@ -1042,10 +1073,14 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 			return out, err
 		}
 		if !bdTransportRetryableError(cityPath, dir, env, err) {
+			// Success or application-class failure: bd reached the store
+			// and answered, so the transport is healthy.
+			recordBdBreakerOutcome(breaker, false)
 			return out, err
 		}
 		if bdTransportRecoverableError(cityPath, dir, env, err) {
 			if recErr := recoverManagedBDCommand(cityPath); recErr != nil {
+				recordBdBreakerOutcome(breaker, true)
 				return out, err
 			}
 		}
@@ -1056,7 +1091,12 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		ensureProjectedDoltEnvExplicit(retryEnv)
 		ensureProjectedPostgresEnvExplicit(retryEnv)
 		retryRunner := beadsExecCommandRunnerWithEnv(retryEnv)
-		return retryRunner(dir, name, args...)
+		retryOut, retryErr := retryRunner(dir, name, args...)
+		// The retry's outcome is this invocation's final word: a second
+		// transport failure counts one consecutive failure toward the
+		// trip threshold; recovery resets the count.
+		recordBdBreakerOutcome(breaker, bdTransportRetryableError(cityPath, dir, retryEnv, retryErr))
+		return retryOut, retryErr
 	}
 }
 
