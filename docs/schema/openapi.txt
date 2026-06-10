@@ -464,6 +464,12 @@
               "null"
             ]
           },
+          "Tier": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "TmuxAlias": {
             "type": [
               "string",
@@ -523,6 +529,7 @@
           "ResumeCommand",
           "WakeMode",
           "MouseMode",
+          "Tier",
           "PreStartAppend",
           "SessionSetupAppend",
           "SessionLiveAppend",
@@ -2183,6 +2190,12 @@
           },
           {
             "$ref": "#/components/schemas/ProjectIdentityStampedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/QuotaObservedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/QuotaPollFailedPayload"
           },
           {
             "$ref": "#/components/schemas/RequestFailedPayload"
@@ -5686,6 +5699,58 @@
         ],
         "type": "object"
       },
+      "QuotaObservedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "five_hour_resets_at": {
+            "type": "string"
+          },
+          "five_hour_util": {
+            "format": "double",
+            "type": "number"
+          },
+          "opus_util": {
+            "format": "double",
+            "type": "number"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "seven_day_resets_at": {
+            "type": "string"
+          },
+          "seven_day_util": {
+            "format": "double",
+            "type": "number"
+          },
+          "sonnet_util": {
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "provider",
+          "five_hour_util",
+          "seven_day_util"
+        ],
+        "type": "object"
+      },
+      "QuotaPollFailedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "provider": {
+            "type": "string"
+          },
+          "reason_class": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "reason_class"
+        ],
+        "type": "object"
+      },
       "ReadinessItem": {
         "additionalProperties": false,
         "properties": {
@@ -7818,6 +7883,8 @@
             "order.fired": "#/components/schemas/TypedEventStreamEnvelopeOrderFired",
             "pg.credential_resolved": "#/components/schemas/TypedEventStreamEnvelopePgCredentialResolved",
             "project.identity.stamped": "#/components/schemas/TypedEventStreamEnvelopeProjectIdentityStamped",
+            "provider.quota_observed": "#/components/schemas/TypedEventStreamEnvelopeProviderQuotaObserved",
+            "provider.quota_poll_failed": "#/components/schemas/TypedEventStreamEnvelopeProviderQuotaPollFailed",
             "provider.swapped": "#/components/schemas/TypedEventStreamEnvelopeProviderSwapped",
             "request.failed": "#/components/schemas/TypedEventStreamEnvelopeRequestFailed",
             "request.result.city.create": "#/components/schemas/TypedEventStreamEnvelopeRequestResultCityCreate",
@@ -7961,6 +8028,12 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeProjectIdentityStamped"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeProviderQuotaObserved"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeProviderQuotaPollFailed"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeProviderSwapped"
@@ -8705,6 +8778,8 @@
                 "order.completed",
                 "order.failed",
                 "provider.swapped",
+                "provider.quota_observed",
+                "provider.quota_poll_failed",
                 "worker.operation",
                 "project.identity.stamped",
                 "supervisor.fs_pressure.skipped_tick",
@@ -9747,6 +9822,90 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope project.identity.stamped",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeProviderQuotaObserved": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/QuotaObservedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "provider.quota_observed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope provider.quota_observed",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeProviderQuotaPollFailed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/QuotaPollFailedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "provider.quota_poll_failed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope provider.quota_poll_failed",
         "type": "object"
       },
       "TypedEventStreamEnvelopeProviderSwapped": {
@@ -10883,6 +11042,8 @@
             "order.fired": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFired",
             "pg.credential_resolved": "#/components/schemas/TypedTaggedEventStreamEnvelopePgCredentialResolved",
             "project.identity.stamped": "#/components/schemas/TypedTaggedEventStreamEnvelopeProjectIdentityStamped",
+            "provider.quota_observed": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderQuotaObserved",
+            "provider.quota_poll_failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderQuotaPollFailed",
             "provider.swapped": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderSwapped",
             "request.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestFailed",
             "request.result.city.create": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultCityCreate",
@@ -11026,6 +11187,12 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeProjectIdentityStamped"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderQuotaObserved"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderQuotaPollFailed"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderSwapped"
@@ -11829,6 +11996,8 @@
                 "order.completed",
                 "order.failed",
                 "provider.swapped",
+                "provider.quota_observed",
+                "provider.quota_poll_failed",
                 "worker.operation",
                 "project.identity.stamped",
                 "supervisor.fs_pressure.skipped_tick",
@@ -12968,6 +13137,98 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope project.identity.stamped",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeProviderQuotaObserved": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/QuotaObservedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "provider.quota_observed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope provider.quota_observed",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeProviderQuotaPollFailed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/QuotaPollFailedPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "provider.quota_poll_failed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope provider.quota_poll_failed",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeProviderSwapped": {

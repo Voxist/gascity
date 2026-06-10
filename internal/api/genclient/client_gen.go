@@ -434,6 +434,7 @@ type AgentPatch struct {
 	SleepAfterIdle          *string           `json:"SleepAfterIdle"`
 	StartCommand            *string           `json:"StartCommand"`
 	Suspended               *bool             `json:"Suspended"`
+	Tier                    *string           `json:"Tier"`
 	TmuxAlias               *string           `json:"TmuxAlias"`
 	WakeMode                *string           `json:"WakeMode"`
 	WorkDir                 *string           `json:"WorkDir"`
@@ -2341,6 +2342,23 @@ type PublishReceipt struct {
 	RetryAfter   int64             `json:"RetryAfter"`
 }
 
+// QuotaObservedPayload defines model for QuotaObservedPayload.
+type QuotaObservedPayload struct {
+	FiveHourResetsAt *string  `json:"five_hour_resets_at,omitempty"`
+	FiveHourUtil     float64  `json:"five_hour_util"`
+	OpusUtil         *float64 `json:"opus_util,omitempty"`
+	Provider         string   `json:"provider"`
+	SevenDayResetsAt *string  `json:"seven_day_resets_at,omitempty"`
+	SevenDayUtil     float64  `json:"seven_day_util"`
+	SonnetUtil       *float64 `json:"sonnet_util,omitempty"`
+}
+
+// QuotaPollFailedPayload defines model for QuotaPollFailedPayload.
+type QuotaPollFailedPayload struct {
+	Provider    string `json:"provider"`
+	ReasonClass string `json:"reason_class"`
+}
+
 // ReadinessItem defines model for ReadinessItem.
 type ReadinessItem struct {
 	Detail      *string `json:"detail,omitempty"`
@@ -3698,6 +3716,30 @@ type TypedEventStreamEnvelopeProjectIdentityStamped struct {
 	Workflow *WorkflowEventProjection      `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeProviderQuotaObserved defines model for TypedEventStreamEnvelopeProviderQuotaObserved.
+type TypedEventStreamEnvelopeProviderQuotaObserved struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  QuotaObservedPayload     `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeProviderQuotaPollFailed defines model for TypedEventStreamEnvelopeProviderQuotaPollFailed.
+type TypedEventStreamEnvelopeProviderQuotaPollFailed struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  QuotaPollFailedPayload   `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeProviderSwapped defines model for TypedEventStreamEnvelopeProviderSwapped.
 type TypedEventStreamEnvelopeProviderSwapped struct {
 	Actor    string                   `json:"actor"`
@@ -4520,6 +4562,32 @@ type TypedTaggedEventStreamEnvelopeProjectIdentityStamped struct {
 	Ts       time.Time                     `json:"ts"`
 	Type     string                        `json:"type"`
 	Workflow *WorkflowEventProjection      `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeProviderQuotaObserved defines model for TypedTaggedEventStreamEnvelopeProviderQuotaObserved.
+type TypedTaggedEventStreamEnvelopeProviderQuotaObserved struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  QuotaObservedPayload     `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeProviderQuotaPollFailed defines model for TypedTaggedEventStreamEnvelopeProviderQuotaPollFailed.
+type TypedTaggedEventStreamEnvelopeProviderQuotaPollFailed struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  QuotaPollFailedPayload   `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeProviderSwapped defines model for TypedTaggedEventStreamEnvelopeProviderSwapped.
@@ -6483,6 +6551,58 @@ func (t *EventPayload) MergeProjectIdentityStampedPayload(v ProjectIdentityStamp
 	return err
 }
 
+// AsQuotaObservedPayload returns the union data inside the EventPayload as a QuotaObservedPayload
+func (t EventPayload) AsQuotaObservedPayload() (QuotaObservedPayload, error) {
+	var body QuotaObservedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromQuotaObservedPayload overwrites any union data inside the EventPayload as the provided QuotaObservedPayload
+func (t *EventPayload) FromQuotaObservedPayload(v QuotaObservedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeQuotaObservedPayload performs a merge with any union data inside the EventPayload, using the provided QuotaObservedPayload
+func (t *EventPayload) MergeQuotaObservedPayload(v QuotaObservedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsQuotaPollFailedPayload returns the union data inside the EventPayload as a QuotaPollFailedPayload
+func (t EventPayload) AsQuotaPollFailedPayload() (QuotaPollFailedPayload, error) {
+	var body QuotaPollFailedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromQuotaPollFailedPayload overwrites any union data inside the EventPayload as the provided QuotaPollFailedPayload
+func (t *EventPayload) FromQuotaPollFailedPayload(v QuotaPollFailedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeQuotaPollFailedPayload performs a merge with any union data inside the EventPayload, using the provided QuotaPollFailedPayload
+func (t *EventPayload) MergeQuotaPollFailedPayload(v QuotaPollFailedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsRequestFailedPayload returns the union data inside the EventPayload as a RequestFailedPayload
 func (t EventPayload) AsRequestFailedPayload() (RequestFailedPayload, error) {
 	var body RequestFailedPayload
@@ -8087,6 +8207,62 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeProjectIdentityS
 	return err
 }
 
+// AsTypedEventStreamEnvelopeProviderQuotaObserved returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeProviderQuotaObserved
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeProviderQuotaObserved() (TypedEventStreamEnvelopeProviderQuotaObserved, error) {
+	var body TypedEventStreamEnvelopeProviderQuotaObserved
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeProviderQuotaObserved overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeProviderQuotaObserved
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeProviderQuotaObserved(v TypedEventStreamEnvelopeProviderQuotaObserved) error {
+	v.Type = "provider.quota_observed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeProviderQuotaObserved performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeProviderQuotaObserved
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeProviderQuotaObserved(v TypedEventStreamEnvelopeProviderQuotaObserved) error {
+	v.Type = "provider.quota_observed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeProviderQuotaPollFailed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeProviderQuotaPollFailed
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeProviderQuotaPollFailed() (TypedEventStreamEnvelopeProviderQuotaPollFailed, error) {
+	var body TypedEventStreamEnvelopeProviderQuotaPollFailed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeProviderQuotaPollFailed overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeProviderQuotaPollFailed
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeProviderQuotaPollFailed(v TypedEventStreamEnvelopeProviderQuotaPollFailed) error {
+	v.Type = "provider.quota_poll_failed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeProviderQuotaPollFailed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeProviderQuotaPollFailed
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeProviderQuotaPollFailed(v TypedEventStreamEnvelopeProviderQuotaPollFailed) error {
+	v.Type = "provider.quota_poll_failed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeProviderSwapped returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeProviderSwapped
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeProviderSwapped() (TypedEventStreamEnvelopeProviderSwapped, error) {
 	var body TypedEventStreamEnvelopeProviderSwapped
@@ -8935,6 +9111,10 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopePgCredentialResolved()
 	case "project.identity.stamped":
 		return t.AsTypedEventStreamEnvelopeProjectIdentityStamped()
+	case "provider.quota_observed":
+		return t.AsTypedEventStreamEnvelopeProviderQuotaObserved()
+	case "provider.quota_poll_failed":
+		return t.AsTypedEventStreamEnvelopeProviderQuotaPollFailed()
 	case "provider.swapped":
 		return t.AsTypedEventStreamEnvelopeProviderSwapped()
 	case "request.failed":
@@ -10066,6 +10246,62 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeProj
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeProviderQuotaObserved returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeProviderQuotaObserved
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeProviderQuotaObserved() (TypedTaggedEventStreamEnvelopeProviderQuotaObserved, error) {
+	var body TypedTaggedEventStreamEnvelopeProviderQuotaObserved
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeProviderQuotaObserved overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeProviderQuotaObserved
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeProviderQuotaObserved(v TypedTaggedEventStreamEnvelopeProviderQuotaObserved) error {
+	v.Type = "provider.quota_observed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeProviderQuotaObserved performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeProviderQuotaObserved
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeProviderQuotaObserved(v TypedTaggedEventStreamEnvelopeProviderQuotaObserved) error {
+	v.Type = "provider.quota_observed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeProviderQuotaPollFailed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeProviderQuotaPollFailed
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeProviderQuotaPollFailed() (TypedTaggedEventStreamEnvelopeProviderQuotaPollFailed, error) {
+	var body TypedTaggedEventStreamEnvelopeProviderQuotaPollFailed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeProviderQuotaPollFailed overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeProviderQuotaPollFailed
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeProviderQuotaPollFailed(v TypedTaggedEventStreamEnvelopeProviderQuotaPollFailed) error {
+	v.Type = "provider.quota_poll_failed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeProviderQuotaPollFailed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeProviderQuotaPollFailed
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeProviderQuotaPollFailed(v TypedTaggedEventStreamEnvelopeProviderQuotaPollFailed) error {
+	v.Type = "provider.quota_poll_failed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeProviderSwapped returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeProviderSwapped
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeProviderSwapped() (TypedTaggedEventStreamEnvelopeProviderSwapped, error) {
 	var body TypedTaggedEventStreamEnvelopeProviderSwapped
@@ -10914,6 +11150,10 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopePgCredentialResolved()
 	case "project.identity.stamped":
 		return t.AsTypedTaggedEventStreamEnvelopeProjectIdentityStamped()
+	case "provider.quota_observed":
+		return t.AsTypedTaggedEventStreamEnvelopeProviderQuotaObserved()
+	case "provider.quota_poll_failed":
+		return t.AsTypedTaggedEventStreamEnvelopeProviderQuotaPollFailed()
 	case "provider.swapped":
 		return t.AsTypedTaggedEventStreamEnvelopeProviderSwapped()
 	case "request.failed":
