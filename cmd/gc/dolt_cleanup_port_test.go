@@ -1,21 +1,57 @@
 package main
 
 import (
-	"os"
+	"errors"
 	"strings"
 	"testing"
-
-	"github.com/gastownhall/gascity/internal/fsys"
 )
 
+// fakeLiveResolve returns a LiveResolve seam that resolves to the given port
+// via the managed-handle source.
+func fakeLiveResolve() func(string) (liveDoltPortResolution, error) {
+	return func(string) (liveDoltPortResolution, error) {
+		return liveDoltPortResolution{
+			Port:   28231,
+			Source: liveDoltHandleSource,
+			Attempts: []PortResolutionAttempt{
+				{Source: liveDoltHandleSource, Status: "found", Detail: "live"},
+			},
+		}, nil
+	}
+}
+
+// fakeLiveResolveMiss returns a LiveResolve seam where neither live source
+// finds an endpoint (clean not-found, no errors).
+func fakeLiveResolveMiss() func(string) (liveDoltPortResolution, error) {
+	return func(string) (liveDoltPortResolution, error) {
+		return liveDoltPortResolution{
+			Attempts: []PortResolutionAttempt{
+				{Source: liveDoltHandleSource, Status: "not-found"},
+				{Source: liveDoltProcessSource, Status: "not-found"},
+			},
+		}, errNoLiveDoltEndpoint
+	}
+}
+
+// fakeLiveResolveError returns a LiveResolve seam whose process-table step
+// fails hard (e.g. ambiguous listeners).
+func fakeLiveResolveError(detail string) func(string) (liveDoltPortResolution, error) {
+	return func(string) (liveDoltPortResolution, error) {
+		return liveDoltPortResolution{
+			Attempts: []PortResolutionAttempt{
+				{Source: liveDoltHandleSource, Status: "not-found"},
+				{Source: liveDoltProcessSource, Status: "error", Detail: detail},
+			},
+		}, errors.New(detail)
+	}
+}
+
 func TestResolveDoltPort_FlagWins(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/city/.beads/dolt-server.port"] = []byte("28231\n")
 	in := PortResolverInput{
-		Flag:     "9999",
-		CityPort: 4242,
-		Rigs:     []resolverRig{{Name: "hq", Path: "/city", HQ: true}},
-		FS:       fs,
+		Flag:        "9999",
+		CityPort:    4242,
+		CityPath:    "/city",
+		LiveResolve: fakeLiveResolve(),
 	}
 
 	got := ResolveDoltPort(in)
@@ -32,11 +68,11 @@ func TestResolveDoltPort_FlagWins(t *testing.T) {
 }
 
 func TestResolveDoltPort_FlagInvalidFallsThrough(t *testing.T) {
-	fs := fsys.NewFake()
 	in := PortResolverInput{
-		Flag:     "not-a-number",
-		CityPort: 4242,
-		FS:       fs,
+		Flag:        "not-a-number",
+		CityPort:    4242,
+		CityPath:    "/city",
+		LiveResolve: fakeLiveResolveMiss(),
 	}
 
 	got := ResolveDoltPort(in)
@@ -53,13 +89,11 @@ func TestResolveDoltPort_FlagInvalidFallsThrough(t *testing.T) {
 	}
 }
 
-func TestResolveDoltPort_CityConfigBeatsRigFile(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/city/.beads/dolt-server.port"] = []byte("28231\n")
+func TestResolveDoltPort_CityConfigBeatsLiveResolution(t *testing.T) {
 	in := PortResolverInput{
-		CityPort: 4242,
-		Rigs:     []resolverRig{{Name: "hq", Path: "/city", HQ: true}},
-		FS:       fs,
+		CityPort:    4242,
+		CityPath:    "/city",
+		LiveResolve: fakeLiveResolve(),
 	}
 
 	got := ResolveDoltPort(in)
@@ -72,57 +106,54 @@ func TestResolveDoltPort_CityConfigBeatsRigFile(t *testing.T) {
 	}
 }
 
-func TestResolveDoltPort_HQRigPortFileWins(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/city/.beads/dolt-server.port"] = []byte("28231\n")
-	fs.Files["/elsewhere/.beads/dolt-server.port"] = []byte("19999\n")
+func TestResolveDoltPort_LiveResolutionWins(t *testing.T) {
 	in := PortResolverInput{
-		Rigs: []resolverRig{
-			{Name: "ext", Path: "/elsewhere", HQ: false},
-			{Name: "hq", Path: "/city", HQ: true},
-		},
-		FS: fs,
+		CityPath:    "/city",
+		LiveResolve: fakeLiveResolve(),
 	}
 
 	got := ResolveDoltPort(in)
 
 	if got.Port != 28231 {
-		t.Errorf("Port = %d, want 28231 (HQ rig)", got.Port)
+		t.Errorf("Port = %d, want 28231 (live managed dolt)", got.Port)
 	}
-	if got.Source != "/city/.beads/dolt-server.port" {
-		t.Errorf("Source = %q, want HQ port-file path", got.Source)
+	if got.Source != liveDoltHandleSource {
+		t.Errorf("Source = %q, want %q", got.Source, liveDoltHandleSource)
 	}
 	if got.Fallback {
 		t.Errorf("Fallback = true, want false")
 	}
 }
 
-func TestResolveDoltPort_NonHQRigUsedWhenHQAbsent(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/elsewhere/.beads/dolt-server.port"] = []byte("19999\n")
+func TestResolveDoltPort_ProcessTableSourceThreadsThrough(t *testing.T) {
 	in := PortResolverInput{
-		Rigs: []resolverRig{
-			{Name: "ext", Path: "/elsewhere", HQ: false},
-			{Name: "hq", Path: "/city", HQ: true},
+		CityPath: "/city",
+		LiveResolve: func(string) (liveDoltPortResolution, error) {
+			return liveDoltPortResolution{
+				Port:   19999,
+				Source: liveDoltProcessSource,
+				Attempts: []PortResolutionAttempt{
+					{Source: liveDoltHandleSource, Status: "not-found"},
+					{Source: liveDoltProcessSource, Status: "found", Detail: "19999"},
+				},
+			}, nil
 		},
-		FS: fs,
 	}
 
 	got := ResolveDoltPort(in)
 
 	if got.Port != 19999 {
-		t.Errorf("Port = %d, want 19999 (non-HQ rig)", got.Port)
+		t.Errorf("Port = %d, want 19999", got.Port)
 	}
-	if got.Source != "/elsewhere/.beads/dolt-server.port" {
-		t.Errorf("Source = %q, want non-HQ port-file path", got.Source)
+	if got.Source != liveDoltProcessSource {
+		t.Errorf("Source = %q, want %q", got.Source, liveDoltProcessSource)
 	}
 }
 
 func TestResolveDoltPort_LegacyFallbackWhenNothingResolves(t *testing.T) {
-	fs := fsys.NewFake()
 	in := PortResolverInput{
-		Rigs: []resolverRig{{Name: "hq", Path: "/city", HQ: true}},
-		FS:   fs,
+		CityPath:    "/city",
+		LiveResolve: fakeLiveResolveMiss(),
 	}
 
 	got := ResolveDoltPort(in)
@@ -139,21 +170,21 @@ func TestResolveDoltPort_LegacyFallbackWhenNothingResolves(t *testing.T) {
 }
 
 func TestResolveDoltPort_TriedRecordsAllSources(t *testing.T) {
-	fs := fsys.NewFake()
 	in := PortResolverInput{
-		Rigs: []resolverRig{{Name: "hq", Path: "/city", HQ: true}},
-		FS:   fs,
+		CityPath:    "/city",
+		LiveResolve: fakeLiveResolveMiss(),
 	}
 
 	got := ResolveDoltPort(in)
 
-	if len(got.Tried) < 4 {
-		t.Fatalf("Tried = %d entries, want at least 4 (flag, config, rig file, legacy)", len(got.Tried))
+	if len(got.Tried) < 5 {
+		t.Fatalf("Tried = %d entries, want at least 5 (flag, config, live handle, process table, legacy)", len(got.Tried))
 	}
 	wantSources := []string{
 		"--port flag",
 		"city config dolt.port",
-		"/city/.beads/dolt-server.port",
+		liveDoltHandleSource,
+		liveDoltProcessSource,
 		"legacy default",
 	}
 	for i, want := range wantSources {
@@ -163,90 +194,73 @@ func TestResolveDoltPort_TriedRecordsAllSources(t *testing.T) {
 	}
 }
 
-func TestResolveDoltPort_BadRigPortFileStopsBeforeLegacyFallback(t *testing.T) {
-	for _, tc := range []struct {
-		name       string
-		setup      func(*fsys.Fake)
-		wantDetail string
-	}{
-		{
-			name:       "empty",
-			setup:      func(fs *fsys.Fake) { fs.Files["/city/.beads/dolt-server.port"] = []byte("\n") },
-			wantDetail: "empty",
-		},
-		{
-			name:       "malformed",
-			setup:      func(fs *fsys.Fake) { fs.Files["/city/.beads/dolt-server.port"] = []byte("not-a-port\n") },
-			wantDetail: "invalid port",
-		},
-		{
-			name:       "out of range",
-			setup:      func(fs *fsys.Fake) { fs.Files["/city/.beads/dolt-server.port"] = []byte("70000\n") },
-			wantDetail: "must be between 1 and 65535",
-		},
-		{
-			name:       "unreadable",
-			setup:      func(fs *fsys.Fake) { fs.Errors["/city/.beads/dolt-server.port"] = os.ErrPermission },
-			wantDetail: "permission",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			fs := fsys.NewFake()
-			tc.setup(fs)
-			in := PortResolverInput{
-				Rigs: []resolverRig{{Name: "hq", Path: "/city", HQ: true}},
-				FS:   fs,
-			}
-
-			got := ResolveDoltPort(in)
-
-			if got.Port != 0 {
-				t.Errorf("Port = %d, want unresolved zero port", got.Port)
-			}
-			if got.Fallback {
-				t.Errorf("Fallback = true, want false for bad rig port file")
-			}
-			if got.Source != "/city/.beads/dolt-server.port" {
-				t.Errorf("Source = %q, want bad rig-port-file path", got.Source)
-			}
-			for _, attempt := range got.Tried {
-				if attempt.Source == "legacy default" {
-					t.Fatalf("legacy default was tried after bad rig port file: %+v", got.Tried)
-				}
-				if attempt.Source == "/city/.beads/dolt-server.port" {
-					if attempt.Status != "error" {
-						t.Errorf("rig-port-file attempt status = %q, want error", attempt.Status)
-					}
-					if !strings.Contains(attempt.Detail, tc.wantDetail) {
-						t.Errorf("rig-port-file detail = %q, want substring %q", attempt.Detail, tc.wantDetail)
-					}
-					return
-				}
-			}
-			t.Errorf("did not find /city/.beads/dolt-server.port in Tried entries: %+v", got.Tried)
-		})
-	}
-}
-
-func TestResolveDoltPort_NoRigsFalse_FallsThroughDirectly(t *testing.T) {
-	fs := fsys.NewFake()
+func TestResolveDoltPort_NeverReadsPortFile(t *testing.T) {
 	in := PortResolverInput{
-		FS: fs,
+		CityPath:    "/city",
+		LiveResolve: fakeLiveResolveMiss(),
 	}
 
 	got := ResolveDoltPort(in)
 
+	for _, attempt := range got.Tried {
+		if strings.Contains(attempt.Source, "dolt-server.port") {
+			t.Fatalf("resolver consulted the dolt-server.port status file: %+v", got.Tried)
+		}
+	}
+}
+
+func TestResolveDoltPort_LiveResolutionErrorStopsBeforeLegacyFallback(t *testing.T) {
+	in := PortResolverInput{
+		CityPath:    "/city",
+		LiveResolve: fakeLiveResolveError("ambiguous live dolt listeners on ports [28231 29000]"),
+	}
+
+	got := ResolveDoltPort(in)
+
+	if got.Port != 0 {
+		t.Errorf("Port = %d, want unresolved zero port", got.Port)
+	}
+	if got.Fallback {
+		t.Errorf("Fallback = true, want false for live resolution error")
+	}
+	if got.Source != liveDoltProcessSource {
+		t.Errorf("Source = %q, want %q", got.Source, liveDoltProcessSource)
+	}
+	for _, attempt := range got.Tried {
+		if attempt.Source == "legacy default" {
+			t.Fatalf("legacy default was tried after live resolution error: %+v", got.Tried)
+		}
+		if attempt.Source == liveDoltProcessSource {
+			if attempt.Status != "error" {
+				t.Errorf("process-table attempt status = %q, want error", attempt.Status)
+			}
+			if !strings.Contains(attempt.Detail, "ambiguous") {
+				t.Errorf("process-table detail = %q, want ambiguity detail", attempt.Detail)
+			}
+			return
+		}
+	}
+	t.Errorf("did not find %s in Tried entries: %+v", liveDoltProcessSource, got.Tried)
+}
+
+func TestResolveDoltPort_NoCityPathFallsThroughDirectly(t *testing.T) {
+	got := ResolveDoltPort(PortResolverInput{
+		LiveResolve: func(cityPath string) (liveDoltPortResolution, error) {
+			return newLiveDoltPortResolver().resolve(cityPath)
+		},
+	})
+
 	if got.Port != 3307 || !got.Fallback {
-		t.Errorf("expected legacy fallback with no rigs, got %+v", got)
+		t.Errorf("expected legacy fallback with no city path, got %+v", got)
 	}
 }
 
 func TestResolveDoltPort_FlagZeroRejected(t *testing.T) {
-	fs := fsys.NewFake()
 	in := PortResolverInput{
-		Flag:     "0",
-		CityPort: 4242,
-		FS:       fs,
+		Flag:        "0",
+		CityPort:    4242,
+		CityPath:    "/city",
+		LiveResolve: fakeLiveResolveMiss(),
 	}
 
 	got := ResolveDoltPort(in)
