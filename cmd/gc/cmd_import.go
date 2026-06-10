@@ -92,6 +92,7 @@ func newImportCmd(stdout, stderr io.Writer) *cobra.Command {
 		newImportListCmd(stdout, stderr),
 		newImportWhyCmd(stdout, stderr),
 		newImportMigrateCmd(stdout, stderr),
+		newImportPruneCmd(stdout, stderr),
 	)
 	return cmd
 }
