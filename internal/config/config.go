@@ -1274,6 +1274,59 @@ type BeadsConfig struct {
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
 	Policies map[string]BeadPolicyConfig `toml:"policies,omitempty"`
+	// NativeStoreCanaryScopes lists the scope names (city name or rig names) for
+	// which the in-process NativeDoltStore is canaried, scope by scope, without
+	// flipping any global store mode. It is the P2.3 env-projection canary lever:
+	// when a scope is listed, the gc beads env projection ensures the native
+	// server-mode Dolt keys (BEADS_DOLT_SERVER_MODE/HOST/PORT) are projected from
+	// the managed-server live handle so the scope can open the native store, and
+	// the post-open identity assertion guarantees a silent-empty or misrouted DB
+	// is detected immediately. Defaults to empty (OFF) and is purely additive: an
+	// unlisted scope's env projection is byte-for-byte unchanged. The operator
+	// can layer additional scopes at runtime without editing committed config via
+	// the GC_BEADS_NATIVE_STORE_CANARY environment variable (comma-separated
+	// scope names); env entries union with this list.
+	NativeStoreCanaryScopes []string `toml:"native_store_canary_scopes,omitempty"`
+}
+
+// NativeStoreCanaryEnvVar is the operator override that unions additional scope
+// names (comma-separated) into NativeStoreCanaryScopes at resolution time. It
+// lets an operator canary a scope without editing committed city config.
+const NativeStoreCanaryEnvVar = "GC_BEADS_NATIVE_STORE_CANARY"
+
+// NativeStoreCanaryScopeSet returns the set of scope names the native-store
+// canary is enabled for, unioning the configured NativeStoreCanaryScopes with
+// any names supplied via the NativeStoreCanaryEnvVar environment variable. Names
+// are trimmed; blank names are dropped. The returned map is never nil so callers
+// can membership-test without a nil guard. Resolution is a pure set union — no
+// judgment call is made about which scopes belong in the canary; that is the
+// operator's configuration.
+func (b BeadsConfig) NativeStoreCanaryScopeSet(envValue string) map[string]struct{} {
+	set := make(map[string]struct{}, len(b.NativeStoreCanaryScopes))
+	add := func(name string) {
+		if trimmed := strings.TrimSpace(name); trimmed != "" {
+			set[trimmed] = struct{}{}
+		}
+	}
+	for _, name := range b.NativeStoreCanaryScopes {
+		add(name)
+	}
+	for _, name := range strings.Split(envValue, ",") {
+		add(name)
+	}
+	return set
+}
+
+// NativeStoreCanaryEnabledForScope reports whether the native-store canary is
+// enabled for scopeName, given the configured scopes plus the operator env
+// override value. It is a membership test (a threshold compare), not a judgment.
+func (b BeadsConfig) NativeStoreCanaryEnabledForScope(scopeName, envValue string) bool {
+	scopeName = strings.TrimSpace(scopeName)
+	if scopeName == "" {
+		return false
+	}
+	_, ok := b.NativeStoreCanaryScopeSet(envValue)[scopeName]
+	return ok
 }
 
 // EventHooksEnabled reports whether bead event hooks should be installed.
