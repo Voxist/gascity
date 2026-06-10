@@ -210,6 +210,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		if workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
 			register(newDoltTopologyCheck(cityPath, cfg))
 			register(newDoltDriftCheck(cityPath, cfg))
+			register(newPortFileConsistencyCheck(cityPath, cfg))
 		}
 		register(doctor.NewConfigValidCheck(cfg))
 		register(doctor.NewLegacySuspendedFieldCheck(cfg))
