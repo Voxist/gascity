@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -30,6 +31,92 @@ func TestProxiedScopeBeadsDirs(t *testing.T) {
 			t.Fatalf("dir[%d] = %q, want %q", i, got[i], want[i])
 		}
 	}
+}
+
+func TestProxiedReapRoots(t *testing.T) {
+	boolp := func(v bool) *bool { return &v }
+	cfgWith := func(shared bool) *config.City {
+		return &config.City{
+			Beads: config.BeadsConfig{
+				Proxied:     boolp(true),
+				SharedProxy: boolp(shared),
+			},
+			Rigs: []config.Rig{{Path: "/srv/rig-a"}},
+		}
+	}
+
+	t.Run("shared_proxy off -> scope dirs only (legacy unchanged)", func(t *testing.T) {
+		got := proxiedReapRoots("/srv/city", cfgWith(false))
+		want := []string{
+			filepath.Join("/srv/city", ".beads"),
+			filepath.Join("/srv/rig-a", ".beads"),
+		}
+		if len(got) != len(want) {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("root[%d] = %q, want %q", i, got[i], want[i])
+			}
+		}
+	})
+
+	t.Run("shared_proxy on -> shared root appended", func(t *testing.T) {
+		t.Setenv("BEADS_SHARED_PROXY_ROOT_PATH", "")
+		t.Setenv("BEADS_SHARED_SERVER_DIR", "")
+		got := proxiedReapRoots("/srv/city", cfgWith(true))
+		if len(got) != 3 {
+			t.Fatalf("got %v, want scope dirs + shared root", got)
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			t.Fatalf("UserHomeDir: %v", err)
+		}
+		want := filepath.Join(home, ".beads", "shared-server", "proxy")
+		if got[2] != want {
+			t.Fatalf("shared root = %q, want %q", got[2], want)
+		}
+	})
+
+	t.Run("shared_proxy on + BEADS_SHARED_PROXY_ROOT_PATH override", func(t *testing.T) {
+		t.Setenv("BEADS_SHARED_PROXY_ROOT_PATH", "/custom/proxy-root")
+		got := proxiedReapRoots("/srv/city", cfgWith(true))
+		if got[len(got)-1] != "/custom/proxy-root" {
+			t.Fatalf("shared root = %q, want /custom/proxy-root", got[len(got)-1])
+		}
+	})
+
+	t.Run("shared_proxy on + BEADS_SHARED_SERVER_DIR override", func(t *testing.T) {
+		t.Setenv("BEADS_SHARED_PROXY_ROOT_PATH", "")
+		t.Setenv("BEADS_SHARED_SERVER_DIR", "/custom/shared-server")
+		got := proxiedReapRoots("/srv/city", cfgWith(true))
+		want := filepath.Join("/custom/shared-server", "proxy")
+		if got[len(got)-1] != want {
+			t.Fatalf("shared root = %q, want %q", got[len(got)-1], want)
+		}
+	})
+}
+
+// The shared-root child's --root IS the shared dir itself (not a path under a
+// scope .beads), so the matcher's exact-match branch must catch it once
+// proxiedReapRoots includes the shared root (ga-ldwvm).
+func TestProxyChildPIDsFromPS_SharedRootChild(t *testing.T) {
+	shared := "/home/u/.beads/shared-server/proxy"
+	ps := "  97542 bd db-proxy-child --root " + shared + " --port 52447 --backend external\n"
+
+	t.Run("matched when discovery set includes the shared root", func(t *testing.T) {
+		pids := proxyChildPIDsFromPS(ps, []string{"/srv/city/.beads", shared})
+		if len(pids) != 1 || pids[0] != 97542 {
+			t.Fatalf("pids = %v, want [97542]", pids)
+		}
+	})
+
+	t.Run("NOT matched by per-scope dirs alone (the ga-ldwvm gap)", func(t *testing.T) {
+		pids := proxyChildPIDsFromPS(ps, []string{"/srv/city/.beads", "/srv/rig-a/.beads"})
+		if len(pids) != 0 {
+			t.Fatalf("pids = %v, want none", pids)
+		}
+	})
 }
 
 func TestProxyChildRootArg(t *testing.T) {

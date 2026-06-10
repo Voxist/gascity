@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -89,6 +90,43 @@ func proxyChildRootArg(command string) string {
 	return ""
 }
 
+// sharedProxyReapRoot mirrors bd's doltserver.SharedProxyRootDir() resolution
+// (beads internal package — not importable across modules, so the path contract
+// is replicated): BEADS_SHARED_PROXY_ROOT_PATH wins, else
+// $BEADS_SHARED_SERVER_DIR/proxy, else ~/.beads/shared-server/proxy. Unlike bd,
+// this never creates the directory — reaping only discovers. Returns "" when
+// the home directory cannot be resolved (nothing to add).
+func sharedProxyReapRoot() string {
+	if d := os.Getenv("BEADS_SHARED_PROXY_ROOT_PATH"); d != "" {
+		return d
+	}
+	if d := os.Getenv("BEADS_SHARED_SERVER_DIR"); d != "" {
+		return filepath.Join(d, "proxy")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".beads", "shared-server", "proxy")
+}
+
+// proxiedReapRoots is the reap discovery set: every scope .beads dir, plus the
+// shared proxy root when the city opts into shared_proxy (ga-ldwvm: the shared
+// child's --root is the shared dir itself, never under a scope .beads, so
+// per-scope discovery alone strands it on gc stop). The shared root is
+// per-user, but be-pen9's upstream-mismatch guard makes it single-upstream —
+// only a city that enabled shared_proxy has a child there to own, so gating on
+// this city's flag cannot reap another city's per-scope children.
+func proxiedReapRoots(cityPath string, cfg *config.City) []string {
+	roots := proxiedScopeBeadsDirs(cityPath, cfg)
+	if cfg != nil && cfg.Beads.SharedProxyEnabled() {
+		if shared := sharedProxyReapRoot(); shared != "" {
+			roots = append(roots, shared)
+		}
+	}
+	return roots
+}
+
 // reapProxiedChildrenForCityPath loads the city config and reaps its proxied
 // db-proxy children. Best-effort: a config-load failure is treated as "nothing
 // to reap" so a stop path is never blocked by it.
@@ -115,7 +153,7 @@ func reapProxiedChildrenForCity(cityPath string, cfg *config.City, warn io.Write
 		}
 		return 0
 	}
-	pids := proxyChildPIDsFromPS(string(out), proxiedScopeBeadsDirs(cityPath, cfg))
+	pids := proxyChildPIDsFromPS(string(out), proxiedReapRoots(cityPath, cfg))
 	for _, pid := range pids {
 		signalProxyChild(pid)
 	}
