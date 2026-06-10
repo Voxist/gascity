@@ -14,6 +14,12 @@ import (
 	// so the import exists solely to fire the registration before the registry-
 	// coverage tests run.
 	_ "github.com/gastownhall/gascity/internal/pgauth"
+
+	// Blank import: providergov's init() registers the provider governor's
+	// QuotaObservedPayload / QuotaPollFailedPayload for the
+	// provider.quota_observed / provider.quota_poll_failed event types.
+	// Same pattern as pgauth above.
+	_ "github.com/gastownhall/gascity/internal/providergov"
 )
 
 // API-layer event payload types. Every API emitter takes one of these
