@@ -3314,6 +3314,24 @@ func TestValidateAgentsMouseMode(t *testing.T) {
 	}
 }
 
+func TestValidateAgentsTier(t *testing.T) {
+	for _, tier := range []string{"", "claude-required", "overflow-ok"} {
+		t.Run("valid_"+tier, func(t *testing.T) {
+			if err := ValidateAgents([]Agent{{Name: "worker", Tier: tier}}); err != nil {
+				t.Fatalf("ValidateAgents tier %q: %v", tier, err)
+			}
+		})
+	}
+
+	err := ValidateAgents([]Agent{{Name: "worker", Tier: "platinum"}})
+	if err == nil {
+		t.Fatal("ValidateAgents invalid tier: got nil error")
+	}
+	if !strings.Contains(err.Error(), "tier") {
+		t.Fatalf("ValidateAgents error = %v, want tier context", err)
+	}
+}
+
 func TestValidateAgentsMissingName(t *testing.T) {
 	agents := []Agent{{MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5)}}
 	err := ValidateAgents(agents)
