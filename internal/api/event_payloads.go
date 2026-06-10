@@ -18,6 +18,11 @@ import (
 	// Blank import: emergency's init() registers emergency.Record as the payload
 	// type for EmergencySignaled and EmergencyAcked events.
 	_ "github.com/gastownhall/gascity/internal/emergency"
+	// Blank import: providergov's init() registers the provider governor's
+	// QuotaObservedPayload / QuotaPollFailedPayload for the
+	// provider.quota_observed / provider.quota_poll_failed event types.
+	// Same pattern as pgauth above.
+	_ "github.com/gastownhall/gascity/internal/providergov"
 )
 
 // API-layer event payload types. Every API emitter takes one of these
