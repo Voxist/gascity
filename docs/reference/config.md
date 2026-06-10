@@ -291,6 +291,7 @@ BeadsResilienceConfig holds circuit breaker settings for transport-class bead st
 | `half_open_interval` | string |  | `15s` | HalfOpenInterval is the minimum spacing between recovery probes while half-open, as a duration string. Defaults to "15s". |
 | `max_inflight_per_scope` | integer |  | `4` | MaxInflightPerScope bounds concurrent bd subprocesses per scope. The admission semaphore blocks the (n+1)th bd call for a scope until one in flight returns, capping the subprocess amplifier (plan item 1.9). Defaults to 4. Non-positive disables the per-scope cap. |
 | `max_inflight_global` | integer |  | `16` | MaxInflightGlobal bounds concurrent bd subprocesses across all scopes in the city. Defaults to 16. Non-positive disables the global cap. |
+| `max_admission_wait` | string |  | `30s` | MaxAdmissionWait bounds how long the admission semaphore waits for a free slot before failing fast, as a duration string. When the caps are saturated by bd subprocesses wedged on a backend transport timeout, a bounded wait prevents reconcile fan-out from blocking the controller tick indefinitely: an admission that cannot be granted within this window fails like an open breaker (typed ErrStoreUnavailable, zero subprocesses). Defaults to "30s". A non-positive value (e.g. "0s") restores the pre-bound behavior of blocking forever. |
 
 ## ChatSessionsConfig
 

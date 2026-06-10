@@ -1084,6 +1084,11 @@
           "type": "integer",
           "description": "MaxInflightGlobal bounds concurrent bd subprocesses across all scopes\nin the city. Defaults to 16. Non-positive disables the global cap.",
           "default": 16
+        },
+        "max_admission_wait": {
+          "type": "string",
+          "description": "MaxAdmissionWait bounds how long the admission semaphore waits for a\nfree slot before failing fast, as a duration string. When the caps are\nsaturated by bd subprocesses wedged on a backend transport timeout, a\nbounded wait prevents reconcile fan-out from blocking the controller\ntick indefinitely: an admission that cannot be granted within this\nwindow fails like an open breaker (typed ErrStoreUnavailable, zero\nsubprocesses). Defaults to \"30s\". A non-positive value (e.g. \"0s\")\nrestores the pre-bound behavior of blocking forever.",
+          "default": "30s"
         }
       },
       "additionalProperties": false,
