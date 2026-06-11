@@ -3939,7 +3939,7 @@ func TestBDCommandRunnerManagedRetry_RetryDelayApplied(t *testing.T) {
 	bdCommandRetrySleep = func(d time.Duration) { sleepCalled = d }
 
 	attempts := 0
-	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
+	beadsExecCommandRunnerWithEnv = func(_ map[string]string) beads.CommandRunner {
 		return func(_ string, _ string, _ ...string) ([]byte, error) {
 			attempts++
 			if attempts == 1 {

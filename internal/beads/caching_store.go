@@ -47,8 +47,8 @@ type CachingStore struct {
 	circuitTripped bool
 	stats          CacheStats
 	onChange       func(eventType, beadID, runID, sessionID, stepID string, payload json.RawMessage)
-	problemf     func(string)
-	problemLog   map[string]cacheProblemLogState
+	problemf       func(string)
+	problemLog     map[string]cacheProblemLogState
 
 	// lastReconcileLogAt rate-limits the per-reconcile success log line
 	// emitted by runReconciliation. Without this, a busy cache at SMALL
