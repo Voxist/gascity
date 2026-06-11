@@ -11,13 +11,12 @@ import (
 	"strings"
 	"time"
 
-	mysql "github.com/go-sql-driver/mysql"
-
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltauth"
+	"github.com/gastownhall/gascity/internal/doltpool"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/sling"
 )
@@ -63,14 +62,16 @@ func workflowSQLCandidatesForWorkflowID(
 // a pre-fetched dep map. Connects to the dolt server on the given port
 // using the given database name.
 func workflowSQLSnapshot(user, password, host string, port int, database, rootID string) ([]beads.Bead, map[string]beads.Bead, map[string][]beads.Dep, error) {
-	dsn := buildDoltDSN(user, password, host, port, database)
-	db, err := sql.Open("mysql", dsn)
+	db, err := doltpool.Open(doltpool.Config{
+		User:     user,
+		Password: password,
+		Host:     host,
+		Port:     port,
+		Database: database,
+	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("sql open: %w", err)
 	}
-	defer db.Close() //nolint:errcheck // best-effort cleanup
-	db.SetMaxOpenConns(1)
-	db.SetConnMaxLifetime(30 * time.Second)
 
 	tableSets, err := workflowSQLAvailableTableSets(db)
 	if err != nil {
@@ -639,7 +640,6 @@ func workflowSQLFindRoot(cfg *config.City, user, password, host string, port int
 	if err != nil {
 		return beads.Bead{}, false, err
 	}
-	defer db.Close() //nolint:errcheck // best-effort cleanup
 
 	tableSets, err := workflowSQLAvailableTableSets(db)
 	if err != nil {
@@ -722,14 +722,13 @@ func workflowSQLFindRootByWorkflowID(db *sql.DB, tableSets []workflowSQLTableSet
 }
 
 func openWorkflowSQLDB(user, password, host string, port int, database string) (*sql.DB, error) {
-	dsn := buildDoltDSN(user, password, host, port, database)
-	db, err := sql.Open("mysql", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("sql open: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-	db.SetConnMaxLifetime(30 * time.Second)
-	return db, nil
+	return doltpool.Open(doltpool.Config{
+		User:     user,
+		Password: password,
+		Host:     host,
+		Port:     port,
+		Database: database,
+	})
 }
 
 func workflowSQLScanBead(scan func(dest ...any) error) (beads.Bead, bool, error) {
@@ -788,24 +787,6 @@ func resolveDoltConnection(cityRoot, scopeRoot string) (string, int, string, str
 	}
 	auth := doltauth.Resolve(doltauth.AuthScopeRoot(cityRoot, scopeRoot, target), strings.TrimSpace(target.User), host, port)
 	return host, port, target.Database, auth.User, auth.Password, nil
-}
-
-func buildDoltDSN(user, password, host string, port int, database string) string {
-	user = strings.TrimSpace(user)
-	if user == "" {
-		user = "root"
-	}
-	cfg := mysql.Config{
-		User:                 user,
-		Passwd:               password,
-		Net:                  "tcp",
-		Addr:                 fmt.Sprintf("%s:%d", host, port),
-		DBName:               database,
-		AllowNativePasswords: true,
-		ParseTime:            true,
-		Timeout:              10 * time.Second,
-	}
-	return cfg.FormatDSN()
 }
 
 // prefetchedDepStore wraps a pre-fetched dep map to satisfy the beads.Store
