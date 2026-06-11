@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -115,7 +116,7 @@ func hasOpenOrderWorkFlat(store beads.Store, scopedName string, skip func(beads.
 	}
 	for _, r := range roots {
 		members, err := reader.List(beads.ListQuery{
-			Metadata:      map[string]string{"gc.root_bead_id": r.ID},
+			Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: r.ID},
 			IncludeClosed: true,
 			TierMode:      beads.TierBoth,
 		})
