@@ -2464,6 +2464,12 @@ type DaemonConfig struct {
 	// RestartWindow is the sliding time window for counting restarts.
 	// Duration string (e.g., "30s", "5m", "1h"). Defaults to "1h".
 	RestartWindow string `toml:"restart_window,omitempty" jsonschema:"default=1h"`
+	// StatusSnapshotTimeout bounds how long `gc status` (and the controller's
+	// StatusView build) wait for the session-bead snapshot load before
+	// continuing with a runtime-only ("partial") status. On a large store the
+	// default 3s is too tight and silently degrades status output; raise it
+	// (e.g. "15s") on big/loaded cities. Duration string. Defaults to "3s".
+	StatusSnapshotTimeout string `toml:"status_snapshot_timeout,omitempty" jsonschema:"default=3s"`
 	// SessionCircuitBreaker enables the named-session respawn circuit breaker.
 	// When enabled, the controller suppresses no-progress named-session respawns
 	// after the configured restart threshold is exceeded.
@@ -2643,6 +2649,14 @@ func (d *DaemonConfig) PatrolIntervalDuration() time.Duration {
 		return 30 * time.Second
 	}
 	return dur
+}
+
+// StatusSnapshotTimeoutDuration returns the bound for the `gc status`
+// session-bead snapshot load. Empty or unparseable values fall back to 3s
+// (the historical default); a non-positive value also falls back so status
+// never blocks indefinitely.
+func (d *DaemonConfig) StatusSnapshotTimeoutDuration() time.Duration {
+	return positiveDurationOrDefault(d.StatusSnapshotTimeout, 3*time.Second)
 }
 
 // TickDebounceDuration returns the tick-debounce window as a
