@@ -548,6 +548,65 @@ func (s *failingScanStore) List(query ListQuery) ([]Bead, error) {
 	return s.Store.List(query)
 }
 
+// TestRunReconciliation_CircuitTripLogs_OnLiveToDegraded guards that the
+// first live→cacheDegraded transition emits exactly one "circuit-breaker
+// tripped" message, and that subsequent reconciliations in the degraded
+// window do not re-emit it.
+func TestRunReconciliation_CircuitTripLogs_OnLiveToDegraded(t *testing.T) {
+	backing := &failingScanStore{Store: NewMemStore()}
+	backing.setFailScan(true)
+	cs := NewCachingStoreForTest(backing, nil)
+	cs.state = cacheLive
+
+	var logMu sync.Mutex
+	var logLines []string
+	cs.problemf = func(msg string) {
+		logMu.Lock()
+		logLines = append(logLines, msg)
+		logMu.Unlock()
+	}
+
+	// Drive syncFailures to maxCacheSyncFailures to trigger the live→degraded transition.
+	for i := 0; i < maxCacheSyncFailures; i++ {
+		cs.runReconciliation()
+	}
+
+	if cs.state != cacheDegraded {
+		t.Fatalf("state = %v, want cacheDegraded after %d failures", cs.state, maxCacheSyncFailures)
+	}
+
+	logMu.Lock()
+	lines := append([]string(nil), logLines...)
+	logMu.Unlock()
+
+	tripCount := 0
+	for _, l := range lines {
+		if strings.Contains(l, "circuit-breaker tripped") {
+			tripCount++
+		}
+	}
+	if tripCount == 0 {
+		t.Fatal("expected 'circuit-breaker tripped' in log after live→degraded transition, got none")
+	}
+
+	// Subsequent reconciliations in the degraded window must NOT re-emit the trip.
+	logMu.Lock()
+	logLines = logLines[:0]
+	logMu.Unlock()
+
+	cs.runReconciliation()
+
+	logMu.Lock()
+	lines = append([]string(nil), logLines...)
+	logMu.Unlock()
+
+	for _, l := range lines {
+		if strings.Contains(l, "circuit-breaker tripped") {
+			t.Fatalf("circuit-breaker trip re-emitted on second degraded reconcile; want exactly once per live→degraded transition")
+		}
+	}
+}
+
 // TestRunReconciliationPromotesPartialCacheToLive asserts that a clean
 // full-scan reconciliation promotes a PrimeActive-only (cachePartial)
 // cache to live. A reconcile loads the same complete active snapshot a
