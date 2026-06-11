@@ -123,6 +123,7 @@ const (
 	PartialFragmentMetadataKey           = "gc.partial_fragment"
 	PartialRetryMetadataKey              = "gc.partial_retry"
 	PerDispatchModelMetadataKey          = "gc.per_dispatch_model"
+	PhaseEnteredAtMetadataKey            = "gc.phase_entered_at"
 	PhaseHistoryMetadataKey              = "gc.phase_history"
 	PhaseMetadataKey                     = "gc.phase"
 	RalphStepIDMetadataKey               = "gc.ralph_step_id"
@@ -164,6 +165,7 @@ const (
 	TerminalMetadataKey                  = "gc.terminal"
 	TruncatedMetadataKey                 = "gc.truncated"
 	VoteFieldMetadataKey                 = "gc.vote_field"
+	WardenEscalatedMetadataKey           = "gc.warden_escalated"
 	WorkDirMetadataKey                   = "gc.work_dir"
 	WorkflowIDMetadataKey                = "gc.workflow_id"
 )
@@ -282,6 +284,7 @@ var KnownMetadataKeys = []string{
 	PartialFragmentMetadataKey,
 	PartialRetryMetadataKey,
 	PerDispatchModelMetadataKey,
+	PhaseEnteredAtMetadataKey,
 	PhaseHistoryMetadataKey,
 	PhaseMetadataKey,
 	RalphStepIDMetadataKey,
@@ -323,6 +326,7 @@ var KnownMetadataKeys = []string{
 	TerminalMetadataKey,
 	TruncatedMetadataKey,
 	VoteFieldMetadataKey,
+	WardenEscalatedMetadataKey,
 	WorkDirMetadataKey,
 	WorkflowIDMetadataKey,
 }
