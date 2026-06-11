@@ -340,7 +340,7 @@ metadata_files() {
     fi
   fi
   find "$GC_CITY_PATH" \
-    \( -path "$GC_CITY_PATH/.gc" -o -path "$GC_CITY_PATH/.git" \) -prune -o \
+    \( -path "$GC_CITY_PATH/.gc" -o -path "$GC_CITY_PATH/.git" -o -path "$GC_CITY_PATH/worktrees" \) -prune -o \
     -path '*/.beads/metadata.json' -print 2>/dev/null || true
 }
 
