@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/doltpool"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -49,11 +52,20 @@ func preflightDatabaseProjectIDReader(cityPath string) func(scope string) (strin
 		if err != nil || !ok {
 			return "", false, err
 		}
-		db, err := managedDoltOpenDatabase(target.Host, target.Port, target.User, target.Database)
+		portInt, err := strconv.Atoi(strings.TrimSpace(target.Port))
+		if err != nil {
+			return "", false, fmt.Errorf("parse dolt port %q: %w", target.Port, err)
+		}
+		db, err := doltpool.Open(doltpool.Config{
+			User:     strings.TrimSpace(target.User),
+			Password: managedDoltPassword(),
+			Host:     managedDoltConnectHost(target.Host),
+			Port:     portInt,
+			Database: strings.TrimSpace(target.Database),
+		})
 		if err != nil {
 			return "", false, err
 		}
-		defer db.Close() //nolint:errcheck // read-only best-effort close
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
