@@ -18,9 +18,11 @@ const (
 
 // Metadata key constants written to bead records by the delivery package.
 const (
-	MetaKeyPhase        = "gc.phase"
-	MetaKeyPhaseHistory = "gc.phase_history"
-	MetaKeyPRURL        = "gc.pr_url"
+	MetaKeyPhase          = "gc.phase"
+	MetaKeyPhaseHistory   = "gc.phase_history"
+	MetaKeyPRURL          = "gc.pr_url"
+	MetaKeyPhaseEnteredAt = "gc.phase_entered_at" // RFC3339 timestamp; re-stamped on every SetPhase transition
+	MetaKeyWardenRetries  = "gc.warden_retries"   // cleared to "" on every SetPhase transition
 )
 
 // IsTerminalPhase reports whether p is a terminal phase (merged or abandoned).

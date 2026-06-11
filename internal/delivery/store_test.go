@@ -2,6 +2,7 @@ package delivery_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/delivery"
@@ -94,5 +95,56 @@ func TestSetPhase_BeadNotFound(t *testing.T) {
 	err := delivery.SetPhase(store, "nonexistent-id", delivery.PhaseBuilding)
 	if err == nil {
 		t.Fatal("SetPhase with nonexistent ID: expected error, got nil")
+	}
+}
+
+func TestSetPhaseAt_StampsEnteredAtAndClearsRetries(t *testing.T) {
+	store := beads.NewMemStore()
+	b := newBeadWithPhase(store, delivery.PhaseBuilding)
+
+	// Pre-populate stale metadata to confirm SetPhaseAt overwrites them.
+	if err := store.SetMetadataBatch(b.ID, map[string]string{
+		delivery.MetaKeyPhaseEnteredAt: "2020-01-01T00:00:00Z",
+		delivery.MetaKeyWardenRetries:  "3",
+	}); err != nil {
+		t.Fatalf("pre-populate metadata: %v", err)
+	}
+
+	fixedTime := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
+	if err := delivery.SetPhaseAt(store, b.ID, delivery.PhaseCIPending, fixedTime); err != nil {
+		t.Fatalf("SetPhaseAt: %v", err)
+	}
+
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got.Metadata[delivery.MetaKeyPhaseEnteredAt] != "2026-06-11T10:00:00Z" {
+		t.Errorf("phase_entered_at: got %q, want %q", got.Metadata[delivery.MetaKeyPhaseEnteredAt], "2026-06-11T10:00:00Z")
+	}
+	if got.Metadata[delivery.MetaKeyWardenRetries] != "" {
+		t.Errorf("warden_retries: got %q, want empty (reset)", got.Metadata[delivery.MetaKeyWardenRetries])
+	}
+}
+
+func TestSetPhaseAt_IdempotentDoesNotUpdateTimestamp(t *testing.T) {
+	store := beads.NewMemStore()
+	b := newBeadWithPhase(store, delivery.PhaseBuilding)
+
+	firstTime := time.Date(2026, 6, 11, 9, 0, 0, 0, time.UTC)
+	if err := delivery.SetPhaseAt(store, b.ID, delivery.PhaseCIPending, firstTime); err != nil {
+		t.Fatalf("first SetPhaseAt: %v", err)
+	}
+
+	// Idempotent call with a different time — must not update the timestamp.
+	laterTime := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
+	if err := delivery.SetPhaseAt(store, b.ID, delivery.PhaseCIPending, laterTime); err != nil {
+		t.Fatalf("idempotent SetPhaseAt: %v", err)
+	}
+
+	got, _ := store.Get(b.ID)
+	if got.Metadata[delivery.MetaKeyPhaseEnteredAt] != "2026-06-11T09:00:00Z" {
+		t.Errorf("idempotent call updated phase_entered_at: got %q, want %q",
+			got.Metadata[delivery.MetaKeyPhaseEnteredAt], "2026-06-11T09:00:00Z")
 	}
 }
