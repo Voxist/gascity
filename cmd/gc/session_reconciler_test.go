@@ -9569,6 +9569,33 @@ func TestPoolDesiredLimitsWakeWork(t *testing.T) {
 	}
 }
 
+func TestReconcileSessionBeads_UsesVisibilitySnapshotForOrphanedSessions(t *testing.T) {
+	env := newReconcilerTestEnv()
+	// N=5 asleep session beads, none in desired state — these are the phantom
+	// accumulation scenario that drives probe timeout.
+	var sessions []beads.Bead
+	for i := 0; i < 5; i++ {
+		name := fmt.Sprintf("phantom-%d", i)
+		sessions = append(sessions, env.createSessionBead(name, "worker"))
+	}
+	// Fake runtime has no running sessions — all five are true phantoms.
+
+	env.reconcile(sessions)
+
+	if got := env.sp.CountCalls("ListRunning", ""); got != 1 {
+		t.Errorf("ListRunning calls = %d, want 1 (one O(1) snapshot per tick)", got)
+	}
+	isRunningCalls := 0
+	for _, c := range env.sp.SnapshotCalls() {
+		if c.Method == "IsRunning" {
+			isRunningCalls++
+		}
+	}
+	if isRunningCalls != 0 {
+		t.Errorf("IsRunning calls = %d, want 0 (must use visibleSet map, not per-session probe)", isRunningCalls)
+	}
+}
+
 // PR #209 -- skipped for now. Drained beads don't block capacity (all
 // selection paths skip them). Closing would break gc attach on drained
 // sessions. Tracked as a future cleanup task.
