@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -95,7 +96,8 @@ func TestGcBeadsBdIsRemoteHostClassification(t *testing.T) {
 			cmd.Stderr = &stderr
 			err := cmd.Run()
 			gotRemote := err == nil // is_remote returns 0 (sh success) when remote
-			if _, isExit := err.(*exec.ExitError); err != nil && !isExit {
+			var exitErr *exec.ExitError
+			if err != nil && !errors.As(err, &exitErr) {
 				t.Fatalf("sh -c failed: %v\nstderr:\n%s", err, stderr.String())
 			}
 			if gotRemote != tc.wantRemote {
