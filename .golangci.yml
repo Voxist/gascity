@@ -1,5 +1,12 @@
 version: "2"
 
+# Allow concurrent golangci-lint invocations (do NOT take the global single-run
+# lock). Multiple fleet executor sessions lint the same module via the pre-commit
+# hook; the default global lock serialised them into a deadlock — including the
+# self-deadlock where the commit that adds this very setting was blocked by it.
+run:
+  allow-parallel-runners: true
+
 severity:
   default: error
 
