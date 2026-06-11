@@ -10,6 +10,60 @@ import (
 	"time"
 )
 
+// TestNextReconcileDelay verifies exponential backoff in nextReconcileDelay:
+// delay starts at failure 1 (not 5), doubles per increment, and caps at 10 min.
+func TestNextReconcileDelay(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(10000, 0)
+
+	makeCache := func(syncFails int, problemAt time.Time) *CachingStore {
+		c := NewCachingStoreForTest(NewMemStore(), nil)
+		c.state = cacheLive
+		c.lastFreshAt = time.Unix(1, 0) // stale — normal path returns 0
+		c.syncFailures = syncFails
+		c.stats.LastProblemAt = problemAt
+		return c
+	}
+
+	t.Run("backoff applies at failure 1", func(t *testing.T) {
+		t.Parallel()
+		// problemAt == now so delay == backoff exactly; normal cadence path returns 0 here.
+		c := makeCache(1, now)
+		if delay := c.nextReconcileDelay(now); delay <= 0 {
+			t.Fatalf("syncFailures=1: got delay %v, want > 0 (exponential backoff must apply from failure 1)", delay)
+		}
+	})
+
+	t.Run("delay doubles per failure", func(t *testing.T) {
+		t.Parallel()
+		// problemAt == now so delay == backoff; each step must be exactly 2× prior.
+		var prev time.Duration
+		for n := 1; n <= 6; n++ {
+			c := makeCache(n, now)
+			delay := c.nextReconcileDelay(now)
+			if delay <= 0 {
+				t.Fatalf("syncFailures=%d: got delay %v, want > 0", n, delay)
+			}
+			if n > 1 && delay != prev*2 {
+				t.Fatalf("syncFailures=%d: got %v, want %v (2× previous %v)", n, delay, prev*2, prev)
+			}
+			prev = delay
+		}
+	})
+
+	t.Run("caps at 10 minutes", func(t *testing.T) {
+		t.Parallel()
+		maxBackoff := 10 * time.Minute
+		// syncFailures=20 → 2s*2^20 far exceeds cap; delay must equal maxBackoff.
+		c := makeCache(20, now)
+		delay := c.nextReconcileDelay(now)
+		if delay != maxBackoff {
+			t.Fatalf("syncFailures=20: got %v, want %v (cap)", delay, maxBackoff)
+		}
+	})
+}
+
 type reconcileRaceStore struct {
 	Store
 	started chan struct{}
@@ -492,6 +546,65 @@ func (s *failingScanStore) List(query ListQuery) ([]Bead, error) {
 		}
 	}
 	return s.Store.List(query)
+}
+
+// TestRunReconciliation_CircuitTripLogs_OnLiveToDegraded guards that the
+// first live→cacheDegraded transition emits exactly one "circuit-breaker
+// tripped" message, and that subsequent reconciliations in the degraded
+// window do not re-emit it.
+func TestRunReconciliation_CircuitTripLogs_OnLiveToDegraded(t *testing.T) {
+	backing := &failingScanStore{Store: NewMemStore()}
+	backing.setFailScan(true)
+	cs := NewCachingStoreForTest(backing, nil)
+	cs.state = cacheLive
+
+	var logMu sync.Mutex
+	var logLines []string
+	cs.problemf = func(msg string) {
+		logMu.Lock()
+		logLines = append(logLines, msg)
+		logMu.Unlock()
+	}
+
+	// Drive syncFailures to maxCacheSyncFailures to trigger the live→degraded transition.
+	for i := 0; i < maxCacheSyncFailures; i++ {
+		cs.runReconciliation()
+	}
+
+	if cs.state != cacheDegraded {
+		t.Fatalf("state = %v, want cacheDegraded after %d failures", cs.state, maxCacheSyncFailures)
+	}
+
+	logMu.Lock()
+	lines := append([]string(nil), logLines...)
+	logMu.Unlock()
+
+	tripCount := 0
+	for _, l := range lines {
+		if strings.Contains(l, "circuit-breaker tripped") {
+			tripCount++
+		}
+	}
+	if tripCount == 0 {
+		t.Fatal("expected 'circuit-breaker tripped' in log after live→degraded transition, got none")
+	}
+
+	// Subsequent reconciliations in the degraded window must NOT re-emit the trip.
+	logMu.Lock()
+	logLines = logLines[:0]
+	logMu.Unlock()
+
+	cs.runReconciliation()
+
+	logMu.Lock()
+	lines = append([]string(nil), logLines...)
+	logMu.Unlock()
+
+	for _, l := range lines {
+		if strings.Contains(l, "circuit-breaker tripped") {
+			t.Fatalf("circuit-breaker trip re-emitted on second degraded reconcile; want exactly once per live→degraded transition")
+		}
+	}
 }
 
 // TestRunReconciliationPromotesPartialCacheToLive asserts that a clean
