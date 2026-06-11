@@ -60,18 +60,9 @@ func pathUnderRoot(path, root string) bool {
 }
 
 // procEnumerationTimeout caps the per-PID I/O during /proc walks so a stuck
-// kernel thread or hung process can't make the reaper hang.
-const procEnumerationTimeout = 5 * time.Second
-
-// psEnumerationTimeout caps the wall-clock budget for the full-system ps -ax
-// invocation on Darwin/macOS. ps -ax can take 2–5 s on a busy machine; it
-// needs a much larger budget than the per-PID procEnumerationTimeout.
-const psEnumerationTimeout = 30 * time.Second
-
-// psEnumerationTimeout caps the full-process-table scan on hosts without /proc
-// (Darwin/macOS). ps -ax enumerates every process; on machines with many
-// processes this routinely exceeds 2 s, so we use a separate, larger timeout.
-const psEnumerationTimeout = 30 * time.Second
+// kernel thread or hung process can't make the reaper hang. On macOS this also
+// applies to the whole-system `ps -ax` call, which can take >2s on busy hosts.
+const procEnumerationTimeout = 10 * time.Second
 
 // discoverDoltProcesses finds live `dolt sql-server` processes and reports
 // their argv and listening ports. Linux uses /proc for argv, ports, RSS, and
