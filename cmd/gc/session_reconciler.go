@@ -219,9 +219,12 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 		// closes it on a subsequent tick. Poke the controller so finalize +
 		// pool respawn runs on the next event-driven tick instead of waiting up
 		// to a full patrol interval (ga-ryhnhd). Mirrors the drain-ack CLI poke.
-		if perr := drainAckAsyncStopPokeController(cityPath); perr != nil {
-			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s: poke failed: %v\n", name, perr) //nolint:errcheck
-		}
+		// Poke is best-effort: a failure is not logged because the goroutine may
+		// outlive its reconcile invocation and write to stderr concurrently with
+		// the caller's subsequent writes on the same writer (data race on
+		// non-goroutine-safe buffers). The controller reconciles on the next
+		// patrol tick regardless.
+		_ = drainAckAsyncStopPokeController(cityPath)
 	}()
 }
 
@@ -2090,23 +2093,25 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// the threshold — but the restart is skipped while the agent is
 		// mid-turn (pending interaction) or holds an open assigned work bead,
 		// so no work is lost mid-flight. The next tick retries.
+		// sessionpkg.DecideMaxSessionAge owns the decision ladder (blocker,
+		// then pending interaction, then assigned work, then stop); this
+		// block gathers the facts it asks for and executes the outcome.
 		if maxAgeTr != nil && alive {
 			creationCompleteAt, hasAnchor := parseRFC3339Metadata(session.Metadata["creation_complete_at"])
-			if hasAnchor && maxAgeTr.shouldRestart(name, tp.TemplateName, creationCompleteAt, clk.Now()) {
-				blocker := lifecycleTimerBlocker(session.Metadata, clk.Now())
-				switch {
-				case blocker != "":
-					// Respect lifecycle timer blockers already enforced by
-					// wake evaluation. Bypass the max-age restart so
-					// SleepPatch does not rewrite the intended sleep state.
-					if trace != nil {
-						trace.recordDecision("reconciler.session.max_session_age", tp.TemplateName, name, blocker, "deferred_"+blocker, nil, nil, "")
+			facts := sessionpkg.TimerFacts{
+				Triggered: hasAnchor && maxAgeTr.shouldRestart(name, tp.TemplateName, creationCompleteAt, clk.Now()),
+			}
+			if facts.Triggered {
+				facts.Blocker = lifecycleTimerBlocker(session.Metadata, clk.Now())
+			}
+			dec := sessionpkg.DecideMaxSessionAge(facts)
+			for dec.Action == sessionpkg.TimerActionGatherPending || dec.Action == sessionpkg.TimerActionGatherAssignedWork {
+				if dec.Action == sessionpkg.TimerActionGatherPending {
+					facts.Pending = sessionpkg.PendingNo
+					if pendingInteractionKeepsAwake(*session, sp, name, clk) {
+						facts.Pending = sessionpkg.PendingYes
 					}
-				case pendingInteractionKeepsAwake(*session, sp, name, clk):
-					if trace != nil {
-						trace.recordDecision("reconciler.session.max_session_age", tp.TemplateName, name, "pending", "deferred_pending", nil, nil, "")
-					}
-				default:
+				} else {
 					hasWork, assignedErr := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, *session)
 					if assignedErr != nil {
 						// Fail closed: treat error as "has work" so a transient
@@ -2115,36 +2120,45 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						fmt.Fprintf(stderr, "session reconciler: checking assigned work for max-age %s: %v\n", name, assignedErr) //nolint:errcheck // best-effort stderr
 						hasWork = true
 					}
+					facts.AssignedWork = sessionpkg.AssignedWorkNone
 					if hasWork {
-						if trace != nil {
-							trace.recordDecision("reconciler.session.max_session_age", tp.TemplateName, name, "assigned_work", "deferred_busy", nil, nil, "")
-						}
-					} else {
-						fmt.Fprintf(stderr, "session reconciler: preemptive max-age restart for %s (age=%s)\n", tp.DisplayName(), clk.Now().Sub(creationCompleteAt).Round(time.Second)) //nolint:errcheck // best-effort stderr
-						if trace != nil {
-							trace.recordDecision("reconciler.session.max_session_age", tp.TemplateName, name, "max_session_age", "stop", nil, nil, "")
-						}
-						if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
-							fmt.Fprintf(stderr, "session reconciler: stopping aged %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
-						} else {
-							_ = sp.ClearScrollback(name)
-							rec.Record(events.Event{
-								Type:    events.SessionMaxAgeKilled,
-								Actor:   "gc",
-								Subject: tp.DisplayName(),
-							})
-							telemetry.RecordAgentMaxAgeKill(context.Background(), tp.DisplayName())
-							batch := sessionpkg.SleepPatch(clk.Now(), "max-session-age")
-							_ = store.SetMetadataBatch(session.ID, batch)
-							if session.Metadata == nil {
-								session.Metadata = make(map[string]string, len(batch))
-							}
-							for key, value := range batch {
-								session.Metadata[key] = value
-							}
-							alive = false
-						}
+						facts.AssignedWork = sessionpkg.AssignedWorkHas
 					}
+				}
+				dec = sessionpkg.DecideMaxSessionAge(facts)
+			}
+			switch dec.Action {
+			case sessionpkg.TimerActionDefer:
+				// Deferrals include lifecycle timer blockers already enforced
+				// by wake evaluation: bypass the max-age restart so SleepPatch
+				// does not rewrite the intended sleep state.
+				if trace != nil {
+					trace.recordDecision("reconciler.session.max_session_age", tp.TemplateName, name, dec.TraceReason, dec.TraceOutcome, nil, nil, "")
+				}
+			case sessionpkg.TimerActionStop:
+				fmt.Fprintf(stderr, "session reconciler: preemptive max-age restart for %s (age=%s)\n", tp.DisplayName(), clk.Now().Sub(creationCompleteAt).Round(time.Second)) //nolint:errcheck // best-effort stderr
+				if trace != nil {
+					trace.recordDecision("reconciler.session.max_session_age", tp.TemplateName, name, dec.TraceReason, dec.TraceOutcome, nil, nil, "")
+				}
+				if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
+					fmt.Fprintf(stderr, "session reconciler: stopping aged %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
+				} else {
+					_ = sp.ClearScrollback(name)
+					rec.Record(events.Event{
+						Type:    events.SessionMaxAgeKilled,
+						Actor:   "gc",
+						Subject: tp.DisplayName(),
+					})
+					telemetry.RecordAgentMaxAgeKill(context.Background(), tp.DisplayName())
+					batch := sessionpkg.SleepPatch(clk.Now(), dec.SleepReason)
+					_ = store.SetMetadataBatch(session.ID, batch)
+					if session.Metadata == nil {
+						session.Metadata = make(map[string]string, len(batch))
+					}
+					for key, value := range batch {
+						session.Metadata[key] = value
+					}
+					alive = false
 				}
 			}
 		}
@@ -2152,33 +2166,50 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Idle timeout: restart sessions idle longer than configured threshold.
 		// Pass the agent template so the tracker can fall back to a per-template
 		// timeout for pool sessions whose bead-derived runtime names are not
-		// registered directly.
-		if it != nil && alive && it.checkIdle(name, tp.TemplateName, sp, clk.Now()) {
-			blocker := lifecycleTimerBlocker(session.Metadata, clk.Now())
-			switch {
-			case blocker != "":
-				// Respect lifecycle timer blockers without skipping the
-				// post-loop wake/drain pass. A metadata-only suspend uses
-				// sleep_intent=user-hold and still needs that pass to drain
-				// the live runtime.
+		// registered directly. sessionpkg.DecideIdleTimeout owns the decision
+		// ladder; this block gathers the facts it asks for and executes the
+		// outcome.
+		if it != nil && alive {
+			facts := sessionpkg.TimerFacts{
+				Triggered: it.checkIdle(name, tp.TemplateName, sp, clk.Now()),
+			}
+			if facts.Triggered {
+				facts.Blocker = lifecycleTimerBlocker(session.Metadata, clk.Now())
+			}
+			dec := sessionpkg.DecideIdleTimeout(facts)
+			for dec.Action == sessionpkg.TimerActionGatherPending {
+				facts.Pending = sessionpkg.PendingNo
+				if pendingInteractionKeepsAwake(*session, sp, name, clk) {
+					facts.Pending = sessionpkg.PendingYes
+				}
+				dec = sessionpkg.DecideIdleTimeout(facts)
+			}
+			switch dec.Action {
+			case sessionpkg.TimerActionDefer:
+				// Blocker deferrals respect lifecycle timer blockers without
+				// skipping the post-loop wake/drain pass. A metadata-only
+				// suspend uses sleep_intent=user-hold and still needs that
+				// pass to drain the live runtime. Pending-interaction
+				// deferrals cancel any pending drain and skip this tick's
+				// wake pass for the session.
+				var payload traceRecordPayload
+				if dec.CancelDrain {
+					drainCancelled := false
+					if dt != nil {
+						drainCancelled = cancelSessionDrain(*session, sp, dt)
+					}
+					payload = traceRecordPayload{"drain_canceled": drainCancelled}
+				}
 				if trace != nil {
-					trace.recordDecision("reconciler.session.idle_timeout", tp.TemplateName, name, blocker, "deferred_"+blocker, nil, nil, "")
+					trace.recordDecision("reconciler.session.idle_timeout", tp.TemplateName, name, dec.TraceReason, dec.TraceOutcome, payload, nil, "")
 				}
-			case pendingInteractionKeepsAwake(*session, sp, name, clk):
-				drainCancelled := false
-				if dt != nil {
-					drainCancelled = cancelSessionDrain(*session, sp, dt)
+				if dec.SkipWakePass {
+					continue
 				}
-				if trace != nil {
-					trace.recordDecision("reconciler.session.idle_timeout", tp.TemplateName, name, "pending", "deferred_pending", traceRecordPayload{
-						"drain_canceled": drainCancelled,
-					}, nil, "")
-				}
-				continue
-			default:
+			case sessionpkg.TimerActionStop:
 				fmt.Fprintf(stderr, "session reconciler: idle timeout for %s\n", tp.DisplayName()) //nolint:errcheck // best-effort stderr
 				if trace != nil {
-					trace.recordDecision("reconciler.session.idle_timeout", tp.TemplateName, name, "idle_timeout", "stop", nil, nil, "")
+					trace.recordDecision("reconciler.session.idle_timeout", tp.TemplateName, name, dec.TraceReason, dec.TraceOutcome, nil, nil, "")
 				}
 				if err := workerKillSessionTargetWithConfig("", store, sp, cfg, name); err != nil {
 					fmt.Fprintf(stderr, "session reconciler: stopping idle %s: %v\n", name, err) //nolint:errcheck // best-effort stderr
@@ -2193,7 +2224,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// Mark for immediate re-wake on this same tick by clearing
 					// last_woke_at and setting state to asleep. The wake logic
 					// below will pick it up.
-					batch := sessionpkg.SleepPatch(clk.Now(), "idle-timeout")
+					batch := sessionpkg.SleepPatch(clk.Now(), dec.SleepReason)
 					_ = store.SetMetadataBatch(session.ID, batch)
 					if session.Metadata == nil {
 						session.Metadata = make(map[string]string, len(batch))
@@ -2820,6 +2851,7 @@ func emitSessionStrandedDiagnostic(
 		Actor:   "gc",
 		Subject: session.ID,
 		Message: formatStrandedMessage(template, session.Metadata["session_name"], ids),
+		Payload: api.SessionStrandedPayloadJSON(session.ID, session.Metadata["session_name"], template, ids),
 	})
 	// Set the in-memory marker first so a SetMetadata failure below
 	// can't cause the next tick (still seeing this same *Bead value or
@@ -3716,47 +3748,21 @@ func resolveTaskWorkDir(store beads.Store, assignees ...string) string {
 	return ""
 }
 
-// dispatchReasoningMetadataKey is the work-bead metadata key that carries a
-// per-dispatch reasoning effort. It mirrors how other gc.* dispatch metadata
-// (e.g. gc.run_target) rides on the work bead and is folded into the session at
-// launch. Only providers that expose a reasoning "effort" option (codex)
-// consume it; see resolveDispatchReasoningEffort.
-const dispatchReasoningMetadataKey = "gc.reasoning"
+const dispatchOptionMetadataPrefix = "opt_"
 
-// isCodexProvider reports whether the resolved provider is the codex CLI or
-// derives from it. It prefers BuiltinAncestor (the canonical resolved family)
-// and falls back to the provider Name so callers that build a ResolvedProvider
-// without walking the builtin chain are still matched.
-func isCodexProvider(rp *config.ResolvedProvider) bool {
-	if rp == nil {
-		return false
-	}
-	return rp.BuiltinAncestor == "codex" || rp.Name == "codex"
+func dispatchOptionMetadataKey(key string) string {
+	return dispatchOptionMetadataPrefix + key
 }
 
-// resolveDispatchReasoningEffort returns the reasoning effort requested by the
-// session's in-progress assigned work bead via the gc.reasoning metadata key,
-// validated against the provider's "effort" option schema. It mirrors
-// resolveTaskWorkDir: query each assignee identifier's in-progress work and use
-// the newest match. Providers without an "effort" option (everything but codex)
-// always return "" so the flag is never added. An invalid value is skipped and
-// logged rather than crashing — the launcher then falls back to the model
-// default.
-func resolveDispatchReasoningEffort(store beads.Store, rp *config.ResolvedProvider, assignees ...string) string {
-	if store == nil || rp == nil {
-		return ""
-	}
-	// gc.reasoning maps to codex's `-c model_reasoning_effort=<effort>` only.
-	// Other providers (e.g. claude) expose an unrelated "effort" option
-	// (`--effort`); never fold the dispatch reasoning value into those.
-	if !isCodexProvider(rp) {
-		return ""
-	}
-	effortOpt := providerEffortOption(rp)
-	if effortOpt == nil {
-		// Codex with no effort schema (custom strip): nothing to validate
-		// against, so emit nothing.
-		return ""
+// resolveTaskOptionOverrides returns provider option choices requested by the
+// newest in-progress work bead assigned to the candidate's identifiers. Work
+// beads use the same opt_<OptionsSchema key> metadata convention as session
+// beads, so a provider can consume opt_model, opt_effort, or future schema
+// options without a new gc.* field. Values are validated against the resolved
+// provider OptionsSchema and invalid values are skipped.
+func resolveTaskOptionOverrides(store beads.Store, rp *config.ResolvedProvider, assignees ...string) map[string]string {
+	if store == nil || rp == nil || len(rp.OptionsSchema) == 0 {
+		return nil
 	}
 	seen := make(map[string]bool, len(assignees))
 	for _, assignee := range assignees {
@@ -3776,63 +3782,39 @@ func resolveDispatchReasoningEffort(store beads.Store, rp *config.ResolvedProvid
 			continue
 		}
 		for _, b := range assigned {
-			raw := strings.TrimSpace(b.Metadata[dispatchReasoningMetadataKey])
-			if raw == "" {
-				continue
+			overrides, sawOptions := workBeadOptionOverrides(b, rp)
+			if sawOptions {
+				return overrides
 			}
-			if !effortChoiceIsValid(effortOpt, raw) {
-				log.Printf("work %s: invalid %s %q (want one of %s); skipping reasoning override",
-					b.ID, dispatchReasoningMetadataKey, raw, strings.Join(effortChoiceValues(effortOpt), ", "))
-				continue
-			}
-			return raw
-		}
-	}
-	return ""
-}
-
-// providerEffortOption returns the provider's "effort" option schema entry, or
-// nil when the provider exposes no reasoning-effort knob.
-func providerEffortOption(rp *config.ResolvedProvider) *config.ProviderOption {
-	if rp == nil {
-		return nil
-	}
-	for i := range rp.OptionsSchema {
-		if rp.OptionsSchema[i].Key == "effort" {
-			return &rp.OptionsSchema[i]
 		}
 	}
 	return nil
 }
 
-// effortChoiceIsValid reports whether value is a declared, non-empty choice of
-// the effort option (for codex: low, medium, high, xhigh). The empty "Default"
-// choice is intentionally rejected as an explicit override value.
-func effortChoiceIsValid(opt *config.ProviderOption, value string) bool {
-	if opt == nil || value == "" {
-		return false
+func workBeadOptionOverrides(b beads.Bead, rp *config.ResolvedProvider) (map[string]string, bool) {
+	if rp == nil {
+		return nil, false
 	}
-	for _, choice := range opt.Choices {
-		if choice.Value == value {
-			return true
-		}
-	}
-	return false
-}
-
-// effortChoiceValues lists the non-empty effort choice values for diagnostics.
-func effortChoiceValues(opt *config.ProviderOption) []string {
-	if opt == nil {
-		return nil
-	}
-	values := make([]string, 0, len(opt.Choices))
-	for _, choice := range opt.Choices {
-		if choice.Value == "" {
+	overrides := make(map[string]string)
+	sawOptions := false
+	for _, opt := range rp.OptionsSchema {
+		metadataKey := dispatchOptionMetadataKey(opt.Key)
+		raw, ok := b.Metadata[metadataKey]
+		if !ok {
 			continue
 		}
-		values = append(values, choice.Value)
+		sawOptions = true
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			continue
+		}
+		if _, err := config.ResolveExplicitOptions(rp.OptionsSchema, map[string]string{opt.Key: value}); err != nil {
+			log.Printf("work %s: ignoring %s=%q: %v", b.ID, metadataKey, value, err)
+			continue
+		}
+		overrides[opt.Key] = value
 	}
-	return values
+	return overrides, sawOptions
 }
 
 type assignedTaskWorkDir struct {

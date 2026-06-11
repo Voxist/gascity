@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -20,11 +23,19 @@ import (
 
 const (
 	legacyOrderConfigFile = "order.toml"
+	packHashManifestFile  = ".gc-pack-hashes.json"
 )
 
 // builtinPacks lists all packs embedded in the gc binary. These are
 // materialized to .gc/system/packs/ on every gc start and gc init.
 var builtinPacks = builtinpacks.All()
+
+// retiredBuiltinPackNames lists packs that earlier gc binaries materialized
+// under .gc/system/packs but that no longer ship with the binary. Their
+// system-pack directories are binary-owned, so materialization removes any
+// stale copy left behind by an upgrade. The maintenance pack was folded into
+// the bundled core pack.
+var retiredBuiltinPackNames = []string{"maintenance"}
 
 var builtinPackRefreshCache sync.Map
 
@@ -54,8 +65,8 @@ type builtinPackFile struct {
 // Operator edits are preserved only for non-required packs: a regular,
 // correct-mode file in a non-required pack is left untouched even when its
 // content differs from the embedded bytes (see gastownhall/gascity#2429).
-// Required packs (core, maintenance, and the provider-dependent bd/dolt) are
-// always refreshed and validated, so a stale or corrupt required pack on disk
+// Required packs (core and the provider-dependent bd/dolt) are always
+// refreshed and validated, so a stale or corrupt required pack on disk
 // is repaired rather than silently accepted.
 // Idempotent: safe to call on every gc start and gc init.
 func MaterializeBuiltinPacks(cityPath string) error {
@@ -63,7 +74,7 @@ func MaterializeBuiltinPacks(cityPath string) error {
 	for _, bp := range builtinPacks {
 		dst := filepath.Join(cityPath, citylayout.SystemPacksRoot, bp.Name)
 		_, isRequired := required[bp.Name]
-		desired, err := materializeFS(bp.FS, dst, !isRequired)
+		desired, err := materializeFS(bp.FS, dst, !isRequired, os.Stderr)
 		if err != nil {
 			return fmt.Errorf("materializing %s pack: %w", bp.Name, err)
 		}
@@ -74,21 +85,37 @@ func MaterializeBuiltinPacks(cityPath string) error {
 			return fmt.Errorf("pruning legacy %s order paths: %w", bp.Name, err)
 		}
 	}
+	for _, name := range retiredBuiltinPackNames {
+		if err := os.RemoveAll(filepath.Join(cityPath, citylayout.SystemPacksRoot, name)); err != nil {
+			return fmt.Errorf("removing retired %s pack: %w", name, err)
+		}
+	}
 	if err := repairLegacyGcBeadsBdScript(cityPath); err != nil {
 		return fmt.Errorf("repairing legacy gc-beads-bd script: %w", err)
 	}
 	return nil
 }
 
-func builtinPackIncludesForConfigLoad(fs fsys.FS, tomlPath string, warningWriter io.Writer) ([]string, error) {
+// ensureBuiltinPacksForConfigLoad is the shared config-load boundary for
+// builtin pack readiness: it hydrates the shared repo cache for bundled
+// imports pinned in packs.lock and materializes the builtin system packs.
+// Every production loader — loadCityConfig, loadCityConfigFS, and
+// loadCityConfigWithBuiltinPacks — routes through it so any gc command
+// self-heals a cold repo cache instead of failing with "run \"gc import
+// install\"" after a binary upgrade or cache eviction.
+//
+// It deliberately injects nothing into config composition: builtin packs
+// compose only through the explicit city.toml includes that gc init writes
+// and gc doctor --fix repairs.
+func ensureBuiltinPacksForConfigLoad(fs fsys.FS, tomlPath string, warningWriter io.Writer) error {
 	if !usesOSFS(fs) {
-		return nil, nil
+		return nil
 	}
 	cityPath := filepath.Dir(tomlPath)
-	if err := ensureBuiltinPacksReadyForConfigLoad(cityPath, warningWriter); err != nil {
-		return nil, err
+	if err := ensureBundledLockedRemoteImportsCached(cityPath); err != nil {
+		return err
 	}
-	return builtinPackIncludes(cityPath), nil
+	return ensureBuiltinPacksReadyForConfigLoad(cityPath, warningWriter)
 }
 
 func usesOSFS(fs fsys.FS) bool {
@@ -234,7 +261,7 @@ func requiredBuiltinPackSet(cityPath string) map[string]struct{} {
 }
 
 func requiredBuiltinPackNames(cityPath string) []string {
-	required := []string{"core", "maintenance"}
+	required := []string{"core"}
 
 	provider := strings.TrimSpace(configuredBeadsProviderValue(cityPath))
 	normalizedProvider := normalizeRawBeadsProvider(cityPath, provider)
@@ -257,30 +284,54 @@ func emitBuiltinPackRefreshWarning(w io.Writer, err error) {
 	fmt.Fprintf(w, "warning: %v\n", err) //nolint:errcheck // best-effort warning emission
 }
 
-// builtinPackIncludes returns the system pack paths that should be
-// auto-included in config loading. These are appended as extraIncludes
-// to LoadWithIncludes so they go through normal pack expansion
-// (ExpandCityPacks) with dedup/fallback resolution.
+// requiredBuiltinIncludePaths returns the canonical city-relative include
+// paths for the builtin packs this city requires (e.g. ".gc/system/packs/core").
+// gc init writes them into city.toml [workspace] includes; the
+// builtin-pack-includes doctor check repairs them when missing. Nothing on
+// the config-load path injects them — builtin packs compose only through
+// these explicit includes.
 //
-// Core and maintenance are always included. Core ships the role prompts
-// referenced by implicit agents and the overlay/per-provider hook files,
-// so its content must reach PackOverlayDirs even when the user has never
-// run `gc init` (and therefore has no implicit-import.toml written to
-// $GC_HOME). When the beads provider is "bd" (the default), include bd
-// and let its own pack includes pull in dolt transitively. Gastown is
-// never auto-included — it requires an explicit workspace.includes entry.
-func builtinPackIncludes(cityPath string) []string {
-	systemRoot := filepath.Join(cityPath, citylayout.SystemPacksRoot)
-
-	var includes []string
-	for _, name := range requiredBuiltinPackNames(cityPath) {
-		packPath := filepath.Join(systemRoot, name)
-		if packExists(packPath) {
-			includes = append(includes, packPath)
-		}
+// Core is always required: it ships the role prompts referenced by implicit
+// agents, the gc-* skills, mechanical housekeeping orders, and the
+// overlay/per-provider hook files. When the beads provider is "bd" (the
+// default), bd is required and its own pack imports pull in dolt
+// transitively. Gastown is never required — it needs an explicit import.
+func requiredBuiltinIncludePaths(cityPath string) []string {
+	names := requiredBuiltinPackNames(cityPath)
+	paths := make([]string, 0, len(names))
+	for _, name := range names {
+		paths = append(paths, builtinIncludePathForPack(name))
 	}
+	return paths
+}
 
+// builtinIncludePathForPack returns the canonical city-relative include path
+// for a builtin pack name.
+func builtinIncludePathForPack(name string) string {
+	return citylayout.SystemPacksRoot + "/" + name
+}
+
+// builtinIncludesForProvider mirrors requiredBuiltinIncludePaths for a city
+// whose city.toml has not been written yet: gc init computes the canonical
+// builtin include list straight from the provider value in play.
+func builtinIncludesForProvider(provider string) []string {
+	includes := []string{builtinIncludePathForPack("core")}
+	if providerUsesBdStoreContract(strings.TrimSpace(provider)) {
+		includes = append(includes, builtinIncludePathForPack("bd"))
+	}
 	return includes
+}
+
+// builtinIncludesForInit resolves the beads provider the same way
+// command-time store selection does — GC_BEADS env first, then the
+// about-to-be-written city.toml provider — so init writes exactly the
+// includes the builtin-pack-includes doctor check will later enforce.
+func builtinIncludesForInit(cityProvider string) []string {
+	provider := strings.TrimSpace(os.Getenv("GC_BEADS"))
+	if provider == "" {
+		provider = cityProvider
+	}
+	return builtinIncludesForProvider(provider)
 }
 
 // packExists checks if a pack.toml exists in the given directory.
@@ -355,25 +406,31 @@ func peekEventsProvider(tomlPath string) string {
 // materializeFS walks an embed.FS, writes all files to dstDir, and returns the
 // relative file paths that belong in the generated directory.
 //
-// When preserveOperatorEdits is true, existing regular files with the correct
-// mode are preserved verbatim — content is NOT overwritten even when it differs
-// from the embedded bytes. This protects operator-authored edits to non-required
-// pack files (formula TOMLs, command scripts, etc.) from being silently reverted
-// on every gc subcommand invocation (see gastownhall/gascity#2429). Operators
-// who want to pick up a fresh embedded version after a binary upgrade must delete
-// the on-disk file first.
+// When preserveOperatorEdits is true, a per-pack hash manifest
+// (.gc-pack-hashes.json) distinguishes stale embedded content from operator
+// edits. A file whose on-disk hash matches the last binary-written hash is
+// stale and refreshed silently. A file whose on-disk hash differs from the
+// manifest entry has been operator-edited and is preserved with a warning. A
+// file with no manifest entry is conservatively preserved without a warning
+// (migration path for cities without a prior manifest).
 //
-// When preserveOperatorEdits is false (required packs), the preservation skip is
-// disabled: every file is refreshed and validated against the embedded bytes, so
-// a stale or corrupt required pack is repaired rather than silently accepted.
+// When preserveOperatorEdits is false (required packs), every file is refreshed
+// and validated against the embedded bytes regardless of the manifest.
+//
+// The manifest is written after a successful walk even when the merged map is
+// empty; write failures are non-fatal and surface through w. The manifest file
+// itself is not included in the returned desired set.
 //
 // The remaining repair semantics are independent of the flag: missing files are
 // written (initial scaffolding), wrong-mode files are rewritten (e.g., script
 // that lost its +x bit), and non-regular files (symlinks, etc.) are replaced
 // with the embedded content.
-func materializeFS(embedded fs.FS, dstDir string, preserveOperatorEdits bool) (map[string]struct{}, error) {
+func materializeFS(embedded fs.FS, dstDir string, preserveOperatorEdits bool, w io.Writer) (map[string]struct{}, error) {
+	existingManifest := readPackHashManifest(dstDir)
+	pendingManifest := make(map[string]string)
 	desired := make(map[string]struct{})
-	err := fs.WalkDir(embedded, ".", func(path string, d fs.DirEntry, err error) error {
+
+	walkErr := fs.WalkDir(embedded, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -383,24 +440,37 @@ func materializeFS(embedded fs.FS, dstDir string, preserveOperatorEdits bool) (m
 		if d.IsDir() {
 			return os.MkdirAll(dst, 0o755)
 		}
-		desired[filepath.ToSlash(path)] = struct{}{}
+
+		rel := filepath.ToSlash(path)
+		desired[rel] = struct{}{}
 
 		perm := builtinpacks.MaterializedFileMode(path)
 
-		// Preserve operator-authored content for non-required packs. Skip the
-		// embedded write only when the existing on-disk entry is a regular file
-		// with the correct mode — that's a file the operator might have edited.
-		// Non-regular files (symlinks) and wrong-mode files still get repaired
-		// below, matching the prior contract. Mode comparison uses
+		// For non-required packs, use the hash manifest to distinguish stale
+		// embedded content from operator edits. Mode comparison uses
 		// fsys.ComparableMode (perm + setuid/setgid/sticky) so it agrees with
-		// the WriteFileIfContentOrModeChangedAtomic repair path below. Required
-		// packs (preserveOperatorEdits == false) skip this branch entirely so
-		// stale content is always refreshed.
+		// the WriteFileIfContentOrModeChangedAtomic repair path below.
 		if preserveOperatorEdits {
 			if info, statErr := os.Lstat(dst); statErr == nil {
 				if info.Mode().IsRegular() && fsys.ComparableMode(info.Mode()) == fsys.ComparableMode(perm) {
-					return nil
+					if knownHash, ok := existingManifest[rel]; ok {
+						onDiskData, readErr := os.ReadFile(dst)
+						if readErr != nil {
+							return fmt.Errorf("reading %s for hash comparison: %w", dst, readErr)
+						}
+						if sha256Hex(onDiskData) != knownHash {
+							// On-disk content differs from last binary-written hash: operator edit.
+							emitBuiltinPackRefreshWarning(w, fmt.Errorf("file %s has local edits; newer version available in the binary", rel))
+							pendingManifest[rel] = knownHash
+							return nil
+						}
+						// On-disk hash matches manifest: stale embed, fall through to refresh.
+					} else {
+						// No manifest entry: conservatively preserve without warning.
+						return nil
+					}
 				}
+				// Wrong mode or non-regular: fall through to repair.
 			} else if !os.IsNotExist(statErr) {
 				return fmt.Errorf("stat %s: %w", dst, statErr)
 			}
@@ -411,16 +481,58 @@ func materializeFS(embedded fs.FS, dstDir string, preserveOperatorEdits bool) (m
 			return fmt.Errorf("reading embedded %s: %w", path, err)
 		}
 
+		pendingManifest[rel] = sha256Hex(data)
+
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return err
 		}
 
 		return fsys.WriteFileIfContentOrModeChangedAtomic(fsys.OSFS{}, dst, data, perm)
 	})
-	if err != nil {
-		return nil, err
+
+	if walkErr != nil {
+		return nil, walkErr
 	}
+
+	if writeErr := writePackHashManifest(dstDir, pendingManifest); writeErr != nil {
+		emitBuiltinPackRefreshWarning(w, fmt.Errorf("could not write pack hash manifest: %w", writeErr))
+	}
+
 	return desired, nil
+}
+
+// sha256Hex returns the hex-encoded SHA-256 digest of data.
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// readPackHashManifest reads the pack hash manifest from dstDir. Returns an
+// empty map when the manifest is absent or contains invalid JSON.
+func readPackHashManifest(dstDir string) map[string]string {
+	data, err := os.ReadFile(filepath.Join(dstDir, packHashManifestFile))
+	if err != nil {
+		return map[string]string{}
+	}
+	var manifest map[string]string
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return map[string]string{}
+	}
+	if manifest == nil {
+		return map[string]string{}
+	}
+	return manifest
+}
+
+// writePackHashManifest writes manifest to dstDir/.gc-pack-hashes.json
+// atomically. The caller is responsible for treating write errors as non-fatal.
+func writePackHashManifest(dstDir string, manifest map[string]string) error {
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		return fmt.Errorf("marshaling pack hash manifest: %w", err)
+	}
+	dst := filepath.Join(dstDir, packHashManifestFile)
+	return fsys.WriteFileIfContentOrModeChangedAtomic(fsys.OSFS{}, dst, data, 0o644)
 }
 
 func repairLegacyGcBeadsBdScript(cityPath string) error {
@@ -523,6 +635,11 @@ func pruneStaleGeneratedPackFiles(dstDir string, desired map[string]struct{}) er
 			_, ok := desired[path]
 			return ok
 		}) {
+			return nil
+		}
+		// Preserve the pack hash manifest and its atomic temp siblings — they
+		// are runtime metadata produced by materializeFS, not embedded content.
+		if rel == packHashManifestFile || strings.HasPrefix(rel, packHashManifestFile+".tmp.") {
 			return nil
 		}
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {

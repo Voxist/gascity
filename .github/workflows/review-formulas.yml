@@ -38,7 +38,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  DOLT_VERSION: "2.1.0"
+  DOLT_VERSION: "2.1.4"
   BD_VERSION: "v1.0.5"
 
 jobs:
@@ -78,6 +78,7 @@ jobs:
           persist-credentials: false
       - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
         id: filter
+        continue-on-error: true
         with:
           filters: |
             review_formulas:

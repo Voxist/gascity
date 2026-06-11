@@ -296,10 +296,6 @@
           "type": "boolean",
           "description": "Attach controls whether the agent's session supports interactive\nattachment (e.g., tmux attach). When false, the agent can use a\nlighter runtime (subprocess instead of tmux). Defaults to true."
         },
-        "fallback": {
-          "type": "boolean",
-          "description": "Fallback marks this agent as a fallback definition. During pack\ncomposition, a non-fallback agent with the same name wins silently.\nWhen two fallbacks collide, the first loaded (depth-first) wins.\nSee docs/guides/shareable-packs.md for pack layout guidance."
-        },
         "depends_on": {
           "items": {
             "type": "string"
@@ -467,6 +463,13 @@
         "provider": {
           "type": "string",
           "description": "Provider overrides the provider name."
+        },
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Args overrides the provider's default arguments. Leave unset to keep\nthe pack-defined args; set to an empty list to clear them; set to a\npopulated list to replace them entirely (full replace, not append)."
         },
         "start_command": {
           "type": "string",
@@ -746,6 +749,13 @@
           "type": "string",
           "description": "Provider overrides the provider name."
         },
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Args overrides the provider's default arguments. Leave unset to keep\nthe pack-defined args; set to an empty list to clear them; set to a\npopulated list to replace them entirely (full replace, not append)."
+        },
         "start_command": {
           "type": "string",
           "description": "StartCommand overrides the start command."
@@ -975,7 +985,7 @@
         },
         "delete_after_close": {
           "type": "string",
-          "description": "DeleteAfterClose deletes matching GC-owned beads after they have been\nclosed for this duration. Accepts Go duration syntax plus whole-day \"d\"\nunits, e.g. \"7d\" or \"1d12h\". Empty means the policy is not GC-managed."
+          "description": "DeleteAfterClose deletes matching GC-owned beads after they have been\nclosed for this duration. Accepts Go duration syntax plus whole-day \"d\"\nunits, e.g. \"7d\" or \"1d12h\". Empty defers to any controller-managed\ndefault for the policy type (e.g. order_tracking defaults to 7d)."
         }
       },
       "additionalProperties": false,
@@ -1100,6 +1110,10 @@
         "idle_timeout": {
           "type": "string",
           "description": "IdleTimeout is the duration after which a detached chat session\nis auto-suspended. Duration string (e.g., \"30m\", \"1h\"). 0 = disabled."
+        },
+        "grace_period": {
+          "type": "string",
+          "description": "GracePeriod is the duration after creation during which a manual\nsession is protected from idle-sleep scale-to-zero. Duration string\n(e.g., \"10m\"). Empty = use default (10m). \"0\" = disabled."
         }
       },
       "additionalProperties": false,
@@ -2870,7 +2884,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "InstallAgentHooks lists provider names whose hooks should be installed\ninto agent working directories. Agent-level overrides workspace-level\n(replace, not additive). Supported: \"claude\", \"codex\", \"gemini\",\n\"antigravity\", \"kiro\", \"opencode\", \"groq\", \"cerebras\", \"copilot\",\n\"cursor\", \"pi\", \"omp\"."
+          "description": "InstallAgentHooks lists provider names whose hooks should be installed\ninto agent working directories. Agent-level overrides workspace-level\n(replace, not additive). Supported: \"claude\", \"codex\", \"gemini\",\n\"antigravity\", \"kiro\", \"opencode\", \"groq\", \"cerebras\", \"copilot\",\n\"cursor\", \"pi\", \"omp\", \"kimi\"."
         },
         "global_fragments": {
           "items": {

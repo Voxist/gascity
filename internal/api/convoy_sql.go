@@ -14,6 +14,7 @@ import (
 
 	mysql "github.com/go-sql-driver/mysql"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
@@ -514,10 +515,10 @@ func (s *Server) tryFullWorkflowSQL(workflowID, fallbackScopeKind, fallbackScope
 			Title:         bead.Title,
 			Status:        workflowStatus(bead),
 			Kind:          workflowKind(bead),
-			StepRef:       strings.TrimSpace(bead.Metadata["gc.step_ref"]),
+			StepRef:       strings.TrimSpace(bead.Metadata[beadmeta.StepRefMetadataKey]),
 			Attempt:       workflowAttempt(bead),
-			LogicalBeadID: strings.TrimSpace(bead.Metadata["gc.logical_bead_id"]),
-			ScopeRef:      strings.TrimSpace(bead.Metadata["gc.scope_ref"]),
+			LogicalBeadID: strings.TrimSpace(bead.Metadata[beadmeta.LogicalBeadIDMetadataKey]),
+			ScopeRef:      strings.TrimSpace(bead.Metadata[beadmeta.ScopeRefMetadataKey]),
 			Assignee:      strings.TrimSpace(bead.Assignee),
 			Metadata:      cloneStringMap(bead.Metadata),
 		})
@@ -554,10 +555,10 @@ func workflowSQLSnapshotScope(root beads.Bead, info workflowStoreInfo, fallbackS
 	if scopeRef == "" {
 		scopeRef = strings.TrimSpace(info.scopeRef)
 	}
-	if sk := strings.TrimSpace(root.Metadata["gc.scope_kind"]); sk != "" {
+	if sk := strings.TrimSpace(root.Metadata[beadmeta.ScopeKindMetadataKey]); sk != "" {
 		scopeKind = sk
 	}
-	if sr := strings.TrimSpace(root.Metadata["gc.scope_ref"]); sr != "" {
+	if sr := strings.TrimSpace(root.Metadata[beadmeta.ScopeRefMetadataKey]); sr != "" {
 		scopeRef = sr
 	}
 	return scopeKind, scopeRef

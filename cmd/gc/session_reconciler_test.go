@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -1710,6 +1711,50 @@ func (c *capturingRecorder) strandedEvents() []events.Event {
 		}
 	}
 	return out
+}
+
+// session.stranded must carry a typed payload with the stranded work
+// bead IDs and session identity, not just the human-readable Message —
+// machine consumers (pack-level recovery subscribers) act on the
+// payload, not on message text. Regression test for ga-kmoj9c.
+func TestEmitSessionStrandedDiagnostic_CarriesTypedPayload(t *testing.T) {
+	store := beads.NewMemStore()
+	session, work := createDetachedStrandedWork(t, store, "")
+
+	if sample, ok := events.LookupPayload(events.SessionStranded); !ok {
+		t.Fatal("no payload registered for session.stranded")
+	} else if _, typed := sample.(api.SessionStrandedPayload); !typed {
+		t.Fatalf("registered session.stranded payload = %T, want api.SessionStrandedPayload", sample)
+	}
+
+	rec := emitStrandedDiagnosticForTest(t, store, &session)
+	stranded := rec.strandedEvents()
+	if len(stranded) != 1 {
+		t.Fatalf("session.stranded events = %d, want 1; events: %+v", len(stranded), rec.events)
+	}
+	e := stranded[0]
+	if !strings.Contains(e.Message, work.ID) {
+		t.Fatalf("session.stranded message = %q, want operator text still listing work bead %q", e.Message, work.ID)
+	}
+	if len(e.Payload) == 0 {
+		t.Fatal("session.stranded payload is empty, want typed api.SessionStrandedPayload")
+	}
+	var payload api.SessionStrandedPayload
+	if err := json.Unmarshal(e.Payload, &payload); err != nil {
+		t.Fatalf("decoding session.stranded payload: %v", err)
+	}
+	if payload.SessionID != session.ID {
+		t.Fatalf("payload.SessionID = %q, want %q", payload.SessionID, session.ID)
+	}
+	if payload.SessionName != "worker-mc-dead" {
+		t.Fatalf("payload.SessionName = %q, want %q", payload.SessionName, "worker-mc-dead")
+	}
+	if payload.Template != "worker" {
+		t.Fatalf("payload.Template = %q, want %q", payload.Template, "worker")
+	}
+	if len(payload.WorkBeadIDs) != 1 || payload.WorkBeadIDs[0] != work.ID {
+		t.Fatalf("payload.WorkBeadIDs = %v, want [%q]", payload.WorkBeadIDs, work.ID)
+	}
 }
 
 func TestEmitSessionStrandedDiagnostic_DetachedProbeAliveSuppressesEvent(t *testing.T) {
@@ -7953,6 +7998,68 @@ func TestReconcileSessionBeads_MaxSessionAgeSkippedWhenBusyWithAssignedWork(t *t
 		if e.Type == events.SessionMaxAgeKilled {
 			t.Error("SessionMaxAgeKilled must not fire while an in-progress assigned bead is held")
 		}
+	}
+}
+
+// TestReconcileSessionBeads_MaxAgeBusyDeferFallsThroughToIdleTimeout pins the
+// max-age half of the timer asymmetry (SESSION-RECON-009): a max-age deferral
+// leaves the session in the rest of the tick. The busy witness is max-age
+// deferred on assigned work but must still be idle-evaluated on the same
+// tick, so the idle stop fires. Fails if the max-age defer path ever gains a
+// `continue`.
+func TestReconcileSessionBeads_MaxAgeBusyDeferFallsThroughToIdleTimeout(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness", MaxSessionAge: "5h"}}}
+	env.addDesired("witness", "witness", true)
+	session := env.createSessionBead("witness", "witness")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"creation_complete_at": env.clk.Now().Add(-6 * time.Hour).UTC().Format(time.RFC3339),
+	})
+	if _, err := env.store.Create(beads.Bead{
+		Title:    "in-flight work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+	}); err != nil {
+		t.Fatalf("Create(in-flight work): %v", err)
+	}
+
+	tr := newMaxSessionAgeTracker()
+	tr.setConfig("witness", 5*time.Hour, 0)
+	it := newFakeIdleTracker()
+	it.idle["witness"] = true
+	rec := events.NewFake()
+	env.rec = rec
+
+	poolDesired := make(map[string]int)
+	for _, tp := range env.desiredState {
+		if tp.TemplateName != "" {
+			poolDesired[tp.TemplateName]++
+		}
+	}
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+	reconcileSessionBeadsTraced(
+		context.Background(), "", []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
+		env.store, nil, nil, nil, nil, env.dt, poolDesired, false, nil, "",
+		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr, nil,
+		withMaxSessionAgeTracker(tr),
+	)
+
+	var maxAgeKilled, idleKilled bool
+	for _, e := range rec.Events {
+		switch e.Type {
+		case events.SessionMaxAgeKilled:
+			maxAgeKilled = true
+		case events.SessionIdleKilled:
+			idleKilled = true
+		}
+	}
+	if maxAgeKilled {
+		t.Error("SessionMaxAgeKilled must not fire while an in-progress assigned bead is held")
+	}
+	if !idleKilled {
+		t.Error("idle timeout must still run on the same tick after a max-age busy deferral")
 	}
 }
 

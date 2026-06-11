@@ -81,7 +81,7 @@ const (
 )
 
 var builtinProviderOrder = []string{
-	"claude", "codex", "gemini", "kimi", "kiro", "cursor", "copilot",
+	"claude", "codex", "gemini", "grok", "kimi", "kiro", "cursor", "copilot",
 	"amp", "opencode", "groq", "cerebras", "auggie", "pi", "omp", "antigravity",
 }
 
@@ -144,6 +144,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Type:  "select",
 				Choices: []BuiltinOptionChoice{
 					{Value: "", Label: "Default"},
+					{Value: "fable-5", Label: "Fable 5", FlagArgs: []string{"--model", "claude-fable-5"}, FlagAliases: [][]string{{"-m", "claude-fable-5"}}},
 					{Value: "opus", Label: "Opus", FlagArgs: []string{"--model", "claude-opus-4-8"}, FlagAliases: [][]string{{"-m", "claude-opus-4-8"}}},
 					{Value: "opus-4-7", Label: "Opus 4.7", FlagArgs: []string{"--model", "claude-opus-4-7"}, FlagAliases: [][]string{{"-m", "claude-opus-4-7"}}},
 					{Value: "sonnet", Label: "Sonnet", FlagArgs: []string{"--model", "claude-sonnet-4-6"}, FlagAliases: [][]string{{"-m", "claude-sonnet-4-6"}}},
@@ -270,6 +271,82 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 			},
 		},
 	},
+	"grok": {
+		DisplayName: "Grok Build",
+		Command:     "grok",
+		OptionDefaults: map[string]string{
+			"permission_mode": "unrestricted",
+			"model":           "grok-composer-2.5-fast",
+		},
+		// The grok TUI accepts no positional or flag-delivered initial
+		// prompt (`-p/--single` is print-and-exit), so prompts are
+		// delivered via tmux send-keys once the TUI is ready.
+		//
+		// grok's input handler does not accept send-keys until ~5-6s after
+		// launch (TUI init: auth check + model-list load). Its prompt box
+		// renders earlier (~3s) but silently drops keystrokes until then, so
+		// ReadyPromptPrefix-based readiness detection can't be used here — the
+		// box would match and we'd send into a not-yet-listening TUI. A blind
+		// 5000ms delay raced that window: the initial nudge was lost and the
+		// worker idled forever at the welcome screen (never running `gc hook`).
+		// 12000ms clears the ready threshold with margin for spawn-time load.
+		// Empirically verified against grok 0.2.32: send-keys is dropped at 5s
+		// and lands reliably from ~6s onward.
+		PromptMode:       "none",
+		ReadyDelayMs:     12000,
+		ProcessNames:     []string{"grok"},
+		InstructionsFile: "AGENTS.md",
+		ResumeFlag:       "--resume",
+		ResumeStyle:      "flag",
+		PrintArgs:        []string{"-p"},
+		TitleModel:       "grok-composer-2.5-fast",
+		PermissionModes: map[string]string{
+			"default":      "--permission-mode default",
+			"auto-edit":    "--permission-mode acceptEdits",
+			"plan":         "--permission-mode plan",
+			"full-auto":    "--permission-mode dontAsk",
+			"unrestricted": "--permission-mode bypassPermissions",
+		},
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:     "permission_mode",
+				Label:   "Permission Mode",
+				Type:    "select",
+				Default: "unrestricted",
+				Choices: []BuiltinOptionChoice{
+					{Value: "default", Label: "Ask before actions", FlagArgs: []string{"--permission-mode", "default"}},
+					{Value: "auto-edit", Label: "Auto-approve edits", FlagArgs: []string{"--permission-mode", "acceptEdits"}},
+					{Value: "plan", Label: "Plan mode", FlagArgs: []string{"--permission-mode", "plan"}},
+					{Value: "full-auto", Label: "Full auto", FlagArgs: []string{"--permission-mode", "dontAsk"}},
+					{Value: "unrestricted", Label: "Bypass permissions", FlagArgs: []string{"--permission-mode", "bypassPermissions"}},
+				},
+			},
+			{
+				Key:   "effort",
+				Label: "Effort",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "low", Label: "Low", FlagArgs: []string{"--effort", "low"}},
+					{Value: "medium", Label: "Medium", FlagArgs: []string{"--effort", "medium"}},
+					{Value: "high", Label: "High", FlagArgs: []string{"--effort", "high"}},
+					{Value: "xhigh", Label: "Extra High", FlagArgs: []string{"--effort", "xhigh"}},
+					{Value: "max", Label: "Max", FlagArgs: []string{"--effort", "max"}},
+				},
+			},
+			{
+				Key:   "model",
+				Label: "Model",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "grok-build", Label: "Grok Build", FlagArgs: []string{"--model", "grok-build"}, FlagAliases: [][]string{{"-m", "grok-build"}}},
+					{Value: "grok-composer-2.5", Label: "Grok Composer 2.5", FlagArgs: []string{"--model", "grok-composer-2.5"}, FlagAliases: [][]string{{"-m", "grok-composer-2.5"}}},
+					{Value: "grok-composer-2.5-fast", Label: "Grok Composer 2.5 Fast", FlagArgs: []string{"--model", "grok-composer-2.5-fast"}, FlagAliases: [][]string{{"-m", "grok-composer-2.5-fast"}}},
+				},
+			},
+		},
+	},
 	"kimi": {
 		DisplayName:          "Kimi Code CLI",
 		Command:              "kimi",
@@ -279,6 +356,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ProcessNames:         []string{"kimi", "python"},
 		AcceptStartupDialogs: boolPtr(false),
 		SupportsACP:          true,
+		SupportsHooks:        true,
 		InstructionsFile:     "AGENTS.md",
 		ResumeFlag:           "--session",
 		ResumeStyle:          "flag",

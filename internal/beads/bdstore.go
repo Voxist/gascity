@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -30,7 +31,7 @@ type CommandRunner func(dir, name string, args ...string) ([]byte, error)
 var (
 	bdCommandTimeout = 120 * time.Second
 	// bdReadCommandTimeout bounds bd read-only subcommands (count, list,
-	// ready, show, stats). Default matches bdCommandTimeout to preserve
+	// ready, show, sql, stats, version). Default matches bdCommandTimeout to preserve
 	// pre-bounded behavior; lowered in follow-up work after slow read
 	// paths are identified.
 	bdReadCommandTimeout = 120 * time.Second
@@ -108,12 +109,7 @@ func ExecCommandRunnerWithEnv(env map[string]string) CommandRunner {
 		cmd.Cancel = func() error {
 			return killCommandTree(cmd)
 		}
-		baseEnv := processEnvSnapshotExcludingNativeDoltOpen()
-		if len(env) > 0 {
-			cmd.Env = mergeEnv(baseEnv, env)
-		} else {
-			cmd.Env = baseEnv
-		}
+		cmd.Env = execEnvFor(name, processEnvSnapshotExcludingNativeDoltOpen(), env)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		out, err := cmd.Output()
@@ -188,7 +184,7 @@ func bdCommandTimeoutFor(name string, args []string) time.Duration {
 		return bdGraphApplyCommandTimeout
 	}
 	switch args[0] {
-	case "count", "list", "ready", "show", "stats":
+	case "count", "list", "ready", "show", "sql", "stats", "version":
 		return bdReadCommandTimeout
 	case "query":
 		return bdQueryCommandTimeout
@@ -246,6 +242,10 @@ type BdStore struct {
 	idPrefix    string          // bead ID prefix owned by this store, without trailing "-"
 
 	listSkipLabelsEnabled bool // whether bd list may receive --skip-labels
+
+	readyProjectionMu      sync.Mutex
+	readyProjectionChecked bool
+	readyProjectionEnabled bool
 }
 
 const bdTransientWriteAttempts = 3
@@ -442,6 +442,29 @@ func truncateRawOutput(data []byte, maxBytes int) string {
 	return string(trimmed[:maxBytes]) + "...(truncated)"
 }
 
+// bdAutoBackupOptOutEnvKey disables bd's PersistentPostRun auto-backup (the
+// hardcoded "backup_export" Dolt remote synced into <root>/.beads/backup on
+// nearly every bd invocation, with no retention). A stuck-looping
+// backup_export sync was the root cause of the 2026-06-08 town-wide wedge
+// (ga-0eq), and the unrotated archives reached 210GB on one dev store
+// (ga-yfbs28). gc's projected envs already opt out (cmd/gc applyBdAutoBackupOptOut);
+// injecting it here covers every other runner-spawned bd call — hook claim,
+// store bridge, t3bridge, libstore, provider lifecycle — current and future.
+const bdAutoBackupOptOutEnvKey = "BD_BACKUP_ENABLED"
+
+// execEnvFor assembles the child environment for a runner exec. For bd
+// commands the auto-backup opt-out is injected as a baseline, replacing any
+// value inherited from the parent process (matching the unconditional
+// projected-env opt-out policy); an explicit per-call override still wins
+// because mergeEnv applies overrides last. Non-bd commands (e.g. direct dolt
+// queries) pass through untouched.
+func execEnvFor(name string, baseEnv []string, overrides map[string]string) []string {
+	if name == "bd" {
+		baseEnv = append(envWithout(baseEnv, bdAutoBackupOptOutEnvKey), bdAutoBackupOptOutEnvKey+"=false")
+	}
+	return mergeEnv(baseEnv, overrides)
+}
+
 // envWithout returns a copy of environ with all entries for the given key removed.
 func envWithout(environ []string, key string) []string {
 	prefix := key + "="
@@ -520,6 +543,7 @@ type bdIssue struct {
 	Ephemeral    bool         `json:"ephemeral,omitempty"`
 	NoHistory    bool         `json:"no_history,omitempty"`
 	DeferUntil   *time.Time   `json:"defer_until,omitempty"`
+	IsBlocked    optionalBool `json:"is_blocked,omitempty"`
 }
 
 type bdIssueDep struct {
@@ -671,6 +695,7 @@ func (b *bdIssue) toBead() Bead {
 		Ephemeral:    b.Ephemeral,
 		NoHistory:    b.NoHistory,
 		DeferUntil:   cloneTimePtr(b.DeferUntil),
+		IsBlocked:    b.IsBlocked.ptr(),
 	}
 }
 
@@ -737,6 +762,52 @@ func mapBdStatus(s string) string {
 	default:
 		return "open"
 	}
+}
+
+type optionalBool struct {
+	set   bool
+	value bool
+}
+
+func (b *optionalBool) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
+		*b = optionalBool{}
+		return nil
+	}
+	var boolValue bool
+	if err := json.Unmarshal(data, &boolValue); err == nil {
+		b.set = true
+		b.value = boolValue
+		return nil
+	}
+	var intValue int
+	if err := json.Unmarshal(data, &intValue); err == nil {
+		b.set = true
+		b.value = intValue != 0
+		return nil
+	}
+	var stringValue string
+	if err := json.Unmarshal(data, &stringValue); err == nil {
+		switch strings.ToLower(strings.TrimSpace(stringValue)) {
+		case "1", "t", "true", "y", "yes":
+			b.set = true
+			b.value = true
+			return nil
+		case "0", "f", "false", "n", "no":
+			b.set = true
+			b.value = false
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid bool value %q", string(data))
+}
+
+func (b optionalBool) ptr() *bool {
+	if !b.set {
+		return nil
+	}
+	return cloneBoolPtr(&b.value)
 }
 
 // Create persists a new bead via bd create.

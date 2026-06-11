@@ -696,6 +696,26 @@ func appendBdCLIRemoteSyncOptOutEnvKeys(keys []string) []string {
 	return keys
 }
 
+// bdAutoBackupOptOutEnvKeys disables bd's PersistentPostRun auto-backup —
+// the hardcoded "backup_export" Dolt remote bd syncs on (almost) every
+// invocation. A stuck-looping backup_export sync was the root cause of the
+// 2026-06-08 town-wide Dolt wedge (ga-0eq): it saturated the commit path
+// while oscillating not-found/already-exists. gc never relies on this path
+// (managed backups run through mol-dog-backup), so it is pure downside here.
+// BD_BACKUP_ENABLED is the key bd's BD-prefixed Viper env binding consumes
+// today; keep BEADS_BACKUP_ENABLED as a compatibility alias only.
+var bdAutoBackupOptOutEnvKeys = [...]string{
+	"BD_BACKUP_ENABLED",
+	"BEADS_BACKUP_ENABLED",
+}
+
+func appendBdAutoBackupOptOutEnvKeys(keys []string) []string {
+	for _, key := range bdAutoBackupOptOutEnvKeys {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
 var (
 	beadsExecCommandRunnerWithEnv             = beads.ExecCommandRunnerWithEnv
 	processEnvSnapshotExcludingNativeDoltOpen = beads.ProcessEnvSnapshotExcludingNativeDoltOpen
@@ -706,6 +726,7 @@ var recoverManagedBDCommand = func(cityPath string) error {
 	overrides := cityRuntimeEnvMapForCity(cityPath)
 	setProjectedDoltEnvEmpty(overrides)
 	applyBdCLIRemoteSyncOptOut(overrides)
+	applyBdAutoBackupOptOut(overrides)
 	environ := mergeRuntimeEnv(processEnvSnapshotExcludingNativeDoltOpen(), overrides)
 	environ = append(environ, providerLifecycleDoltPathEnv(cityPath)...)
 	if gcBin := resolveProviderLifecycleGCBinary(); gcBin != "" {
@@ -1361,10 +1382,13 @@ func bdRuntimeEnvWithError(cityPath string) (map[string]string, error) {
 	// large datasets.
 	env["BD_EXPORT_AUTO"] = "false"
 	applyBdCLIRemoteSyncOptOut(env)
-	// Opt-in: route bd through the pooling db-proxy (no-op unless [beads] proxied
-	// and bd supports it). Covers agent AND controller bd calls (rig env builds
-	// on this base).
-	applyProxiedPoolEnv(env, cityPath)
+	// Suppress bd's PersistentPostRun auto-backup (the "backup_export" Dolt
+	// remote). Like BD_EXPORT_AUTO above, the env var is the bulletproof
+	// per-invocation guard: it covers fresh rig scopes whose config has not
+	// been canonicalized and overrides any drifted backup.enabled:true. A
+	// stuck-looping backup_export sync wedged the whole town on 2026-06-08
+	// (ga-0eq); managed backups run through mol-dog-backup, not this path.
+	applyBdAutoBackupOptOut(env)
 	if !cityUsesBdStoreContract(cityPath) {
 		return env, nil
 	}
@@ -1421,6 +1445,7 @@ func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 	if cityUsesBdStoreContract(cityPath) {
 		source := map[string]string{"BEADS_DOLT_AUTO_START": "0"}
 		applyBdCLIRemoteSyncOptOut(source)
+		applyBdAutoBackupOptOut(source)
 		if usedPostgres, err := applyCityPostgresBackendEnv(source, cityPath); err != nil {
 			clearProjectedDoltEnv(source)
 			clearProjectedPostgresEnv(source)
@@ -1440,9 +1465,6 @@ func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 			}
 		}
 	}
-	// Opt-in: carry the proxied/pool env to the gc-beads-bd provider script and
-	// any bd it forks (no-op unless [beads] proxied and bd supports it).
-	applyProxiedPoolEnv(overrides, cityPath)
 	return mergeRuntimeEnv(processEnvSnapshotExcludingNativeDoltOpen(), overrides), projectionErr
 }
 
@@ -1451,6 +1473,19 @@ func applyBdCLIRemoteSyncOptOut(env map[string]string) {
 		return
 	}
 	for _, key := range bdCLIRemoteSyncOptOutEnvKeys {
+		env[key] = "false"
+	}
+}
+
+// applyBdAutoBackupOptOut forces bd's PersistentPostRun auto-backup off for
+// gc-managed bd invocations. It overrides any ambient or per-scope config
+// value so a fresh or drifted rig store cannot re-enable the destructive
+// backup_export sync (ga-0eq). See bdAutoBackupOptOutEnvKeys.
+func applyBdAutoBackupOptOut(env map[string]string) {
+	if env == nil {
+		return
+	}
+	for _, key := range bdAutoBackupOptOutEnvKeys {
 		env[key] = "false"
 	}
 }
@@ -1554,6 +1589,7 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 		"GC_RIG_ROOT",
 	}
 	keys = appendBdCLIRemoteSyncOptOutEnvKeys(keys)
+	keys = appendBdAutoBackupOptOutEnvKeys(keys)
 	if len(overrides) > 0 {
 		for key := range overrides {
 			if !containsString(keys, key) {

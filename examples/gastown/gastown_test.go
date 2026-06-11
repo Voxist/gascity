@@ -275,8 +275,10 @@ func TestCityTomlParses(t *testing.T) {
 	if cfg.Workspace.Name != "gastown" {
 		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "gastown")
 	}
-	if len(cfg.Workspace.LegacyIncludes()) != 0 {
-		t.Errorf("Workspace.Includes = %v, want empty (migrated to pack.toml)", cfg.Workspace.LegacyIncludes())
+	wantIncludes := []string{".gc/system/packs/core", ".gc/system/packs/bd"}
+	gotIncludes := cfg.Workspace.LegacyIncludes()
+	if len(gotIncludes) != len(wantIncludes) || gotIncludes[0] != wantIncludes[0] || gotIncludes[1] != wantIncludes[1] {
+		t.Errorf("Workspace.Includes = %v, want %v (explicit builtin pack includes)", gotIncludes, wantIncludes)
 	}
 	if len(cfg.Imports) != 0 {
 		t.Errorf("cfg.Imports = %v, want empty (imports migrated to pack.toml)", cfg.Imports)
@@ -1784,7 +1786,7 @@ func TestGastownWarrantCreateCommandsUseCreateMetadata(t *testing.T) {
 		"packs/gastown/agents/witness/prompt.template.md",
 		"packs/gastown/formulas/mol-deacon-patrol.toml",
 		"packs/gastown/formulas/mol-witness-patrol.toml",
-		"packs/maintenance/formulas/mol-shutdown-dance.toml",
+		"packs/gastown/formulas/mol-shutdown-dance.toml",
 	}
 	for _, rel := range files {
 		data, err := os.ReadFile(filepath.Join(dir, rel))
@@ -1809,19 +1811,48 @@ func TestGastownWarrantCreateCommandsUseCreateMetadata(t *testing.T) {
 	}
 }
 
+func TestShutdownDanceUsesClaimedWarrantModel(t *testing.T) {
+	// Release 0.1.2 of the gastown pack moved mol-shutdown-dance off the
+	// vapor-wisp shape: dogs read warrant metadata from the claimed bead
+	// via $GC_BEAD_ID instead of poured template vars.
+	path := filepath.Join(exampleDir(), "packs/gastown/formulas/mol-shutdown-dance.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading mol-shutdown-dance.toml: %v", err)
+	}
+	body := string(data)
+	var decoded struct {
+		Formula string                       `toml:"formula"`
+		Phase   string                       `toml:"phase"`
+		Vars    map[string]map[string]string `toml:"vars"`
+	}
+	if _, err := toml.Decode(body, &decoded); err != nil {
+		t.Fatalf("decoding mol-shutdown-dance.toml: %v", err)
+	}
+	if decoded.Formula != "mol-shutdown-dance" {
+		t.Errorf("formula = %q, want mol-shutdown-dance", decoded.Formula)
+	}
+	if decoded.Phase == "vapor" {
+		t.Error("mol-shutdown-dance must not be a vapor formula (claimed-warrant model)")
+	}
+	if _, ok := decoded.Vars["warrant_id"]; ok {
+		t.Error("mol-shutdown-dance must not declare a warrant_id var; the claimed bead is the warrant")
+	}
+	if !strings.Contains(body, "$GC_BEAD_ID") {
+		t.Error("mol-shutdown-dance must read warrant metadata from the claimed bead via $GC_BEAD_ID")
+	}
+	if strings.Contains(body, "formula_compiler") {
+		t.Error("mol-shutdown-dance must not require formula_compiler")
+	}
+}
+
 func TestDogAndDigestVaporFormulasHaveNoCompilerRequirement(t *testing.T) {
 	dir := exampleDir()
 	checks := []struct {
 		rel     string
 		formula string
 	}{
-		{"../dolt/formulas/mol-dog-backup.toml", "mol-dog-backup"},
-		{"../dolt/formulas/mol-dog-doctor.toml", "mol-dog-doctor"},
-		{"../dolt/formulas/mol-dog-phantom-db.toml", "mol-dog-phantom-db"},
-		{"../dolt/formulas/mol-dog-stale-db.toml", "mol-dog-stale-db"},
-		{"packs/maintenance/formulas/mol-dog-jsonl.toml", "mol-dog-jsonl"},
-		{"packs/maintenance/formulas/mol-dog-reaper.toml", "mol-dog-reaper"},
-		{"packs/maintenance/formulas/mol-shutdown-dance.toml", "mol-shutdown-dance"},
+		{"../bd/dolt/formulas/mol-dog-stale-db.toml", "mol-dog-stale-db"},
 		{"packs/gastown/formulas/mol-digest-generate.toml", "mol-digest-generate"},
 	}
 	for _, check := range checks {
@@ -1878,8 +1909,6 @@ func TestDogAndDigestVaporFormulasHaveNoCompilerRequirement(t *testing.T) {
 func TestDogStartupPromptUsesSplitClaimFirstQueries(t *testing.T) {
 	dir := exampleDir()
 	checks := []string{
-		"packs/maintenance/agents/dog/prompt.template.md",
-		"packs/maintenance/template-fragments/propulsion.template.md",
 		"packs/gastown/template-fragments/propulsion.template.md",
 	}
 	for _, rel := range checks {
@@ -1918,38 +1947,37 @@ func TestDogStartupPromptUsesSplitClaimFirstQueries(t *testing.T) {
 		}
 	}
 
-	dogPrompt, err := os.ReadFile(filepath.Join(dir, "packs/maintenance/agents/dog/prompt.template.md"))
+	// The dog prompt stays thin: the claim-first startup protocol renders
+	// through the propulsion-dog fragment asserted above.
+	dogPrompt, err := os.ReadFile(filepath.Join(dir, "packs/gastown/agents/dog/prompt.template.md"))
 	if err != nil {
 		t.Fatalf("reading dog prompt: %v", err)
 	}
 	assertContainsInOrder(t, string(dogPrompt),
-		"## Startup Protocol",
-		"CLAIM-FIRST INVARIANT",
-		"{{ .AssignedInProgressQuery }}",
-		"{{ .AssignedReadyQuery }}",
-		"{{ .RoutedPoolQuery }}",
+		`{{ template "propulsion-dog" . }}`,
+		"{{ .WorkQuery }}",
 		"gc bd update <id> --claim",
 		"gc bd show <id> --json",
 	)
 
 	renderedDogPrompt := renderGastownPromptForPack(t,
-		"packs/maintenance/agents/dog/prompt.template.md",
-		"maintenance/dog",
+		"packs/gastown/agents/dog/prompt.template.md",
+		"gastown/dog",
 		"dog",
 		"demo",
-		"maintenance",
-		"maintenance.",
+		"gastown",
+		"gastown.",
 	)
+	// The claim-first startup behavior renders through the propulsion-dog
+	// fragment: split queries expand, claim precedes inspection, and the
+	// source-aware verification guidance survives rendering.
 	assertContainsInOrder(t, renderedDogPrompt,
-		"CLAIM-FIRST INVARIANT",
-		"# Step 1a: Check for assigned in-progress work",
 		`bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_ID"`,
 		`bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_NAME"`,
 		`bd list --include-ephemeral --status in_progress --assignee="$GC_ALIAS"`,
-		"# Step 1b: If none, check for assigned ready work",
 		"bd ready --include-ephemeral --assignee=<session>",
-		"# Step 1c: If none, find routed pool work",
 		"bd ready --metadata-field gc.routed_to=<canonical> --unassigned",
+		"gc bd update <id> --claim",
 		"For Step 1a/1b candidates",
 		"Assigned work may have no",
 		"For Step 1c candidates",
@@ -2023,42 +2051,42 @@ func TestNonDogStartupPromptsUseAssignedInProgressQuery(t *testing.T) {
 			forbid: []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
 		},
 		{
-			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
 			start:  `{{ define "propulsion-mayor" }}`,
 			end:    `{{ define "propulsion-crew" }}`,
 			want:   "{{ .AssignedInProgressQuery }}",
 			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
 		},
 		{
-			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
 			start:  `{{ define "propulsion-crew" }}`,
 			end:    `{{ define "propulsion-deacon" }}`,
 			want:   "{{ .AssignedInProgressQuery }}",
 			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
 		},
 		{
-			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
 			start:  `{{ define "propulsion-deacon" }}`,
 			end:    `{{ define "propulsion-witness" }}`,
 			want:   "{{ .AssignedInProgressQuery }}",
 			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
 		},
 		{
-			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
 			start:  `{{ define "propulsion-witness" }}`,
 			end:    `{{ define "propulsion-polecat" }}`,
 			want:   "{{ .AssignedInProgressQuery }}",
 			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
 		},
 		{
-			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
 			start:  `{{ define "propulsion-polecat" }}`,
 			end:    `{{ define "propulsion-refinery" }}`,
 			want:   "{{ .AssignedInProgressQuery }}",
 			forbid: []string{`gc bd list --assignee=$GC_AGENT --status=in_progress`},
 		},
 		{
-			rel:    "packs/maintenance/template-fragments/propulsion.template.md",
+			rel:    "packs/gastown/template-fragments/propulsion.template.md",
 			start:  `{{ define "propulsion-refinery" }}`,
 			end:    `{{ define "propulsion-dog" }}`,
 			want:   "{{ .AssignedInProgressQuery }}",
@@ -2088,18 +2116,11 @@ func TestNonDogStartupPromptsUseAssignedInProgressQuery(t *testing.T) {
 			rig:     "gastown",
 			binding: "gastown.",
 		},
-		{
-			rel:     "packs/gastown/agents/witness/prompt.template.md",
-			start:   "## Startup Protocol",
-			end:     "**Hook ->",
-			want:    "{{ .AssignedInProgressQuery }}",
-			forbid:  []string{`gc bd list --assignee="$GC_ALIAS" --status=in_progress`},
-			render:  true,
-			agent:   "gastown/witness",
-			tmpl:    "witness",
-			rig:     "gastown",
-			binding: "gastown.",
-		},
+		// The witness Startup Protocol deliberately does NOT use the shared
+		// AssignedInProgressQuery: its patrol wisps live on the town ledger
+		// and must be found with `gc bd`, not the bare-bd shared query that
+		// resolves to the rig ledger. Its startup/no-idle wisp reconciliation
+		// is covered by TestWitnessStartupAndNoIdleReconcileWisps.
 		{
 			rel:     "packs/gastown/agents/refinery/prompt.template.md",
 			start:   "# Step 1: Check for an in-progress patrol wisp",
@@ -2139,6 +2160,65 @@ func TestNonDogStartupPromptsUseAssignedInProgressQuery(t *testing.T) {
 				t.Fatalf("%s rendered prompt missing compatibility-aware in-progress query: %q", check.rel, rendered)
 			}
 		})
+	}
+}
+
+// TestWitnessStartupAndNoIdleReconcileWisps is the regression guard for the
+// town-wide witness wisp leak (ga-7c6). The witness's patrol wisps are
+// ephemeral molecules on the town ledger, poured/assigned with `gc bd`. Its
+// startup work-check and no-idle guard must therefore (1) look them up with
+// `gc bd`, not the bare-bd shared query that resolves to the rig ledger and
+// never sees them; (2) filter `--type=molecule`, never the invalid
+// `--type=wisp` (not a valid bd issue type — the query errors and matches
+// nothing); and (3) reconcile duplicates to exactly one by burning the
+// surplus, so restarts never accumulate wisps.
+func TestWitnessStartupAndNoIdleReconcileWisps(t *testing.T) {
+	rendered := renderGastownPromptForPack(t,
+		"packs/gastown/agents/witness/prompt.template.md",
+		"gastown/witness", "witness", "demo", "gastown", "gastown.")
+
+	// Bug 2: no `gc bd` command may filter --type=wisp — it is not a valid bd
+	// issue type, so the query errors and matches nothing (prose warning
+	// against it is fine; an actual command is the bug).
+	for _, line := range strings.Split(rendered, "\n") {
+		if strings.Contains(line, "gc bd") && strings.Contains(line, "--type=wisp") {
+			t.Errorf("witness prompt runs a gc bd command with invalid --type=wisp (matches nothing -> duplicate wisps): %q", line)
+		}
+	}
+
+	// Startup work-check: between "## Startup Protocol" and "**Hook ->".
+	startup := sectionBetween(t, rendered, "## Startup Protocol", "**Hook ->")
+	// Bug 1: must not run the bare-bd shared query (rig ledger) in startup.
+	for _, bare := range []string{
+		`bd list --include-ephemeral --status in_progress --assignee="$GC_SESSION_ID"`,
+		"{{ .AssignedInProgressQuery }}",
+	} {
+		if strings.Contains(startup, bare) {
+			t.Errorf("witness startup must not use the bare-bd shared query %q; patrol wisps live on the town ledger via gc bd", bare)
+		}
+	}
+	// Must look up its own wisps on the town ledger with gc bd + --type=molecule,
+	// then reconcile to one by burning surplus.
+	for _, want := range []string{
+		`gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule`,
+		`gc bd list --assignee="$GC_AGENT" --status=open --type=molecule`,
+		"gc bd mol burn",
+	} {
+		if !strings.Contains(startup, want) {
+			t.Errorf("witness startup missing %q", want)
+		}
+	}
+
+	// No-idle guard: between its heading and "## Context Exhaustion".
+	noIdle := sectionBetween(t, rendered, "## CRITICAL: No Idle State Between Cycles", "## Context Exhaustion")
+	for _, want := range []string{
+		`gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule`,
+		`gc bd list --assignee="$GC_AGENT" --status=open --type=molecule`,
+		"gc bd mol burn",
+	} {
+		if !strings.Contains(noIdle, want) {
+			t.Errorf("witness no-idle guard missing %q", want)
+		}
 	}
 }
 
@@ -2635,46 +2715,69 @@ func TestGastownPatrolPromptFallbackPreservesLifecycle(t *testing.T) {
 		agentName string
 		template  string
 		formula   string
-		pourLine  string
+		wantOrder []string
 	}{
 		{
 			rel:       "packs/gastown/agents/deacon/prompt.template.md",
 			agentName: "gascity/gastown.deacon",
 			template:  "deacon",
 			formula:   "mol-deacon-patrol",
-			pourLine:  `NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix=gastown. --json | jq -r '.new_epic_id // empty')`,
+			wantOrder: []string{
+				`run ` + "`gc hook`" + ` immediately`,
+				`CURRENT_WISP=${GC_BEAD_ID:-}`,
+				`if [ -z "$CURRENT_WISP" ]; then`,
+				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+				`ASSIGNED_WISP=$(gc bd list --assignee="$GC_AGENT" --status=open --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
+				`if [ -n "$CURRENT_WISP" ] && [ -z "$ASSIGNED_WISP" ]; then`,
+				`NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix=gastown. --json | jq -r '.new_epic_id // empty')`,
+				`if [ -z "$NEXT" ]; then`,
+				`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
+				`gc bd mol burn "$CURRENT_WISP" --force`,
+				`elif [ -n "$CURRENT_WISP" ]; then`,
+				`gc bd mol burn "$CURRENT_WISP" --force`,
+				`elif [ -z "$ASSIGNED_WISP" ]; then`,
+				`NEXT=$(gc bd mol wisp mol-deacon-patrol --root-only --var binding_prefix=gastown. --json | jq -r '.new_epic_id // empty')`,
+				`if [ -z "$NEXT" ]; then`,
+				`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
+				`gc hook`,
+			},
 		},
 		{
 			rel:       "packs/gastown/agents/witness/prompt.template.md",
 			agentName: "gascity/gastown.witness",
 			template:  "witness",
 			formula:   "mol-witness-patrol",
-			pourLine:  `NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='gastown.' --json | jq -r '.new_epic_id // empty')`,
+			// The witness no-idle guard finds its own patrol wisps with
+			// --type=molecule (never the invalid --type=wisp) and reconciles
+			// surplus open wisps to exactly one by burning extras (ga-7c6).
+			wantOrder: []string{
+				`run ` + "`gc hook`" + ` immediately`,
+				`CURRENT_WISP=${GC_BEAD_ID:-}`,
+				`if [ -z "$CURRENT_WISP" ]; then`,
+				`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=molecule --limit=1 --json | jq -r '.[0].id // empty')`,
+				`OPEN_WISPS=$(gc bd list --assignee="$GC_AGENT" --status=open --type=molecule --limit=0 --json | jq -r '.[].id')`,
+				`ASSIGNED_WISP=$(printf '%s\n' $OPEN_WISPS | sed -n '1p')`,
+				`gc bd mol burn "$extra" --force`,
+				`if [ -n "$CURRENT_WISP" ] && [ -z "$ASSIGNED_WISP" ]; then`,
+				`NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='gastown.' --json | jq -r '.new_epic_id // empty')`,
+				`if [ -z "$NEXT" ]; then`,
+				`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
+				`gc bd mol burn "$CURRENT_WISP" --force`,
+				`elif [ -n "$CURRENT_WISP" ]; then`,
+				`gc bd mol burn "$CURRENT_WISP" --force`,
+				`elif [ -z "$ASSIGNED_WISP" ]; then`,
+				`NEXT=$(gc bd mol wisp mol-witness-patrol --root-only --var binding_prefix='gastown.' --json | jq -r '.new_epic_id // empty')`,
+				`if [ -z "$NEXT" ]; then`,
+				`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
+				`gc hook`,
+			},
 		},
 	}
 
 	for _, check := range checks {
 		body := renderGastownPromptForPack(t, check.rel, check.agentName, check.template, "gascity", "gastown", "gastown.")
 		section := sectionBetween(t, body, "## CRITICAL: No Idle State Between Cycles", "## Context Exhaustion")
-		assertContainsInOrder(t, section,
-			`run `+"`gc hook`"+` immediately`,
-			`CURRENT_WISP=${GC_BEAD_ID:-}`,
-			`if [ -z "$CURRENT_WISP" ]; then`,
-			`CURRENT_WISP=$(gc bd list --assignee="$GC_AGENT" --status=in_progress --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
-			`ASSIGNED_WISP=$(gc bd list --assignee="$GC_AGENT" --status=open --type=wisp --limit=1 --json | jq -r '.[0].id // empty')`,
-			`if [ -n "$CURRENT_WISP" ] && [ -z "$ASSIGNED_WISP" ]; then`,
-			check.pourLine,
-			`if [ -z "$NEXT" ]; then`,
-			`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
-			`gc bd mol burn "$CURRENT_WISP" --force`,
-			`elif [ -n "$CURRENT_WISP" ]; then`,
-			`gc bd mol burn "$CURRENT_WISP" --force`,
-			`elif [ -z "$ASSIGNED_WISP" ]; then`,
-			check.pourLine,
-			`if [ -z "$NEXT" ]; then`,
-			`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
-			`gc hook`,
-		)
+		assertContainsInOrder(t, section, check.wantOrder...)
 		for _, bad := range []string{`--assignee="$GC_ALIAS"`, "sleep 5"} {
 			if strings.Contains(section, bad) {
 				t.Fatalf("%s no-idle fallback still contains %q", check.rel, bad)
@@ -3352,8 +3455,8 @@ func TestAllPromptTemplatesExist(t *testing.T) {
 		}
 	}
 
-	if count != 6 {
-		t.Errorf("found %d prompt templates, want 6", count)
+	if count != 7 {
+		t.Errorf("found %d prompt templates, want 7", count)
 	}
 }
 
@@ -3382,7 +3485,6 @@ func TestFormulasDir(t *testing.T) {
 		t.Fatal("FormulaLayers.City is empty, want pack formulas layers")
 	}
 	wantSuffixes := []string{
-		filepath.Join("packs", "maintenance", "formulas"),
 		filepath.Join("packs", "gastown", "formulas"),
 	}
 	for _, suffix := range wantSuffixes {
@@ -3397,6 +3499,11 @@ func TestFormulasDir(t *testing.T) {
 			t.Errorf("FormulaLayers.City = %v, want entry ending with %s", cfg.FormulaLayers.City, suffix)
 		}
 	}
+	for _, d := range cfg.FormulaLayers.City {
+		if strings.HasSuffix(d, filepath.Join("packs", "maintenance", "formulas")) {
+			t.Errorf("FormulaLayers.City = %v, want no retired maintenance formula layer", cfg.FormulaLayers.City)
+		}
+	}
 }
 
 func TestPackDirsPopulated(t *testing.T) {
@@ -3404,20 +3511,17 @@ func TestPackDirsPopulated(t *testing.T) {
 	if len(cfg.PackDirs) == 0 {
 		t.Fatal("PackDirs is empty after expansion")
 	}
-	// Should have pack dirs from maintenance and gastown packs.
-	// Note: bd/dolt packs are auto-included at runtime by builtinPackIncludes,
-	// not via pack.toml includes, so they won't appear in static expansion.
-	var hasMaintenance, hasGastown bool
+	// Should have the gastown pack dir. Note: builtin packs (core, bd, dolt)
+	// compose via the explicit city.toml includes that gc init writes, so
+	// they won't appear in this example's static expansion.
+	var hasGastown bool
 	for _, d := range cfg.PackDirs {
 		if strings.HasSuffix(d, filepath.Join("packs", "maintenance")) {
-			hasMaintenance = true
+			t.Errorf("PackDirs = %v, want no retired maintenance pack dir", cfg.PackDirs)
 		}
 		if strings.HasSuffix(d, filepath.Join("packs", "gastown")) {
 			hasGastown = true
 		}
-	}
-	if !hasMaintenance {
-		t.Errorf("PackDirs missing maintenance: %v", cfg.PackDirs)
 	}
 	if !hasGastown {
 		t.Errorf("PackDirs missing gastown: %v", cfg.PackDirs)
@@ -3514,22 +3618,19 @@ func TestCombinedPackParses(t *testing.T) {
 		t.Errorf("[pack] schema = %d, want 2", tc.Pack.Schema)
 	}
 	if len(tc.Pack.Includes) != 0 {
-		t.Fatalf("pack includes = %v, want empty (migrated to [imports.maintenance])", tc.Pack.Includes)
+		t.Fatalf("pack includes = %v, want empty", tc.Pack.Includes)
 	}
-	maintImp, ok := tc.Imports["maintenance"]
-	if !ok {
-		t.Fatalf("pack imports = %v, want entry for \"maintenance\"", tc.Imports)
-	}
-	if maintImp.Source != "../maintenance" {
-		t.Errorf("pack imports[\"maintenance\"].Source = %q, want %q", maintImp.Source, "../maintenance")
+	if len(tc.Imports) != 0 {
+		t.Fatalf("pack imports = %v, want none (gastown owns its agents; core housekeeping is builtin)", tc.Imports)
 	}
 
-	// Expect 6 locally-discovered agents. Dog comes from the maintenance import
-	// and is themed via a pack patch, not a local agent file.
+	// Expect 7 locally-discovered agents. The dog utility pool is owned by
+	// this pack — the maintenance fallback dog was removed.
 	agents := discoverPackAgents(t, filepath.Join("packs", "gastown"))
 	want := map[string]bool{
 		"mayor": false, "deacon": false, "boot": false,
 		"witness": false, "refinery": false, "polecat": false,
+		"dog": false,
 	}
 	for _, a := range agents {
 		if _, ok := want[a.Name]; ok {
@@ -3543,8 +3644,8 @@ func TestCombinedPackParses(t *testing.T) {
 			t.Errorf("missing pack agent %q", name)
 		}
 	}
-	if len(agents) != 6 {
-		t.Errorf("pack has %d locally-discovered agents, want 6", len(agents))
+	if len(agents) != 7 {
+		t.Errorf("pack has %d locally-discovered agents, want 7", len(agents))
 	}
 
 	// Verify city-scoped agents have scope = "city".
@@ -3562,6 +3663,7 @@ func TestPackUsesIsolatedWorkDirs(t *testing.T) {
 		"mayor":    ".gc/agents/mayor",
 		"deacon":   ".gc/agents/deacon",
 		"boot":     ".gc/agents/boot",
+		"dog":      ".gc/agents/dogs/{{.AgentBase}}",
 		"witness":  ".gc/agents/{{.Rig}}/witness",
 		"refinery": ".gc/worktrees/{{.Rig}}/refinery",
 		"polecat":  ".gc/worktrees/{{.Rig}}/polecats/{{.AgentBase}}",
@@ -3609,7 +3711,7 @@ func TestCityAgentsFilter(t *testing.T) {
 	}
 }
 
-func TestExpandedCityUsesGastownDogOverride(t *testing.T) {
+func TestExpandedCityUsesGastownDog(t *testing.T) {
 	cfg := loadExpanded(t)
 
 	var dog *config.Agent
@@ -3625,13 +3727,12 @@ func TestExpandedCityUsesGastownDogOverride(t *testing.T) {
 	if dog.WorkDir != ".gc/agents/dogs/{{.AgentBase}}" {
 		t.Errorf("dog work_dir = %q, want gastown themed work dir", dog.WorkDir)
 	}
-	wantPromptSuffix := filepath.Join("packs", "maintenance", "agents", "dog", "prompt.template.md")
+	wantPromptSuffix := filepath.Join("packs", "gastown", "agents", "dog", "prompt.template.md")
 	if !strings.HasSuffix(dog.PromptTemplate, wantPromptSuffix) {
 		t.Errorf("dog prompt_template = %q, want suffix %q", dog.PromptTemplate, wantPromptSuffix)
 	}
-	wantOverlaySuffix := filepath.Join("packs", "maintenance", "agents", "dog", "overlay")
-	if !strings.HasSuffix(dog.OverlayDir, wantOverlaySuffix) {
-		t.Errorf("dog overlay_dir = %q, want suffix %q", dog.OverlayDir, wantOverlaySuffix)
+	if dog.OverlayDir != "" {
+		t.Errorf("dog overlay_dir = %q, want empty (pack-local dog ships no overlay)", dog.OverlayDir)
 	}
 	if len(dog.SessionLive) != 2 {
 		t.Fatalf("dog session_live has %d entries, want 2 gastown theming commands", len(dog.SessionLive))
@@ -3644,78 +3745,9 @@ func TestExpandedCityUsesGastownDogOverride(t *testing.T) {
 	}
 }
 
-func TestMaintenancePackParses(t *testing.T) {
-	dir := exampleDir()
-	topoPath := filepath.Join(dir, "packs", "maintenance", "pack.toml")
-
-	data, err := os.ReadFile(topoPath)
-	if err != nil {
-		t.Fatalf("reading pack.toml: %v", err)
-	}
-
-	var tc packFileConfig
-	if _, err := toml.Decode(string(data), &tc); err != nil {
-		t.Fatalf("parsing pack.toml: %v", err)
-	}
-
-	if tc.Pack.Name != "maintenance" {
-		t.Errorf("[pack] name = %q, want %q", tc.Pack.Name, "maintenance")
-	}
-	if tc.Pack.Schema != 2 {
-		t.Errorf("[pack] schema = %d, want 2", tc.Pack.Schema)
-	}
-
-	agents := discoverPackAgents(t, filepath.Join("packs", "maintenance"))
-	// Maintenance has 1 agent: dog.
-	if len(agents) != 1 {
-		t.Errorf("pack has %d agents, want 1", len(agents))
-	}
-	if len(agents) > 0 && agents[0].Name != "dog" {
-		t.Errorf("agent name = %q, want %q", agents[0].Name, "dog")
-	}
-
-	// Verify dog agent has scope = "city".
-	if len(agents) > 0 && agents[0].Scope != "city" {
-		t.Errorf("dog scope = %q, want %q", agents[0].Scope, "city")
-	}
-
-	// Verify prompt file exists.
-	for _, a := range agents {
-		if a.PromptTemplate == "" {
-			continue
-		}
-		if _, err := os.Stat(a.PromptTemplate); err != nil {
-			t.Errorf("agent %q: prompt_template %q: %v", a.Name, a.PromptTemplate, err)
-		}
-	}
-}
-
-func TestMaintenanceFormulasExist(t *testing.T) {
-	dir := exampleDir()
-	formulaDir := filepath.Join(dir, "packs", "maintenance", "formulas")
-
-	entries, err := os.ReadDir(formulaDir)
-	if err != nil {
-		t.Fatalf("reading formulas dir: %v", err)
-	}
-
-	var count int
-	for _, e := range entries {
-		if e.IsDir() || !formula.IsTOMLFilename(e.Name()) {
-			continue
-		}
-		count++
-	}
-
-	// 3 formulas: mol-shutdown-dance + mol-dog-jsonl + mol-dog-reaper
-	if count != 3 {
-		t.Errorf("found %d formula files, want 3", count)
-	}
-}
-
 func TestDoltHealthFormulasExist(t *testing.T) {
 	dir := exampleDir()
-	formulaDir := filepath.Join(dir, "..", "dolt", "formulas")
+	formulaDir := filepath.Join(dir, "..", "bd", "dolt", "formulas")
 
 	entries, err := os.ReadDir(formulaDir)
 	if err != nil {
@@ -3774,7 +3806,7 @@ func TestDeaconPatrolDetectsQueueStarvation(t *testing.T) {
 	)
 }
 
-func TestDeaconPatrolNextIterationBurnsCurrentBeforeBackoff(t *testing.T) {
+func TestDeaconPatrolNextIterationBurnsCurrentBeforeIdleExit(t *testing.T) {
 	dir := exampleDir()
 	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-deacon-patrol.toml")
 	data, err := os.ReadFile(path)
@@ -3793,11 +3825,16 @@ func TestDeaconPatrolNextIterationBurnsCurrentBeforeBackoff(t *testing.T) {
 		`if ! gc bd update "$NEXT" --assignee="$GC_AGENT"; then`,
 		`if [ -n "$CURRENT_WISP" ]; then`,
 		`gc bd mol burn "$CURRENT_WISP" --force`,
-		`sleep {{event_timeout}}`,
-		`gc hook`,
+		`IDLE: no work, exiting turn.`,
 	)
 	if strings.Contains(section, "<this-wisp-id>") {
 		t.Fatal("next-iteration still uses placeholder burn target")
+	}
+	if strings.Contains(section, "sleep {{event_timeout}}") {
+		t.Fatal("next-iteration still contains sleep backoff — should use clean idle exit")
+	}
+	if strings.Contains(section, "gc hook") {
+		t.Fatal("next-iteration still calls gc hook — should use clean idle exit")
 	}
 }
 

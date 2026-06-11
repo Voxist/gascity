@@ -4860,6 +4860,30 @@ func TestValidateAgentsSameNameDifferentDir(t *testing.T) {
 	}
 }
 
+func TestValidateAgentsSameNameDifferentBinding(t *testing.T) {
+	agents := []Agent{
+		{Name: "dog", SourceDir: "packs/maintenance"},
+		{Name: "dog", BindingName: "dolt", SourceDir: "packs/bd/dolt"},
+	}
+	if err := ValidateAgents(agents); err != nil {
+		t.Errorf("ValidateAgents: unexpected error for qualified same-name agents: %v", err)
+	}
+}
+
+func TestValidateAgentsSameNameSameBinding(t *testing.T) {
+	agents := []Agent{
+		{Name: "dog", BindingName: "dolt", SourceDir: "packs/bd/dolt"},
+		{Name: "dog", BindingName: "dolt", SourceDir: "packs/other-dolt"},
+	}
+	err := ValidateAgents(agents)
+	if err == nil {
+		t.Fatal("expected error for duplicate binding-qualified name")
+	}
+	if !strings.Contains(err.Error(), "duplicate") {
+		t.Errorf("error = %q, want 'duplicate'", err)
+	}
+}
+
 func TestValidateAgentsSameNameSameDir(t *testing.T) {
 	agents := []Agent{
 		{Name: "polecat", Dir: "frontend"},
@@ -5078,6 +5102,92 @@ func TestMaxSessionAgeOmittedWhenEmpty(t *testing.T) {
 	}
 	if strings.Contains(string(data), "max_session_age") {
 		t.Errorf("TOML output should omit max_session_age when empty, got:\n%s", data)
+	}
+}
+
+// --- ChatSessionsConfig tests ---
+
+func TestChatSessionsIdleTimeoutDurationEmpty(t *testing.T) {
+	c := ChatSessionsConfig{}
+	if got := c.IdleTimeoutDuration(); got != 0 {
+		t.Errorf("IdleTimeoutDuration() = %v, want 0", got)
+	}
+}
+
+func TestChatSessionsIdleTimeoutDurationValid(t *testing.T) {
+	c := ChatSessionsConfig{IdleTimeout: "30m"}
+	if got := c.IdleTimeoutDuration(); got != 30*time.Minute {
+		t.Errorf("IdleTimeoutDuration() = %v, want 30m", got)
+	}
+}
+
+func TestChatSessionsIdleTimeoutDurationInvalid(t *testing.T) {
+	c := ChatSessionsConfig{IdleTimeout: "not-a-duration"}
+	if got := c.IdleTimeoutDuration(); got != 0 {
+		t.Errorf("IdleTimeoutDuration() = %v, want 0 for invalid", got)
+	}
+}
+
+func TestGracePeriodDurationDefault(t *testing.T) {
+	c := ChatSessionsConfig{}
+	if got := c.GracePeriodDuration(); got != DefaultManualGracePeriod {
+		t.Errorf("GracePeriodDuration() = %v, want %v", got, DefaultManualGracePeriod)
+	}
+}
+
+func TestGracePeriodDurationExplicitZero(t *testing.T) {
+	for _, val := range []string{"0", "0s"} {
+		c := ChatSessionsConfig{GracePeriod: val}
+		if got := c.GracePeriodDuration(); got != 0 {
+			t.Errorf("GracePeriodDuration(%q) = %v, want 0", val, got)
+		}
+	}
+}
+
+func TestGracePeriodDurationValid(t *testing.T) {
+	c := ChatSessionsConfig{GracePeriod: "5m"}
+	if got := c.GracePeriodDuration(); got != 5*time.Minute {
+		t.Errorf("GracePeriodDuration() = %v, want 5m", got)
+	}
+}
+
+func TestGracePeriodDurationInvalid(t *testing.T) {
+	c := ChatSessionsConfig{GracePeriod: "bogus"}
+	if got := c.GracePeriodDuration(); got != DefaultManualGracePeriod {
+		t.Errorf("GracePeriodDuration() = %v, want %v for invalid", got, DefaultManualGracePeriod)
+	}
+}
+
+func TestGracePeriodRoundTrip(t *testing.T) {
+	c := City{
+		Workspace:    Workspace{Name: "test"},
+		Agents:       []Agent{{Name: "mayor"}},
+		ChatSessions: ChatSessionsConfig{GracePeriod: "15m"},
+	}
+	data, err := c.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	got, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got.ChatSessions.GracePeriod != "15m" {
+		t.Errorf("GracePeriod after round-trip = %q, want %q", got.ChatSessions.GracePeriod, "15m")
+	}
+}
+
+func TestGracePeriodOmittedWhenEmpty(t *testing.T) {
+	c := City{
+		Workspace: Workspace{Name: "test"},
+		Agents:    []Agent{{Name: "mayor"}},
+	}
+	data, err := c.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(data), "grace_period") {
+		t.Errorf("TOML output should omit grace_period when empty, got:\n%s", data)
 	}
 }
 
@@ -7740,6 +7850,7 @@ func TestDefaultInstallAgentHooksForProvider(t *testing.T) {
 		{"opencode", []string{"opencode"}},
 		{"kiro", []string{"kiro"}},
 		{"groq", []string{"groq"}},
+		{"kimi", []string{"kimi"}},
 		{"claude", nil},
 	}
 	for _, tc := range cases {
@@ -7747,5 +7858,30 @@ func TestDefaultInstallAgentHooksForProvider(t *testing.T) {
 		if !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("defaultInstallAgentHooksForProvider(%q) = %v, want %v", tc.provider, got, tc.want)
 		}
+	}
+}
+
+func TestCityWithProvidersInstallsKimiHooksByDefault(t *testing.T) {
+	tests := []struct {
+		name string
+		city City
+	}{
+		{
+			name: "wizard",
+			city: WizardCityWithProviders("test-city", "kimi", []string{"kimi"}),
+		},
+		{
+			name: "gastown",
+			city: GastownCityWithProviders("test-city", "kimi", []string{"kimi"}),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.city.Workspace.InstallAgentHooks
+			want := []string{"kimi"}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("Workspace.InstallAgentHooks = %v, want %v", got, want)
+			}
+		})
 	}
 }
