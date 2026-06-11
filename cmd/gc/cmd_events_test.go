@@ -1148,6 +1148,31 @@ func TestEventsRotateHelpIncludesFlagsAndExample(t *testing.T) {
 	}
 }
 
+// TestResolveEventsScope_ExplicitAPIYieldsSupervisorScope verifies that
+// resolveEventsScope short-circuits city discovery when --api is given.
+// It must succeed in an empty directory with no city.toml, and the returned
+// scope must be a supervisor scope (no cityName) with the URL trimmed.
+func TestResolveEventsScope_ExplicitAPIYieldsSupervisorScope(t *testing.T) {
+	clearGCEnv(t)
+	t.Chdir(t.TempDir())
+
+	const rawURL = "http://127.0.0.1:8765/"
+	scope, err := resolveEventsScope(rawURL)
+	if err != nil {
+		t.Fatalf("resolveEventsScope with explicit URL: %v", err)
+	}
+	if !scope.explicitAPI {
+		t.Errorf("scope.explicitAPI = false, want true")
+	}
+	if !scope.isSupervisor() {
+		t.Errorf("scope.isSupervisor() = false (cityName=%q), want true", scope.cityName)
+	}
+	const wantURL = "http://127.0.0.1:8765"
+	if scope.apiURL != wantURL {
+		t.Errorf("scope.apiURL = %q, want %q", scope.apiURL, wantURL)
+	}
+}
+
 type testEventRoutes struct {
 	cityEvents       func(http.ResponseWriter, *http.Request)
 	cityRotate       func(http.ResponseWriter, *http.Request)

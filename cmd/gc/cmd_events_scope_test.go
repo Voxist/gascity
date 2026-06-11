@@ -219,58 +219,9 @@ provider = "claude"
 	if !scope.explicitAPI {
 		t.Fatal("events scope explicitAPI = false, want true")
 	}
-	if scope.cityName != "alpha" {
-		t.Fatalf("events scope cityName = %q, want registered supervisor name %q", scope.cityName, "alpha")
-	}
-}
-
-func TestResolveEventsScopeExplicitAPIPreservesLocalCityNameForForeignServer(t *testing.T) {
-	configureIsolatedRuntimeEnv(t)
-
-	cityDir := filepath.Join(t.TempDir(), "alpha")
-	if err := os.MkdirAll(cityDir, 0o755); err != nil {
-		t.Fatalf("mkdir city dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(withBuiltinProviderAliasesTOMLForTest(`
-[workspace]
-name = "renamed-alpha"
-provider = "claude"
-`, "claude")), 0o644); err != nil {
-		t.Fatalf("write city.toml: %v", err)
-	}
-
-	reg := supervisor.NewRegistry(supervisor.RegistryPath())
-	if err := reg.Register(cityDir, "alpha"); err != nil {
-		t.Fatalf("register city: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(supervisor.ConfigPath()), 0o755); err != nil {
-		t.Fatalf("mkdir supervisor config dir: %v", err)
-	}
-	if err := os.WriteFile(supervisor.ConfigPath(), []byte("[supervisor]\nport = 8372\n"), 0o644); err != nil {
-		t.Fatalf("write supervisor config: %v", err)
-	}
-
-	t.Chdir(t.TempDir())
-
-	oldAlive := supervisorAliveHook
-	oldCityFlag := cityFlag
-	oldRigFlag := rigFlag
-	t.Cleanup(func() {
-		supervisorAliveHook = oldAlive
-		cityFlag = oldCityFlag
-		rigFlag = oldRigFlag
-	})
-
-	supervisorAliveHook = func() int { return 1234 }
-	cityFlag = cityDir
-	rigFlag = ""
-
-	scope, err := resolveEventsScope("http://127.0.0.1:9123")
-	if err != nil {
-		t.Fatalf("resolveEventsScope() error = %v, want nil", err)
-	}
-	if scope.cityName != "renamed-alpha" {
-		t.Fatalf("events scope cityName = %q, want local configured name %q for foreign explicit API", scope.cityName, "renamed-alpha")
+	// explicit API skips city resolution; cityName is empty regardless of registered city.
+	if scope.cityName != "" {
+		t.Fatalf("events scope cityName = %q, want empty (explicit API skips city resolution)", scope.cityName)
 	}
 }
 
@@ -322,7 +273,8 @@ provider = "claude"
 	if !scope.localSupervisorAPI {
 		t.Fatal("events scope localSupervisorAPI = false, want true")
 	}
-	if scope.cityName != "alpha" {
-		t.Fatalf("events scope cityName = %q, want registered supervisor name %q", scope.cityName, "alpha")
+	// explicit API skips city resolution; cityName is empty regardless of registered city.
+	if scope.cityName != "" {
+		t.Fatalf("events scope cityName = %q, want empty (explicit API skips city resolution)", scope.cityName)
 	}
 }
