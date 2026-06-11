@@ -1,12 +1,14 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 type cityDiscoveryOptions struct {
@@ -110,16 +112,19 @@ func isIgnoredLegacyRuntimeRoot(dir string, ignored []string) bool {
 func normalizeDiscoveryPaths(paths []string) []string {
 	seen := make(map[string]struct{}, len(paths))
 	out := make([]string, 0, len(paths))
-	for _, path := range paths {
-		path = normalizeDiscoveryPath(path)
-		if path == "" {
+	for _, raw := range paths {
+		normalized := normalizeDiscoveryPath(raw)
+		if normalized == "" {
 			continue
 		}
-		if _, ok := seen[path]; ok {
+		if _, ok := seen[normalized]; ok {
 			continue
 		}
-		seen[path] = struct{}{}
-		out = append(out, path)
+		if _, err := os.Stat(normalized); errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "gc: warning: ceiling directory %q does not exist; discovery may be unbounded\n", normalized)
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, normalized)
 	}
 	return out
 }
@@ -129,9 +134,5 @@ func normalizeDiscoveryPath(path string) string {
 	if path == "" {
 		return ""
 	}
-	abs, err := filepath.Abs(path)
-	if err == nil {
-		path = abs
-	}
-	return filepath.Clean(path)
+	return pathutil.NormalizePathForCompare(path)
 }
