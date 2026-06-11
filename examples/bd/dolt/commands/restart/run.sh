@@ -42,7 +42,7 @@ fi
 # or 0.0.0.0 (the explicit wildcard opt-out). Anything else names a remote
 # server whose process GC cannot manage.
 case "${GC_DOLT_HOST:-}" in
-  ''|127.0.0.1|0.0.0.0) ;;
+  ''|127.0.0.1|0.0.0.0|localhost|"::1"|"[::1]") ;;
   *)
     echo "gc dolt restart: not supported for remote dolt servers (set GC_DOLT_HOST=127.0.0.1, GC_DOLT_HOST=0.0.0.0, or unset to manage a local server)" >&2
     exit 1

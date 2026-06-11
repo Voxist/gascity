@@ -103,7 +103,7 @@ resolve_gc_bin() {
 # managed server.
 is_remote() {
     case "${GC_DOLT_HOST:-}" in
-        ''|127.0.0.1|0.0.0.0) return 1 ;;
+        ''|127.0.0.1|0.0.0.0|localhost|"::1"|"[::1]") return 1 ;;
     esac
     return 0
 }
@@ -1291,6 +1291,11 @@ graceful_stop_owned_pid() {
 # accumulate and the server enters unrecoverable read-only mode.
 write_config_yaml() {
     local archive_level auto_gc_enabled auto_gc_sysvar gc_bin raw_wait_timeout wait_timeout_line max_connections read_timeout_millis write_timeout_millis
+    # Surface the resolved managed-server bind. Since the default flipped from
+    # 0.0.0.0 to loopback, an operator who relied on the old wildcard bind would
+    # otherwise see a bare connection-refused; this line names the bind host and
+    # the override knob.
+    printf 'gc-beads-bd: managed dolt server binding %s:%s (override bind with GC_DOLT_HOST=0.0.0.0)\n' "$DOLT_HOST" "$DOLT_PORT" >&2
     archive_level=${GC_DOLT_ARCHIVE_LEVEL:-0}
     case "$archive_level" in
         ''|*[!0-9]*)

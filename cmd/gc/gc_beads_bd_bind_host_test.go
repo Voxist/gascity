@@ -79,6 +79,8 @@ func TestGcBeadsBdIsRemoteHostClassification(t *testing.T) {
 		{"unset is local-managed", "", false},
 		{"loopback default is local-managed", "127.0.0.1", false},
 		{"wildcard opt-out is local-managed", "0.0.0.0", false},
+		{"localhost alias is local-managed", "localhost", false},
+		{"ipv6 loopback is local-managed", "::1", false},
 		{"hostname is remote", "db.example.com", true},
 		{"lan address is remote", "10.0.0.5", true},
 	}
