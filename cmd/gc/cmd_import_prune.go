@@ -85,8 +85,7 @@ func doImportPrune(allCities, apply bool, keepDays int, stdout, stderr io.Writer
 	if result.Applied {
 		mode = "applied"
 	}
-	fmt.Fprintf(stdout, "%d referenced, %d unreferenced (%s) [%s]\n",
-		len(result.Kept), len(result.Pruned), formatBytes(result.FreedBytes), mode) //nolint:errcheck
+	fmt.Fprintf(stdout, "%d referenced, %d unreferenced (%s) [%s]\n", len(result.Kept), len(result.Pruned), formatBytes(result.FreedBytes), mode) //nolint:errcheck
 	for _, e := range result.Pruned {
 		fmt.Fprintf(stdout, "  %s %s\n", e.Name, formatBytes(e.Bytes)) //nolint:errcheck
 	}

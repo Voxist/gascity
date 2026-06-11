@@ -46,7 +46,7 @@ func pruneTestCacheRoot(t *testing.T) string {
 
 // registerPruneCity writes a minimal city with a packs.lock pinning source@commit
 // and registers it in the supervisor registry.
-func registerPruneCity(t *testing.T, name, source, commit string) string {
+func registerPruneCity(t *testing.T, name, source, commit string) {
 	t.Helper()
 	cityDir := filepath.Join(t.TempDir(), name)
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
@@ -63,7 +63,6 @@ func registerPruneCity(t *testing.T, name, source, commit string) string {
 	if err := reg.Register(cityDir, name); err != nil {
 		t.Fatalf("Register(%q): %v", name, err)
 	}
-	return cityDir
 }
 
 func TestDoImportPruneDryRunReportsWithoutDeleting(t *testing.T) {
