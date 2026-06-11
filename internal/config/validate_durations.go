@@ -60,6 +60,7 @@ func ValidateDurations(cfg *City, source string) []string {
 	// Daemon config durations.
 	check("[daemon]", "patrol_interval", cfg.Daemon.PatrolInterval)
 	check("[daemon]", "restart_window", cfg.Daemon.RestartWindow)
+	check("[daemon]", "status_snapshot_timeout", cfg.Daemon.StatusSnapshotTimeout)
 	check("[daemon]", "session_circuit_breaker_window", cfg.Daemon.SessionCircuitBreakerWindow)
 	check("[daemon]", "session_circuit_breaker_reset_after", cfg.Daemon.SessionCircuitBreakerResetAfter)
 	check("[daemon]", "shutdown_timeout", cfg.Daemon.ShutdownTimeout)

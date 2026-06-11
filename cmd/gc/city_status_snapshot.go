@@ -145,7 +145,7 @@ func buildCityStoreHealth(cityPath string, store beads.Store, stderr io.Writer) 
 }
 
 func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath string, store beads.Store, stderr io.Writer) cityStatusSnapshot {
-	return collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, loadStatusSessionSnapshot(store, stderr), stderr)
+	return collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, loadStatusSessionSnapshot(store, statusSnapshotTimeout(cfg), stderr), stderr)
 }
 
 func collectCityStatusSnapshotFromStoreSnapshot(
