@@ -1295,6 +1295,11 @@
           "description": "RestartWindow is the sliding time window for counting restarts.\nDuration string (e.g., \"30s\", \"5m\", \"1h\"). Defaults to \"1h\".",
           "default": "1h"
         },
+        "status_snapshot_timeout": {
+          "type": "string",
+          "description": "StatusSnapshotTimeout bounds how long `gc status` (and the controller's\nStatusView build) wait for the session-bead snapshot load before\ncontinuing with a runtime-only (\"partial\") status. On a large store the\ndefault 3s is too tight and silently degrades status output; raise it\n(e.g. \"15s\") on big/loaded cities. Duration string. Defaults to \"3s\".",
+          "default": "3s"
+        },
         "session_circuit_breaker": {
           "type": "boolean",
           "description": "SessionCircuitBreaker enables the named-session respawn circuit breaker.\nWhen enabled, the controller suppresses no-progress named-session respawns\nafter the configured restart threshold is exceeded."

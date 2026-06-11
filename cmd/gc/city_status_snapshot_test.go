@@ -52,7 +52,7 @@ func TestCityStatusNamedSessionsUseProvidedStore(t *testing.T) {
 	if snapshot.NamedSessions[0].Status != "materialized" {
 		t.Fatalf("named session status = %q, want materialized", snapshot.NamedSessions[0].Status)
 	}
-	code := doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, loadStatusSessionSnapshot(store, &stderr), &stdout, &stderr)
+	code := doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, loadStatusSessionSnapshot(store, statusSessionSnapshotTimeout, &stderr), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -161,7 +161,7 @@ func TestLoadStatusSessionSnapshotTimesOut(t *testing.T) {
 
 	var stderr bytes.Buffer
 	start := time.Now()
-	snapshot := loadStatusSessionSnapshot(store, &stderr)
+	snapshot := loadStatusSessionSnapshot(store, statusSessionSnapshotTimeout, &stderr)
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("loadStatusSessionSnapshot elapsed %s, want bounded timeout", elapsed)
 	}
@@ -213,6 +213,40 @@ func TestCityStatusNamedSessionSurfacesLookupErrorWhenSnapshotDegraded(t *testin
 	}
 	if !strings.Contains(status, "timed out") {
 		t.Fatalf("named session status = %q, want underlying load-error text in the surfaced lookup error", status)
+	}
+}
+
+// TestCityStatusSnapshotRosterSurvivesDegradedSnapshot is the regression test
+// for the "partial status drops every rig" failure: when the session-bead
+// snapshot load times out (degraded snapshot), the rig roster is config-derived
+// and must still be fully populated so consumers never lose product rigs. The
+// roster comes from cfg.Rigs, independent of the store snapshot.
+func TestCityStatusSnapshotRosterSurvivesDegradedSnapshot(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Rigs: []config.Rig{
+			{Name: "voxcept", Path: "/repos/wise-stack", Prefix: "vct"},
+			{Name: "voxlive", Path: "/repos/livecenter", Prefix: "vl"},
+			{Name: "voxreply", Path: "/repos/voxist-app", Prefix: "vr"},
+		},
+	}
+	store := beads.NewMemStore()
+	degraded := newSessionBeadSnapshotWithError(nil, errors.New("loading session snapshot timed out after 20ms"))
+
+	var stderr bytes.Buffer
+	snapshot := collectCityStatusSnapshotFromStoreSnapshot(runtime.NewFake(), cfg, "/city", store, degraded, &stderr)
+
+	got := make(map[string]string, len(snapshot.Rigs))
+	for _, r := range snapshot.Rigs {
+		got[r.Name] = r.Path
+	}
+	for _, want := range cfg.Rigs {
+		if got[want.Name] != want.Path {
+			t.Fatalf("rig %q missing or wrong path in degraded-snapshot status: roster=%v, want path %q", want.Name, got, want.Path)
+		}
+	}
+	if len(snapshot.Rigs) != len(cfg.Rigs) {
+		t.Fatalf("roster has %d rigs, want all %d cfg rigs even on degraded snapshot", len(snapshot.Rigs), len(cfg.Rigs))
 	}
 }
 
@@ -609,7 +643,7 @@ func TestCityStatusNamedSessionsUseLoadedSnapshotWithoutGet(t *testing.T) {
 		t.Fatalf("snapshot named session status = %q, want materialized", got)
 	}
 
-	code := doCityStatusWithStoreAndSnapshot(sp, dops, cfg, "/home/user/city", store, loadStatusSessionSnapshot(store, &stderr), &stdout, &stderr)
+	code := doCityStatusWithStoreAndSnapshot(sp, dops, cfg, "/home/user/city", store, loadStatusSessionSnapshot(store, statusSessionSnapshotTimeout, &stderr), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
