@@ -49,3 +49,6 @@ issues.jsonl
 # Beads / Dolt files (added by bd init)
 .beads/proxieddb/
 .beads.backup-*
+
+# Per-bead git worktrees are transient — never track them
+worktrees/
