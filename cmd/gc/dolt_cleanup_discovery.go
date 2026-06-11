@@ -46,6 +46,12 @@ func loadRigDoltPorts(rigs []resolverRig, fs fsys.FS) map[int]string {
 // kernel thread or hung process can't make the reaper hang.
 const procEnumerationTimeout = 2 * time.Second
 
+// psAllProcessesTimeout caps the full-system `ps -ax` scan. On machines with
+// 2000+ processes and long argv (tmux sessions, many agents), ps -o command=
+// can take 6+ seconds; a 30-second bound catches truly hung invocations while
+// allowing legitimate slow scans.
+const psAllProcessesTimeout = 30 * time.Second
+
 // discoverDoltProcesses finds live `dolt sql-server` processes and reports
 // their argv and listening ports. Linux uses /proc for argv, ports, RSS, and
 // start ticks. Hosts without /proc (including Darwin/macOS) fall back to ps for
@@ -277,7 +283,7 @@ func readDoltSQLServerArgv(pid int) ([]string, bool) {
 }
 
 func psLStartCommandLines() ([]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), procEnumerationTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), psAllProcessesTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "ps", "-ax", "-o", "pid=,rss=,lstart=,command=")
 	out, err := cmd.Output()

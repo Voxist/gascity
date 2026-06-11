@@ -9,12 +9,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	gcapi "github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/doltpool"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -604,11 +606,14 @@ func assertMetadataProjectID(t *testing.T, metadataPath string, want string) {
 
 func assertDatabaseProjectID(t *testing.T, port string, want string) {
 	t.Helper()
-	db, err := managedDoltOpenDatabase("127.0.0.1", port, "root", "hq")
+	portInt, err := strconv.Atoi(port)
 	if err != nil {
-		t.Fatalf("managedDoltOpenDatabase: %v", err)
+		t.Fatalf("parse port %q: %v", port, err)
 	}
-	defer func() { _ = db.Close() }()
+	db, err := doltpool.Open(doltpool.Config{User: "root", Host: "127.0.0.1", Port: portInt, Database: "hq"})
+	if err != nil {
+		t.Fatalf("doltpool.Open: %v", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	got, ok, err := readDatabaseProjectID(ctx, db)
@@ -812,11 +817,10 @@ func TestEnsureManagedDoltProjectIDGeneratesLocalIdentityWithPasswordedServer(t 
 	_, port, _, cleanup := startPasswordedDoltServer(t, repoDir, "CREATE DATABASE IF NOT EXISTS `hq`; USE `hq`; CREATE TABLE IF NOT EXISTS metadata (`key` VARCHAR(255) PRIMARY KEY, value LONGTEXT);")
 	defer cleanup()
 
-	db, err := managedDoltOpenDatabase("127.0.0.1", fmt.Sprintf("%d", port), "root", "hq")
+	db, err := doltpool.Open(doltpool.Config{User: "root", Host: "127.0.0.1", Port: port, Database: "hq"})
 	if err != nil {
-		t.Fatalf("managedDoltOpenDatabase: %v", err)
+		t.Fatalf("doltpool.Open: %v", err)
 	}
-	defer func() { _ = db.Close() }()
 
 	if _, err := db.Exec("DELETE FROM metadata WHERE `key` = '_project_id'"); err != nil {
 		t.Fatalf("delete database _project_id: %v", err)

@@ -13,13 +13,14 @@ import (
 	"strings"
 	"time"
 
-	mysql "github.com/go-sql-driver/mysql"
+	"github.com/gastownhall/gascity/internal/doltpool"
 )
 
 type managedDoltSQLHealthReport struct {
 	QueryReady      bool
 	ReadOnly        string
 	ConnectionCount string
+	PoolOpenConns   int
 }
 
 // managedDoltProbeDatabase is the legacy dedicated probe database name. The
@@ -245,6 +246,7 @@ func managedDoltHealthCheck(host, port, user string, checkReadOnly bool) (manage
 	if count, err := managedDoltConnectionCount(host, port, user); err == nil {
 		report.ConnectionCount = count
 	}
+	report.PoolOpenConns = doltpool.TotalOpenConns()
 	return report, nil
 }
 
@@ -256,6 +258,7 @@ func managedDoltHealthCheckFields(report managedDoltSQLHealthReport) []string {
 		"query_ready\ttrue",
 		"read_only\t" + report.ReadOnly,
 		"connection_count\t" + report.ConnectionCount,
+		"pool_open_conns\t" + strconv.Itoa(report.PoolOpenConns),
 	}
 }
 
@@ -264,25 +267,16 @@ func managedDoltPassword() string {
 }
 
 func managedDoltOpenDB(host, port, user string) (*sql.DB, error) {
-	host = managedDoltConnectHost(host)
-	port = strings.TrimSpace(port)
-	if port == "" {
-		return nil, fmt.Errorf("missing port")
+	portInt, err := strconv.Atoi(strings.TrimSpace(port))
+	if err != nil {
+		return nil, fmt.Errorf("parse dolt port %q: %w", port, err)
 	}
-	user = strings.TrimSpace(user)
-	if user == "" {
-		user = "root"
-	}
-	cfg := mysql.NewConfig()
-	cfg.User = user
-	cfg.Passwd = managedDoltPassword()
-	cfg.Net = "tcp"
-	cfg.Addr = host + ":" + port
-	cfg.Timeout = 5 * time.Second
-	cfg.ReadTimeout = 5 * time.Second
-	cfg.WriteTimeout = 5 * time.Second
-	cfg.AllowNativePasswords = true
-	return sql.Open("mysql", cfg.FormatDSN())
+	return doltpool.Open(doltpool.Config{
+		User:     strings.TrimSpace(user),
+		Password: managedDoltPassword(),
+		Host:     managedDoltConnectHost(host),
+		Port:     portInt,
+	})
 }
 
 func managedDoltQueryProbeDirect(host, port, user string) error {
@@ -290,7 +284,6 @@ func managedDoltQueryProbeDirect(host, port, user string) error {
 	if err != nil {
 		return err
 	}
-	defer db.Close() //nolint:errcheck
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -309,7 +302,6 @@ func managedDoltReadOnlyStateDirect(host, port, user string) (string, error) {
 	if err != nil {
 		return "unknown", err
 	}
-	defer db.Close() //nolint:errcheck
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -374,7 +366,6 @@ func managedDoltConnectionCountDirect(host, port, user string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer db.Close() //nolint:errcheck
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -412,7 +403,6 @@ func managedDoltResetProbeDirect(host, port, user string) error {
 	if err != nil {
 		return err
 	}
-	defer db.Close() //nolint:errcheck
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

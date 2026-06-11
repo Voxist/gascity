@@ -16,9 +16,9 @@ import (
 
 	gcapi "github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/doltpool"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
-	mysql "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
 )
 
@@ -151,11 +151,20 @@ func ensureManagedDoltProjectIDWithRecorder(metadataPath, host, port, user, data
 	}
 	metadataOK := metadataProjectID != ""
 
-	db, err := managedDoltOpenDatabase(host, port, user, database)
+	portInt, err := strconv.Atoi(strings.TrimSpace(port))
+	if err != nil {
+		return managedDoltProjectIDReport{}, fmt.Errorf("parse dolt port %q: %w", port, err)
+	}
+	db, err := doltpool.Open(doltpool.Config{
+		User:     strings.TrimSpace(user),
+		Password: managedDoltPassword(),
+		Host:     managedDoltConnectHost(host),
+		Port:     portInt,
+		Database: strings.TrimSpace(database),
+	})
 	if err != nil {
 		return managedDoltProjectIDReport{}, err
 	}
-	defer db.Close() //nolint:errcheck
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -489,33 +498,6 @@ func formatLegacyL2L3MismatchError(l2, l3 string) error {
 			"with the chosen value to unblock reconcile.",
 		l2, l3,
 	)
-}
-
-func managedDoltOpenDatabase(host, port, user, database string) (*sql.DB, error) {
-	host = managedDoltConnectHost(host)
-	port = strings.TrimSpace(port)
-	if port == "" {
-		return nil, fmt.Errorf("missing port")
-	}
-	user = strings.TrimSpace(user)
-	if user == "" {
-		user = "root"
-	}
-	database = strings.TrimSpace(database)
-	if database == "" {
-		return nil, fmt.Errorf("missing database")
-	}
-	cfg := mysql.NewConfig()
-	cfg.User = user
-	cfg.Passwd = managedDoltPassword()
-	cfg.Net = "tcp"
-	cfg.Addr = host + ":" + port
-	cfg.DBName = database
-	cfg.Timeout = 5 * time.Second
-	cfg.ReadTimeout = 5 * time.Second
-	cfg.WriteTimeout = 5 * time.Second
-	cfg.AllowNativePasswords = true
-	return sql.Open("mysql", cfg.FormatDSN())
 }
 
 func readManagedMetadataProjectID(metadataPath string) (string, error) {
