@@ -581,9 +581,6 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		if reapPhantomSessionBeads(cr.cityBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) > 0 {
 			sessionBeads = cr.loadSessionBeadSnapshot()
 		}
-		if reapExpiredStartPendingSessionBeads(cr.cityBeadStore(), cr.sp, cr.sessionDrains, cr.cfg.Session.PendingCreateTTLDuration(), clock.Real{}, cr.stderr) > 0 {
-			sessionBeads = cr.loadSessionBeadSnapshot()
-		}
 		result := cr.buildDesiredState(sessionBeads, startupTrace)
 		sessionBeads = cr.loadSessionBeadSnapshot()
 		result = refreshDesiredStateWithSessionBeads(
@@ -1193,20 +1190,12 @@ func (cr *CityRuntime) tick(
 		recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.after_reap", phaseStart, traceSessionSnapshotFields(sessionBeads))
 	}
 	phaseStart = time.Now()
-	reapedPhantom := reapPhantomSessionBeads(cr.cityBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr)
-	recordPhase(TraceSiteControllerTickPhase, "reap_phantom_session_beads", phaseStart, map[string]any{"reaped": reapedPhantom})
-	if reapedPhantom > 0 {
+	phantomReaped := reapPhantomSessionBeads(cr.cityBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr)
+	recordPhase(TraceSiteControllerTickPhase, "reap_phantom_session_beads", phaseStart, map[string]any{"reaped": phantomReaped})
+	if phantomReaped > 0 {
 		phaseStart = time.Now()
 		sessionBeads = cr.loadSessionBeadSnapshot()
 		recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.after_phantom_reap", phaseStart, traceSessionSnapshotFields(sessionBeads))
-	}
-	phaseStart = time.Now()
-	reapedExpiredPending := reapExpiredStartPendingSessionBeads(cr.cityBeadStore(), cr.sp, cr.sessionDrains, cr.cfg.Session.PendingCreateTTLDuration(), clock.Real{}, cr.stderr)
-	recordPhase(TraceSiteControllerTickPhase, "reap_expired_start_pending_session_beads", phaseStart, map[string]any{"reaped": reapedExpiredPending})
-	if reapedExpiredPending > 0 {
-		phaseStart = time.Now()
-		sessionBeads = cr.loadSessionBeadSnapshot()
-		recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.after_expired_pending_reap", phaseStart, traceSessionSnapshotFields(sessionBeads))
 	}
 	if cr.cfg.Daemon.AutoReapClosedBeadWorktreesEnabled() {
 		phaseStart = time.Now()
@@ -1546,7 +1535,8 @@ func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(now time.Time) {
 
 	policy := orderTrackingRetentionPolicyForConfig(cr.cfg)
 	deleted, sweepErr := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
-		stores, now, policy, nil, orderTrackingRetentionWatchdogDeleteBudget)
+		stores, now, policy, nil, orderTrackingRetentionWatchdogDeleteBudget,
+	)
 	if err := errors.Join(storeErr, sweepErr); err != nil && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
@@ -2243,7 +2233,8 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		poolDesired = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(ComputePoolDesiredStatesTraced(
-				cr.cfg, poolWorkBeads, sessionBeads.Open(), result.ScaleCheckCounts, trace)),
+				cr.cfg, poolWorkBeads, sessionBeads.Open(), result.ScaleCheckCounts, trace,
+			)),
 			sessionBeads,
 			result.PoolScaleCheckPartialTemplates,
 		)
@@ -2904,7 +2895,8 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		filteredCfg,
 		PoolDesiredCounts(ComputePoolDesiredStates(
-			filteredCfg, poolWorkBeads, open, wfcResult.ScaleCheckCounts)),
+			filteredCfg, poolWorkBeads, open, wfcResult.ScaleCheckCounts,
+		)),
 		newSessionBeadSnapshot(open),
 		wfcResult.PoolScaleCheckPartialTemplates,
 	)
@@ -3090,7 +3082,8 @@ func (cr *CityRuntime) loadDemandSnapshot(
 		result.PoolDesiredCounts = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(ComputePoolDesiredStatesTraced(
-				cr.cfg, poolWorkBeads, openSessionBeads, result.ScaleCheckCounts, trace)),
+				cr.cfg, poolWorkBeads, openSessionBeads, result.ScaleCheckCounts, trace,
+			)),
 			sessionBeads,
 			result.PoolScaleCheckPartialTemplates,
 		)
