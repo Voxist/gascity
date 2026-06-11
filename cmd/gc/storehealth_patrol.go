@@ -194,7 +194,7 @@ func storeHealthProbeRoutedFresh(_ context.Context, cityPath string, cfg *config
 		// confirming; treat any routed failure as probe-A-fail.
 		reason := strings.TrimSpace(err.Error())
 		if reason == "" {
-			reason = "bd list failed"
+			reason = "routed store probe failed"
 		}
 		return storehealth.ProbeResult{Ok: false, Reason: reason}
 	}
