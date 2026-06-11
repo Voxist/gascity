@@ -42,12 +42,13 @@ type CachingStore struct {
 	mutationSeq     uint64
 	primePartialErr error
 
-	reconciling  atomic.Bool
-	syncFailures int
-	stats        CacheStats
-	onChange     func(eventType, beadID string, payload json.RawMessage)
-	problemf     func(string)
-	problemLog   map[string]cacheProblemLogState
+	reconciling    atomic.Bool
+	syncFailures   int
+	circuitTripped bool
+	stats          CacheStats
+	onChange       func(eventType, beadID string, payload json.RawMessage)
+	problemf       func(string)
+	problemLog     map[string]cacheProblemLogState
 
 	// lastReconcileLogAt rate-limits the per-reconcile success log line
 	// emitted by runReconciliation. Without this, a busy cache at SMALL
@@ -160,6 +161,8 @@ const (
 	cacheReconcileIntervalLarge     = 120 * time.Second
 	cacheProblemLogWindow           = time.Minute
 	cacheReconcileFailureBackoff    = time.Minute
+	cacheReconcileBaseBackoff       = 2 * time.Second
+	cacheReconcileMaxBackoff        = 10 * time.Minute
 	// cacheReconcileSuccessLogWindow rate-limits the per-reconcile success
 	// log line. Reuses the one-minute pattern from cacheProblemLogWindow so
 	// the reconciler's footprint in the operator-visible log stays bounded
@@ -582,6 +585,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	}
 	c.state = cacheLive
 	c.syncFailures = 0
+	c.circuitTripped = false
 	c.stats.SyncFailures = 0
 	c.primePartialErr = partialErr
 	c.markFreshLocked(now)

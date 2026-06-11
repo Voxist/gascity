@@ -229,8 +229,12 @@ func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if c.syncFailures >= maxCacheSyncFailures && !c.stats.LastProblemAt.IsZero() {
-		dueAt := c.stats.LastProblemAt.Add(cacheReconcileFailureBackoff)
+	if c.syncFailures > 0 && !c.stats.LastProblemAt.IsZero() {
+		backoff := cacheReconcileBaseBackoff << uint(c.syncFailures)
+		if backoff > cacheReconcileMaxBackoff || backoff <= 0 {
+			backoff = cacheReconcileMaxBackoff
+		}
+		dueAt := c.stats.LastProblemAt.Add(backoff)
 		if !now.Before(dueAt) {
 			return 0
 		}
@@ -277,6 +281,10 @@ func (c *CachingStore) runReconciliation() {
 		c.syncFailures++
 		if (IsPartialResult(err) || c.syncFailures >= maxCacheSyncFailures) && (c.state == cacheLive || c.state == cachePartial) {
 			c.state = cacheDegraded
+			if !c.circuitTripped {
+				c.circuitTripped = true
+				c.problemf(fmt.Sprintf("circuit-breaker tripped rig=%s syncFailures=%d", c.idPrefix, c.syncFailures))
+			}
 		}
 		c.recordProblemLocked("reconcile cache", err)
 		c.recordReconcileLatencyLocked(bdLatency)

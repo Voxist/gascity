@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
@@ -975,49 +976,11 @@ func bdTransportErrorMatches(cityPath, scopeRoot string, env map[string]string, 
 const (
 	bdSilentFallbackMarkerImport  = "auto-importing"
 	bdSilentFallbackMarkerEmptyDB = "into empty database"
+
+	bdCommandRetryBaseDelay = 500 * time.Millisecond
 )
 
-// bdTransportRetryableMarkers is the bd stderr/error string table gc uses
-// to classify transport-class failures (managed retry, circuit breaker
-// recording, and gc hook's store-unavailable signal all flow through it).
-// It is an explicit, tested compatibility surface with the bd CLI —
-// pinned by TestBdTransportRetryableMarkersArePinned — and remains the
-// classification mechanism until bd ships a typed machine-readable error
-// envelope (a reserved exit-code contract distinguishing transport from
-// application failures; bd currently exits 1 for both, so exit codes
-// carry no transport signal today). Change it deliberately, in one place,
-// together with the pin test.
-var bdTransportRetryableMarkers = []string{
-	"server unreachable",
-	"dial tcp",
-	"connection refused",
-	"broken pipe",
-	"unexpected eof",
-	"bad connection",
-	"use of closed network connection",
-	// bd silently falls back to opening the on-disk store when it cannot
-	// reach the managed Dolt server. On an empty .beads/dolt/ that fallback
-	// triggers a JSONL auto-import, which presents as a 2m command timeout
-	// rather than a network error. Treat the auto-import marker as a
-	// transport failure so the managed-retry path republishes the correct
-	// port and retries against the live server. See gastownhall/gascity#1930.
-	bdSilentFallbackMarkerImport,
-	bdSilentFallbackMarkerEmptyDB,
-}
-
-// bdTransportRecoverableMarkers is the subset of transport failures where
-// republishing the managed Dolt port (recoverManagedBDCommand) can unstick
-// the next attempt. Pinned alongside bdTransportRetryableMarkers.
-var bdTransportRecoverableMarkers = []string{
-	"server unreachable",
-	"dial tcp",
-	"connection refused",
-	// When bd auto-imports into an empty on-disk store it has lost the
-	// managed Dolt server; republishing the port via the recovery path
-	// is what unsticks the next attempt. See gastownhall/gascity#1930.
-	bdSilentFallbackMarkerImport,
-	bdSilentFallbackMarkerEmptyDB,
-}
+var bdCommandRetrySleep = time.Sleep
 
 func bdTransportRetryableError(cityPath, scopeRoot string, env map[string]string, err error) bool {
 	return bdTransportErrorMatches(cityPath, scopeRoot, env, err, bdTransportRetryableMarkers)
@@ -1122,6 +1085,7 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 				return out, err
 			}
 		}
+		bdCommandRetrySleep(bdCommandRetryBaseDelay)
 		retryEnv, retryEnvErr := envFn(dir)
 		if retryEnvErr != nil {
 			return nil, retryEnvErr
