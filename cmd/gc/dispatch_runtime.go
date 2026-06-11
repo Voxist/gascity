@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -22,11 +23,11 @@ import (
 	"github.com/gastownhall/gascity/internal/sling"
 )
 
-// graphExecutionRouteMetaKey is an alias for sling.GraphExecutionRouteMetaKey.
-const graphExecutionRouteMetaKey = sling.GraphExecutionRouteMetaKey
+// graphExecutionRouteMetaKey is an alias for beadmeta.ExecutionRoutedToMetadataKey.
+const graphExecutionRouteMetaKey = beadmeta.ExecutionRoutedToMetadataKey
 
-// graphExecutionRigContextMetaKey is an alias for sling.GraphExecutionRigContextMetaKey.
-const graphExecutionRigContextMetaKey = sling.GraphExecutionRigContextMetaKey
+// graphExecutionRigContextMetaKey is an alias for beadmeta.ExecutionRigContextMetadataKey.
+const graphExecutionRigContextMetaKey = beadmeta.ExecutionRigContextMetadataKey
 
 // isControlDispatcherKind delegates to sling.IsControlDispatcherKind.
 func isControlDispatcherKind(kind string) bool {
@@ -463,7 +464,7 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 		pendingCount := 0
 		for _, candidate := range queue {
 			beadID := candidate.ID
-			kind := strings.TrimSpace(candidate.Metadata["gc.kind"])
+			kind := strings.TrimSpace(candidate.Metadata[beadmeta.KindMetadataKey])
 			workflowTracef("serve process bead=%s kind=%s store=%s", beadID, kind, storePath)
 			// controlDispatcherServe currently returns nil both when it
 			// successfully advanced a control bead AND when ProcessControl

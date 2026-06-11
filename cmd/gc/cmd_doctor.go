@@ -237,6 +237,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
 	}
 	if _, rawCfgErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); rawCfgErr == nil {
+		register(newBuiltinIncludeDoctorCheck(cityPath))
 		register(newImportStateDoctorCheck(cityPath))
 		register(newJsonlArchiveDoctorCheck(cityPath))
 	}
@@ -296,10 +297,16 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewBeadsStoreCheck(cityPath, storeFactory))
 		register(newV2RoutedToNamespaceCheck(cfg, cityPath, storeFactory))
 		register(newRunTargetRoutedToBackfillCheck(cfg, cityPath, storeFactory))
+		register(newWorkOptionMetadataMigrationCheck(cfg, cityPath, storeFactory))
 		register(newBacklogDepthCheck(cityPath, storeFactory))
+		register(newOrderTrackingRetentionCheck(cityPath, storeFactory))
 		register(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
 	}
 	register(newDoctorDoltServerCheck(cityPath, opts.SkipCityDoltCheck))
+	// Host-level fork-rate watch: surfaces the per-command data-plane fork storm
+	// (gc -> bd.real -> dolt) that operators routinely misread as CPU saturation.
+	// Advisory + read-only (/proc/stat); no config needed.
+	register(newForkRateCheck())
 	if cfgErr == nil && doctorWorkspaceHasPostgresScope(cityPath, cfg) {
 		register(doctor.NewPostgresAuthCheck(cityPath, cfg))
 	}
@@ -318,6 +325,10 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// invocation without retention. This check warns before the directory
 	// fills the disk and cascades into broken dolt writes.
 	register(doctor.NewBdBackupSizeCheckForConfig(cityPath, cfg, cfgErr))
+	// Stale bd backup state: corrupt-store quarantines that were never
+	// reclaimed and dolt-backup.json registrations pointing at deleted
+	// paths (ga-yfbs28).
+	register(doctor.NewBdBackupStateCheckForConfig(cityPath, cfg, cfgErr))
 	// Worktree checks deliberately run even when cfgErr != nil — they
 	// only need the city path, and a broken city.toml is exactly when
 	// silent disk-fill is most likely. The zero-value DoctorConfig

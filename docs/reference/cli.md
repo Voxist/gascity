@@ -2286,6 +2286,7 @@ gc pack
 | [gc pack fetch](#gc-pack-fetch) | Clone missing and update existing remote packs |
 | [gc pack list](#gc-pack-list) | Show remote pack sources and cache status |
 | [gc pack registry](#gc-pack-registry) | Manage pack registries |
+| [gc pack release](#gc-pack-release) | Author pack registry release metadata |
 
 ## gc pack fetch
 
@@ -2404,6 +2405,80 @@ gc pack registry show <pack-name> [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL result |
 | `--refresh` | bool |  | refresh catalogs before showing |
+
+## gc pack release
+
+Author pack registry release metadata, including canonical pack content hashes.
+
+```
+gc pack release
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc pack release hash](#gc-pack-release-hash) | Compute a pack release content hash |
+| [gc pack release stamp](#gc-pack-release-stamp) | Stamp a registry release entry with a computed content hash |
+| [gc pack release validate](#gc-pack-release-validate) | Validate registry release content hashes |
+| [gc pack release verify](#gc-pack-release-verify) | Verify a pack release content hash |
+
+## gc pack release hash
+
+Compute a pack release content hash
+
+```
+gc pack release hash <source> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--commit` | string |  | git commit or ref to hash |
+| `--path` | string |  | pack path inside the source repository |
+
+## gc pack release stamp
+
+Stamp a registry release entry with a computed content hash
+
+```
+gc pack release stamp <registry.toml> <pack-name> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--commit` | string |  | git commit or ref to hash and record |
+| `--description` | string |  | release description |
+| `--pack-description` | string |  | pack description; required when creating a new [[pack]] |
+| `--path` | string |  | pack path inside the source repository |
+| `--ref` | string |  | release ref to record |
+| `--replace` | bool |  | replace an existing release with the same version |
+| `--source` | string |  | pack source; required when creating a new [[pack]] |
+| `--version` | string |  | release version to stamp |
+
+## gc pack release validate
+
+Validate registry release content hashes
+
+```
+gc pack release validate <registry.toml> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--include-withdrawn` | bool |  | also validate withdrawn releases |
+| `--pack` | string |  | validate only one registry pack |
+
+## gc pack release verify
+
+Verify a pack release content hash
+
+```
+gc pack release verify <source> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--commit` | string |  | git commit or ref to verify |
+| `--hash` | string |  | expected sha256:&lt;64hex&gt; content hash |
+| `--path` | string |  | pack path inside the source repository |
 
 ## gc prime
 
@@ -2710,7 +2785,9 @@ The rig's agents won't spawn until explicitly resumed with "gc rig resume".
 
 Use --adopt to register a directory that already has a fully initialized
 .beads/ directory (must include both metadata.json and config.yaml).
-Skips beads init; the git repo check remains informational.
+For managed-Dolt rigs, runs an idempotent config sync (registers types.custom
+and other config into the DB, never destructively reinitializes). The git repo
+check remains informational.
 
 ```
 gc rig add <path> [flags]

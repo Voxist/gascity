@@ -789,58 +789,36 @@ func buildPreparedStartWithWorkDirResolver(
 	tp := candidate.tp
 	agentCfg := templateParamsToConfig(tp)
 
-	// Fold a per-dispatch reasoning effort from the session's assigned work
-	// bead (gc.reasoning metadata) into template_overrides["effort"], mirroring
-	// how schema option overrides are carried. Only providers with an "effort"
-	// option (codex) consume it; for codex this becomes
-	// `-c model_reasoning_effort=<effort>` via the existing resolution below.
-	// An explicit session-level effort override wins over the dispatch default.
-	applyDispatchReasoningOverride(candidate, cfg, store)
-
 	// Apply template_overrides from bead metadata. These are per-session
 	// schema option overrides (e.g., {"model":"opus","effort":"high"}) that
 	// override the agent's default CLI flags for specific options.
 	// Build complete options: effective defaults + explicit overrides so
 	// unoverridden defaults are preserved when replaceSchemaFlags strips all
 	// schema flags.
-	if rawOverrides := session.Metadata["template_overrides"]; rawOverrides != "" {
-		if tp.ResolvedProvider != nil && len(tp.ResolvedProvider.OptionsSchema) > 0 {
-			var overrides map[string]string
-			if err := json.Unmarshal([]byte(rawOverrides), &overrides); err != nil {
-				log.Printf("session %s: invalid template_overrides JSON: %v", session.ID, err)
-			} else if len(overrides) > 0 {
-				fullOptions := make(map[string]string)
-				hasSchemaOverride := false
-				for k, v := range tp.ResolvedProvider.EffectiveDefaults {
-					fullOptions[k] = v
-				}
-				for k, v := range overrides {
-					if k == "initial_message" {
-						continue // handled separately below, not a schema option
-					}
-					fullOptions[k] = v
-					hasSchemaOverride = true
-				}
-				args, resolveErr := config.ResolveExplicitOptions(tp.ResolvedProvider.OptionsSchema, fullOptions)
-				if resolveErr != nil {
-					log.Printf("session %s: template_overrides resolution error: %v", session.ID, resolveErr)
-				} else if len(args) > 0 {
-					agentCfg.Command = replaceSchemaFlags(agentCfg.Command, tp.ResolvedProvider.OptionsSchema, args)
-				}
-				if hasSchemaOverride {
-					if command, err := config.BuildProviderResumeCommand(tp.ResolvedProvider, overrides); err == nil && strings.TrimSpace(command) != "" {
-						resolved := *tp.ResolvedProvider
-						resolved.ResumeCommand = command
-						tp.ResolvedProvider = &resolved
-					}
-				}
-			}
-		}
-	}
+	sessionOverrides := parseSessionTemplateOverridesForLaunch(session)
+	applySchemaOptionOverridesForLaunch(&agentCfg, &tp, session.ID, sessionOverrides)
 
 	coreHash := runtime.CoreFingerprint(agentCfg)
 	coreBreakdown := runtime.CoreFingerprintBreakdown(agentCfg)
 	liveHash := runtime.LiveFingerprint(agentCfg)
+
+	// Work beads may carry one-shot provider option overrides as opt_<key>
+	// metadata, where <key> is an OptionsSchema key such as "model" or
+	// "effort". Apply them after core/live hash calculation because they are
+	// dispatch inputs from the current work bead, not durable session config.
+	// Explicit session template_overrides still win per key.
+	dispatchOptions := resolveTaskOptionOverrides(store, tp.ResolvedProvider, taskWorkDirAssignees(candidate, cfg)...)
+	if len(dispatchOptions) > 0 {
+		launchOverrides := make(map[string]string, len(dispatchOptions))
+		for k, v := range dispatchOptions {
+			launchOverrides[k] = v
+		}
+		for k, v := range sessionOverrides {
+			launchOverrides[k] = v
+		}
+		applySchemaOptionOverridesForLaunch(&agentCfg, &tp, session.ID, launchOverrides)
+	}
+
 	if wd := resolvePreparedTaskWorkDir(candidate, cfg, store, workDirResolver); wd != "" {
 		agentCfg.WorkDir = wd
 	} else if wd := session.Metadata["work_dir"]; wd != "" {
@@ -973,46 +951,53 @@ func buildPreparedStartWithWorkDirResolver(
 	}, nil
 }
 
-// applyDispatchReasoningOverride reads the per-dispatch reasoning effort from
-// the session's assigned work bead and folds it into the in-memory session
-// template_overrides under the "effort" key, so the normal override resolution
-// (both fresh-start and resume command building) emits the provider's reasoning
-// flag. It is a no-op when the provider has no "effort" option, when no work
-// bead carries gc.reasoning, or when the session already pins an explicit
-// effort override (the more specific session value wins). The persisted bead is
-// not mutated; only the in-memory copy used for this launch is updated.
-func applyDispatchReasoningOverride(candidate startCandidate, cfg *config.City, store beads.Store) {
-	session := candidate.session
+func parseSessionTemplateOverridesForLaunch(session *beads.Bead) map[string]string {
 	if session == nil {
+		return nil
+	}
+	rawOverrides := strings.TrimSpace(session.Metadata["template_overrides"])
+	if rawOverrides == "" {
+		return nil
+	}
+	var overrides map[string]string
+	if err := json.Unmarshal([]byte(rawOverrides), &overrides); err != nil {
+		log.Printf("session %s: invalid template_overrides JSON: %v", session.ID, err)
+		return nil
+	}
+	return overrides
+}
+
+func applySchemaOptionOverridesForLaunch(agentCfg *runtime.Config, tp *TemplateParams, sessionID string, overrides map[string]string) {
+	if agentCfg == nil || tp == nil || len(overrides) == 0 {
 		return
 	}
-	tp := candidate.tp
-	effort := resolveDispatchReasoningEffort(store, tp.ResolvedProvider, taskWorkDirAssignees(candidate, cfg)...)
-	if effort == "" {
+	resolved := tp.ResolvedProvider
+	if resolved == nil || len(resolved.OptionsSchema) == 0 {
 		return
 	}
-	overrides := map[string]string{}
-	if raw := strings.TrimSpace(session.Metadata["template_overrides"]); raw != "" {
-		if err := json.Unmarshal([]byte(raw), &overrides); err != nil {
-			// Malformed override metadata is logged and surfaced by the main
-			// resolution block below; don't fold on top of unparseable JSON.
-			return
+	fullOptions := make(map[string]string, len(resolved.EffectiveDefaults))
+	for k, v := range resolved.EffectiveDefaults {
+		fullOptions[k] = v
+	}
+	for k, v := range overrides {
+		if k == "initial_message" {
+			continue
 		}
+		fullOptions[k] = v
 	}
-	if _, ok := overrides["effort"]; ok {
-		// Explicit session-level effort override takes precedence over the
-		// per-dispatch default.
+	args, resolveErr := config.ResolveExplicitOptions(resolved.OptionsSchema, fullOptions)
+	if resolveErr != nil {
+		log.Printf("session %s: template option resolution error: %v", sessionID, resolveErr)
 		return
 	}
-	overrides["effort"] = effort
-	merged, err := json.Marshal(overrides)
-	if err != nil {
-		return
+	if len(args) > 0 {
+		agentCfg.Command = replaceSchemaFlags(agentCfg.Command, resolved.OptionsSchema, args)
 	}
-	if session.Metadata == nil {
-		session.Metadata = map[string]string{}
+	if command, err := config.BuildProviderResumeCommand(resolved, overrides); err == nil && strings.TrimSpace(command) != "" {
+		dup := *resolved
+		dup.ResumeCommand = command
+		tp.ResolvedProvider = &dup
 	}
-	session.Metadata["template_overrides"] = string(merged)
 }
 
 func resolvePreparedTaskWorkDir(
@@ -1799,12 +1784,6 @@ func commitStartResultTraced(
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
 		return false
 	}
-	fmt.Fprintf(stdout, "Woke session '%s'\n", tp.DisplayName()) //nolint:errcheck
-	rec.Record(events.Event{
-		Type:    events.SessionWoke,
-		Actor:   "gc",
-		Subject: tp.DisplayName(),
-	})
 	coreBreakdown := ""
 	if bdj, err := json.Marshal(result.prepared.coreBreakdown); err == nil {
 		coreBreakdown = string(bdj)
@@ -1875,6 +1854,16 @@ func commitStartResultTraced(
 	for key, value := range metadata {
 		session.Metadata[key] = value
 	}
+	// Announce the wake only after the metadata batch has durably landed.
+	// Emitting earlier lets a subscriber observe a session.woke for a start
+	// whose commit then fails — a fact the store never recorded, since the
+	// failure paths above report the start as failed and retry (ga-kmoj9c).
+	fmt.Fprintf(stdout, "Woke session '%s'\n", tp.DisplayName()) //nolint:errcheck
+	rec.Record(events.Event{
+		Type:    events.SessionWoke,
+		Actor:   "gc",
+		Subject: tp.DisplayName(),
+	})
 	if trace != nil {
 		trace.recordMutation("bead_metadata", tp.TemplateName, name, "metadata_batch", session.ID, "started_config_hash", "", result.prepared.coreHash, "success", traceRecordPayload{
 			"wave": wave,

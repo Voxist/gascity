@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -547,7 +548,19 @@ func buildDesiredStateWithSessionBeads(
 			// not create a parallel generic worker for the same backing template.
 			poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
 			if store != nil && !hasCustomScaleCheck {
-				defaultNamedScaleTargets = append(defaultNamedScaleTargets, defaultScaleCheckTargetForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores))
+				ownTarget := defaultScaleCheckTargetForAgent(cityPath, cfg, &cfg.Agents[i], store, rigStores)
+				defaultNamedScaleTargets = append(defaultNamedScaleTargets, ownTarget)
+				// Cross-store cold-wake for named-backing pools (vp-cl4): mirror the
+				// generic-pool guard (vp-s37 / #3078 line ~598). A cold rig pool that
+				// backs a named session and has no custom scale_check must also probe
+				// the city store so that routed demand delivered there (vp-kvp) can
+				// wake the pool. Same guard conditions apply: healthy own rig store,
+				// not city-aliased, not city-scoped. defaultNamedSessionDemand
+				// aggregates targets by storeKey; the city group discovers demand via
+				// Ready() independently from the rig-store group.
+				if isCold && ownTarget.storeKey != "city" && ownTarget.store != nil && ownTarget.err == nil && ownTarget.store != store {
+					defaultNamedScaleTargets = append(defaultNamedScaleTargets, defaultScaleCheckTarget{template: template, store: store, storeKey: "city"})
+				}
 				continue
 			}
 			if store != nil && isCold {
@@ -634,7 +647,7 @@ func buildDesiredStateWithSessionBeads(
 		if len(assignedWorkBeads) > 0 {
 			fmt.Fprintf(stderr, "assignedWorkBeads: %d beads found\n", len(assignedWorkBeads)) //nolint:errcheck
 			for _, wb := range assignedWorkBeads {
-				fmt.Fprintf(stderr, "  %s assignee=%s routed=%s status=%s\n", wb.ID, wb.Assignee, wb.Metadata["gc.routed_to"], wb.Status) //nolint:errcheck
+				fmt.Fprintf(stderr, "  %s assignee=%s routed=%s status=%s\n", wb.ID, wb.Assignee, wb.Metadata[beadmeta.RoutedToMetadataKey], wb.Status) //nolint:errcheck
 			}
 		} else {
 			fmt.Fprintf(stderr, "assignedWorkBeads: 0 beads (rigStores=%d)\n", len(rigStores)) //nolint:errcheck
@@ -3293,11 +3306,11 @@ func stampRunSessionIdentity(workBeads []beads.Bead, workStores []beads.Store, s
 			continue
 		}
 		patch := map[string]string{}
-		if sessionName != "" && strings.TrimSpace(wb.Metadata["gc.session_name"]) != sessionName {
-			patch["gc.session_name"] = sessionName
+		if sessionName != "" && strings.TrimSpace(wb.Metadata[beadmeta.SessionNameMetadataKey]) != sessionName {
+			patch[beadmeta.SessionNameMetadataKey] = sessionName
 		}
-		if workDir != "" && strings.TrimSpace(wb.Metadata["gc.work_dir"]) != workDir {
-			patch["gc.work_dir"] = workDir
+		if workDir != "" && strings.TrimSpace(wb.Metadata[beadmeta.WorkDirMetadataKey]) != workDir {
+			patch[beadmeta.WorkDirMetadataKey] = workDir
 		}
 		if len(patch) > 0 {
 			if err := store.SetMetadataBatch(wb.ID, patch); err != nil && stderr != nil {
@@ -3319,7 +3332,7 @@ func stampRunSessionIdentity(workBeads []beads.Bead, workStores []beads.Store, s
 // in another store, already gone, or already stamped is silently skipped (a
 // cross-store root gets stamped on its own store's reconcile pass).
 func stampRunRootFromStep(store beads.Store, step beads.Bead, sessionName, workDir string, stampedRoots map[string]struct{}, stderr io.Writer) {
-	rootID := strings.TrimSpace(step.Metadata["gc.root_bead_id"])
+	rootID := strings.TrimSpace(step.Metadata[beadmeta.RootBeadIDMetadataKey])
 	if rootID == "" || rootID == step.ID {
 		return
 	}
@@ -3334,11 +3347,11 @@ func stampRunRootFromStep(store beads.Store, step beads.Bead, sessionName, workD
 	}
 	stampedRoots[rootID] = struct{}{}
 	patch := map[string]string{}
-	if sessionName != "" && strings.TrimSpace(root.Metadata["gc.session_name"]) != sessionName {
-		patch["gc.session_name"] = sessionName
+	if sessionName != "" && strings.TrimSpace(root.Metadata[beadmeta.SessionNameMetadataKey]) != sessionName {
+		patch[beadmeta.SessionNameMetadataKey] = sessionName
 	}
-	if workDir != "" && strings.TrimSpace(root.Metadata["gc.work_dir"]) != workDir {
-		patch["gc.work_dir"] = workDir
+	if workDir != "" && strings.TrimSpace(root.Metadata[beadmeta.WorkDirMetadataKey]) != workDir {
+		patch[beadmeta.WorkDirMetadataKey] = workDir
 	}
 	if len(patch) == 0 {
 		return

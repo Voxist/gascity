@@ -248,6 +248,11 @@ func (c *CachingStore) cachedReadyOnly(query ReadyQuery) ([]Bead, error) {
 		}
 		openBeads = append(openBeads, cloneBead(b))
 	}
+	// Sort candidates before the limit-bounded loop below: c.beads is a map,
+	// so without this a Limit cuts an arbitrary, per-call-different subset —
+	// the #3208 bug class. Canonical ready order matches the SQL-backed
+	// ready readers.
+	sortBeadsReadyOrder(openBeads)
 
 	result := make([]Bead, 0, len(openBeads))
 	for _, b := range openBeads {
@@ -259,7 +264,7 @@ func (c *CachingStore) cachedReadyOnly(query ReadyQuery) ([]Bead, error) {
 		default:
 			return nil, fmt.Errorf("reading ready deps from cache: %w", ErrCacheUnavailable)
 		}
-		if !cachedBeadReady(statusByID, deps) {
+		if !cachedBeadReady(b, statusByID, deps) {
 			continue
 		}
 		result = append(result, cloneBead(b))

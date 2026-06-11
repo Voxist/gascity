@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
@@ -75,6 +77,18 @@ func (s *beadPolicyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 
 func (s *beadPolicyStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 	return s.Store.Ready(expandPolicyReadyQuery(query...))
+}
+
+// Count implements beads.Counter with the same read-tier expansion as List.
+// The embedded Store interface does not promote optional capabilities, so
+// the delegation must be explicit. Inner stores without a Counter report
+// ErrCountUnsupported, signaling callers to fall back to List.
+func (s *beadPolicyStore) Count(ctx context.Context, query beads.ListQuery, excludeTypes ...string) (int, error) {
+	counter, ok := s.Store.(beads.Counter)
+	if !ok {
+		return 0, fmt.Errorf("counting beads: policy-wrapped store: %w", beads.ErrCountUnsupported)
+	}
+	return counter.Count(ctx, expandPolicyReadTier(query), excludeTypes...)
 }
 
 func (s *beadPolicyStore) Handles() beads.StoreHandles {
@@ -166,7 +180,7 @@ func (s *beadPolicyStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 }
 
 func (s *beadPolicyStore) policyForCreate(b beads.Bead) (string, string) {
-	if rootID := strings.TrimSpace(b.Metadata["gc.root_bead_id"]); rootID != "" {
+	if rootID := strings.TrimSpace(b.Metadata[beadmeta.RootBeadIDMetadataKey]); rootID != "" {
 		root, err := s.Get(rootID)
 		if err == nil && policyNameForBead(root) == beadPolicyWisp {
 			return beadPolicyWisp, storageFromPersistedWispRoot(root)
@@ -239,16 +253,16 @@ func policyNameForBead(b beads.Bead) string {
 }
 
 func isWispPolicyMetadata(metadata map[string]string) bool {
-	return metadata["gc.kind"] == "wisp"
+	return metadata[beadmeta.KindMetadataKey] == beadmeta.KindWisp
 }
 
 func isWorkflowPolicyMetadata(metadata map[string]string) bool {
 	if metadata == nil {
 		return false
 	}
-	return metadata["gc.kind"] == "workflow" ||
-		metadata["gc.formula_contract"] == "graph.v2" ||
-		strings.TrimSpace(metadata["gc.root_bead_id"]) != ""
+	return metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow ||
+		metadata[beadmeta.FormulaContractMetadataKey] == "graph.v2" ||
+		strings.TrimSpace(metadata[beadmeta.RootBeadIDMetadataKey]) != ""
 }
 
 func effectiveBeadStorage(cfg *config.City, policyName string) string {

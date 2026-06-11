@@ -116,7 +116,6 @@ Agent defines a configured agent in the city.
 | `append_fragments` | []string |  |  | AppendFragments is the V2 per-agent alias for prompt fragment injection. It layers after InjectFragments and before inherited/default fragments. |
 | `inject_assigned_skills` | boolean |  |  | InjectAssignedSkills controls whether gc appends an "assigned skills" appendix to the agent's rendered prompt. The appendix lists every skill visible to this agent, partitioned into (assigned-to-you, shared-with-every-agent), so agents sharing a scope-root sink can tell which skills are their specialization vs which are the city-wide set.  Pointer tri-state:   nil   -&gt; inherit: inject when the agent has a vendor sink   *true -&gt; explicitly inject (equivalent to the default)   *false -&gt; disable; the template is responsible for rendering             any skill guidance itself |
 | `attach` | boolean |  |  | Attach controls whether the agent's session supports interactive attachment (e.g., tmux attach). When false, the agent can use a lighter runtime (subprocess instead of tmux). Defaults to true. |
-| `fallback` | boolean |  |  | Fallback marks this agent as a fallback definition. During pack composition, a non-fallback agent with the same name wins silently. When two fallbacks collide, the first loaded (depth-first) wins. See docs/guides/shareable-packs.md for pack layout guidance. |
 | `depends_on` | []string |  |  | DependsOn lists agent names that must be awake before this agent wakes. Used for dependency-ordered startup and shutdown. Validated for cycles at config load time. |
 | `resume_command` | string |  |  | ResumeCommand is the full shell command to run when resuming this agent. Supports &#123;&#123;.SessionKey&#125;&#125; template variable. When set, takes precedence over the provider's ResumeFlag/ResumeStyle. Example:   "claude --resume &#123;&#123;.SessionKey&#125;&#125; --dangerously-skip-permissions" |
 | `wake_mode` | string |  |  | WakeMode controls context freshness across sleep/wake cycles. "resume" (default): reuse provider session key for conversation continuity. "fresh": start a new provider session on every wake (polecat pattern). Enum: `resume`, `fresh` |
@@ -158,6 +157,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `prompt_template` | string |  |  | PromptTemplate overrides the prompt template path. Relative paths resolve against the declaring config file's directory (pack-safe). Paths prefixed with "//" resolve against the city root. |
 | `session` | string |  |  | Session overrides the session transport ("acp"). |
 | `provider` | string |  |  | Provider overrides the provider name. |
+| `args` | []string |  |  | Args overrides the provider's default arguments. Leave unset to keep the pack-defined args; set to an empty list to clear them; set to a populated list to replace them entirely (full replace, not append). |
 | `start_command` | string |  |  | StartCommand overrides the start command. |
 | `lifecycle` | string |  |  | Lifecycle overrides the runtime lifecycle ("one_shot" or empty). Enum: `one_shot` |
 | `nudge` | string |  |  | Nudge overrides the nudge text. |
@@ -214,6 +214,7 @@ AgentPatch modifies an existing agent identified by (Dir, Name).
 | `prompt_template` | string |  |  | PromptTemplate overrides the prompt template path. Relative paths resolve against the declaring config file's directory (pack-safe). Paths prefixed with "//" resolve against the city root. |
 | `session` | string |  |  | Session overrides the session transport ("acp" or "tmux"). |
 | `provider` | string |  |  | Provider overrides the provider name. |
+| `args` | []string |  |  | Args overrides the provider's default arguments. Leave unset to keep the pack-defined args; set to an empty list to clear them; set to a populated list to replace them entirely (full replace, not append). |
 | `start_command` | string |  |  | StartCommand overrides the start command. |
 | `lifecycle` | string |  |  | Lifecycle overrides the runtime lifecycle ("one_shot" or empty). Enum: `one_shot` |
 | `nudge` | string |  |  | Nudge overrides the nudge text. |
@@ -258,7 +259,7 @@ BeadPolicyConfig holds storage and retention defaults for a named bead use.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `storage` | string |  |  | Storage selects the intended persistence tier: "history", "no_history", or "ephemeral". Creation paths apply this incrementally as they opt in. Enum: `history`, `no_history`, `ephemeral` |
-| `delete_after_close` | string |  |  | DeleteAfterClose deletes matching GC-owned beads after they have been closed for this duration. Accepts Go duration syntax plus whole-day "d" units, e.g. "7d" or "1d12h". Empty means the policy is not GC-managed. |
+| `delete_after_close` | string |  |  | DeleteAfterClose deletes matching GC-owned beads after they have been closed for this duration. Accepts Go duration syntax plus whole-day "d" units, e.g. "7d" or "1d12h". Empty defers to any controller-managed default for the policy type (e.g. order_tracking defaults to 7d). |
 
 ## BeadsConfig
 
@@ -300,6 +301,7 @@ ChatSessionsConfig configures chat session behavior.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `idle_timeout` | string |  |  | IdleTimeout is the duration after which a detached chat session is auto-suspended. Duration string (e.g., "30m", "1h"). 0 = disabled. |
+| `grace_period` | string |  |  | GracePeriod is the duration after creation during which a manual session is protected from idle-sleep scale-to-zero. Duration string (e.g., "10m"). Empty = use default (10m). "0" = disabled. |
 
 ## ConvergenceConfig
 
@@ -842,7 +844,7 @@ Workspace holds city-level metadata and optional defaults that apply to all agen
 | `suspended_on_start` | boolean |  |  | SuspendedOnStart is the city's desired suspension state at start. When true and no explicit entry exists in .gc/runtime/suspension-state.json, the city is treated as suspended. Once the user has explicitly suspended or resumed via `gc suspend/resume`, the runtime state wins. |
 | `max_active_sessions` | integer |  |  | MaxActiveSessions is the workspace-level cap on total concurrent sessions. Nil means unlimited. Agents and rigs inherit this if they don't set their own. |
 | `session_template` | string |  |  | SessionTemplate is a template string supporting placeholders: &#123;&#123;.City&#125;&#125;, &#123;&#123;.Agent&#125;&#125; (sanitized), &#123;&#123;.Dir&#125;&#125;, &#123;&#123;.Name&#125;&#125;. Controls tmux session naming. Default (empty): "&#123;&#123;.Agent&#125;&#125;" — just the sanitized agent name. Per-city tmux socket isolation makes a city prefix unnecessary. |
-| `install_agent_hooks` | []string |  |  | InstallAgentHooks lists provider names whose hooks should be installed into agent working directories. Agent-level overrides workspace-level (replace, not additive). Supported: "claude", "codex", "gemini", "antigravity", "kiro", "opencode", "groq", "cerebras", "copilot", "cursor", "pi", "omp". |
+| `install_agent_hooks` | []string |  |  | InstallAgentHooks lists provider names whose hooks should be installed into agent working directories. Agent-level overrides workspace-level (replace, not additive). Supported: "claude", "codex", "gemini", "antigravity", "kiro", "opencode", "groq", "cerebras", "copilot", "cursor", "pi", "omp", "kimi". |
 | `global_fragments` | []string |  |  | GlobalFragments lists named template fragments injected into every agent's rendered prompt. Applied before per-agent InjectFragments. Each name must match a &#123;&#123; define "name" &#125;&#125; block from a pack's prompts/shared/ directory. |
 | `includes` | []string |  |  | Includes is the legacy city.toml pack-composition list.  Deprecated: use root pack.toml [imports.*] instead. Run gc doctor to inspect; gc doctor --fix handles the safe mechanical rewrites available in this release wave. Each entry is a local path, a git source//sub#ref URL, or a GitHub tree URL. |
 | `default_rig_includes` | []string |  |  | DefaultRigIncludes is the legacy city.toml default-rig pack list.  Deprecated: use city.toml [defaults.rig.imports.&lt;binding&gt;] instead. Run gc doctor to inspect; gc doctor --fix handles the safe mechanical rewrites available in this release wave. |

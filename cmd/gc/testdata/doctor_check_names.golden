@@ -39,6 +39,7 @@ native-store-canary-identity
 rig-pack-coverage
 mcp-config
 mcp-shared-target
+builtin-pack-includes
 packv2-import-state
 jsonl-archive
 tmux-binary
@@ -57,15 +58,19 @@ bd-split-store
 beads-store
 v2-routed-to-namespace
 run-target-routed-to-backfill
+work-option-metadata-migration
 backlog-depth
+order-tracking-retention
 session-model
 dolt-server
+fork-rate
 dolt-noms-size
 dolt-config
 dolt-version
 events-log
 events-log-size
 bd-backup-size
+bd-backup-state
 worktree-disk-size
 nested-worktree-prune
 custom-types:city

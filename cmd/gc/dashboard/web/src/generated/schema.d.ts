@@ -2065,6 +2065,7 @@ export interface components {
         };
         AgentPatch: {
             AppendFragments: string[] | null;
+            Args: string[] | null;
             Attach: boolean | null;
             DefaultSlingFormula: string | null;
             DependsOn: string[] | null;
@@ -2230,6 +2231,7 @@ export interface components {
             ephemeral?: boolean;
             from?: string;
             id: string;
+            is_blocked?: boolean;
             issue_type: string;
             labels?: string[] | null;
             metadata?: {
@@ -2704,7 +2706,7 @@ export interface components {
             /** @description Event type. */
             type: string;
         };
-        EventPayload: components["schemas"]["AdapterEventPayload"] | components["schemas"]["BeadEventPayload"] | components["schemas"]["BeadWorktreeReapSkippedPayload"] | components["schemas"]["BeadWorktreeReapedPayload"] | components["schemas"]["BoundEventPayload"] | components["schemas"]["BreakerStateChangedPayload"] | components["schemas"]["CityCreateSucceededPayload"] | components["schemas"]["CityLifecyclePayload"] | components["schemas"]["CityUnregisterSucceededPayload"] | components["schemas"]["ControllerTickCompletedPayload"] | components["schemas"]["DoctorAlertPayload"] | components["schemas"]["GroupCreatedEventPayload"] | components["schemas"]["InboundEventPayload"] | components["schemas"]["MailEventPayload"] | components["schemas"]["NoPayload"] | components["schemas"]["OrderGateTimeoutFailOpenPayload"] | components["schemas"]["OutboundEventPayload"] | components["schemas"]["PostgresCredentialResolvedPayload"] | components["schemas"]["ProjectIdentityStampedPayload"] | components["schemas"]["ProxyReapedPayload"] | components["schemas"]["QuotaObservedPayload"] | components["schemas"]["QuotaPollFailedPayload"] | components["schemas"]["RequestFailedPayload"] | components["schemas"]["RotatedPayload"] | components["schemas"]["SessionCreateSucceededPayload"] | components["schemas"]["SessionDrainAckedWithAssignedWorkPayload"] | components["schemas"]["SessionLifecyclePayload"] | components["schemas"]["SessionMessageSucceededPayload"] | components["schemas"]["SessionResetStalledPayload"] | components["schemas"]["SessionSubmitSucceededPayload"] | components["schemas"]["StoreDegradedPayload"] | components["schemas"]["StoreDiskCriticalPayload"] | components["schemas"]["StoreDiskWarnPayload"] | components["schemas"]["StoreMaintenanceDonePayload"] | components["schemas"]["StoreMaintenanceFailedPayload"] | components["schemas"]["StoreProbeFailedPayload"] | components["schemas"]["StoreRecoveredPayload"] | components["schemas"]["SupervisorFSPressureSkippedTickPayload"] | components["schemas"]["SupervisorRequestPayload"] | components["schemas"]["SupervisorShutdownPayload"] | components["schemas"]["UnboundEventPayload"] | components["schemas"]["WorkerOperationEventPayload"];
+        EventPayload: components["schemas"]["AdapterEventPayload"] | components["schemas"]["BeadEventPayload"] | components["schemas"]["BeadWorktreeReapSkippedPayload"] | components["schemas"]["BeadWorktreeReapedPayload"] | components["schemas"]["BoundEventPayload"] | components["schemas"]["BreakerStateChangedPayload"] | components["schemas"]["CityCreateSucceededPayload"] | components["schemas"]["CityLifecyclePayload"] | components["schemas"]["CityUnregisterSucceededPayload"] | components["schemas"]["ControllerTickCompletedPayload"] | components["schemas"]["DoctorAlertPayload"] | components["schemas"]["GroupCreatedEventPayload"] | components["schemas"]["InboundEventPayload"] | components["schemas"]["MailEventPayload"] | components["schemas"]["NoPayload"] | components["schemas"]["OrderGateTimeoutFailOpenPayload"] | components["schemas"]["OutboundEventPayload"] | components["schemas"]["PostgresCredentialResolvedPayload"] | components["schemas"]["ProjectIdentityStampedPayload"] | components["schemas"]["ProxyReapedPayload"] | components["schemas"]["QuotaObservedPayload"] | components["schemas"]["QuotaPollFailedPayload"] | components["schemas"]["RequestFailedPayload"] | components["schemas"]["RotatedPayload"] | components["schemas"]["SessionCreateSucceededPayload"] | components["schemas"]["SessionDrainAckedWithAssignedWorkPayload"] | components["schemas"]["SessionLifecyclePayload"] | components["schemas"]["SessionMessageSucceededPayload"] | components["schemas"]["SessionResetStalledPayload"] | components["schemas"]["SessionStrandedPayload"] | components["schemas"]["SessionSubmitSucceededPayload"] | components["schemas"]["StoreDegradedPayload"] | components["schemas"]["StoreDiskCriticalPayload"] | components["schemas"]["StoreDiskWarnPayload"] | components["schemas"]["StoreMaintenanceDonePayload"] | components["schemas"]["StoreMaintenanceFailedPayload"] | components["schemas"]["StoreProbeFailedPayload"] | components["schemas"]["StoreRecoveredPayload"] | components["schemas"]["SupervisorFSPressureSkippedTickPayload"] | components["schemas"]["SupervisorRequestPayload"] | components["schemas"]["SupervisorShutdownPayload"] | components["schemas"]["UnboundEventPayload"] | components["schemas"]["WorkerOperationEventPayload"];
         EventRotateAnchor: {
             /**
              * Format: int64
@@ -4156,6 +4158,16 @@ export interface components {
             submission_capabilities?: components["schemas"]["SubmissionCapabilities"];
             template: string;
             title: string;
+        };
+        SessionStrandedPayload: {
+            /** @description Canonical session bead ID for the stranded pool session (also the envelope Subject). */
+            session_id: string;
+            /** @description Runtime session name from the session bead metadata, when set. */
+            session_name?: string;
+            /** @description Pool template name when known at the emission site. */
+            template?: string;
+            /** @description IDs of the open/in-progress work beads still assigned to the session. Never truncated, unlike the envelope Message. Empty when the work-collection query failed at emission time. */
+            work_bead_ids?: string[] | null;
         };
         /**
          * Session stream lifecycle event
@@ -5742,7 +5754,7 @@ export interface components {
         TypedEventStreamEnvelopeSessionStranded: {
             actor: string;
             message?: string;
-            payload: components["schemas"]["NoPayload"];
+            payload: components["schemas"]["SessionStrandedPayload"];
             /** Format: int64 */
             seq: number;
             subject?: string;
@@ -7085,7 +7097,7 @@ export interface components {
             actor: string;
             city: string;
             message?: string;
-            payload: components["schemas"]["NoPayload"];
+            payload: components["schemas"]["SessionStrandedPayload"];
             /** Format: int64 */
             seq: number;
             subject?: string;

@@ -2,8 +2,11 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
@@ -28,29 +31,19 @@ type (
 
 var statusStoreReadTimeout = time.Second
 
-// statusResponseCacheTTL bounds how long a built /status body is reused.
-//
-// Unlike the shared response cache (which keys on the event sequence and so
-// misses on every poll of a busy city — the sequence advances each tick),
-// /status keys its cache entry on a TIME bucket of this width. /status is a
-// coarse operator overview where a few seconds of staleness is acceptable
-// (the response already reports X-GC-Cache-Age-S), so on a busy city the
-// dashboard's high-frequency polls hit the cache instead of rebuilding the
-// O(store-size) body every time (gascity#3186). Strict-freshness callers
-// (blocking ?index=&wait= requests) bypass this cache; see humaHandleStatus.
-var statusResponseCacheTTL = 2 * time.Second
+// statusResponseTTLFloor lets non-blocking status requests reuse a recently
+// built body after the time-bucket entry has rolled over. The shared
+// time-bucket cache (responseCacheTimeBucket / timeBucketResponseCacheTTL in
+// response_cache.go) bounds the rebuild rate within a bucket; the floor
+// smooths the bucket-boundary miss so interactive callers with short budgets
+// never pay a full fan-out rebuild more than once per floor window (#1896).
+// Blocking (long-poll) requests bypass it because they explicitly wait for
+// change. Var, not const, so tests can pin index-driven invalidation behavior.
+var statusResponseTTLFloor = 3 * time.Second
 
-// statusCacheBucket returns a monotonically increasing generation that only
-// changes once per statusResponseCacheTTL window. Passing it where the shared
-// cache expects an event index makes /status's cache entry survive across the
-// event-sequence churn of a busy city while still expiring on a wall-clock TTL.
-func statusCacheBucket(now time.Time) uint64 {
-	ttl := statusResponseCacheTTL
-	if ttl <= 0 {
-		return uint64(now.UnixNano())
-	}
-	return uint64(now.UnixNano() / int64(ttl))
-}
+// statusWorkExcludedTypes are bead types counted as infrastructure, not
+// work, by the status endpoint's work-count buckets.
+var statusWorkExcludedTypes = []string{"message", "convoy", "convergence"}
 
 // StatusInput is the Huma input for GET /v0/status.
 type StatusInput struct {
@@ -59,8 +52,8 @@ type StatusInput struct {
 	// Lite trims the body to the cheap fleet-overview fields for
 	// high-frequency dashboard polls, omitting the expensive per-request
 	// blocks: StoreHealth (full closed-history Dolt scan), the
-	// session-count detail, and the per-rig work loop. The default/full
-	// body that `gc status` renders is unchanged (gascity#3186).
+	// session-count detail, and the per-rig work-count fan-out. The
+	// default/full body that `gc status` renders is unchanged (gascity#3186).
 	Lite bool `query:"lite" required:"false" doc:"When true, omit the expensive store-health, session-count, and work-count blocks for low-cost dashboard polls."`
 }
 
@@ -87,7 +80,7 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	// on a busy city the sequence advances every poll, so an index-keyed
 	// entry would miss on nearly every request and force a full O(store-size)
 	// rebuild (gascity#3186). The bucket changes only once per
-	// statusResponseCacheTTL, so high-frequency dashboard polls reuse the
+	// timeBucketResponseCacheTTL, so high-frequency dashboard polls reuse the
 	// built body. The ?lite variant caches under its own key (the shared
 	// cache map keys on the string key, so the suffix is enough).
 	//
@@ -98,14 +91,17 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	if input.Lite {
 		cacheKey = "status?lite"
 	}
-	bucket := statusCacheBucket(time.Now())
+	bucket := responseCacheTimeBucket(time.Now())
 	if !blocking {
 		if body, ok := cachedResponseAs[StatusBody](s, cacheKey, bucket); ok {
 			return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: body}, nil
 		}
+		if body, ok := cachedResponseWithinAgeAs[StatusBody](s, cacheKey, statusResponseTTLFloor); ok {
+			return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: body}, nil
+		}
 	}
 
-	resp := s.buildStatusBody(input.Lite)
+	resp := s.buildStatusBody(ctx, input.Lite)
 	if !blocking {
 		s.storeResponse(cacheKey, bucket, resp)
 	}
@@ -113,15 +109,17 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: resp}, nil
 }
 
-// buildStatusBody constructs the status response body.
+// buildStatusBody constructs the status response body. ctx bounds the
+// per-store work-count queries; cancellation aborts in-flight backend
+// counts.
 //
 // When lite is true the expensive per-request blocks are omitted for
-// high-frequency dashboard polls (gascity#3186): the per-rig work-count loop
-// (a scan of every rig store), the StoreHealth block (a full closed-history
+// high-frequency dashboard polls (gascity#3186): the work-count fan-out
+// (a query per rig store), the StoreHealth block (a full closed-history
 // Dolt row scan), and the session-count detail. The session snapshot itself
 // is still read because agent running/suspended state depends on it. The full
 // (non-lite) body that `gc status` renders is unchanged.
-func (s *Server) buildStatusBody(lite bool) StatusBody {
+func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
 	cityName := s.state.CityName()
@@ -231,41 +229,13 @@ func (s *Server) buildStatusBody(lite bool) StatusBody {
 		})
 	}
 
-	// Count work items (best-effort). Skipped in lite mode: scanning every
+	// Count work items (best-effort). Skipped in lite mode: querying every
 	// rig store is one of the per-request costs the lite poll avoids.
 	var wc workCounts
 	if !lite {
-		stores := s.state.BeadStores()
-		seenStores := make(map[string]bool)
-		for _, rigName := range sortedRigNames(stores) {
-			store := stores[rigName]
-			key := fmt.Sprintf("%p", store)
-			if seenStores[key] {
-				continue
-			}
-			seenStores[key] = true
-			list, err := statusListStoreWithTimeout(store, beads.ListQuery{AllowScan: true})
-			if err != nil {
-				partialErrors = append(partialErrors, fmt.Sprintf("rig %s work: %v", rigName, err))
-				if !beads.IsPartialResult(err) || len(list) == 0 {
-					continue
-				}
-			}
-			for _, b := range list {
-				switch b.Type {
-				case "message", "convoy", "convergence":
-					continue
-				}
-				switch b.Status {
-				case "in_progress":
-					wc.InProgress++
-				case "ready":
-					wc.Ready++
-				case "open":
-					wc.Open++
-				}
-			}
-		}
+		var workErrs []string
+		wc, workErrs = s.statusWorkCounts(ctx)
+		partialErrors = append(partialErrors, workErrs...)
 	}
 
 	// Count mail (best-effort).
@@ -537,6 +507,118 @@ func (s *Server) statusSessionSnapshot() statusSessionSnapshot {
 	return snapshot
 }
 
+// statusWorkResult is one store's contribution to the work counts.
+type statusWorkResult struct {
+	wc   workCounts
+	errs []string
+}
+
+// statusWorkCounts tallies open/ready/in_progress work across all rig
+// stores. Stores exposing beads.Counter answer without hydrating rows —
+// the caching layer counts matches in memory when its cache is clean
+// (#1896) — with the per-store timeout canceling any delegated backing
+// query instead of leaking a goroutine that pins a connection.
+// Stores without a Counter (or whose Counter cannot answer the query
+// shape) keep the legacy hydrating List path. Stores are queried
+// concurrently; results aggregate in deterministic rig order.
+func (s *Server) statusWorkCounts(ctx context.Context) (workCounts, []string) {
+	stores := s.state.BeadStores()
+	// sortedRigNames deduplicates rigs sharing one store instance, so each
+	// store is counted exactly once.
+	rigNames := sortedRigNames(stores)
+	results := make([]statusWorkResult, len(rigNames))
+	var wg sync.WaitGroup
+	for i, rigName := range rigNames {
+		wg.Add(1)
+		go func(i int, rigName string, store beads.Store) {
+			defer wg.Done()
+			results[i] = statusStoreWorkCounts(ctx, rigName, store)
+		}(i, rigName, stores[rigName])
+	}
+	wg.Wait()
+
+	var wc workCounts
+	var errs []string
+	for _, r := range results {
+		wc.Open += r.wc.Open
+		wc.Ready += r.wc.Ready
+		wc.InProgress += r.wc.InProgress
+		errs = append(errs, r.errs...)
+	}
+	return wc, errs
+}
+
+// statusStoreWorkCounts counts one store's work beads, preferring the
+// hydration-free Counter path. Operational count failures (timeouts,
+// connection errors) report a partial error without retrying via List —
+// the List scan would hit the same backend and pay the timeout again.
+func statusStoreWorkCounts(ctx context.Context, rigName string, store beads.Store) statusWorkResult {
+	if counter, ok := store.(beads.Counter); ok {
+		wc, err := statusCountWork(ctx, counter)
+		if err == nil {
+			return statusWorkResult{wc: wc}
+		}
+		if !errors.Is(err, beads.ErrCountUnsupported) {
+			return statusWorkResult{errs: []string{fmt.Sprintf("rig %s work: %v", rigName, err)}}
+		}
+	}
+
+	list, err := statusListStoreWithTimeout(store, beads.ListQuery{AllowScan: true})
+	var result statusWorkResult
+	if err != nil {
+		result.errs = append(result.errs, fmt.Sprintf("rig %s work: %v", rigName, err))
+		if !beads.IsPartialResult(err) || len(list) == 0 {
+			return result
+		}
+	}
+	for _, b := range list {
+		if slices.Contains(statusWorkExcludedTypes, b.Type) {
+			continue
+		}
+		switch b.Status {
+		case "in_progress":
+			result.wc.InProgress++
+		case "ready":
+			result.wc.Ready++
+		case "open":
+			result.wc.Open++
+		}
+	}
+	return result
+}
+
+// statusCountWork fills the work-count buckets via beads.Counter. One
+// shared statusStoreReadTimeout window bounds all three bucket queries —
+// the same per-store budget the legacy single-List path had, though the
+// three queries consume it serially — and derives from ctx, so a slow
+// backend query is canceled (releasing its connection) rather than
+// abandoned.
+func statusCountWork(ctx context.Context, counter beads.Counter) (workCounts, error) {
+	ctx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
+	defer cancel()
+	var wc workCounts
+	for _, bucket := range []struct {
+		status string
+		dst    *int
+	}{
+		{"open", &wc.Open},
+		{"ready", &wc.Ready},
+		{"in_progress", &wc.InProgress},
+	} {
+		n, err := counter.Count(ctx, beads.ListQuery{Status: bucket.status, AllowScan: true}, statusWorkExcludedTypes...)
+		if err != nil {
+			return workCounts{}, err
+		}
+		*bucket.dst = n
+	}
+	return wc, nil
+}
+
+// statusListStoreWithTimeout lists with the per-store read timeout.
+// Store.List takes no context, so on timeout the goroutine is abandoned
+// (it keeps its connection until the scan returns). Counter-capable
+// stores avoid this path entirely; fixing it for the remaining stores
+// requires plumbing context through Store.List.
 func statusListStoreWithTimeout(store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
 	if store == nil {
 		return nil, nil

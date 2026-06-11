@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/closeorder"
 	"github.com/gastownhall/gascity/internal/config"
@@ -76,6 +77,14 @@ const (
 	orderTrackingHistoryIndexLimit   = 2048
 	defaultMaxOrderDispatchesPerTick = 4
 	orderTrackingSweepCloseBudget    = 4
+
+	// orderTrackingRetentionWatchdogInterval is the minimum time between
+	// controller-driven closed-bead retention sweeps. 15 minutes balances
+	// effective cleanup against per-tick overhead.
+	orderTrackingRetentionWatchdogInterval = 15 * time.Minute
+	// orderTrackingRetentionWatchdogDeleteBudget bounds the number of
+	// closed order-tracking beads deleted per watchdog invocation.
+	orderTrackingRetentionWatchdogDeleteBudget = 100
 )
 
 var (
@@ -280,6 +289,14 @@ type memoryOrderDispatcher struct {
 }
 
 type orderDispatchTrackingIndex struct {
+	// mu guards entries and errs. dispatch shares ONE index across every
+	// order's open-work gate, and gateOpenWorkBounded runs each gate in a
+	// goroutine it abandons on timeout/ctx-cancel (#2893) — so multiple gate
+	// goroutines touch these maps concurrently. The lock is held only around
+	// the map reads/writes below, never across the listCanonical* bd calls, so
+	// one slow or contended store read cannot stall sibling gates (the property
+	// gateOpenWorkBounded exists to preserve).
+	mu      sync.Mutex
 	entries map[string]map[string]orderTrackingSummary
 	errs    map[string]error
 }
@@ -826,16 +843,22 @@ func (idx *orderDispatchTrackingIndex) lastRunForStore(store beads.Store, storeK
 
 func (idx *orderDispatchTrackingIndex) historyEntriesForStore(store beads.Store, storeKey string) (map[string]orderTrackingSummary, error) {
 	key := storeKey + "\x00history"
+	idx.mu.Lock()
 	if err, ok := idx.errs[key]; ok {
+		idx.mu.Unlock()
 		return nil, err
 	}
 	if entries, ok := idx.entries[key]; ok {
+		idx.mu.Unlock()
 		return entries, nil
 	}
+	idx.mu.Unlock()
 	items, err := listCanonicalRecentOrderTrackingHistoryBeads(store)
 	if err != nil {
 		wrapped := fmt.Errorf("listing order-tracking history: %w", err)
+		idx.mu.Lock()
 		idx.errs[key] = wrapped
+		idx.mu.Unlock()
 		return nil, wrapped
 	}
 	entries := make(map[string]orderTrackingSummary)
@@ -850,21 +873,31 @@ func (idx *orderDispatchTrackingIndex) historyEntriesForStore(store beads.Store,
 		}
 		entries[scopedName] = summary
 	}
+	// A sibling gate goroutine may have populated this key while we listed;
+	// both computed the same result from the same store, so last writer wins.
+	idx.mu.Lock()
 	idx.entries[key] = entries
+	idx.mu.Unlock()
 	return entries, nil
 }
 
 func (idx *orderDispatchTrackingIndex) entriesForStore(store beads.Store, storeKey string) (map[string]orderTrackingSummary, error) {
+	idx.mu.Lock()
 	if err, ok := idx.errs[storeKey]; ok {
+		idx.mu.Unlock()
 		return nil, err
 	}
 	if entries, ok := idx.entries[storeKey]; ok {
+		idx.mu.Unlock()
 		return entries, nil
 	}
+	idx.mu.Unlock()
 	items, err := listCanonicalOpenOrderTrackingBeads(store)
 	if err != nil {
 		wrapped := fmt.Errorf("listing order-tracking beads: %w", err)
+		idx.mu.Lock()
 		idx.errs[storeKey] = wrapped
+		idx.mu.Unlock()
 		return nil, wrapped
 	}
 	entries := make(map[string]orderTrackingSummary)
@@ -879,7 +912,11 @@ func (idx *orderDispatchTrackingIndex) entriesForStore(store beads.Store, storeK
 		}
 		entries[scopedName] = summary
 	}
+	// A sibling gate goroutine may have populated this key while we listed;
+	// both computed the same result from the same store, so last writer wins.
+	idx.mu.Lock()
 	idx.entries[storeKey] = entries
+	idx.mu.Unlock()
 	return entries, nil
 }
 
@@ -1323,7 +1360,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		)
 	}
 	if a.Pool != "" {
-		update.Metadata = map[string]string{"gc.routed_to": pool}
+		update.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: pool}
 	}
 	if err := store.Update(rootID, update); err != nil {
 		// Label failure is critical for duplicate-dispatch prevention.
@@ -1443,11 +1480,11 @@ func isOrderWispRootCandidate(b beads.Bead) bool {
 	if beads.IsMoleculeType(b.Type) {
 		return true
 	}
-	return b.Metadata["gc.kind"] == "workflow" || b.Metadata["gc.kind"] == "wisp"
+	return b.Metadata[beadmeta.KindMetadataKey] == "workflow" || b.Metadata[beadmeta.KindMetadataKey] == "wisp"
 }
 
 func isOrderRootOnlyWispCandidate(b beads.Bead) bool {
-	return b.Metadata["gc.kind"] == "wisp" && !beads.IsMoleculeType(b.Type)
+	return b.Metadata[beadmeta.KindMetadataKey] == "wisp" && !beads.IsMoleculeType(b.Type)
 }
 
 // isTransientNotificationBead reports whether a bead is a short-lived delivery
@@ -1489,7 +1526,7 @@ func isTransientNotificationBead(b beads.Bead) bool {
 func storeHasOpenDescendants(store beads.Store, rootID string, skip func(beads.Bead) bool) (bool, error) {
 	reader := beads.HandlesFor(store).Live
 	members, err := reader.List(beads.ListQuery{
-		Metadata:      map[string]string{"gc.root_bead_id": rootID},
+		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
 		IncludeClosed: true,
 		TierMode:      beads.TierBoth,
 	})
@@ -1642,20 +1679,20 @@ func orderWispGraphDependentOwnedByRoot(child beads.Bead, rootID string) bool {
 	if child.ID == rootID {
 		return true
 	}
-	return child.Metadata["gc.root_bead_id"] == rootID
+	return child.Metadata[beadmeta.RootBeadIDMetadataKey] == rootID
 }
 
 func orderWispMayHaveGraphDependents(bead beads.Bead) bool {
 	if isOrderWispRootCandidate(bead) {
 		return true
 	}
-	if bead.Metadata["gc.root_bead_id"] != "" {
+	if bead.Metadata[beadmeta.RootBeadIDMetadataKey] != "" {
 		return true
 	}
-	if bead.Metadata["gc.step_ref"] != "" {
+	if bead.Metadata[beadmeta.StepRefMetadataKey] != "" {
 		return true
 	}
-	if bead.Metadata["gc.logical_bead_id"] != "" {
+	if bead.Metadata[beadmeta.LogicalBeadIDMetadataKey] != "" {
 		return true
 	}
 	return false
@@ -2049,6 +2086,36 @@ func sweepClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now tim
 	return result, errors.Join(errs...)
 }
 
+// sweepClosedOrderTrackingRetentionAcrossStoresBounded is the watchdog variant
+// of sweepClosedOrderTrackingRetentionAcrossStores. It stops once the total
+// deletion count across all stores reaches limit, returning the partial deleted
+// count with a nil error on budget exhaustion. Store errors are returned as
+// normal; deletion errors within budget are propagated.
+func sweepClosedOrderTrackingRetentionAcrossStoresBounded(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) { //nolint:unparam // onlyOrders is nil at all current call sites; preserved for API parity with the unbounded variant
+	if limit <= 0 {
+		return 0, nil
+	}
+	deleted := 0
+	var errs []error
+	for i, store := range stores {
+		if store == nil {
+			continue
+		}
+		remaining := limit - deleted
+		if remaining <= 0 {
+			break
+		}
+		// Enforce the global budget by passing the remaining allowance to the
+		// per-store bounded sweep, which stops deleting once it is spent.
+		n, err := sweepClosedOrderTrackingRetentionBounded(store, now, policy, onlyOrders, remaining)
+		deleted += n
+		if err != nil {
+			errs = append(errs, fmt.Errorf("pruning closed order-tracking %s: %w", orderTrackingSweepStoreLabel(store, i), err))
+		}
+	}
+	return deleted, errors.Join(errs...)
+}
+
 func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (int, error) {
 	if store == nil {
 		return 0, fmt.Errorf("bead store unavailable")
@@ -2101,6 +2168,79 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 			continue
 		}
 		for _, entry := range entries[policy.retainLast:] {
+			if !orderTrackingClosedReferenceTime(entry).Before(cutoff) {
+				continue
+			}
+			if err := deleteWorkflowBead(store, entry.ID); err != nil {
+				deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting closed order-tracking bead %q: %w", entry.ID, err))
+				continue
+			}
+			deleted++
+		}
+	}
+	return deleted, deleteErr
+}
+
+// sweepClosedOrderTrackingRetentionBounded is the per-store bounded variant of
+// sweepClosedOrderTrackingRetention. It stops deleting once limit deletions have
+// occurred within this store call. On budget exhaustion it returns the partial
+// count with a nil error; delete errors are still propagated.
+func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) {
+	if store == nil {
+		return 0, fmt.Errorf("bead store unavailable")
+	}
+	if policy.deleteAfterClose <= 0 || limit <= 0 {
+		return 0, nil
+	}
+	if policy.retainLast < minClosedOrderTrackingRetained {
+		policy.retainLast = minClosedOrderTrackingRetained
+	}
+	entries, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+		Status:   "closed",
+		Label:    labelOrderTracking,
+		Sort:     beads.SortCreatedDesc,
+		TierMode: beads.TierBoth,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("listing closed order-tracking beads: %w", err)
+	}
+
+	byOrder := make(map[string][]beads.Bead)
+	for _, entry := range entries {
+		scopedName, ok := orderTrackingRetentionBucket(entry, onlyOrders)
+		if len(onlyOrders) > 0 {
+			if !ok {
+				continue
+			}
+		}
+		if !ok {
+			scopedName = legacyOrderTrackingRetentionBucket
+		}
+		byOrder[scopedName] = append(byOrder[scopedName], entry)
+	}
+
+	cutoff := now.Add(-policy.deleteAfterClose)
+	deleted := 0
+	var deleteErr error
+	for _, entries := range byOrder {
+		if deleted >= limit {
+			break
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			left := orderTrackingClosedReferenceTime(entries[i])
+			right := orderTrackingClosedReferenceTime(entries[j])
+			if left.Equal(right) {
+				return entries[i].ID > entries[j].ID
+			}
+			return left.After(right)
+		})
+		if len(entries) <= policy.retainLast {
+			continue
+		}
+		for _, entry := range entries[policy.retainLast:] {
+			if deleted >= limit {
+				break
+			}
 			if !orderTrackingClosedReferenceTime(entry).Before(cutoff) {
 				continue
 			}
@@ -2469,9 +2609,16 @@ func qualifyPool(pool, rig string, cfg *config.City, sourceDirHint string) (stri
 
 func qualifyPoolInDir(pool, dir, scope string, cfg *config.City, cleanHint string) (string, bool, error) {
 	var exactQualified []string
+	var exactSourceMatches []string
 	var sourceScopedMatches []string
 	var localBareMatches []string
 	var bareMatches []string
+	exactSourceBindings := map[string]bool(nil)
+	sourceScopedBindings := map[string]bool(nil)
+	if cleanHint != "" {
+		exactSourceBindings = sourceBindingsMatchingOrderHint(cfg, dir, cleanHint, agentSourceDirEqualsOrderHint)
+		sourceScopedBindings = sourceBindingsMatchingOrderHint(cfg, dir, cleanHint, agentMatchesOrderSourceHint)
+	}
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
 		if a.Dir != dir {
@@ -2485,17 +2632,31 @@ func qualifyPoolInDir(pool, dir, scope string, cfg *config.City, cleanHint strin
 			if a.BindingName == "" {
 				localBareMatches = appendUniquePoolTarget(localBareMatches, a.BindingQualifiedName())
 			}
-			if cleanHint != "" && filepath.Clean(a.SourceDir) == cleanHint {
-				sourceScopedMatches = appendUniquePoolTarget(sourceScopedMatches, a.BindingQualifiedName())
+			if cleanHint != "" {
+				if agentSourceDirEqualsOrderHint(*a, cleanHint) || exactSourceBindings[a.BindingName] {
+					exactSourceMatches = appendUniquePoolTarget(exactSourceMatches, a.BindingQualifiedName())
+				}
+				if agentMatchesOrderSourceHint(*a, cleanHint) || sourceScopedBindings[a.BindingName] {
+					sourceScopedMatches = appendUniquePoolTarget(sourceScopedMatches, a.BindingQualifiedName())
+				}
 			}
 		}
 	}
 
+	// Exact SourceDir matches (and their binding closure) take priority over
+	// tail matches: distinct packs can share the same trailing two path
+	// components (a city-local fork at packs/<name> vs the builtin pack
+	// materialized at .gc/system/packs/<name>), and a hint that names one of
+	// them exactly must not go ambiguous because the other tail-matches.
 	switch {
 	case len(exactQualified) == 1:
 		return exactQualified[0], true, nil
 	case len(exactQualified) > 1:
 		return "", false, fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(exactQualified, ", "))
+	case len(exactSourceMatches) == 1:
+		return exactSourceMatches[0], true, nil
+	case len(exactSourceMatches) > 1:
+		return "", false, fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(exactSourceMatches, ", "))
 	case len(sourceScopedMatches) == 1:
 		return sourceScopedMatches[0], true, nil
 	case len(sourceScopedMatches) > 1:
@@ -2510,6 +2671,64 @@ func qualifyPoolInDir(pool, dir, scope string, cfg *config.City, cleanHint strin
 		return "", false, fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(bareMatches, ", "))
 	}
 	return pool, false, nil
+}
+
+func sourceBindingsMatchingOrderHint(cfg *config.City, dir, cleanHint string, matches func(config.Agent, string) bool) map[string]bool {
+	bindings := make(map[string]bool)
+	for i := range cfg.Agents {
+		a := cfg.Agents[i]
+		if a.Dir != dir {
+			continue
+		}
+		if matches(a, cleanHint) {
+			bindings[a.BindingName] = true
+		}
+	}
+	return bindings
+}
+
+func agentSourceDirEqualsOrderHint(a config.Agent, cleanHint string) bool {
+	return a.SourceDir != "" && filepath.Clean(a.SourceDir) == cleanHint
+}
+
+func agentMatchesOrderSourceHint(a config.Agent, cleanHint string) bool {
+	if agentSourceDirEqualsOrderHint(a, cleanHint) {
+		return true
+	}
+	if a.SourceDir == "" {
+		return false
+	}
+	return packSourceTailMatches(filepath.Clean(a.SourceDir), cleanHint)
+}
+
+func packSourceTailMatches(source, hint string) bool {
+	sourceTail := lastPathComponents(source, 2)
+	hintTail := lastPathComponents(hint, 2)
+	if len(sourceTail) != 2 || len(hintTail) != 2 {
+		return false
+	}
+	for i := range sourceTail {
+		if sourceTail[i] != hintTail[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func lastPathComponents(path string, n int) []string {
+	clean := filepath.ToSlash(filepath.Clean(path))
+	parts := strings.Split(clean, "/")
+	compact := parts[:0]
+	for _, part := range parts {
+		if part == "" || part == "." {
+			continue
+		}
+		compact = append(compact, part)
+	}
+	if len(compact) < n {
+		return nil
+	}
+	return compact[len(compact)-n:]
 }
 
 func appendUniquePoolTarget(values []string, want string) []string {

@@ -604,6 +604,10 @@ type AgentOverride struct {
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
+	// Args overrides the provider's default arguments. Leave unset to keep
+	// the pack-defined args; set to an empty list to clear them; set to a
+	// populated list to replace them entirely (full replace, not append).
+	Args *[]string `toml:"args,omitempty"`
 	// StartCommand overrides the start command.
 	StartCommand *string `toml:"start_command,omitempty"`
 	// Lifecycle overrides the runtime lifecycle ("one_shot" or empty).
@@ -1169,7 +1173,7 @@ type Workspace struct {
 	// into agent working directories. Agent-level overrides workspace-level
 	// (replace, not additive). Supported: "claude", "codex", "gemini",
 	// "antigravity", "kiro", "opencode", "groq", "cerebras", "copilot",
-	// "cursor", "pi", "omp".
+	// "cursor", "pi", "omp", "kimi".
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
 	// GlobalFragments lists named template fragments injected into every
 	// agent's rendered prompt. Applied before per-agent InjectFragments.
@@ -1561,7 +1565,8 @@ type BeadPolicyConfig struct {
 	Storage string `toml:"storage,omitempty" jsonschema:"enum=history,enum=no_history,enum=ephemeral"`
 	// DeleteAfterClose deletes matching GC-owned beads after they have been
 	// closed for this duration. Accepts Go duration syntax plus whole-day "d"
-	// units, e.g. "7d" or "1d12h". Empty means the policy is not GC-managed.
+	// units, e.g. "7d" or "1d12h". Empty defers to any controller-managed
+	// default for the policy type (e.g. order_tracking defaults to 7d).
 	DeleteAfterClose string `toml:"delete_after_close,omitempty"`
 }
 
@@ -2154,6 +2159,10 @@ type ChatSessionsConfig struct {
 	// IdleTimeout is the duration after which a detached chat session
 	// is auto-suspended. Duration string (e.g., "30m", "1h"). 0 = disabled.
 	IdleTimeout string `toml:"idle_timeout,omitempty"`
+	// GracePeriod is the duration after creation during which a manual
+	// session is protected from idle-sleep scale-to-zero. Duration string
+	// (e.g., "10m"). Empty = use default (10m). "0" = disabled.
+	GracePeriod string `toml:"grace_period,omitempty"`
 }
 
 // SessionSleepConfig configures default idle sleep policies by session class.
@@ -2177,6 +2186,27 @@ func (c ChatSessionsConfig) IdleTimeoutDuration() time.Duration {
 	d, err := time.ParseDuration(c.IdleTimeout)
 	if err != nil {
 		return 0
+	}
+	return d
+}
+
+// DefaultManualGracePeriod is the grace period for manual sessions when
+// no explicit grace_period is configured. Protects ad-hoc sessions from
+// idle-sleep scale-to-zero during their initial startup window.
+const DefaultManualGracePeriod = 10 * time.Minute
+
+// GracePeriodDuration parses GracePeriod, returning DefaultManualGracePeriod
+// if unset, 0 if explicitly set to "0", or the parsed duration.
+func (c ChatSessionsConfig) GracePeriodDuration() time.Duration {
+	switch c.GracePeriod {
+	case "":
+		return DefaultManualGracePeriod
+	case "0", "0s":
+		return 0
+	}
+	d, err := time.ParseDuration(c.GracePeriod)
+	if err != nil {
+		return DefaultManualGracePeriod
 	}
 	return d
 }
@@ -3385,11 +3415,6 @@ type Agent struct {
 	// attachment (e.g., tmux attach). When false, the agent can use a
 	// lighter runtime (subprocess instead of tmux). Defaults to true.
 	Attach *bool `toml:"attach,omitempty"`
-	// Fallback marks this agent as a fallback definition. During pack
-	// composition, a non-fallback agent with the same name wins silently.
-	// When two fallbacks collide, the first loaded (depth-first) wins.
-	// See docs/guides/shareable-packs.md for pack layout guidance.
-	Fallback bool `toml:"fallback,omitempty"`
 	// DependsOn lists agent names that must be awake before this agent wakes.
 	// Used for dependency-ordered startup and shutdown. Validated for cycles
 	// at config load time.
@@ -4587,12 +4612,17 @@ func configuredProviderOrder(providers map[string]ProviderSpec) []string {
 	return order
 }
 
+// validationAgentKey identifies the canonical route template for an agent.
+type validationAgentKey struct{ dir, binding, name string }
+
 // ValidateAgents checks agent configurations for errors. It returns an error
-// if any agent is missing required fields, has duplicate identities, or has
-// invalid pool bounds. Uniqueness is keyed on (dir, name) — the same name
-// in different dirs is allowed.
+// if any agent is missing required fields, has duplicate canonical identities,
+// or has invalid pool bounds. Uniqueness is keyed on (dir, binding, name), so
+// the same bare name may exist in the same scope when imports qualify it under
+// different bindings.
 func ValidateAgents(agents []Agent) error {
-	seen := make(map[agentKey]int, len(agents))
+	seen := make(map[validationAgentKey]int, len(agents))
+	layoutSeen := make(map[agentKey][]int, len(agents))
 	for i, a := range agents {
 		if a.Name == "" {
 			return fmt.Errorf("agent[%d]: name is required", i)
@@ -4600,7 +4630,15 @@ func ValidateAgents(agents []Agent) error {
 		if !validAgentName.MatchString(a.Name) {
 			return fmt.Errorf("agent %q: name must match [a-zA-Z0-9][a-zA-Z0-9_-]* (no spaces, slashes, or dots)", a.Name)
 		}
-		key := agentKey{dir: a.Dir, name: a.Name}
+		layoutKey := agentKey{dir: a.Dir, name: a.Name}
+		for _, priorIdx := range layoutSeen[layoutKey] {
+			if _, _, ok := orderV1V2(agents[priorIdx], a); ok {
+				return formatDuplicateAgentError(agents[priorIdx], a)
+			}
+		}
+		layoutSeen[layoutKey] = append(layoutSeen[layoutKey], i)
+
+		key := validationAgentKey{dir: a.Dir, binding: a.BindingName, name: a.Name}
 		if priorIdx, dup := seen[key]; dup {
 			return formatDuplicateAgentError(agents[priorIdx], a)
 		}
@@ -4914,7 +4952,7 @@ func DefaultCity(name string) City {
 
 func defaultInstallAgentHooksForProvider(provider string) []string {
 	switch strings.TrimSpace(provider) {
-	case "kiro", "opencode", "groq":
+	case "kiro", "opencode", "groq", "kimi":
 		return []string{strings.TrimSpace(provider)}
 	default:
 		return nil

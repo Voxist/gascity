@@ -307,7 +307,9 @@ func (s *DoltliteReadStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		q.Limit = rq.Limit
 	}
 	readyWhere, readyArgs := s.doltliteReadyIssueWhere(doltliteIssueTables)
-	out, err := s.queryIssuesOrdered(q, readyWhere, readyArgs, q.Limit, "ORDER BY COALESCE(i.priority, 2) ASC, i.created_at ASC")
+	// The id tiebreaker keeps a LIMIT deterministic when rows share
+	// (priority, created_at) — same bug class as queryIssueTable (#3208).
+	out, err := s.queryIssuesOrdered(q, readyWhere, readyArgs, q.Limit, "ORDER BY COALESCE(i.priority, 2) ASC, i.created_at ASC, i.id ASC")
 	if err != nil {
 		return nil, err
 	}
@@ -670,6 +672,20 @@ func (s *DoltliteReadStore) DepListBatch(ids []string) (map[string][]Dep, error)
 	return result, nil
 }
 
+func (s *DoltliteReadStore) dependencySnapshotForCache(ids []string) (map[string][]Dep, bool, error) {
+	deps, err := s.DepListBatch(ids)
+	if err != nil {
+		return deps, false, err
+	}
+	return deps, true, nil
+}
+
+func (s *DoltliteReadStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, error) {
+	// Native DoltLite snapshots do not carry bd's denormalized is_blocked
+	// projection, so cached ready intentionally keeps the nil fallback.
+	return items, nil
+}
+
 func (s *DoltliteReadStore) queryDeps(where, value string) ([]Dep, error) {
 	var deps []Dep
 	for _, table := range []string{"dependencies", "wisp_dependencies"} {
@@ -920,12 +936,15 @@ func (s *DoltliteReadStore) queryIssueTable(query ListQuery, tables doltliteTabl
 	if len(where) > 0 {
 		sqlText += " WHERE " + strings.Join(where, " AND ")
 	}
+	// The id tiebreaker matches sortBeadsForQuery's (created_at, id) total
+	// order so a SQL LIMIT cuts a deterministic prefix even when rows share
+	// a created_at timestamp (#3208).
 	if orderBy != "" {
 		sqlText += " " + orderBy
 	} else if query.Sort == SortCreatedAsc {
-		sqlText += " ORDER BY i.created_at ASC"
+		sqlText += " ORDER BY i.created_at ASC, i.id ASC"
 	} else {
-		sqlText += " ORDER BY i.created_at DESC"
+		sqlText += " ORDER BY i.created_at DESC, i.id DESC"
 	}
 	if limit > 0 {
 		sqlText += fmt.Sprintf(" LIMIT %d", limit)
