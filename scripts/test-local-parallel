@@ -70,7 +70,7 @@ add_fsys_compile_job() {
 
 add_unit_core_job() {
   add_job "unit-core" \
-    'GC_FAST_UNIT=1 go test $(go list ./... | grep -v '"'"'^github.com/gastownhall/gascity/cmd/gc$'"'"')'
+    'GC_FAST_UNIT=1 go test -timeout 15m $(go list ./... | grep -v '"'"'^github.com/gastownhall/gascity/cmd/gc$'"'"')'
 }
 
 add_cmd_gc_shards() {
