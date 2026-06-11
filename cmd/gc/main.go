@@ -300,7 +300,12 @@ func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 	root.AddCommand(newGenDocCmd(stdout, stderr, root))
 
 	// Best-effort: discover pack CLI commands if we're inside a city.
-	registerPackCommands(root, stdout, stderr)
+	// Skipped when argv routes to a core command (packs can't shadow those,
+	// and tryPackCommandFallback covers execution) — the eager pass costs a
+	// full city-config + pack-DAG load per invocation (ga-4419j).
+	if packCommandsNeeded(root, os.Args) {
+		registerPackCommands(root, stdout, stderr)
+	}
 
 	installArgUsageErrors(root, stderr)
 	installFlagGroupUsageErrors(root, stderr)

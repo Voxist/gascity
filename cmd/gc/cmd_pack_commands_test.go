@@ -158,6 +158,44 @@ path = "packs/mypk"
 	}
 }
 
+func TestPackCommandsNeeded(t *testing.T) {
+	root := &cobra.Command{Use: "gc"}
+	root.AddCommand(&cobra.Command{Use: "version"})
+	root.AddCommand(&cobra.Command{Use: "bd", Aliases: []string{"beads"}})
+	root.AddCommand(&cobra.Command{Use: "session"})
+
+	cases := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		// Core-command invocations: packs cannot shadow core names
+		// (coreCommandNames), and execution of pack commands is covered by
+		// tryPackCommandFallback — eager registration would only burn the
+		// city-config + pack-DAG load. Skip it.
+		{"core command", []string{"gc", "version"}, false},
+		{"core command with args", []string{"gc", "bd", "ready", "--rig", "x"}, false},
+		{"core alias", []string{"gc", "beads", "list"}, false},
+		{"core with trailing flags", []string{"gc", "session", "list", "--json"}, false},
+
+		// Display/completion/unknown paths still need the eager pass.
+		{"bare gc (help listing)", []string{"gc"}, true},
+		{"help", []string{"gc", "help"}, true},
+		{"root help flag", []string{"gc", "--help"}, true},
+		{"any leading flag", []string{"gc", "--city", "/x", "bd"}, true},
+		{"completion", []string{"gc", "completion"}, true},
+		{"cobra __complete", []string{"gc", "__complete", "b"}, true},
+		{"pack/unknown command", []string{"gc", "deploy-prod"}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := packCommandsNeeded(root, c.args); got != c.want {
+				t.Fatalf("packCommandsNeeded(%v) = %v, want %v", c.args, got, c.want)
+			}
+		})
+	}
+}
+
 func TestCoreCommandNames(t *testing.T) {
 	root := &cobra.Command{Use: "gc"}
 	root.AddCommand(&cobra.Command{Use: "start", Aliases: []string{"up"}})

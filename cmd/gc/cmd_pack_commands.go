@@ -72,6 +72,35 @@ func registerPackCommands(root *cobra.Command, stdout, stderr io.Writer) {
 	addDiscoveredCommandsToRoot(root, cfg.PackCommands, cityPath, loadedCityName(cfg, cityPath), stdout, stderr, false)
 }
 
+// packCommandsNeeded reports whether this invocation could route to or
+// display pack-provided commands. Packs cannot shadow core command names
+// (coreCommandNames enforces this), so when argv[1] is a core subcommand the
+// eager pack registration cannot change routing or behavior — and execution
+// of pack commands without eager registration is already covered by the
+// root RunE's tryPackCommandFallback. Skipping the eager pass on core-command
+// invocations avoids the city-config load + pack-DAG expansion + repo-cache
+// locking that dominates gc CLI startup (~2-4s under agent concurrency,
+// ga-4419j) on the hot paths (gc bd / hook / mail / internal / version ...).
+//
+// Conservative by construction: anything that is not provably a core-command
+// invocation (bare gc, help, completion, a leading flag, an unknown/pack
+// name) keeps the eager registration, so help listings, completion, and
+// pack-command --help are byte-identical.
+func packCommandsNeeded(root *cobra.Command, args []string) bool {
+	if len(args) < 2 {
+		return true // bare `gc` renders help, which lists pack commands
+	}
+	first := args[1]
+	if strings.HasPrefix(first, "-") {
+		return true // leading flag (--help, --city ...): keep full tree
+	}
+	switch first {
+	case "help", "completion", "__complete", "__completeNoDesc":
+		return true
+	}
+	return !coreCommandNames(root)[first]
+}
+
 // coreCommandNames returns the set of built-in command names that packs
 // must not shadow.
 func coreCommandNames(root *cobra.Command) map[string]bool {
