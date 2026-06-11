@@ -42,10 +42,11 @@ type CachingStore struct {
 	mutationSeq     uint64
 	primePartialErr error
 
-	reconciling  atomic.Bool
-	syncFailures int
-	stats        CacheStats
-	onChange     func(eventType, beadID, runID, sessionID, stepID string, payload json.RawMessage)
+	reconciling    atomic.Bool
+	syncFailures   int
+	circuitTripped bool
+	stats          CacheStats
+	onChange       func(eventType, beadID, runID, sessionID, stepID string, payload json.RawMessage)
 	problemf     func(string)
 	problemLog   map[string]cacheProblemLogState
 
@@ -591,6 +592,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	}
 	c.state = cacheLive
 	c.syncFailures = 0
+	c.circuitTripped = false
 	c.stats.SyncFailures = 0
 	c.primePartialErr = partialErr
 	c.markFreshLocked(now)
