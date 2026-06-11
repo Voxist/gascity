@@ -68,6 +68,11 @@ const procEnumerationTimeout = 5 * time.Second
 // needs a much larger budget than the per-PID procEnumerationTimeout.
 const psEnumerationTimeout = 30 * time.Second
 
+// psEnumerationTimeout caps the full-process-table scan on hosts without /proc
+// (Darwin/macOS). ps -ax enumerates every process; on machines with many
+// processes this routinely exceeds 2 s, so we use a separate, larger timeout.
+const psEnumerationTimeout = 30 * time.Second
+
 // discoverDoltProcesses finds live `dolt sql-server` processes and reports
 // their argv and listening ports. Linux uses /proc for argv, ports, RSS, and
 // start ticks. Hosts without /proc (including Darwin/macOS) fall back to ps for

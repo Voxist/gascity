@@ -2132,6 +2132,12 @@ func TestHasRepositoryRefInSource(t *testing.T) {
 func TestResolveImportRootFallsBackToStandalonePackDir(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()
+	// Prevent /tmp/.gc/ (orphaned supervisor runtime) from poisoning city
+	// discovery: the ceiling must use the real path because os.Getwd()
+	// resolves symlinks (macOS /tmp → /private/tmp).
+	if realDir, err := filepath.EvalSymlinks(dir); err == nil {
+		t.Setenv("GC_CEILING_DIRECTORIES", realDir)
+	}
 	writePackToml(t, dir, `[pack]
 name = "demo-pack"
 schema = 1
@@ -2175,6 +2181,12 @@ schema = 1
 func TestImportAddCommandWorksInStandalonePackDir(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()
+	// Prevent /tmp/.gc/ (orphaned supervisor runtime) from poisoning city
+	// discovery: the ceiling must use the real path because os.Getwd()
+	// resolves symlinks (macOS /tmp → /private/tmp).
+	if realDir, err := filepath.EvalSymlinks(dir); err == nil {
+		t.Setenv("GC_CEILING_DIRECTORIES", realDir)
+	}
 	writePackToml(t, dir, `[pack]
 name = "demo-pack"
 schema = 1

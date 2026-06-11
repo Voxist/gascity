@@ -1,107 +1,78 @@
-# Bead effective-state analysis
+# Bead Effective-State Taxonomy
 
-**Problem this solves.** A bead's `status` field (`open` / `in_progress` /
-`closed` / …) does **not** tell you who owns the next action. The real,
-decision-relevant state is a *composite* of status + dependencies + delivery
-phase + session binding + labels + type + routing. Reconstructing it by hand —
-"is this waiting on a human? on a review? on another bead? on a router that
-never fired?" — is exactly the time-sink this process removes.
+A bead's raw `status` field (`open`, `in_progress`, `closed`, …) tells you
+what happened last; the **effective state** tells you *who owns the next
+action*. The classifier collapses status + dependencies + delivery phase +
+session binding + labels + type + routing into a single unambiguous state per
+bead.
 
-The answer is a single **effective state** per bead, each mapped to the **owner**
-of the next action. It is always *derived live* (never a stored status file, per
-the no-status-files principle) — re-run any time and it reflects reality.
+## The 16 effective states
 
-Tool: [`scripts/bead-state.py`](../../scripts/bead-state.py) (self-tested:
-`scripts/bead-state.py --selftest`). Future home: a `gc beads state` subcommand.
+| State | Owner | Description |
+|---|---|---|
+| `done` | — | Closed or delivery reached a terminal phase (merged/abandoned). No action needed. |
+| `deferred` | scheduler | Deferred to a future date; hidden from ready/blocked views until then. |
+| `pinned` | — | Explicitly frozen; excluded from automatic routing and dispatch. |
+| `orchestration` | controller | gc-internal bookkeeping bead (non-work type, wisp, nudge/order/wisp title, or gc.kind-tagged). Controller owns these. |
+| `delivering` | agent | A delivery phase is active (building, ci-pending, rework, merge-pending, conflicted). The assigned agent is working. |
+| `waiting-review` | human | Delivery phase is `review-pending`. Awaiting human code review. |
+| `waiting-decision` | human | Delivery phase is `decision-pending`. Awaiting a human-made decision. |
+| `in-progress` | agent | Actively held by a session (`status=in_progress`, `status=hooked`, or `gc.session_name` set to a live session). |
+| `orphaned` | RECLAIM | Was held by a session that is no longer live. The claim should be reclaimed and re-dispatched. |
+| `blocked-deps` | upstream-beads | Has at least one open blocking dependency (`blocks` or `conditional-blocks` type). Waiting for upstream work to close. |
+| `waiting-human` | human | Open work that requires a human to act: `human` label, `decision` type, or `gc.do_not_auto_route=1`. |
+| `epic-triage` | human/triage | An epic (type=epic or title prefix EPIC) that needs decomposition before it can be dispatched. |
+| `routed-waiting` | agent-pool | Routed to a pool via `gc.routed_to` and the target rig has live sessions. Waiting for a session to claim it. |
+| `routed-stalled-dispatch` | RECLAIM | Routed to a pool but the target rig has **no live sessions** (dispatcher may be down or pool exhausted). Needs operator attention. |
+| `ready-unrouted` | DISPATCHER | Open, unblocked, plannable, not yet routed. The dispatcher should pick this up on the next hook cycle. |
+| `unknown` | INVESTIGATE | Did not match any state in the decision tree. A gap in coverage — surface and fix. |
 
-## The raw state signals
+## Decision tree (precedence order)
 
-| Signal | Source | Values |
-| --- | --- | --- |
-| `status` | bd builtin | `open`, `in_progress`, `blocked`, `deferred`, `closed`, `pinned`, `hooked` |
-| dependencies | `bd ready` / `bd blocked` | ready set vs blocked set (open blockers) |
-| delivery phase | `gc.phase` metadata | `building`, `ci-pending`, `review-pending`, `rework`, `decision-pending`, `merge-pending`, `conflicted`, `merged`/`abandoned` (terminal) — see `internal/delivery/phase.go` |
-| session binding | `gc.session_name` + `gc session list` | bound-to-live vs bound-to-dead (orphan) |
-| routing | `gc.routed_to` | routed to a pool, or not |
-| human gate | `human` label / `type=decision` / `gc.do_not_auto_route=1` | needs a person |
-| work vs internal | `issue_type` + title | work types `{task,bug,feature,chore,epic,decision}`; everything else (session/convoy/step/…) and `^(nudge\|order\|wisp):` titles are gc-internal |
+The classifier evaluates each bead against the following rules in order; the
+first match wins.
 
-## The effective-state taxonomy
+1. **Done** — `status=closed` OR delivery phase is `merged`/`abandoned`
+2. **Deferred** — `status=deferred`
+3. **Pinned** — `status=pinned`
+4. **Orchestration** — non-work type (not task/bug/feature/chore/epic/decision),
+   OR bead ID contains `-wisp-`, OR title starts with `nudge:`/`order:`/`wisp:`,
+   OR `gc.kind` metadata is set
+5. **Waiting-review** — `gc.phase=review-pending`
+6. **Waiting-decision** — `gc.phase=decision-pending`
+7. **Delivering** — `gc.phase` is an active agent phase (building, ci-pending,
+   rework, merge-pending, conflicted)
+8. **In-progress** — `status=in_progress` OR `status=hooked` OR `gc.session_name`
+   is set to a live (non-zombie) session
+9. **Orphaned** — `gc.session_name` is set but the session is no longer live
+10. **Blocked-deps** — bead has an open blocking dependency
+11. **Waiting-human** — `human` label, `decision` type, or `gc.do_not_auto_route=1`
+12. **Epic-triage** — `type=epic` or title starts with `EPIC`
+13. **Routed-stalled-dispatch** — `gc.routed_to` is set but the target rig has
+    no live sessions (checked via `liveRigs` set)
+14. **Routed-waiting** — `gc.routed_to` is set
+15. **Ready-unrouted** — `status=open`, in the ready set, and a plannable type
+    (task/bug/feature/chore)
+16. **Unknown** — nothing matched
 
-Each bead resolves to **exactly one** state. `owner` answers "who do I
-nudge / unblock / wait on?".
+## Sync requirements
 
-| Effective state | Owner | Meaning / determined by |
-| --- | --- | --- |
-| `ready-unrouted` | **DISPATCHER** ⚠️ | open, ready, plannable, **not routed** — the router should have picked it up. If stale (> ~1d) this is a **routing gap** (the expensive-to-diagnose case). |
-| `orphaned` | **RECLAIM** ⚠️ | `gc.session_name` set but that session is **dead** — work stranded; `open` ones are skipped by the work-query as "taken", `in_progress` ones are zombies. |
-| `unknown` | **INVESTIGATE** ⚠️ | a work-typed bead that matched no rule — a **gap in the model**. Should be ~0; non-zero means extend the taxonomy. |
-| `blocked-deps` | upstream beads | in the `bd blocked` set — waiting on other beads to close. |
-| `waiting-human` | human | `human` label, `type=decision`, or `gc.do_not_auto_route=1`. |
-| `waiting-review` | human | `gc.phase=review-pending` — a PR awaits human review. |
-| `waiting-decision` | human | `gc.phase=decision-pending` — a merge/keep decision awaits a human. |
-| `epic-triage` | human/triage | `type=epic` or `EPIC:` title — a container needing decomposition. |
-| `routed-waiting` | agent-pool | routed via `gc.routed_to`, awaiting pool pickup (imminent). |
-| `in-progress` | agent | `status∈{in_progress,hooked}` or bound to a **live** session. |
-| `delivering` | agent | `gc.phase∈{building,ci-pending,rework,merge-pending,conflicted}`. |
-| `orchestration` | controller | gc-internal runtime beads: session/convoy/step/wisp + `nudge:`/`order:`/`wisp:` markers + anything with `gc.kind`. Not human/agent work. |
-| `deferred` | scheduler | `status=deferred`. |
-| `pinned` | — | `status=pinned` — persistent by design. |
-| `done` | — | `status=closed` or terminal phase (`merged`/`abandoned`). |
+Two constant sets in `internal/beads/state/classify.go` must stay in sync with
+the dispatcher's unrouted-feeder definitions:
 
-## The decision tree (precedence — FIRST match wins)
+- **`workTypes`** — the set of bead types treated as human-meaningful work.
+  Anything not in this set is classified as `orchestration`. Must match the
+  dispatcher's `PLANNABLE_TYPES` definition (which also includes `epic` and
+  `decision` as non-dispatchable work types).
 
-Order matters: a bead can satisfy several signals; the **most specific / most
-blocking** one wins.
+- **`internalTitleRe`** — the regex matching gc-internal beads by title prefix
+  (`nudge:`, `order:`, `wisp:`). Must match the dispatcher's
+  `GC_INTERNAL_TITLE_RE` definition.
 
-1. **terminal/frozen** — closed/terminal-phase → `done`; `deferred`; `pinned`
-2. **orchestration** — non-work type, `-wisp-` id, `nudge:`/`order:`/`wisp:` title, or `gc.kind` set
-3. **delivery phase** — `review-pending` → `waiting-review`; `decision-pending` → `waiting-decision`; agent phases → `delivering`
-4. **active session** — `in_progress`/`hooked` or `gc.session_name` set → `in-progress`, **unless** the session is dead → `orphaned`
-5. **blocked** — in `bd blocked` → `blocked-deps`
-6. **human gate** — `human` label / `type=decision` / `do_not_auto_route` → `waiting-human`
-7. **epic** — `type=epic`/`EPIC:` → `epic-triage`
-8. **routed** — `gc.routed_to` set → `routed-waiting`
-9. **ready + plannable + unrouted** → `ready-unrouted`
-10. else → `unknown`
+If either set drifts, beads that should be `ready-unrouted` will instead appear
+as `orchestration`, causing the dispatcher to skip them silently.
 
-## Usage
+## Home
 
-```bash
-# Full breakdown for the city in the current directory:
-scripts/bead-state.py
-
-# One rig, or one state with ids:
-scripts/bead-state.py --rig <rig-name>
-scripts/bead-state.py --state ready-unrouted
-scripts/bead-state.py --ids          # ids under every state
-scripts/bead-state.py --json         # machine-readable
-
-scripts/bead-state.py --selftest     # verify the taxonomy
-```
-
-## How to read the result — the three "you are losing time" signals
-
-Investigate these **first**; they are why dispatch silently stalls:
-
-- **`orphaned` > 0** — stranded work bound to dead sessions. The fix is to clear
-  `gc.session_name` so it re-enters the queue (what a delivery-warden /
-  orphan-reaper automates). Until then it consumes pool headroom and is invisible
-  to the work-query.
-- **`ready-unrouted` stale** — the router (unrouted-feeder) isn't placing ready
-  work. Check feeder cadence, planner headroom, and that `gc hook` actually
-  surfaces routed work (see `gc-hook-deaddrop` notes: a broken `bd context` or a
-  rejected dolt mode makes every hook return `[]`).
-- **`unknown` > 0** — a bead the model can't classify. Extend the taxonomy (and
-  this doc + `bead-state.py` together).
-
-Everything in `waiting-human` / `waiting-review` / `waiting-decision` /
-`epic-triage` is **not** a fault — it is correctly parked on a person. A drained
-backlog of only those states means the fleet is healthy and waiting on you, not
-stuck.
-
-## Keep in sync
-
-The "work vs internal" rule mirrors the unrouted-feeder's `PLANNABLE_TYPES` +
-`GC_INTERNAL_TITLE_RE`. If the feeder's definition of "work" changes, update both
-it and `bead-state.py` so the classifier still agrees with the dispatcher.
+The Go implementation lives at `internal/beads/state/classify.go`.
+The first-class CLI command is `gc beads state` (`cmd/gc/cmd_beads_state.go`).

@@ -35,6 +35,7 @@ fallback to direct bd reads.`,
 		newBeadsHealthCmd(stdout, stderr),
 		newBeadsListCmd(stdout, stderr),
 		newBeadsShowCmd(stdout, stderr),
+		newBeadsStateCmd(stdout, stderr),
 	)
 	return cmd
 }
