@@ -315,23 +315,21 @@ func openEventsScope(apiURLOverride string, stderr io.Writer) (eventsAPIScope, i
 }
 
 func resolveEventsScope(apiURLOverride string) (eventsAPIScope, error) {
+	if override := strings.TrimSpace(apiURLOverride); override != "" {
+		localSupervisorAPI := matchesLocalSupervisorAPI(override)
+		return eventsAPIScope{
+			apiURL:             strings.TrimRight(override, "/"),
+			explicitAPI:        true,
+			localSupervisorAPI: localSupervisorAPI,
+		}, nil
+	}
+
 	cityPath, cfg, err := resolveDashboardContext()
 	if err != nil {
 		return eventsAPIScope{}, err
 	}
 
 	cityName := resolvedEventsCityName(cityPath, cfg)
-	if override := strings.TrimSpace(apiURLOverride); override != "" {
-		localSupervisorAPI := matchesLocalSupervisorAPI(override)
-		cityName = resolvedExplicitEventsCityName(override, cityPath, cityName)
-		return eventsAPIScope{
-			apiURL:             strings.TrimRight(override, "/"),
-			cityName:           cityName,
-			cityPath:           cityPath,
-			explicitAPI:        true,
-			localSupervisorAPI: localSupervisorAPI,
-		}, nil
-	}
 
 	if supervisorAliveHook() != 0 {
 		cityName = resolvedManagedEventsCityName(cityPath, cityName)
@@ -375,13 +373,6 @@ func resolveEventsScope(apiURLOverride string) (eventsAPIScope, error) {
 		cityPath,
 		"gc supervisor start",
 	)
-}
-
-func resolvedExplicitEventsCityName(apiURLOverride, cityPath, fallback string) string {
-	if !matchesLocalSupervisorAPI(apiURLOverride) {
-		return fallback
-	}
-	return resolvedManagedEventsCityName(cityPath, fallback)
 }
 
 func matchesLocalSupervisorAPI(apiURLOverride string) bool {
