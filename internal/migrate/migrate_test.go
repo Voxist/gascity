@@ -943,6 +943,9 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		"SharedMCP":    true,
 		"SkillsDir":    true, // runtime-only (discovered from agents/<n>/skills/)
 		"MCPDir":       true, // runtime-only (discovered from agents/<n>/mcp/)
+		// Fork-side provider-governor classification — not part of v0
+		// migration data, so migrate intentionally does not propagate it.
+		"Tier": true,
 	}
 
 	cfgFields := make(map[string]bool)
