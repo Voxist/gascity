@@ -363,6 +363,9 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 		report.Reaped.Errors = append(report.Reaped.Errors, err.Error())
 		return
 	}
+	if len(procs) == 0 {
+		return
+	}
 
 	rigPorts := protectedDoltPortsForReap(opts)
 	tempDir := opts.TempDir

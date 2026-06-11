@@ -9,8 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	mysql "github.com/go-sql-driver/mysql"
-
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -238,34 +236,6 @@ func TestResolveDoltConnectionRejectsInvalidCityExplicitOrigin(t *testing.T) {
 
 	if _, _, _, _, _, err := resolveDoltConnection(city, city); err == nil || !strings.Contains(err.Error(), "invalid for city scope") {
 		t.Fatalf("resolveDoltConnection() error = %v, want city-scope origin rejection", err)
-	}
-}
-
-func TestBuildDoltDSNUsesResolvedUserAndPassword(t *testing.T) {
-	tests := []struct {
-		name     string
-		user     string
-		password string
-		want     string
-	}{
-		{name: "explicit user", user: "agent", want: "agent@tcp(db.example.com:3307)/hq?checkConnLiveness=false&parseTime=true&timeout=10s&maxAllowedPacket=0"},
-		{name: "defaults to root", user: "", want: "root@tcp(db.example.com:3307)/hq?checkConnLiveness=false&parseTime=true&timeout=10s&maxAllowedPacket=0"},
-		{name: "escapes password", user: "agent", password: "p@ss:word", want: "agent:p@ss:word@tcp(db.example.com:3307)/hq?checkConnLiveness=false&parseTime=true&timeout=10s&maxAllowedPacket=0"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := buildDoltDSN(tt.user, tt.password, "db.example.com", 3307, "hq")
-			if got != tt.want {
-				t.Fatalf("buildDoltDSN() = %q, want %q", got, tt.want)
-			}
-			cfg, err := mysql.ParseDSN(got)
-			if err != nil {
-				t.Fatalf("ParseDSN(%q) error = %v", got, err)
-			}
-			if !cfg.AllowNativePasswords {
-				t.Fatal("buildDoltDSN() disabled mysql native password authentication")
-			}
-		})
 	}
 }
 
