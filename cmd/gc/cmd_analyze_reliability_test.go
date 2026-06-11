@@ -424,6 +424,7 @@ func TestResolveEventsPath_CityFlagComputesPath(t *testing.T) {
 }
 
 func TestResolveEventsPath_NoSourceReturnsError(t *testing.T) {
+	clearGCEnv(t)
 	t.Setenv("GC_CITY", "")
 	t.Setenv("GC_CITY_PATH", "")
 	t.Setenv("GC_CITY_ROOT", "")
@@ -434,18 +435,10 @@ func TestResolveEventsPath_NoSourceReturnsError(t *testing.T) {
 		cityFlag = prevCityFlag
 		rigFlag = prevRigFlag
 	})
-	origCwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
 	cwd := t.TempDir()
-	if err := os.Chdir(cwd); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = os.Chdir(origCwd) //nolint:errcheck
-	})
-	_, err = resolveEventsPath(reliabilityCmdOptions{})
+	t.Chdir(cwd)
+	t.Setenv("GC_CEILING_DIRECTORIES", cwd)
+	_, err := resolveEventsPath(reliabilityCmdOptions{})
 	if err == nil {
 		t.Fatal("expected error when no city is findable")
 	}

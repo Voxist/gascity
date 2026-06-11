@@ -6237,12 +6237,10 @@ prompt_template = "prompts/mayor.md"
 // TestDoPrimeStrictNoCity verifies --strict errors when no city config
 // can be resolved, rather than silently emitting the default prompt.
 func TestDoPrimeStrictNoCity(t *testing.T) {
+	clearGCEnv(t)
 	dir := t.TempDir()
-	orig, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(orig) })
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
+	t.Chdir(dir)
+	t.Setenv("GC_CEILING_DIRECTORIES", dir)
 
 	var stdout, stderr bytes.Buffer
 	code := doPrimeWithMode([]string{"anyname"}, &stdout, &stderr, false, true)

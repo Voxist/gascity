@@ -9,8 +9,11 @@ import (
 )
 
 func TestRunDashboardServeAllowsNoCityWithSupervisor(t *testing.T) {
+	clearGCEnv(t)
 	configureIsolatedRuntimeEnv(t)
-	t.Chdir(t.TempDir())
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("GC_CEILING_DIRECTORIES", dir)
 
 	oldAlive := supervisorAliveHook
 	oldServe := dashboardServeHook

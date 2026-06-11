@@ -2137,18 +2137,12 @@ name = "demo-pack"
 schema = 1
 `)
 
-	cwd, err := os.Getwd()
+	t.Chdir(dir)
+	realDir, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("Getwd: %v", err)
 	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("Chdir(%q): %v", dir, err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chdir(cwd); err != nil {
-			t.Fatalf("restore cwd: %v", err)
-		}
-	})
+	t.Setenv("GC_CEILING_DIRECTORIES", realDir)
 
 	prevCityFlag := cityFlag
 	prevRigFlag := rigFlag
@@ -2163,12 +2157,18 @@ schema = 1
 	if err != nil {
 		t.Fatalf("resolveImportRoot: %v", err)
 	}
-	want, err := filepath.EvalSymlinks(dir)
+	// Normalize both via EvalSymlinks: resolveImportRoot uses filepath.Abs (no symlink
+	// resolution) while t.TempDir may return a symlink path (e.g. /tmp on macOS).
+	gotReal, err := filepath.EvalSymlinks(got)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", got, err)
+	}
+	wantReal, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		t.Fatalf("EvalSymlinks(%q): %v", dir, err)
 	}
-	if got != want {
-		t.Fatalf("resolveImportRoot() = %q, want %q", got, want)
+	if gotReal != wantReal {
+		t.Fatalf("resolveImportRoot() = %q (real: %q), want real path %q", got, gotReal, wantReal)
 	}
 }
 
@@ -2180,18 +2180,12 @@ name = "demo-pack"
 schema = 1
 `)
 
-	cwd, err := os.Getwd()
+	t.Chdir(dir)
+	realDir, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("Getwd: %v", err)
 	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("Chdir(%q): %v", dir, err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chdir(cwd); err != nil {
-			t.Fatalf("restore cwd: %v", err)
-		}
-	})
+	t.Setenv("GC_CEILING_DIRECTORIES", realDir)
 
 	prevCityFlag := cityFlag
 	prevRigFlag := rigFlag
