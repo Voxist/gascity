@@ -1106,6 +1106,23 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 		rollbackPendingCreate(session, store, clk.Now().UTC(), stderr)
 	}
+	// O(1) tmux ls snapshot instead of O(n) per-session has-session probes.
+	// With 80+ phantoms the per-session path saturates the 50 ms probe budget
+	// → partial status → the spawn/phantom vicious cycle (vp-g0z1).
+	var listedRunning []string
+	var listRunErr error
+	if sp != nil {
+		listedRunning, listRunErr = sp.ListRunning("")
+	}
+	listRunPartial := listRunErr != nil && runtime.IsPartialListError(listRunErr)
+	visibleSet := make(map[string]bool, len(listedRunning))
+	if listRunErr == nil || listRunPartial {
+		for _, sn := range listedRunning {
+			if sn = strings.TrimSpace(sn); sn != "" {
+				visibleSet[sn] = true
+			}
+		}
+	}
 	phaseStart = time.Now()
 	for i := range ordered {
 		if ctx != nil && ctx.Err() != nil {
@@ -1140,9 +1157,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Handle BEFORE heal/stability to avoid false crash detection —
 		// a running session that leaves the desired set is not a crash.
 		if !desired {
-			providerAlive, err := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, session.ID)
-			if err != nil {
-				providerAlive = false
+			var (
+				providerAlive bool
+				err           error
+			)
+			if listRunErr == nil || listRunPartial {
+				providerAlive = visibleSet[name]
+			} else {
+				providerAlive, err = workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, session.ID)
+				if err != nil {
+					providerAlive = false
+				}
 			}
 			// Run this before configured named-session preservation. A stale
 			// state=creating bead with an expired pending-create lease would
