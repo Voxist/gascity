@@ -949,7 +949,6 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
 			if err := shutdownBeadsProvider(cityPath); err != nil {
 				fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", mc.name, err) //nolint:errcheck
 			}
-			doltpool.Shutdown()
 			if mc.closer != nil {
 				mc.closer.Close() //nolint:errcheck
 			}
@@ -983,7 +982,6 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
 	if err := shutdownBeadsProvider(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", mc.name, err) //nolint:errcheck
 	}
-	doltpool.Shutdown()
 	if mc.closer != nil {
 		mc.closer.Close() //nolint:errcheck
 	}
@@ -1071,6 +1069,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		return 1
 	}
 	defer lock.Close() //nolint:errcheck
+	defer doltpool.Shutdown()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1990,7 +1989,6 @@ func reconcileCities(
 					if err := shutdownBeadsProvider(p); err != nil {
 						fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store: %v\n", n, err) //nolint:errcheck
 					}
-					doltpool.Shutdown()
 					// Close the file recorder (only on panic — normal exit
 					// leaves it for the external caller via mc.closer).
 					if cityFr != nil {
