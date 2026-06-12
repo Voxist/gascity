@@ -232,7 +232,7 @@ func TestCityStatusSnapshotRosterSurvivesDegradedSnapshot(t *testing.T) {
 		},
 	}
 	store := beads.NewMemStore()
-	degraded := newSessionBeadSnapshotWithError(nil, errors.New("loading session snapshot timed out after 20ms"))
+	degraded := newSessionBeadSnapshotWithError(errors.New("loading session snapshot timed out after 20ms"))
 
 	var stderr bytes.Buffer
 	snapshot := collectCityStatusSnapshotFromStoreSnapshot(runtime.NewFake(), cfg, "/city", store, degraded, &stderr)

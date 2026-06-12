@@ -25,7 +25,7 @@ type Registry struct {
 	mu       sync.Mutex
 	settings Settings
 	onChange func(Transition)
-	jitter   func(cap time.Duration) time.Duration
+	jitter   func(capacity time.Duration) time.Duration
 	breakers map[Key]*Breaker
 }
 
@@ -74,7 +74,7 @@ func (r *Registry) Breaker(scope, opClass string) *Breaker {
 // SetJitterForTest pins the open-state jitter function on the registry
 // and every existing breaker so backoff deadlines are deterministic in
 // tests. Test-only.
-func (r *Registry) SetJitterForTest(fn func(cap time.Duration) time.Duration) {
+func (r *Registry) SetJitterForTest(fn func(capacity time.Duration) time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.jitter = fn

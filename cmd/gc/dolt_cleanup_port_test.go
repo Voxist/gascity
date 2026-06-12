@@ -8,10 +8,10 @@ import (
 
 // fakeLiveResolve returns a LiveResolve seam that resolves to the given port
 // via the managed-handle source.
-func fakeLiveResolve(port int) func(string) (liveDoltPortResolution, error) {
+func fakeLiveResolve() func(string) (liveDoltPortResolution, error) {
 	return func(string) (liveDoltPortResolution, error) {
 		return liveDoltPortResolution{
-			Port:   port,
+			Port:   28231,
 			Source: liveDoltHandleSource,
 			Attempts: []PortResolutionAttempt{
 				{Source: liveDoltHandleSource, Status: "found", Detail: "live"},
@@ -23,7 +23,7 @@ func fakeLiveResolve(port int) func(string) (liveDoltPortResolution, error) {
 // fakeLiveResolveMiss returns a LiveResolve seam where neither live source
 // finds an endpoint (clean not-found, no errors).
 func fakeLiveResolveMiss() func(string) (liveDoltPortResolution, error) {
-	return func(cityPath string) (liveDoltPortResolution, error) {
+	return func(_ string) (liveDoltPortResolution, error) {
 		return liveDoltPortResolution{
 			Attempts: []PortResolutionAttempt{
 				{Source: liveDoltHandleSource, Status: "not-found"},
@@ -51,7 +51,7 @@ func TestResolveDoltPort_FlagWins(t *testing.T) {
 		Flag:        "9999",
 		CityPort:    4242,
 		CityPath:    "/city",
-		LiveResolve: fakeLiveResolve(28231),
+		LiveResolve: fakeLiveResolve(),
 	}
 
 	got := ResolveDoltPort(in)
@@ -93,7 +93,7 @@ func TestResolveDoltPort_CityConfigBeatsLiveResolution(t *testing.T) {
 	in := PortResolverInput{
 		CityPort:    4242,
 		CityPath:    "/city",
-		LiveResolve: fakeLiveResolve(28231),
+		LiveResolve: fakeLiveResolve(),
 	}
 
 	got := ResolveDoltPort(in)
@@ -109,7 +109,7 @@ func TestResolveDoltPort_CityConfigBeatsLiveResolution(t *testing.T) {
 func TestResolveDoltPort_LiveResolutionWins(t *testing.T) {
 	in := PortResolverInput{
 		CityPath:    "/city",
-		LiveResolve: fakeLiveResolve(28231),
+		LiveResolve: fakeLiveResolve(),
 	}
 
 	got := ResolveDoltPort(in)

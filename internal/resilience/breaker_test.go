@@ -30,7 +30,7 @@ func (c *testClock) Advance(d time.Duration) {
 
 // maxJitter pins full jitter to its upper bound so open deadlines are
 // deterministic in tests.
-func maxJitter(cap time.Duration) time.Duration { return cap }
+func maxJitter(capacity time.Duration) time.Duration { return capacity }
 
 func newTestBreaker(t *testing.T, settings Settings, clock *testClock, onChange func(Transition)) *Breaker {
 	t.Helper()
@@ -382,7 +382,7 @@ func TestBreakerFullJitterStaysWithinCap(t *testing.T) {
 	}
 }
 
-func TestBreakerConcurrentAccess(t *testing.T) {
+func TestBreakerConcurrentAccess(_ *testing.T) {
 	b := newBreaker("scope-a", "bd", DefaultSettings(), nil)
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {

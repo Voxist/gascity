@@ -97,7 +97,7 @@ func breakerTestRunner(cityPath string) beads.CommandRunner {
 func TestBdRunnerTransportFailuresTripBreakerToErrStoreUnavailable(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	cityPath := writeBreakerTestCity(t, "")
-	bdResilienceRegistryForCity(cityPath).SetJitterForTest(func(cap time.Duration) time.Duration { return cap })
+	bdResilienceRegistryForCity(cityPath).SetJitterForTest(func(capDur time.Duration) time.Duration { return capDur })
 	calls := installFakeBdExec(t, func(_, _ string, _ ...string) ([]byte, error) {
 		return nil, fmt.Errorf("dial tcp 127.0.0.1:3307: connection refused")
 	})
@@ -129,7 +129,7 @@ func TestBdRunnerTransportFailuresTripBreakerToErrStoreUnavailable(t *testing.T)
 func TestBdRunnerScopesBreakerIndependently(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	cityPath := writeBreakerTestCity(t, "")
-	bdResilienceRegistryForCity(cityPath).SetJitterForTest(func(cap time.Duration) time.Duration { return cap })
+	bdResilienceRegistryForCity(cityPath).SetJitterForTest(func(capDur time.Duration) time.Duration { return capDur })
 	calls := installFakeBdExec(t, func(_, _ string, _ ...string) ([]byte, error) {
 		return nil, fmt.Errorf("dial tcp 127.0.0.1:3307: connection refused")
 	})
@@ -170,7 +170,7 @@ func TestBdRunnerApplicationErrorsDoNotTripBreaker(t *testing.T) {
 func TestBdRunnerSuccessResetsConsecutiveFailures(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	cityPath := writeBreakerTestCity(t, "")
-	bdResilienceRegistryForCity(cityPath).SetJitterForTest(func(cap time.Duration) time.Duration { return cap })
+	bdResilienceRegistryForCity(cityPath).SetJitterForTest(func(capDur time.Duration) time.Duration { return capDur })
 	fail := true
 	failures := 0
 	installFakeBdExec(t, func(_, _ string, _ ...string) ([]byte, error) {
@@ -221,7 +221,7 @@ func TestBdRunnerBreakerDisabledByConfig(t *testing.T) {
 func TestBdRunnerNonBdCommandsBypassBreaker(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	cityPath := writeBreakerTestCity(t, "")
-	bdResilienceRegistryForCity(cityPath).SetJitterForTest(func(cap time.Duration) time.Duration { return cap })
+	bdResilienceRegistryForCity(cityPath).SetJitterForTest(func(capDur time.Duration) time.Duration { return capDur })
 	calls := installFakeBdExec(t, func(_, name string, _ ...string) ([]byte, error) {
 		if name == "bd" {
 			return nil, fmt.Errorf("dial tcp 127.0.0.1:3307: connection refused")

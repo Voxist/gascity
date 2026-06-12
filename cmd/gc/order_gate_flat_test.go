@@ -69,7 +69,7 @@ func TestHasOpenWorkStrictFlatEvaluation(t *testing.T) {
 	}{
 		{
 			name: "no order beads",
-			seed: func(t *testing.T, store beads.Store) {},
+			seed: func(_ *testing.T, _ beads.Store) {},
 			want: false,
 		},
 		{
