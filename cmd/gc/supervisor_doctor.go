@@ -82,7 +82,7 @@ func runSupervisorDoctorSubset(reg *cityRegistry, stderr io.Writer) {
 }
 
 // evaluateCityDoctorSubset runs the subset for one city's controller state.
-func evaluateCityDoctorSubset(state api.State, stderr io.Writer) {
+func evaluateCityDoctorSubset(state api.State, _ io.Writer) {
 	cfg := state.Config()
 	if cfg == nil {
 		return

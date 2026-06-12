@@ -53,12 +53,12 @@ func parentDir(p string) string {
 // putCanonicalCityConfig writes a city_canonical scope config into the fake
 // FS so contract.ResolveDoltConnectionTarget resolves the city endpoint from
 // config alone (no managed runtime state, no network).
-func putCanonicalCityConfig(fs *fsys.Fake, cityPath, port string) {
-	fs.Files[cityPath+"/.beads/config.yaml"] = []byte("issue_prefix: gc\n" +
+func putCanonicalCityConfig(fs *fsys.Fake) {
+	fs.Files["/city/.beads/config.yaml"] = []byte("issue_prefix: gc\n" +
 		"gc.endpoint_origin: city_canonical\n" +
 		"gc.endpoint_status: verified\n" +
 		"dolt.host: 127.0.0.1\n" +
-		"dolt.port: \"" + port + "\"\n")
+		"dolt.port: \"28231\"\n")
 }
 
 // putExplicitRigConfig writes an explicit-endpoint rig scope config into the
@@ -372,7 +372,7 @@ func TestRunDoltCleanup_ForceSkipsPurgeForMissingRigDatabases(t *testing.T) {
 func TestRunDoltCleanup_ForceSkipsPurgeBytesForRigsOnDifferentPort(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/.beads/metadata.json"] = []byte(`{"dolt_database":"hq"}`)
-	putCanonicalCityConfig(fs, "/city", "28231")
+	putCanonicalCityConfig(fs)
 	putFakeDirTree(fs, "/city/.beads/dolt/.dolt_dropped_databases", map[string]int64{
 		"db_a/data.bin": 100,
 	})
@@ -430,7 +430,7 @@ func TestRunDoltCleanup_ForceSkipsPurgeBytesForRigsOnDifferentPort(t *testing.T)
 func TestRunDoltCleanup_DryRunSkipsPurgeBytesForRigsOnDifferentPort(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/.beads/metadata.json"] = []byte(`{"dolt_database":"hq"}`)
-	putCanonicalCityConfig(fs, "/city", "28231")
+	putCanonicalCityConfig(fs)
 	putFakeDirTree(fs, "/city/.beads/dolt/.dolt_dropped_databases", map[string]int64{
 		"db_a/data.bin": 100,
 	})
@@ -763,7 +763,7 @@ func TestRigSharesResolvedDoltServer_ContractResolutionDecides(t *testing.T) {
 
 	t.Run("city scope with canonical endpoint shares", func(t *testing.T) {
 		fs := fsys.NewFake()
-		putCanonicalCityConfig(fs, "/city", "28231")
+		putCanonicalCityConfig(fs)
 		opts := cleanupOptions{FS: fs, CityPath: "/city", PortResolution: resolved}
 		if !rigSharesResolvedDoltServer(resolverRig{Name: "city", Path: "/city", HQ: true}, opts) {
 			t.Error("city scope on the resolved canonical port must share")
@@ -772,7 +772,7 @@ func TestRigSharesResolvedDoltServer_ContractResolutionDecides(t *testing.T) {
 
 	t.Run("inherited rig under canonical city shares", func(t *testing.T) {
 		fs := fsys.NewFake()
-		putCanonicalCityConfig(fs, "/city", "28231")
+		putCanonicalCityConfig(fs)
 		opts := cleanupOptions{FS: fs, CityPath: "/city", PortResolution: resolved}
 		// Rig has no canonical config: it inherits the city endpoint, which
 		// provably matches the resolved port.
@@ -783,7 +783,7 @@ func TestRigSharesResolvedDoltServer_ContractResolutionDecides(t *testing.T) {
 
 	t.Run("explicit rig on a different port does not share", func(t *testing.T) {
 		fs := fsys.NewFake()
-		putCanonicalCityConfig(fs, "/city", "28231")
+		putCanonicalCityConfig(fs)
 		putExplicitRigConfig(fs, "/rigs/r", "28232")
 		opts := cleanupOptions{FS: fs, CityPath: "/city", PortResolution: resolved}
 		if rigSharesResolvedDoltServer(resolverRig{Name: "r", Path: "/rigs/r"}, opts) {
@@ -793,7 +793,7 @@ func TestRigSharesResolvedDoltServer_ContractResolutionDecides(t *testing.T) {
 
 	t.Run("invalid rig config fails closed", func(t *testing.T) {
 		fs := fsys.NewFake()
-		putCanonicalCityConfig(fs, "/city", "28231")
+		putCanonicalCityConfig(fs)
 		fs.Files["/rigs/r/.beads/config.yaml"] = []byte("issue_prefix: r\ngc.endpoint_origin: explicit\n")
 		opts := cleanupOptions{FS: fs, CityPath: "/city", PortResolution: resolved}
 		if rigSharesResolvedDoltServer(resolverRig{Name: "r", Path: "/rigs/r"}, opts) {

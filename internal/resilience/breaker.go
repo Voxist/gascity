@@ -133,7 +133,7 @@ type Breaker struct {
 
 	// now and jitter are injectable for deterministic tests.
 	now    func() time.Time
-	jitter func(cap time.Duration) time.Duration
+	jitter func(capacity time.Duration) time.Duration
 
 	mu sync.Mutex
 	// onChange receives state transitions; guarded by mu so registry
@@ -163,13 +163,13 @@ func newBreaker(scope, opClass string, settings Settings, onChange func(Transiti
 	}
 }
 
-// fullJitter draws a wait uniformly from (0, cap]. Zero or negative caps
+// fullJitter draws a wait uniformly from (0, capacity]. Zero or negative caps
 // return zero.
-func fullJitter(cap time.Duration) time.Duration {
-	if cap <= 0 {
+func fullJitter(capacity time.Duration) time.Duration {
+	if capacity <= 0 {
 		return 0
 	}
-	return time.Duration(rand.Int64N(int64(cap))) + 1
+	return time.Duration(rand.Int64N(int64(capacity))) + 1
 }
 
 // Allow reports whether an operation may proceed. Closed: always true.
@@ -331,14 +331,14 @@ func (b *Breaker) openLocked(now time.Time) {
 // or exceeds OpenMax returns OpenMax immediately — so the loop never exits
 // with cap > OpenMax and no post-loop clamp is needed.
 func (b *Breaker) backoffCapLocked() time.Duration {
-	cap := b.settings.OpenBase
+	capacity := b.settings.OpenBase
 	for i := 1; i < b.trips; i++ {
-		cap *= 2
-		if cap >= b.settings.OpenMax || cap <= 0 {
+		capacity *= 2
+		if capacity >= b.settings.OpenMax || capacity <= 0 {
 			return b.settings.OpenMax
 		}
 	}
-	return cap
+	return capacity
 }
 
 // transitionLocked changes state and notifies the callback. Caller must

@@ -67,7 +67,7 @@ func newPrimedGatedCache(t *testing.T, beadsIn ...Bead) (*CachingStore, *callCou
 	t.Helper()
 	backing := &callCountingStore{Store: NewMemStore()}
 	for _, b := range beadsIn {
-		if _, err := backing.Store.Create(b); err != nil {
+		if _, err := backing.Create(b); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
 	}

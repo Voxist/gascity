@@ -92,7 +92,7 @@ func TestRegistryStatesSnapshot(t *testing.T) {
 	}
 }
 
-func TestRegistryConcurrentBreakerAccess(t *testing.T) {
+func TestRegistryConcurrentBreakerAccess(_ *testing.T) {
 	reg := NewRegistry(Settings{Enabled: true})
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
