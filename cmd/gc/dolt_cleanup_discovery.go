@@ -63,6 +63,7 @@ func pathUnderRoot(path, root string) bool {
 // kernel thread or hung process can't make the reaper hang. On macOS this also
 // applies to the whole-system `ps -ax` call, which can take >2s on busy hosts.
 const procEnumerationTimeout = 10 * time.Second
+const psEnumerationTimeout = 30 * time.Second
 
 // discoverDoltProcesses finds live `dolt sql-server` processes and reports
 // their argv and listening ports. Linux uses /proc for argv, ports, RSS, and

@@ -3530,7 +3530,7 @@ func TestBdCommandRunnerWithManagedRetryRecoversFromAutoImportFallback(t *testin
 	attempts := 0
 	recoverCalls := 0
 
-	beadsExecCommandRunnerWithEnv = func(_ map[string]string) beads.CommandRunner {
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
 		copied := map[string]string{}
 		for key, value := range env {
 			copied[key] = value
@@ -3584,7 +3584,7 @@ func TestBdCommandRunnerWithManagedRetryRecoversAndRerunsWithFreshEnv(t *testing
 	recoverCalls := 0
 	seenPorts := make([]string, 0, 2)
 
-	beadsExecCommandRunnerWithEnv = func(_ map[string]string) beads.CommandRunner {
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
 		copied := map[string]string{}
 		for key, value := range env {
 			copied[key] = value
@@ -3717,7 +3717,7 @@ dolt.port: 3307
 
 	attempts := 0
 	recoverCalls := 0
-	beadsExecCommandRunnerWithEnv = func(_ map[string]string) beads.CommandRunner {
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
 		return func(_ string, _ string, _ ...string) ([]byte, error) {
 			attempts++
 			return nil, fmt.Errorf("server unreachable at 127.0.0.1:%s", env["GC_DOLT_PORT"])
@@ -3772,7 +3772,7 @@ dolt.auto-start: false
 
 	attempts := 0
 	recoverCalls := 0
-	beadsExecCommandRunnerWithEnv = func(_ map[string]string) beads.CommandRunner {
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
 		return func(_ string, _ string, _ ...string) ([]byte, error) {
 			attempts++
 			return nil, fmt.Errorf("server unreachable at %s:%s", env["GC_DOLT_HOST"], env["GC_DOLT_PORT"])
@@ -3836,7 +3836,7 @@ dolt.auto-start: false
 
 	attempts := 0
 	recoverCalls := 0
-	beadsExecCommandRunnerWithEnv = func(_ map[string]string) beads.CommandRunner {
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
 		return func(_ string, _ string, _ ...string) ([]byte, error) {
 			attempts++
 			return nil, fmt.Errorf("server unreachable at %s:%s", env["GC_DOLT_HOST"], env["GC_DOLT_PORT"])
@@ -3949,7 +3949,7 @@ func TestControlBdCommandRunnerDefaultsBeadsActorToControllerWhenUnset(t *testin
 	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = origRunner })
 
 	var captured map[string]string
-	beadsExecCommandRunnerWithEnv = func(_ map[string]string) beads.CommandRunner {
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
 		captured = map[string]string{}
 		for key, value := range env {
 			captured[key] = value
@@ -4644,7 +4644,7 @@ func TestBdCommandRunnerEnsuresProjectedPostgresEnvExplicit(t *testing.T) {
 	t.Cleanup(func() { beadsExecCommandRunnerWithEnv = origRunner })
 
 	var captured map[string]string
-	beadsExecCommandRunnerWithEnv = func(_ map[string]string) beads.CommandRunner {
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
 		captured = map[string]string{}
 		for key, value := range env {
 			captured[key] = value
@@ -4891,7 +4891,7 @@ dolt.auto-start: false
 	originalErr := errors.New("dial tcp 127.0.0.1:5432: connect: connection refused")
 	attempts := 0
 	recoverCalls := 0
-	beadsExecCommandRunnerWithEnv = func(_ map[string]string) beads.CommandRunner {
+	beadsExecCommandRunnerWithEnv = func(env map[string]string) beads.CommandRunner {
 		if got := env["BEADS_POSTGRES_PASSWORD"]; got != "citypw" {
 			t.Fatalf("BEADS_POSTGRES_PASSWORD = %q, want inherited city password", got)
 		}
