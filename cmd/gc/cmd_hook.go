@@ -393,7 +393,7 @@ func classifyWorkQueryStoreUnavailable(err error) error {
 	msg := strings.ToLower(err.Error())
 	for _, marker := range bdTransportRetryableMarkers {
 		if strings.Contains(msg, marker) {
-			return fmt.Errorf("%w: %s", beads.ErrStoreUnavailable, err)
+			return fmt.Errorf("%w: %w", beads.ErrStoreUnavailable, err)
 		}
 	}
 	return err

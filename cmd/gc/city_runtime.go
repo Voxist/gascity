@@ -356,8 +356,13 @@ func (cr *CityRuntime) crashTrack() crashTracker {
 func (cr *CityRuntime) run(ctx context.Context) {
 	defer cr.shutdown()
 
-	// configDirty is always non-nil: newCityRuntime (the sole constructor)
-	// substitutes a fresh *atomic.Bool when the caller passes none.
+	// configDirty is normally non-nil (newCityRuntime substitutes a fresh
+	// *atomic.Bool when the caller passes none), but controllerLoop constructs
+	// CityRuntime via a struct literal. Initialize the shared field here so the
+	// config watcher and the run loop observe the same atomic.
+	if cr.configDirty == nil {
+		cr.configDirty = &atomic.Bool{}
+	}
 	dirty := cr.configDirty
 
 	if cr.tomlPath != "" {
