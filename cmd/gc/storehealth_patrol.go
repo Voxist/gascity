@@ -370,7 +370,7 @@ func scopeBeadsDir(cityPath, scope string) string {
 // proxyChildPIDsForScope returns the db-proxy-child PIDs whose --root lives
 // under the scope's .beads directory. Discovery is by live process table,
 // never a pidfile (the process table is the single source of truth).
-func proxyChildPIDsForScope(cityPath string, cfg *config.City, scope string) []int {
+func proxyChildPIDsForScope(cityPath string, _ *config.City, scope string) []int {
 	out, err := exec.Command("ps", "-axww", "-o", "pid=,command=").Output() //nolint:gosec // fixed argv
 	if err != nil {
 		return nil

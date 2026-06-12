@@ -32,9 +32,9 @@ func portFileFixture(t *testing.T) (cityDir, rigDir string, cfg *config.City) {
 	return cityDir, rigDir, cfg
 }
 
-func livePortFixed(port int) func(string) (liveDoltPortResolution, error) {
+func livePortFixed() func(string) (liveDoltPortResolution, error) {
 	return func(string) (liveDoltPortResolution, error) {
-		return liveDoltPortResolution{Port: port, Source: liveDoltHandleSource}, nil
+		return liveDoltPortResolution{Port: 28231, Source: liveDoltHandleSource}, nil
 	}
 }
 
@@ -63,7 +63,7 @@ func TestPortFileConsistency_MatchingFilesOK(t *testing.T) {
 	writeScopeFile(t, cityDir, "dolt-server.port", "28231\n")
 	writeScopeFile(t, rigDir, "dolt-server.port", "28231\n")
 
-	r := runPortFileCheck(t, cityDir, cfg, livePortFixed(28231))
+	r := runPortFileCheck(t, cityDir, cfg, livePortFixed())
 	if r.Status != doctor.StatusOK {
 		t.Fatalf("Status = %v, want OK; message=%q details=%v", r.Status, r.Message, r.Details)
 	}
@@ -73,7 +73,7 @@ func TestPortFileConsistency_CityPortFileMismatchIsError(t *testing.T) {
 	cityDir, _, cfg := portFileFixture(t)
 	writeScopeFile(t, cityDir, "dolt-server.port", "29000\n")
 
-	r := runPortFileCheck(t, cityDir, cfg, livePortFixed(28231))
+	r := runPortFileCheck(t, cityDir, cfg, livePortFixed())
 	if r.Status != doctor.StatusError {
 		t.Fatalf("Status = %v, want Error; message=%q", r.Status, r.Message)
 	}
@@ -91,7 +91,7 @@ func TestPortFileConsistency_RigPortFileMismatchIsError(t *testing.T) {
 	writeScopeFile(t, cityDir, "dolt-server.port", "28231\n")
 	writeScopeFile(t, rigDir, "dolt-server.port", "29000\n")
 
-	r := runPortFileCheck(t, cityDir, cfg, livePortFixed(28231))
+	r := runPortFileCheck(t, cityDir, cfg, livePortFixed())
 	if r.Status != doctor.StatusError {
 		t.Fatalf("Status = %v, want Error; message=%q", r.Status, r.Message)
 	}
@@ -104,7 +104,7 @@ func TestPortFileConsistency_UnparseablePortFileIsError(t *testing.T) {
 	cityDir, _, cfg := portFileFixture(t)
 	writeScopeFile(t, cityDir, "dolt-server.port", "not-a-port\n")
 
-	r := runPortFileCheck(t, cityDir, cfg, livePortFixed(28231))
+	r := runPortFileCheck(t, cityDir, cfg, livePortFixed())
 	if r.Status != doctor.StatusError {
 		t.Fatalf("Status = %v, want Error for unparseable port file", r.Status)
 	}
@@ -114,7 +114,7 @@ func TestPortFileConsistency_ProxiedClientInfoMismatchIsError(t *testing.T) {
 	cityDir, _, cfg := portFileFixture(t)
 	writeScopeFile(t, cityDir, "proxied_server_client_info.json", `{"external":{"host":"127.0.0.1","port":29000,"user":"root"}}`)
 
-	r := runPortFileCheck(t, cityDir, cfg, livePortFixed(28231))
+	r := runPortFileCheck(t, cityDir, cfg, livePortFixed())
 	if r.Status != doctor.StatusError {
 		t.Fatalf("Status = %v, want Error; message=%q", r.Status, r.Message)
 	}
@@ -127,7 +127,7 @@ func TestPortFileConsistency_ProxiedClientInfoMatchingOK(t *testing.T) {
 	cityDir, _, cfg := portFileFixture(t)
 	writeScopeFile(t, cityDir, "proxied_server_client_info.json", `{"external":{"host":"127.0.0.1","port":28231,"user":"root"}}`)
 
-	r := runPortFileCheck(t, cityDir, cfg, livePortFixed(28231))
+	r := runPortFileCheck(t, cityDir, cfg, livePortFixed())
 	if r.Status != doctor.StatusOK {
 		t.Fatalf("Status = %v, want OK; message=%q details=%v", r.Status, r.Message, r.Details)
 	}
@@ -156,7 +156,7 @@ func TestPortFileConsistency_NotBdStoreWorkspaceOK(t *testing.T) {
 	cityDir := t.TempDir() // no .beads/metadata.json anywhere
 	cfg := &config.City{Workspace: config.Workspace{Name: "plain"}}
 
-	r := runPortFileCheck(t, cityDir, cfg, livePortFixed(28231))
+	r := runPortFileCheck(t, cityDir, cfg, livePortFixed())
 	if r.Status != doctor.StatusOK {
 		t.Fatalf("Status = %v, want OK for non-bd workspace", r.Status)
 	}

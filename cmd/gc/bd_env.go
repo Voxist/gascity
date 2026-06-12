@@ -282,6 +282,26 @@ func canonicalScopeDoltTarget(cityPath, scopeRoot string) (contract.DoltConnecti
 	return target, true, nil
 }
 
+// canonicalScopeDoltProjectionAuthoritative reports whether canonical
+// Dolt projection would resolve auth for the city scope: the scope
+// backend is not postgres and the scope config resolves authoritative —
+// the same ResolveScopeConfigState gate applyOrderExecCanonicalDoltEnv
+// and its managed fallback apply before calling
+// applyCanonicalDoltAuthEnv. Callers that feed ambient environments
+// into the projection use this to strip untrusted password mirrors
+// from the resolution input without breaking the strict no-op
+// pass-through for non-authoritative scopes.
+func canonicalScopeDoltProjectionAuthoritative(cityPath string) bool {
+	if scopeBackendIsPostgres(cityPath, cityPath) {
+		return false
+	}
+	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, cityPath, "")
+	if err != nil {
+		return false
+	}
+	return resolved.Kind == contract.ScopeConfigAuthoritative
+}
+
 func applyCanonicalDoltTargetEnv(env map[string]string, target contract.DoltConnectionTarget) {
 	if env == nil {
 		return
@@ -981,6 +1001,48 @@ const (
 )
 
 var bdCommandRetrySleep = time.Sleep
+
+// bdTransportRetryableMarkers is the bd stderr/error string table gc uses
+// to classify transport-class failures (managed retry, circuit breaker
+// recording, and gc hook's store-unavailable signal all flow through it).
+// It is an explicit, tested compatibility surface with the bd CLI —
+// pinned by TestBdTransportRetryableMarkersArePinned — and remains the
+// classification mechanism until bd ships a typed machine-readable error
+// envelope (a reserved exit-code contract distinguishing transport from
+// application failures; bd currently exits 1 for both, so exit codes
+// carry no transport signal today). Change it deliberately, in one place,
+// together with the pin test.
+var bdTransportRetryableMarkers = []string{
+	"server unreachable",
+	"dial tcp",
+	"connection refused",
+	"broken pipe",
+	"unexpected eof",
+	"bad connection",
+	"use of closed network connection",
+	// bd silently falls back to opening the on-disk store when it cannot
+	// reach the managed Dolt server. On an empty .beads/dolt/ that fallback
+	// triggers a JSONL auto-import, which presents as a 2m command timeout
+	// rather than a network error. Treat the auto-import marker as a
+	// transport failure so the managed-retry path republishes the correct
+	// port and retries against the live server. See gastownhall/gascity#1930.
+	bdSilentFallbackMarkerImport,
+	bdSilentFallbackMarkerEmptyDB,
+}
+
+// bdTransportRecoverableMarkers is the subset of transport failures where
+// republishing the managed Dolt port (recoverManagedBDCommand) can unstick
+// the next attempt. Pinned alongside bdTransportRetryableMarkers.
+var bdTransportRecoverableMarkers = []string{
+	"server unreachable",
+	"dial tcp",
+	"connection refused",
+	// When bd auto-imports into an empty on-disk store it has lost the
+	// managed Dolt server; republishing the port via the recovery path
+	// is what unsticks the next attempt. See gastownhall/gascity#1930.
+	bdSilentFallbackMarkerImport,
+	bdSilentFallbackMarkerEmptyDB,
+}
 
 func bdTransportRetryableError(cityPath, scopeRoot string, env map[string]string, err error) bool {
 	return bdTransportErrorMatches(cityPath, scopeRoot, env, err, bdTransportRetryableMarkers)

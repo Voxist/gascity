@@ -127,7 +127,7 @@ func TestRunDoltCleanup_JSONOutputsResolvedPort(t *testing.T) {
 		Rigs:        rigs,
 		FS:          fs,
 		CityPath:    "/city",
-		LiveResolve: fakeLiveResolve(28231),
+		LiveResolve: fakeLiveResolve(),
 		JSON:        true,
 		Probe:       false, // skip TCP probe in unit tests
 	}
@@ -184,7 +184,7 @@ func TestRunDoltCleanup_FlagOverridesEverything(t *testing.T) {
 		Rigs:        []resolverRig{{Name: "hq", Path: "/city", HQ: true}},
 		FS:          fs,
 		CityPath:    "/city",
-		LiveResolve: fakeLiveResolve(28231),
+		LiveResolve: fakeLiveResolve(),
 		JSON:        true,
 		Probe:       false,
 	}
@@ -829,7 +829,7 @@ func TestRunDoltCleanup_ForceRevalidatesPIDBeforeSIGTERM(t *testing.T) {
 		Rigs:        []resolverRig{{Name: "hq", Path: "/city", HQ: true}},
 		FS:          fs,
 		CityPath:    "/city",
-		LiveResolve: fakeLiveResolve(28231),
+		LiveResolve: fakeLiveResolve(),
 		JSON:        true,
 		Force:       true,
 		HomeDir:     "/home/u",
@@ -1042,7 +1042,7 @@ func TestRunDoltCleanup_ForceSkipsSIGKILLWhenProcessBecomesProtected(t *testing.
 		Rigs:        []resolverRig{{Name: "hq", Path: "/city", HQ: true}},
 		FS:          fs,
 		CityPath:    "/city",
-		LiveResolve: fakeLiveResolve(28231),
+		LiveResolve: fakeLiveResolve(),
 		JSON:        true,
 		Force:       true,
 		HomeDir:     "/home/u",
