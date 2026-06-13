@@ -31,6 +31,19 @@ type QuotaPollFailedPayload struct {
 // IsEventPayload marks QuotaPollFailedPayload as an events.Payload variant.
 func (QuotaPollFailedPayload) IsEventPayload() {}
 
+// Decision reason classes emitted (Phase 2) or noted (Phase 1):
+//
+//   - "overflow"        — tier overflow-ok routed to the vendor pool head.
+//   - "stay"            — active account is under FlipThreshold.
+//   - "flip"            — active account crossed FlipThreshold; sibling selected.
+//   - "lowest-pressure" — no active account; lowest-pressure account selected.
+//   - "cascade"         — all Claude accounts dark; overflow pool serves claude-required.
+//   - "reentry"         — cascade→Claude revert: FiveHourUtil < ReentryThreshold AND
+//     cooldown elapsed. No event is emitted in Phase 1; Phase 2 will emit it.
+//
+// No personal data, account credentials, or usage payloads are emitted in any of
+// these reason classes. The event carries only the decision label and the provider
+// name, which is configuration data, not user data (GDPR-neutral, no consent required).
 func init() {
 	events.RegisterPayload(events.ProviderQuotaObserved, QuotaObservedPayload{})
 	events.RegisterPayload(events.ProviderQuotaPollFailed, QuotaPollFailedPayload{})

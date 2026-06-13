@@ -3,6 +3,7 @@ package providergov
 import (
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -32,6 +33,11 @@ const (
 	// ReasonCascade: every Claude account is dark; the overflow pool
 	// serves claude-required work (degrade quality rather than stop).
 	ReasonCascade = "cascade"
+	// ReasonReentry: cascade-to-Claude revert that passed both the headroom
+	// gate (FiveHourUtil < ReentryThreshold) and the cooldown gate
+	// (now − lastCascadeAt ≥ ReentryCooldown). Phase 2 will emit this as
+	// a lifecycle event; Phase 1 surfaces it in CLI/test output only.
+	ReasonReentry = "reentry"
 )
 
 // AccountState is the measured quota state of one Claude account, as
@@ -80,12 +86,21 @@ type Policy struct {
 	// OverflowProviders is the overflow vendor pool in priority order.
 	// Serves overflow-ok work always and claude-required work on cascade.
 	OverflowProviders []string
+	// ReentryThreshold: when cascading, a Claude account is re-entry eligible
+	// only when its FiveHourUtil is strictly below this percent. Distinct from
+	// DarkThreshold: accounts in [ReentryThreshold, DarkThreshold) are not dark
+	// and can serve existing active work but cannot trigger a cascade revert.
+	ReentryThreshold float64
+	// ReentryCooldown: minimum time since the last cascade switch before re-entry
+	// from cascade is allowed. Prevents oscillation at the reset boundary.
+	ReentryCooldown time.Duration
 }
 
 // DefaultPolicy returns the documented default thresholds:
 // flip at 85% five-hour utilization, dark at 99% on either window,
 // unweighted seven-day pressure, Opus degrade at 85% with at least 15%
-// Sonnet headroom, and an empty overflow pool.
+// Sonnet headroom, re-entry threshold at 65% five-hour utilization,
+// re-entry cooldown of 10 minutes, and an empty overflow pool.
 func DefaultPolicy() Policy {
 	return Policy{
 		FlipThreshold:         85,
@@ -93,6 +108,8 @@ func DefaultPolicy() Policy {
 		SevenDayWeight:        1.0,
 		DegradeOpusThreshold:  85,
 		DegradeSonnetHeadroom: 15,
+		ReentryThreshold:      65,
+		ReentryCooldown:       10 * time.Minute,
 	}
 }
 
@@ -109,28 +126,40 @@ type Decision struct {
 	Reason string
 }
 
-// SelectProvider resolves which provider should serve work of the given
-// tier from measured account state and configured policy. It is pure:
-// same inputs, same decision, no I/O and no clock.
+// DecisionInput carries the caller-supplied time and cascade context for
+// SelectProviderFor. Passing Cascading:false reproduces SelectProvider's
+// legacy behavior byte-for-byte (the re-entry path is unreachable).
+type DecisionInput struct {
+	// Now is the caller's wall-clock time, injected for determinism.
+	Now time.Time
+	// LastCascadeAt is the time of the most recent cascade switch. Zero
+	// when the caller has never cascaded.
+	LastCascadeAt time.Time
+	// Cascading reports whether the caller is currently serving
+	// claude-required work from the overflow pool. When false the
+	// re-entry gate is bypassed and SelectProviderFor behaves identically
+	// to SelectProvider.
+	Cascading bool
+}
+
+// SelectProviderFor is SelectProvider with injected time and cascade
+// context, enabling the re-entry gate without wall-clock reads inside the
+// function. Pure: identical inputs → identical decision.
 //
-// Rules, in order:
-//   - overflow-ok → the overflow pool head; with an empty pool the tier
-//     falls back to claude-required selection (config owns the policy of
-//     an absent pool, the function stays total).
-//   - claude-required → among non-dark accounts: stay on the active
-//     account while its five-hour utilization is at or below
-//     FlipThreshold; otherwise pick the account with the lowest pressure
-//     score max(five_hour, SevenDayWeight × seven_day), ties broken by
-//     name. The model-degrade signal is computed on the selected account.
-//   - every account dark (or none measured) → cascade to the overflow
-//     pool head; with no overflow pool configured, return an error.
-func SelectProvider(tier string, accounts []AccountState, policy Policy) (Decision, error) {
+// When input.Cascading is false, behavior is byte-identical to SelectProvider.
+//
+// Re-entry gate (when input.Cascading is true):
+//   - Headroom condition: a Claude account is re-entry eligible only when
+//     its FiveHourUtil < policy.ReentryThreshold.
+//   - Cooldown condition: input.Now − input.LastCascadeAt ≥ policy.ReentryCooldown.
+//   - Both must hold; if either fails, cascade continues.
+//   - On re-entry, selects the lowest-pressure eligible account (pressureScore).
+func SelectProviderFor(input DecisionInput, tier string, accounts []AccountState, policy Policy) (Decision, error) {
 	switch tier {
 	case TierOverflowOK:
 		if len(policy.OverflowProviders) > 0 {
 			return Decision{Provider: policy.OverflowProviders[0], Reason: ReasonOverflow}, nil
 		}
-		// No overflow pool configured: fall through to Claude selection.
 	case TierClaudeRequired:
 		// Handled below.
 	default:
@@ -158,6 +187,37 @@ func SelectProvider(tier string, accounts []AccountState, policy Policy) (Decisi
 		)
 	}
 
+	// Re-entry gate: when cascading, require both headroom and cooldown
+	// before reverting to Claude. Accounts in [ReentryThreshold, DarkThreshold)
+	// are not dark but are not re-entry eligible.
+	if input.Cascading {
+		reentryEligible := make([]AccountState, 0, len(candidates))
+		for _, acc := range candidates {
+			if acc.FiveHourUtil < policy.ReentryThreshold {
+				reentryEligible = append(reentryEligible, acc)
+			}
+		}
+		cooldownElapsed := !input.LastCascadeAt.IsZero() &&
+			input.Now.Sub(input.LastCascadeAt) >= policy.ReentryCooldown
+		if len(reentryEligible) == 0 || !cooldownElapsed {
+			if len(policy.OverflowProviders) > 0 {
+				return Decision{Provider: policy.OverflowProviders[0], Reason: ReasonCascade}, nil
+			}
+			return Decision{}, fmt.Errorf(
+				"providergov: cascading with no overflow providers configured",
+			)
+		}
+		sort.Slice(reentryEligible, func(i, j int) bool { return reentryEligible[i].Name < reentryEligible[j].Name })
+		best := reentryEligible[0]
+		bestScore := pressureScore(best, policy)
+		for _, acc := range reentryEligible[1:] {
+			if score := pressureScore(acc, policy); score < bestScore {
+				best, bestScore = acc, score
+			}
+		}
+		return decisionFor(best, ReasonReentry, policy), nil
+	}
+
 	// Deterministic order: by name, so score ties and the multi-active
 	// edge case resolve identically across runs.
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Name < candidates[j].Name })
@@ -181,6 +241,14 @@ func SelectProvider(tier string, accounts []AccountState, policy Policy) (Decisi
 		reason = ReasonFlip
 	}
 	return decisionFor(best, reason, policy), nil
+}
+
+// SelectProvider resolves which provider should serve work of the given
+// tier from measured account state and configured policy. It is a thin
+// shim over SelectProviderFor with Cascading:false, preserving the legacy
+// signature and behavior byte-for-byte.
+func SelectProvider(tier string, accounts []AccountState, policy Policy) (Decision, error) {
+	return SelectProviderFor(DecisionInput{}, tier, accounts, policy)
 }
 
 // StateFromPayload builds an AccountState from an observed quota
