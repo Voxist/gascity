@@ -321,6 +321,30 @@ Lesson test — it becomes LESS useful as models improve.
   `make test-cmd-gc-process-parallel`, `make test-integration-shards-parallel`,
   `make test-local-full-parallel`) over raw `go test`.
 
+## Build Cache Conventions
+
+**Never run `go clean -cache`** in any script, hook, or agent session.
+
+Rationale: the fleet shares a single `GOCACHE` directory across all executor
+sessions running on the same rig. A bare `go clean -cache` wipes every other
+concurrent executor's cached artifacts, causing cascading build failures that
+look like missing-package errors across unrelated beads (incident vp-g96b,
+2026-06-13).
+
+Rules:
+
+- **Hard ban:** `go clean -cache` is forbidden in scripts, hooks, and agent
+  sessions. If CI scripts need it, they must be changed to the safe alternative
+  below.
+- **Safe alternative for cold builds:**
+  ```bash
+  GOCACHE=$(mktemp -d) go build ./cmd/gc/
+  ```
+  This gives the build its own throwaway cache without disturbing the shared
+  fleet cache.
+- **`go clean -testcache` is explicitly allowed** — it only clears cached test
+  results, not compiled artifacts, and does not affect other executors.
+
 ## Code quality gates
 
 Before considering any task complete:
