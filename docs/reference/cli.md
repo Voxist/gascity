@@ -2799,6 +2799,7 @@ gc provider
 | Subcommand | Description |
 |------------|-------------|
 | [gc provider quota](#gc-provider-quota) | Show Claude account quota states and per-tier provider decisions |
+| [gc provider rotate-key](#gc-provider-rotate-key) | Rotate a provider API key across tmux global env and live sessions |
 
 ## gc provider quota
 
@@ -2818,6 +2819,23 @@ gc provider quota [flags]
 | `--overflow` | stringSlice |  | overflow vendor pool in priority order (e.g. zai,openrouter) |
 | `--poll` | bool |  | keep polling on an interval, recording provider.* events to the city event log |
 | `--timeout` | duration | `10s` | per-account usage request timeout |
+
+## gc provider rotate-key
+
+Propagate a new API key into the tmux server global env and every live session
+that uses the named provider, without requiring a tmux kill-server.
+
+Running agent processes that already hold the old key in-process will pick up
+the new key on their next natural restart (drain/respawn), not immediately.
+Use --dry-run to preview what would change before writing.
+
+```
+gc provider rotate-key <provider> <newkey> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dry-run` | bool |  | Print what would change without writing to tmux |
 
 ## gc register
 
