@@ -4580,12 +4580,9 @@ func TestSelectOrCreatePoolSessionBead_SerializesAliasCheckAndCreate(t *testing.
 		close(store.releaseFirstCreate)
 		select {
 		case <-store.secondCreateStarted:
-			// G2 called store.Create() — alias was taken so it created without alias.
 			close(store.releaseSecondCreate)
 		case <-time.After(time.Second):
-			// G2 returned via reuseOpenStartPendingPoolSlotBead: found G1's slot-1 bead
-			// and returned it without calling store.Create(). This is the correct
-			// idempotent behavior added in 958e11c58 to prevent incident-6 zombie beads.
+			t.Fatal("second pool create did not start after first create completed")
 		}
 	}
 

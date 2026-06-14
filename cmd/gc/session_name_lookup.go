@@ -254,8 +254,8 @@ func createPoolSessionBeadWithAlias(
 // A bead is reusable when it is open with state=start-pending,
 // pending_create_claim=true, last_woke_at unset (never reached
 // preWakeCommit, so it holds no claims), a non-empty session_name, the same
-// template and pool_slot, and is not a configured named-session bead. The
-// oldest match wins (deterministic across ticks).
+// template, pool_slot, and alias, and is not a configured named-session bead.
+// The oldest match wins (deterministic across ticks).
 //
 // On reuse the pending-create stale clock is reset to now — the reuse IS a
 // fresh spawn attempt, mirroring reopenClosedConfiguredNamedSessionBead. If
@@ -300,6 +300,14 @@ func reuseOpenStartPendingPoolSlotBead(
 			continue
 		}
 		if isNamedSessionBead(b) {
+			continue
+		}
+		// Alias is part of the dedup key: a concurrent create whose alias was
+		// already taken (identity.Alias="") must not reuse a bead that owns an
+		// alias, and vice versa. Without this guard the second goroutine inside
+		// the alias lock returns the first's bead and never reaches store.Create,
+		// breaking serialization (vp-iua7).
+		if strings.TrimSpace(b.Metadata["alias"]) != strings.TrimSpace(identity.Alias) {
 			continue
 		}
 		matches = append(matches, b)
