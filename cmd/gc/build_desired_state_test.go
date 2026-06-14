@@ -4580,22 +4580,29 @@ func TestSelectOrCreatePoolSessionBead_SerializesAliasCheckAndCreate(t *testing.
 		close(store.releaseFirstCreate)
 		select {
 		case <-store.secondCreateStarted:
+			// G2 called store.Create() — alias was taken so it created without alias.
 			close(store.releaseSecondCreate)
 		case <-time.After(time.Second):
-			t.Fatal("second pool create did not start after first create completed")
+			// G2 returned via reuseOpenStartPendingPoolSlotBead: found G1's slot-1 bead
+			// and returned it without calling store.Create(). This is the correct
+			// idempotent behavior added in 958e11c58 to prevent incident-6 zombie beads.
 		}
 	}
 
 	for i := 0; i < 2; i++ {
-		result := <-results
-		if result.err != nil {
-			t.Fatalf("selectOrCreatePoolSessionBead result %d: %v", i+1, result.err)
-		}
-		if result.bead.ID == "" {
-			t.Fatalf("selectOrCreatePoolSessionBead result %d returned empty bead", i+1)
-		}
-		if result.slot != 1 {
-			t.Fatalf("selectOrCreatePoolSessionBead result %d slot = %d, want 1", i+1, result.slot)
+		select {
+		case result := <-results:
+			if result.err != nil {
+				t.Fatalf("selectOrCreatePoolSessionBead result %d: %v", i+1, result.err)
+			}
+			if result.bead.ID == "" {
+				t.Fatalf("selectOrCreatePoolSessionBead result %d returned empty bead", i+1)
+			}
+			if result.slot != 1 {
+				t.Fatalf("selectOrCreatePoolSessionBead result %d slot = %d, want 1", i+1, result.slot)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("selectOrCreatePoolSessionBead result %d: timed out waiting for goroutine to complete", i+1)
 		}
 	}
 
