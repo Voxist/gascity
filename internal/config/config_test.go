@@ -8031,3 +8031,26 @@ func TestCityWithProvidersInstallsKimiHooksByDefault(t *testing.T) {
 		})
 	}
 }
+
+// TestFailoverChainConfig verifies that failover_chain in [daemon] is parsed
+// into DaemonConfig.FailoverChain.
+func TestFailoverChainConfig(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+failover_chain = ["claude", "zai"]
+
+[[agent]]
+name = "worker"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	want := []string{"claude", "zai"}
+	if !reflect.DeepEqual(cfg.Daemon.FailoverChain, want) {
+		t.Fatalf("Daemon.FailoverChain = %v, want %v", cfg.Daemon.FailoverChain, want)
+	}
+}

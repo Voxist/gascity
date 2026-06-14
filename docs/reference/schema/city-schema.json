@@ -1409,6 +1409,13 @@
           "type": "boolean",
           "description": "AutoPruneWorkerDir controls whether the reconciler removes a\npool-managed session's worker_dir (agent worktree) after the session\nbead is closed. Removal is gated on: path lives under the city's\n.gc/worktrees/ tree, clean working tree, no unpushed commits, no\nstashed work. Nil (unset) defaults to true so pool worktrees do not\naccumulate without bound across pool recycles. Set to false to\nretain worktrees for post-session diagnostics.",
           "default": true
+        },
+        "failover_chain": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "FailoverChain is the ordered list of provider names the controller walks\nwhen the primary provider is red in the live health registry. The first\nhealthy entry is used; if all entries are red the spawn is skipped.\nWhen empty, failover is disabled and the primary provider is used directly."
         }
       },
       "additionalProperties": false,

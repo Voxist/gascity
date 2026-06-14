@@ -6366,3 +6366,70 @@ func TestWarnIfClosedOrderTrackingBacklogLarge_SilentOnNilStore(_ *testing.T) {
 	// nil store: must not panic.
 	warnIfClosedOrderTrackingBacklogLarge(nil, io.Discard)
 }
+
+// TestCityRuntime_StartsModelProxy verifies that when failover_chain is
+// non-empty, newCityRuntime starts the in-process model proxy and stores its
+// bound address in cr.modelProxyAddr.
+func TestCityRuntime_StartsModelProxy(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	stubManagedDoltStoreOpeners(t)
+	sp := runtime.NewFake()
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath: t.TempDir(),
+		CityName: "test-city",
+		Cfg: &config.City{
+			Daemon: config.DaemonConfig{
+				FailoverChain: []string{"claude"},
+			},
+		},
+		SP: sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:              newDrainOps(sp),
+		Rec:               events.Discard,
+		Stdout:            io.Discard,
+		Stderr:            io.Discard,
+		ManagedDoltHealth: func(string) error { return nil },
+		ManagedDoltOwned:  func(string) (bool, error) { return true, nil },
+		ManagedDoltPort:   func(string) string { return "" },
+	})
+	if cr.modelProxyAddr == "" {
+		t.Fatal("modelProxyAddr is empty — model proxy not started when failover_chain is set")
+	}
+}
+
+// TestBuildDesiredState_InjectsProxyBaseURL verifies that when modelProxyAddr
+// is set on the CityRuntime, buildDesiredState rewrites each session's
+// ANTHROPIC_BASE_URL to route through the local model proxy.
+func TestBuildDesiredState_InjectsProxyBaseURL(t *testing.T) {
+	const proxyAddr = "http://localhost:12345"
+	const providerName = "claude"
+
+	cr := &CityRuntime{
+		modelProxyAddr: proxyAddr,
+		buildFn: func(_ *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
+			return DesiredStateResult{
+				State: map[string]TemplateParams{
+					"worker": {
+						Command:          "test-cmd",
+						SessionName:      "worker",
+						ResolvedProvider: &config.ResolvedProvider{Name: providerName},
+					},
+				},
+			}
+		},
+	}
+
+	result := cr.buildDesiredState(nil, nil)
+
+	tp, ok := result.State["worker"]
+	if !ok {
+		t.Fatal("worker missing from desired state")
+	}
+	want := proxyAddr + "/proxy/" + providerName
+	got := tp.Env["ANTHROPIC_BASE_URL"]
+	if got != want {
+		t.Fatalf("ANTHROPIC_BASE_URL = %q, want %q", got, want)
+	}
+}

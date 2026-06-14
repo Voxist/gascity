@@ -2725,6 +2725,11 @@ type DaemonConfig struct {
 	// accumulate without bound across pool recycles. Set to false to
 	// retain worktrees for post-session diagnostics.
 	AutoPruneWorkerDir *bool `toml:"auto_prune_worker_dir,omitempty" jsonschema:"default=true"`
+	// FailoverChain is the ordered list of provider names the controller walks
+	// when the primary provider is red in the live health registry. The first
+	// healthy entry is used; if all entries are red the spawn is skipped.
+	// When empty, failover is disabled and the primary provider is used directly.
+	FailoverChain []string `toml:"failover_chain,omitempty"`
 }
 
 // AutoRestartOnDriftEnabled reports whether the supervisor should be

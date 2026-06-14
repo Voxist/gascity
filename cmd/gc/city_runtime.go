@@ -8,6 +8,8 @@ import (
 	"hash/fnv"
 	"io"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -106,6 +108,12 @@ type CityRuntime struct {
 	asyncStarts        asyncStartTracker
 	asyncStops         asyncStartTracker
 	demandSnapshot     *runtimeDemandSnapshot
+
+	// modelProxyAddr is the bound address of the in-process model proxy (e.g.
+	// "http://localhost:54321"). Empty when the proxy is not running.
+	modelProxyAddr    string
+	providerHealthReg *providerHealthRegistry
+	modelProxyServer  *http.Server
 
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
@@ -335,6 +343,24 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	cr.svc = workspacesvc.NewManager(&serviceRuntime{cr: cr})
 	if err := cr.svc.Reload(); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: service init: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+	}
+	if len(p.Cfg.Daemon.FailoverChain) > 0 {
+		upstreams := make(map[string]string, len(p.Cfg.Providers))
+		for name, spec := range p.Cfg.Providers {
+			if u := spec.Env["ANTHROPIC_BASE_URL"]; u != "" {
+				upstreams[name] = u
+			}
+		}
+		reg := newProviderHealthRegistry()
+		srv := &http.Server{Handler: newModelProxyHandler(reg, upstreams)}
+		if ln, err := net.Listen("tcp", "localhost:0"); err != nil {
+			fmt.Fprintf(cr.stderr, "%s: model proxy listen: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		} else {
+			cr.modelProxyAddr = "http://" + ln.Addr().String()
+			cr.providerHealthReg = reg
+			cr.modelProxyServer = srv
+			go srv.Serve(ln) //nolint:errcheck
+		}
 	}
 	return cr
 }
@@ -2337,6 +2363,8 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		ctx, cr.cityPath, open, desiredState, cfgNames, cr.cfg, cr.sp, store,
 		cr.dops,
 		awakeAssignedWorkBeads, rigStores, readyWaitSet, cr.sessionDrains, cr.providerHealthGate,
+		cr.providerHealthReg,
+		cr.cfg.Daemon.FailoverChain,
 		poolDesired,
 		result.NamedSessionDemand,
 		result.snapshotQueryPartial(),
@@ -2826,6 +2854,8 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		nil, // control-dispatcher ticks only need ownership continuity, not main-tick assigned/ready snapshots
 		cr.sessionDrains,
 		cr.providerHealthGate,
+		cr.providerHealthReg,
+		cr.cfg.Daemon.FailoverChain,
 		poolDesired,
 		wfcResult.NamedSessionDemand,
 		false, // storeQueryPartial: config-change path doesn't query work beads
@@ -2966,10 +2996,25 @@ func filterSessionBeadsByName(snapshot *sessionBeadSnapshot, names map[string]bo
 func (cr *CityRuntime) buildDesiredState(sessionBeads *sessionBeadSnapshot, trace *sessionReconcilerTraceCycle) DesiredStateResult {
 	store := cr.cityBeadStore()
 	rigStores := cr.rigBeadStores()
+	var result DesiredStateResult
 	if cr.buildFnWithSessionBeads != nil {
-		return cr.buildFnWithSessionBeads(cr.cfg, cr.sp, store, rigStores, sessionBeads, trace)
+		result = cr.buildFnWithSessionBeads(cr.cfg, cr.sp, store, rigStores, sessionBeads, trace)
+	} else {
+		result = cr.buildFn(cr.cfg, cr.sp, store)
 	}
-	return cr.buildFn(cr.cfg, cr.sp, store)
+	if cr.modelProxyAddr != "" {
+		for name, tp := range result.State {
+			if tp.ResolvedProvider == nil {
+				continue
+			}
+			if tp.Env == nil {
+				tp.Env = make(map[string]string)
+			}
+			tp.Env["ANTHROPIC_BASE_URL"] = cr.modelProxyAddr + "/proxy/" + tp.ResolvedProvider.Name
+			result.State[name] = tp
+		}
+	}
+	return result
 }
 
 func (cr *CityRuntime) loadDemandSnapshot(
@@ -3200,6 +3245,9 @@ func (cr *CityRuntime) shutdown() {
 		}
 		if cr.trace != nil {
 			_ = cr.trace.Close()
+		}
+		if cr.modelProxyServer != nil {
+			_ = cr.modelProxyServer.Close()
 		}
 		if cr.svc != nil {
 			// Workspace-service proxies are process-group-bound, not preserved
