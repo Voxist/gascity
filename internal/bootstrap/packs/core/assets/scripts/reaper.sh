@@ -53,7 +53,7 @@ MAX_AGE="${GC_REAPER_MAX_AGE:-24h}"
 PURGE_AGE="${GC_REAPER_PURGE_AGE:-168h}"
 STALE_ISSUE_AGE="${GC_REAPER_STALE_ISSUE_AGE:-720h}"
 SESSION_PURGE_AGE="${GC_REAPER_SESSION_PURGE_AGE:-720h}"
-SESSION_BEAD_PATTERN="${GC_REAPER_SESSION_BEAD_PATTERN:-gm-*}"
+SESSION_BEAD_PATTERN="${GC_REAPER_SESSION_BEAD_PATTERN-gm-*}"
 SESSION_STATE_PRUNE_AGE="${GC_REAPER_SESSION_STATE_PRUNE_AGE:-24h}"
 ALERT_THRESHOLD="${GC_REAPER_ALERT_THRESHOLD:-500}"
 MAIL_ALERT_THRESHOLD="${GC_REAPER_MAIL_ALERT_THRESHOLD:-0}"  # 0 = disabled
@@ -1128,39 +1128,22 @@ if [ -d "$CITY_BEADS_DIR" ]; then
         # Activated when GC_REAPER_SESSION_BEAD_PATTERN="". Targets only rows
         # with issue_type='session' so it cannot accidentally prune non-session beads.
         SESSION_AGE_H=$(printf '%s' "$SESSION_PURGE_AGE" | sed 's/h$//')
-        DOLT_HOST="${GC_DOLT_HOST:-127.0.0.1}"
-        DOLT_PORT="${GC_DOLT_PORT:-48770}"
-        DOLT_USER="${GC_DOLT_USER:-root}"
-        export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
-
-        dolt_sql_reaper() {
-            dolt --host "$DOLT_HOST" --port "$DOLT_PORT" --user "$DOLT_USER" --no-tls \
-                sql --result-format csv -q "$1"
-        }
-
-        METADATA_FILE="$CITY_ABS/.beads/metadata.json"
-        DB_NAME=""
-        if [ -f "$METADATA_FILE" ]; then
-            DB_NAME=$(python3 -B -c "import json; print(json.load(open('${METADATA_FILE}'))['dolt_database'])" 2>/dev/null) || DB_NAME=""
-        fi
-        if [ -z "$DB_NAME" ]; then
-            record_anomaly "session" "type-safe SQL path: cannot resolve dolt_database from $METADATA_FILE — skipping"
+        if [ -z "$CITY_DB" ]; then
+            record_anomaly "session" "type-safe SQL path: city database unresolved — skipping"
         else
             if [ -n "$DRY_RUN" ]; then
-                RAW=$(dolt_sql_reaper "USE ${DB_NAME}; SELECT COUNT(*) FROM issues WHERE issue_type='session' AND status='closed' AND closed_at < DATE_SUB(NOW(), INTERVAL ${SESSION_AGE_H} HOUR);") 2>/dev/null || RAW=""
+                RAW=$(dolt_sql -r csv -q "USE \`${CITY_DB}\`; SELECT COUNT(*) FROM issues WHERE issue_type='session' AND status='closed' AND closed_at < DATE_SUB(NOW(), INTERVAL ${SESSION_AGE_H} HOUR);") 2>/dev/null || RAW=""
                 COUNT=$(printf '%s\n' "$RAW" | tail -n +2 | tr -d ',' | grep -v '^$' | head -1)
                 TOTAL_SESSIONS_PRUNED="${COUNT:-0}"
             else
                 TOTAL=0
                 while true; do
-                    RAW=$(dolt_sql_reaper "USE ${DB_NAME}; SELECT id FROM issues WHERE issue_type='session' AND status='closed' AND closed_at < DATE_SUB(NOW(), INTERVAL ${SESSION_AGE_H} HOUR) LIMIT 500;") 2>/dev/null || break
+                    RAW=$(dolt_sql -r csv -q "USE \`${CITY_DB}\`; SELECT id FROM issues WHERE issue_type='session' AND status='closed' AND closed_at < DATE_SUB(NOW(), INTERVAL ${SESSION_AGE_H} HOUR) LIMIT 500;") 2>/dev/null || break
                     BATCH_IDS=$(printf '%s\n' "$RAW" | tail -n +2 | grep -v '^$')
                     BATCH_COUNT=$(printf '%s\n' "$BATCH_IDS" | grep -c . || true)
                     [ "$BATCH_COUNT" -gt 0 ] || break
                     SQL_IDS=$(printf '%s\n' "$BATCH_IDS" | sed "s/.*/'&'/" | tr '\n' ',' | sed 's/,$//')
-                    dolt_sql_reaper "USE ${DB_NAME};
-DELETE FROM comments WHERE issue_id IN (${SQL_IDS});
-DELETE FROM events WHERE issue_id IN (${SQL_IDS});
+                    dolt_sql -r csv -q "USE \`${CITY_DB}\`;
 DELETE FROM labels WHERE issue_id IN (${SQL_IDS});
 DELETE FROM dependencies WHERE issue_id IN (${SQL_IDS}) OR depends_on_issue_id IN (${SQL_IDS});
 DELETE FROM issues WHERE id IN (${SQL_IDS});
