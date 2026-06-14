@@ -830,6 +830,79 @@ func TestBeadsConfigRoundTripPreservesStagedFields(t *testing.T) {
 	}
 }
 
+func TestApplyBeadPolicyDefaults_NilCityIsNoop(t *testing.T) {
+	ApplyBeadPolicyDefaults(nil) // must not panic
+	t.Log("nil city is a noop")
+}
+
+func TestApplyBeadPolicyDefaults_SetsOrderTrackingDefault(t *testing.T) {
+	cfg := &City{}
+	ApplyBeadPolicyDefaults(cfg)
+
+	p, ok := cfg.Beads.Policies["order_tracking"]
+	if !ok {
+		t.Fatal("order_tracking policy not set after ApplyBeadPolicyDefaults")
+	}
+	if p.DeleteAfterClose != "7d" {
+		t.Errorf("order_tracking.delete_after_close = %q, want 7d", p.DeleteAfterClose)
+	}
+}
+
+func TestApplyBeadPolicyDefaults_DoesNotOverrideExplicitValue(t *testing.T) {
+	cfg := &City{
+		Beads: BeadsConfig{
+			Policies: map[string]BeadPolicyConfig{
+				"order_tracking": {DeleteAfterClose: "48h"},
+			},
+		},
+	}
+	ApplyBeadPolicyDefaults(cfg)
+
+	p := cfg.Beads.Policies["order_tracking"]
+	if p.DeleteAfterClose != "48h" {
+		t.Errorf("order_tracking.delete_after_close = %q, want 48h (explicit value must not be overridden)", p.DeleteAfterClose)
+	}
+}
+
+func TestApplyBeadPolicyDefaults_PreservesOtherPolicies(t *testing.T) {
+	cfg := &City{
+		Beads: BeadsConfig{
+			Policies: map[string]BeadPolicyConfig{
+				"control": {DeleteAfterClose: "24h"},
+			},
+		},
+	}
+	ApplyBeadPolicyDefaults(cfg)
+
+	control := cfg.Beads.Policies["control"]
+	if control.DeleteAfterClose != "24h" {
+		t.Errorf("control.delete_after_close = %q, want 24h (must be preserved)", control.DeleteAfterClose)
+	}
+	orderTracking := cfg.Beads.Policies["order_tracking"]
+	if orderTracking.DeleteAfterClose != "7d" {
+		t.Errorf("order_tracking.delete_after_close = %q, want 7d", orderTracking.DeleteAfterClose)
+	}
+}
+
+func TestApplyBeadPolicyDefaults_StorageFieldPreserved(t *testing.T) {
+	cfg := &City{
+		Beads: BeadsConfig{
+			Policies: map[string]BeadPolicyConfig{
+				"order_tracking": {Storage: BeadStorageNoHistory},
+			},
+		},
+	}
+	ApplyBeadPolicyDefaults(cfg)
+
+	p := cfg.Beads.Policies["order_tracking"]
+	if p.DeleteAfterClose != "7d" {
+		t.Errorf("order_tracking.delete_after_close = %q, want 7d (default should be applied when only Storage is set)", p.DeleteAfterClose)
+	}
+	if p.Storage != BeadStorageNoHistory {
+		t.Errorf("order_tracking.storage = %q, want no_history (must be preserved)", p.Storage)
+	}
+}
+
 func TestParseSessionSection(t *testing.T) {
 	data := []byte(`
 [workspace]
@@ -3334,6 +3407,24 @@ func TestValidateAgentsMouseMode(t *testing.T) {
 	}
 }
 
+func TestValidateAgentsTier(t *testing.T) {
+	for _, tier := range []string{"", "claude-required", "overflow-ok"} {
+		t.Run("valid_"+tier, func(t *testing.T) {
+			if err := ValidateAgents([]Agent{{Name: "worker", Tier: tier}}); err != nil {
+				t.Fatalf("ValidateAgents tier %q: %v", tier, err)
+			}
+		})
+	}
+
+	err := ValidateAgents([]Agent{{Name: "worker", Tier: "platinum"}})
+	if err == nil {
+		t.Fatal("ValidateAgents invalid tier: got nil error")
+	}
+	if !strings.Contains(err.Error(), "tier") {
+		t.Fatalf("ValidateAgents error = %v, want tier context", err)
+	}
+}
+
 func TestValidateAgentsMissingName(t *testing.T) {
 	agents := []Agent{{MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5)}}
 	err := ValidateAgents(agents)
@@ -4914,6 +5005,30 @@ func TestValidateAgentsSameNameDifferentDir(t *testing.T) {
 	}
 }
 
+func TestValidateAgentsSameNameDifferentBinding(t *testing.T) {
+	agents := []Agent{
+		{Name: "dog", SourceDir: "packs/maintenance"},
+		{Name: "dog", BindingName: "dolt", SourceDir: "packs/bd/dolt"},
+	}
+	if err := ValidateAgents(agents); err != nil {
+		t.Errorf("ValidateAgents: unexpected error for qualified same-name agents: %v", err)
+	}
+}
+
+func TestValidateAgentsSameNameSameBinding(t *testing.T) {
+	agents := []Agent{
+		{Name: "dog", BindingName: "dolt", SourceDir: "packs/bd/dolt"},
+		{Name: "dog", BindingName: "dolt", SourceDir: "packs/other-dolt"},
+	}
+	err := ValidateAgents(agents)
+	if err == nil {
+		t.Fatal("expected error for duplicate binding-qualified name")
+	}
+	if !strings.Contains(err.Error(), "duplicate") {
+		t.Errorf("error = %q, want 'duplicate'", err)
+	}
+}
+
 func TestValidateAgentsSameNameSameDir(t *testing.T) {
 	agents := []Agent{
 		{Name: "polecat", Dir: "frontend"},
@@ -5132,6 +5247,92 @@ func TestMaxSessionAgeOmittedWhenEmpty(t *testing.T) {
 	}
 	if strings.Contains(string(data), "max_session_age") {
 		t.Errorf("TOML output should omit max_session_age when empty, got:\n%s", data)
+	}
+}
+
+// --- ChatSessionsConfig tests ---
+
+func TestChatSessionsIdleTimeoutDurationEmpty(t *testing.T) {
+	c := ChatSessionsConfig{}
+	if got := c.IdleTimeoutDuration(); got != 0 {
+		t.Errorf("IdleTimeoutDuration() = %v, want 0", got)
+	}
+}
+
+func TestChatSessionsIdleTimeoutDurationValid(t *testing.T) {
+	c := ChatSessionsConfig{IdleTimeout: "30m"}
+	if got := c.IdleTimeoutDuration(); got != 30*time.Minute {
+		t.Errorf("IdleTimeoutDuration() = %v, want 30m", got)
+	}
+}
+
+func TestChatSessionsIdleTimeoutDurationInvalid(t *testing.T) {
+	c := ChatSessionsConfig{IdleTimeout: "not-a-duration"}
+	if got := c.IdleTimeoutDuration(); got != 0 {
+		t.Errorf("IdleTimeoutDuration() = %v, want 0 for invalid", got)
+	}
+}
+
+func TestGracePeriodDurationDefault(t *testing.T) {
+	c := ChatSessionsConfig{}
+	if got := c.GracePeriodDuration(); got != DefaultManualGracePeriod {
+		t.Errorf("GracePeriodDuration() = %v, want %v", got, DefaultManualGracePeriod)
+	}
+}
+
+func TestGracePeriodDurationExplicitZero(t *testing.T) {
+	for _, val := range []string{"0", "0s"} {
+		c := ChatSessionsConfig{GracePeriod: val}
+		if got := c.GracePeriodDuration(); got != 0 {
+			t.Errorf("GracePeriodDuration(%q) = %v, want 0", val, got)
+		}
+	}
+}
+
+func TestGracePeriodDurationValid(t *testing.T) {
+	c := ChatSessionsConfig{GracePeriod: "5m"}
+	if got := c.GracePeriodDuration(); got != 5*time.Minute {
+		t.Errorf("GracePeriodDuration() = %v, want 5m", got)
+	}
+}
+
+func TestGracePeriodDurationInvalid(t *testing.T) {
+	c := ChatSessionsConfig{GracePeriod: "bogus"}
+	if got := c.GracePeriodDuration(); got != DefaultManualGracePeriod {
+		t.Errorf("GracePeriodDuration() = %v, want %v for invalid", got, DefaultManualGracePeriod)
+	}
+}
+
+func TestGracePeriodRoundTrip(t *testing.T) {
+	c := City{
+		Workspace:    Workspace{Name: "test"},
+		Agents:       []Agent{{Name: "mayor"}},
+		ChatSessions: ChatSessionsConfig{GracePeriod: "15m"},
+	}
+	data, err := c.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	got, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got.ChatSessions.GracePeriod != "15m" {
+		t.Errorf("GracePeriod after round-trip = %q, want %q", got.ChatSessions.GracePeriod, "15m")
+	}
+}
+
+func TestGracePeriodOmittedWhenEmpty(t *testing.T) {
+	c := City{
+		Workspace: Workspace{Name: "test"},
+		Agents:    []Agent{{Name: "mayor"}},
+	}
+	data, err := c.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(data), "grace_period") {
+		t.Errorf("TOML output should omit grace_period when empty, got:\n%s", data)
 	}
 }
 
@@ -7792,8 +7993,10 @@ func TestDefaultInstallAgentHooksForProvider(t *testing.T) {
 		want     []string
 	}{
 		{"opencode", []string{"opencode"}},
+		{"mimocode", []string{"mimocode"}},
 		{"kiro", []string{"kiro"}},
 		{"groq", []string{"groq"}},
+		{"kimi", []string{"kimi"}},
 		{"claude", nil},
 	}
 	for _, tc := range cases {
@@ -7801,5 +8004,53 @@ func TestDefaultInstallAgentHooksForProvider(t *testing.T) {
 		if !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("defaultInstallAgentHooksForProvider(%q) = %v, want %v", tc.provider, got, tc.want)
 		}
+	}
+}
+
+func TestCityWithProvidersInstallsKimiHooksByDefault(t *testing.T) {
+	tests := []struct {
+		name string
+		city City
+	}{
+		{
+			name: "wizard",
+			city: WizardCityWithProviders("test-city", "kimi", []string{"kimi"}),
+		},
+		{
+			name: "gastown",
+			city: GastownCityWithProviders("test-city", "kimi", []string{"kimi"}),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.city.Workspace.InstallAgentHooks
+			want := []string{"kimi"}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("Workspace.InstallAgentHooks = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// TestFailoverChainConfig verifies that failover_chain in [daemon] is parsed
+// into DaemonConfig.FailoverChain.
+func TestFailoverChainConfig(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+failover_chain = ["claude", "zai"]
+
+[[agent]]
+name = "worker"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	want := []string{"claude", "zai"}
+	if !reflect.DeepEqual(cfg.Daemon.FailoverChain, want) {
+		t.Fatalf("Daemon.FailoverChain = %v, want %v", cfg.Daemon.FailoverChain, want)
 	}
 }
