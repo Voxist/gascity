@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 )
@@ -14,6 +15,8 @@ type fakeRotateTmux struct {
 	globalEnv map[string]string
 	// callsSet records (key, value) calls to SetGlobalEnvironment
 	callsSet []string
+	// errListSessions, if non-nil, is returned by ListSessions.
+	errListSessions error
 }
 
 func newFakeRotateTmux(sessions map[string]map[string]string) *fakeRotateTmux {
@@ -30,6 +33,9 @@ func (f *fakeRotateTmux) SetGlobalEnvironment(key, value string) error {
 }
 
 func (f *fakeRotateTmux) ListSessions() ([]string, error) {
+	if f.errListSessions != nil {
+		return nil, f.errListSessions
+	}
 	names := make([]string, 0, len(f.sessions))
 	for name := range f.sessions {
 		names = append(names, name)
@@ -125,4 +131,59 @@ func TestRotateProviderKey(t *testing.T) {
 			t.Errorf("dry-run SessionsUpdated = %v; want session-zai", result.SessionsUpdated)
 		}
 	})
+}
+
+// TestRotateProviderKeyMixedStaticRef guards against corrupting static-literal
+// keys in spec.Env. When a provider spec has both a ${VAR}-ref key and a
+// static-literal key (e.g. ANTHROPIC_BASE_URL=https://...), only the ref-
+// bearing key should be updated in the session — the static key must be left
+// unchanged.
+func TestRotateProviderKeyMixedStaticRef(t *testing.T) {
+	spec := ProviderEnv{Env: map[string]string{
+		"ANTHROPIC_API_KEY":  "${ANTHROPIC_AUTH_TOKEN_ZAI}", // ref-bearing
+		"ANTHROPIC_BASE_URL": "https://api.example.com",     // static literal
+	}}
+
+	fake := newFakeRotateTmux(map[string]map[string]string{
+		"session-zai": {
+			"GC_PROVIDER":        "zai",
+			"ANTHROPIC_BASE_URL": "https://api.example.com",
+		},
+	})
+
+	_, err := rotateProviderKey(context.Background(), "zai", "sk-ant-new", fake, spec, false)
+	if err != nil {
+		t.Fatalf("rotateProviderKey: %v", err)
+	}
+
+	// Ref-bearing key must be updated.
+	if fake.sessions["session-zai"]["ANTHROPIC_API_KEY"] != "sk-ant-new" {
+		t.Errorf("ANTHROPIC_API_KEY = %q; want %q", fake.sessions["session-zai"]["ANTHROPIC_API_KEY"], "sk-ant-new")
+	}
+	// Static-literal key must NOT be overwritten with newKey.
+	if got := fake.sessions["session-zai"]["ANTHROPIC_BASE_URL"]; got != "https://api.example.com" {
+		t.Errorf("ANTHROPIC_BASE_URL = %q; want unchanged %q", got, "https://api.example.com")
+	}
+}
+
+// TestRotateProviderKeyListSessionsError verifies that a ListSessions failure
+// is returned to the caller rather than swallowed. If the global env was already
+// written and ListSessions fails, the operator must see the error so they can
+// retry rather than believe rotation succeeded with zero sessions updated.
+func TestRotateProviderKeyListSessionsError(t *testing.T) {
+	spec := ProviderEnv{Env: map[string]string{
+		"ANTHROPIC_API_KEY": "${ANTHROPIC_AUTH_TOKEN_ZAI}",
+	}}
+
+	sentinelErr := errors.New("tmux: server not running")
+	fake := newFakeRotateTmux(nil)
+	fake.errListSessions = sentinelErr
+
+	_, err := rotateProviderKey(context.Background(), "zai", "sk-ant-new", fake, spec, false)
+	if err == nil {
+		t.Fatal("expected error from ListSessions, got nil")
+	}
+	if !errors.Is(err, sentinelErr) {
+		t.Errorf("err = %v; want to wrap %v", err, sentinelErr)
+	}
 }
