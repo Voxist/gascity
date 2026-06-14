@@ -42,7 +42,11 @@ const pollInterval = 100 * time.Millisecond
 // non-listed providers) prevents the Enter from submitting — the worker then
 // idles at grok's welcome screen forever. Skip the pre-Enter Escape for grok
 // (like the other send-keys-driven TUIs). See ga-3xu / grok-engagement follow-up.
-var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "copilot", "gemini", "grok", "kimi", "opencode", "pi", "antigravity"}
+// The list doubles as a process-name fallback when the pane lacks a
+// GC_PROVIDER env var; mimocode's binary names differ from its provider
+// name ("mimo" wrapper, ".mimocode" compiled child), so both are listed
+// alongside the family name.
+var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "copilot", "gemini", "grok", "kimi", "mimocode", "mimo", ".mimocode", "opencode", "pi", "antigravity"}
 
 // Config holds configurable timeouts and intervals for the tmux provider.
 // All fields have sensible defaults matching the original hardcoded values.
@@ -226,6 +230,10 @@ type Tmux struct {
 	// (see discountPokeActivity).
 	pokeMu sync.Mutex
 	pokes  map[string]pokeInfo
+
+	// agentSlice wraps pane commands in a transient systemd user scope when
+	// GC_AGENT_SLICE is set (see AgentSliceEnv in agent_slice.go).
+	agentSlice agentSliceWrapper
 }
 
 // pokeInfo records a gc-initiated send-keys ("poke", e.g. a wake or nudge) to a
@@ -403,7 +411,7 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 		args = append(args, "-c", workDir)
 	}
 	// Add the command as the last argument - tmux runs it as the pane's initial process
-	args = append(args, command)
+	args = append(args, t.wrapPaneCommand(command))
 	_, err := t.run(args...)
 	if err != nil {
 		return err
@@ -463,7 +471,7 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 		command = "env" + prefix + " " + command
 	}
 	// Add the command as the last argument
-	args = append(args, command)
+	args = append(args, t.wrapPaneCommand(command))
 	_, err := t.run(args...)
 	if err != nil {
 		return err
@@ -1860,15 +1868,16 @@ func (t *Tmux) FindAgentPane(session string) (string, error) {
 			}
 		}
 
-		// Shell with agent descendant
-		for _, shell := range supportedShells {
-			if paneCmd == shell && hasDescendantWithNames(panePID, processNames, 0) {
-				return paneID, nil
-			}
-		}
-
 		// Version-as-argv[0] (e.g., "2.1.30") — check real binary name
 		if processMatchesNames(panePID, processNames) {
+			return paneID, nil
+		}
+
+		// Descendant walk: agents under shells ("bash -c 'exec claude'")
+		// or wrapper roots (systemd-run when GC_AGENT_SLICE is set) keep
+		// the shell/wrapper as pane_current_command — same unconditional
+		// descendant fallback as IsRuntimeRunning.
+		if hasDescendantWithNames(panePID, processNames, 0) {
 			return paneID, nil
 		}
 	}
@@ -2492,10 +2501,17 @@ func (t *Tmux) resolveSessionProcessNames(session string) []string {
 // Useful for waiting until a shell has started a new process (e.g., claude).
 // Returns nil when a non-excluded command is detected, or error on timeout.
 //
+// Known pane-root wrappers (see wrapperCommands, e.g. systemd-run under
+// GC_AGENT_SLICE) are treated as excluded regardless of excludeCommands: a
+// wrapped pane reports the wrapper as pane_current_command for the pane's
+// whole lifetime, so first sight of the wrapper does not mean the agent
+// command has appeared.
+//
 // Includes an IsAgentAlive fallback: when the pane command stays as a shell
-// (e.g., "bash"), the agent may be running as a descendant process via a
-// wrapper script (e.g., "bash -c 'exec claude'"). In this case, pane_current_command
-// never changes from "bash", but IsAgentAlive detects the descendant.
+// (e.g., "bash") or a wrapper root, the agent may be running as a descendant
+// process (e.g., "bash -c 'exec claude'", or systemd-run's scope child). In
+// these cases pane_current_command never changes, but IsAgentAlive detects
+// the descendant.
 func (t *Tmux) WaitForCommand(ctx context.Context, session string, excludeCommands []string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -2513,8 +2529,10 @@ func (t *Tmux) WaitForCommand(ctx context.Context, session string, excludeComman
 			}
 			continue
 		}
-		// Check if current command is NOT in the exclude list
-		excluded := false
+		// Check if current command is NOT in the exclude list. Wrapper
+		// roots count as excluded: they hide the agent command for the
+		// pane's lifetime, so they must never satisfy the wait directly.
+		excluded := isWrapperCommand(cmd)
 		for _, exc := range excludeCommands {
 			if cmd == exc {
 				excluded = true
@@ -2524,8 +2542,9 @@ func (t *Tmux) WaitForCommand(ctx context.Context, session string, excludeComman
 		if !excluded {
 			return nil
 		}
-		// Fallback: if pane command is still a shell, check whether the
-		// agent is running as a descendant (handles bash-wrapped agents).
+		// Fallback: the pane command is still a shell or a wrapper root;
+		// check whether the agent is running as a descendant (handles
+		// bash-wrapped agents and systemd-run scope children).
 		if t.IsAgentAlive(session) {
 			return nil
 		}
@@ -3125,7 +3144,7 @@ func (t *Tmux) SetMailClickBinding(_ string) error {
 // This is used for "hot reload" of agent sessions - instantly restart in place.
 // The pane parameter should be a pane ID (e.g., "%0") or session:window.pane format.
 func (t *Tmux) RespawnPane(pane, command string) error {
-	_, err := t.run("respawn-pane", "-k", "-t", pane, command)
+	_, err := t.run("respawn-pane", "-k", "-t", pane, t.wrapPaneCommand(command))
 	return err
 }
 
@@ -3137,7 +3156,7 @@ func (t *Tmux) RespawnPaneWithWorkDir(pane, workDir, command string) error {
 	if workDir != "" {
 		args = append(args, "-c", workDir)
 	}
-	args = append(args, command)
+	args = append(args, t.wrapPaneCommand(command))
 	_, err := t.run(args...)
 	return err
 }

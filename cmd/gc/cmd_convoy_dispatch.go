@@ -695,12 +695,12 @@ func graphFallbackBindingForBead(source beads.Bead, store beads.Store, cityName,
 		return binding, nil
 	}
 	if cfg == nil {
-		return graphRouteBinding{}, fmt.Errorf("graph.v2 routing for %s requires config", source.ID)
+		return graphRouteBinding{}, fmt.Errorf("formulas v2 routing for %s requires config", source.ID)
 	}
 
 	agentCfg, ok := resolveAgentIdentity(cfg, routedTo, rigContext)
 	if !ok {
-		return graphRouteBinding{}, fmt.Errorf("unknown graph.v2 fallback target %q on %s", routedTo, source.ID)
+		return graphRouteBinding{}, fmt.Errorf("unknown formulas v2 fallback target %q on %s", routedTo, source.ID)
 	}
 
 	binding := graphRouteBinding{QualifiedName: agentCfg.QualifiedName()}
@@ -1327,6 +1327,9 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		// was stamped), we fall back to blank for backward compatibility.
 		nextRoute := strings.TrimSpace(currentSource.Metadata[beadmeta.RunTargetMetadataKey])
 		if err := target.storeView.store.SetMetadata(currentSource.ID, beadmeta.RoutedToMetadataKey, nextRoute); err != nil {
+			return err
+		}
+		if err := clearSessionAffinityMetadataOnBead(target.storeView.store, currentSource.ID); err != nil {
 			return err
 		}
 		if err := target.storeView.store.Update(currentSource.ID, beads.UpdateOpts{

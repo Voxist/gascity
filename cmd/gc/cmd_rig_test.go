@@ -108,6 +108,48 @@ func TestDoRigAdd_Basic(t *testing.T) {
 	}
 }
 
+func TestDoRigAdd_PreservesComments(t *testing.T) {
+	cityPath := t.TempDir()
+	cityToml := `# This is a city-level rationale comment.
+[workspace]
+name = "my-city"
+
+# Pack rationale: core tools are required.
+[packs.core]
+source = ".gc/system/packs/core"
+`
+	writeSchema2RigCity(t, cityPath, "my-city", cityToml, "")
+
+	rigPath := filepath.Join(t.TempDir(), "backend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "bd")
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	for _, want := range []string{
+		"# This is a city-level rationale comment.",
+		"# Pack rationale: core tools are required.",
+		"backend",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("city.toml missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestDoRigAddSqliteCityCreatesBdBackedRig(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(t.TempDir(), "tincan")
@@ -1244,6 +1286,14 @@ func TestDoRigListShowsSuspended(t *testing.T) {
 func TestDoRigAdd_WithPack(t *testing.T) {
 	cityPath := t.TempDir()
 	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	// A real local pack at packs/gastown: the include token must stay a
+	// local import instead of canonicalizing to the bundled source.
+	if err := os.MkdirAll(filepath.Join(cityPath, "packs", "gastown"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "packs", "gastown", "pack.toml"), []byte("[pack]\nname = \"gastown\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	rigPath := filepath.Join(t.TempDir(), "my-project")
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
@@ -1734,7 +1784,10 @@ func TestDoRigAdd_RealGastownExampleRootPackDefaultRigImport(t *testing.T) {
 		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
 	}
 
-	if !strings.Contains(stdout.String(), "Import: gastown=packs/gastown (default)") {
+	// The example city composes gastown via the pinned public import, not a
+	// checked-in packs/gastown copy, so the default rig import carries the
+	// public source.
+	if !strings.Contains(stdout.String(), "Import: gastown="+config.PublicGastownPackSource+" (default)") {
 		t.Fatalf("output missing gastown default import: %s", stdout.String())
 	}
 	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
@@ -1744,8 +1797,11 @@ func TestDoRigAdd_RealGastownExampleRootPackDefaultRigImport(t *testing.T) {
 	if len(cfg.Rigs) != 1 {
 		t.Fatalf("len(Rigs) = %d, want 1", len(cfg.Rigs))
 	}
-	if got := cfg.Rigs[0].Imports["gastown"].Source; got != "packs/gastown" {
-		t.Fatalf("rig gastown import source = %q, want %q", got, "packs/gastown")
+	if got := cfg.Rigs[0].Imports["gastown"].Source; got != config.PublicGastownPackSource {
+		t.Fatalf("rig gastown import source = %q, want %q", got, config.PublicGastownPackSource)
+	}
+	if got := cfg.Rigs[0].Imports["gastown"].Version; got != config.PublicGastownPackVersion {
+		t.Fatalf("rig gastown import version = %q, want %q", got, config.PublicGastownPackVersion)
 	}
 }
 
@@ -3257,4 +3313,24 @@ func TestRouteRigList_StaleBannerOver30s(t *testing.T) {
 	if !strings.Contains(stdout.String(), "cache age: 45s") {
 		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
 	}
+}
+
+// Regression test for the ga-lurp5d follow-up: a failed rig add must roll
+// back a symlinked city.toml by restoring the link target, not by replacing
+// the link with a regular file.
+func TestRigAddRollbackRestoresThroughCityTomlSymlink(t *testing.T) {
+	fs := fsys.OSFS{}
+	cityDir, link, target := setupSymlinkedCityToml(t)
+
+	snapshots, err := snapshotRigAddTopologyFiles(fs, cityDir, &config.City{})
+	if err != nil {
+		t.Fatalf("snapshotRigAddTopologyFiles: %v", err)
+	}
+	if err := os.WriteFile(target, []byte("[workspace]\nname = \"mutated\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreSnapshots(fs, snapshots); err != nil {
+		t.Fatalf("restoreSnapshots: %v", err)
+	}
+	assertCityTomlSymlinkRestored(t, link, target, symlinkedCityTomlOriginal)
 }

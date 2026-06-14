@@ -896,6 +896,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	dt := newDrainTracker()
 	poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, open, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
 	poolDesired := retainScaleCheckPartialPoolDesired(
+		cfg,
 		PoolDesiredCounts(ComputePoolDesiredStates(
 			cfg, poolWorkBeads, open, dsResult.ScaleCheckCounts)),
 		sessionBeads,
@@ -1100,7 +1101,7 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string, hoo
 	}
 
 	providerSet := hookProviderSet(hookProviders)
-	// workDir-based hooks: gemini, codex, antigravity, opencode, copilot, cursor, pi, omp, kimi.
+	// workDir-based hooks: gemini, codex, antigravity, opencode, mimocode, copilot, cursor, pi, omp, kimi.
 	for _, provider := range orderedWorkDirHookProviders {
 		if !providerSet[provider.name] {
 			continue
@@ -1162,6 +1163,7 @@ var orderedWorkDirHookProviders = []workDirHookProvider{
 	{name: "codex", relPaths: []string{path.Join(".codex", "hooks.json")}},
 	{name: "antigravity", relPaths: []string{path.Join(".agents", "hooks.json")}},
 	{name: "opencode", relPaths: []string{path.Join(".opencode", "plugins", "gascity.js")}},
+	{name: "mimocode", relPaths: []string{path.Join(".mimocode", "plugin", "gascity.js")}},
 	{name: "copilot", relPaths: []string{
 		path.Join(".github", "hooks", "gascity.json"),
 		path.Join(".github", "copilot-instructions.md"),

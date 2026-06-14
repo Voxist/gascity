@@ -83,6 +83,12 @@ const (
 	ConvoyClosed            = "convoy.closed"
 	ControllerStarted       = "controller.started"
 	ControllerStopped       = "controller.stopped"
+	// SupervisorStarted fires once per supervisor startup, after the
+	// instance lock is acquired. Its payload classifies how the previous
+	// supervisor instance exited (clean, crash, or unknown), derived from
+	// the clean-shutdown handoff token the STOPPING path leaves behind,
+	// so flap alerts can distinguish a crash loop from deploy restarts.
+	SupervisorStarted = "supervisor.started"
 	// SupervisorShutdownRequested fires when the supervisor's main loop
 	// observes a shutdown trigger (signal or socket stop) and is about to
 	// cancel the supervisor context. Carries attribution so operators can
@@ -179,6 +185,11 @@ const (
 	// session count. One alert per episode; AlertSent is cleared on green so
 	// the next episode fires independently. (ADR-0013 A1 M3a)
 	ProviderHealthGateAlert = "provider.health_gate_alert"
+
+	// Emergency events are dolt-independent escalation records written to
+	// .gc/emergency and mirrored into the city event log.
+	EmergencySignaled = "emergency.signaled"
+	EmergencyAcked    = "emergency.acked"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
@@ -208,7 +219,7 @@ var KnownEventTypes = []string{
 	OrderFired, OrderCompleted, OrderFailed, OrderGateTimeoutFailOpen,
 	ProviderSwapped, ProviderQuotaObserved, ProviderQuotaPollFailed,
 	WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
-	SupervisorShutdownRequested, SupervisorRequest,
+	SupervisorStarted, SupervisorShutdownRequested, SupervisorRequest,
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
 	ExtMsgAdapterAdded, ExtMsgAdapterRemoved,
 	ExtMsgInbound, ExtMsgOutbound,
@@ -219,6 +230,7 @@ var KnownEventTypes = []string{
 	StoreDegraded, StoreRecovered, StoreProbeFailed,
 	ProxyReaped, BreakerStateChanged,
 	ControllerTickCompleted, DoctorAlert,
+	EmergencySignaled, EmergencyAcked,
 	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
 	// The event is emitted by the reconciler but its typed SSE payload is not
 	// yet registered in internal/api (the payload registration lives in a
