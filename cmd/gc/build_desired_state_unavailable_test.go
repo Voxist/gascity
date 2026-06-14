@@ -81,14 +81,14 @@ func TestRetainScaleCheckPartialPoolDesiredFreezesUnavailableScope(t *testing.T)
 		},
 	})
 
-	got := retainScaleCheckPartialPoolDesired(nil, sessionBeads, map[string]bool{"vr/worker": true})
+	got := retainScaleCheckPartialPoolDesired(nil, nil, sessionBeads, map[string]bool{"vr/worker": true})
 	if got["vr/worker"] != 2 {
 		t.Fatalf("retained pool desired = %v, want vr/worker frozen at 2 running sessions", got)
 	}
 
 	// Without partial marking the same zero-count input would drain — the
 	// typed unavailable signal is what arms the freeze.
-	if drained := retainScaleCheckPartialPoolDesired(nil, sessionBeads, nil); len(drained) != 0 {
+	if drained := retainScaleCheckPartialPoolDesired(nil, nil, sessionBeads, nil); len(drained) != 0 {
 		t.Fatalf("retention without partial templates = %v, want empty", drained)
 	}
 }

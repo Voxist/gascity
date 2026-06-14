@@ -20,7 +20,6 @@ USER="${GC_DOLT_USER:-root}"
 # precedence; otherwise derive from the legacy seconds knob (default 1s ->
 # 1000ms) for backward compatibility.
 LATENCY_WARN_MS="${GC_DOCTOR_LATENCY_WARN_MS:-$(( ${GC_DOCTOR_LATENCY_WARN_S:-1} * 1000 ))}"
-CONN_MAX="${GC_DOCTOR_CONN_MAX:-50}"
 CONN_WARN_PCT="${GC_DOCTOR_CONN_WARN_PCT:-80}"
 BACKUP_STALE_S="${GC_DOCTOR_BACKUP_STALE_S:-43200}"  # 2x 6h backup interval
 BACKUP_ARTIFACT_DIR="${GC_BACKUP_ARTIFACT_DIR:-$GC_CITY_PATH/.dolt-backup}"
@@ -30,6 +29,18 @@ dolt_sql() {
         run_bounded 10 \
         dolt --host "$HOST" --port "$PORT" --user "$USER" --no-tls sql "$@"
 }
+
+# CONN_MAX: explicit override > server @@GLOBAL.max_connections > fallback.
+if [ -n "${GC_DOCTOR_CONN_MAX:-}" ]; then
+    CONN_MAX="$GC_DOCTOR_CONN_MAX"
+else
+    _server_max=$(dolt_sql -r csv -q "SELECT @@GLOBAL.max_connections" 2>/dev/null | tail -1 || true)
+    case "${_server_max:-}" in
+        ''|*[!0-9]*) CONN_MAX=256 ;;
+        *) CONN_MAX="$_server_max" ;;
+    esac
+    unset _server_max
+fi
 
 file_mtime() {
     file_path="$1"
@@ -138,15 +149,21 @@ if [ "${ORPHAN_COUNT:-0}" -gt 0 ]; then
 fi
 
 # Backup freshness: check newest backup artifact per database.
-# Scope mirrors mol-dog-backup.sh: only DBs with a configured <db>-backup
-# remote are eligible. Cities with user DBs but no backup remotes
-# (legitimate config) must not get false stale-backup alarms.
+# Every user database is in scope. DBs without a configured <db>-backup
+# remote are reported as a coverage gap rather than silently excluded —
+# the exclusion is how unconfigured production DBs went unbacked-up until
+# journal corruption made them unrecoverable (#3176). mol-dog-backup.sh
+# auto-configures the remote on its next run, so this warning self-heals
+# unless the backup dog itself is failing.
 BACKUP_ELIGIBLE_DBS=""
+BACKUP_STALE_ITEMS=""
 for db in $USER_DBS; do
     db_dir="$DOLT_DATA_DIR/$db"
     if [ -d "$db_dir/.dolt" ]; then
-        if (cd "$db_dir" && dolt backup 2>/dev/null | awk '{print $1}' | grep -qx "${db}-backup"); then
+        if (cd "$db_dir" && run_bounded 30 dolt backup 2>/dev/null | awk '{print $1}' | grep -qx "${db}-backup"); then
             BACKUP_ELIGIBLE_DBS="$BACKUP_ELIGIBLE_DBS $db"
+        else
+            append_backup_stale "$db backup remote missing"
         fi
     fi
 done
@@ -157,7 +174,6 @@ if [ -n "$BACKUP_ELIGIBLE_DBS" ]; then
     if [ ! -d "$BACKUP_ARTIFACT_DIR" ]; then
         BACKUP_STALE=" [WARN: backup artifact dir missing]"
     else
-        BACKUP_STALE_ITEMS=""
         NOW_S=$(date +%s)
         for db in $BACKUP_ELIGIBLE_DBS; do
             NEWEST_BACKUP_MTIME=$(newest_backup_mtime_for_db "$db")
@@ -170,10 +186,10 @@ if [ -n "$BACKUP_ELIGIBLE_DBS" ]; then
                 append_backup_stale "$db backup is $((BACKUP_AGE / 3600))h old"
             fi
         done
-        if [ -n "$BACKUP_STALE_ITEMS" ]; then
-            BACKUP_STALE=" [WARN: backup freshness: $BACKUP_STALE_ITEMS]"
-        fi
     fi
+fi
+if [ -n "$BACKUP_STALE_ITEMS" ]; then
+    BACKUP_STALE="$BACKUP_STALE [WARN: backup freshness: $BACKUP_STALE_ITEMS]"
 fi
 
 # --- Step 3: Compose report and escalate if critical ---

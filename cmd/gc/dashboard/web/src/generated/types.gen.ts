@@ -635,6 +635,7 @@ export type ConversationGroupParticipant = {
     };
     Public: boolean;
     SessionID: string;
+    SessionName: string;
 };
 
 export type ConversationGroupRecord = {
@@ -865,7 +866,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | BreakerStateChangedPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ControllerTickCompletedPayload | DoctorAlertPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OrderGateTimeoutFailOpenPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | ProxyReapedPayload | QuotaObservedPayload | QuotaPollFailedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | StoreDegradedPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | StoreProbeFailedPayload | StoreRecoveredPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | UnboundEventPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | BreakerStateChangedPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ControllerTickCompletedPayload | DoctorAlertPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OrderGateTimeoutFailOpenPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | ProxyReapedPayload | QuotaObservedPayload | QuotaPollFailedPayload | Record | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | StoreDegradedPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | StoreProbeFailedPayload | StoreRecoveredPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -1219,7 +1220,7 @@ export type FormulaPreviewBody = {
      */
     scope_ref?: string;
     /**
-     * Target agent for preview compilation.
+     * Preview target: a bead or convoy ID, or a configured agent identity (for example a workflow root's gc.routed_to value).
      */
     target: string;
     /**
@@ -2442,6 +2443,21 @@ export type ReadinessResponse = {
     };
 };
 
+export type Record = {
+    actor: string;
+    created_at: string;
+    hostname?: string;
+    id: string;
+    message: string;
+    metadata?: {
+        [key: string]: string;
+    };
+    ref_bead?: string;
+    severity: string;
+    source_path?: string;
+    source_pid?: number;
+};
+
 export type RequestFailedPayload = {
     /**
      * Machine-readable error code.
@@ -2632,6 +2648,7 @@ export type SessionBindingRecord = {
     };
     SchemaVersion: number;
     SessionID: string;
+    SessionName: string;
     Status: BindingStatus;
 };
 
@@ -3449,6 +3466,10 @@ export type SupervisorHealthOutputBody = {
      */
     cities_total: number;
     /**
+     * SHA-256 hex digest of the first managed city's packs.lock contents, for single-city deployments (mirrors the startup field's first-city semantics). Drift checkers compare this against the committed lockfile copy. Omitted when no city is registered, the city has no packs.lock, or the lockfile is unreadable (read error logged server-side) — treat absence as unknown, not as proof there is no lockfile.
+     */
+    packs_lock_sha256?: string;
+    /**
      * First-city startup info for single-city deployments.
      */
     startup?: SupervisorStartup;
@@ -3518,6 +3539,13 @@ export type SupervisorShutdownPayload = {
      * Which path triggered the shutdown.
      */
     source: 'signal' | 'socket_stop';
+};
+
+export type SupervisorStartedPayload = {
+    /**
+     * How the previous supervisor instance exited: clean (it completed its STOPPING path and left the shutdown handoff token), crash (a prior instance ran but left no token), or unknown (no evidence of a prior instance).
+     */
+    previous_exit: 'clean' | 'crash' | 'unknown';
 };
 
 export type SupervisorStartup = {
@@ -3597,6 +3625,10 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeConvoyCreated) | ({
     type: 'doctor.alert';
 } & TypedEventStreamEnvelopeDoctorAlert) | ({
+    type: 'emergency.acked';
+} & TypedEventStreamEnvelopeEmergencyAcked) | ({
+    type: 'emergency.signaled';
+} & TypedEventStreamEnvelopeEmergencySignaled) | ({
     type: 'events.rotated';
 } & TypedEventStreamEnvelopeEventsRotated) | ({
     type: 'extmsg.adapter_added';
@@ -3709,6 +3741,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSupervisorRequest) | ({
     type: 'supervisor.shutdown_requested';
 } & TypedEventStreamEnvelopeSupervisorShutdownRequested) | ({
+    type: 'supervisor.started';
+} & TypedEventStreamEnvelopeSupervisorStarted) | ({
     type: 'worker.operation';
 } & TypedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedEventStreamEnvelopeCustom';
@@ -3963,6 +3997,34 @@ export type TypedEventStreamEnvelopeDoctorAlert = {
     subject?: string;
     ts: string;
     type: 'doctor.alert';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope emergency.acked
+ */
+export type TypedEventStreamEnvelopeEmergencyAcked = {
+    actor: string;
+    message?: string;
+    payload: Record;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'emergency.acked';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope emergency.signaled
+ */
+export type TypedEventStreamEnvelopeEmergencySignaled = {
+    actor: string;
+    message?: string;
+    payload: Record;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'emergency.signaled';
     workflow?: WorkflowEventProjection;
 };
 
@@ -4751,6 +4813,20 @@ export type TypedEventStreamEnvelopeSupervisorShutdownRequested = {
 };
 
 /**
+ * TypedEventStreamEnvelope supervisor.started
+ */
+export type TypedEventStreamEnvelopeSupervisorStarted = {
+    actor: string;
+    message?: string;
+    payload: SupervisorStartedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'supervisor.started';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope worker.operation
  */
 export type TypedEventStreamEnvelopeWorkerOperation = {
@@ -4804,6 +4880,10 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeConvoyCreated) | ({
     type: 'doctor.alert';
 } & TypedTaggedEventStreamEnvelopeDoctorAlert) | ({
+    type: 'emergency.acked';
+} & TypedTaggedEventStreamEnvelopeEmergencyAcked) | ({
+    type: 'emergency.signaled';
+} & TypedTaggedEventStreamEnvelopeEmergencySignaled) | ({
     type: 'events.rotated';
 } & TypedTaggedEventStreamEnvelopeEventsRotated) | ({
     type: 'extmsg.adapter_added';
@@ -4916,6 +4996,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSupervisorRequest) | ({
     type: 'supervisor.shutdown_requested';
 } & TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested) | ({
+    type: 'supervisor.started';
+} & TypedTaggedEventStreamEnvelopeSupervisorStarted) | ({
     type: 'worker.operation';
 } & TypedTaggedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedTaggedEventStreamEnvelopeCustom';
@@ -5188,6 +5270,36 @@ export type TypedTaggedEventStreamEnvelopeDoctorAlert = {
     subject?: string;
     ts: string;
     type: 'doctor.alert';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope emergency.acked
+ */
+export type TypedTaggedEventStreamEnvelopeEmergencyAcked = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: Record;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'emergency.acked';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope emergency.signaled
+ */
+export type TypedTaggedEventStreamEnvelopeEmergencySignaled = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: Record;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'emergency.signaled';
     workflow?: WorkflowEventProjection;
 };
 
@@ -6028,6 +6140,21 @@ export type TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested = {
     subject?: string;
     ts: string;
     type: 'supervisor.shutdown_requested';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope supervisor.started
+ */
+export type TypedTaggedEventStreamEnvelopeSupervisorStarted = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: SupervisorStartedPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'supervisor.started';
     workflow?: WorkflowEventProjection;
 };
 
@@ -8699,7 +8826,7 @@ export type GetV0CityByCityNameFormulaByNameData = {
          */
         scope_ref?: string;
         /**
-         * Target agent for preview compilation.
+         * Preview target: a bead or convoy ID, or a configured agent identity (for example a workflow root's gc.routed_to value).
          */
         target: string;
     };
@@ -8828,7 +8955,7 @@ export type GetV0CityByCityNameFormulasByNameData = {
          */
         scope_ref?: string;
         /**
-         * Target agent for preview compilation.
+         * Preview target: a bead or convoy ID, or a configured agent identity (for example a workflow root's gc.routed_to value).
          */
         target: string;
     };
