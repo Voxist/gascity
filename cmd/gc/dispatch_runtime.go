@@ -60,9 +60,17 @@ var (
 	workflowServeIdlePollInterval  = 100 * time.Millisecond
 	workflowServeIdlePollAttempts  = 3
 	workflowServeWakeSweepInterval = 1 * time.Second
-	workflowServeMaxIdleSleep      = 30 * time.Second
-	workflowServeWaitForWake       = waitForRelevantWorkflowWakeWithTrace
-	workflowTraceNow               = time.Now
+	// Cap the --follow idle backoff at 5s. A worker that closes a step bead
+	// with a raw bd write does not publish a city BeadClosed event, so the
+	// control-dispatcher only notices the next ready step on its idle re-poll.
+	// At the former 30s cap each graph hop could wait up to ~30s, so a
+	// multi-step workflow accumulated minutes of pure wake latency (the bulk of
+	// the TestGraphWorkflowSuccessPath flake). 5s keeps the loop responsive
+	// across hops while still backing off from the 1s base; the cost is one
+	// serve loop polling every 5s rather than 30s when a city is fully idle.
+	workflowServeMaxIdleSleep = 5 * time.Second
+	workflowServeWaitForWake  = waitForRelevantWorkflowWakeWithTrace
+	workflowTraceNow          = time.Now
 	// The trace helper is intentionally process-global because workflowTracef
 	// does not carry per-invocation context. Nested installs (serve ->
 	// runControlDispatcherWithStore) reuse the active dedup map so one bad trace
