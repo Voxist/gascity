@@ -34,6 +34,24 @@ func TestSupervisorPlistSetsFDResourceLimits(t *testing.T) {
 	}
 }
 
+// TestSupervisorSystemdSetsFDLimit guards the Linux parallel of the FD fix:
+// the systemd unit must raise LimitNOFILE for the same dolt-saturation reason.
+func TestSupervisorSystemdSetsFDLimit(t *testing.T) {
+	content, err := renderSupervisorTemplate(supervisorSystemdTemplate, &supervisorServiceData{
+		GCPath:       "/usr/local/bin/gc",
+		LogPath:      "/home/user/.gc/supervisor.log",
+		GCHome:       "/home/user/.gc",
+		LaunchdLabel: defaultSupervisorLaunchdLabel,
+		Path:         "/usr/local/bin:/usr/bin:/bin",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(content, "LimitNOFILE=8192:16384") {
+		t.Fatalf("systemd unit missing LimitNOFILE=8192:16384")
+	}
+}
+
 // TestBeadStoreStartBackoff pins the breaker backoff schedule (capped
 // exponential): a transient dolt blip is ridden out across ~45s instead of
 // crash-looping the supervisor and re-bouncing dolt.
