@@ -37,6 +37,10 @@ jobs:
 
   tier-c:
     name: Tier C acceptance tests (Ollama)
+    # Requires the OLLAMA_API_KEY secret + GC_WORKER_INFERENCE_CLAUDE_OLLAMA_*
+    # model vars, which GitHub does not propagate to forks. Skip everywhere the
+    # secret cannot exist so forks don't fail this job on missing config.
+    if: github.repository == 'gastownhall/gascity'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
