@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/processenv"
 )
@@ -41,10 +42,13 @@ func rotateProviderKey(_ context.Context, providerName, newKey string, tm Rotate
 	sourceVars := processenv.ProviderSourceVars(spec.Env)
 	sort.Strings(sourceVars)
 
-	// Collect the expanded var keys (keys in spec.Env whose values had refs).
+	// Collect only the keys whose values contain ${...} refs — static-literal
+	// keys (e.g. ANTHROPIC_BASE_URL=https://...) must not be overwritten.
 	expandedVars := make([]string, 0, len(spec.Env))
-	for k := range spec.Env {
-		expandedVars = append(expandedVars, k)
+	for k, v := range spec.Env {
+		if strings.Contains(v, "${") {
+			expandedVars = append(expandedVars, k)
+		}
 	}
 	sort.Strings(expandedVars)
 
@@ -63,8 +67,7 @@ func rotateProviderKey(_ context.Context, providerName, newKey string, tm Rotate
 	// Enumerate live sessions and refresh those belonging to providerName.
 	sessions, err := tm.ListSessions()
 	if err != nil {
-		// No sessions is not an error for the rotate command.
-		return result, nil
+		return result, fmt.Errorf("listing sessions: %w", err)
 	}
 	sort.Strings(sessions)
 

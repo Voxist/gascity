@@ -16,8 +16,13 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/providergov"
+	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/spf13/cobra"
 )
+
+// rotateTmuxFactory creates the RotateTmux implementation used by rotate-key.
+// Overridden in tests to inject a fake without a live tmux server.
+var rotateTmuxFactory = func() RotateTmux { return tmux.NewTmux() }
 
 // newProviderCmd builds the `gc provider` command group: provider
 // governor utilities (city-scale plan, "Provider Governor" P1).
@@ -41,6 +46,7 @@ created once per account with:
     CLAUDE_CONFIG_DIR=~/.gc/monitor-claude claude login`,
 	}
 	cmd.AddCommand(newProviderQuotaCmd(stdout, stderr))
+	cmd.AddCommand(newProviderRotateKeyCmd(stdout, stderr))
 	return cmd
 }
 
@@ -297,4 +303,62 @@ func utilOrDash(v *float64) string {
 		return "-"
 	}
 	return fmt.Sprintf("%.1f", *v)
+}
+
+// newProviderRotateKeyCmd builds `gc provider rotate-key <provider> <newkey>`:
+// propagate a new API key into the tmux server global env and every live
+// session that uses the named provider, without requiring a tmux kill-server.
+func newProviderRotateKeyCmd(stdout, stderr io.Writer) *cobra.Command {
+	var dryRun bool
+	cmd := &cobra.Command{
+		Use:   "rotate-key <provider> <newkey>",
+		Short: "Rotate a provider API key across tmux global env and live sessions",
+		Long: `Propagate a new API key into the tmux server global env and every live session
+that uses the named provider, without requiring a tmux kill-server.
+
+Running agent processes that already hold the old key in-process will pick up
+the new key on their next natural restart (drain/respawn), not immediately.
+Use --dry-run to preview what would change before writing.`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			providerName, newKey := args[0], args[1]
+
+			cityPath, err := resolveCity()
+			if err != nil {
+				fmt.Fprintf(stderr, "gc: %v\n", err) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+
+			cfg, _, err := loadCityConfigWithBuiltinPacks(cityPath)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc: loading city config: %v\n", err) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+
+			spec, ok := cfg.Providers[providerName]
+			if !ok {
+				fmt.Fprintf(stderr, "gc: provider not found: %q\n", providerName) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+
+			tm := rotateTmuxFactory()
+			result, err := rotateProviderKey(cmd.Context(), providerName, newKey, tm, ProviderEnv{Env: spec.Env}, dryRun)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc: rotate-key: %v\n", err) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+
+			prefix := ""
+			if dryRun {
+				prefix = "would update "
+			}
+			for _, sv := range result.GlobalVarsUpdated {
+				fmt.Fprintf(stdout, "%sglobal env: %s\n", prefix, sv) //nolint:errcheck // best-effort stdout
+			}
+			fmt.Fprintf(stdout, "%s%d session(s) updated\n", prefix, len(result.SessionsUpdated)) //nolint:errcheck // best-effort stdout
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print what would change without writing to tmux")
+	return cmd
 }
