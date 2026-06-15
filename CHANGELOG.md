@@ -49,6 +49,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pack is embedded from the `github.com/gastownhall/gascity-packs` module
   root, so the pin resolves offline from the bundled synthetic cache.
 
+- **Managed Dolt servers now enable auto-GC by default.** `auto_gc_behavior.enable`
+  is `true` and `dolt_auto_gc_enabled` is `ON` in the generated server config.
+  Previously both defaulted to `false`/`OFF`, requiring manual `CALL dolt_gc()`
+  runs to reclaim disk space. Set `[dolt] auto_gc_enabled = false` in `city.toml`
+  to restore the previous behavior.
+
 - **The bundled gastown pack is now a Go module dependency, not a checked-in
   copy.** `examples/gastown/packs/gastown` is gone; the gc binary embeds the
   pack from `github.com/gastownhall/gascity-packs` (pinned in go.mod to the
@@ -91,6 +97,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   work to a pool they ship themselves).
 
 ### Added
+
+- **`gc provider rotate-key <provider> <newkey>` hot-rotates provider credentials
+  without a tmux kill-server.** The command re-sources the new key into the tmux
+  server global environment (`SetGlobalEnvironment`) and then pushes it into
+  every live session's environment (`SetEnvironment`) — so existing agents pick
+  up the new credential on their next API call without a restart. Supports
+  `--dry-run` to preview which sessions would be updated. Sessions restored via
+  `PRESERVE_SESSIONS` are enumerated by `ListSessions()` and receive the update;
+  the only edge case that survives rotation is a session that crashes and is
+  restored from tmux resurrection *after* rotate-key runs (a pre-existing
+  constraint of the no-kill-server design, noted in `--help`).
 
 - **Formulas v2 and `drain` are the supported path for new graph
   workflows.** The v2 compiler emits flat workflow graphs with

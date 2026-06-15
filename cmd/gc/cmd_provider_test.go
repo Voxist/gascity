@@ -32,6 +32,19 @@ func writeMonitorCredential(t *testing.T, token string) string {
 	return dir
 }
 
+// writeProviderTestCity creates a temporary city directory with the given
+// city.toml content and ensures builtin runtime assets are available.
+// Returns the city path.
+func writeProviderTestCity(t *testing.T, cityToml string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	materializeBuiltinPacksForTest(t, dir)
+	return dir
+}
+
 func TestCollectAccountQuotaMixedOutcomes(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.Header.Get("Authorization"), "good") {
@@ -203,5 +216,89 @@ func TestProviderQuotaReportJSONShape(t *testing.T) {
 	}
 	if !strings.Contains(string(empty), `"accounts": []`) && !strings.Contains(string(empty), `"accounts":[]`) {
 		t.Errorf("empty report accounts not []: %s", empty)
+	}
+}
+
+func TestProviderRotateKeyCLI(t *testing.T) {
+	testCity := writeProviderTestCity(t, `
+[workspace]
+name = "test"
+
+[beads]
+provider = "file"
+
+[providers.zai]
+env = {ANTHROPIC_API_KEY = "${ANTHROPIC_AUTH_TOKEN_ZAI}", ANTHROPIC_AUTH_TOKEN = "${ANTHROPIC_AUTH_TOKEN_ZAI}"}
+`)
+
+	// Inject a fake so no real tmux is required.
+	fake := newFakeRotateTmux(map[string]map[string]string{})
+	orig := rotateTmuxFactory
+	rotateTmuxFactory = func() RotateTmux { return fake }
+	t.Cleanup(func() { rotateTmuxFactory = orig })
+
+	t.Run("rotate zai exits 0 and names source var", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"provider", "rotate-key", "--city", testCity, "zai", "sk-ant-new"}, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("run() = %d; want 0\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "ANTHROPIC_AUTH_TOKEN_ZAI") {
+			t.Errorf("stdout = %q; want to contain ANTHROPIC_AUTH_TOKEN_ZAI", stdout.String())
+		}
+	})
+
+	t.Run("unknown provider exits non-zero", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"provider", "rotate-key", "--city", testCity, "unknown-provider", "sk-ant-new"}, &stdout, &stderr)
+		if code == 0 {
+			t.Fatalf("run() = 0; want non-zero for unknown provider")
+		}
+		if !strings.Contains(stderr.String(), "provider not found") {
+			t.Errorf("stderr = %q; want to contain 'provider not found'", stderr.String())
+		}
+	})
+
+	t.Run("provider --help exits 0", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"provider", "--help"}, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("run(provider --help) = %d; want 0\nstderr: %s", code, stderr.String())
+		}
+	})
+}
+
+func TestProviderRotateKeyDryRunFlag(t *testing.T) {
+	testCity := writeProviderTestCity(t, `
+[workspace]
+name = "test"
+
+[beads]
+provider = "file"
+
+[providers.zai]
+env = {ANTHROPIC_API_KEY = "${ANTHROPIC_AUTH_TOKEN_ZAI}", ANTHROPIC_AUTH_TOKEN = "${ANTHROPIC_AUTH_TOKEN_ZAI}"}
+`)
+
+	spy := newFakeRotateTmux(map[string]map[string]string{
+		"session-zai": {"GC_PROVIDER": "zai"},
+	})
+	orig := rotateTmuxFactory
+	rotateTmuxFactory = func() RotateTmux { return spy }
+	t.Cleanup(func() { rotateTmuxFactory = orig })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"provider", "rotate-key", "--city", testCity, "--dry-run", "zai", "sk-ant-new"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run(--dry-run) = %d; want 0\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "would update") {
+		t.Errorf("stdout = %q; want to contain 'would update'", stdout.String())
+	}
+	if len(spy.callsSet) != 0 {
+		t.Errorf("dry-run: SetGlobalEnvironment called %d times; want 0 (spy.callsSet=%v)", len(spy.callsSet), spy.callsSet)
+	}
+	if spy.sessions["session-zai"]["ANTHROPIC_API_KEY"] != "" {
+		t.Errorf("dry-run: session env modified; want untouched")
 	}
 }
