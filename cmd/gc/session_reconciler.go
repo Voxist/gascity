@@ -2484,13 +2484,30 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					} else {
 						target.tp.Env = maps.Clone(target.tp.Env)
 					}
+					// Merge alternate provider's own env so providers that require
+					// distinct credentials (e.g. openrouter, dashscope-anthropic)
+					// receive their own API key instead of the primary provider's.
+					altProvidedBaseURL := false
+					if altSpec, ok := cfg.Providers[alternate]; ok {
+						for k, v := range altSpec.Env {
+							target.tp.Env[k] = v
+							if k == "ANTHROPIC_BASE_URL" {
+								altProvidedBaseURL = true
+							}
+						}
+					}
 					target.tp.Env["GC_PROVIDER"] = alternate
 					// Redirect the model proxy URL to route through the alternate provider.
 					// buildDesiredState sets ANTHROPIC_BASE_URL = proxyAddr+"/proxy/"+original;
-					// chain-walk must rewrite the trailing provider segment.
-					if u := target.tp.Env["ANTHROPIC_BASE_URL"]; u != "" {
-						if i := strings.LastIndexByte(u, '/'); i >= 0 {
-							target.tp.Env["ANTHROPIC_BASE_URL"] = u[:i+1] + alternate
+					// chain-walk must rewrite the trailing provider segment — but only
+					// when the alternate didn't supply its own explicit base URL above.
+					// Otherwise the rewrite would clobber a real endpoint
+					// (e.g. https://openrouter.ai/api/v1 -> .../api/openrouter).
+					if !altProvidedBaseURL {
+						if u := target.tp.Env["ANTHROPIC_BASE_URL"]; u != "" {
+							if i := strings.LastIndexByte(u, '/'); i >= 0 {
+								target.tp.Env["ANTHROPIC_BASE_URL"] = u[:i+1] + alternate
+							}
 						}
 					}
 					if trace != nil {

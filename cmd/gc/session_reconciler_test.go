@@ -10137,3 +10137,112 @@ func TestReconcilerChainWalkSelectsAlternate(t *testing.T) {
 		t.Errorf("expected ANTHROPIC_BASE_URL=%q after chain-walk to zai, got %q", wantURL, got)
 	}
 }
+
+// TestReconcilerChainWalkInjectsAlternateProviderCredentials verifies that
+// when chain-walk selects an alternate provider, the alternate's own Env
+// credentials are merged into the spawned session, overriding the primary's
+// values for shared keys. Regression test for the bug where providers like
+// dashscope-anthropic or openrouter (which both share ANTHROPIC_API_KEY /
+// ANTHROPIC_BASE_URL with the primary claude provider) would inherit the
+// primary's credentials and 401 silently after failover.
+func TestReconcilerChainWalkInjectsAlternateProviderCredentials(t *testing.T) {
+	cityPath := t.TempDir()
+	reg := newProviderHealthRegistry()
+	base := time.Now()
+	// Mark claude red.
+	for i := range 3 {
+		reg.RecordResponse("claude", 429, base.Add(time.Duration(i)*time.Second))
+	}
+	if healthy, present := reg.Check("claude"); !present || healthy {
+		t.Fatalf("precondition: claude must be red, got healthy=%v present=%v", healthy, present)
+	}
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	dt := newDrainTracker()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	// Both providers use the same env var names (realistic: openrouter is
+	// Anthropic-compatible, so it shares ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL).
+	// The alternate's values must override the primary's on failover.
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "worker", Provider: "claude"}},
+		Providers: map[string]config.ProviderSpec{
+			"claude": {Env: map[string]string{
+				"ANTHROPIC_API_KEY":  "claude-key",
+				"ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+			}},
+			"openrouter": {Env: map[string]string{
+				"ANTHROPIC_API_KEY":  "or-secret-key",
+				"ANTHROPIC_BASE_URL": "https://openrouter.ai/api/v1",
+			}},
+		},
+	}
+
+	desiredState := map[string]TemplateParams{
+		"worker": {
+			Command:          "test-cmd",
+			SessionName:      "worker",
+			TemplateName:     "worker",
+			ResolvedProvider: &config.ResolvedProvider{Name: "claude"},
+			Env: map[string]string{
+				"GC_PROVIDER":        "claude",
+				"ANTHROPIC_API_KEY":  "claude-key",
+				"ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+			},
+		},
+	}
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "worker",
+			"agent_name":           "worker",
+			"template":             "worker",
+			"live_hash":            runtime.LiveFingerprint(runtime.Config{Command: "test-cmd"}),
+			"generation":           "1",
+			"instance_token":       "test-token",
+			"state":                "creating",
+			"pending_create_claim": "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+
+	gate := newProviderHealthGate()
+	var stdout, stderr bytes.Buffer
+	woken := reconcileSessionBeadsTracedWithNamedDemand(
+		context.Background(), cityPath, []beads.Bead{session}, desiredState,
+		map[string]bool{"worker": true}, cfg, sp, store, nil, nil, nil, nil,
+		dt, gate, reg, []string{"claude", "openrouter"},
+		map[string]int{"worker": 1}, nil, false, nil, "", nil, clk, events.Discard,
+		0, 0, &stdout, &stderr, nil,
+	)
+
+	if woken == 0 {
+		t.Fatal("expected session to be spawned via openrouter failover, but woken=0")
+	}
+	calls := sp.SnapshotCalls()
+	var startCall *runtime.Call
+	for i := range calls {
+		if calls[i].Method == "Start" && calls[i].Name == "worker" {
+			startCall = &calls[i]
+		}
+	}
+	if startCall == nil {
+		t.Fatal("no Start call recorded for worker")
+	}
+	env := startCall.Config.Env
+	if got := env["GC_PROVIDER"]; got != "openrouter" {
+		t.Errorf("GC_PROVIDER: got %q, want %q", got, "openrouter")
+	}
+	// The alternate's ANTHROPIC_API_KEY must override the primary's so
+	// openrouter receives its own credential, not claude's.
+	if got := env["ANTHROPIC_API_KEY"]; got != "or-secret-key" {
+		t.Errorf("ANTHROPIC_API_KEY: got %q, want %q (alternate credential must override primary)", got, "or-secret-key")
+	}
+	if got := env["ANTHROPIC_BASE_URL"]; got != "https://openrouter.ai/api/v1" {
+		t.Errorf("ANTHROPIC_BASE_URL: got %q, want %q (alternate base URL must override primary)", got, "https://openrouter.ai/api/v1")
+	}
+}
