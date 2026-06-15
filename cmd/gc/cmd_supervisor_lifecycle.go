@@ -1341,6 +1341,16 @@ const supervisorLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
         <string>{{xmlesc .Value}}</string>
         {{end}}
     </dict>
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>8192</integer>
+    </dict>
+    <key>HardResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>16384</integer>
+    </dict>
 </dict>
 </plist>
 `
