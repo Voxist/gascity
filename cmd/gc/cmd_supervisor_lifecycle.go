@@ -1368,6 +1368,10 @@ KillMode=process
 ExecStart={{systemdpath .GCPath}} supervisor run
 Restart=always
 RestartSec=5s
+# Raise the file-descriptor limit (parallel to the launchd plist's
+# SoftResourceLimits) so the managed dolt server the supervisor spawns is not
+# capped at a low default FD limit under connection load (incident 2026-06-15).
+LimitNOFILE=8192:16384
 StandardOutput=append:{{.LogPath}}
 StandardError=append:{{.LogPath}}
 Environment=GC_HOME="{{.GCHome}}"
