@@ -89,6 +89,7 @@ type CityRuntime struct {
 	orderSweepWatchdogLast             time.Time
 	orderTrackingRetentionWatchdogLast time.Time
 	nudgeMailSweepWatchdogLast         time.Time
+	wispIndexMigrationApplied          bool
 
 	rec events.Recorder
 	cs  *controllerState // nil when controller-managed bead stores are unavailable
@@ -1354,6 +1355,10 @@ func (cr *CityRuntime) dispatchOrders(ctx context.Context, cityRoot string) {
 		return
 	}
 	now := time.Now()
+	if !cr.wispIndexMigrationApplied {
+		cr.wispIndexMigrationApplied = true
+		cr.applyWispQueryIndexes(ctx)
+	}
 	cr.rescanOrderDispatcherIfDue(ctx, cityRoot, now)
 	cr.runOrderTrackingSweepWatchdog(now)
 	cr.runOrderTrackingRetentionWatchdog(now)
@@ -1376,6 +1381,19 @@ func (cr *CityRuntime) rescanOrderDispatcherIfDue(ctx context.Context, cityRoot 
 	}
 }
 
+// replaceOrderDispatcher installs next as the active order dispatcher, carrying
+// warm last-run data from the outgoing dispatcher so a rebuild (reload or
+// rescan) reuses it instead of cold-starting and re-querying every order
+// (#3201). Call after draining the outgoing dispatcher.
+func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
+	if prev, ok := cr.od.(*memoryOrderDispatcher); ok {
+		if nextMem, ok := next.(*memoryOrderDispatcher); ok {
+			nextMem.carryLastRunCacheFrom(prev)
+		}
+	}
+	cr.od = next
+}
+
 func (cr *CityRuntime) rescanOrderDispatcher(ctx context.Context, cityRoot string, cfg *config.City, cmdName string, now time.Time) (bool, string, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1395,7 +1413,7 @@ func (cr *CityRuntime) rescanOrderDispatcher(ctx context.Context, cityRoot strin
 		cr.drainOutgoingOrderDispatcher(drainCtx, cr.od)
 		drainCancel()
 	}
-	cr.od = buildOrderDispatcherFromOrderSet(cityRoot, cfg, snapshot.Orders, cr.rec, cr.stderr)
+	cr.replaceOrderDispatcher(buildOrderDispatcherFromOrderSet(cityRoot, cfg, snapshot.Orders, cr.rec, cr.stderr))
 	cr.orderSet = snapshot.Orders
 	cr.orderSetSignature = snapshot.Signature
 	if summary != "unchanged" {
@@ -1998,7 +2016,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	}
 	nextOD, orderSnapshot := buildOrderDispatcherWithSnapshot(cityRoot, nextCfg, cr.rec, cr.stderr, "gc reload: order scan")
 	orderSummary := orderSetChangeSummary(cr.orderSet, orderSnapshot.Orders)
-	cr.od = nextOD
+	cr.replaceOrderDispatcher(nextOD)
 	cr.orderSet = orderSnapshot.Orders
 	cr.orderSetSignature = orderSnapshot.Signature
 	cr.orderRescanLast = time.Now()

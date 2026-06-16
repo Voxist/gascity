@@ -1,5 +1,6 @@
 {
   "skipDangerousModePermissionPrompt": true,
+  "enableAllProjectMcpServers": true,
   "editorMode": "normal",
   "awaySummaryEnabled": false,
   "hooks": {

@@ -155,6 +155,9 @@ func TestInstallClaude(t *testing.T) {
 	if !strings.Contains(s, `"skipDangerousModePermissionPrompt": true`) {
 		t.Error("claude settings should contain skipDangerousModePermissionPrompt")
 	}
+	if !strings.Contains(s, `"enableAllProjectMcpServers": true`) {
+		t.Error("claude settings should pre-approve project MCP servers (enableAllProjectMcpServers) so managed agents don't block on the 'New MCP server found' trust modal (#3466)")
+	}
 	if !strings.Contains(s, `"editorMode": "normal"`) {
 		t.Error("claude settings should contain editorMode")
 	}
