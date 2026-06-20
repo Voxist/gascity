@@ -862,6 +862,7 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 			SkipPoke:   opts.SkipPoke,
 			DryRun:     opts.DryRun,
 			InlineText: opts.InlineText,
+			NoFormula:  opts.NoFormula,
 		}, querier)
 	}
 	// Print warnings before error check so they're visible on failure.

@@ -223,6 +223,7 @@ compact_remote="${GC_DOLT_COMPACT_REMOTE:-}"
 dry_run="${GC_DOLT_COMPACT_DRY_RUN:-}"
 only_dbs="${GC_DOLT_COMPACT_ONLY_DBS:-}"
 bare_gc_input="${GC_DOLT_COMPACT_BARE_GC:-}"
+compact_alert_to="${GC_DOLT_COMPACT_ALERT_TO:-mayor}"
 case "$bare_gc_input" in
   ''|0|false|FALSE|no|NO)
     bare_gc=0
@@ -1181,7 +1182,21 @@ write_compact_marker() {
     printf 'compact: db=%s unable to install marker in %s\n' "$db" "$dir" >&2
     return 1
   fi
+  if [ "$dir" = "$quarantine_dir" ]; then
+    send_compact_quarantine_alert "$db" "compact-quarantine" "$marker_path" "$reason" "$created_at" || true
+  fi
   return 0
+}
+
+send_compact_quarantine_alert() {
+  _ca_db="$1"
+  _ca_type="$2"
+  _ca_path="$3"
+  _ca_reason="$4"
+  _ca_created_at="${5:-<unknown>}"
+  _ca_msg="db=$_ca_db type=$_ca_type marker=$_ca_path reason=$_ca_reason created_at=$_ca_created_at recipient=$compact_alert_to"
+  gc event emit dolt.compact.quarantine --actor controller --message "$_ca_msg" || true
+  gc mail send "$compact_alert_to" --from controller -s "dolt compact quarantine: $_ca_db $_ca_type" -m "$_ca_msg" || true
 }
 
 ensure_compact_marker_writable() {
@@ -1306,6 +1321,7 @@ ensure_remote_push_retry_fresh() {
   if [ "$age_secs" -gt "$pending_push_max_age_secs" ]; then
     printf 'compact: db=%s %s marker is stale age=%ss max_age=%ss — manual review required before remote push retry\n' \
       "$db" "$marker_label" "$age_secs" "$pending_push_max_age_secs" >&2
+    send_compact_quarantine_alert "$db" "$(basename "$dir")" "$(compact_marker_path "$dir" "$db")" "$marker_label marker is stale" "$(compact_marker_value "$dir" "$db" created_at || true)" || true
     return 1
   fi
   return 0
@@ -1676,6 +1692,7 @@ flatten_database() {
     quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
     printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s — manual intervention required before compaction or GC\n' \
       "$db" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
+    send_compact_quarantine_alert "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" || true
     return 1
   fi
 
@@ -2353,6 +2370,7 @@ bare_gc_database() {
     quarantine_created_at=$(compact_marker_value "$quarantine_dir" "$db" created_at || true)
     printf 'compact: db=%s integrity quarantine marker exists at %s reason=%s created_at=%s — manual intervention required before compaction or GC\n' \
       "$db" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" >&2
+    send_compact_quarantine_alert "$db" "compact-quarantine" "$quarantine_marker" "${quarantine_reason:-<unknown>}" "${quarantine_created_at:-<unknown>}" || true
     return 1
   fi
 

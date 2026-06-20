@@ -221,6 +221,10 @@ type RouteOpts struct {
 	// callers always provide explicit bead or formula references.
 	InlineText bool
 	SkipPoke   bool
+	// NoFormula suppresses default_sling_formula attachment even when the
+	// target agent has one configured. Without this field, ExpandConvoy
+	// cannot propagate --no-formula through DoSlingBatch.
+	NoFormula bool
 }
 
 // FormulaOpts holds options for formula-based operations.
@@ -301,6 +305,7 @@ func (s *Sling) ExpandConvoy(_ context.Context, convoyID string, target config.A
 		SkipPoke:      opts.SkipPoke,
 		DryRun:        opts.DryRun,
 		InlineText:    opts.InlineText,
+		NoFormula:     opts.NoFormula,
 	}, s.deps, querier)
 }
 
