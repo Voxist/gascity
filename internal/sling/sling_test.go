@@ -2736,6 +2736,41 @@ func TestSlingExpandConvoy(t *testing.T) {
 	}
 }
 
+// TestExpandConvoyNoFormulaSuppressesDefaultFormula is a regression test for
+// the bug where ExpandConvoy did not propagate NoFormula into DoSlingBatch,
+// causing the default_sling_formula to fire even when --no-formula was set.
+func TestExpandConvoyNoFormulaSuppressesDefaultFormula(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	store := deps.Store
+
+	// Agent with a default_sling_formula configured.
+	a := config.Agent{Name: "mayor", DefaultSlingFormula: stringPtr("code-review"), MaxActiveSessions: intPtr(1)}
+
+	bead, err := store.Create(beads.Bead{Title: "task", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// NoFormula=true: formula must NOT be invoked.
+	result, err := s.ExpandConvoy(context.Background(), bead.ID, a, RouteOpts{NoFormula: true}, store)
+	if err != nil {
+		t.Fatalf("ExpandConvoy with NoFormula=true: %v", err)
+	}
+	if result.WispRootID != "" || result.WorkflowID != "" {
+		t.Errorf("expected no formula attachment; WispRootID=%q WorkflowID=%q", result.WispRootID, result.WorkflowID)
+	}
+	if len(runner.calls) != 1 {
+		t.Errorf("expected 1 route call, got %d", len(runner.calls))
+	}
+}
+
 func TestDoSlingPoolEmptyWarns(t *testing.T) {
 	runner := newFakeRunner()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}

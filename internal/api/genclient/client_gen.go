@@ -612,6 +612,13 @@ type BeadAssignInputBody struct {
 	Assignee *string `json:"assignee,omitempty"`
 }
 
+// BeadClaimRejectedPayload defines model for BeadClaimRejectedPayload.
+type BeadClaimRejectedPayload struct {
+	AttemptedClaimant string `json:"attempted_claimant"`
+	BeadId            string `json:"bead_id"`
+	ExistingClaimant  string `json:"existing_claimant"`
+}
+
 // BeadCreateInputBody defines model for BeadCreateInputBody.
 type BeadCreateInputBody struct {
 	// Assignee Assigned agent.
@@ -2086,6 +2093,14 @@ type OrdersFeedBody struct {
 	PartialErrors *[]string                  `json:"partial_errors,omitempty"`
 }
 
+// OutboundChannelMismatchPayload defines model for OutboundChannelMismatchPayload.
+type OutboundChannelMismatchPayload struct {
+	ConversationId string `json:"conversation_id"`
+	OwnerSession   string `json:"owner_session"`
+	PostingSession string `json:"posting_session"`
+	Provider       string `json:"provider"`
+}
+
 // OutboundEventPayload defines model for OutboundEventPayload.
 type OutboundEventPayload struct {
 	ConversationId string `json:"conversation_id"`
@@ -3422,6 +3437,18 @@ type TypedEventStreamEnvelope struct {
 	union json.RawMessage
 }
 
+// TypedEventStreamEnvelopeBeadClaimRejected defines model for TypedEventStreamEnvelopeBeadClaimRejected.
+type TypedEventStreamEnvelopeBeadClaimRejected struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  BeadClaimRejectedPayload `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeBeadClosed defines model for TypedEventStreamEnvelopeBeadClosed.
 type TypedEventStreamEnvelopeBeadClosed struct {
 	Actor    string                   `json:"actor"`
@@ -3744,6 +3771,18 @@ type TypedEventStreamEnvelopeExtmsgOutbound struct {
 	Ts       time.Time                `json:"ts"`
 	Type     string                   `json:"type"`
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch defines model for TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch.
+type TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch struct {
+	Actor    string                         `json:"actor"`
+	Message  *string                        `json:"message,omitempty"`
+	Payload  OutboundChannelMismatchPayload `json:"payload"`
+	Seq      int64                          `json:"seq"`
+	Subject  *string                        `json:"subject,omitempty"`
+	Ts       time.Time                      `json:"ts"`
+	Type     string                         `json:"type"`
+	Workflow *WorkflowEventProjection       `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeExtmsgUnbound defines model for TypedEventStreamEnvelopeExtmsgUnbound.
@@ -4363,6 +4402,19 @@ type TypedTaggedEventStreamEnvelope struct {
 	union json.RawMessage
 }
 
+// TypedTaggedEventStreamEnvelopeBeadClaimRejected defines model for TypedTaggedEventStreamEnvelopeBeadClaimRejected.
+type TypedTaggedEventStreamEnvelopeBeadClaimRejected struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  BeadClaimRejectedPayload `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedTaggedEventStreamEnvelopeBeadClosed defines model for TypedTaggedEventStreamEnvelopeBeadClosed.
 type TypedTaggedEventStreamEnvelopeBeadClosed struct {
 	Actor    string                   `json:"actor"`
@@ -4712,6 +4764,19 @@ type TypedTaggedEventStreamEnvelopeExtmsgOutbound struct {
 	Ts       time.Time                `json:"ts"`
 	Type     string                   `json:"type"`
 	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch defines model for TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch.
+type TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch struct {
+	Actor    string                         `json:"actor"`
+	City     string                         `json:"city"`
+	Message  *string                        `json:"message,omitempty"`
+	Payload  OutboundChannelMismatchPayload `json:"payload"`
+	Seq      int64                          `json:"seq"`
+	Subject  *string                        `json:"subject,omitempty"`
+	Ts       time.Time                      `json:"ts"`
+	Type     string                         `json:"type"`
+	Workflow *WorkflowEventProjection       `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeExtmsgUnbound defines model for TypedTaggedEventStreamEnvelopeExtmsgUnbound.
@@ -6636,6 +6701,32 @@ func (t *EventPayload) MergeAdapterEventPayload(v AdapterEventPayload) error {
 	return err
 }
 
+// AsBeadClaimRejectedPayload returns the union data inside the EventPayload as a BeadClaimRejectedPayload
+func (t EventPayload) AsBeadClaimRejectedPayload() (BeadClaimRejectedPayload, error) {
+	var body BeadClaimRejectedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromBeadClaimRejectedPayload overwrites any union data inside the EventPayload as the provided BeadClaimRejectedPayload
+func (t *EventPayload) FromBeadClaimRejectedPayload(v BeadClaimRejectedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeBeadClaimRejectedPayload performs a merge with any union data inside the EventPayload, using the provided BeadClaimRejectedPayload
+func (t *EventPayload) MergeBeadClaimRejectedPayload(v BeadClaimRejectedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsBeadEventPayload returns the union data inside the EventPayload as a BeadEventPayload
 func (t EventPayload) AsBeadEventPayload() (BeadEventPayload, error) {
 	var body BeadEventPayload
@@ -7016,6 +7107,32 @@ func (t *EventPayload) FromOrderGateTimeoutFailOpenPayload(v OrderGateTimeoutFai
 
 // MergeOrderGateTimeoutFailOpenPayload performs a merge with any union data inside the EventPayload, using the provided OrderGateTimeoutFailOpenPayload
 func (t *EventPayload) MergeOrderGateTimeoutFailOpenPayload(v OrderGateTimeoutFailOpenPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsOutboundChannelMismatchPayload returns the union data inside the EventPayload as a OutboundChannelMismatchPayload
+func (t EventPayload) AsOutboundChannelMismatchPayload() (OutboundChannelMismatchPayload, error) {
+	var body OutboundChannelMismatchPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromOutboundChannelMismatchPayload overwrites any union data inside the EventPayload as the provided OutboundChannelMismatchPayload
+func (t *EventPayload) FromOutboundChannelMismatchPayload(v OutboundChannelMismatchPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeOutboundChannelMismatchPayload performs a merge with any union data inside the EventPayload, using the provided OutboundChannelMismatchPayload
+func (t *EventPayload) MergeOutboundChannelMismatchPayload(v OutboundChannelMismatchPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -7878,6 +7995,34 @@ func (t *SessionStreamCommonEvent) UnmarshalJSON(b []byte) error {
 	return err
 }
 
+// AsTypedEventStreamEnvelopeBeadClaimRejected returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadClaimRejected
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadClaimRejected() (TypedEventStreamEnvelopeBeadClaimRejected, error) {
+	var body TypedEventStreamEnvelopeBeadClaimRejected
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeBeadClaimRejected overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeBeadClaimRejected
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeBeadClaimRejected(v TypedEventStreamEnvelopeBeadClaimRejected) error {
+	v.Type = "bead.claim_rejected"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeBeadClaimRejected performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeBeadClaimRejected
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadClaimRejected(v TypedEventStreamEnvelopeBeadClaimRejected) error {
+	v.Type = "bead.claim_rejected"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeBeadClosed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBeadClosed
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBeadClosed() (TypedEventStreamEnvelopeBeadClosed, error) {
 	var body TypedEventStreamEnvelopeBeadClosed
@@ -8596,6 +8741,34 @@ func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExtmsgOutbound(v 
 // MergeTypedEventStreamEnvelopeExtmsgOutbound performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExtmsgOutbound
 func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExtmsgOutbound(v TypedEventStreamEnvelopeExtmsgOutbound) error {
 	v.Type = "extmsg.outbound"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeExtmsgOutboundChannelMismatch returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeExtmsgOutboundChannelMismatch() (TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch, error) {
+	var body TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeExtmsgOutboundChannelMismatch overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeExtmsgOutboundChannelMismatch(v TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch) error {
+	v.Type = "extmsg.outbound_channel_mismatch"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeExtmsgOutboundChannelMismatch performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExtmsgOutboundChannelMismatch(v TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch) error {
+	v.Type = "extmsg.outbound_channel_mismatch"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -10078,6 +10251,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 	switch discriminator {
 	case "TypedEventStreamEnvelopeCustom":
 		return t.AsTypedEventStreamEnvelopeCustom()
+	case "bead.claim_rejected":
+		return t.AsTypedEventStreamEnvelopeBeadClaimRejected()
 	case "bead.closed":
 		return t.AsTypedEventStreamEnvelopeBeadClosed()
 	case "bead.created":
@@ -10130,6 +10305,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeExtmsgInbound()
 	case "extmsg.outbound":
 		return t.AsTypedEventStreamEnvelopeExtmsgOutbound()
+	case "extmsg.outbound_channel_mismatch":
+		return t.AsTypedEventStreamEnvelopeExtmsgOutboundChannelMismatch()
 	case "extmsg.unbound":
 		return t.AsTypedEventStreamEnvelopeExtmsgUnbound()
 	case "gc.store.disk_critical":
@@ -10244,6 +10421,34 @@ func (t TypedEventStreamEnvelope) MarshalJSON() ([]byte, error) {
 
 func (t *TypedEventStreamEnvelope) UnmarshalJSON(b []byte) error {
 	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeBeadClaimRejected returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeBeadClaimRejected
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeBeadClaimRejected() (TypedTaggedEventStreamEnvelopeBeadClaimRejected, error) {
+	var body TypedTaggedEventStreamEnvelopeBeadClaimRejected
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeBeadClaimRejected overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeBeadClaimRejected
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeadClaimRejected(v TypedTaggedEventStreamEnvelopeBeadClaimRejected) error {
+	v.Type = "bead.claim_rejected"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeBeadClaimRejected performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadClaimRejected
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadClaimRejected(v TypedTaggedEventStreamEnvelopeBeadClaimRejected) error {
+	v.Type = "bead.claim_rejected"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
 	return err
 }
 
@@ -10965,6 +11170,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExtms
 // MergeTypedTaggedEventStreamEnvelopeExtmsgOutbound performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExtmsgOutbound
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExtmsgOutbound(v TypedTaggedEventStreamEnvelopeExtmsgOutbound) error {
 	v.Type = "extmsg.outbound"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch() (TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch, error) {
+	var body TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch(v TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch) error {
+	v.Type = "extmsg.outbound_channel_mismatch"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch(v TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch) error {
+	v.Type = "extmsg.outbound_channel_mismatch"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -12447,6 +12680,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 	switch discriminator {
 	case "TypedTaggedEventStreamEnvelopeCustom":
 		return t.AsTypedTaggedEventStreamEnvelopeCustom()
+	case "bead.claim_rejected":
+		return t.AsTypedTaggedEventStreamEnvelopeBeadClaimRejected()
 	case "bead.closed":
 		return t.AsTypedTaggedEventStreamEnvelopeBeadClosed()
 	case "bead.created":
@@ -12499,6 +12734,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgInbound()
 	case "extmsg.outbound":
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgOutbound()
+	case "extmsg.outbound_channel_mismatch":
+		return t.AsTypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch()
 	case "extmsg.unbound":
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgUnbound()
 	case "gc.store.disk_critical":

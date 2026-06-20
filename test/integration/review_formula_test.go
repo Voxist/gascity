@@ -17,12 +17,14 @@ import (
 
 // reviewWorkflowTimeout bounds waits for review-formula workflow beads to
 // close. Successful runs on CI average ~5 min per test, but runner variance
-// is high: the transient-retry test (soft-fail after 3 attempts) runs 3
-// full polecat cycles back-to-back, each ~3 min on a busy runner, plus
-// synthesis. The earlier 12-minute budget left no headroom and produced
-// intermittent timeout flakes; 18 min keeps a healthy margin for runner
-// contention without letting a genuinely stuck workflow loiter.
-const reviewWorkflowTimeout = 18 * time.Minute
+// is high: mol-personal-work-v2 has 18+ steps across two Ralph loops (6
+// polecat in design-review, 2 in code-review), taking ~20 min on busy
+// runners. The transient-retry tests add extra polecat cycles on top. The
+// earlier 12-minute budget produced intermittent flakes; 18 min still left
+// no headroom for personal-work and retry tests (~38 s from done at cutoff
+// in CI run 27788351365). 24 min leaves ~4 min margin while staying under
+// the 30-minute job ceiling.
+const reviewWorkflowTimeout = 24 * time.Minute
 
 // reviewWorkflowSlingTimeout only covers formula instantiation and convoy
 // routing. The personal-work graph is large enough that bd-backed graph apply
@@ -348,6 +350,9 @@ on_exhausted = "hard_fail"
 func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]string) string {
 	t.Helper()
 	env := newIsolatedCommandEnv(t, true)
+	// Reduce bd probe timeout so pool respawn gaps don't stall CI runners.
+	// 30s is well above the floor (5s) and well below the 180s production default.
+	env = append(env, "GC_BD_PROBE_TIMEOUT=30s")
 
 	var cityName string
 	if usingSubprocess() {

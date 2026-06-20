@@ -417,7 +417,7 @@ func mergeOptionsSchemaByKey(base, city []ProviderOption) ([]ProviderOption, map
 			continue
 		}
 		if idx, ok := index[opt.Key]; ok && opt.Key != "" {
-			out[idx] = opt
+			out[idx] = mergeProviderOptionByKey(out[idx], opt)
 			continue
 		}
 		if opt.Key != "" {
@@ -426,6 +426,43 @@ func mergeOptionsSchemaByKey(base, city []ProviderOption) ([]ProviderOption, map
 		out = append(out, opt)
 	}
 	return out, pruned
+}
+
+func mergeProviderOptionByKey(base, overlay ProviderOption) ProviderOption {
+	out := overlay
+	if out.Label == "" {
+		out.Label = base.Label
+	}
+	if out.Type == "" {
+		out.Type = base.Type
+	}
+	if out.Default == "" {
+		out.Default = base.Default
+	}
+	out.Choices = mergeOptionChoicesByValue(base.Choices, overlay.Choices)
+	return out
+}
+
+func mergeOptionChoicesByValue(base, overlay []OptionChoice) []OptionChoice {
+	out := make([]OptionChoice, 0, len(base)+len(overlay))
+	index := make(map[string]int, len(base)+len(overlay))
+	for _, choice := range base {
+		if choice.Value != "" {
+			index[choice.Value] = len(out)
+		}
+		out = append(out, choice)
+	}
+	for _, choice := range overlay {
+		if idx, ok := index[choice.Value]; ok && choice.Value != "" {
+			out[idx] = choice
+			continue
+		}
+		if choice.Value != "" {
+			index[choice.Value] = len(out)
+		}
+		out = append(out, choice)
+	}
+	return out
 }
 
 func optionKeysRemovedByReplacement(base, replacement []ProviderOption) map[string]bool {
