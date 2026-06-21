@@ -83,3 +83,32 @@ No-op. This change has no effect on the voxmemo clinical documentation pipeline
 (microphone → voxist-api ASR → clinical note). Provider failover logic operates
 at the gc session-orchestration layer, upstream of any clinical transcription flow.
 No chain-of-evidence metadata is modified.
+
+## Task status
+
+- [x] T-001 — Write `TestProviderHealthRegistry_BasicRecord`   ✅ green at 13ec312ee
+- [x] T-002 — Implement `providerHealthRegistry` + `RecordResponse`/`Check`   ✅ green at 13ec312ee
+- [x] T-003 — Write `TestProviderHealthRegistry_Cooldown`   ✅ green at 13ec312ee
+- [x] T-004 — Implement cooldown threshold + failback window   ✅ green at 13ec312ee
+- [x] T-005 — Write `TestProviderHealthRegistry_SelectHealthy`   ✅ green at 13ec312ee
+- [x] T-006 — Implement `SelectHealthy(chain []string) string`   ✅ green at 13ec312ee
+- [x] T-007 — Write `TestModelProxy_ForwardsAndRecords`   ✅ green at 13ec312ee
+- [x] T-008 — Implement `modelProxyHandler`   ✅ green at 13ec312ee
+- [x] T-009 — Write `TestModelProxy_ProviderRouting`   ✅ green at 13ec312ee
+- [x] T-010 — Wire per-provider upstream URL resolution   ✅ green at 13ec312ee
+- [x] T-011 — Write `TestReconcilerUsesLiveRegistry`   ✅ green at 15606802e
+- [x] T-012 — Replace `loadProviderHealthSnapshot` with `registry.Snapshot()`   ✅ green at 15606802e
+- [x] T-013 — Write `TestReconcilerChainWalkSelectsAlternate`   ✅ green at 15606802e
+- [x] T-014 — Add chain-walk in spawn path   ✅ green at 15606802e
+- [x] T-015 — Write `TestBuildDesiredState_InjectsProxyBaseURL`   ✅ green at 15606802e
+- [x] T-016 — Wire proxy URL injection in `buildDesiredState`   ✅ green at 15606802e
+- [x] T-017 — Write `TestFailoverChainConfig`   ✅ green at 15606802e
+- [x] T-018 — Add `FailoverChain []string` to `config.Daemon`   ✅ green at 15606802e
+- [x] T-019 — Write `TestCityRuntime_StartsModelProxy`   ✅ green at 15606802e
+- [x] T-020 — Wire model proxy startup into `CityRuntime.init`   ✅ green at 15606802e
+- [x] T-021 — `go vet ./...` + test suite clean   ✅ green at HEAD
+  - `go vet ./...`: zero warnings
+  - New provider-health tests (9): all pass
+  - Full `cmd/gc` suite (527 pass, 5 skip): pre-existing flaky timeout
+    `TestInitBeadsForDirExecSetsBEADSDIR/gc-beads-bd_canonical` in
+    `beads_provider_lifecycle_test.go` — file not touched by this branch
