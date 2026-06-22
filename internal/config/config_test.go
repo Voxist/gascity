@@ -3564,6 +3564,41 @@ name = "mayor"
 	}
 }
 
+func TestDaemonOnBootStaggerDefault(t *testing.T) {
+	d := DaemonConfig{}
+	if got := d.OnBootStaggerDuration(); got != DefaultOnBootStagger {
+		t.Errorf("OnBootStaggerDuration() = %v, want %v (default)", got, DefaultOnBootStagger)
+	}
+}
+
+func TestDaemonOnBootStaggerCustom(t *testing.T) {
+	d := DaemonConfig{OnBootStagger: "1s"}
+	if got := d.OnBootStaggerDuration(); got != time.Second {
+		t.Errorf("OnBootStaggerDuration() = %v, want 1s", got)
+	}
+}
+
+func TestDaemonOnBootStaggerDisabled(t *testing.T) {
+	d := DaemonConfig{OnBootStagger: "0"}
+	if got := d.OnBootStaggerDuration(); got != 0 {
+		t.Errorf("OnBootStaggerDuration() = %v, want 0 (explicit disable)", got)
+	}
+}
+
+func TestDaemonOnBootStaggerInvalidFallsBack(t *testing.T) {
+	d := DaemonConfig{OnBootStagger: "not-a-duration"}
+	if got := d.OnBootStaggerDuration(); got != DefaultOnBootStagger {
+		t.Errorf("OnBootStaggerDuration() = %v, want %v (default on invalid)", got, DefaultOnBootStagger)
+	}
+}
+
+func TestDaemonOnBootStaggerNegativeFallsBack(t *testing.T) {
+	d := DaemonConfig{OnBootStagger: "-200ms"}
+	if got := d.OnBootStaggerDuration(); got != DefaultOnBootStagger {
+		t.Errorf("OnBootStaggerDuration() = %v, want %v (default on negative)", got, DefaultOnBootStagger)
+	}
+}
+
 func TestDaemonTickDebounceDefault(t *testing.T) {
 	d := DaemonConfig{}
 	if got := d.TickDebounceDuration(); got != 0 {

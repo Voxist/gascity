@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
@@ -1123,6 +1124,68 @@ func TestRunPoolOnBootExpandsTemplateCommands(t *testing.T) {
 	}
 	if ran[0] != "echo demo-city frontend worker" {
 		t.Fatalf("on_boot command = %q, want %q", ran[0], "echo demo-city frontend worker")
+	}
+}
+
+func TestRunPoolOnBootStaggersHooks(t *testing.T) {
+	// Capture stagger sleeps without real wall-clock delay.
+	var sleeps []time.Duration
+	orig := onBootStaggerSleep
+	onBootStaggerSleep = func(d time.Duration) { sleeps = append(sleeps, d) }
+	t.Cleanup(func() { onBootStaggerSleep = orig })
+
+	var ran []string
+	runner := func(cmd, _ string, _ map[string]string) (string, error) {
+		ran = append(ran, cmd)
+		return "", nil
+	}
+
+	cfg := &config.City{
+		Daemon: config.DaemonConfig{OnBootStagger: "40ms"},
+		Agents: []config.Agent{
+			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), OnBoot: "bd update --unclaim"},
+			{Name: "cat", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2), OnBoot: "bd update --unclaim"},
+			{Name: "fox", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2), OnBoot: "bd update --unclaim"},
+		},
+	}
+
+	var stderr bytes.Buffer
+	runPoolOnBoot(cfg, t.TempDir(), runner, &stderr)
+
+	if len(ran) != 3 {
+		t.Fatalf("ran %d hooks, want 3", len(ran))
+	}
+	// Stagger fires between hooks: N hooks => N-1 sleeps (none before the first).
+	if len(sleeps) != 2 {
+		t.Fatalf("got %d stagger sleeps, want 2 (one between each of 3 hooks)", len(sleeps))
+	}
+	for i, d := range sleeps {
+		if d != 40*time.Millisecond {
+			t.Errorf("sleeps[%d] = %v, want 40ms", i, d)
+		}
+	}
+}
+
+func TestRunPoolOnBootStaggerDisabled(t *testing.T) {
+	var sleeps int
+	orig := onBootStaggerSleep
+	onBootStaggerSleep = func(time.Duration) { sleeps++ }
+	t.Cleanup(func() { onBootStaggerSleep = orig })
+
+	runner := func(_, _ string, _ map[string]string) (string, error) { return "", nil }
+
+	cfg := &config.City{
+		Daemon: config.DaemonConfig{OnBootStagger: "0"},
+		Agents: []config.Agent{
+			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), OnBoot: "bd update --unclaim"},
+			{Name: "cat", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2), OnBoot: "bd update --unclaim"},
+		},
+	}
+
+	runPoolOnBoot(cfg, t.TempDir(), runner, io.Discard)
+
+	if sleeps != 0 {
+		t.Fatalf("stagger sleeps = %d, want 0 when on_boot_stagger=\"0\"", sleeps)
 	}
 }
 

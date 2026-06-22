@@ -393,10 +393,24 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 	return dst
 }
 
+// onBootStaggerSleep is the pause primitive used between successive
+// on_boot hooks. Overridable in tests so they can assert the stagger
+// without real wall-clock delay.
+var onBootStaggerSleep = time.Sleep
+
 // runPoolOnBoot runs on_boot commands for all pool agents at controller startup.
 // Errors are logged but not fatal — the controller continues regardless.
+//
+// on_boot hooks issue bd list/query/update to reopen stranded in_progress
+// beads. Firing them back-to-back for every agent template — multiplied by
+// every rig booting at once — bursts the shared dolt connection pool into
+// saturation. To spread that priming load, a configurable stagger
+// ([daemon].on_boot_stagger, default DefaultOnBootStagger) is inserted
+// between successive hooks. Set the knob to "0" to disable. See vp-hsau.
 func runPoolOnBoot(cfg *config.City, cityPath string, runner ScaleCheckRunner, stderr io.Writer) {
 	cityName := workdirutil.CityName(cityPath, cfg)
+	stagger := cfg.Daemon.OnBootStaggerDuration()
+	ranOne := false
 	for _, a := range cfg.Agents {
 		if !a.SupportsInstanceExpansion() || a.Implicit {
 			continue
@@ -412,6 +426,12 @@ func runPoolOnBoot(cfg *config.City, cityPath string, runner ScaleCheckRunner, s
 			fmt.Fprintf(stderr, "on_boot %s env: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort stderr
 			continue
 		}
+		// Stagger before every hook except the first one that actually
+		// runs, so a single-agent city pays no boot-latency penalty.
+		if ranOne && stagger > 0 {
+			onBootStaggerSleep(stagger)
+		}
+		ranOne = true
 		if _, err := runner(cmd, dir, env); err != nil {
 			fmt.Fprintf(stderr, "on_boot %s: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort stderr
 		}

@@ -1372,6 +1372,11 @@
           "description": "ProbeConcurrency bounds the number of concurrent bd subprocess probes\nissued by the pool scale_check and work_query paths. bd serializes on\na shared dolt sql-server, so unbounded parallelism causes contention.\nNil (unset) defaults to 8. Set higher for workspaces with a fast\ndedicated dolt server, or lower to reduce contention on slow storage.",
           "default": 8
         },
+        "on_boot_stagger": {
+          "type": "string",
+          "description": "OnBootStagger is the pause inserted between successive per-agent\non_boot lifecycle hooks at controller/supervisor startup. on_boot\nhooks run bd list/query/update to reopen stranded in_progress beads;\nfiring every agent template's hook back-to-back (and across many\nrigs booting at once) bursts the shared dolt connection pool into\nsaturation (\"closing bad idle connection: EOF\", multi-second\nreconciles, hooks killed on timeout). A small stagger spreads the\npriming load so the pool is not hit all-at-once. Duration string\n(e.g., \"250ms\", \"1s\"). Empty (unset) defaults to\nDefaultOnBootStagger; \"0\" or \"0s\" disables staggering (restores the\nhistorical back-to-back behavior).",
+          "default": "250ms"
+        },
         "max_wakes_per_tick": {
           "type": "integer",
           "description": "MaxWakesPerTick caps how many sessions the reconciler may start in a\nsingle tick. Fresh generic pool session-bead creation uses the same\nbudget so the controller does not materialize more ordinary pool sessions\nthan it can wake. Bounded dependency-floor prerequisites are exempt.\nNil (unset) defaults to 5. Values \u003c= 0 are treated as the default — set a\npositive integer to override.",
