@@ -140,6 +140,14 @@ var (
 	initAndHookDirWaitForScopeReady   = waitForBeadsScopeReadyAfterRecovery
 )
 
+// startBeadsLifecycleEnsureProvider and startBeadsLifecycleInitAndHookDir are
+// the stubbable hooks for the startBeadsLifecycle critical path — separate from
+// the initDirIfReady* set so each entry point can be tested independently.
+var (
+	startBeadsLifecycleEnsureProvider = ensureBeadsProvider
+	startBeadsLifecycleInitAndHookDir = initAndHookDir
+)
+
 const initDirIfReadyRetryLimit = 2
 
 func isRetryableManagedDoltLifecycleError(err error) bool {
@@ -200,7 +208,7 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 		skipLocalDolt = true
 	}
 	if !skipLocalDolt {
-		if err := ensureBeadsProvider(cityPath); err != nil {
+		if err := startBeadsLifecycleEnsureProvider(cityPath); err != nil {
 			return fmt.Errorf("bead store: %w", err)
 		}
 	}
@@ -209,29 +217,61 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 	// identity that differs from the bead prefix. New managed bd stores still
 	// default to prefix-named databases, but older/imported metadata may carry
 	// a different dolt_database that gc-beads-bd should preserve.
-	if err := initAndHookDir(cityPath, cityPath, beadsPrefix); err != nil {
+	if err := startBeadsLifecycleInitAndHookDir(cityPath, cityPath, beadsPrefix); err != nil {
 		return fmt.Errorf("init city beads: %w", err)
 	}
+	// Degrade-not-fatal: collect per-rig init failures rather than aborting.
+	// One rig's bead-store failure (e.g. ensure-project-id L1/L3 mismatch)
+	// must not crash the fleet. Degraded rigs are logged offline here and
+	// excluded from post-init normalization and route generation; healthy
+	// rigs and the dispatcher continue normally (vp-cz7o.13).
+	var degradedRigs []string
 	for i := range cfg.Rigs {
 		if strings.TrimSpace(cfg.Rigs[i].Path) == "" {
 			continue
 		}
 		prefix := cfg.Rigs[i].EffectivePrefix()
-		if err := initAndHookDir(cityPath, cfg.Rigs[i].Path, prefix); err != nil {
-			return fmt.Errorf("init rig %q beads: %w", cfg.Rigs[i].Name, err)
+		if err := startBeadsLifecycleInitAndHookDir(cityPath, cfg.Rigs[i].Path, prefix); err != nil {
+			fmt.Fprintf(stderr, "gc: rig %q bead store init failed — rig offline until next gc restart: %v\n",
+				cfg.Rigs[i].Name, err)
+			degradedRigs = append(degradedRigs, cfg.Rigs[i].Name)
 		}
 	}
-	if err := normalizeCanonicalBdScopeFiles(cityPath, cfg, stderr); err != nil {
+	healthyCfg := cfg
+	if len(degradedRigs) > 0 {
+		healthyCfg = rigFilteredCityConfig(cfg, degradedRigs)
+	}
+	if err := normalizeCanonicalBdScopeFiles(cityPath, healthyCfg, stderr); err != nil {
 		return err
 	}
-	// Regenerate routes for cross-rig routing.
-	if len(cfg.Rigs) > 0 {
-		allRigs := collectRigRoutes(cityPath, cfg)
+	// Regenerate routes for cross-rig routing (healthy rigs only).
+	if len(healthyCfg.Rigs) > 0 {
+		allRigs := collectRigRoutes(cityPath, healthyCfg)
 		if err := writeAllRoutes(allRigs); err != nil {
 			return fmt.Errorf("writing routes: %w", err)
 		}
 	}
 	return nil
+}
+
+// rigFilteredCityConfig returns a shallow copy of cfg with the named rigs
+// removed. Used to exclude degraded rigs from post-init normalization and
+// route generation so that one offline rig does not propagate failures to
+// healthy rigs or the dispatcher (vp-cz7o.13).
+func rigFilteredCityConfig(cfg *config.City, skipNames []string) *config.City {
+	skip := make(map[string]bool, len(skipNames))
+	for _, n := range skipNames {
+		skip[n] = true
+	}
+	out := *cfg
+	healthy := make([]config.Rig, 0, len(cfg.Rigs))
+	for _, r := range cfg.Rigs {
+		if !skip[r.Name] {
+			healthy = append(healthy, r)
+		}
+	}
+	out.Rigs = healthy
+	return &out
 }
 
 // initDirIfReady initializes beads for a single directory, ensuring the
