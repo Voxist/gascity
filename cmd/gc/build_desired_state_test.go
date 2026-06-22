@@ -2223,8 +2223,16 @@ func TestCollectAssignedWorkBeads_ReadyProbeExcludesFutureNamedSessionRuntimeAss
 	if queried[runtimeName] {
 		t.Fatalf("rig Ready queries = %#v, must not include future runtime assignee %q", rigStore.readyQueries, runtimeName)
 	}
-	if !queried[identity] {
-		t.Fatalf("rig Ready queries = %#v, want canonical named-session assignee %q", rigStore.readyQueries, identity)
+	// Fork divergence vs upstream's per-assignee Ready probe: this fork collapses
+	// the per-assignee Ready fan-out into a single scope-wide read (Assignee:"")
+	// plus an in-memory partitionReadyByAssignee, avoiding one bd subprocess per
+	// assignee per reconcile tick. The canonical identity %q drives that in-memory
+	// partition rather than a per-identity backing-store query, so the invariant
+	// this test guards -- the future-runtime-assigned bead is excluded -- is
+	// asserted above via got==0 (and the runtime assignee is never queried,
+	// checked above). Here we confirm the fork took the collapsed scope-read path.
+	if !queried[""] {
+		t.Fatalf("rig Ready queries = %#v, want a scope-wide read (empty assignee) under the fork's collapsed partition model; canonical identity %q drives the in-memory partition", rigStore.readyQueries, identity)
 	}
 }
 
