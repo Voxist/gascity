@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
+	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/worker"
 	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
@@ -189,6 +190,8 @@ type preparedStart struct {
 	coreHash      string
 	coreBreakdown runtime.BreakdownV1
 	liveHash      string
+	provisionHash string
+	launchHash    string
 }
 
 type startResult struct {
@@ -429,9 +432,14 @@ type asyncPreparedStart struct {
 }
 
 type stopTarget struct {
-	sessionID   string
-	name        string
-	template    string
+	sessionID string
+	name      string
+	template  string
+	// agentName is the stable agent identity (pool instance name or qualified
+	// agent name) used for the gc.agent.stops.total metric label. It is kept
+	// separate from subject (the event subject) because the metric must never
+	// fall back to the sanitized runtime session name, whereas subject may.
+	agentName   string
 	subject     string
 	order       int
 	resolved    bool
@@ -801,6 +809,12 @@ func buildPreparedStartWithWorkDirResolver(
 	coreHash := runtime.CoreFingerprint(agentCfg)
 	coreBreakdown := runtime.CoreFingerprintBreakdown(agentCfg)
 	liveHash := runtime.LiveFingerprint(agentCfg)
+	// Partition sub-hashes (B2): a launch-only change relaunches the agent in
+	// the warm box instead of re-provisioning. Computed over the same durable
+	// agentCfg as coreHash — BEFORE the one-shot dispatch overrides below — so
+	// they stay consistent with the started_config_hash the reconciler compares.
+	provisionHash := runtime.ProvisionFingerprint(agentCfg)
+	launchHash := runtime.LaunchFingerprint(agentCfg)
 
 	// Work beads may carry one-shot provider option overrides as opt_<key>
 	// metadata, where <key> is an OptionsSchema key such as "model" or
@@ -948,6 +962,8 @@ func buildPreparedStartWithWorkDirResolver(
 		coreHash:      coreHash,
 		coreBreakdown: coreBreakdown,
 		liveHash:      liveHash,
+		provisionHash: provisionHash,
+		launchHash:    launchHash,
 	}, nil
 }
 
@@ -1731,62 +1747,7 @@ func commitStartResultTraced(
 		return false
 	}
 	if result.err != nil {
-		fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
-		if result.rateLimitScreen {
-			if err := recordRateLimitQuarantine(session, store, clk); err != nil {
-				fmt.Fprintf(stderr, "session reconciler: recording startup rate-limit hold for %s: %v\n", name, err) //nolint:errcheck
-				if trace != nil {
-					trace.recordOperation("reconciler.start.rate_limit_hold", tp.TemplateName, name, "", "start", "hold_deferred", traceRecordPayload{
-						"error": formatLifecycleError(result.err),
-						"cause": err.Error(),
-					}, "")
-				}
-				logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
-				return false
-			}
-			if trace != nil {
-				trace.recordOperation("reconciler.start.rate_limit_hold", tp.TemplateName, name, "", "start", "held", traceRecordPayload{
-					"error": formatLifecycleError(result.err),
-				}, "")
-			}
-			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
-			return false
-		}
-		if result.rollbackPending {
-			if errors.Is(result.err, context.DeadlineExceeded) {
-				rec.Record(events.Event{
-					Type:    events.SessionColdStartTimeout,
-					Actor:   "controller",
-					Subject: name,
-					Message: fmt.Sprintf("session %q cold start timed out", name),
-				})
-			}
-			// A rolled-back pending create is closed and recreated fresh on the
-			// next tick, so it deliberately does not record a wake failure (see
-			// TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError).
-			// Genuine wake-failure accounting happens on the non-rollback path
-			// below via recordWakeFailure.
-			if trace != nil {
-				trace.recordOperation("reconciler.start.rollback_pending", tp.TemplateName, name, "", "start", result.outcome, traceRecordPayload{
-					"error": formatLifecycleError(result.err),
-				}, "")
-			}
-			rollbackPendingCreate(session, store, clk.Now().UTC(), stderr)
-			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
-			return false
-		}
-		if err := store.SetMetadata(session.ID, "last_woke_at", ""); err != nil {
-			fmt.Fprintf(stderr, "session reconciler: clearing last_woke_at for %s: %v\n", name, err) //nolint:errcheck
-		} else {
-			session.Metadata["last_woke_at"] = ""
-		}
-		recordWakeFailure(session, store, clk)
-		if trace != nil {
-			trace.recordOperation("reconciler.start.failed", tp.TemplateName, name, "", "start", result.outcome, traceRecordPayload{
-				"error": formatLifecycleError(result.err),
-			}, "")
-		}
-		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
+		commitStartFailure(result, store, clk, rec, wave, stderr, trace)
 		return false
 	}
 	coreBreakdown := ""
@@ -1803,11 +1764,16 @@ func commitStartResultTraced(
 	metadata := sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
 		CoreHash:                result.prepared.coreHash,
 		LiveHash:                result.prepared.liveHash,
+		ProvisionHash:           result.prepared.provisionHash,
+		LaunchHash:              result.prepared.launchHash,
 		CoreBreakdown:           coreBreakdown,
 		ConfirmState:            confirmPendingStart(session.Metadata["state"]),
 		ClearSleepReason:        session.Metadata["sleep_reason"] != "",
 		ClearPendingCreateClaim: shouldRollbackPendingCreate(session),
-		Now:                     clk.Now(),
+		// A confirmed transition out of a dormant/creating state opens a new
+		// awake interval — stamp a fresh compute-usage epoch for it.
+		StartsAwakeInterval: confirmPendingStart(session.Metadata["state"]),
+		Now:                 clk.Now(),
 	})
 	storedMCPSnapshot, err := sessionpkg.EncodeMCPServersSnapshot(result.prepared.cfg.MCPServers)
 	if err != nil {
@@ -1869,6 +1835,7 @@ func commitStartResultTraced(
 		Actor:   "gc",
 		Subject: tp.DisplayName(),
 	})
+	telemetry.RecordAgentStart(context.Background(), name, tp.DisplayName(), nil)
 	if trace != nil {
 		trace.recordMutation("bead_metadata", tp.TemplateName, name, "metadata_batch", session.ID, "started_config_hash", "", result.prepared.coreHash, "success", traceRecordPayload{
 			"wave": wave,
@@ -1876,6 +1843,76 @@ func commitStartResultTraced(
 	}
 	logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, nil, result.phases)
 	return true
+}
+
+// commitStartFailure performs the failure-path side effects for a start that
+// returned an error: startup rate-limit quarantine, pending-create rollback, or
+// wake-failure accounting, plus the matching trace and log records. It is split
+// out of commitStartResultTraced to keep the success path legible; the caller
+// returns false after invoking it.
+func commitStartFailure(result startResult, store beads.Store, clk clock.Clock, rec events.Recorder, wave int, stderr io.Writer, trace *sessionReconcilerTraceCycle) {
+	session := result.prepared.candidate.session
+	name := result.prepared.candidate.name()
+	tp := result.prepared.candidate.tp
+	fmt.Fprintf(stderr, "session reconciler: starting %s: %s\n", name, formatLifecycleError(result.err)) //nolint:errcheck
+	if result.rateLimitScreen {
+		if err := recordRateLimitQuarantine(session, store, clk); err != nil {
+			fmt.Fprintf(stderr, "session reconciler: recording startup rate-limit hold for %s: %v\n", name, err) //nolint:errcheck
+			if trace != nil {
+				trace.recordOperation("reconciler.start.rate_limit_hold", tp.TemplateName, name, "", "start", "hold_deferred", traceRecordPayload{
+					"error": formatLifecycleError(result.err),
+					"cause": err.Error(),
+				}, "")
+			}
+			logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
+			return
+		}
+		if trace != nil {
+			trace.recordOperation("reconciler.start.rate_limit_hold", tp.TemplateName, name, "", "start", "held", traceRecordPayload{
+				"error": formatLifecycleError(result.err),
+			}, "")
+		}
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
+		return
+	}
+	if result.rollbackPending {
+		if errors.Is(result.err, context.DeadlineExceeded) {
+			rec.Record(events.Event{
+				Type:    events.SessionColdStartTimeout,
+				Actor:   "controller",
+				Subject: name,
+				Message: fmt.Sprintf("session %q cold start timed out", name),
+			})
+		}
+		// A rolled-back pending create is closed and recreated fresh on the
+		// next tick, so it deliberately does not record a wake failure (see
+		// TestReconcileSessionBeads_RollsBackPendingCreateOnProviderError).
+		// Genuine wake-failure accounting happens on the non-rollback path
+		// below via recordWakeFailure.
+		if trace != nil {
+			trace.recordOperation("reconciler.start.rollback_pending", tp.TemplateName, name, "", "start", result.outcome, traceRecordPayload{
+				"error": formatLifecycleError(result.err),
+			}, "")
+		}
+		rollbackPendingCreate(session, store, clk.Now().UTC(), stderr)
+		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
+		return
+	}
+	if err := store.SetMetadata(session.ID, "last_woke_at", ""); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: clearing last_woke_at for %s: %v\n", name, err) //nolint:errcheck
+	} else {
+		session.Metadata["last_woke_at"] = ""
+	}
+	// tp.DisplayName() is the exact identity the start counter records, so a
+	// quarantine triggered by repeated start failures joins the start series
+	// even for a namepool-themed pool instance whose bead predates agent_name.
+	recordWakeFailure(session, store, clk, tp.DisplayName())
+	if trace != nil {
+		trace.recordOperation("reconciler.start.failed", tp.TemplateName, name, "", "start", result.outcome, traceRecordPayload{
+			"error": formatLifecycleError(result.err),
+		}, "")
+	}
+	logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, result.outcome, result.started, result.finished, result.err, result.phases)
 }
 
 func recoverRunningPendingCreate(
@@ -1914,6 +1951,8 @@ func recoverRunningPendingCreate(
 	metadata := sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
 		CoreHash:      prepared.coreHash,
 		LiveHash:      prepared.liveHash,
+		ProvisionHash: prepared.provisionHash,
+		LaunchHash:    prepared.launchHash,
 		CoreBreakdown: coreBreakdown,
 		ConfirmState: confirmPendingStart(session.Metadata["state"]) ||
 			sessionpkg.State(strings.TrimSpace(session.Metadata["state"])) == sessionpkg.StateAwake,
@@ -1923,7 +1962,11 @@ func recoverRunningPendingCreate(
 		// at this point the claim is guaranteed to be set — hard-code the
 		// clear rather than re-evaluating the same predicate.
 		ClearPendingCreateClaim: true,
-		Now:                     now,
+		// Recovering an already-awake runtime must not reset the in-flight
+		// awake interval, so key the fresh epoch on a genuine dormant/creating
+		// start only — not the StateAwake re-confirmation above.
+		StartsAwakeInterval: confirmPendingStart(session.Metadata["state"]),
+		Now:                 now,
 	})
 	if err := store.SetMetadataBatch(session.ID, metadata); err != nil {
 		if trace != nil {
@@ -2553,6 +2596,7 @@ func lifecycleStopRequested(stopCh <-chan struct{}) bool {
 
 func stopTargetsForNames(names []string, cfg *config.City, store beads.Store, stderr io.Writer) []stopTarget {
 	sessionTemplates := make(map[string]string)
+	sessionAgentNames := make(map[string]string)
 	sessionSubjects := make(map[string]string)
 	sessionPoolManaged := make(map[string]bool)
 	sessionIDs := make(map[string]string)
@@ -2566,9 +2610,12 @@ func stopTargetsForNames(names []string, cfg *config.City, store beads.Store, st
 				}
 				if name != "" {
 					sessionIDs[name] = bead.ID
+					if agentName := sessionAgentMetricIdentity(bead, cfg); agentName != "" {
+						sessionAgentNames[name] = agentName
+					}
 					subject := sessionBeadAgentName(bead)
-					if subject == "" && template != "" && bead.Metadata["pool_slot"] != "" {
-						subject = template + "-" + bead.Metadata["pool_slot"]
+					if subject == "" {
+						subject = pooledFallbackIdentity(bead, cfg)
 					}
 					if subject == "" {
 						subject = template
@@ -2611,6 +2658,7 @@ func stopTargetsForNames(names []string, cfg *config.City, store beads.Store, st
 			sessionID:   sessionIDs[name],
 			name:        name,
 			template:    template,
+			agentName:   firstNonEmptyGCString(sessionAgentNames[name], template),
 			subject:     subject,
 			order:       idx,
 			resolved:    resolved,
@@ -2671,6 +2719,9 @@ func hydrateStopTargets(targets []stopTarget, cfg *config.City, store beads.Stor
 			}
 			if strings.TrimSpace(target.template) == "" {
 				target.template = hydratedTarget.template
+			}
+			if strings.TrimSpace(target.agentName) == "" {
+				target.agentName = hydratedTarget.agentName
 			}
 			if strings.TrimSpace(target.subject) == "" {
 				target.subject = hydratedTarget.subject
@@ -2834,6 +2885,7 @@ func stopTargetsBounded(
 						Type: events.SessionStopped, Actor: actor, Subject: result.target.subject,
 						Payload: api.SessionLifecyclePayloadJSON(result.target.lifecycleCorrelationID(), result.target.template, "stopped"),
 					})
+					telemetry.RecordAgentStop(context.Background(), result.target.name, firstNonEmptyGCString(result.target.agentName, result.target.template), "stopped", nil)
 				}
 				logLifecycleWave(stderr, "stop", wave, waveStarted, 1)
 			}
@@ -2877,6 +2929,7 @@ func stopTargetsBounded(
 				Type: events.SessionStopped, Actor: actor, Subject: result.target.subject,
 				Payload: api.SessionLifecyclePayloadJSON(result.target.lifecycleCorrelationID(), result.target.template, "stopped"),
 			})
+			telemetry.RecordAgentStop(context.Background(), result.target.name, firstNonEmptyGCString(result.target.agentName, result.target.template), "stopped", nil)
 		}
 		logLifecycleWave(stderr, "stop", wave, waveStarted, len(waveTargets))
 	}

@@ -238,6 +238,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewBeadsExpectedBuildCheck(cfg.Beads.ExpectedBuild))
 		register(newNativeStoreCanaryIdentityCheck(cityPath, cfg))
 		register(doctor.NewRigPackCoverageCheck(cfg, cityPath))
+		register(newPackRuntimesDoctorCheck(cfg))
 		register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
 		register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
 	}

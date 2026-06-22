@@ -38,6 +38,7 @@ beads-proxied-capability
 beads-expected-build
 native-store-canary-identity
 rig-pack-coverage
+pack-runtimes
 mcp-config
 mcp-shared-target
 builtin-pack-imports

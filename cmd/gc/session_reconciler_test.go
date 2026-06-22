@@ -3630,7 +3630,7 @@ func TestReconcileSessionBeads_OnDemandNamedSessionDoesNotWakeFromDesiredStatePr
 	}
 }
 
-func TestReconcileSessionBeads_OnDemandNamedSessionWakesFromRoutedIdentityDemand(t *testing.T) {
+func TestReconcileSessionBeads_OnDemandNamedSessionWakesFromPoolDemandWithoutNamedDemand(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
@@ -3643,16 +3643,22 @@ func TestReconcileSessionBeads_OnDemandNamedSessionWakesFromRoutedIdentityDemand
 	}
 	sessionName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "mayor")
 
-	woken, running := reconcileExistingAsleepNamedSessionWithRoutedWork(t, cfg, sessionName, "mayor", "mayor")
-	if woken != 1 {
-		t.Fatalf("woken = %d, want 1", woken)
+	woken, running, namedDemand, starts := reconcileExistingAsleepNamedSessionWithRoutedWork(t, cfg, sessionName, "mayor", "mayor")
+	if namedDemand["mayor"] {
+		t.Fatalf("NamedSessionDemand[mayor] = true for routed_to=mayor, want false because routed_to targets pools")
 	}
-	if !running {
-		t.Fatalf("on-demand named session %q was not started from routed identity demand", sessionName)
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1; starts=%v", woken, starts)
+	}
+	if running {
+		t.Fatalf("on-demand named session %q started from routed pool demand; starts=%v", sessionName, starts)
+	}
+	if len(starts) == 0 {
+		t.Fatal("pool demand did not start any session")
 	}
 }
 
-func TestReconcileSessionBeads_OnDemandNamedSessionWakesFromRoutedSingletonTemplateDemand(t *testing.T) {
+func TestReconcileSessionBeads_OnDemandNamedSessionWakesFromSingletonPoolDemandWithoutNamedDemand(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
@@ -3664,16 +3670,22 @@ func TestReconcileSessionBeads_OnDemandNamedSessionWakesFromRoutedSingletonTempl
 		NamedSessions: []config.NamedSession{{Name: "primary", Template: "worker", Mode: "on_demand"}},
 	}
 
-	woken, running := reconcileExistingAsleepNamedSessionWithRoutedWork(t, cfg, "primary", "primary", "worker")
-	if woken != 1 {
-		t.Fatalf("woken = %d, want 1", woken)
+	woken, running, namedDemand, starts := reconcileExistingAsleepNamedSessionWithRoutedWork(t, cfg, "primary", "primary", "worker")
+	if namedDemand["primary"] {
+		t.Fatalf("NamedSessionDemand[primary] = true for routed_to=worker, want false because routed_to targets pools")
 	}
-	if !running {
-		t.Fatal("on-demand named session primary was not started from routed singleton-template demand")
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1; starts=%v", woken, starts)
+	}
+	if running {
+		t.Fatalf("on-demand named session primary started from routed pool demand; starts=%v", starts)
+	}
+	if len(starts) == 0 {
+		t.Fatal("pool demand did not start any session")
 	}
 }
 
-func reconcileExistingAsleepNamedSessionWithRoutedWork(t *testing.T, cfg *config.City, sessionName, identity, routedTo string) (int, bool) {
+func reconcileExistingAsleepNamedSessionWithRoutedWork(t *testing.T, cfg *config.City, sessionName, identity, routedTo string) (int, bool, map[string]bool, []string) {
 	t.Helper()
 
 	cityPath := t.TempDir()
@@ -3711,9 +3723,6 @@ func reconcileExistingAsleepNamedSessionWithRoutedWork(t *testing.T, cfg *config
 
 	var stdout, stderr bytes.Buffer
 	dsResult := buildDesiredState(cfg.EffectiveCityName(), cityPath, clk.Now().UTC(), cfg, sp, store, &stderr)
-	if !dsResult.NamedSessionDemand[identity] {
-		t.Fatalf("NamedSessionDemand[%s] = false for routed_to=%s; stderr:\n%s", identity, routedTo, stderr.String())
-	}
 	cfgNames := configuredSessionNames(cfg, cfg.EffectiveCityName(), store)
 	syncSessionBeads(cityPath, store, dsResult.State, sp, cfgNames, cfg, clk, &stderr, true)
 	sessions, err := loadSessionBeads(store)
@@ -3732,7 +3741,13 @@ func reconcileExistingAsleepNamedSessionWithRoutedWork(t *testing.T, cfg *config
 		dsResult.NamedSessionDemand, dsResult.StoreQueryPartial, nil, cfg.EffectiveCityName(),
 		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
 	)
-	return woken, sp.IsRunning(sessionName)
+	var starts []string
+	for _, call := range sp.SnapshotCalls() {
+		if call.Method == "Start" {
+			starts = append(starts, call.Name)
+		}
+	}
+	return woken, sp.IsRunning(sessionName), dsResult.NamedSessionDemand, starts
 }
 
 func TestReconcileSessionBeads_SyncsGCDirWithWorkDirOverride(t *testing.T) {
@@ -7023,6 +7038,274 @@ func TestReconcileSessionBeads_LiveDriftReapplied(t *testing.T) {
 	expectedLive := runtime.LiveFingerprint(expectedCfg)
 	if b.Metadata["live_hash"] != expectedLive {
 		t.Errorf("live_hash not updated: got %q, want %q", b.Metadata["live_hash"], expectedLive)
+	}
+}
+
+// Launch-only config drift (LaunchFingerprint moved, ProvisionFingerprint held)
+// must relaunch the agent in the warm box — Relaunch, not Stop+Start, not a
+// drain — and rebaseline the Core/provision/launch baselines (B2.3).
+func TestReconcileSessionBeads_LaunchOnlyDriftRelaunchesOrdinarySession(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+
+	// Stored baseline = the running config with ONLY the launch half (Command)
+	// changed, so the provision hash matches and the launch hash differs.
+	agentCfg := sessionCoreConfigForHash(env.desiredState["worker"], session)
+	oldCfg := agentCfg
+	oldCfg.Command = "stale-" + agentCfg.Command
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash":    runtime.CoreFingerprint(oldCfg),
+		"started_provision_hash": runtime.ProvisionFingerprint(oldCfg),
+		"started_launch_hash":    runtime.LaunchFingerprint(oldCfg),
+	})
+
+	startsBefore := env.sp.CountCalls("Start", "worker")
+	env.reconcile([]beads.Bead{session})
+
+	if got := env.sp.CountCalls("Relaunch", "worker"); got != 1 {
+		t.Fatalf("Relaunch calls = %d, want 1 (launch-only drift must relaunch); stderr=%s", got, env.stderr.String())
+	}
+	if got := env.sp.CountCalls("Stop", "worker"); got != 0 {
+		t.Errorf("Stop calls = %d, want 0 (relaunch must not Stop+Start)", got)
+	}
+	if got := env.sp.CountCalls("Start", "worker"); got != startsBefore {
+		t.Errorf("Start calls = %d, want %d (relaunch must not re-Start)", got, startsBefore)
+	}
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Errorf("expected no drain for launch-only drift, got reason=%q", ds.reason)
+	}
+	b, _ := env.store.Get(session.ID)
+	if got, want := b.Metadata["started_config_hash"], runtime.CoreFingerprint(agentCfg); got != want {
+		t.Errorf("started_config_hash = %q, want rebaselined %q", got, want)
+	}
+	if got, want := b.Metadata["started_launch_hash"], runtime.LaunchFingerprint(agentCfg); got != want {
+		t.Errorf("started_launch_hash = %q, want rebaselined %q", got, want)
+	}
+	if got, want := b.Metadata["started_provision_hash"], runtime.ProvisionFingerprint(agentCfg); got != want {
+		t.Errorf("started_provision_hash = %q, want %q", got, want)
+	}
+	// started_live_hash is the live half — a relaunch does not re-run SessionLive,
+	// so the rebaseline must leave it exactly as it was (here: empty, untouched).
+	if got := b.Metadata["started_live_hash"]; got != session.Metadata["started_live_hash"] {
+		t.Errorf("started_live_hash = %q, want left unchanged %q", got, session.Metadata["started_live_hash"])
+	}
+	// The Config handed to Relaunch is the new (drifted) agent config.
+	if rc := env.sp.LastRelaunchConfig("worker"); rc == nil {
+		t.Error("no Relaunch config recorded")
+	} else if rc.Command != agentCfg.Command {
+		t.Errorf("Relaunch config Command = %q, want %q", rc.Command, agentCfg.Command)
+	}
+}
+
+// A simultaneous launch-half (Command) change AND a SessionLive change: the
+// reconciler relaunches the agent (the launch half) but deliberately leaves
+// started_live_hash stale — a relaunch does not re-run SessionLive — so the live
+// change is re-applied by the live-drift clause on the NEXT tick. Pins the
+// one-tick-deferred live semantics (a relaunch is not a silent live-drop).
+func TestReconcileSessionBeads_LaunchAndLiveDriftRelaunchThenLiveNextTick(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesiredLive("worker", "worker", true, []string{"echo live-new"})
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+
+	agentCfg := sessionCoreConfigForHash(env.desiredState["worker"], session)
+	// Launch-only Core drift (Command), plus a stale live hash so live also drifts.
+	oldCfg := agentCfg
+	oldCfg.Command = "stale-" + agentCfg.Command
+	staleLive := runtime.LiveFingerprint(runtime.Config{Command: "test-cmd"})
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash":    runtime.CoreFingerprint(oldCfg),
+		"started_provision_hash": runtime.ProvisionFingerprint(oldCfg),
+		"started_launch_hash":    runtime.LaunchFingerprint(oldCfg),
+		"started_live_hash":      staleLive,
+	})
+	if runtime.LiveFingerprint(agentCfg) == staleLive {
+		t.Fatal("test setup: SessionLive did not move the live hash")
+	}
+
+	// Tick 1: launch-only relaunch; live deliberately left stale.
+	env.reconcile([]beads.Bead{session})
+	if got := env.sp.CountCalls("Relaunch", "worker"); got != 1 {
+		t.Fatalf("tick 1: Relaunch calls = %d, want 1; stderr=%s", got, env.stderr.String())
+	}
+	if got := env.sp.CountCalls("RunLive", "worker"); got != 0 {
+		t.Errorf("tick 1: RunLive calls = %d, want 0 (live deferred one tick)", got)
+	}
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Errorf("tick 1: expected no drain, got reason=%q", ds.reason)
+	}
+	b, _ := env.store.Get(session.ID)
+	if got, want := b.Metadata["started_config_hash"], runtime.CoreFingerprint(agentCfg); got != want {
+		t.Errorf("tick 1: started_config_hash not rebaselined: got %q want %q", got, want)
+	}
+	if got := b.Metadata["started_live_hash"]; got != staleLive {
+		t.Errorf("tick 1: started_live_hash = %q, want left stale %q", got, staleLive)
+	}
+
+	// Tick 2: no Core drift (rebaselined); the live change is now applied.
+	env.reconcile([]beads.Bead{b})
+	if got := env.sp.CountCalls("Relaunch", "worker"); got != 1 {
+		t.Errorf("tick 2: Relaunch calls = %d, want still 1 (no second relaunch)", got)
+	}
+	if got := env.sp.CountCalls("RunLive", "worker"); got != 1 {
+		t.Fatalf("tick 2: RunLive calls = %d, want 1 (live re-applied); stderr=%s", got, env.stderr.String())
+	}
+	b2, _ := env.store.Get(session.ID)
+	if got, want := b2.Metadata["started_live_hash"], runtime.LiveFingerprint(agentCfg); got != want {
+		t.Errorf("tick 2: started_live_hash = %q, want rebaselined %q", got, want)
+	}
+}
+
+// A launch-only drift on a named session relaunches in place (Relaunch) rather
+// than the reset-in-place full restart, preserving the warm box.
+func TestReconcileSessionBeads_LaunchOnlyDriftRelaunchesNamedSession(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "new-cmd",
+			MaxActiveSessions: intPtr(1),
+		}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		TemplateName:            "worker",
+		InstanceName:            "worker",
+		Alias:                   "worker",
+		Command:                 "new-cmd",
+		ConfiguredNamedIdentity: "worker",
+		ConfiguredNamedMode:     "always",
+	}
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "new-cmd"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	session := env.createSessionBead(sessionName, "worker")
+	env.markSessionActive(&session)
+
+	agentCfg := sessionCoreConfigForHash(env.desiredState[sessionName], session)
+	oldCfg := agentCfg
+	oldCfg.Command = "stale-" + agentCfg.Command
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		"session_key":                "warm-conversation",
+		"started_config_hash":        runtime.CoreFingerprint(oldCfg),
+		"started_provision_hash":     runtime.ProvisionFingerprint(oldCfg),
+		"started_launch_hash":        runtime.LaunchFingerprint(oldCfg),
+		"started_live_hash":          runtime.LiveFingerprint(oldCfg),
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	if got := env.sp.CountCalls("Relaunch", sessionName); got != 1 {
+		t.Fatalf("Relaunch calls = %d, want 1 (named launch-only drift must relaunch, not reset); stderr=%s", got, env.stderr.String())
+	}
+	if got := env.sp.CountCalls("Stop", sessionName); got != 0 {
+		t.Errorf("Stop calls = %d, want 0", got)
+	}
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Errorf("expected no drain, got reason=%q", ds.reason)
+	}
+	b, _ := env.store.Get(session.ID)
+	if got, want := b.Metadata["started_config_hash"], runtime.CoreFingerprint(agentCfg); got != want {
+		t.Errorf("started_config_hash = %q, want rebaselined %q", got, want)
+	}
+}
+
+// Provision drift (a box-affecting field moved) must NOT relaunch — it takes the
+// full re-provision restart (drain → Stop+Start).
+func TestReconcileSessionBeads_ProvisionDriftDoesNotRelaunch(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+
+	// Stored baseline differs in a provision-half field (PreStart): both the
+	// provision hash AND the core hash move, so this is not launch-only.
+	agentCfg := sessionCoreConfigForHash(env.desiredState["worker"], session)
+	oldCfg := agentCfg
+	oldCfg.PreStart = append([]string{"echo stale-prestart"}, agentCfg.PreStart...)
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash":    runtime.CoreFingerprint(oldCfg),
+		"started_provision_hash": runtime.ProvisionFingerprint(oldCfg),
+		"started_launch_hash":    runtime.LaunchFingerprint(oldCfg),
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	if got := env.sp.CountCalls("Relaunch", "worker"); got != 0 {
+		t.Fatalf("Relaunch calls = %d, want 0 (provision drift must NOT relaunch); stderr=%s", got, env.stderr.String())
+	}
+	ds := env.dt.get(session.ID)
+	if ds == nil {
+		t.Fatalf("expected config-drift drain for provision drift; stderr=%s", env.stderr.String())
+	}
+	if ds.reason != "config-drift" {
+		t.Errorf("drain reason = %q, want config-drift", ds.reason)
+	}
+}
+
+// When the provider can't relaunch (Relaunch errors), the reconciler falls back
+// to the full restart so the launch change still lands.
+func TestReconcileSessionBeads_LaunchOnlyDriftFallsBackWhenRelaunchFails(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+
+	agentCfg := sessionCoreConfigForHash(env.desiredState["worker"], session)
+	oldCfg := agentCfg
+	oldCfg.Command = "stale-" + agentCfg.Command
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash":    runtime.CoreFingerprint(oldCfg),
+		"started_provision_hash": runtime.ProvisionFingerprint(oldCfg),
+		"started_launch_hash":    runtime.LaunchFingerprint(oldCfg),
+	})
+	env.sp.RelaunchErrors["worker"] = fmt.Errorf("warm box vanished")
+
+	env.reconcile([]beads.Bead{session})
+
+	if got := env.sp.CountCalls("Relaunch", "worker"); got != 1 {
+		t.Fatalf("Relaunch calls = %d, want 1 (attempted before fallback); stderr=%s", got, env.stderr.String())
+	}
+	ds := env.dt.get(session.ID)
+	if ds == nil {
+		t.Fatalf("expected drain fallback after relaunch failure; stderr=%s", env.stderr.String())
+	}
+	if ds.reason != "config-drift" {
+		t.Errorf("drain reason = %q, want config-drift", ds.reason)
+	}
+}
+
+// A pre-B2.2 session carries an empty started_provision_hash/started_launch_hash.
+// Even on a pure launch-half (Command) change, the empty sub-hashes force the
+// conservative full restart, which re-stamps the baselines and self-heals.
+func TestReconcileSessionBeads_EmptySubHashesTakeFullRestart(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addRunningWorkerDesiredWithNewConfig()
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+	})
+
+	env.reconcile([]beads.Bead{session})
+
+	if got := env.sp.CountCalls("Relaunch", "worker"); got != 0 {
+		t.Fatalf("Relaunch calls = %d, want 0 (empty sub-hashes must not relaunch); stderr=%s", got, env.stderr.String())
+	}
+	if ds := env.dt.get(session.ID); ds == nil {
+		t.Fatalf("expected drain (full restart) for empty-sub-hash drift; stderr=%s", env.stderr.String())
 	}
 }
 

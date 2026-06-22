@@ -951,6 +951,9 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 	if err := workspacesvc.ValidateRuntimeSupport(newCfg.Services); err != nil {
 		return failWithWarnings(fmt.Errorf("validating services: %w", err))
 	}
+	if err := validatePackRuntimeRegistrations(newCfg); err != nil {
+		return failWithWarnings(fmt.Errorf("validating pack runtimes: %w", err))
+	}
 	newName := loadedCityName(newCfg, filepath.Dir(tomlPath))
 	if newName != lockedWorkspaceName {
 		return failWithWarnings(fmt.Errorf("workspace.name changed from %q to %q (restart controller to apply)", lockedWorkspaceName, newName))
@@ -1064,7 +1067,7 @@ func gracefulStopAllWithForceSignal(
 			// variable, which is the session_name. ResolveSessionID
 			// canonicalizes session_name → bead ID for any consumer.
 			sessionID := name
-			var template string
+			var template, agentIdentity string
 			if target, ok := targetByName[name]; ok {
 				if target.subject != "" {
 					subject = target.subject
@@ -1073,6 +1076,7 @@ func gracefulStopAllWithForceSignal(
 					sessionID = target.sessionID
 				}
 				template = target.template
+				agentIdentity = target.agentName
 				if cityStopSessionMarked(store, target.sessionID) {
 					markCityStopSessionAsAsleep(store, target.sessionID, stderr)
 				}
@@ -1081,6 +1085,7 @@ func gracefulStopAllWithForceSignal(
 				Type: events.SessionStopped, Actor: "gc", Subject: subject,
 				Payload: api.SessionLifecyclePayloadJSON(sessionID, template, "exited gracefully"),
 			})
+			telemetry.RecordAgentStop(context.Background(), name, firstNonEmptyGCString(agentIdentity, template), "graceful-exit", nil)
 			continue
 		}
 		survivors = append(survivors, name)
