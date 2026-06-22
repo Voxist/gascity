@@ -292,6 +292,14 @@ func orderScanOptions(stderr io.Writer, cmdName string) orderdiscovery.ScanOptio
 			fmt.Fprintf(stderr, "%s: rig %s: %v\n", cmdName, rigName, err) //nolint:errcheck // best-effort stderr
 			return nil
 		},
+		// Degrade-not-fatal: a stale [[orders.overrides]] naming a removed
+		// order must NOT fail the whole `gc order` command (the vp-ia7c
+		// outage: one dangling override → 0 orders enumerate → no dispatch).
+		// Warn and continue with the rest of the order config.
+		OnOverrideError: func(err error) error {
+			fmt.Fprintf(stderr, "%s: order overrides: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+			return nil
+		},
 		OnValidateError: func(orderName string, err error) error {
 			fmt.Fprintf(stderr, "%s: order %s: %v\n", cmdName, orderName, err) //nolint:errcheck // best-effort stderr
 			return nil
