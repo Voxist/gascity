@@ -2670,6 +2670,18 @@ type DaemonConfig struct {
 	// Nil (unset) defaults to 8. Set higher for workspaces with a fast
 	// dedicated dolt server, or lower to reduce contention on slow storage.
 	ProbeConcurrency *int `toml:"probe_concurrency,omitempty" jsonschema:"default=8"`
+	// OnBootStagger is the pause inserted between successive per-agent
+	// on_boot lifecycle hooks at controller/supervisor startup. on_boot
+	// hooks run bd list/query/update to reopen stranded in_progress beads;
+	// firing every agent template's hook back-to-back (and across many
+	// rigs booting at once) bursts the shared dolt connection pool into
+	// saturation ("closing bad idle connection: EOF", multi-second
+	// reconciles, hooks killed on timeout). A small stagger spreads the
+	// priming load so the pool is not hit all-at-once. Duration string
+	// (e.g., "250ms", "1s"). Empty (unset) defaults to
+	// DefaultOnBootStagger; "0" or "0s" disables staggering (restores the
+	// historical back-to-back behavior).
+	OnBootStagger string `toml:"on_boot_stagger,omitempty" jsonschema:"default=250ms"`
 	// MaxWakesPerTick caps how many sessions the reconciler may start in a
 	// single tick. Fresh generic pool session-bead creation uses the same
 	// budget so the controller does not materialize more ordinary pool sessions
@@ -2956,6 +2968,29 @@ func (d *DaemonConfig) ProbeConcurrencyOrDefault() int {
 		return 1
 	}
 	return *d.ProbeConcurrency
+}
+
+// DefaultOnBootStagger is the pause inserted between successive per-agent
+// on_boot hooks when [daemon].on_boot_stagger is unset. Small enough that
+// a city with a handful of pool agents adds negligible boot latency, large
+// enough to spread the bd/dolt connection-priming burst that otherwise
+// saturates the shared pool. See vp-hsau.
+const DefaultOnBootStagger = 250 * time.Millisecond
+
+// OnBootStaggerDuration returns the inter-hook pause for on_boot priming.
+// Empty (unset) defaults to DefaultOnBootStagger. An explicit "0"/"0s"
+// disables staggering, restoring the historical back-to-back behavior.
+// Invalid or negative values fall back to DefaultOnBootStagger (not
+// disabled) — only an explicit zero opts out.
+func (d *DaemonConfig) OnBootStaggerDuration() time.Duration {
+	if d.OnBootStagger == "" {
+		return DefaultOnBootStagger
+	}
+	v, err := time.ParseDuration(d.OnBootStagger)
+	if err != nil || v < 0 {
+		return DefaultOnBootStagger
+	}
+	return v // may be 0 (disabled)
 }
 
 // DefaultMaxWakesPerTick is the per-tick wake budget the reconciler uses
