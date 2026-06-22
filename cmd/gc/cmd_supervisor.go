@@ -2352,8 +2352,8 @@ func beadStoreStartBackoff(attempt int) time.Duration {
 		attempt = 1
 	}
 	d := 3 * time.Second << uint(attempt-1)
-	if max := 24 * time.Second; d > max {
-		d = max
+	if backoffMax := 24 * time.Second; d > backoffMax {
+		d = backoffMax
 	}
 	return d
 }
@@ -2413,8 +2413,8 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 		}
 		if attempt < beadStoreStartAttempts {
 			wait := beadStoreStartBackoff(attempt)
-			fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store start attempt %d/%d failed: %v; retrying in %s\n",
-				cityName, attempt, beadStoreStartAttempts, beadStoreErr, wait) //nolint:errcheck
+			fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store start attempt %d/%d failed: %v; retrying in %s\n", //nolint:errcheck
+				cityName, attempt, beadStoreStartAttempts, beadStoreErr, wait)
 			time.Sleep(wait)
 		}
 	}
