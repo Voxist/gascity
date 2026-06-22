@@ -112,3 +112,15 @@ No chain-of-evidence metadata is modified.
   - Full `cmd/gc` suite (527 pass, 5 skip): pre-existing flaky timeout
     `TestInitBeadsForDirExecSetsBEADSDIR/gc-beads-bd_canonical` in
     `beads_provider_lifecycle_test.go` — file not touched by this branch
+- [x] T-014 addendum — rewrite `ANTHROPIC_BASE_URL` during chain-walk   ✅ green (targeted tests pass)
+  - When chain-walk selects an alternate provider, `ANTHROPIC_BASE_URL` now gets
+    the provider segment rewritten (e.g. `/proxy/claude` → `/proxy/zai`) so the
+    proxy routes the restarted session to the correct upstream.
+  - `TestReconcilerChainWalkSelectsAlternate` extended to assert the URL rewrite.
+- [x] Rework — address reviewer findings (a92251d44189, 2d22d4a797db)
+  - `model_proxy.go`: removed dead `capturedStatus` variable — `ErrorHandler` never read it;
+    `_ = capturedStatus` was a no-op after `ServeHTTP` returned.
+  - `session_reconciler.go`: removed stale `//nolint:unparam` annotation on
+    `reconcileSessionBeadsAtPathWithNamedDemand` — comment said "registry will be wired in
+    T-020" but T-020 is done and `city_runtime.go` now passes a live registry, making the
+    annotation both incorrect and unnecessary.
