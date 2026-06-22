@@ -284,6 +284,28 @@ func TestOrderFiringCurrent_SkipsWildcardOverridesForSuspendedOnlyOrders(t *test
 	}
 }
 
+func TestOrderFiringCurrent_SkipsStaleOverrideDuringScan(t *testing.T) {
+	// A stale [[orders.overrides]] referencing a non-existent order must
+	// degrade-not-fatal: the check logs and skips the bad override instead of
+	// returning an error, matching the degrade-not-fatal contract from vp-ia7c.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "cleanup-cooldown", "cooldown", "4h")
+	cfg.Orders.Overrides = []config.OrderOverride{{Name: "removed-order"}}
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-8 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "cleanup-cooldown", Ts: now.Add(-1 * time.Hour)},
+	)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, want OK for stale override; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if !strings.Contains(strings.Join(result.Details, "\n"), "cleanup-cooldown: last fired 1h ago") {
+		t.Fatalf("details = %v, want valid order still reported after stale override skip", result.Details)
+	}
+}
+
 func TestOrderFiringCurrent_SkipsInvalidOrderDuringScan(t *testing.T) {
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	cityPath, cfg := orderFiringTestCity(t)
