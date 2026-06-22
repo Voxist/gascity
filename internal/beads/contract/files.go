@@ -316,6 +316,39 @@ func ReadDoltDatabase(fs fsys.FS, path string) (string, bool, error) {
 	return "", false, nil
 }
 
+// ReadMetadataProjectID reads the project_id field from
+// <scopeRoot>/.beads/metadata.json.
+//
+// The bool reports whether a usable id was found. Both an absent file
+// and a present file with no (or empty) project_id key return ("", false, nil).
+// A malformed JSON document returns ("", false, err).
+//
+// scopeRoot is the parent of the .beads/ directory. Callers should not
+// construct the path themselves.
+func ReadMetadataProjectID(fs fsys.FS, scopeRoot string) (string, bool, error) {
+	path := filepath.Join(scopeRoot, ".beads", "metadata.json")
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("read metadata %s: %w", path, err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", false, fmt.Errorf("parse metadata %s: %w", path, err)
+	}
+	raw, ok := meta["project_id"]
+	if !ok || raw == nil {
+		return "", false, nil
+	}
+	id := strings.TrimSpace(fmt.Sprint(raw))
+	if id == "" || id == "<nil>" {
+		return "", false, nil
+	}
+	return id, true, nil
+}
+
 // LoadMetadataState parses .beads/metadata.json at path and returns the
 // canonical MetadataState if the file exists and validates.
 //
