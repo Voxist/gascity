@@ -46,7 +46,6 @@ func TestStartBeadsLifecycleDegradeNotFatal_OneRigFails(t *testing.T) {
 
 	var stderrBuf strings.Builder
 	err := startBeadsLifecycle(cityPath, "test-city", cfg, &stderrBuf)
-
 	if err != nil {
 		t.Fatalf("startBeadsLifecycle returned error, want nil (degrade-not-fatal): %v", err)
 	}
@@ -96,7 +95,6 @@ func TestStartBeadsLifecycleDegradeNotFatal_AllRigsFail(t *testing.T) {
 
 	var stderrBuf strings.Builder
 	err := startBeadsLifecycle(cityPath, "test-city", cfg, &stderrBuf)
-
 	if err != nil {
 		t.Fatalf("startBeadsLifecycle returned error even with all rigs degraded, want nil: %v", err)
 	}

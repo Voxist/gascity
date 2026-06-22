@@ -581,6 +581,9 @@ func TestNoExternalIdentityWriters(t *testing.T) {
 		// gitignore.go writes .gitignore negation patterns so identity.toml is
 		// tracked; it never reads or writes the identity file itself.
 		filepath.Join("cmd", "gc", "gitignore.go"): "gitignore pattern",
+		// checks_rig_identity.go surfaces identity.toml in error/status messages
+		// only; all file I/O goes through contract.ReadProjectIdentity.
+		filepath.Join("internal", "doctor", "checks_rig_identity.go"): "error messages only; reads via contract.ReadProjectIdentity",
 	}
 
 	needle := []byte("identity.toml")
