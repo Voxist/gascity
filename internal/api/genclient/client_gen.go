@@ -458,6 +458,7 @@ type AgentPatch struct {
 	Suspended               *bool             `json:"Suspended"`
 	Tier                    *string           `json:"Tier"`
 	TmuxAlias               *string           `json:"TmuxAlias"`
+	Upstream                *string           `json:"Upstream"`
 	WakeMode                *string           `json:"WakeMode"`
 	WorkDir                 *string           `json:"WorkDir"`
 }
@@ -733,9 +734,10 @@ type BindingStatus string
 
 // BoundEventPayload defines model for BoundEventPayload.
 type BoundEventPayload struct {
-	ConversationId string `json:"conversation_id"`
-	Provider       string `json:"provider"`
-	SessionId      string `json:"session_id"`
+	AgentName      *string `json:"agent_name,omitempty"`
+	ConversationId string  `json:"conversation_id"`
+	Provider       string  `json:"provider"`
+	SessionId      string  `json:"session_id"`
 }
 
 // BreakerStateChangedPayload defines model for BreakerStateChangedPayload.
@@ -1228,13 +1230,15 @@ type ExtMsgAdapterUnregisterInputBody struct {
 
 // ExtMsgBindInputBody defines model for ExtMsgBindInputBody.
 type ExtMsgBindInputBody struct {
+	// AgentName Configured agent identity to bind; its live session is resolved at delivery time, cold-waking one when none is live (mutually exclusive with session_id).
+	AgentName    *string          `json:"agent_name,omitempty"`
 	Conversation *ConversationRef `json:"conversation,omitempty"`
 
 	// Metadata Optional binding metadata.
 	Metadata *map[string]string `json:"metadata,omitempty"`
 
-	// SessionId Session ID to bind.
-	SessionId string `json:"session_id"`
+	// SessionId Session ID to bind (mutually exclusive with agent_name).
+	SessionId *string `json:"session_id,omitempty"`
 }
 
 // ExtMsgGroupEnsureInputBody defines model for ExtMsgGroupEnsureInputBody.
@@ -1326,10 +1330,12 @@ type ExtMsgUnbindBody struct {
 
 // ExtMsgUnbindInputBody defines model for ExtMsgUnbindInputBody.
 type ExtMsgUnbindInputBody struct {
+	// AgentName Configured agent identity to unbind.
+	AgentName    *string          `json:"agent_name,omitempty"`
 	Conversation *ConversationRef `json:"conversation,omitempty"`
 
 	// SessionId Session ID to unbind.
-	SessionId string `json:"session_id"`
+	SessionId *string `json:"session_id,omitempty"`
 }
 
 // ExternalActor defines model for ExternalActor.
@@ -1539,10 +1545,11 @@ type HeartbeatEvent struct {
 
 // InboundEventPayload defines model for InboundEventPayload.
 type InboundEventPayload struct {
-	Actor          string `json:"actor"`
-	ConversationId string `json:"conversation_id"`
-	Provider       string `json:"provider"`
-	TargetSession  string `json:"target_session"`
+	Actor          string  `json:"actor"`
+	ConversationId string  `json:"conversation_id"`
+	Provider       string  `json:"provider"`
+	TargetAgent    *string `json:"target_agent,omitempty"`
+	TargetSession  string  `json:"target_session"`
 }
 
 // InboundResult defines model for InboundResult.
@@ -1550,6 +1557,7 @@ type InboundResult struct {
 	Binding         SessionBindingRecord         `json:"Binding"`
 	GroupRoute      GroupRouteDecision           `json:"GroupRoute"`
 	Message         ExternalInboundMessage       `json:"Message"`
+	TargetAgentName string                       `json:"TargetAgentName"`
 	TargetSessionID string                       `json:"TargetSessionID"`
 	TranscriptEntry ConversationTranscriptRecord `json:"TranscriptEntry"`
 }
@@ -2656,6 +2664,7 @@ type SessionAgentListResponse struct {
 
 // SessionBindingRecord defines model for SessionBindingRecord.
 type SessionBindingRecord struct {
+	AgentName         string            `json:"AgentName"`
 	BindingGeneration int64             `json:"BindingGeneration"`
 	BoundAt           time.Time         `json:"BoundAt"`
 	Conversation      ConversationRef   `json:"Conversation"`
@@ -5487,15 +5496,21 @@ type WorkerOperationEventPayload struct {
 	PromptTokens *int64 `json:"prompt_tokens,omitempty"`
 
 	// PromptVersion Template version frontmatter (best-effort, currently always absent; #1256 follow-up).
-	PromptVersion *string   `json:"prompt_version,omitempty"`
-	Provider      *string   `json:"provider,omitempty"`
-	Queued        *bool     `json:"queued,omitempty"`
-	Result        string    `json:"result"`
-	SessionId     *string   `json:"session_id,omitempty"`
-	SessionName   *string   `json:"session_name,omitempty"`
-	StartedAt     time.Time `json:"started_at"`
-	Template      *string   `json:"template,omitempty"`
-	Transport     *string   `json:"transport,omitempty"`
+	PromptVersion *string `json:"prompt_version,omitempty"`
+	Provider      *string `json:"provider,omitempty"`
+	Queued        *bool   `json:"queued,omitempty"`
+	Result        string  `json:"result"`
+
+	// RunId Run-root identifier for rolling this operation up to a workflow/molecule/chat run (best-effort).
+	RunId       *string   `json:"run_id,omitempty"`
+	SessionId   *string   `json:"session_id,omitempty"`
+	SessionName *string   `json:"session_name,omitempty"`
+	StartedAt   time.Time `json:"started_at"`
+	Template    *string   `json:"template,omitempty"`
+	Transport   *string   `json:"transport,omitempty"`
+
+	// Unpriced True when tokens were observed but no price resolved (best-effort tri-state; absent = not evaluated).
+	Unpriced *bool `json:"unpriced,omitempty"`
 }
 
 // WorkflowAttemptSummary defines model for WorkflowAttemptSummary.
