@@ -846,3 +846,143 @@ func TestEnsureManagedDoltProjectIDGeneratesLocalIdentityWithPasswordedServer(t 
 		t.Fatalf("database _project_id = %q, want %q", databaseProjectID, report.ProjectID)
 	}
 }
+
+// TestEnsureProjectIDRestoresFromCityIdentityMap covers the L0 pre-heal path
+// added by vp-cz7o.21. Requires a managed Dolt server.
+func TestEnsureProjectIDRestoresFromCityIdentityMap(t *testing.T) {
+	skipSlowCmdGCTest(t, "requires a managed dolt server; run make test-cmd-gc-process for full coverage")
+
+	const canonicalID = "c3c9af4a-0000-0000-0000-000000000000"
+
+	writeCityTOMLForRig := func(t *testing.T, cityDir, rigName, rigPath, projectID string) {
+		t.Helper()
+		content := "[[rigs]]\nname = \"" + rigName + "\"\npath = \"" + rigPath + "\"\n\n" +
+			"[identity_map]\n" + rigName + " = { project_id = \"" + projectID + "\" }\n"
+		if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("case1_L1_absent_L3_matches_L0_repairs_L1_L2", func(t *testing.T) {
+		// L1 absent, L3==L0 → pre-heal writes L1 and L2; reconcile returns NoOp.
+		scopeRoot := t.TempDir()
+		cityDir := t.TempDir()
+		writeCityTOMLForRig(t, cityDir, "my-rig", scopeRoot, canonicalID)
+		metadataPath := writeProjectIDMetadataFile(t, scopeRoot, "")
+		port, cleanup := startProjectIDTestServer(t, seedDatabaseProjectIDQueries(canonicalID)...)
+		defer cleanup()
+
+		rec := &projectIdentityRecordingRecorder{}
+		report, err := ensureManagedDoltProjectIDWithRecorder(metadataPath, "127.0.0.1", port, "root", "hq", cityDir, rec)
+		if err != nil {
+			t.Fatalf("ensureManagedDoltProjectIDWithRecorder: %v", err)
+		}
+		if report.ProjectID != canonicalID {
+			t.Fatalf("report.ProjectID = %q, want %q", report.ProjectID, canonicalID)
+		}
+		assertProjectIdentityFile(t, scopeRoot, canonicalID)
+		assertMetadataProjectID(t, metadataPath, canonicalID)
+		assertDatabaseProjectID(t, port, canonicalID)
+
+		found := false
+		for _, p := range decodeProjectIdentityStampedPayloads(t, rec.records) {
+			if p.Source == "restored_from_canonical" {
+				found = true
+				if p.NewID != canonicalID {
+					t.Fatalf("event NewID = %q, want %q", p.NewID, canonicalID)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("no restored_from_canonical event emitted; got: %+v", rec.records)
+		}
+	})
+
+	t.Run("case2_L3_disagrees_with_L0_emits_mismatch_no_repair", func(t *testing.T) {
+		// L3≠L0 → pre-heal emits canonical_l3_mismatch, does NOT repair L1.
+		// Existing reconcile adopts L3 (L1 absent, L2 absent, L3 present).
+		const differentID = "different-uuid-9999-0000-000000000000"
+		scopeRoot := t.TempDir()
+		cityDir := t.TempDir()
+		writeCityTOMLForRig(t, cityDir, "my-rig", scopeRoot, canonicalID)
+		metadataPath := writeProjectIDMetadataFile(t, scopeRoot, "")
+		port, cleanup := startProjectIDTestServer(t, seedDatabaseProjectIDQueries(differentID)...)
+		defer cleanup()
+
+		rec := &projectIdentityRecordingRecorder{}
+		report, err := ensureManagedDoltProjectIDWithRecorder(metadataPath, "127.0.0.1", port, "root", "hq", cityDir, rec)
+		if err != nil {
+			t.Fatalf("ensureManagedDoltProjectIDWithRecorder: %v", err)
+		}
+		if report.ProjectID != differentID {
+			t.Fatalf("report.ProjectID = %q, want %q (L3)", report.ProjectID, differentID)
+		}
+		assertProjectIdentityFile(t, scopeRoot, differentID)
+
+		found := false
+		for _, p := range decodeProjectIdentityStampedPayloads(t, rec.records) {
+			if p.Source == "canonical_l3_mismatch" {
+				found = true
+			}
+			if p.Source == "restored_from_canonical" {
+				t.Fatal("restored_from_canonical emitted when L3≠L0 — pre-heal must not repair")
+			}
+		}
+		if !found {
+			t.Fatalf("no canonical_l3_mismatch event emitted; got: %+v", rec.records)
+		}
+	})
+
+	t.Run("case3_L1_already_matches_L0_noop", func(t *testing.T) {
+		// L1==L0==L3 → pre-heal condition false; reconcile returns NoOp.
+		scopeRoot := t.TempDir()
+		cityDir := t.TempDir()
+		writeCityTOMLForRig(t, cityDir, "my-rig", scopeRoot, canonicalID)
+		metadataPath := writeProjectIDMetadataFile(t, scopeRoot, canonicalID)
+		if err := contract.WriteProjectIdentity(fsys.OSFS{}, scopeRoot, canonicalID); err != nil {
+			t.Fatalf("WriteProjectIdentity: %v", err)
+		}
+		port, cleanup := startProjectIDTestServer(t, seedDatabaseProjectIDQueries(canonicalID)...)
+		defer cleanup()
+
+		rec := &projectIdentityRecordingRecorder{}
+		report, err := ensureManagedDoltProjectIDWithRecorder(metadataPath, "127.0.0.1", port, "root", "hq", cityDir, rec)
+		if err != nil {
+			t.Fatalf("ensureManagedDoltProjectIDWithRecorder: %v", err)
+		}
+		if report.ProjectID != canonicalID || report.Source != "match" {
+			t.Fatalf("report = %+v, want match/noop", report)
+		}
+		if report.IdentityFileUpdated || report.MetadataUpdated || report.DatabaseUpdated {
+			t.Fatalf("unexpected update on noop path: %+v", report)
+		}
+	})
+
+	t.Run("case4_no_identity_map_entry_preheal_skipped", func(t *testing.T) {
+		// city.toml has no [identity_map] → pre-heal skips entirely.
+		// Existing reconcile adopts from L3 (L1 absent, L2 absent, L3 present).
+		scopeRoot := t.TempDir()
+		cityDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(cityDir, "city.toml"),
+			[]byte("[workspace]\nname = \"demo\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		metadataPath := writeProjectIDMetadataFile(t, scopeRoot, "")
+		port, cleanup := startProjectIDTestServer(t, seedDatabaseProjectIDQueries(canonicalID)...)
+		defer cleanup()
+
+		rec := &projectIdentityRecordingRecorder{}
+		report, err := ensureManagedDoltProjectIDWithRecorder(metadataPath, "127.0.0.1", port, "root", "hq", cityDir, rec)
+		if err != nil {
+			t.Fatalf("ensureManagedDoltProjectIDWithRecorder: %v", err)
+		}
+		if report.ProjectID != canonicalID {
+			t.Fatalf("report.ProjectID = %q, want %q (L3)", report.ProjectID, canonicalID)
+		}
+		for _, p := range decodeProjectIdentityStampedPayloads(t, rec.records) {
+			if p.Source == "restored_from_canonical" {
+				t.Fatal("restored_from_canonical emitted when no identity_map entry")
+			}
+		}
+	})
+}
