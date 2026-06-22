@@ -10,7 +10,7 @@ import (
 )
 
 // RigIdentityTriadCheck asserts that the per-rig identity file layers are
-// consistent: .beads/identity.toml#project.id (L1) must equal
+// consistent: the L1 project identity project.id must equal
 // .beads/metadata.json#project_id (L2). A mismatch surfaces as a blocking
 // error so operators see it during `gc doctor` or `gc start` warmup, not
 // silently as "0 agents" hours later (the 2026-06-21 incident pattern).
@@ -53,7 +53,7 @@ func (c *RigIdentityTriadCheck) CanFix() bool { return false }
 // Fix is a no-op.
 func (c *RigIdentityTriadCheck) Fix(_ *CheckContext) error { return nil }
 
-// Run checks that .beads/identity.toml#project.id matches
+// Run checks that the L1 project identity project.id matches
 // .beads/metadata.json#project_id for the rig.
 func (c *RigIdentityTriadCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
@@ -63,7 +63,7 @@ func (c *RigIdentityTriadCheck) Run(_ *CheckContext) *CheckResult {
 	if err != nil {
 		r.Status = StatusWarning
 		r.Severity = SeverityAdvisory
-		r.Message = fmt.Sprintf("rig %q: cannot read identity.toml", c.rig.Name)
+		r.Message = fmt.Sprintf("rig %q: cannot read project identity", c.rig.Name)
 		r.Details = []string{err.Error()}
 		return r
 	}
@@ -86,14 +86,14 @@ func (c *RigIdentityTriadCheck) Run(_ *CheckContext) *CheckResult {
 	case l1ok && !l2ok:
 		r.Status = StatusWarning
 		r.Severity = SeverityAdvisory
-		r.Message = fmt.Sprintf("rig %q: identity.toml has project.id but metadata.json project_id is absent — L2 not yet seeded", c.rig.Name)
+		r.Message = fmt.Sprintf("rig %q: project identity has project.id but metadata.json project_id is absent — L2 not yet seeded", c.rig.Name)
 		r.FixHint = "gc stop && gc start — city restart triggers automatic identity reconciliation"
 		return r
 
 	case !l1ok && l2ok:
 		r.Status = StatusWarning
 		r.Severity = SeverityAdvisory
-		r.Message = fmt.Sprintf("rig %q: metadata.json has project_id but identity.toml is absent — run gc stop && gc start", c.rig.Name)
+		r.Message = fmt.Sprintf("rig %q: metadata.json has project_id but project identity is absent — run gc stop && gc start", c.rig.Name)
 		r.FixHint = "gc stop && gc start"
 		return r
 
@@ -106,9 +106,9 @@ func (c *RigIdentityTriadCheck) Run(_ *CheckContext) *CheckResult {
 		r.Status = StatusError
 		// SeverityBlocking is the zero value — set explicitly for clarity.
 		r.Severity = SeverityBlocking
-		r.Message = fmt.Sprintf("rig %q: identity mismatch — identity.toml has %q, metadata.json has %q", c.rig.Name, l1, l2)
+		r.Message = fmt.Sprintf("rig %q: identity mismatch — project identity has %q, metadata.json has %q", c.rig.Name, l1, l2)
 		r.Details = []string{
-			fmt.Sprintf("identity.toml: %s", filepath.Join(rigPath, ".beads", "identity.toml")),
+			"L1: " + contract.ProjectIdentityPath(rigPath),
 			fmt.Sprintf("metadata.json: %s", filepath.Join(rigPath, ".beads", "metadata.json")),
 		}
 		r.FixHint = "gc stop && gc start — city restart triggers gc dolt-state ensure-project-id which reconciles all three identity layers"
