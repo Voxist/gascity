@@ -849,7 +849,6 @@ func reconcileSessionBeadsAtPath(
 	)
 }
 
-//nolint:unparam // registry will be wired in T-020 when the model proxy starts
 func reconcileSessionBeadsAtPathWithNamedDemand(
 	ctx context.Context,
 	cityPath string,
@@ -2442,6 +2441,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						target.tp.Env = maps.Clone(target.tp.Env)
 					}
 					target.tp.Env["GC_PROVIDER"] = alternate
+					// Redirect the model proxy URL to route through the alternate provider.
+					// buildDesiredState sets ANTHROPIC_BASE_URL = proxyAddr+"/proxy/"+original;
+					// chain-walk must rewrite the trailing provider segment.
+					if u := target.tp.Env["ANTHROPIC_BASE_URL"]; u != "" {
+						if i := strings.LastIndexByte(u, '/'); i >= 0 {
+							target.tp.Env["ANTHROPIC_BASE_URL"] = u[:i+1] + alternate
+						}
+					}
 					if trace != nil {
 						trace.recordDecision("reconciler.session.provider_health_gate", target.tp.TemplateName, name, "provider_red", "chain_walk", traceRecordPayload{
 							"original_provider": phProvider,

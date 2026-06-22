@@ -9787,14 +9787,18 @@ func TestReconcilerChainWalkSelectsAlternate(t *testing.T) {
 		},
 	}
 
+	const proxyBaseURL = "http://localhost:12345"
 	desiredState := map[string]TemplateParams{
 		"worker": {
 			Command:          "test-cmd",
 			SessionName:      "worker",
 			TemplateName:     "worker",
 			ResolvedProvider: &config.ResolvedProvider{Name: "claude"},
-			// Chain-walk must update GC_PROVIDER to the alternate in tp.Env.
-			Env: map[string]string{"GC_PROVIDER": "claude"},
+			// Simulate what buildDesiredState injects when the model proxy is running.
+			Env: map[string]string{
+				"GC_PROVIDER":        "claude",
+				"ANTHROPIC_BASE_URL": proxyBaseURL + "/proxy/claude",
+			},
 		},
 	}
 	session, err := store.Create(beads.Bead{
@@ -9844,5 +9848,9 @@ func TestReconcilerChainWalkSelectsAlternate(t *testing.T) {
 	}
 	if got := startCall.Config.Env["GC_PROVIDER"]; got != "zai" {
 		t.Errorf("expected GC_PROVIDER=zai in spawned session env after chain-walk, got %q", got)
+	}
+	wantURL := proxyBaseURL + "/proxy/zai"
+	if got := startCall.Config.Env["ANTHROPIC_BASE_URL"]; got != wantURL {
+		t.Errorf("expected ANTHROPIC_BASE_URL=%q after chain-walk to zai, got %q", wantURL, got)
 	}
 }
