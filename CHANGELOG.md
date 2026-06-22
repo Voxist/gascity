@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **L0 pre-heal in `ensure-project-id`: auto-restore canonical project_id from
+  `city.toml [identity_map]` when the DB confirms it but L1 was wiped (vp-cz7o.21).**
+  `gc dolt-state ensure-project-id` now reads a new L0 layer — the
+  `[identity_map]` block in city.toml — before running the 3-layer reconcile.
+  When L3 matches the canonical ID in L0 and L1 is absent or stale (the
+  2026-06-20 incident scenario), L1 and L2 are repaired from the canonical source,
+  so a recovery re-init always reconstructs the correct identity without human
+  intervention. The 3-layer `decideReconcile` contract is unchanged; L0 is a
+  pre-heal step only. New file `cmd/gc/city_identity_map.go`; ~20 lines added to
+  `ensureManagedDoltProjectIDWithRecorder`.
+
 ### Fixed
 
 - **Pin the `beads` dependency to the stable v1.0.4.** v1.3.0 built against

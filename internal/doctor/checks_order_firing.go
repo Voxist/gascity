@@ -198,6 +198,10 @@ func scanOrderFiringCurrentOrders(cityPath string, cfg *config.City) ([]orders.O
 
 func orderFiringCurrentScanOptions(cityPath string) orderdiscovery.ScanOptions {
 	return orderdiscovery.ScanOptions{
+		OnOverrideError: func(err error) error {
+			log.Printf("gc doctor: skipping invalid order override for %s: %v", cityPath, err)
+			return nil
+		},
 		OnValidateError: func(orderName string, err error) error {
 			log.Printf("gc doctor: skipping invalid order %s for %s: %v", orderName, cityPath, err)
 			return nil
