@@ -42,9 +42,6 @@ func newModelProxyHandler(reg *providerHealthRegistry, providerUpstreams map[str
 			return
 		}
 
-		// statusCapture lets ModifyResponse and ErrorHandler share the code.
-		var capturedStatus int
-
 		rp := &httputil.ReverseProxy{
 			Director: func(req *http.Request) {
 				req.URL.Scheme = target.Scheme
@@ -53,7 +50,6 @@ func newModelProxyHandler(reg *providerHealthRegistry, providerUpstreams map[str
 				req.Host = target.Host
 			},
 			ModifyResponse: func(resp *http.Response) error {
-				capturedStatus = resp.StatusCode
 				reg.RecordResponse(provider, resp.StatusCode, time.Now())
 				return nil
 			},
@@ -63,7 +59,6 @@ func newModelProxyHandler(reg *providerHealthRegistry, providerUpstreams map[str
 				http.Error(rw, "upstream error: "+err.Error(), http.StatusBadGateway)
 			},
 		}
-		_ = capturedStatus
 		rp.ServeHTTP(w, r)
 	})
 }
