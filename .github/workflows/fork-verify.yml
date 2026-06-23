@@ -37,7 +37,7 @@ jobs:
         run: go vet ./cmd/gc/...
       - name: Unit tests — cross-store work delivery
         run: go test ./cmd/gc/ -run 'TestFilterAssignedWorkBeads|TestAssignedWork|TestFirstStoreWithWork|TestCrossStoreClaimDir|TestRunBDForBead|TestGateOpenWorkBounded|TestCrossStorePipeline' -count=1 -v
-      - name: Unit tests — cross-store reachability predicate + fail-loud guard (vp-kvp stage i)
+      - name: Unit tests — cross-store reachability predicate + fail-loud guard
         run: |
           go test ./internal/agentutil/ -run 'TestAgentReachesWorkflowStore|TestAgentIsCrossStoreEligible' -count=1 -v
           go test ./internal/sling/ -run 'TestValidateBuiltInRouteStoreReachableAllowsCityScopedTarget|TestDoSlingRefusesCrossStore' -count=1 -v
