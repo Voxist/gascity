@@ -58,7 +58,6 @@ gc [flags]
 | [gc prime](#gc-prime) | Output the behavioral prompt for an agent |
 | [gc prompt](#gc-prompt) | Author and inspect agent prompt templates |
 | [gc provider](#gc-provider) | Provider governor utilities |
-| [gc provider](#gc-provider) | Provider governor utilities |
 | [gc register](#gc-register) | Register a city with the machine-wide supervisor |
 | [gc reload](#gc-reload) | Reload the current city's config without restarting the city/controller |
 | [gc restart](#gc-restart) | Restart all agent sessions in the city |
@@ -2800,68 +2799,6 @@ gc prompt synth [flags]
 | `--wait-timeout` | duration | `10m0s` | in slingued mode with --wait, abort after this duration |
 | `--write` | bool |  | write to &lt;city&gt;/agents/&lt;role&gt;/prompt.template.md instead of stdout (direct mode only; slingued mode always writes) |
 | `--writer-agent` | string |  | Gas City agent to delegate the synth to via mol-prompt-synth (default: empty = direct mode, no agent) |
-
-## gc provider
-
-Provider governor utilities.
-
-The provider governor reads each Claude account's subscription usage
-(quota) and resolves which provider should serve each agent tier.
-Accounts are configured per provider in city.toml:
-
-    [providers.claude]
-    quota_monitor      = true
-    monitor_config_dir = "~/.gc/monitor-claude"
-
-The monitoring credential is a full OAuth login (scope user:profile)
-created once per account with:
-
-    CLAUDE_CONFIG_DIR=~/.gc/monitor-claude claude login
-
-```
-gc provider
-```
-
-| Subcommand | Description |
-|------------|-------------|
-| [gc provider quota](#gc-provider-quota) | Show Claude account quota states and per-tier provider decisions |
-| [gc provider rotate-key](#gc-provider-rotate-key) | Rotate a provider API key across tmux global env and live sessions |
-
-## gc provider quota
-
-Show Claude account quota states and per-tier provider decisions
-
-```
-gc provider quota [flags]
-```
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--active` | string |  | provider name of the currently-active Claude account (alternation stay/flip input) |
-| `--base-url` | string | `https://api.anthropic.com` | API origin serving /api/oauth/usage |
-| `--flip-threshold` | float64 | `85` | five-hour utilization percent above which the active account flips to its sibling |
-| `--interval` | duration | `2m0s` | poll interval used with --poll |
-| `--json` | bool |  | output as JSON |
-| `--overflow` | stringSlice |  | overflow vendor pool in priority order (e.g. zai,openrouter) |
-| `--poll` | bool |  | keep polling on an interval, recording provider.* events to the city event log |
-| `--timeout` | duration | `10s` | per-account usage request timeout |
-
-## gc provider rotate-key
-
-Propagate a new API key into the tmux server global env and every live session
-that uses the named provider, without requiring a tmux kill-server.
-
-Running agent processes that already hold the old key in-process will pick up
-the new key on their next natural restart (drain/respawn), not immediately.
-Use --dry-run to preview what would change before writing.
-
-```
-gc provider rotate-key <provider> <newkey> [flags]
-```
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--dry-run` | bool |  | Print what would change without writing to tmux |
 
 ## gc provider
 
