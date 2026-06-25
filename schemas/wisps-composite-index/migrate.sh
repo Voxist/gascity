@@ -26,6 +26,7 @@ ensure_database_and_table
 
 info "using Dolt database $DOLT_DB on $DOLT_HOST:$DOLT_PORT as $DOLT_USER"
 
+PRE_ROWS=$(count_wisps_rows)
 changed=false
 indexes=$(show_wisps_indexes)
 rows=$(index_rows "$indexes")
@@ -78,5 +79,6 @@ if [ "$changed" = false ]; then
     exit 0
 fi
 
+assert_rows_not_decreased "$PRE_ROWS"
 commit_schema_change "schema: add wisps planner indexes" >/dev/null
 info "created and committed missing wisps indexes"

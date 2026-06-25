@@ -14,6 +14,7 @@ ensure_database_and_table
 
 info "using Dolt database $DOLT_DB on $DOLT_HOST:$DOLT_PORT as $DOLT_USER"
 
+PRE_ROWS=$(count_wisps_rows)
 changed=false
 indexes=$(show_wisps_indexes)
 rows=$(index_rows "$indexes")
@@ -75,5 +76,6 @@ if [ "$rows" -ne 0 ]; then
     die "rollback failed; index $DEFER_UNTIL_INDEX_NAME is still present"
 fi
 
+assert_rows_not_decreased "$PRE_ROWS"
 commit_schema_change "schema: drop wisps planner indexes" >/dev/null
 info "dropped and committed wisps planner indexes"

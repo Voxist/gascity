@@ -313,6 +313,20 @@ verify_defer_until_index_definition() {
     verify_single_column_index "$1" "$DEFER_UNTIL_INDEX_NAME" "$DEFER_UNTIL_INDEX_COLUMNS"
 }
 
+count_wisps_rows() {
+    dolt_sql_csv "USE \`$DOLT_DB\`; SELECT COUNT(*) FROM wisps;" \
+        | tail -n +2 | tr -d '\r'
+}
+
+assert_rows_not_decreased() {
+    local pre_rows="$1"
+    local post_rows
+    post_rows=$(count_wisps_rows)
+    [ "$post_rows" -ge "$pre_rows" ] \
+        || die "migration dropped rows: had $pre_rows before, $post_rows after"
+    info "row count preserved: $pre_rows → $post_rows"
+}
+
 commit_schema_change() {
     local message="$1"
     local output

@@ -11472,3 +11472,34 @@ exit 0
 		t.Fatalf("cross-rig-deps summary missing or wrong (subshell counter regression?)\nwant substring: %q\ngot output:\n%s\nbd log:\n%s", want, out, logData)
 	}
 }
+
+// TestMigrationCommonAssertRowsNotDecreased_DiesWhenDropped verifies that
+// assert_rows_not_decreased exits non-zero when the post-migration row count
+// is less than the pre-migration count. This is the primary data-loss guard
+// in the wisps-composite-index migration scripts.
+func TestMigrationCommonAssertRowsNotDecreased_DiesWhenDropped(t *testing.T) {
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	commonSh := filepath.Join(exampleDir(), "..", "..", "schemas", "wisps-composite-index", "common.sh")
+	if _, err := os.Stat(commonSh); err != nil {
+		t.Fatalf("common.sh not found at %s: %v", commonSh, err)
+	}
+	// Source common.sh, override count_wisps_rows to return 5, then call
+	// assert_rows_not_decreased 10 (pre=10, post=5 → drop → non-zero exit).
+	script := `set -euo pipefail
+. ` + commonSh + `
+count_wisps_rows() { printf '5\n'; }
+assert_rows_not_decreased 10
+`
+	cmd := exec.Command(bashPath, "-c", script)
+	out, execErr := cmd.CombinedOutput()
+	if execErr == nil {
+		t.Fatalf("assert_rows_not_decreased should fail when rows dropped (pre=10, post=5); got exit 0\noutput: %s", out)
+	}
+	// Should print a message about dropped rows.
+	if !strings.Contains(string(out), "migration dropped rows") {
+		t.Fatalf("output missing 'migration dropped rows' message; got:\n%s", out)
+	}
+}
