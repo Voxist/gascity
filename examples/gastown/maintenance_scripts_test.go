@@ -11473,6 +11473,43 @@ exit 0
 	}
 }
 
+// TestMigrationCommonAssertRowsNotDecreased_OKWhenPreserved verifies that
+// assert_rows_not_decreased exits 0 when the post-migration row count equals
+// or exceeds the pre-migration count.
+func TestMigrationCommonAssertRowsNotDecreased_OKWhenPreserved(t *testing.T) {
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	commonSh := filepath.Join(exampleDir(), "..", "..", "schemas", "wisps-composite-index", "common.sh")
+	if _, err := os.Stat(commonSh); err != nil {
+		t.Fatalf("common.sh not found at %s: %v", commonSh, err)
+	}
+	for _, tc := range []struct {
+		name string
+		pre  int
+		post int
+	}{
+		{"equal", 10, 10},
+		{"increased", 10, 15},
+		{"zero_to_zero", 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			script := fmt.Sprintf(`set -euo pipefail
+. %s
+count_wisps_rows() { printf '%%d\n' %d; }
+assert_rows_not_decreased %d
+`, commonSh, tc.post, tc.pre)
+			cmd := exec.Command(bashPath, "-c", script)
+			out, execErr := cmd.CombinedOutput()
+			if execErr != nil {
+				t.Fatalf("assert_rows_not_decreased should pass (pre=%d, post=%d); got non-zero exit\noutput: %s",
+					tc.pre, tc.post, out)
+			}
+		})
+	}
+}
+
 // TestMigrationCommonAssertRowsNotDecreased_DiesWhenDropped verifies that
 // assert_rows_not_decreased exits non-zero when the post-migration row count
 // is less than the pre-migration count. This is the primary data-loss guard
