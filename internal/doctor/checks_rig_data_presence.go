@@ -1,7 +1,11 @@
 package doctor
 
 import (
+	"bufio"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -97,9 +101,41 @@ func (c *RigDataPresenceCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 
+	// Secondary signal: issues.jsonl export has more rows than the live store.
+	jsonlLines, err := countJSONLLines(filepath.Join(rigPath, ".beads", "issues.jsonl"))
+	if err == nil && jsonlLines > 0 && len(rows) < jsonlLines {
+		r.Status = StatusError
+		r.Severity = SeverityBlocking
+		r.Message = fmt.Sprintf("rig %s: live store has %d rows but issues.jsonl has %d — row deficit detected",
+			c.rig.Name, len(rows), jsonlLines)
+		r.FixHint = dataPresenceFixHint()
+		return r
+	}
+
 	r.Status = StatusOK
 	r.Message = fmt.Sprintf("rig %s: data present (%d rows)", c.rig.Name, len(rows))
 	return r
+}
+
+// countJSONLLines counts non-empty lines in a JSONL file.
+// Returns (0, os.ErrNotExist) when the file is absent — callers treat that as "no signal".
+func countJSONLLines(path string) (int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, fs.ErrNotExist
+		}
+		return 0, err
+	}
+	defer f.Close() //nolint:errcheck
+	count := 0
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		if line := sc.Text(); line != "" {
+			count++
+		}
+	}
+	return count, sc.Err()
 }
 
 func dataPresenceFixHint() string {
