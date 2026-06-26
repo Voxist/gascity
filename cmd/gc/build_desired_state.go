@@ -1182,6 +1182,7 @@ func collectAssignedWorkBeadsWithStores(
 	}
 
 	readyResults := make([]storeAssignedWorkResult, len(stores))
+	readyLimit := assignedWorkReadyLimit(cfg)
 	for idx, source := range stores {
 		idx, source := idx, source
 		wg.Add(1)
@@ -1191,18 +1192,29 @@ func collectAssignedWorkBeadsWithStores(
 			var err error
 			var errs []error
 			if len(assignees) == 0 {
-				ready, err = liveReadyForControllerDemandQuery(source.store, beads.ReadyQuery{Limit: assignedWorkReadyLimit(cfg)})
+				ready, err = liveReadyForControllerDemandQuery(source.store, beads.ReadyQuery{Limit: readyLimit})
 				if err != nil {
 					errs = append(errs, fmt.Errorf("Ready(): %w", err))
 				}
 			} else {
-				for _, assignee := range assignees {
-					part, partErr := liveReadyForControllerDemandQuery(source.store, beads.ReadyQuery{Assignee: assignee, Limit: assignedWorkReadyLimit(cfg)})
-					if partErr != nil {
-						errs = append(errs, fmt.Errorf("Ready(assignee=%q): %w", assignee, partErr))
-					}
-					ready = append(ready, part...)
+				// Collapse the per-assignee Ready fan-out into a single live
+				// scope read, then partition the result in memory. The former
+				// loop issued one backing-store Ready query per assignee, which
+				// for a BdStore-backed scope is one bd subprocess per assignee
+				// per reconcile pass (≈ stores × open sessions per tick). The
+				// per-assignee Assignee filter is an exact-match post-filter on
+				// every store implementation, so reading the scope once and
+				// keeping only ready beads whose assignee is in the requested set
+				// yields the identical bead output while paying a single read.
+				// Limit 0 means unbounded so partitionReadyByAssignee can reapply
+				// the old per-assignee Limit cap in memory rather than truncating
+				// the shared read before partitioning.
+				var readErr error
+				ready, readErr = liveReadyForControllerDemandQuery(source.store, beads.ReadyQuery{Limit: 0})
+				if readErr != nil {
+					errs = append(errs, fmt.Errorf("Ready(scope): %w", readErr))
 				}
+				ready = partitionReadyByAssignee(ready, assignees, readyLimit)
 			}
 			var readyBeads []beads.Bead
 			var readyStores []beads.Store
