@@ -1191,12 +1191,13 @@ func collectAssignedWorkBeadsWithStores(
 			var ready []beads.Bead
 			var err error
 			var errs []error
-			if len(assignees) == 0 {
+			switch {
+			case len(assignees) == 0:
 				ready, err = liveReadyForControllerDemandQuery(source.store, beads.ReadyQuery{Limit: readyLimit})
 				if err != nil {
 					errs = append(errs, fmt.Errorf("Ready(): %w", err))
 				}
-			} else {
+			case sessionBeads != nil:
 				// Collapse the per-assignee Ready fan-out into a single live
 				// scope read, then partition the result in memory. The former
 				// loop issued one backing-store Ready query per assignee, which
@@ -1209,12 +1210,23 @@ func collectAssignedWorkBeadsWithStores(
 				// Limit 0 means unbounded so partitionReadyByAssignee can reapply
 				// the old per-assignee Limit cap in memory rather than truncating
 				// the shared read before partitioning.
+				// Only collapse when session beads drive the assignee set; named-
+				// session assignees use per-assignee queries so the query shape
+				// reflects the canonical identity (not the runtime name).
 				var readErr error
 				ready, readErr = liveReadyForControllerDemandQuery(source.store, beads.ReadyQuery{Limit: 0})
 				if readErr != nil {
 					errs = append(errs, fmt.Errorf("Ready(scope): %w", readErr))
 				}
 				ready = partitionReadyByAssignee(ready, assignees, readyLimit)
+			default:
+				for _, assignee := range assignees {
+					part, partErr := liveReadyForControllerDemandQuery(source.store, beads.ReadyQuery{Assignee: assignee, Limit: readyLimit})
+					if partErr != nil {
+						errs = append(errs, fmt.Errorf("Ready(assignee=%q): %w", assignee, partErr))
+					}
+					ready = append(ready, part...)
+				}
 			}
 			var readyBeads []beads.Bead
 			var readyStores []beads.Store
