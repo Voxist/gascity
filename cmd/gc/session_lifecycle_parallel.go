@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -455,6 +456,11 @@ type stopTarget struct {
 // metadata.session_name. Returning the empty string here would violate
 // the SessionLifecyclePayload.SessionID "always present" contract — see
 // internal/api/event_payloads.go's docstring.
+// NOTE: when used as an event's SessionID (session.stopped), the t.name
+// fallback can be a non-opaque session NAME (uppercase allowed). That is
+// intentional and safe: the export's safeRef gate DROPS a non-opaque value
+// rather than emit it — do not "fix" the gate assuming this is always an
+// opaque id.
 func (t stopTarget) lifecycleCorrelationID() string {
 	if t.sessionID != "" {
 		return t.sessionID
@@ -955,6 +961,9 @@ func buildPreparedStartWithWorkDirResolver(
 	if gcProvider := sessionProviderFamily(*session); gcProvider != "" {
 		agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 	}
+	if triggerEnv := sessionTriggerBeadEnv(session); len(triggerEnv) > 0 {
+		agentCfg.Env = mergeEnv(agentCfg.Env, triggerEnv)
+	}
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
 	return &preparedStart{
 		candidate:     candidate,
@@ -965,6 +974,25 @@ func buildPreparedStartWithWorkDirResolver(
 		provisionHash: provisionHash,
 		launchHash:    launchHash,
 	}, nil
+}
+
+func sessionTriggerBeadEnv(session *beads.Bead) map[string]string {
+	if session == nil {
+		return nil
+	}
+	triggerBeadID := strings.TrimSpace(session.Metadata[beadmeta.TriggerBeadIDMetadataKey])
+	if triggerBeadID == "" {
+		return nil
+	}
+	env := map[string]string{
+		"GC_TRIGGER_BEAD_ID":      triggerBeadID,
+		"GC_TRIGGER_WORK_BEAD_ID": triggerBeadID,
+	}
+	if storeRef := strings.TrimSpace(session.Metadata[beadmeta.TriggerBeadStoreRefMetadataKey]); storeRef != "" {
+		env["GC_TRIGGER_BEAD_STORE_REF"] = storeRef
+		env["GC_TRIGGER_WORK_STORE_REF"] = storeRef
+	}
+	return env
 }
 
 func parseSessionTemplateOverridesForLaunch(session *beads.Bead) map[string]string {
@@ -1831,9 +1859,10 @@ func commitStartResultTraced(
 	// failure paths above report the start as failed and retry (ga-kmoj9c).
 	fmt.Fprintf(stdout, "Woke session '%s'\n", tp.DisplayName()) //nolint:errcheck
 	rec.Record(events.Event{
-		Type:    events.SessionWoke,
-		Actor:   "gc",
-		Subject: tp.DisplayName(),
+		Type:      events.SessionWoke,
+		Actor:     "gc",
+		Subject:   tp.DisplayName(),
+		SessionID: session.ID,
 	})
 	telemetry.RecordAgentStart(context.Background(), name, tp.DisplayName(), nil)
 	if trace != nil {
@@ -2883,7 +2912,8 @@ func stopTargetsBounded(
 					stopped++
 					rec.Record(events.Event{
 						Type: events.SessionStopped, Actor: actor, Subject: result.target.subject,
-						Payload: api.SessionLifecyclePayloadJSON(result.target.lifecycleCorrelationID(), result.target.template, "stopped"),
+						SessionID: result.target.lifecycleCorrelationID(),
+						Payload:   api.SessionLifecyclePayloadJSON(result.target.lifecycleCorrelationID(), result.target.template, "stopped"),
 					})
 					telemetry.RecordAgentStop(context.Background(), result.target.name, firstNonEmptyGCString(result.target.agentName, result.target.template), "stopped", nil)
 				}
@@ -2927,7 +2957,8 @@ func stopTargetsBounded(
 			stopped++
 			rec.Record(events.Event{
 				Type: events.SessionStopped, Actor: actor, Subject: result.target.subject,
-				Payload: api.SessionLifecyclePayloadJSON(result.target.lifecycleCorrelationID(), result.target.template, "stopped"),
+				SessionID: result.target.lifecycleCorrelationID(),
+				Payload:   api.SessionLifecyclePayloadJSON(result.target.lifecycleCorrelationID(), result.target.template, "stopped"),
 			})
 			telemetry.RecordAgentStop(context.Background(), result.target.name, firstNonEmptyGCString(result.target.agentName, result.target.template), "stopped", nil)
 		}

@@ -242,7 +242,7 @@ func TestRestartRefusesRecentENOSPCUnlessForced(t *testing.T) {
 func TestRestartTreatsLoopbackAndWildcardHostsAsLocalManaged(t *testing.T) {
 	root := repoRoot(t)
 
-	for _, host := range []string{"127.0.0.1", "0.0.0.0"} {
+	for _, host := range []string{"127.0.0.1", "0.0.0.0", "localhost", "::1"} {
 		t.Run(host, func(t *testing.T) {
 			port, cleanup := startReachableTCPListener(t)
 			defer cleanup()
