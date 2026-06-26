@@ -116,7 +116,6 @@ func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedStat
 	for managedStopPIDAlive(targetPID) && time.Now().Before(deadline) {
 		time.Sleep(pollInterval)
 	}
-	lockWindow := managedDoltLockReleaseTimeoutFn(cityPath)
 	if managedStopPIDAlive(targetPID) {
 		// The process outlived the SIGTERM grace. SIGKILL is only safe when
 		// the dolt exclusive store lock is free — a holder is mid-flush, and

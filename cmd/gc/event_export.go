@@ -127,6 +127,13 @@ func startEventExport(ctx context.Context, ec supervisor.ExportConfig, providers
 // a restart would resume from a stale cursor (re-exporting or skipping events),
 // which an operator needs to see.
 func persistExportCursors(ctx context.Context, exp *eventexport.Exporter, path string, logf func(string, ...any)) {
+	// If the context is already done when the goroutine starts (e.g. an
+	// immediate-shutdown scenario), nothing has been exported yet so there is
+	// no cursor state worth persisting — skip the write to avoid a racy
+	// create-then-delete of the cursor file during cleanup.
+	if ctx.Err() != nil {
+		return
+	}
 	t := time.NewTicker(10 * time.Second)
 	defer t.Stop()
 	save := func() {
