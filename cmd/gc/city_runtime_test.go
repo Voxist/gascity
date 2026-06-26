@@ -6432,3 +6432,62 @@ func TestWarnIfClosedOrderTrackingBacklogLarge_SilentOnNilStore(_ *testing.T) {
 	// nil store: must not panic.
 	warnIfClosedOrderTrackingBacklogLarge(nil, io.Discard)
 }
+
+// TestOrderTrackingRetentionWatchdogSkipsStaleBackup verifies that the watchdog
+// skips bulk deletion and emits a warning when the city backup is stale.
+func TestOrderTrackingRetentionWatchdogSkipsStaleBackup(t *testing.T) {
+	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+
+	// Write a stale backup_state.json (48h old — past the 24h default threshold).
+	cityPath := t.TempDir()
+	backupDir := filepath.Join(cityPath, ".beads", "backup")
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+		t.Fatalf("mkdir backup dir: %v", err)
+	}
+	staleTS := now.Add(-48 * time.Hour).Format(time.RFC3339)
+	backupState := `{"last_dolt_commit":"abc","timestamp":"` + staleTS + `"}`
+	if err := os.WriteFile(filepath.Join(backupDir, "backup_state.json"), []byte(backupState), 0o644); err != nil {
+		t.Fatalf("write backup_state.json: %v", err)
+	}
+
+	// Seed eligible beads (8d old, past 7d TTL, enough to exceed retain-10 floor).
+	seed := make([]beads.Bead, 0, minClosedOrderTrackingRetained+1)
+	for i := range minClosedOrderTrackingRetained + 1 {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("guard-%02d", i),
+			Title:     "order:guard",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-8*24*time.Hour + time.Duration(i)*time.Minute),
+			Labels:    []string{"order-run:guard", labelOrderTracking},
+			Ephemeral: true,
+		})
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	var stderrBuf bytes.Buffer
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cityPath:            cityPath,
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              &stderrBuf,
+		logPrefix:           "gc test",
+		// Zero last: watchdog would fire if not for the backup gate.
+	}
+	cr.runOrderTrackingRetentionWatchdog(now)
+
+	// No beads should have been deleted — backup gate must block the sweep.
+	if _, err := store.Get("guard-00"); err != nil {
+		t.Fatalf("guard-00 should be preserved when backup is stale: %v", err)
+	}
+	// A non-empty warning must appear on stderr.
+	got := stderrBuf.String()
+	if got == "" {
+		t.Fatalf("want a backup-stale warning on stderr, got empty output")
+	}
+	if !strings.Contains(got, "backup") {
+		t.Fatalf("stderr = %q, want 'backup' in warning", got)
+	}
+}

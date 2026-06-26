@@ -2305,6 +2305,66 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 	return deleted, deleteErr
 }
 
+// countClosedOrderTrackingRetentionEligible returns the number of closed
+// order-tracking beads across stores that would be deleted by
+// sweepClosedOrderTrackingRetentionAcrossStores. It performs no deletions.
+func countClosedOrderTrackingRetentionEligible(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (int, error) {
+	if policy.deleteAfterClose <= 0 {
+		return 0, nil
+	}
+	if policy.retainLast < minClosedOrderTrackingRetained {
+		policy.retainLast = minClosedOrderTrackingRetained
+	}
+	total := 0
+	cutoff := now.Add(-policy.deleteAfterClose)
+	var errs []error
+	for i, store := range stores {
+		if store == nil {
+			continue
+		}
+		entries, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+			Status:   "closed",
+			Label:    labelOrderTracking,
+			Sort:     beads.SortCreatedDesc,
+			TierMode: beads.TierBoth,
+		})
+		if err != nil {
+			errs = append(errs, fmt.Errorf("listing closed order-tracking %s: %w", orderTrackingSweepStoreLabel(store, i), err))
+			continue
+		}
+		byOrder := make(map[string][]beads.Bead)
+		for _, entry := range entries {
+			scopedName, ok := orderTrackingRetentionBucket(entry, onlyOrders)
+			if len(onlyOrders) > 0 && !ok {
+				continue
+			}
+			if !ok {
+				scopedName = legacyOrderTrackingRetentionBucket
+			}
+			byOrder[scopedName] = append(byOrder[scopedName], entry)
+		}
+		for _, group := range byOrder {
+			sort.Slice(group, func(a, b int) bool {
+				l := orderTrackingClosedReferenceTime(group[a])
+				r := orderTrackingClosedReferenceTime(group[b])
+				if l.Equal(r) {
+					return group[a].ID > group[b].ID
+				}
+				return l.After(r)
+			})
+			if len(group) <= policy.retainLast {
+				continue
+			}
+			for _, entry := range group[policy.retainLast:] {
+				if orderTrackingClosedReferenceTime(entry).Before(cutoff) {
+					total++
+				}
+			}
+		}
+	}
+	return total, errors.Join(errs...)
+}
+
 func orderTrackingRetentionBucket(entry beads.Bead, onlyOrders map[string]struct{}) (string, bool) {
 	scopedName, ok := orderNameFromTrackingBead(entry)
 	if !ok {
