@@ -19,8 +19,12 @@ var (
 	materializeSyntheticRepo = builtinpacks.MaterializeSyntheticRepo
 )
 
-// RepoCacheRoot returns the shared machine-local repo cache root.
+// RepoCacheRoot returns the shared machine-local repo cache root,
+// honoring GC_HOME when set so tests can isolate their cache.
 func RepoCacheRoot() (string, error) {
+	if gcHome := os.Getenv("GC_HOME"); gcHome != "" {
+		return filepath.Join(gcHome, "cache", "repos"), nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolving home dir: %w", err)
