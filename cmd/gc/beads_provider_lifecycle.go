@@ -148,8 +148,6 @@ var (
 	startBeadsLifecycleInitAndHookDir = initAndHookDir
 )
 
-const initDirIfReadyRetryLimit = 2
-
 func isRetryableManagedDoltLifecycleError(err error) bool {
 	if err == nil {
 		return false
