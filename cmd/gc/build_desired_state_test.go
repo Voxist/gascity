@@ -2224,15 +2224,17 @@ func TestCollectAssignedWorkBeads_ReadyProbeExcludesFutureNamedSessionRuntimeAss
 	if len(storeRefs) != 0 {
 		t.Fatalf("storeRefs = %#v, want none", storeRefs)
 	}
-	queried := make(map[string]bool)
-	for _, query := range rigStore.readyQueries {
-		queried[query.Assignee] = true
+	// Post-collapse (#3218/#3312) the demand path issues a single unfiltered
+	// scope read, not a per-assignee fan-out, so the future runtime assignee is
+	// excluded by the in-memory partition (proven by len(got)==0 above) rather
+	// than by omitting a per-assignee query. Assert the collapse invariant:
+	// exactly one unfiltered scope read. The exclusion semantics this test name
+	// guards are carried by the result assertions, not the query shape.
+	if len(rigStore.readyQueries) != 1 {
+		t.Fatalf("rig Ready read count = %d (queries=%#v), want exactly 1 unfiltered scope read per scope", len(rigStore.readyQueries), rigStore.readyQueries)
 	}
-	if queried[runtimeName] {
-		t.Fatalf("rig Ready queries = %#v, must not include future runtime assignee %q", rigStore.readyQueries, runtimeName)
-	}
-	if !queried[identity] {
-		t.Fatalf("rig Ready queries = %#v, want canonical named-session assignee %q", rigStore.readyQueries, identity)
+	if rigStore.readyQueries[0].Assignee != "" {
+		t.Fatalf("collapsed Ready query carried Assignee %q, want a single unfiltered scope read", rigStore.readyQueries[0].Assignee)
 	}
 }
 
