@@ -69,8 +69,10 @@ func TestRigDataPresenceCheck_StoreOpenFailure_Advisory(t *testing.T) {
 	}
 }
 
-func TestRigDataPresenceCheck_IssuesJSONLDeficit_Error(t *testing.T) {
-	// Store has 2 rows but issues.jsonl has 5 lines → row deficit → blocking error.
+func TestRigDataPresenceCheck_IssuesJSONLDeficit_Advisory(t *testing.T) {
+	// Store has 2 rows but issues.jsonl has 5 lines → partial deficit. This is
+	// advisory, not blocking: retention/archival (#3342/#3772) can legitimately
+	// delete live rows while the export lags or keeps archived rows.
 	rigDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
@@ -94,11 +96,11 @@ func TestRigDataPresenceCheck_IssuesJSONLDeficit_Error(t *testing.T) {
 	c := NewRigDataPresenceCheck(t.TempDir(), config.Rig{Name: "myrig", Path: rigDir},
 		func(_ string) (beads.Store, error) { return store, nil })
 	r := c.Run(&CheckContext{})
-	if r.Status != StatusError {
-		t.Errorf("status = %d, want Error (JSONL deficit); msg = %s", r.Status, r.Message)
+	if r.Status != StatusWarning {
+		t.Errorf("status = %d, want Warning (partial deficit is advisory); msg = %s", r.Status, r.Message)
 	}
-	if r.Severity != SeverityBlocking {
-		t.Errorf("severity = %d, want Blocking", r.Severity)
+	if r.Severity != SeverityAdvisory {
+		t.Errorf("severity = %d, want Advisory (deficit must not gate dispatch)", r.Severity)
 	}
 }
 
@@ -123,8 +125,40 @@ func TestRigDataPresenceCheck_NonEmptyStore_OK(t *testing.T) {
 	}
 }
 
-func TestRigDataPresenceCheck_EmptyStoreWithIdentity_Error(t *testing.T) {
-	// identity.toml present + store has zero rows → blocking error.
+func TestRigDataPresenceCheck_EmptyStoreWithExportHistory_Error(t *testing.T) {
+	// identity present + empty live store + populated issues.jsonl → unambiguous
+	// data loss (the va incident 2026-06-20). This is the only empty-store case
+	// that blocks.
+	rigDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := contract.WriteProjectIdentity(fsys.OSFS{}, rigDir, "gc-test-proj"); err != nil {
+		t.Fatalf("WriteProjectIdentity: %v", err)
+	}
+	// Export history proves the rig previously held data.
+	jsonlPath := filepath.Join(rigDir, ".beads", "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte("{\"id\":\"a\"}\n{\"id\":\"b\"}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(issues.jsonl): %v", err)
+	}
+	c := NewRigDataPresenceCheck(t.TempDir(), config.Rig{Name: "myrig", Path: rigDir},
+		func(_ string) (beads.Store, error) { return beads.NewMemStore(), nil })
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusError {
+		t.Errorf("status = %d, want Error (empty store + export history); msg = %s", r.Status, r.Message)
+	}
+	if r.Severity != SeverityBlocking {
+		t.Errorf("severity = %d, want Blocking", r.Severity)
+	}
+	if r.FixHint == "" {
+		t.Error("FixHint is empty, want restore-from-backup hint")
+	}
+}
+
+func TestRigDataPresenceCheck_EmptyStoreNoExportHistory_FreshRig_OK(t *testing.T) {
+	// identity present (stamped at scope creation) + empty store + NO export
+	// history → freshly created rig, not data loss. Must pass without gating
+	// dispatch (the false-positive the review flagged).
 	rigDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
@@ -135,13 +169,10 @@ func TestRigDataPresenceCheck_EmptyStoreWithIdentity_Error(t *testing.T) {
 	c := NewRigDataPresenceCheck(t.TempDir(), config.Rig{Name: "myrig", Path: rigDir},
 		func(_ string) (beads.Store, error) { return beads.NewMemStore(), nil })
 	r := c.Run(&CheckContext{})
-	if r.Status != StatusError {
-		t.Errorf("status = %d, want Error (empty store + identity); msg = %s", r.Status, r.Message)
-	}
-	if r.Severity != SeverityBlocking {
-		t.Errorf("severity = %d, want Blocking", r.Severity)
-	}
-	if r.FixHint == "" {
-		t.Error("FixHint is empty, want restore-from-backup hint")
+	// StatusOK never gates dispatch regardless of severity (only StatusError /
+	// StatusWarning + SeverityBlocking does), so asserting OK is sufficient to
+	// prove the fresh rig is not a false-positive — matching NonEmptyStore_OK.
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK (fresh rig: empty store, no export); msg = %s", r.Status, r.Message)
 	}
 }

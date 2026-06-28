@@ -14,16 +14,22 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-// RigDataPresenceCheck verifies that a rig whose identity is configured has at
-// least one row in its live bead store. An empty store with a configured
-// identity is evidence of data loss (e.g. the va incident 2026-06-20 where
-// 803 beads were missing). The check also catches the case where the local
-// issues.jsonl export has more rows than the live store, which is a secondary
-// signal of row deficit.
+// RigDataPresenceCheck flags likely data loss in a rig's live bead store,
+// using the local issues.jsonl export as the evidence that the rig previously
+// held data. Because identity.toml is stamped at scope creation (before the
+// first bead), identity-present alone does not imply the store should be
+// non-empty; the export history is what separates data loss from a fresh rig.
 //
-// Two degradation paths:
+// Blocking only on unambiguous loss:
+//   - Empty live store + populated issues.jsonl → StatusError, SeverityBlocking
+//     (the va incident 2026-06-20: 803 export rows, 0 live).
+//
+// Non-blocking paths (never gate dispatch):
 //   - No identity configured → StatusOK (legacy rig, skip silently).
-//   - Store open fails → StatusWarning, SeverityAdvisory (Dolt may be offline).
+//   - Empty store + no export history → StatusOK (freshly created rig).
+//   - Live rows < export rows → StatusWarning, SeverityAdvisory (a partial
+//     deficit can be legitimate retention/archival, not loss).
+//   - Store open / list fails → StatusWarning, SeverityAdvisory (Dolt offline).
 type RigDataPresenceCheck struct {
 	cityPath string
 	rig      config.Rig
@@ -93,20 +99,45 @@ func (c *RigDataPresenceCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 
+	// issues.jsonl is the local export history — the evidence that the rig
+	// *previously* held data. identity.toml is written at scope creation, before
+	// the first bead exists (cmd/gc/dolt_project_id.go), so identity-present plus
+	// an empty store cannot by itself distinguish data loss from a freshly
+	// created rig. Read the export count first and gate the blocking signals on
+	// it.
+	jsonlLines, jsonlErr := countJSONLLines(filepath.Join(rigPath, ".beads", "issues.jsonl"))
+	haveExportHistory := jsonlErr == nil && jsonlLines > 0
+
 	if len(rows) == 0 {
+		if !haveExportHistory {
+			// Fresh rig: identity stamped at scope creation, no beads slung yet,
+			// no export history. Not data loss — pass silently rather than gate
+			// dispatch on a brand-new or just-added rig.
+			r.Status = StatusOK
+			r.Message = fmt.Sprintf("rig %q: no rows yet and no export history (fresh rig, skip)", c.rig.Name)
+			return r
+		}
+		// Empty live store with a populated export is unambiguous data loss —
+		// retention/archival never empties a store that still has an export
+		// (the va incident 2026-06-20: 803 rows in issues.jsonl, 0 live).
 		r.Status = StatusError
 		r.Severity = SeverityBlocking
-		r.Message = fmt.Sprintf("rig %s: live store is empty despite identity being configured", c.rig.Name)
+		r.Message = fmt.Sprintf("rig %s: live store is empty but issues.jsonl has %d rows — data loss",
+			c.rig.Name, jsonlLines)
 		r.FixHint = dataPresenceFixHint()
 		return r
 	}
 
-	// Secondary signal: issues.jsonl export has more rows than the live store.
-	jsonlLines, err := countJSONLLines(filepath.Join(rigPath, ".beads", "issues.jsonl"))
-	if err == nil && jsonlLines > 0 && len(rows) < jsonlLines {
-		r.Status = StatusError
-		r.Severity = SeverityBlocking
-		r.Message = fmt.Sprintf("rig %s: live store has %d rows but issues.jsonl has %d — row deficit detected",
+	// Secondary signal: a partial deficit (live rows < export rows) is advisory,
+	// not blocking. Active retention/archival (#3342 / #3772 archive-then-delete)
+	// legitimately deletes live rows while issues.jsonl may lag or retain the
+	// archived rows, so a deficit does not prove loss and must not gate dispatch.
+	// Surface it for operator review until the export/retention contract
+	// guarantees the two counts track.
+	if haveExportHistory && len(rows) < jsonlLines {
+		r.Status = StatusWarning
+		r.Severity = SeverityAdvisory
+		r.Message = fmt.Sprintf("rig %s: live store has %d rows but issues.jsonl has %d — possible row deficit (advisory; retention/archival can cause this)",
 			c.rig.Name, len(rows), jsonlLines)
 		r.FixHint = dataPresenceFixHint()
 		return r
