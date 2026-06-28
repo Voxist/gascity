@@ -215,10 +215,17 @@ func (s *controllerDemandPartialStore) Ready(query ...beads.ReadyQuery) ([]beads
 	}
 	// The collapsed assigned-work scope read (P2.5 / #3218) and the
 	// pool/scale-check controller-demand reads now share the same unfiltered
-	// (Assignee=="" && Limit==0) shape. This fixture models a partial on the
-	// downstream scale-check/pool-demand read only; the first Ready call is the
-	// assigned-work collapse read, which must stay clean so the named
-	// scale_check partial does not escalate to StoreQueryPartial.
+	// (Assignee=="" && Limit==0) shape, so this fixture distinguishes them by
+	// call ordinal: the first Ready call is the assigned-work collapse read,
+	// which must stay clean so the named scale_check partial does not escalate
+	// to StoreQueryPartial. The ordinal is not silently fragile to a reorder —
+	// it is guarded by divergent observable outcomes: an assigned-work partial
+	// sets result.StoreQueryPartial, while a scale_check partial sets only
+	// ScaleCheckPartialTemplates. If a future reorder made the assigned-work
+	// read the one that receives the injected partial, the caller's
+	// StoreQueryPartial assertion (asserted false in
+	// TestBuildDesiredState_NamedScaleCheckPartialDoesNotRetainGenericPoolSession)
+	// would flip true and fail the test rather than pass against the wrong call.
 	s.assignedWorkReadSeen++
 	if s.assignedWorkReadSeen == 1 {
 		return rows, nil

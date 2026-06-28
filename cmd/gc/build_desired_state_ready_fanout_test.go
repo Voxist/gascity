@@ -105,6 +105,34 @@ func TestCollectAssignedWorkBeads_ReadyFanOutCollapsesToOneReadPerScope(t *testi
 // Ready(Assignee=…) fan-out would have returned from the same ready set:
 // only beads whose assignee is in the demand set, capped per assignee, in
 // assignee order, and never duplicated.
+// TestCollectAssignedWorkBeads_CollapsedReadPropagatesPartial covers the
+// collapsed single-scope-read branch (len(assignees) > 0) under a partial
+// backing-store read — the path the former per-assignee fan-out never had a
+// direct test for. A PartialResultError on the unfiltered scope read must
+// surface as partial == true so the caller suppresses that tick's drain
+// decisions, while the beads that survived the partial read are still
+// returned (a partial read is degraded, not empty).
+func TestCollectAssignedWorkBeads_CollapsedReadPropagatesPartial(t *testing.T) {
+	store := &partialAssignedWorkStore{MemStore: beads.NewMemStore()}
+
+	session := makeSleepySession(t, store, "worker-a")
+	work := makeReadyWork(t, store, "ready for worker-a", "worker-a")
+
+	// Inject the partial only after the fixture's beads exist, so Create()
+	// during setup stays clean and the partial lands on the collapsed read.
+	store.partialReady = true
+
+	snapshot := newSessionBeadSnapshot([]beads.Bead{session})
+
+	got, _, _, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil, snapshot)
+	if !partial {
+		t.Fatal("collapsed scope read returned a PartialResultError but partial was not propagated")
+	}
+	if gotIDs := sortedIDs(got); !equalStringSlices(gotIDs, []string{work.ID}) {
+		t.Fatalf("collected ready IDs = %v under a partial read, want the surviving assigned bead %v", gotIDs, []string{work.ID})
+	}
+}
+
 func TestPartitionReadyByAssignee_MatchesPerAssigneeFilter(t *testing.T) {
 	ready := []beads.Bead{
 		{ID: "a1", Assignee: "alice"},
