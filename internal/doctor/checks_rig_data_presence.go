@@ -16,7 +16,7 @@ import (
 
 // RigDataPresenceCheck flags likely data loss in a rig's live bead store,
 // using the local issues.jsonl export as the evidence that the rig previously
-// held data. Because identity.toml is stamped at scope creation (before the
+// held data. Because the rig identity file is stamped at scope creation (before the
 // first bead), identity-present alone does not imply the store should be
 // non-empty; the export history is what separates data loss from a fresh rig.
 //
@@ -100,7 +100,7 @@ func (c *RigDataPresenceCheck) Run(_ *CheckContext) *CheckResult {
 	}
 
 	// issues.jsonl is the local export history — the evidence that the rig
-	// *previously* held data. identity.toml is written at scope creation, before
+	// *previously* held data. The identity file is written at scope creation, before
 	// the first bead exists (cmd/gc/dolt_project_id.go), so identity-present plus
 	// an empty store cannot by itself distinguish data loss from a freshly
 	// created rig. Read the export count first and gate the blocking signals on
@@ -172,5 +172,5 @@ func countJSONLLines(path string) (int, error) {
 func dataPresenceFixHint() string {
 	return "restore the rig from its last backup (`bd dolt pull` or `mol-dog restore`), " +
 		"then run `gc stop && gc start` to re-stamp identity — " +
-		"do NOT edit identity.toml or metadata.json to match an empty store"
+		"do NOT edit the identity or metadata files to match an empty store"
 }
