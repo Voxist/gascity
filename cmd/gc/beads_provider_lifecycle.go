@@ -230,7 +230,7 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 		}
 		prefix := cfg.Rigs[i].EffectivePrefix()
 		if err := startBeadsLifecycleInitAndHookDir(cityPath, cfg.Rigs[i].Path, prefix); err != nil {
-			fmt.Fprintf(stderr, "gc: rig %q bead store init failed — rig offline until next gc restart: %v\n",
+			fmt.Fprintf(stderr, "gc: rig %q bead store init failed — rig offline until next gc restart: %v\n", //nolint:errcheck
 				cfg.Rigs[i].Name, err)
 			degradedRigs = append(degradedRigs, cfg.Rigs[i].Name)
 		}
