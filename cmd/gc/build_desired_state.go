@@ -1257,9 +1257,27 @@ func collectAssignedWorkBeadsWithStores(
 				// every store implementation, so reading the scope once and
 				// keeping only ready beads whose assignee is in the requested set
 				// yields the identical bead output while paying a single read.
-				// Limit 0 means unbounded so partitionReadyByAssignee can reapply
+				//
+				// Fault contract (unchanged by the collapse): the per-assignee
+				// loop did NOT isolate faults. BdStore.Ready parses the whole
+				// subprocess output and applies --assignee as a client-side
+				// post-filter, so a corrupt/unreadable bead in the scope already
+				// failed every per-assignee query and already marked the whole
+				// scope partial. The single read has identical fault behavior —
+				// it just drops the N−1 redundant spawns. A PartialResultError
+				// suppresses this tick's drain decisions for the scope; a
+				// transient bad bead is a one-tick conservative skip (demand
+				// recomputes next tick), while a persistently corrupt bead
+				// suppresses whole-scope drain every tick until it is fixed
+				// (true before and after this change).
+				//
+				// Limit 0 is unbounded so partitionReadyByAssignee can reapply
 				// the old per-assignee Limit cap in memory rather than truncating
-				// the shared read before partitioning.
+				// the shared read before partitioning. The trade is that the read
+				// now pulls the whole ready set for the scope into memory once per
+				// tick instead of capping per assignee at the store; acceptable
+				// because the prior fan-out already materialized a superset
+				// (K capped reads ≥ one uncapped read of the same scope).
 				var readErr error
 				ready, readErr = liveReadyForControllerDemandQuery(source.store, beads.ReadyQuery{Limit: 0})
 				if readErr != nil {
