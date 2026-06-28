@@ -33,17 +33,11 @@ if [ -n "$staged_go_files" ]; then
   git add docs/reference/schema/city-schema.json docs/reference/schema/city-schema.txt docs/reference/config.md docs/reference/cli.md
 
   make vet
-  # The full test suite is heavy and, on hosts where Dolt's CGO/ICU deps don't
-  # run (e.g. macOS dev/orchestration boxes), crawls or hangs. Running it on
-  # every commit saturates the box and wedges automated/agent commits for tens
-  # of minutes — which in turn starves the controller's reconcile/spawn loop.
-  # It belongs in CI (which runs `make test` directly, not via this hook). Opt
-  # in locally with GC_PRECOMMIT_FULL=1 when you want the pre-commit gate.
-  if [ -n "${GC_PRECOMMIT_FULL:-}" ]; then
-    make test-fast-parallel
-  else
-    echo "pre-commit: skipping 'make test-fast-parallel' (set GC_PRECOMMIT_FULL=1 to run; CI enforces it)" >&2
-  fi
+  # Heavy `go test` fan-out runs in .githooks/pre-push, not here (#3628).
+  # Invoking `make test-fast-parallel` on every commit fired an
+  # `xargs -P<nproc>` storm of ~2.8 GB test-binary compiles (~17 GB pressure,
+  # load >100 on constrained hosts such as WSL). Format, lint, vet, and codegen
+  # stay in pre-commit; the test suite gates at push time instead.
 fi
 
 if [ -n "$staged_docs" ]; then

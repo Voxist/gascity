@@ -50,13 +50,12 @@ func runRecoverWithHost(t *testing.T, host string) ([]byte, error) {
 }
 
 // TestRecoverTreatsLocalHostsAsManaged pins the recover script's host
-// classification to the P0.5 contract: empty, 127.0.0.1 (the bind
-// default), and 0.0.0.0 (the explicit wildcard opt-out) all mean a
-// GC-managed local server, so recovery must proceed past the remote-host
-// guard. Pre-fix, 0.0.0.0 was misclassified as remote even though it was
-// the managed bind default.
+// classification to the P0.5 contract: empty, 127.0.0.1 (the managed bind
+// default), 0.0.0.0 (the explicit wildcard opt-out), localhost, and ::1 all
+// mean a GC-managed local server, so recovery must proceed past the
+// remote-host guard. Matches contract.DoltHostIsLocal.
 func TestRecoverTreatsLocalHostsAsManaged(t *testing.T) {
-	for _, host := range []string{"", "127.0.0.1", "0.0.0.0", "localhost"} {
+	for _, host := range []string{"", "127.0.0.1", "0.0.0.0", "localhost", "::1"} {
 		name := host
 		if name == "" {
 			name = "unset"

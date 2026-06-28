@@ -43,7 +43,11 @@ type ConfigState struct {
 	DoltHost       string
 	DoltPort       string
 	DoltUser       string
-	Dolt           DoltConfig
+	// DoltMode is the beads dolt.mode value to write to config.yaml.
+	// When non-empty, EnsureCanonicalConfig writes dolt.mode to the canonical config.
+	// When empty, the existing dolt.mode value is preserved.
+	DoltMode string
+	Dolt     DoltConfig
 }
 
 // DoltConfig is the Dolt-specific subset of .beads/config.yaml that GC owns.
@@ -550,6 +554,10 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 		changed = deleteKeys(root, "dolt.user") || changed
 	}
 
+	if mode := strings.TrimSpace(state.DoltMode); mode != "" {
+		changed = setString(root, "dolt.mode", mode) || changed
+	}
+
 	changed = deleteKeys(root, deprecatedConfigKeys...) || changed
 	if !changed {
 		return false, nil
@@ -687,6 +695,9 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 	} else {
 		deletions["dolt.user"] = struct{}{}
 	}
+	if mode := strings.TrimSpace(state.DoltMode); mode != "" {
+		replacements["dolt.mode"] = "dolt.mode: " + mode
+	}
 	disableEventFlush := doltDisableEventFlushFallbackValue(data, state)
 
 	lines := strings.Split(string(data), "\n")
@@ -741,6 +752,7 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 		"dolt.host",
 		"dolt.port",
 		"dolt.user",
+		"dolt.mode",
 	}
 	for _, key := range orderedKeys {
 		want, ok := replacements[key]

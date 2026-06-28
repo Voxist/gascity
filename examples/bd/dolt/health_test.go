@@ -34,6 +34,14 @@ func repoRoot(t *testing.T) string {
 	return filepath.Dir(filename)
 }
 
+// filteredEnv returns os.Environ() with the supplied keys removed and
+// every GC_* / DOLT_* entry stripped unconditionally. The blanket
+// scrub keeps shell-script tests hermetic when invoked from an agent
+// worktree, where the host shell carries managed-runtime
+// state (GC_DOLT_STATE_FILE, GC_CITY_RUNTIME_DIR, GC_DOLT_PORT, etc.)
+// that would otherwise override the test fixture's temp paths and
+// route runtime.sh at the production state file. The explicit keys
+// argument remains for non-GC_/DOLT_ scrubbing such as PATH.
 func filteredEnv(keys ...string) []string {
 	blocked := make(map[string]struct{}, len(keys))
 	for _, key := range keys {
@@ -46,10 +54,47 @@ func filteredEnv(keys ...string) []string {
 			if _, skip := blocked[key]; skip {
 				continue
 			}
+			if strings.HasPrefix(key, "GC_") || strings.HasPrefix(key, "DOLT_") {
+				continue
+			}
 		}
 		env = append(env, entry)
 	}
 	return env
+}
+
+// TestFilteredEnvStripsGCAndDOLTPrefixes is the unit-level regression
+// guard for the env scrub. The TestRuntimeScriptPortPrecedence* tests
+// only fail when the host shell happens to carry leaking GC_* values,
+// so a revert of the prefix scrub goes undetected on clean machines.
+// This test injects the leak explicitly and asserts it never reaches
+// the returned slice.
+func TestFilteredEnvStripsGCAndDOLTPrefixes(t *testing.T) {
+	t.Setenv("GC_DOLT_STATE_FILE", "/host/leak/dolt-state.json")
+	t.Setenv("GC_DOLT_PORT", "38676")
+	t.Setenv("GC_CITY_RUNTIME_DIR", "/host/leak/runtime")
+	t.Setenv("DOLT_CLI_PASSWORD", "host-leak")
+	t.Setenv("FILTERED_ENV_TEST_KEEP", "kept")
+
+	got := filteredEnv()
+
+	for _, entry := range got {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, "GC_") || strings.HasPrefix(key, "DOLT_") {
+			t.Errorf("filteredEnv leaked %q; GC_*/DOLT_* must be stripped", entry)
+		}
+	}
+
+	var sawKept bool
+	for _, entry := range got {
+		if entry == "FILTERED_ENV_TEST_KEEP=kept" {
+			sawKept = true
+			break
+		}
+	}
+	if !sawKept {
+		t.Errorf("filteredEnv dropped non-GC_/DOLT_ entry FILTERED_ENV_TEST_KEEP")
+	}
 }
 
 // startDeadTCPListener accepts connections but never writes or reads —
@@ -979,6 +1024,80 @@ func writeExecutable(t *testing.T, path, contents string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(contents), 0o755); err != nil {
 		t.Fatalf("WriteFile(%s): %v", path, err)
+	}
+}
+
+func TestHealthScriptProbesConfiguredExternalHost(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	root := repoRoot(t)
+	fakeBin := t.TempDir()
+	argsFile := filepath.Join(t.TempDir(), "dolt.args")
+	emptyDataDir := t.TempDir()
+
+	// Force the local managed-server precheck to fail. External hosts must still
+	// be probed via SQL against GC_DOLT_HOST:GC_DOLT_PORT.
+	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), `#!/bin/sh
+printf '%s\n' "$@" > "$FAKE_DOLT_ARGS"
+exit 0
+`)
+
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+		"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH", "FAKE_DOLT_ARGS",
+		"GC_DOLT_DATA_DIR"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+emptyDataDir,
+		"GC_DOLT_HOST=superlzy-dolt",
+		"GC_DOLT_PORT=3306",
+		"GC_DOLT_USER=superlzy",
+		"GC_DOLT_PASSWORD=secret",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"FAKE_DOLT_ARGS="+argsFile,
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+	}
+
+	var report struct {
+		Server struct {
+			Running   bool `json:"running"`
+			Reachable bool `json:"reachable"`
+		} `json:"server"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("health.sh --json returned invalid JSON: %v\n%s", err, out)
+	}
+	if report.Server.Running {
+		t.Fatalf("server.running = true for external host; want false local-managed signal\n%s", out)
+	}
+	if !report.Server.Reachable {
+		t.Fatalf("server.reachable = false; want configured external host SQL probe to succeed\n%s", out)
+	}
+
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("fake dolt was not invoked: %v\nhealth output:\n%s", err, out)
+	}
+	gotArgs := "\n" + string(args)
+	for _, want := range []string{"\n--host\nsuperlzy-dolt\n", "\n--port\n3306\n", "\n--user\nsuperlzy\n", "\nsql\n", "\n-q\n", "\nSELECT 1\n"} {
+		if !strings.Contains(gotArgs, want) {
+			t.Fatalf("fake dolt args missing %q; got:\n%s\nhealth output:\n%s", want, args, out)
+		}
 	}
 }
 

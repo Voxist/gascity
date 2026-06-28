@@ -192,7 +192,7 @@ func (c PreflightChecker) checkDoltModeSafe(metadata preflightMetadata, ctx Pref
 		// than reporting "unsupported dolt mode", so the diagnostic is accurate.
 		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckFail, "dolt_mode=proxied-server routes through the bd-subprocess store (native store not used)", details)
 	case "embedded":
-		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckFail, "dolt_mode=embedded requires server mode or native_embedded build tag", details)
+		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckFail, "dolt_mode=embedded; native store requires Dolt server mode (bd context must report dolt_mode=server) — falling back to per-call bd. See troubleshooting.", details)
 	default:
 		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckFail, "bd context reports unsupported dolt mode", details)
 	}
