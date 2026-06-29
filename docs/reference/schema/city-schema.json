@@ -326,6 +326,14 @@
             "off"
           ],
           "description": "MouseMode controls whether tmux mouse mode is preserved for this agent.\n\"on\" leaves the session's mouse setting alone for human-attached\nsessions; \"off\" or empty preserves the SDK's default mouse-off startup\nbehavior for headless sessions."
+        },
+        "tier": {
+          "type": "string",
+          "enum": [
+            "claude-required",
+            "overflow-ok"
+          ],
+          "description": "Tier classifies this agent's provider-quality requirement for the\nprovider governor (internal/providergov). \"claude-required\" agents\nare served from the governed Claude account pool; \"overflow-ok\"\nagents always run on the configured overflow vendor pool, which\nstretches the Claude weekly cap. Empty means unclassified: the\ngovernor does not steer this agent and its configured provider\napplies unchanged."
         }
       },
       "additionalProperties": false,
@@ -648,6 +656,14 @@
           ],
           "description": "MouseMode overrides whether tmux mouse mode is preserved (\"on\" or \"off\")."
         },
+        "tier": {
+          "type": "string",
+          "enum": [
+            "claude-required",
+            "overflow-ok"
+          ],
+          "description": "Tier overrides the agent's provider-governor tier classification\n(\"claude-required\" or \"overflow-ok\")."
+        },
         "inject_fragments_append": {
           "items": {
             "type": "string"
@@ -901,6 +917,14 @@
           ],
           "description": "MouseMode overrides whether tmux mouse mode is preserved (\"on\" or \"off\")."
         },
+        "tier": {
+          "type": "string",
+          "enum": [
+            "claude-required",
+            "overflow-ok"
+          ],
+          "description": "Tier overrides the agent's provider-governor tier classification\n(\"claude-required\" or \"overflow-ok\")."
+        },
         "pre_start_append": {
           "items": {
             "type": "string"
@@ -1037,6 +1061,13 @@
         "resilience": {
           "$ref": "#/$defs/BeadsResilienceConfig",
           "description": "Resilience configures the transport circuit breaker that guards bd\nsubprocess and store operations ([beads.resilience])."
+        },
+        "native_store_canary_scopes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "NativeStoreCanaryScopes lists the scope names (city name or rig names) for\nwhich the in-process NativeDoltStore is canaried, scope by scope, without\nflipping any global store mode. It is the P2.3 env-projection canary lever:\nwhen a scope is listed, the gc beads env projection ensures the native\nserver-mode Dolt keys (BEADS_DOLT_SERVER_MODE/HOST/PORT) are projected from\nthe managed-server live handle so the scope can open the native store, and\nthe post-open identity assertion guarantees a silent-empty or misrouted DB\nis detected immediately. Defaults to empty (OFF) and is purely additive: an\nunlisted scope's env projection is byte-for-byte unchanged. The operator\ncan layer additional scopes at runtime without editing committed config via\nthe GC_BEADS_NATIVE_STORE_CANARY environment variable (comma-separated\nscope names); env entries union with this list."
         }
       },
       "additionalProperties": false,
@@ -2516,6 +2547,14 @@
           },
           "type": "array",
           "description": "ACPArgs overrides Args when the session transport is ACP.\nWhen nil, Args is used for both tmux and ACP transports."
+        },
+        "quota_monitor": {
+          "type": "boolean",
+          "description": "QuotaMonitor enables controller-side subscription-usage polling for\nthe account behind this provider (the provider-governor quota\npoller, internal/providergov). Tri-state: nil = inherit, \u0026true =\nenable, \u0026false = explicit disable. Requires MonitorConfigDir."
+        },
+        "monitor_config_dir": {
+          "type": "string",
+          "description": "MonitorConfigDir is the config directory holding this account's\nmonitoring credential: a full OAuth login (scope user:profile)\nwritten by `CLAUDE_CONFIG_DIR=\u003cdir\u003e claude login` into\n\u003cdir\u003e/.credentials.json. Separate from the agents' inference auth —\nagent setup-tokens (scope user:inference) cannot read the usage\nendpoint. Supports a leading \"~/\" expanded against the home dir."
         }
       },
       "additionalProperties": false,
