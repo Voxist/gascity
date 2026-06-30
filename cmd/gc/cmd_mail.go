@@ -900,36 +900,17 @@ func isStorelessMailProvider() bool {
 	return strings.HasPrefix(v, "exec:") || v == "fake" || v == "fail"
 }
 
+// sessionMailboxAddress / sessionMailboxAddresses delegate to the session-class
+// front-door codec (internal/session) so the session-bead metadata vocabulary
+// (alias / alias_history / session_name) lives in one place. The per-session-id
+// resolution paths route through InfoStore.MailboxAddress(es); these thin
+// wrappers remain for the list-scan sites that already hold a []beads.Bead.
 func sessionMailboxAddress(b beads.Bead) string {
-	if alias := strings.TrimSpace(b.Metadata["alias"]); alias != "" {
-		return alias
-	}
-	if b.ID != "" {
-		return b.ID
-	}
-	return strings.TrimSpace(b.Metadata["session_name"])
+	return session.MailboxAddress(b)
 }
 
 func sessionMailboxAddresses(b beads.Bead) []string {
-	seen := map[string]bool{}
-	var addresses []string
-	add := func(value string) {
-		value = strings.TrimSpace(value)
-		if value == "" || seen[value] {
-			return
-		}
-		seen[value] = true
-		addresses = append(addresses, value)
-	}
-	add(sessionMailboxAddress(b))
-	add(b.ID)
-	for _, alias := range session.AliasHistory(b.Metadata) {
-		add(alias)
-	}
-	if len(addresses) == 0 {
-		add(strings.TrimSpace(b.Metadata["session_name"]))
-	}
-	return addresses
+	return session.MailboxAddresses(b)
 }
 
 func resolveMailIdentityCached(store beads.Store, identifier string, cache *mailIdentitySessionCache) (string, error) {
@@ -950,11 +931,10 @@ func resolveMailIdentityCached(store beads.Store, identifier string, cache *mail
 		}
 		return "", err
 	}
-	b, err := store.Get(sessionID)
+	address, err := session.NewInfoStore(beads.SessionStore{Store: store}).MailboxAddress(sessionID)
 	if err != nil {
 		return "", err
 	}
-	address := sessionMailboxAddress(b)
 	if address == "" {
 		return "", fmt.Errorf("session %q has no mailbox identity", identifier)
 	}
@@ -972,11 +952,10 @@ func resolveMailIdentityWithConfigCached(cityPath string, cfg *config.City, stor
 	if store != nil && cfg != nil {
 		sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, identifier)
 		if err == nil {
-			b, err := store.Get(sessionID)
+			address, err := session.NewInfoStore(beads.SessionStore{Store: store}).MailboxAddress(sessionID)
 			if err != nil {
 				return "", err
 			}
-			address := sessionMailboxAddress(b)
 			if address == "" {
 				return "", fmt.Errorf("session %q has no mailbox identity", identifier)
 			}
@@ -1068,55 +1047,6 @@ func listLiveSessionMailboxesCached(store beads.Store, cache *mailIdentitySessio
 type resolvedMailTarget struct {
 	display    string
 	recipients []string
-}
-
-func mailSenderRouteMetadata(store beads.Store, sender string) (map[string]string, error) {
-	sender = strings.TrimSpace(sender)
-	if store == nil || sender == "" || sender == "human" {
-		return nil, nil
-	}
-	sessionID, err := resolveSessionID(store, sender)
-	if err != nil {
-		if errors.Is(err, session.ErrSessionNotFound) || errors.Is(err, session.ErrAmbiguous) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("resolving sender route %q: %w", sender, err)
-	}
-	b, err := store.Get(sessionID)
-	if err != nil {
-		return nil, fmt.Errorf("loading sender session %q: %w", sessionID, err)
-	}
-	display := mailSenderDisplayAddress(b, sender)
-	return map[string]string{
-		mail.FromSessionIDMetadataKey: sessionID,
-		mail.FromDisplayMetadataKey:   display,
-	}, nil
-}
-
-func mailSenderDisplayAddress(b beads.Bead, fallback string) string {
-	if alias := strings.TrimSpace(b.Metadata["alias"]); alias != "" {
-		return alias
-	}
-	fallback = strings.TrimSpace(fallback)
-	if fallback != "" && fallback != b.ID {
-		return fallback
-	}
-	if name := strings.TrimSpace(b.Metadata["session_name"]); name != "" {
-		return name
-	}
-	if b.ID != "" {
-		return b.ID
-	}
-	return fallback
-}
-
-func mailSenderDisplayFromMetadata(fallback string, metadata map[string]string) string {
-	if metadata != nil {
-		if display := strings.TrimSpace(metadata[mail.FromDisplayMetadataKey]); display != "" {
-			return display
-		}
-	}
-	return strings.TrimSpace(fallback)
 }
 
 // mailIdentitySessionCache memoizes a single gc:session enumeration so that
@@ -1218,11 +1148,10 @@ func resolveMailTargetsCached(store beads.Store, identifier string, cache *mailI
 		}
 		return resolvedMailTarget{}, err
 	}
-	b, err := store.Get(sessionID)
+	addresses, err := session.NewInfoStore(beads.SessionStore{Store: store}).MailboxAddresses(sessionID)
 	if err != nil {
 		return resolvedMailTarget{}, err
 	}
-	addresses := sessionMailboxAddresses(b)
 	if len(addresses) == 0 {
 		return resolvedMailTarget{}, fmt.Errorf("session %q has no mailbox identity", identifier)
 	}
@@ -1350,7 +1279,7 @@ func tryOpenCityStore() (beads.Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return openCityStoreAt(cityPath)
+	return openStoreAtForCity(cityPath, cityPath)
 }
 
 func resolveMailAddressForCommand(identifier string, stderr io.Writer, cmdName string) (string, bool) {
@@ -1691,7 +1620,7 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 	cityPath, err := resolveCity()
 	if err == nil {
 		cfg, _ = loadCityConfig(cityPath, stderr)
-		store, err = openCityStoreAt(cityPath)
+		store, err = openStoreAtForCity(cityPath, cityPath)
 	}
 	// Narrower than isStorelessMailProvider: exec: providers can legitimately
 	// run without a city store, but fake/fail still require one for alias
@@ -2159,7 +2088,7 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 			cityPath, err = resolveCity()
 			if err == nil {
 				cfg, _ = loadCityConfig(cityPath, stderr)
-				store, err = openCityStoreAt(cityPath)
+				store, err = openStoreAtForCity(cityPath, cityPath)
 			}
 			if err != nil {
 				notifySetupErr = err

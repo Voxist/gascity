@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/eventfeed"
@@ -45,7 +46,15 @@ const minActorSaltLen = 16
 // batches to the configured endpoint. It runs in its own goroutine, holds its
 // cursor on sink failure, and applies backpressure rather than blocking event
 // recording.
-func startEventExport(ctx context.Context, ec supervisor.ExportConfig, providers func() map[string]events.Provider, homeDir string, stderr io.Writer) {
+//
+// The returned WaitGroup tracks the background goroutines (the exporter loop and
+// the cursor-persist loop, both of which write under homeDir). It is nil when no
+// goroutine was launched — the fail-closed cursor return. Callers that own
+// homeDir's lifetime — e.g. a test using t.TempDir, or a future supervisor that
+// wants its final cursor flush to complete before exit — cancel ctx and Wait on
+// it so the homeDir writes drain before teardown. The long-lived supervisor
+// process ignores it today: its homeDir outlives the process.
+func startEventExport(ctx context.Context, ec supervisor.ExportConfig, providers func() map[string]events.Provider, homeDir string, stderr io.Writer) *sync.WaitGroup {
 	logf := func(format string, args ...any) {
 		fmt.Fprintf(stderr, "gc events-export: "+format+"\n", args...) //nolint:errcheck
 	}
@@ -92,7 +101,7 @@ func startEventExport(ctx context.Context, ec supervisor.ExportConfig, providers
 		// operator can repair the file (or remove it to deliberately start fresh)
 		// rather than lose exports.
 		logf("ERROR: cannot read durable export cursor %s (refusing to start; remove it to start fresh): %v", cursorPath, err)
-		return
+		return nil
 	}
 	exp.SetCursors(cursors)
 
@@ -103,10 +112,13 @@ func startEventExport(ctx context.Context, ec supervisor.ExportConfig, providers
 	transcriptmeta.SetEnabled(true)
 
 	src := eventfeed.NewMuxSource(providers, exp.Cursors, muxRebuildInterval, logf)
-	go func() { _ = exp.Run(ctx, src) }()
-	go persistExportCursors(ctx, exp, cursorPath, logf)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); _ = exp.Run(ctx, src) }()
+	go func() { defer wg.Done(); persistExportCursors(ctx, exp, cursorPath, logf) }()
 
 	logf("enabled -> %s (envelope-only metadata; no payloads leave the box)", ec.Endpoint)
+	return &wg
 }
 
 // persistExportCursors snapshots the exporter cursor to disk periodically and on

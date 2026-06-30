@@ -15,7 +15,7 @@ func TestCreatePoolSessionBead_SetsPendingCreateClaim(t *testing.T) {
 	store := beads.NewMemStore()
 	now := time.Date(2026, 5, 1, 9, 15, 0, 0, time.UTC)
 
-	bead, err := createPoolSessionBead(store, "gascity/claude", now, poolSessionCreateIdentity{})
+	bead, err := createPoolSessionBead(sessionFrontDoor(store), "gascity/claude", now, poolSessionCreateIdentity{})
 	if err != nil {
 		t.Fatalf("createPoolSessionBead: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestCreatePoolSessionBead_UsesExplicitIDThroughCachingStore(t *testing.T) {
 	store := beads.NewCachingStore(backing, nil)
 	now := time.Date(2026, 5, 1, 9, 15, 0, 0, time.UTC)
 
-	bead, err := createPoolSessionBead(store, "gascity/claude", now, poolSessionCreateIdentity{})
+	bead, err := createPoolSessionBead(sessionFrontDoor(store), "gascity/claude", now, poolSessionCreateIdentity{})
 	if err != nil {
 		t.Fatalf("createPoolSessionBead: %v", err)
 	}
@@ -529,13 +529,13 @@ func TestCreatePoolSessionBead_ReusesOpenStartPendingSlotBead(t *testing.T) {
 	now := time.Date(2026, 5, 1, 9, 15, 0, 0, time.UTC)
 	identity := poolSessionCreateIdentity{AgentName: "gascity/claude-1", Slot: 1}
 
-	first, err := createPoolSessionBead(store, "gascity/claude", now, identity)
+	first, err := createPoolSessionBead(sessionFrontDoor(store), "gascity/claude", now, identity)
 	if err != nil {
 		t.Fatalf("createPoolSessionBead (first): %v", err)
 	}
 
 	later := now.Add(5 * time.Minute)
-	second, err := createPoolSessionBead(store, "gascity/claude", later, identity)
+	second, err := createPoolSessionBead(sessionFrontDoor(store), "gascity/claude", later, identity)
 	if err != nil {
 		t.Fatalf("createPoolSessionBead (second): %v", err)
 	}
@@ -566,11 +566,11 @@ func TestCreatePoolSessionBead_DifferentSlotCreatesFresh(t *testing.T) {
 	store := beads.NewMemStore()
 	now := time.Date(2026, 5, 1, 9, 15, 0, 0, time.UTC)
 
-	first, err := createPoolSessionBead(store, "gascity/claude", now, poolSessionCreateIdentity{AgentName: "gascity/claude-1", Slot: 1})
+	first, err := createPoolSessionBead(sessionFrontDoor(store), "gascity/claude", now, poolSessionCreateIdentity{AgentName: "gascity/claude-1", Slot: 1})
 	if err != nil {
 		t.Fatalf("createPoolSessionBead (slot 1): %v", err)
 	}
-	second, err := createPoolSessionBead(store, "gascity/claude", now, poolSessionCreateIdentity{AgentName: "gascity/claude-2", Slot: 2})
+	second, err := createPoolSessionBead(sessionFrontDoor(store), "gascity/claude", now, poolSessionCreateIdentity{AgentName: "gascity/claude-2", Slot: 2})
 	if err != nil {
 		t.Fatalf("createPoolSessionBead (slot 2): %v", err)
 	}
@@ -583,11 +583,11 @@ func TestCreatePoolSessionBead_NoSlotSkipsReuse(t *testing.T) {
 	store := beads.NewMemStore()
 	now := time.Date(2026, 5, 1, 9, 15, 0, 0, time.UTC)
 
-	first, err := createPoolSessionBead(store, "gascity/claude", now, poolSessionCreateIdentity{})
+	first, err := createPoolSessionBead(sessionFrontDoor(store), "gascity/claude", now, poolSessionCreateIdentity{})
 	if err != nil {
 		t.Fatalf("createPoolSessionBead (first): %v", err)
 	}
-	second, err := createPoolSessionBead(store, "gascity/claude", now, poolSessionCreateIdentity{})
+	second, err := createPoolSessionBead(sessionFrontDoor(store), "gascity/claude", now, poolSessionCreateIdentity{})
 	if err != nil {
 		t.Fatalf("createPoolSessionBead (second): %v", err)
 	}
@@ -601,7 +601,7 @@ func TestCreatePoolSessionBead_ClosedPendingBeadNotReused(t *testing.T) {
 	now := time.Date(2026, 5, 1, 9, 15, 0, 0, time.UTC)
 	identity := poolSessionCreateIdentity{AgentName: "gascity/claude-1", Slot: 1}
 
-	first, err := createPoolSessionBead(store, "gascity/claude", now, identity)
+	first, err := createPoolSessionBead(sessionFrontDoor(store), "gascity/claude", now, identity)
 	if err != nil {
 		t.Fatalf("createPoolSessionBead (first): %v", err)
 	}
@@ -609,7 +609,7 @@ func TestCreatePoolSessionBead_ClosedPendingBeadNotReused(t *testing.T) {
 		t.Fatalf("store.Close(%s): %v", first.ID, err)
 	}
 
-	second, err := createPoolSessionBead(store, "gascity/claude", now, identity)
+	second, err := createPoolSessionBead(sessionFrontDoor(store), "gascity/claude", now, identity)
 	if err != nil {
 		t.Fatalf("createPoolSessionBead (second): %v", err)
 	}
@@ -625,7 +625,7 @@ func TestCreatePoolSessionBead_NonStartPendingStateNotReused(t *testing.T) {
 
 	for _, state := range []string{"creating", "active", "asleep", "drained"} {
 		t.Run(state, func(t *testing.T) {
-			first, err := createPoolSessionBead(store, "gascity/claude", now, identity)
+			first, err := createPoolSessionBead(sessionFrontDoor(store), "gascity/claude", now, identity)
 			if err != nil {
 				t.Fatalf("createPoolSessionBead (first): %v", err)
 			}
@@ -633,7 +633,7 @@ func TestCreatePoolSessionBead_NonStartPendingStateNotReused(t *testing.T) {
 				t.Fatalf("SetMetadata state=%s: %v", state, err)
 			}
 
-			second, err := createPoolSessionBead(store, "gascity/claude", now, identity)
+			second, err := createPoolSessionBead(sessionFrontDoor(store), "gascity/claude", now, identity)
 			if err != nil {
 				t.Fatalf("createPoolSessionBead (second): %v", err)
 			}
@@ -656,7 +656,7 @@ func TestCreatePoolSessionBead_WokenPendingBeadNotReused(t *testing.T) {
 	now := time.Date(2026, 5, 1, 9, 15, 0, 0, time.UTC)
 	identity := poolSessionCreateIdentity{AgentName: "gascity/claude-1", Slot: 1}
 
-	first, err := createPoolSessionBead(store, "gascity/claude", now, identity)
+	first, err := createPoolSessionBead(sessionFrontDoor(store), "gascity/claude", now, identity)
 	if err != nil {
 		t.Fatalf("createPoolSessionBead (first): %v", err)
 	}
@@ -664,7 +664,7 @@ func TestCreatePoolSessionBead_WokenPendingBeadNotReused(t *testing.T) {
 		t.Fatalf("SetMetadata last_woke_at: %v", err)
 	}
 
-	second, err := createPoolSessionBead(store, "gascity/claude", now, identity)
+	second, err := createPoolSessionBead(sessionFrontDoor(store), "gascity/claude", now, identity)
 	if err != nil {
 		t.Fatalf("createPoolSessionBead (second): %v", err)
 	}

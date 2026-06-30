@@ -2,7 +2,7 @@
 set -euo pipefail
 
 staged_go_files=$(git diff --cached --name-only --diff-filter=ACM -- '*.go' || true)
-staged_web_src=$(git diff --cached --name-only --diff-filter=ACM -- 'cmd/gc/dashboard/web/src/' 'cmd/gc/dashboard/web/index.html' 'cmd/gc/dashboard/web/public/' 'cmd/gc/dashboard/web/package.json' 'cmd/gc/dashboard/web/openapi-ts.config.ts' 'cmd/gc/dashboard/web/vite.config.ts' 'cmd/gc/dashboard/web/tsconfig.json' || true)
+staged_web_src=$(git diff --cached --name-only --diff-filter=ACM -- 'internal/api/dashboardspa/web/shared/src/' 'internal/api/dashboardspa/web/frontend/src/' 'internal/api/dashboardspa/web/frontend/index.html' 'internal/api/dashboardspa/web/frontend/public/' 'internal/api/dashboardspa/web/package.json' 'internal/api/dashboardspa/web/shared/package.json' 'internal/api/dashboardspa/web/frontend/package.json' 'internal/api/dashboardspa/web/frontend/vite.config.ts' 'internal/api/dashboardspa/web/frontend/tsconfig.json' 'internal/api/dashboardspa/web/shared/tsconfig.json' || true)
 staged_docs=$(git diff --cached --name-only --diff-filter=ACM -- '*.md' 'docs/**' 'engdocs/**' 'plans/**' 'specs/**' 'AGENTS.md' 'CONTRIBUTING.md' 'README.md' 'TESTING.md' || true)
 
 if [ -z "$staged_go_files" ] && [ -z "$staged_web_src" ] && [ -z "$staged_docs" ]; then
@@ -61,8 +61,7 @@ if command -v npm >/dev/null 2>&1; then
     # aren't wedged; CI enforces the full dashboard regeneration.
     if [ -n "${GC_PRECOMMIT_FULL:-}" ]; then
       make dashboard-check dashboard-smoke
-      git add -f cmd/gc/dashboard/web/src/generated
-      git add cmd/gc/dashboard/web/dist
+      git add internal/api/dashboardspa/dist
     else
       echo "pre-commit: skipping dashboard typecheck/build (set GC_PRECOMMIT_FULL=1 to run; CI enforces it)" >&2
     fi

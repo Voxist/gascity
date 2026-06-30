@@ -148,6 +148,17 @@ const (
 	ProjectIdentityStamped          = "project.identity.stamped"
 	SupervisorFSPressureSkippedTick = "supervisor.fs_pressure.skipped_tick"
 
+	// MoleculeResolved fires once at the molecule-autoclose Go close site
+	// when a molecule root transitions to closed. It carries the
+	// state-transition record (issue, from/to status, close reason) joined
+	// to the resolving session, resolved from the root's stamped metadata
+	// (gc.session_name / gc.session_id / gc.work_dir). It is additive: the
+	// existing bead.closed emission is unchanged. A manual non-molecule
+	// `bd close` produces bead.closed but NOT molecule.resolved, so this
+	// event attributes molecule-resolution closes only — a root hand-closed
+	// directly has no resolving session and degrades to empty session fields.
+	MoleculeResolved = "molecule.resolved"
+
 	// External messaging events.
 	ExtMsgBound          = "extmsg.bound"
 	ExtMsgUnbound        = "extmsg.unbound"
@@ -232,6 +243,7 @@ var KnownEventTypes = []string{
 	OrderFired, OrderCompleted, OrderFailed, OrderGateTimeoutFailOpen,
 	ProviderSwapped, ProviderQuotaObserved, ProviderQuotaPollFailed,
 	WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
+	MoleculeResolved,
 	SupervisorStarted, SupervisorShutdownRequested, SupervisorRequest,
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
 	ExtMsgAdapterAdded, ExtMsgAdapterRemoved,

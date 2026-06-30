@@ -1261,6 +1261,26 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	if len(supCfg.Supervisor.AllowedHosts) > 0 {
 		apiMux.WithAllowedHosts(supCfg.Supervisor.AllowedHosts)
 	}
+	// Gate city-config mutations on a signed write grant when configured. Fail
+	// closed at boot if write-auth is required but no key is set, so the
+	// multi-city supervisor cannot silently serve mutations unguarded.
+	if err := api.InstallWriteAuth(apiMux, supCfg.Supervisor.WriteAuthVerifyKey, supCfg.Supervisor.WriteAuthRequired); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: write-auth: %v\n", err) //nolint:errcheck
+		return 1
+	}
+
+	// Host the embedded dashboard SPA + host-side /api plane on the same
+	// listener (same-origin), so the supervisor serves the dashboard for all
+	// registered cities. Disabled with GC_SUPERVISOR_DASHBOARD=0.
+	dashboardPlane, dashErr := attachDashboard(apiMux, registry, readOnly, bind, port)
+	if dashErr != nil {
+		fmt.Fprintf(stderr, "gc supervisor: dashboard: %v\n", dashErr) //nolint:errcheck
+		return 1
+	}
+	if dashboardPlane != nil {
+		dashboardPlane.Start(ctx)
+		defer dashboardPlane.Stop()
+	}
 
 	pprofSrv, pprofErr := api.StartPprof("")
 	if pprofErr != nil {
@@ -1296,11 +1316,21 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		apiMux.Shutdown(shutCtx) //nolint:errcheck
 	}()
 	fmt.Fprintf(stdout, "Supervisor API listening on http://%s\n", addr) //nolint:errcheck
+	if dashboardPlane != nil {
+		dashTag := ""
+		if readOnly {
+			dashTag = "  [read-only]"
+		}
+		fmt.Fprintf(stdout, "Dashboard:  %s/%s\n", dashboardLoopbackBaseURL(bind, port), dashTag) //nolint:errcheck
+	}
 
 	// Redacted event export (opt-in via [events.export]). No-op unless an
 	// endpoint is configured.
 	if supCfg.Events.Export.Enabled() {
-		startEventExport(ctx, supCfg.Events.Export, apiMux.EventProviders, supervisor.DefaultHome(), stderr)
+		// The returned drain handle is intentionally discarded: the supervisor's
+		// home dir outlives the process, so there is nothing to wait for before
+		// teardown. Tests that own a transient home (t.TempDir) Wait on it.
+		_ = startEventExport(ctx, supCfg.Events.Export, apiMux.EventProviders, supervisor.DefaultHome(), stderr)
 	}
 
 	// Control socket — uses supervisor-specific path, not the per-city controller socket.

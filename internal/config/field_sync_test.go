@@ -474,6 +474,7 @@ func TestProviderFieldSync(t *testing.T) {
 		"ResumeStyle":            "internal resume config, not patched directly (use ResumeCommand)",
 		"ResumeCommand":          "already patchable at agent level via AgentPatch.ResumeCommand",
 		"SessionIDFlag":          "internal session-id config, not patched",
+		"ForkFlag":               "internal fork-launch config (claude-only), not patched",
 		"PrintArgs":              "internal print-mode args, not patched",
 		"TitleModel":             "internal title-model key, not patched",
 		"QuotaMonitor":           "controller-side governor monitoring switch, set per account in city.toml, not patched",
