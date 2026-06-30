@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/extmsg"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -384,8 +385,10 @@ func TestHandleExtMsgOutboundNotifiesDeliveredConversationMembers(t *testing.T) 
 
 	found := false
 	deadline = time.Now().Add(time.Second)
+	var calls []runtime.Call
 	for time.Now().Before(deadline) {
-		for _, call := range fs.sp.Calls {
+		calls = fs.sp.SnapshotCalls()
+		for _, call := range calls {
 			if call.Method == "Nudge" && call.Name == peerSessionName && strings.Contains(call.Message, "thread-delivered") {
 				found = true
 				break
@@ -397,7 +400,7 @@ func TestHandleExtMsgOutboundNotifiesDeliveredConversationMembers(t *testing.T) 
 		time.Sleep(10 * time.Millisecond)
 	}
 	if !found {
-		t.Fatalf("delivered conversation peer nudge not found; calls=%#v", fs.sp.Calls)
+		t.Fatalf("delivered conversation peer nudge not found; calls=%#v", calls)
 	}
 }
 
