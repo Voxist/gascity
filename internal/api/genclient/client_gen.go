@@ -4022,14 +4022,17 @@ type TypedEventStreamEnvelopeOrderFired struct {
 
 // TypedEventStreamEnvelopeOrderGateTimeoutFailOpen defines model for TypedEventStreamEnvelopeOrderGateTimeoutFailOpen.
 type TypedEventStreamEnvelopeOrderGateTimeoutFailOpen struct {
-	Actor    string                          `json:"actor"`
-	Message  *string                         `json:"message,omitempty"`
-	Payload  OrderGateTimeoutFailOpenPayload `json:"payload"`
-	Seq      int64                           `json:"seq"`
-	Subject  *string                         `json:"subject,omitempty"`
-	Ts       time.Time                       `json:"ts"`
-	Type     string                          `json:"type"`
-	Workflow *WorkflowEventProjection        `json:"workflow,omitempty"`
+	Actor     string                          `json:"actor"`
+	Message   *string                         `json:"message,omitempty"`
+	Payload   OrderGateTimeoutFailOpenPayload `json:"payload"`
+	RunId     *string                         `json:"run_id,omitempty"`
+	Seq       int64                           `json:"seq"`
+	SessionId *string                         `json:"session_id,omitempty"`
+	StepId    *string                         `json:"step_id,omitempty"`
+	Subject   *string                         `json:"subject,omitempty"`
+	Ts        time.Time                       `json:"ts"`
+	Type      string                          `json:"type"`
+	Workflow  *WorkflowEventProjection        `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopePgCredentialResolved defines model for TypedEventStreamEnvelopePgCredentialResolved.
@@ -5146,15 +5149,18 @@ type TypedTaggedEventStreamEnvelopeOrderFired struct {
 
 // TypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen defines model for TypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen.
 type TypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen struct {
-	Actor    string                          `json:"actor"`
-	City     string                          `json:"city"`
-	Message  *string                         `json:"message,omitempty"`
-	Payload  OrderGateTimeoutFailOpenPayload `json:"payload"`
-	Seq      int64                           `json:"seq"`
-	Subject  *string                         `json:"subject,omitempty"`
-	Ts       time.Time                       `json:"ts"`
-	Type     string                          `json:"type"`
-	Workflow *WorkflowEventProjection        `json:"workflow,omitempty"`
+	Actor     string                          `json:"actor"`
+	City      string                          `json:"city"`
+	Message   *string                         `json:"message,omitempty"`
+	Payload   OrderGateTimeoutFailOpenPayload `json:"payload"`
+	RunId     *string                         `json:"run_id,omitempty"`
+	Seq       int64                           `json:"seq"`
+	SessionId *string                         `json:"session_id,omitempty"`
+	StepId    *string                         `json:"step_id,omitempty"`
+	Subject   *string                         `json:"subject,omitempty"`
+	Ts        time.Time                       `json:"ts"`
+	Type      string                          `json:"type"`
+	Workflow  *WorkflowEventProjection        `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopePgCredentialResolved defines model for TypedTaggedEventStreamEnvelopePgCredentialResolved.
