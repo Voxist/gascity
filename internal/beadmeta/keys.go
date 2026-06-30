@@ -197,6 +197,7 @@ const (
 	PackRootMetadataKey                 = "gc.pack_root"
 	PackWorkspaceMetadataKey            = "gc.pack_workspace"
 	PerDispatchModelMetadataKey         = "gc.per_dispatch_model"
+	PhaseMetadataKey                    = "gc.phase"
 	RalphStepIDMetadataKey              = "gc.ralph_step_id"
 	ReasoningMetadataKey                = "gc.reasoning"
 	RequiredArtifactMetadataKey         = "gc.required_artifact"
@@ -496,6 +497,7 @@ var KnownMetadataKeys = []string{
 	PackRootMetadataKey,
 	PackWorkspaceMetadataKey,
 	PerDispatchModelMetadataKey,
+	PhaseMetadataKey,
 	RalphStepIDMetadataKey,
 	ReasoningMetadataKey,
 	RequiredArtifactMetadataKey,
