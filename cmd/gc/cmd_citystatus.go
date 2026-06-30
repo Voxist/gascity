@@ -193,6 +193,17 @@ var cityStatusAPIClient = func(cityPath string) (*api.Client, string) {
 	if c := apiClient(cityPath); c != nil {
 		return c, ""
 	}
+	// Supervisor-managed cities expose no standalone [api] port, so apiClient
+	// returns nil and status reads would fall back to a slow local tmux probe
+	// (route=fallback reason=controller-down) even though the supervisor hosts a
+	// warm StatusView on its own port. Route status reads to the supervisor
+	// client when it is alive — same precedent as gc service (cmd_service.go) and
+	// the maintenance commands (ga-tp7). routeCityStatus still falls back to the
+	// local probe on any API read error via api.ShouldFallbackForRead, so this
+	// only ever ADDS the warm-state path; it never removes the probe safety net.
+	if c := supervisorCityAPIClient(cityPath); c != nil {
+		return c, ""
+	}
 	return nil, apiClientFallbackReason(cityPath)
 }
 
