@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"log"
 	"time"
 )
 
@@ -70,7 +71,18 @@ func (s *Server) buildAndStoreStatus(lite bool) StatusBody {
 	if lite {
 		key = "status?lite"
 	}
-	v, _, _ := s.statusBuildSF.Do(key, func() (any, error) {
+	ch := s.statusBuildSF.DoChan(key, func() (_ any, _ error) {
+		// Recover so a panic in the agent/rig/session fan-out can never crash
+		// the supervisor process via a background-refresh goroutine (which, unlike
+		// the request path, has no net/http panic guard) or propagate through
+		// singleflight to joined callers. On panic the warm entry is left
+		// unchanged and callers get a zero body for this build; the next refresh
+		// retries.
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("api: status build panicked (lite=%v): %v", lite, r)
+			}
+		}()
 		// Detached from any request ctx and longer-lived than backgroundCtx
 		// (30s) — a status build can legitimately take ~28s on a loaded city,
 		// and completing it warms the cache even if the triggering client left.
@@ -82,8 +94,26 @@ func (s *Server) buildAndStoreStatus(lite bool) StatusBody {
 		s.storeResponse(key, responseCacheTimeBucket(now), body)
 		return body, nil
 	})
-	body, _ := v.(StatusBody)
-	return body
+	select {
+	case res := <-ch:
+		body, _ := res.Val.(StatusBody)
+		return body
+	case <-time.After(statusWarmBuildTimeout):
+		// The build is wedged on an uncancellable read (Store.List / WalkSize /
+		// the version probe take no context, so the build's own ctx timeout
+		// can't cut them off). Do NOT block this — and, because callers coalesce
+		// on the singleflight key, every future — /status request on the dead
+		// leader forever: forget the key so the next call starts a fresh attempt
+		// (restoring the per-request retry the pre-warm-cache code had), and
+		// serve the last warm body if we have one. The wedged goroutine still
+		// leaks until it returns; making the reads ctx-cancellable is the
+		// separate root fix (vp-e0hv plan, fix 2).
+		s.statusBuildSF.Forget(key)
+		if entry, ok := s.warmStatusBody(lite); ok {
+			return entry.body
+		}
+		return StatusBody{}
+	}
 }
 
 // refreshStatusBodyAsync rebuilds the status body off the request path (used

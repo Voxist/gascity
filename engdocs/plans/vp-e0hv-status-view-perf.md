@@ -40,35 +40,47 @@ background-built body immediately (stale-while-revalidate); rebuild off the requ
   pattern; the shared `responseCache` is unsuitable — its 2 s expiry + 256-entry eviction
   would drop the warm body):
   ```go
-  statusWarmMu       sync.Mutex
-  statusWarmFull     *statusWarmEntry   // full body
-  statusWarmLite     *statusWarmEntry   // ?lite body
-  statusBuildingFull bool               // single-flight guard, full
-  statusBuildingLite bool               // single-flight guard, lite
+  statusWarmMu   sync.Mutex
+  statusWarmFull *statusWarmEntry      // full body
+  statusWarmLite *statusWarmEntry      // ?lite body
+  statusBuildSF  singleflight.Group    // single-flights the (re)build per variant
   ```
 - New `internal/api/status_warm.go`: `statusWarmEntry{body, builtAt}`, tunables
   (`statusWarmServeMaxAge = 5m`, `statusWarmRefreshAfter = 5s`, `statusWarmBuildTimeout = 60s`),
-  and helpers `warmStatusBody` / `setWarmStatusBody` / `refreshStatusBodyAsync` /
-  `statusWarming503`.
-- `refreshStatusBodyAsync(lite)` spawns **one** background goroutine per variant (guarded by
-  `statusBuildingFull/Lite`), builds with a dedicated 60 s ctx (not the 30 s `backgroundCtx`),
-  stores the result as the warm entry, and also `storeResponse`s it so the existing ≤2 s
-  exact-bucket fast path keeps working.
+  and helpers `warmStatusBody` / `setWarmStatusBody` / `buildAndStoreStatus` /
+  `refreshStatusBodyAsync`.
+- `buildAndStoreStatus(lite)` is the single (re)build entry point, single-flighted per variant
+  via `statusBuildSF.DoChan` so a burst of cold requests — or a cold request racing a refresh —
+  shares ONE build. It builds with a dedicated 60 s ctx (not the 30 s `backgroundCtx`), stores
+  the warm entry, and `storeResponse`s it so the ≤2 s exact-bucket fast path keeps working. Two
+  hardening guards (added after self-review): the build closure `recover()`s so a panic in the
+  agent/rig fan-out can't crash the supervisor via a background goroutine; and the caller
+  `select`s the `DoChan` result against `statusWarmBuildTimeout` and `Forget`s the key on
+  timeout, so a build wedged on an uncancellable read can't poison the singleflight key and
+  hang every future request (it serves the last warm body instead).
+- `refreshStatusBodyAsync(lite)` runs `buildAndStoreStatus` off the request path (fire-and-forget
+  via `statusBuildAsyncHook`, overridable in tests).
 - `humaHandleStatus` (non-blocking path) becomes:
   1. exact time-bucket cache hit → serve (unchanged ≤2 s burst path);
   2. warm entry within `statusWarmServeMaxAge` → **serve it now**, and if older than
      `statusWarmRefreshAfter` kick `refreshStatusBodyAsync` (don't wait);
-  3. otherwise (cold start / long idle) → kick `refreshStatusBodyAsync` and return
-     `statusWarming503` so the CLI uses its fast local fallback instead of blocking ~28 s.
-  Blocking/strict-freshness callers (`?index=&wait=`) keep the synchronous build (they asked
-  to wait on an event).
+  3. otherwise (cold start / long idle) → **one single-flighted synchronous build**, then serve
+     and warm. Only this first build after a (re)start or >5 m idle is synchronous.
+  Blocking/strict-freshness callers (`?index=&wait=`) keep their own synchronous build (they
+  asked to wait on an event).
 
-**Behavior change:** a freshly-(re)started supervisor serves 503-fallback for the first ~28 s
-(until the first background build lands), so `gc status` shows the local-probe view briefly;
-thereafter every call is instant. No request ever blocks ~28 s again.
+**Behavior change:** the very first `/status` after a (re)start or >5 m idle still pays the
+~28 s build synchronously (single-flighted, so concurrent cold requests share it and a wedged
+build is capped at `statusWarmBuildTimeout`, not infinite). Every subsequent request — the
+common case on an actively-polled fleet — is served from the warm entry in <1 ms. (An earlier
+draft of this plan proposed a `statusWarming503` cold-start fallback that returns immediately;
+that was dropped in favor of the synchronous cold build to preserve the always-200 contract and
+avoid reworking the handler's cache tests. There is no `statusWarming503` in the shipped code.)
 
-**Tests:** unit tests for the warm-cache helpers (round-trip, in-flight guard prevents double
-build, age→serve/refresh/503 decision); existing `handler_status` / `city_status` tests stay green.
+**Tests:** unit tests for the warm-cache helpers (round-trip, warm-serve-without-rebuild,
+aged-body triggers background refresh); the TTL-expiry cache test was rewritten to the warm
+contract (`TestHandleStatusWarmCacheServesAcrossBucketExpiry`); existing `handler_status` /
+`city_status` tests stay green.
 
 **Risk:** low — additive, isolated to the status read path; the 503-fallback contract already
 exists (`cacheLiveOr503`).

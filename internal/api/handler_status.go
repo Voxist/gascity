@@ -100,6 +100,13 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 			if age > statusWarmRefreshAfter {
 				s.refreshStatusBodyAsync(input.Lite)
 			}
+			// entry.body is served without the cloneCachedValue deep-copy used by
+			// the bucket-cache path above. Safe because a built StatusBody is
+			// immutable after publish: buildStatusBody constructs every slice
+			// fresh and the two pointer fields (StoreHealth, Beads) are
+			// replace-not-mutate, and nothing appends to a stored body. If a
+			// future handler enriches the body in place before serialization,
+			// clone here (matching response_cache.go's clone-on-read invariant).
 			return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: entry.body}, nil
 		}
 	}
