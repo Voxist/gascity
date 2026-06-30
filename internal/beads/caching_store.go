@@ -149,7 +149,6 @@ const (
 	cacheReconcileIntervalMedium    = 60 * time.Second
 	cacheReconcileIntervalLarge     = 120 * time.Second
 	cacheProblemLogWindow           = time.Minute
-	cacheReconcileFailureBackoff    = time.Minute
 	cacheReconcileBaseBackoff       = 2 * time.Second
 	cacheReconcileMaxBackoff        = 10 * time.Minute
 	// cacheReconcileSuccessLogWindow rate-limits the per-reconcile success

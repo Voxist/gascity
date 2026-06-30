@@ -585,8 +585,8 @@ func TestRunReconciliation_CircuitTripLogs_OnLiveToDegraded(t *testing.T) {
 			tripCount++
 		}
 	}
-	if tripCount == 0 {
-		t.Fatal("expected 'circuit-breaker tripped' in log after live→degraded transition, got none")
+	if tripCount != 1 {
+		t.Fatalf("expected exactly one 'circuit-breaker tripped' log on the live→degraded transition, got %d", tripCount)
 	}
 
 	// Subsequent reconciliations in the degraded window must NOT re-emit the trip.
@@ -604,6 +604,69 @@ func TestRunReconciliation_CircuitTripLogs_OnLiveToDegraded(t *testing.T) {
 		if strings.Contains(l, "circuit-breaker tripped") {
 			t.Fatalf("circuit-breaker trip re-emitted on second degraded reconcile; want exactly once per live→degraded transition")
 		}
+	}
+}
+
+// TestRunReconciliation_CircuitTripReArmsAfterReconcileRecovery guards that the
+// one-shot breaker signal re-arms when a degraded store recovers via the
+// reconcile path (not just prime): trip → reconcile-recover → re-degrade must
+// fire the trip log a SECOND time. Without the circuitTripped reset in
+// promoteLiveLocked, a flapping store emits the signal at most once per process.
+func TestRunReconciliation_CircuitTripReArmsAfterReconcileRecovery(t *testing.T) {
+	backing := &failingScanStore{Store: NewMemStore()}
+	backing.setFailScan(true)
+	cs := NewCachingStoreForTest(backing, nil)
+	cs.state = cacheLive
+
+	var logMu sync.Mutex
+	var logLines []string
+	cs.problemf = func(msg string) {
+		logMu.Lock()
+		logLines = append(logLines, msg)
+		logMu.Unlock()
+	}
+	tripCount := func() int {
+		logMu.Lock()
+		defer logMu.Unlock()
+		n := 0
+		for _, l := range logLines {
+			if strings.Contains(l, "circuit-breaker tripped") {
+				n++
+			}
+		}
+		return n
+	}
+
+	// 1. Trip: drive live→degraded; the breaker fires once.
+	for i := 0; i < maxCacheSyncFailures; i++ {
+		cs.runReconciliation()
+	}
+	if cs.state != cacheDegraded {
+		t.Fatalf("state = %v, want cacheDegraded after the first failure run", cs.state)
+	}
+	if got := tripCount(); got != 1 {
+		t.Fatalf("trip count after first degrade = %d, want 1", got)
+	}
+
+	// 2. Recover via reconcile: a clean scan promotes degraded→live through
+	//    promoteLiveLocked, which must re-arm the breaker.
+	backing.setFailScan(false)
+	cs.runReconciliation()
+	if cs.state != cacheLive {
+		t.Fatalf("state = %v, want cacheLive after the recovery reconcile", cs.state)
+	}
+
+	// 3. Re-degrade: the breaker must fire AGAIN, proving it re-armed on the
+	//    reconcile recovery rather than staying latched from the first trip.
+	backing.setFailScan(true)
+	for i := 0; i < maxCacheSyncFailures; i++ {
+		cs.runReconciliation()
+	}
+	if cs.state != cacheDegraded {
+		t.Fatalf("state = %v, want cacheDegraded after the re-degrade run", cs.state)
+	}
+	if got := tripCount(); got != 2 {
+		t.Fatalf("trip count after recover→re-trip = %d, want 2 (breaker must re-arm on reconcile recovery)", got)
 	}
 }
 

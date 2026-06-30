@@ -569,6 +569,12 @@ func (c *CachingStore) runReconciliation() {
 // hold c.mu (write lock).
 func (c *CachingStore) promoteLiveLocked() {
 	c.state = cacheLive
+	// Re-arm the one-shot circuit-breaker signal. promoteLiveLocked is the single
+	// live-promotion point — both prime() and the reconcile success paths route
+	// through it — so resetting here ensures a store that recovers via reconcile
+	// (not just prime) will fire the trip log again on a subsequent re-degrade.
+	// Without this, a flapping store emits the breaker signal at most once.
+	c.circuitTripped = false
 }
 
 // reconcileSuccessLogLocked composes the per-reconcile success log line
