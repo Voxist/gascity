@@ -56,6 +56,69 @@ func TestLiveDoltPortResolver_ManagedHandleWins(t *testing.T) {
 	}
 }
 
+func TestResolveManagedDoltRuntimeLayoutStrict_IgnoresEnvOverrides(t *testing.T) {
+	t.Setenv("GC_DOLT_DATA_DIR", "/foreign/.beads/dolt")
+	t.Setenv("GC_DOLT_CONFIG_FILE", "/foreign/dolt-config.yaml")
+	t.Setenv("GC_PACK_STATE_DIR", "/foreign/packs/dolt")
+
+	strict, err := resolveManagedDoltRuntimeLayoutStrict("/cityA")
+	if err != nil {
+		t.Fatalf("strict: %v", err)
+	}
+	if samePath(strict.DataDir, "/foreign/.beads/dolt") {
+		t.Fatalf("strict DataDir = %q, must be cityPath-derived, not the GC_DOLT_DATA_DIR override", strict.DataDir)
+	}
+	if !samePath(strict.DataDir, "/cityA/.beads/dolt") {
+		t.Fatalf("strict DataDir = %q, want /cityA/.beads/dolt", strict.DataDir)
+	}
+	if samePath(strict.ConfigFile, "/foreign/dolt-config.yaml") {
+		t.Fatalf("strict ConfigFile = %q, must not honor GC_DOLT_CONFIG_FILE", strict.ConfigFile)
+	}
+
+	// Contrast: the env-honoring resolver DOES pick up the overrides.
+	env, err := resolveManagedDoltRuntimeLayout("/cityA")
+	if err != nil {
+		t.Fatalf("env: %v", err)
+	}
+	if !samePath(env.DataDir, "/foreign/.beads/dolt") {
+		t.Fatalf("env-honoring DataDir = %q, want the GC_DOLT_DATA_DIR override", env.DataDir)
+	}
+}
+
+// TestLiveDoltPortResolverForExplicitCity_PoisonedEnvDoesNotMatchForeignCity is
+// the cleanup-safety regression: with GC_DOLT_* pointing at a foreign city's
+// dolt sql-server, `gc dolt cleanup --city /cityA` must NOT resolve the foreign
+// city's port (and so cannot connect to / reap the wrong DB). The strict match
+// layout ignores the env poison.
+func TestLiveDoltPortResolverForExplicitCity_PoisonedEnvDoesNotMatchForeignCity(t *testing.T) {
+	const foreignConfig = "/cityB/.gc/runtime/packs/dolt/dolt-config.yaml"
+	t.Setenv("GC_DOLT_CONFIG_FILE", foreignConfig)
+	t.Setenv("GC_DOLT_DATA_DIR", "/cityB/.beads/dolt")
+
+	foreignProcs := func() ([]DoltProcInfo, error) {
+		return []DoltProcInfo{
+			{PID: 99, Ports: []int{29999}, Argv: []string{"dolt", "sql-server", "--config", foreignConfig}},
+		}, nil
+	}
+
+	r := newLiveDoltPortResolverForExplicitCity()
+	r.managedHandlePort = func(string) string { return "" } // force the process-table path
+	r.discoverProcesses = foreignProcs
+	if _, err := r.resolve("/cityA"); !errors.Is(err, errNoLiveDoltEndpoint) {
+		t.Fatalf("strict resolve(/cityA) err = %v, want errNoLiveDoltEndpoint — the foreign city's poisoned process must not match", err)
+	}
+
+	// Sanity: the env-honoring resolver WOULD match the foreign process,
+	// confirming the poison vector the strict cleanup path closes.
+	rEnv := newLiveDoltPortResolver()
+	rEnv.managedHandlePort = func(string) string { return "" }
+	rEnv.discoverProcesses = foreignProcs
+	got, err := rEnv.resolve("/cityA")
+	if err != nil || got.Port != 29999 {
+		t.Fatalf("env-honoring resolve(/cityA) = (port %d, err %v), want a match on the foreign process via the GC_DOLT_CONFIG_FILE poison", got.Port, err)
+	}
+}
+
 func TestLiveDoltPortResolver_ProcessTableByConfigPath(t *testing.T) {
 	layout := testManagedLayout()
 	r := liveDoltPortResolver{

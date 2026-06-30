@@ -63,13 +63,28 @@ type liveDoltPortResolver struct {
 }
 
 // newLiveDoltPortResolver returns the production resolver wired to the
-// managed runtime handle and the process-table discovery helpers.
+// managed runtime handle and the process-table discovery helpers. Its match
+// layout honors the GC_DOLT_* environment (suitable for operating within a
+// city's own runtime context).
 func newLiveDoltPortResolver() liveDoltPortResolver {
 	return liveDoltPortResolver{
 		managedHandlePort: currentResolvableManagedDoltPort,
 		runtimeLayout:     resolveManagedDoltRuntimeLayout,
 		discoverProcesses: discoverDoltProcesses,
 	}
+}
+
+// newLiveDoltPortResolverForExplicitCity is the resolver for destructive,
+// target-selecting callers (gc dolt cleanup) where an explicit --city must be
+// authoritative. It resolves the match layout strictly from cityPath, ignoring
+// the GC_DOLT_*/GC_PACK_STATE_DIR overrides, so ambient env from a different
+// city cannot redirect the process match onto a foreign live server (which
+// cleanup would then resolve and connect to). See
+// resolveManagedDoltRuntimeLayoutStrict.
+func newLiveDoltPortResolverForExplicitCity() liveDoltPortResolver {
+	r := newLiveDoltPortResolver()
+	r.runtimeLayout = resolveManagedDoltRuntimeLayoutStrict
+	return r
 }
 
 // resolve runs the live resolution chain for cityPath. On success the
