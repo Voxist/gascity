@@ -4858,6 +4858,104 @@ func TestValidateRigs_ExplicitPrefixAvoidsCollision(t *testing.T) {
 	}
 }
 
+// A reserved coordination-class id-prefix is no longer a fatal ValidateRigs
+// error. On a default city the relocated class stores are an identity seam, so
+// the prefix is allowed and surfaced as a non-fatal advisory (see
+// ReservedPrefixWarnings) instead. This keeps an existing city or rig that
+// already uses one able to start and reload.
+func TestValidateRigs_AllowsReservedRigPrefix(t *testing.T) {
+	rigs := []Rig{
+		{Name: "graph", Path: "/a", Prefix: "gcg"}, // reserved graph class prefix
+	}
+	if err := ValidateRigs(rigs, "mc"); err != nil {
+		t.Fatalf("ValidateRigs: reserved rig prefix must be allowed, got error: %v", err)
+	}
+}
+
+func TestValidateRigs_AllowsReservedHQPrefix(t *testing.T) {
+	if err := ValidateRigs(nil, "gco"); err != nil { // reserved orders class prefix
+		t.Fatalf("ValidateRigs: reserved HQ prefix must be allowed, got error: %v", err)
+	}
+}
+
+// An explicit reserved rig prefix is reported as an advisory warning naming the
+// rig and the reserved prefix.
+func TestReservedPrefixWarnings_ExplicitRigPrefix(t *testing.T) {
+	rigs := []Rig{
+		{Name: "graph", Path: "/a", Prefix: "gcg"}, // reserved graph class prefix
+	}
+	warnings := ReservedPrefixWarnings(rigs, "mc")
+	if len(warnings) != 1 {
+		t.Fatalf("ReservedPrefixWarnings = %v, want exactly one warning", warnings)
+	}
+	if !strings.Contains(warnings[0], "reserved") || !strings.Contains(warnings[0], "gcg") {
+		t.Errorf("warning = %q, want mention of 'reserved' and 'gcg'", warnings[0])
+	}
+	if !strings.Contains(warnings[0], "graph") {
+		t.Errorf("warning = %q, want mention of the rig name 'graph'", warnings[0])
+	}
+}
+
+// The derived prefix path also warns: "graph-class-gateway" derives to "gcg"
+// via DeriveBeadsPrefix, shadowing the reserved graph prefix.
+func TestReservedPrefixWarnings_DerivedRigPrefix(t *testing.T) {
+	rigs := []Rig{
+		{Name: "graph-class-gateway", Path: "/a"}, // derives to "gcg"
+	}
+	warnings := ReservedPrefixWarnings(rigs, "mc")
+	if len(warnings) != 1 {
+		t.Fatalf("ReservedPrefixWarnings = %v, want exactly one warning", warnings)
+	}
+	if !strings.Contains(warnings[0], "reserved") || !strings.Contains(warnings[0], "gcg") {
+		t.Errorf("warning = %q, want mention of 'reserved' and 'gcg'", warnings[0])
+	}
+}
+
+// The effective HQ prefix is warned about too; EffectiveHQPrefix already
+// resolves the site-bound value before this.
+func TestReservedPrefixWarnings_HQPrefix(t *testing.T) {
+	warnings := ReservedPrefixWarnings(nil, "gco") // reserved orders class prefix
+	if len(warnings) != 1 {
+		t.Fatalf("ReservedPrefixWarnings = %v, want exactly one warning", warnings)
+	}
+	if !strings.Contains(warnings[0], "reserved") || !strings.Contains(warnings[0], "HQ") {
+		t.Errorf("warning = %q, want mention of 'reserved' and 'HQ'", warnings[0])
+	}
+}
+
+// Site-bound HQ prefixes flow through EffectiveHQPrefix before validation, so a
+// site binding that pins a reserved class prefix is warned about through that
+// resolved path too.
+func TestReservedPrefixWarnings_SiteBoundHQPrefix(t *testing.T) {
+	cfg := &City{
+		Workspace:               Workspace{Name: "maintainer-city"},
+		ResolvedWorkspacePrefix: "gcs", // site-bound to the reserved sessions prefix
+	}
+	hqPrefix := EffectiveHQPrefix(cfg)
+	if hqPrefix != "gcs" {
+		t.Fatalf("EffectiveHQPrefix = %q, want site-bound %q", hqPrefix, "gcs")
+	}
+	warnings := ReservedPrefixWarnings(cfg.Rigs, hqPrefix)
+	if len(warnings) != 1 {
+		t.Fatalf("ReservedPrefixWarnings = %v, want exactly one warning", warnings)
+	}
+	if !strings.Contains(warnings[0], "reserved") {
+		t.Errorf("warning = %q, want mention of 'reserved'", warnings[0])
+	}
+}
+
+// A config whose effective HQ and rig prefixes are not reserved produces no
+// warnings.
+func TestReservedPrefixWarnings_NonReservedNoWarnings(t *testing.T) {
+	rigs := []Rig{
+		{Name: "my-cloud", Path: "/a"},              // derives to "mc"
+		{Name: "gascity", Path: "/b", Prefix: "ga"}, // explicit "ga"
+	}
+	if warnings := ReservedPrefixWarnings(rigs, "hq"); len(warnings) != 0 {
+		t.Errorf("ReservedPrefixWarnings = %v, want no warnings for non-reserved prefixes", warnings)
+	}
+}
+
 func TestEffectiveHQPrefix_Explicit(t *testing.T) {
 	cfg := &City{Workspace: Workspace{Name: "gascity", Prefix: "hq"}}
 	if got := EffectiveHQPrefix(cfg); got != "hq" {
@@ -7881,6 +7979,84 @@ printf 'TRACE=%%s\nARGS=%%s\n' "$GC_WORKFLOW_TRACE" "$*" > %q
 		t.Fatalf("fake gc result missing args:\n%s", data)
 	}
 	return tracePath, args
+}
+
+// TestPreferredDeterministicControlDispatcher locks the singleton-first
+// selection both graphroute and dispatch route control beads with. The city-
+// level singleton (Dir == "") must win for every scope; a rig-scoped instance is
+// used only when no city-level deterministic dispatcher exists. Non-deterministic
+// control-dispatcher agents (no convoy-control StartCommand) are ignored.
+func TestPreferredDeterministicControlDispatcher(t *testing.T) {
+	deterministic := func(dir string) Agent {
+		return Agent{
+			Name:         ControlDispatcherAgentName,
+			BindingName:  "core",
+			Dir:          dir,
+			StartCommand: ControlDispatcherStartCommandFor("{{.Agent}}"),
+		}
+	}
+
+	citySingleton := deterministic("")
+	rigCopy := deterministic("fixture")
+	plain := Agent{Name: ControlDispatcherAgentName, Dir: "fixture"} // no StartCommand
+
+	tests := []struct {
+		name       string
+		agents     []Agent
+		rigContext string
+		wantQN     string
+		wantOK     bool
+	}{
+		{
+			name:       "singleton preferred over rig copy for rig scope",
+			agents:     []Agent{rigCopy, citySingleton},
+			rigContext: "fixture",
+			wantQN:     "core.control-dispatcher",
+			wantOK:     true,
+		},
+		{
+			name:       "singleton preferred for empty scope",
+			agents:     []Agent{rigCopy, citySingleton},
+			rigContext: "",
+			wantQN:     "core.control-dispatcher",
+			wantOK:     true,
+		},
+		{
+			name:       "rig-scoped fallback when no singleton",
+			agents:     []Agent{rigCopy},
+			rigContext: "fixture",
+			wantQN:     "fixture/core.control-dispatcher",
+			wantOK:     true,
+		},
+		{
+			name:       "no match when only a non-deterministic dispatcher exists",
+			agents:     []Agent{plain},
+			rigContext: "fixture",
+			wantOK:     false,
+		},
+		{
+			name:       "no match when rig scope has no matching rig-scoped dispatcher",
+			agents:     []Agent{rigCopy},
+			rigContext: "other",
+			wantOK:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := PreferredDeterministicControlDispatcher(&City{Agents: tt.agents}, tt.rigContext)
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if ok && got.QualifiedName() != tt.wantQN {
+				t.Fatalf("QualifiedName = %q, want %q", got.QualifiedName(), tt.wantQN)
+			}
+		})
+	}
+
+	if _, ok := PreferredDeterministicControlDispatcher(nil, ""); ok {
+		t.Fatal("nil cfg should return ok=false")
+	}
 }
 
 // TestAllPackDirs covers (*City).AllPackDirs() — the union of PackDirs and

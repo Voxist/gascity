@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -1489,14 +1490,18 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 			})
 			if nudgeErr == nil && result.Delivered {
 				telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), nil)
-				stampLastNudgeDeliveredAt(store, target.sessionID, time.Now())
+				var sessFront *session.InfoStore
+				if store != nil {
+					sessFront = sessionFrontDoor(store)
+				}
+				stampLastNudgeDeliveredAt(sessFront, target.sessionID, time.Now())
 				fmt.Fprintf(stdout, "Nudged %s\n", target.agent.QualifiedName()) //nolint:errcheck // best-effort
 				return
 			}
 		}
 	}
 
-	if err := enqueueQueuedNudgeWithStore(target.cityPath, store, newQueuedNudgeWithOptions(target.agent.QualifiedName(), msg, "sling", now, queuedNudgeOptionsFromTarget(target))); err != nil {
+	if err := enqueueQueuedNudgeWithStore(target.cityPath, beads.NudgesStore{Store: store}, newQueuedNudgeWithOptions(target.agent.QualifiedName(), msg, "sling", now, queuedNudgeOptionsFromTarget(target))); err != nil {
 		telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), err)
 		fmt.Fprintf(stderr, "gc sling: nudge failed: %v\n", err) //nolint:errcheck // best-effort
 		return

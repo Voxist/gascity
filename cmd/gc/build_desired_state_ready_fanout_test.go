@@ -78,7 +78,7 @@ func TestCollectAssignedWorkBeads_ReadyFanOutCollapsesToOneReadPerScope(t *testi
 
 	snapshot := newSessionBeadSnapshot(sessions)
 
-	got, _, _, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil, snapshot)
+	got, _, _, _, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil, snapshot)
 	if partial {
 		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
 	}

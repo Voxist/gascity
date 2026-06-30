@@ -136,7 +136,15 @@ func TestStartEventExport_SuccessfulStartupArmsSidecar(t *testing.T) {
 	ec := supervisor.ExportConfig{Endpoint: "https://example.invalid/ingest", ActorSalt: "test-actor-salt-ok"}
 	providers := func() map[string]events.Provider { return map[string]events.Provider{} }
 
-	startEventExport(ctx, ec, providers, home, io.Discard)
+	wg := startEventExport(ctx, ec, providers, home, io.Discard)
+	// The exporter and cursor-persist goroutines write under home (e.g. the
+	// shutdown cursor flush in persistExportCursors). Drain them before the test
+	// returns so t.TempDir cleanup does not race those writes ("directory not
+	// empty"). On this happy path the goroutines were launched, so wg is non-nil.
+	if wg == nil {
+		t.Fatal("happy-path startEventExport must return a drain handle")
+	}
+	wg.Wait()
 
 	if !transcriptmeta.Enabled() {
 		t.Fatal("sidecar gate must be armed once the exporter clears its fail-closed startup")
