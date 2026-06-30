@@ -2032,6 +2032,13 @@ type OrderCheckResponse struct {
 	ScopedName     string  `json:"scoped_name"`
 }
 
+// OrderGateTimeoutFailOpenPayload defines model for OrderGateTimeoutFailOpenPayload.
+type OrderGateTimeoutFailOpenPayload struct {
+	ElapsedS float64 `json:"elapsed_s"`
+	Order    string  `json:"order"`
+	Scope    *string `json:"scope,omitempty"`
+}
+
 // OrderHistoryDetailResponse defines model for OrderHistoryDetailResponse.
 type OrderHistoryDetailResponse struct {
 	BeadId    string    `json:"bead_id"`
@@ -4013,6 +4020,21 @@ type TypedEventStreamEnvelopeOrderFired struct {
 	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeOrderGateTimeoutFailOpen defines model for TypedEventStreamEnvelopeOrderGateTimeoutFailOpen.
+type TypedEventStreamEnvelopeOrderGateTimeoutFailOpen struct {
+	Actor     string                          `json:"actor"`
+	Message   *string                         `json:"message,omitempty"`
+	Payload   OrderGateTimeoutFailOpenPayload `json:"payload"`
+	RunId     *string                         `json:"run_id,omitempty"`
+	Seq       int64                           `json:"seq"`
+	SessionId *string                         `json:"session_id,omitempty"`
+	StepId    *string                         `json:"step_id,omitempty"`
+	Subject   *string                         `json:"subject,omitempty"`
+	Ts        time.Time                       `json:"ts"`
+	Type      string                          `json:"type"`
+	Workflow  *WorkflowEventProjection        `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopePgCredentialResolved defines model for TypedEventStreamEnvelopePgCredentialResolved.
 type TypedEventStreamEnvelopePgCredentialResolved struct {
 	Actor     string                            `json:"actor"`
@@ -5123,6 +5145,22 @@ type TypedTaggedEventStreamEnvelopeOrderFired struct {
 	Ts        time.Time                `json:"ts"`
 	Type      string                   `json:"type"`
 	Workflow  *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen defines model for TypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen.
+type TypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen struct {
+	Actor     string                          `json:"actor"`
+	City      string                          `json:"city"`
+	Message   *string                         `json:"message,omitempty"`
+	Payload   OrderGateTimeoutFailOpenPayload `json:"payload"`
+	RunId     *string                         `json:"run_id,omitempty"`
+	Seq       int64                           `json:"seq"`
+	SessionId *string                         `json:"session_id,omitempty"`
+	StepId    *string                         `json:"step_id,omitempty"`
+	Subject   *string                         `json:"subject,omitempty"`
+	Ts        time.Time                       `json:"ts"`
+	Type      string                          `json:"type"`
+	Workflow  *WorkflowEventProjection        `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopePgCredentialResolved defines model for TypedTaggedEventStreamEnvelopePgCredentialResolved.
@@ -7210,6 +7248,32 @@ func (t *EventPayload) MergeNoPayload(v NoPayload) error {
 	return err
 }
 
+// AsOrderGateTimeoutFailOpenPayload returns the union data inside the EventPayload as a OrderGateTimeoutFailOpenPayload
+func (t EventPayload) AsOrderGateTimeoutFailOpenPayload() (OrderGateTimeoutFailOpenPayload, error) {
+	var body OrderGateTimeoutFailOpenPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromOrderGateTimeoutFailOpenPayload overwrites any union data inside the EventPayload as the provided OrderGateTimeoutFailOpenPayload
+func (t *EventPayload) FromOrderGateTimeoutFailOpenPayload(v OrderGateTimeoutFailOpenPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeOrderGateTimeoutFailOpenPayload performs a merge with any union data inside the EventPayload, using the provided OrderGateTimeoutFailOpenPayload
+func (t *EventPayload) MergeOrderGateTimeoutFailOpenPayload(v OrderGateTimeoutFailOpenPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsOutboundChannelMismatchPayload returns the union data inside the EventPayload as a OutboundChannelMismatchPayload
 func (t EventPayload) AsOutboundChannelMismatchPayload() (OutboundChannelMismatchPayload, error) {
 	var body OutboundChannelMismatchPayload
@@ -9080,6 +9144,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeOrderFired(v Typ
 	return err
 }
 
+// AsTypedEventStreamEnvelopeOrderGateTimeoutFailOpen returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeOrderGateTimeoutFailOpen
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeOrderGateTimeoutFailOpen() (TypedEventStreamEnvelopeOrderGateTimeoutFailOpen, error) {
+	var body TypedEventStreamEnvelopeOrderGateTimeoutFailOpen
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeOrderGateTimeoutFailOpen overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeOrderGateTimeoutFailOpen
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeOrderGateTimeoutFailOpen(v TypedEventStreamEnvelopeOrderGateTimeoutFailOpen) error {
+	v.Type = "order.gate_timeout_fail_open"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeOrderGateTimeoutFailOpen performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeOrderGateTimeoutFailOpen
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeOrderGateTimeoutFailOpen(v TypedEventStreamEnvelopeOrderGateTimeoutFailOpen) error {
+	v.Type = "order.gate_timeout_fail_open"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopePgCredentialResolved returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopePgCredentialResolved
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopePgCredentialResolved() (TypedEventStreamEnvelopePgCredentialResolved, error) {
 	var body TypedEventStreamEnvelopePgCredentialResolved
@@ -10018,6 +10110,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeOrderFailed()
 	case "order.fired":
 		return t.AsTypedEventStreamEnvelopeOrderFired()
+	case "order.gate_timeout_fail_open":
+		return t.AsTypedEventStreamEnvelopeOrderGateTimeoutFailOpen()
 	case "pg.credential_resolved":
 		return t.AsTypedEventStreamEnvelopePgCredentialResolved()
 	case "project.identity.stamped":
@@ -11239,6 +11333,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeOrde
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen() (TypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen, error) {
+	var body TypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen(v TypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen) error {
+	v.Type = "order.gate_timeout_fail_open"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen(v TypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen) error {
+	v.Type = "order.gate_timeout_fail_open"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopePgCredentialResolved returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopePgCredentialResolved
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopePgCredentialResolved() (TypedTaggedEventStreamEnvelopePgCredentialResolved, error) {
 	var body TypedTaggedEventStreamEnvelopePgCredentialResolved
@@ -12177,6 +12299,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeOrderFailed()
 	case "order.fired":
 		return t.AsTypedTaggedEventStreamEnvelopeOrderFired()
+	case "order.gate_timeout_fail_open":
+		return t.AsTypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen()
 	case "pg.credential_resolved":
 		return t.AsTypedTaggedEventStreamEnvelopePgCredentialResolved()
 	case "project.identity.stamped":
