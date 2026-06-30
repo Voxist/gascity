@@ -139,6 +139,13 @@ var rigStatusAPIClient = func(cityPath string) (*api.Client, string) {
 	if c := apiClient(cityPath); c != nil {
 		return c, ""
 	}
+	// Same supervisor-managed-city fallthrough as cityStatusAPIClient (vp-m84x):
+	// route rig-status reads to the warm supervisor StatusView when it is alive
+	// instead of the slow local probe. routeRigStatus still falls back on any API
+	// read error, so this only adds the warm-state path.
+	if c := supervisorCityAPIClient(cityPath); c != nil {
+		return c, ""
+	}
 	return nil, apiClientFallbackReason(cityPath)
 }
 
