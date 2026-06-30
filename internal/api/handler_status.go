@@ -31,16 +31,6 @@ type (
 
 var statusStoreReadTimeout = time.Second
 
-// statusResponseTTLFloor lets non-blocking status requests reuse a recently
-// built body after the time-bucket entry has rolled over. The shared
-// time-bucket cache (responseCacheTimeBucket / timeBucketResponseCacheTTL in
-// response_cache.go) bounds the rebuild rate within a bucket; the floor
-// smooths the bucket-boundary miss so interactive callers with short budgets
-// never pay a full fan-out rebuild more than once per floor window (#1896).
-// Blocking (long-poll) requests bypass it because they explicitly wait for
-// change. Var, not const, so tests can pin index-driven invalidation behavior.
-var statusResponseTTLFloor = 3 * time.Second
-
 // statusWorkExcludedTypes are bead types counted as infrastructure, not
 // work, by the status endpoint's work-count buckets.
 var statusWorkExcludedTypes = []string{"message", "convoy", "convergence"}
@@ -76,36 +66,50 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	}
 	index := s.latestIndex()
 
-	// /status keys its response cache on a TIME bucket, not the event index:
-	// on a busy city the sequence advances every poll, so an index-keyed
-	// entry would miss on nearly every request and force a full O(store-size)
-	// rebuild (gascity#3186). The bucket changes only once per
-	// timeBucketResponseCacheTTL, so high-frequency dashboard polls reuse the
-	// built body. The ?lite variant caches under its own key (the shared
-	// cache map keys on the string key, so the suffix is enough).
-	//
-	// Strict-freshness callers (blocking ?index=&wait=) bypass this cache so
-	// the body they receive reflects the event they waited for, never a body
-	// built before it.
+	// Strict-freshness callers (blocking ?index=&wait=) asked to observe a
+	// specific event, so they get a fresh synchronous build and bypass every
+	// cache — the body must reflect the event they waited for.
+	if blocking {
+		resp := s.buildStatusBody(ctx, input.Lite)
+		return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: resp}, nil
+	}
+
 	cacheKey := "status"
 	if input.Lite {
 		cacheKey = "status?lite"
 	}
+
+	// Fast path: a body built within the current time bucket (≤2s). On a busy
+	// city the event sequence advances every poll, so the cache keys on a TIME
+	// bucket rather than the event index (gascity#3186); high-frequency
+	// dashboard polls reuse the built body. The ?lite variant caches under its
+	// own key.
 	bucket := responseCacheTimeBucket(time.Now())
-	if !blocking {
-		if body, ok := cachedResponseAs[StatusBody](s, cacheKey, bucket); ok {
-			return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: body}, nil
-		}
-		if body, ok := cachedResponseWithinAgeAs[StatusBody](s, cacheKey, statusResponseTTLFloor); ok {
-			return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: body}, nil
+	if body, ok := cachedResponseAs[StatusBody](s, cacheKey, bucket); ok {
+		return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: body}, nil
+	}
+
+	// Warm StatusView (vp-e0hv): serve the last background-built body instead of
+	// running the ~28s O(store-size) buildStatusBody on the request path — that
+	// synchronous build is what made every cold `gc status` time out and fall
+	// back to the slow local probe. Refresh in the background once the body ages
+	// past statusWarmRefreshAfter; never block the request on the rebuild.
+	if entry, ok := s.warmStatusBody(input.Lite); ok {
+		age := time.Since(entry.builtAt)
+		if age <= statusWarmServeMaxAge {
+			if age > statusWarmRefreshAfter {
+				s.refreshStatusBodyAsync(input.Lite)
+			}
+			return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: entry.body}, nil
 		}
 	}
 
-	resp := s.buildStatusBody(ctx, input.Lite)
-	if !blocking {
-		s.storeResponse(cacheKey, bucket, resp)
-	}
-
+	// No usable warm body (cold start or long idle): build synchronously once,
+	// single-flighted so a burst of cold requests shares one build, then serve
+	// it and seed the warm entry. Only this first build after a (re)start or
+	// long idle pays the O(store) cost; every subsequent request is served from
+	// the warm entry above without blocking.
+	resp := s.buildAndStoreStatus(input.Lite)
 	return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: resp}, nil
 }
 
