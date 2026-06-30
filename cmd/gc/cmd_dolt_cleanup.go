@@ -498,7 +498,7 @@ func protectedDoltPortsForReap(opts cleanupOptions, procs []DoltProcInfo) map[in
 	ports := map[int]string{}
 	liveResolve := opts.LiveResolve
 	if liveResolve == nil {
-		liveResolve = newLiveDoltPortResolver().resolve
+		liveResolve = newLiveDoltPortResolverForExplicitCity().resolve
 	}
 	if live, err := liveResolve(opts.CityPath); err == nil && validDoltPort(live.Port) {
 		ports[live.Port] = "managed city dolt"
