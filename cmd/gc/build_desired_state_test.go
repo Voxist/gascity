@@ -2513,14 +2513,18 @@ func TestCollectAssignedWorkBeadsWithStores_SkipSetIsStoreScopedAcrossSameID(t *
 		t.Fatalf("worker-rig ready bead %q was dropped: the same-ID city ready bead collapsed the skip set and suppressed worker-rig's store-scoped Ready probe; collected=%#v", rigReadyWork.ID, gotIDs)
 	}
 
-	rigProbedForRigAssignee := false
-	for _, query := range rigStore.readyQueries {
-		if query.Assignee == "worker-rig" {
-			rigProbedForRigAssignee = true
-		}
-	}
-	if !rigProbedForRigAssignee {
+	// Post-collapse (#3218/#3312) the rig store gets a single unfiltered scope
+	// read, not a per-assignee "worker-rig" query. The store-scoping this test
+	// guards — the same-ID city ready bead must not suppress worker-rig's probe —
+	// is proven by rigReadyWork being collected above; here just assert the rig
+	// store was probed at all, with the unfiltered collapse shape.
+	if len(rigStore.readyQueries) == 0 {
 		t.Fatalf("rig Ready queries = %#v, want a probe for worker-rig despite the same-ID city ready bead", rigStore.readyQueries)
+	}
+	for _, query := range rigStore.readyQueries {
+		if query.Assignee != "" {
+			t.Fatalf("rig Ready query carried Assignee %q, want a single unfiltered scope read post-collapse", query.Assignee)
+		}
 	}
 }
 

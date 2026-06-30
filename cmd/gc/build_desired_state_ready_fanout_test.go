@@ -78,7 +78,7 @@ func TestCollectAssignedWorkBeads_ReadyFanOutCollapsesToOneReadPerScope(t *testi
 
 	snapshot := newSessionBeadSnapshot(sessions)
 
-	got, _, _, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil, snapshot)
+	got, _, _, _, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil, snapshot)
 	if partial {
 		t.Fatal("collectAssignedWorkBeadsWithStores reported partial results")
 	}
@@ -124,7 +124,7 @@ func TestCollectAssignedWorkBeads_CollapsedReadPropagatesPartial(t *testing.T) {
 
 	snapshot := newSessionBeadSnapshot([]beads.Bead{session})
 
-	got, _, _, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil, snapshot)
+	got, _, _, _, partial := collectAssignedWorkBeadsWithStores(&config.City{}, store, nil, nil, snapshot)
 	if !partial {
 		t.Fatal("collapsed scope read returned a PartialResultError but partial was not propagated")
 	}
