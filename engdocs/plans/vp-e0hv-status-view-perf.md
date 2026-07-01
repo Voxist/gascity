@@ -80,7 +80,12 @@ avoid reworking the handler's cache tests. There is no `statusWarming503` in the
 **Tests:** unit tests for the warm-cache helpers (round-trip, warm-serve-without-rebuild,
 aged-body triggers background refresh); the TTL-expiry cache test was rewritten to the warm
 contract (`TestHandleStatusWarmCacheServesAcrossBucketExpiry`); existing `handler_status` /
-`city_status` tests stay green.
+`city_status` tests stay green. The two hardening guards added in the self-review
+(panic `recover()`, `DoChan`+`Forget` wedge escape) each have a dedicated regression test
+(`TestBuildAndStoreStatusRecoversFromBuildPanic`, `TestBuildAndStoreStatusEscapesWedgedBuild`,
+added in the rework pass responding to PR #74's second review) that inject a
+panicking/blocking `storeHealthComputer` and were verified to fail against the
+pre-hardening commit (`8f3d1f5a86`) before confirming green against the fix.
 
 **Risk:** low — additive, isolated to the status read path; the 503-fallback contract already
 exists (`cacheLiveOr503`).
