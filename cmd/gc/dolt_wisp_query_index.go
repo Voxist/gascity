@@ -65,11 +65,15 @@ func applyWispQueryIndexesToDB(ctx context.Context, port, database string, stder
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
+	// managedDoltOpenDatabase returns a shared pooled *sql.DB owned by
+	// internal/doltpool — do NOT Close it. Closing here poisoned the registry:
+	// doltpool caches the handle by key and never evicts, so after this ran
+	// (once per city on the first controller tick, against "hq") every later
+	// pooled query on that key failed with "sql: database is closed".
 	db, err := managedDoltOpenDatabase("127.0.0.1", port, "root", database)
 	if err != nil {
 		return fmt.Errorf("open dolt connection: %w", err)
 	}
-	defer db.Close() //nolint:errcheck
 
 	if err := db.PingContext(ctx); err != nil {
 		return fmt.Errorf("ping dolt: %w", err)
