@@ -937,6 +937,27 @@ func IsPartialResult(err error) bool {
 	return errors.As(err, &partial)
 }
 
+// IsTimeoutError reports whether err was caused by a store/bd query exceeding
+// its time budget — a per-command bd exec timeout (bdExecTimeoutError, "timed
+// out after ...") or a context deadline. It deliberately excludes cancellation
+// (context.Canceled) and genuine store-read failures (parse errors, connection
+// resets, "read failed"): those are not contention signals. Callers use it to
+// tell a query that merely ran out of time under store contention — safe to
+// relax for idempotent work — apart from an error that must be treated as a
+// hard failure. Message matching is required because bd exec timeouts are
+// formatted strings that do not wrap the context.DeadlineExceeded sentinel.
+func IsTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "timed out after") ||
+		strings.Contains(msg, "deadline exceeded")
+}
+
 // parseIssuesTolerant unmarshals bd list output, skipping any entries that
 // fail to parse (e.g. corrupt metadata with non-string values). bd 1.0.4 emits
 // a top-level array; bd 1.0.5 may emit an object envelope with an issues array.

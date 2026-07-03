@@ -102,6 +102,59 @@ func TestOrderDispatchIdempotentFailsOpenOnGateTimeout(t *testing.T) {
 	}
 }
 
+// gateErrorStore returns a supplied error (not a hang) from the strict
+// open-work gate scan, reproducing vp-gprv where the wisp-tier bd query fails
+// with "bd query: timed out after 30s" under Dolt contention. Unlike
+// gateTimeoutStore (which sleeps until the per-order bound fires and yields an
+// errGateTimeout), the error arrives promptly and reaches gateFailClosed as a
+// store-read error. Only the exact strict-gate query shape is failed; every
+// other read (including trackingBeads' IncludeClosed verification query) stays
+// live.
+type gateErrorStore struct {
+	beads.Store
+	err error
+}
+
+func (s *gateErrorStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if strings.HasPrefix(query.Label, "order-run:") && !query.IncludeClosed && query.Limit == 0 {
+		return nil, s.err
+	}
+	return s.Store.List(query)
+}
+
+// TestOrderDispatchIdempotentFailsOpenOnStoreTimeout is the vp-gprv regression:
+// when the open-work gate's wisp bd query TIMES OUT (returns a timeout error
+// rather than merely hanging past the per-order bound), an idempotent order
+// must still fail OPEN and dispatch, while a non-idempotent order fails CLOSED.
+// code-review-gate (idempotent) was starved fleet-wide because this store-layer
+// timeout was misclassified as a genuine read failure and failed closed even
+// though the order opted into idempotent fail-open.
+func TestOrderDispatchIdempotentFailsOpenOnStoreTimeout(t *testing.T) {
+	store := &gateErrorStore{
+		Store: beads.NewMemStore(),
+		err:   fmt.Errorf("bd list both tiers: bd query: %w", errors.New("timed out after 30s")),
+	}
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+
+	aa := []orders.Order{
+		{Name: "code-review-gate", Trigger: "cooldown", Interval: "1m", Exec: "true", Idempotent: true},
+		{Name: "merge-loop-sweep", Trigger: "cooldown", Interval: "1m", Exec: "true", Idempotent: false},
+	}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, successfulExec, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	ad.dispatch(context.Background(), t.TempDir(), now)
+	ad.drain(context.Background())
+
+	if got := trackingBeads(t, store, "order-run:code-review-gate"); len(got) == 0 {
+		t.Error("idempotent order should fail OPEN on a store-query timeout and dispatch, but no tracking bead was created (vp-gprv starvation)")
+	}
+	if got := trackingBeads(t, store, "order-run:merge-loop-sweep"); len(got) != 0 {
+		t.Errorf("non-idempotent order should fail CLOSED on a store-query timeout and skip; got %d tracking beads", len(got))
+	}
+}
+
 // TestGateFailClosed covers the gate-error decision logic directly: a per-order
 // gate timeout fails open only for idempotent orders, but a done dispatch
 // context (shutdown / tick deadline) always blocks, even for idempotent orders.
@@ -116,7 +169,21 @@ func TestGateFailClosed(t *testing.T) {
 		t.Error("non-idempotent order on gate timeout should fail CLOSED (blocked)")
 	}
 	if !m.gateFailClosed(context.Background(), orders.Order{Idempotent: true}, "feeder", errors.New("dolt: read failed")) {
-		t.Error("idempotent order must fail CLOSED on a non-timeout gate error (only the bounded-gate timeout fails open)")
+		t.Error("idempotent order must fail CLOSED on a non-timeout gate error (only a timeout fails open)")
+	}
+
+	// A raw store/bd query timeout (the wisp "bd query: timed out after 30s"
+	// case, vp-gprv) is the same store-contention signal as the per-order gate
+	// bound, just surfaced from a different layer: an idempotent order must fail
+	// OPEN on it, a non-idempotent order still fails CLOSED. Before the fix this
+	// reached gateFailClosed as a non-errGateTimeout error and blocked even
+	// idempotent orders, starving code-review-gate fleet-wide.
+	storeTimeoutErr := fmt.Errorf("checking open work: %w", errors.New("bd list both tiers: bd query: timed out after 30s"))
+	if m.gateFailClosed(context.Background(), orders.Order{Idempotent: true}, "review", storeTimeoutErr) {
+		t.Error("idempotent order on a store-query timeout should fail OPEN (vp-gprv)")
+	}
+	if !m.gateFailClosed(context.Background(), orders.Order{Idempotent: false}, "sweep", storeTimeoutErr) {
+		t.Error("non-idempotent order on a store-query timeout should still fail CLOSED")
 	}
 
 	canceledCtx, cancel := context.WithCancel(context.Background())

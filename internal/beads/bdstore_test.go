@@ -5101,3 +5101,34 @@ func TestBdStoreReadyRetryBoundedReturnsErrorAfterExhaustion(t *testing.T) {
 		t.Fatalf("calls = %d, want >= 2 (retry must be attempted)", calls)
 	}
 }
+
+// TestIsTimeoutError pins the narrow timeout classifier used to distinguish a
+// store/bd query that ran out of time (a contention signal callers may safely
+// relax for idempotent work) from a genuine store-read failure or a plain
+// cancellation. Both must NOT be treated as timeouts: a connection failure is a
+// real error, and a cancellation is a shutdown signal, not contention.
+func TestIsTimeoutError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"bd exec timeout", errors.New("timed out after 30s"), true},
+		{"bd list both tiers wisp timeout", fmt.Errorf("bd list both tiers: bd query: %w", errors.New("timed out after 30s")), true},
+		{"caller-deadline timeout", errors.New("timed out after 500ms (caller deadline)"), true},
+		{"context deadline sentinel", fmt.Errorf("gate: %w", context.DeadlineExceeded), true},
+		{"deadline exceeded text", errors.New("context deadline exceeded"), true},
+		{"partial result wrapping timeout", &beads.PartialResultError{Op: "bd list both tiers", Err: errors.New("bd query: timed out after 30s")}, true},
+		{"context canceled is NOT a timeout", fmt.Errorf("gate: %w", context.Canceled), false},
+		{"genuine store read failure", errors.New("dolt: read failed"), false},
+		{"connection reset is NOT a timeout", errors.New("connection reset by peer"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := beads.IsTimeoutError(tc.err); got != tc.want {
+				t.Errorf("IsTimeoutError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
