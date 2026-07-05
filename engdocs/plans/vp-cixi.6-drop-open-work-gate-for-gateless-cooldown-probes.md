@@ -72,7 +72,7 @@ Why a new flag, not reusing `Idempotent`:
 
 ## Status
 
-- [ ] T-001
-- [ ] T-002
+- [x] T-001 — Order model: add NoWorkGate field + TOML decode + validation guard   ✅ green at 415429c91
+- [x] T-002 — Dispatcher: skip both gates when NoWorkGate   ✅ green at TestOrderDispatchNoWorkGateSkipsGatesUnderStoreDelay
 - [ ] T-003
 - [ ] T-004

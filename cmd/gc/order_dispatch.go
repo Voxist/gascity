@@ -535,24 +535,35 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			storeKeysForGate = append(storeKeysForGate, orderStoreTargetKey(legacyOrderCityTarget(cityPath, m.cfg)))
 		}
 		scoped := a.ScopedName()
-		if m.gateBackoffActive(scoped, now) {
-			continue
-		}
-		hasOpenTracking, err := gateOpenWorkBounded(ctx, orderGateTimeout, scoped, func() (bool, error) {
-			return trackingIndex.hasOpenTracking(storesForGate, storeKeysForGate, scoped)
-		})
-		if err != nil {
-			if m.gateFailClosed(ctx, a, scoped, err) {
-				if errors.Is(err, errGateTimeout) {
-					// Anchor to actual wall clock after the gate consumed orderGateTimeout;
-					// using the tick-start 'now' would set a deadline that has already passed.
-					m.setGateBackoff(scoped, time.Now().Add(orderGateBackoffDuration))
-				}
+		// NoWorkGate orders (pure probes/sweeps that track no beads) opt out of
+		// BOTH open-work gates entirely. The gates exist to suppress re-dispatch
+		// while bead work is in flight, which is meaningless for an order that
+		// consumes no bead work; running them makes the order's dispatch
+		// contingent on a Dolt read completing inside orderGateTimeout, so a slow
+		// store times the gate out and skips the order every cycle (#2893
+		// dispatch starvation -> stale cooldown cache -> fail-closed health).
+		// These orders are still single-flight-bounded by their own cooldown
+		// interval plus the synchronous tracking bead created below.
+		if !a.NoWorkGate {
+			if m.gateBackoffActive(scoped, now) {
 				continue
 			}
-		}
-		if hasOpenTracking {
-			continue
+			hasOpenTracking, err := gateOpenWorkBounded(ctx, orderGateTimeout, scoped, func() (bool, error) {
+				return trackingIndex.hasOpenTracking(storesForGate, storeKeysForGate, scoped)
+			})
+			if err != nil {
+				if m.gateFailClosed(ctx, a, scoped, err) {
+					if errors.Is(err, errGateTimeout) {
+						// Anchor to actual wall clock after the gate consumed orderGateTimeout;
+						// using the tick-start 'now' would set a deadline that has already passed.
+						m.setGateBackoff(scoped, time.Now().Add(orderGateBackoffDuration))
+					}
+					continue
+				}
+			}
+			if hasOpenTracking {
+				continue
+			}
 		}
 
 		baseLastRunFn := trackingIndex.lastRunFunc(storesForGate, storeKeysForGate, orders.LastRunAcross(orderFrontDoorsForStores(storesForGate)))
@@ -643,22 +654,25 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 
 		// Skip dispatch if previous work hasn't been processed yet.
 		// Bound the wisp-aware open-work gate (#2921) with our per-order
-		// timeout so a slow store can't starve later orders.
-		hasOpenWork, err := gateOpenWorkBounded(ctx, orderGateTimeout, scoped, func() (bool, error) {
-			return trackingIndex.hasOpenWork(storesForGate, storeKeysForGate, scoped, m.hasOpenWorkInStoresStrict, true)
-		})
-		if err != nil {
-			if m.gateFailClosed(ctx, a, scoped, err) {
-				if errors.Is(err, errGateTimeout) {
-					// Anchor to actual wall clock after the gate consumed orderGateTimeout;
-					// using the tick-start 'now' would set a deadline that has already passed.
-					m.setGateBackoff(scoped, time.Now().Add(orderGateBackoffDuration))
+		// timeout so a slow store can't starve later orders. NoWorkGate orders
+		// skip this gate too (see the first-gate skip above).
+		if !a.NoWorkGate {
+			hasOpenWork, err := gateOpenWorkBounded(ctx, orderGateTimeout, scoped, func() (bool, error) {
+				return trackingIndex.hasOpenWork(storesForGate, storeKeysForGate, scoped, m.hasOpenWorkInStoresStrict, true)
+			})
+			if err != nil {
+				if m.gateFailClosed(ctx, a, scoped, err) {
+					if errors.Is(err, errGateTimeout) {
+						// Anchor to actual wall clock after the gate consumed orderGateTimeout;
+						// using the tick-start 'now' would set a deadline that has already passed.
+						m.setGateBackoff(scoped, time.Now().Add(orderGateBackoffDuration))
+					}
+					continue
 				}
+			}
+			if hasOpenWork {
 				continue
 			}
-		}
-		if hasOpenWork {
-			continue
 		}
 
 		// Create the tracking bead (which suppresses re-fire on the next tick)
