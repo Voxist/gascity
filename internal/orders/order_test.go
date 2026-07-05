@@ -91,6 +91,31 @@ func TestParseIdempotent(t *testing.T) {
 	}
 }
 
+// TestOrderNoWorkGateParsed covers vp-cixi.6: an order can opt out of the
+// dispatcher's open-work gates via no_work_gate. Pure cooldown probes that
+// track no beads (provider-health-probe) set this so a slow Dolt store can't
+// time the gate out and skip the probe every cycle (#2893 dispatch starvation).
+func TestOrderNoWorkGateParsed(t *testing.T) {
+	on, err := Parse([]byte("[order]\nexec = \"true\"\ntrigger = \"cooldown\"\ninterval = \"10m\"\nno_work_gate = true\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !on.NoWorkGate {
+		t.Error("NoWorkGate = false, want true")
+	}
+	off, err := Parse([]byte("[order]\nexec = \"true\"\ntrigger = \"cooldown\"\ninterval = \"10m\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if off.NoWorkGate {
+		t.Error("NoWorkGate = true, want false (default)")
+	}
+	// Validate must accept the flag (no extra constraint).
+	if err := Validate(Order{Name: "probe", Exec: "true", Trigger: "cooldown", Interval: "10m", NoWorkGate: true}); err != nil {
+		t.Errorf("Validate with NoWorkGate: %v", err)
+	}
+}
+
 func TestValidateCooldown(t *testing.T) {
 	a := Order{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h"}
 	if err := Validate(a); err != nil {
