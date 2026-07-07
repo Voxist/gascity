@@ -9658,3 +9658,121 @@ func TestCarryLastRunCacheFrom(t *testing.T) {
 		t.Errorf("cache size = %d after no-op carries, want 2", len(next.lastRunCache))
 	}
 }
+
+// --- vp-cixi.6: dispatch-budget starvation fixes ---------------------------
+
+func TestOrderDispatchBudgetDefaultRaised(t *testing.T) {
+	// The old default of 4 starved short-interval orders on cities with
+	// large order rings (one fire per full rotation regardless of interval).
+	if defaultMaxOrderDispatchesPerTick < 32 {
+		t.Fatalf("defaultMaxOrderDispatchesPerTick = %d, want >= 32", defaultMaxOrderDispatchesPerTick)
+	}
+}
+
+func TestOrderDispatchBudgetConfigKnob(t *testing.T) {
+	aa := []orders.Order{{Name: "o", Trigger: "cooldown", Interval: "1m", Exec: "true"}}
+	cfg := &config.City{}
+	seven := 7
+	cfg.Orders.MaxDispatchesPerTick = &seven
+	ad := buildOrderDispatcherFromOrderSet(t.TempDir(), cfg, aa, events.Discard, io.Discard)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	if got := ad.(*memoryOrderDispatcher).maxDispatchesPerTick; got != 7 {
+		t.Fatalf("maxDispatchesPerTick = %d, want 7 (from cfg.Orders.MaxDispatchesPerTick)", got)
+	}
+	cfg.Orders.MaxDispatchesPerTick = nil
+	ad = buildOrderDispatcherFromOrderSet(t.TempDir(), cfg, aa, events.Discard, io.Discard)
+	if got := ad.(*memoryOrderDispatcher).maxDispatchesPerTick; got != defaultMaxOrderDispatchesPerTick {
+		t.Fatalf("maxDispatchesPerTick = %d, want default %d when knob unset", got, defaultMaxOrderDispatchesPerTick)
+	}
+}
+
+func TestOrderAdmissionOrderMostOverdueFirst(t *testing.T) {
+	now := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	aa := []orders.Order{
+		{Name: "slow-10m", Trigger: "cooldown", Interval: "10m"}, // 12m ago => 1.2x overdue
+		{Name: "fast-30s", Trigger: "cooldown", Interval: "30s"}, // 5m ago  => 10x overdue
+		{Name: "cron-x", Trigger: "cron", Schedule: "* * * * *"}, // 10m ago => 2x (5m norm)
+	}
+	lastRuns := map[string]time.Time{
+		"slow-10m": now.Add(-12 * time.Minute),
+		"fast-30s": now.Add(-5 * time.Minute),
+		"cron-x":   now.Add(-10 * time.Minute),
+	}
+	peek := func(name string) (time.Time, bool) { last, ok := lastRuns[name]; return last, ok }
+	got := orderAdmissionOrder(aa, 0, now, peek)
+	want := []int{1, 2, 0} // fast-30s (10x), cron-x (2x), slow-10m (1.2x)
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("admission order = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestOrderAdmissionOrderUnknownLastRunFirstInRingOrder(t *testing.T) {
+	// Orders never seen by this process outrank everything and keep the
+	// ring rotation among themselves — a cold dispatcher degrades to the
+	// old round-robin exactly.
+	now := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	aa := []orders.Order{
+		{Name: "a", Trigger: "cooldown", Interval: "1m"},
+		{Name: "b", Trigger: "cooldown", Interval: "1m"},
+		{Name: "c", Trigger: "cooldown", Interval: "1m"},
+	}
+	// "b" has a cached run; "a"/"c" unknown. Ring start=2 => ring order c,a,b.
+	peek := func(name string) (time.Time, bool) {
+		if name == "b" {
+			return now.Add(-time.Hour), true
+		}
+		return time.Time{}, false
+	}
+	got := orderAdmissionOrder(aa, 2, now, peek)
+	want := []int{2, 0, 1} // c,a (unknown, ring order from start=2), then b
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("admission order = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestOrderDispatchPrioritizesOverdueShortIntervalUnderBudget(t *testing.T) {
+	// End-to-end: with budget 1 and a warm last-run cache, the most-overdue
+	// order wins the slot even when the ring cursor points elsewhere.
+	store := beads.NewMemStore()
+	aa := []orders.Order{
+		{Name: "long-a", Trigger: "cooldown", Interval: "10m", Exec: "true"},
+		{Name: "long-b", Trigger: "cooldown", Interval: "10m", Exec: "true"},
+		{Name: "fast", Trigger: "cooldown", Interval: "30s", Exec: "true"},
+	}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, func(context.Context, string, string, []string) ([]byte, error) {
+		return []byte("ok\n"), nil
+	}, nil)
+	m := ad.(*memoryOrderDispatcher)
+	m.maxDispatchesPerTick = 1
+	m.nextDispatchStart = 0 // ring would pick long-a first
+
+	now := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	// Warm the cache as if all three ran, fast most-overdue relative to interval.
+	cityPath := t.TempDir()
+	for _, warm := range []struct {
+		name string
+		ago  time.Duration
+	}{{"long-a", 11 * time.Minute}, {"long-b", 12 * time.Minute}, {"fast", 5 * time.Minute}} {
+		target, err := resolveOrderStoreTarget(cityPath, m.cfg, orders.Order{Name: warm.name})
+		if err != nil {
+			t.Fatalf("resolving target: %v", err)
+		}
+		m.rememberLastRun(warm.name, []string{orderStoreTargetKey(target)}, now.Add(-warm.ago))
+	}
+
+	ad.dispatch(context.Background(), cityPath, now)
+	ad.drain(context.Background())
+
+	if got := len(trackingBeads(t, store, "order-run:fast")); got != 1 {
+		t.Fatalf("fast (10x overdue) should win the single budget slot; runs=%d", got)
+	}
+	if got := len(trackingBeads(t, store, "order-run:long-a")); got != 0 {
+		t.Fatalf("long-a (1.1x overdue) should NOT dispatch under budget 1; runs=%d", got)
+	}
+}

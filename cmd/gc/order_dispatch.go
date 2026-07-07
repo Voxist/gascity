@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -76,8 +77,15 @@ const (
 
 	completedOrderTrackingCloseReason = "order dispatch completed: tracking bead lifecycle finished"
 
-	orderTrackingHistoryIndexLimit   = 2048
-	defaultMaxOrderDispatchesPerTick = 4
+	orderTrackingHistoryIndexLimit = 2048
+	// defaultMaxOrderDispatchesPerTick bounds per-tick admission cost, not
+	// execution (dispatchOne already runs async). It must comfortably exceed
+	// the number of orders that come due per tick or the round-robin budget
+	// degrades every order to one fire per full ring rotation regardless of
+	// interval (vp-cixi.6: 122 orders × ~94s ticks × old budget 4 ⇒ 30s
+	// orders fired every 33–90 min). Override via [orders]
+	// max_dispatches_per_tick in city.toml.
+	defaultMaxOrderDispatchesPerTick = 32
 	orderTrackingSweepCloseBudget    = 4
 
 	// orderTrackingRetentionWatchdogInterval is the minimum time between
@@ -403,6 +411,11 @@ func buildOrderDispatcherFromOrderSet(cityPath string, cfg *config.City, allAA [
 		ep = p
 	}
 
+	maxDispatches := defaultMaxOrderDispatchesPerTick
+	if cfg != nil && cfg.Orders.MaxDispatchesPerTick != nil && *cfg.Orders.MaxDispatchesPerTick > 0 {
+		maxDispatches = *cfg.Orders.MaxDispatchesPerTick
+	}
+
 	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
 	return &memoryOrderDispatcher{
 		aa: auto,
@@ -414,7 +427,7 @@ func buildOrderDispatcherFromOrderSet(cityPath string, cfg *config.City, allAA [
 		rec:                  rec,
 		stderr:               lockedStderr(stderr),
 		maxTimeout:           cfg.Orders.MaxTimeoutDuration(),
-		maxDispatchesPerTick: defaultMaxOrderDispatchesPerTick,
+		maxDispatchesPerTick: maxDispatches,
 		cfg:                  cfg,
 		cityName:             loadedCityName(cfg, cityPath),
 		cityPath:             cityPath,
@@ -474,8 +487,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		return m.maxDispatchesPerTick > 0 && budgetSpent >= m.maxDispatchesPerTick
 	}
 
-	for offset := 0; offset < total; offset++ {
-		idx := (start + offset) % total
+	for _, idx := range orderAdmissionOrder(m.aa, start, now, m.peekLastRun) {
 		a := m.aa[idx]
 		// Skip orders targeting suspended rigs.
 		if m.orderRigSuspended(a) {
@@ -1076,6 +1088,74 @@ func (m *memoryOrderDispatcher) carryGateBackoffFrom(prev *memoryOrderDispatcher
 
 func orderHistoryCacheKey(orderName string, storeKeys []string) string {
 	return orderName + "\x00" + strings.Join(storeKeys, "\x00")
+}
+
+// peekLastRun returns the freshest cached last-run for a scoped order name
+// across any store-key combination, without touching a store. Used only for
+// admission ordering — the dispatch loop still resolves the authoritative
+// last-run per order.
+func (m *memoryOrderDispatcher) peekLastRun(scoped string) (time.Time, bool) {
+	prefix := scoped + "\x00"
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	var best time.Time
+	found := false
+	for key, last := range m.lastRunCache {
+		if strings.HasPrefix(key, prefix) && (!found || last.After(best)) {
+			best, found = last, true
+		}
+	}
+	return best, found
+}
+
+// orderAdmissionOrder returns the order indices most-overdue-first so that
+// short-interval orders cannot be starved by ring position when the dispatch
+// budget saturates (vp-cixi.6: with a pure round-robin, every order fired
+// once per full rotation — 33-90 min — regardless of interval; a supervisor
+// restart reset the cursor and re-parked just-fired orders behind an hour of
+// rig sweeps).
+//
+// Score = elapsed-since-last-run ÷ interval (cooldown orders with a parseable
+// interval; other triggers normalize elapsed against 5 minutes). Orders with
+// no cached last-run in this process score +Inf — they must be probed first;
+// among themselves (and on any tie) the previous ring order from `start` is
+// preserved, so a cold dispatcher degrades to exactly the old rotation.
+// peek is injected for testability and must not block.
+func orderAdmissionOrder(aa []orders.Order, start int, now time.Time,
+	peek func(string) (time.Time, bool),
+) []int {
+	total := len(aa)
+	idxs := make([]int, total)
+	scores := make([]float64, total)
+	ringPos := make([]int, total)
+	for offset := 0; offset < total; offset++ {
+		idx := (start + offset) % total
+		idxs[offset] = idx
+		ringPos[idx] = offset
+		last, ok := peek(aa[idx].ScopedName())
+		if !ok {
+			scores[idx] = math.Inf(1)
+			continue
+		}
+		elapsed := now.Sub(last)
+		norm := 5 * time.Minute
+		if aa[idx].Trigger == "cooldown" {
+			if d, err := time.ParseDuration(aa[idx].Interval); err == nil && d > 0 {
+				norm = d
+			}
+		}
+		scores[idx] = float64(elapsed) / float64(norm)
+	}
+	sort.SliceStable(idxs, func(i, j int) bool {
+		a, b := idxs[i], idxs[j]
+		if scores[a] != scores[b] {
+			// NaN-safe: math.Inf compares consistently; scores are never NaN
+			// (norm > 0 enforced above).
+			return scores[a] > scores[b]
+		}
+		return ringPos[a] < ringPos[b]
+	})
+	return idxs
 }
 
 func orderTriggerUsesLastRun(a orders.Order) bool {
