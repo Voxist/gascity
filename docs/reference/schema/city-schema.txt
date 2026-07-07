@@ -2150,6 +2150,11 @@
           "type": "string",
           "description": "MaxTimeout is an operator hard cap on per-order timeouts.\nNo order gets more than this duration. Go duration string (e.g., \"60s\").\nEmpty means uncapped (no override)."
         },
+        "max_dispatches_per_tick": {
+          "type": "integer",
+          "description": "MaxDispatchesPerTick caps how many due orders the dispatcher admits\nper controller tick. Unset (nil) or \u003c=0 uses the built-in default. On\ncities whose auto-order count exceeds default×(tick rate ÷ order\ninterval), the round-robin budget starves short-interval orders down\nto one fire per full ring rotation regardless of their configured\ninterval — raise this cap there (voxist vp-cixi.6: 122 orders × ~94s\nticks × budget 4 ⇒ 30s orders fired every 33–90 min). Pointer so the\nzero value stays out of marshaled default configs.",
+          "default": 32
+        },
         "overrides": {
           "items": {
             "$ref": "#/$defs/OrderOverride"

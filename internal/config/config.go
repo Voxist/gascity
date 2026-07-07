@@ -2275,6 +2275,15 @@ type OrdersConfig struct {
 	// No order gets more than this duration. Go duration string (e.g., "60s").
 	// Empty means uncapped (no override).
 	MaxTimeout string `toml:"max_timeout,omitempty"`
+	// MaxDispatchesPerTick caps how many due orders the dispatcher admits
+	// per controller tick. Unset (nil) or <=0 uses the built-in default. On
+	// cities whose auto-order count exceeds default×(tick rate ÷ order
+	// interval), the round-robin budget starves short-interval orders down
+	// to one fire per full ring rotation regardless of their configured
+	// interval — raise this cap there (voxist vp-cixi.6: 122 orders × ~94s
+	// ticks × budget 4 ⇒ 30s orders fired every 33–90 min). Pointer so the
+	// zero value stays out of marshaled default configs.
+	MaxDispatchesPerTick *int `toml:"max_dispatches_per_tick,omitempty" jsonschema:"default=32"`
 	// Overrides apply per-order field overrides after scanning.
 	// Each override targets an order by name and optionally by rig.
 	Overrides []OrderOverride `toml:"overrides,omitempty"`

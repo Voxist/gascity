@@ -611,6 +611,7 @@ OrdersConfig holds order settings for orders discovered from flat TOML files (on
 |-------|------|----------|---------|-------------|
 | `skip` | []string |  |  | Skip lists order names to exclude from scanning. |
 | `max_timeout` | string |  |  | MaxTimeout is an operator hard cap on per-order timeouts. No order gets more than this duration. Go duration string (e.g., "60s"). Empty means uncapped (no override). |
+| `max_dispatches_per_tick` | integer |  | `32` | MaxDispatchesPerTick caps how many due orders the dispatcher admits per controller tick. Unset (nil) or &lt;=0 uses the built-in default. On cities whose auto-order count exceeds default×(tick rate ÷ order interval), the round-robin budget starves short-interval orders down to one fire per full ring rotation regardless of their configured interval — raise this cap there (voxist vp-cixi.6: 122 orders × ~94s ticks × budget 4 ⇒ 30s orders fired every 33–90 min). Pointer so the zero value stays out of marshaled default configs. |
 | `overrides` | []OrderOverride |  |  | Overrides apply per-order field overrides after scanning. Each override targets an order by name and optionally by rig. |
 
 ## PackDefaults
