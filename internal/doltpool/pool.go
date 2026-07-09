@@ -27,9 +27,32 @@ import (
 // supervisor doctor budget (≤0.8×@@max_connections, plan item 2.7) can
 // reason about.
 const (
-	maxOpenConns    = 5
-	maxIdleConns    = 2
-	connMaxLifetime = time.Hour
+	maxOpenConns = 5
+	maxIdleConns = 2
+	// connMaxLifetime bounds a connection's TOTAL age (busy or idle). Lowered
+	// from time.Hour (vc-wz5) to a hygiene backstop that periodically recycles
+	// even continuously-busy conns. The death-match guard is connMaxIdleTime
+	// below, not this value — a busy conn is never idle long enough for the
+	// server to kill it.
+	connMaxLifetime = 20 * time.Second
+	// connMaxIdleTime reaps an IDLE pooled connection client-side before the
+	// managed Dolt server's read_timeout_millis kills it server-side. This is
+	// THE fix for the vc-wz5 "read-timeout death match": previously the pool
+	// only bounded total lifetime (1h) with no idle reaping, so an idle conn
+	// unused >= the server read_timeout was closed by the server while the
+	// client still trusted it for up to an hour — the driver then handed the
+	// dead conn to the next op ("closing bad idle connection: EOF / reset /
+	// broken pipe"), taxing every op and losing the dispatcher's last-fired
+	// write under churn (town-wide order staleness).
+	//
+	// INVARIANT (enforced at runtime by the dolt-timeout-race doctor check):
+	// this MUST stay strictly below the managed server read_timeout_millis.
+	// The managed default is config.DefaultDoltReadTimeoutMillis = 15000ms; the
+	// live city runs 30000ms. 10s clears both with margin. NOTE: the client
+	// per-query readTimeout (below, 30s) is deliberately NOT the guard — it is
+	// the response-read deadline for a query in flight, unrelated to idle-conn
+	// reaping; lowering it would abort legitimately slow queries.
+	connMaxIdleTime = 10 * time.Second
 	connTimeout     = 5 * time.Second
 	readTimeout     = 30 * time.Second
 	writeTimeout    = 30 * time.Second
@@ -83,8 +106,36 @@ func Open(host, port, user, password, database string) (*sql.DB, error) {
 	db.SetMaxOpenConns(maxOpenConns)
 	db.SetMaxIdleConns(maxIdleConns)
 	db.SetConnMaxLifetime(connMaxLifetime)
+	// Idle reaping is the death-match guard (vc-wz5): reap idle conns before the
+	// managed Dolt server read_timeout closes them under the client. See the
+	// connMaxIdleTime doc comment and the dolt-timeout-race doctor check.
+	db.SetConnMaxIdleTime(connMaxIdleTime)
 	registry.dbs[k] = db
 	return db, nil
+}
+
+// IdleConnCeiling reports the longest an idle pooled connection may live before
+// this pool reaps it client-side: the smaller positive bound of connMaxIdleTime
+// and connMaxLifetime (a non-positive bound means "no limit from that knob").
+// A return of 0 means no client-side idle reaping at all — the pre-vc-wz5
+// death-match configuration.
+//
+// The managed Dolt server's read_timeout_millis MUST exceed this value; if it
+// does not, the server closes idle connections the client still trusts. The
+// dolt-timeout-race doctor check asserts server read_timeout > IdleConnCeiling()
+// at runtime, and this accessor is the single source of truth both the pool and
+// that check read.
+func IdleConnCeiling() time.Duration {
+	ceiling := time.Duration(0)
+	for _, bound := range []time.Duration{connMaxIdleTime, connMaxLifetime} {
+		if bound <= 0 {
+			continue // this knob imposes no limit
+		}
+		if ceiling == 0 || bound < ceiling {
+			ceiling = bound
+		}
+	}
+	return ceiling
 }
 
 // Shutdown closes all pooled connections and empties the registry. Call

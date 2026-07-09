@@ -22,6 +22,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Break the Dolt read-timeout death match: reap idle pooled connections
+  client-side before the managed server kills them (vc-wz5.1).** The Go-native
+  `internal/doltpool` pool bounded only a connection's total lifetime
+  (`connMaxLifetime`, `1h`) with no idle reaping, so an idle pooled connection
+  unused past the managed Dolt server's `read_timeout_millis` was closed
+  server-side while the client still trusted it for up to an hour. The driver
+  then handed the dead conn to the next operation (`closing bad idle connection:
+  EOF / connection reset by peer / broken pipe`), taxing every op with a
+  dead-conn round trip and — under churn — losing the dispatcher's last-fired
+  write, which surfaced as town-wide scheduled-order staleness (vc-wz5). The pool
+  now sets `connMaxIdleTime = 10s` (the load-bearing guard: below both the 15s
+  managed default and a 30s live override, with margin) and lowers
+  `connMaxLifetime` to `20s`; the client per-query `readTimeout` is unchanged
+  (it is the in-flight response deadline, not the idle-reaping knob). A new
+  `dolt-timeout-race` doctor check asserts the client idle-connection ceiling
+  (`doltpool.IdleConnCeiling`) stays strictly below the server
+  `read_timeout_millis` at runtime — reading the live managed `dolt-config.yaml`
+  with a configured-default fallback — turning a previously silent stderr storm
+  into a structured, blocking signal.
+
 - **Pin the `beads` dependency to the stable v1.0.4.** v1.3.0 built against
   `beads v1.0.5`, which was subsequently withdrawn (demoted to a pre-release;
   `v1.0.4` is the current stable release). v1.3.1 repins the `beads` Go module

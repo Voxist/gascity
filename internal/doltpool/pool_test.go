@@ -3,7 +3,54 @@ package doltpool
 import (
 	"sync"
 	"testing"
+	"time"
 )
+
+// managedDoltDefaultReadTimeout mirrors config.DefaultDoltReadTimeoutMillis
+// (15000ms). Duplicated as a local constant to keep this leaf package free of
+// a dependency on internal/config; the dolt-timeout-race doctor check performs
+// the authoritative comparison against the live/configured server value.
+const managedDoltDefaultReadTimeout = 15 * time.Second
+
+// TestIdleConnCeilingBreaksDeathMatch is the vc-wz5 regression guard: the pool
+// must reap idle connections client-side strictly before the managed Dolt
+// server's read_timeout would kill them. A zero ceiling (no idle reaping) or a
+// ceiling >= the server read_timeout reintroduces the death match.
+func TestIdleConnCeilingBreaksDeathMatch(t *testing.T) {
+	got := IdleConnCeiling()
+	if got <= 0 {
+		t.Fatalf("IdleConnCeiling() = %v, want > 0 (idle reaping must be enabled; a 0 ceiling is the pre-vc-wz5 death match)", got)
+	}
+	if got >= managedDoltDefaultReadTimeout {
+		t.Fatalf("IdleConnCeiling() = %v, want < %v (managed dolt read_timeout default); an idle conn held >= the server timeout is killed under the client", got, managedDoltDefaultReadTimeout)
+	}
+}
+
+// TestPoolIdleReapingConstants pins the constants so an accidental revert to
+// the death-match configuration (connMaxLifetime=1h, no connMaxIdleTime) fails
+// loudly. connMaxIdleTime is the tighter bound and therefore the ceiling.
+func TestPoolIdleReapingConstants(t *testing.T) {
+	if connMaxIdleTime <= 0 {
+		t.Fatalf("connMaxIdleTime = %v, want > 0 (idle reaping guard)", connMaxIdleTime)
+	}
+	if connMaxIdleTime >= managedDoltDefaultReadTimeout {
+		t.Fatalf("connMaxIdleTime = %v, want < %v (managed dolt read_timeout default)", connMaxIdleTime, managedDoltDefaultReadTimeout)
+	}
+	// connMaxLifetime need not be below the server timeout for correctness (a
+	// busy conn is never idle long enough to be killed; connMaxIdleTime is the
+	// guard). But the vc-wz5 fix lowered it from time.Hour to short-lived
+	// recycling — assert it stays well under a minute so a regression back to
+	// the 1h death-match lifetime fails loudly.
+	if connMaxLifetime > time.Minute {
+		t.Fatalf("connMaxLifetime = %v, want <= 1m post-vc-wz5 (was time.Hour)", connMaxLifetime)
+	}
+	if connMaxIdleTime > connMaxLifetime {
+		t.Fatalf("connMaxIdleTime (%v) > connMaxLifetime (%v): idle conns should be reaped no later than total-lifetime recycling", connMaxIdleTime, connMaxLifetime)
+	}
+	if want := connMaxIdleTime; IdleConnCeiling() != want {
+		t.Fatalf("IdleConnCeiling() = %v, want %v (the tighter of connMaxIdleTime/connMaxLifetime)", IdleConnCeiling(), want)
+	}
+}
 
 // resetForTest empties the registry so tests are order-independent.
 func resetForTest(t *testing.T) {
