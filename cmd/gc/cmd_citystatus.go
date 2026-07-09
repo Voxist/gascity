@@ -398,7 +398,11 @@ type statusObservationTarget struct {
 // config ([daemon] status_snapshot_timeout), falling back to the package
 // default when no config is available.
 func statusSnapshotTimeout(cfg *config.City) time.Duration {
-	if cfg == nil {
+	// Fall back to the package default when no explicit [daemon]
+	// status_snapshot_timeout is configured, so tests (which override the
+	// package var) and unset configs both resolve here rather than to
+	// StatusSnapshotTimeoutDuration's hardcoded default.
+	if cfg == nil || strings.TrimSpace(cfg.Daemon.StatusSnapshotTimeout) == "" {
 		return statusSessionSnapshotTimeout
 	}
 	return cfg.Daemon.StatusSnapshotTimeoutDuration()
