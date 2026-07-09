@@ -55,7 +55,7 @@ type fakeState struct {
 	allOrders         []orders.Order
 	services          workspacesvc.Registry
 	webhookDispatcher orderdispatch.Dispatcher // backs WebhookDispatchProvider; nil disables webhook dispatch
-	pokeCount         int
+	pokeCount         atomic.Int32
 	extmsgSvc         *extmsg.Services
 	adapterReg        *extmsg.AdapterRegistry
 	maintenance       MaintenanceProvider
@@ -158,7 +158,7 @@ func (f *fakeState) OrdersAll() []orders.Order {
 	}
 	return f.autos
 }
-func (f *fakeState) Poke()                                  { f.pokeCount++ }
+func (f *fakeState) Poke()                                  { f.pokeCount.Add(1) }
 func (f *fakeState) ServiceRegistry() workspacesvc.Registry { return f.services }
 
 // WebhookDispatcher lets fakeState satisfy WebhookDispatchProvider so webhook
