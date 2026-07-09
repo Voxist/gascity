@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
@@ -83,6 +85,19 @@ type Server struct {
 	storeHealthEntry    *StatusStoreHealth
 	storeHealthExpires  time.Time
 	storeHealthComputer func() *StatusStoreHealth
+
+	// statusWarm holds the last background-built /v0/status body (full + lite
+	// variants) so the request path serves a snapshot instead of running the
+	// ~28s O(store) buildStatusBody synchronously (vp-e0hv). The shared
+	// responseCache is unsuitable — its 2s expiry + 256-entry eviction would
+	// drop the warm body — so this gets its own field, like storeHealth above.
+	// statusBuildSF single-flights the (re)build per variant so a burst of cold
+	// requests — or a cold request racing a background refresh — shares one
+	// build instead of stampeding the store with abandoned scans.
+	statusWarmMu   sync.Mutex
+	statusWarmFull *statusWarmEntry
+	statusWarmLite *statusWarmEntry
+	statusBuildSF  singleflight.Group
 
 	// componentVersions caches the dolt engine and bd CLI versions the
 	// supervisor drives for /v0/status. Binary versions are immutable for
