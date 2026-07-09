@@ -361,8 +361,14 @@ func observeSessionTargetWithWarning(
 		err         error
 	}
 	done := make(chan observeResult, 1)
+	// Snapshot the package var into a local before spawning the worker so the
+	// goroutine reads a stable value. observeSessionTargetForStatus can be
+	// swapped by tests (and t.Cleanup restores it) concurrently with the
+	// observation goroutine, which the race detector flags as a read/write
+	// race on the package-level var.
+	observe := observeSessionTargetForStatus
 	go func() {
-		obs, err := observeSessionTargetForStatus(cityPath, nil, sp, cfg, target.runtimeSessionName)
+		obs, err := observe(cityPath, nil, sp, cfg, target.runtimeSessionName)
 		done <- observeResult{observation: obs, err: err}
 	}()
 

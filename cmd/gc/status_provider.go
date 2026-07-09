@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,6 +21,23 @@ var (
 type statusProvider struct {
 	base     runtime.Provider
 	warnOnce sync.Once
+
+	// Last-known-good liveness signals, served on a probe timeout so a slow
+	// (but not hung) runtime renders its last observed state instead of a false
+	// "dead". This is the status-CLI-only boundary (see newBoundedStatusProvider
+	// callers: only newStatusSessionProviderForCity[WithSnapshot], used by
+	// `gc status`/`gc city status`) — the reconciler/control plane uses the
+	// UNBOUNDED provider, so stale values here can never drive a control decision.
+	mu            sync.Mutex
+	lastRunning   map[string]bool
+	lastProcAlive map[string]bool
+	lastLiveness  map[string]runtime.Liveness
+}
+
+// livenessKey namespaces a per-session last-good entry by the process-name set
+// the probe was asked about (ProcessAlive/ObserveLiveness vary on it).
+func livenessKey(name string, processNames []string) string {
+	return name + "\x00" + strings.Join(processNames, "\x00")
 }
 
 var _ runtime.RelaunchProvider = (*statusProvider)(nil)
@@ -48,6 +66,40 @@ func boundedStatusCall[T any](p *statusProvider, fallback T, fn func() T) T {
 	}
 }
 
+// boundedStatusCallSWR is boundedStatusCall with stale-while-revalidate. fn runs
+// under the status timeout and ALWAYS records its result as last-known-good via
+// store — even when the bound has already elapsed, the goroutine keeps running,
+// lands the value, and (as a side effect) refreshes the base StateCache. On a
+// timeout we serve the last-known-good via load instead of the zero fallback, so
+// a slow-but-live runtime shows its last observed state rather than a false
+// "dead". Cold start (no last-good recorded yet) still returns zero, preserving
+// the original timeout-fallback contract. The stored value converges to the
+// truth within one probe completion, so a genuinely dead session self-corrects
+// on the next render. Safe only because this wrapper is status-CLI-only.
+func boundedStatusCallSWR[T any](p *statusProvider, zero T, load func() (T, bool), store func(T), fn func() T) T {
+	if statusProviderCallTimeout <= 0 {
+		r := fn()
+		store(r)
+		return r
+	}
+	resultCh := make(chan T, 1)
+	go func() {
+		r := fn()
+		store(r)
+		resultCh <- r
+	}()
+	select {
+	case result := <-resultCh:
+		return result
+	case <-time.After(statusProviderCallTimeout):
+		p.warnOnce.Do(statusProviderTimeoutWarning)
+		if last, ok := load(); ok {
+			return last
+		}
+		return zero
+	}
+}
+
 func (p *statusProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	return p.base.Start(ctx, name, cfg)
 }
@@ -61,9 +113,23 @@ func (p *statusProvider) Interrupt(name string) error {
 }
 
 func (p *statusProvider) IsRunning(name string) bool {
-	return boundedStatusCall(p, false, func() bool {
-		return p.base.IsRunning(name)
-	})
+	return boundedStatusCallSWR(p, false,
+		func() (bool, bool) {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			v, ok := p.lastRunning[name]
+			return v, ok
+		},
+		func(v bool) {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			if p.lastRunning == nil {
+				p.lastRunning = map[string]bool{}
+			}
+			p.lastRunning[name] = v
+		},
+		func() bool { return p.base.IsRunning(name) },
+	)
 }
 
 func (p *statusProvider) IsAttached(name string) bool {
@@ -77,15 +143,45 @@ func (p *statusProvider) Attach(name string) error {
 }
 
 func (p *statusProvider) ProcessAlive(name string, processNames []string) bool {
-	return boundedStatusCall(p, false, func() bool {
-		return p.base.ProcessAlive(name, processNames)
-	})
+	key := livenessKey(name, processNames)
+	return boundedStatusCallSWR(p, false,
+		func() (bool, bool) {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			v, ok := p.lastProcAlive[key]
+			return v, ok
+		},
+		func(v bool) {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			if p.lastProcAlive == nil {
+				p.lastProcAlive = map[string]bool{}
+			}
+			p.lastProcAlive[key] = v
+		},
+		func() bool { return p.base.ProcessAlive(name, processNames) },
+	)
 }
 
 func (p *statusProvider) ObserveLiveness(name string, processNames []string) runtime.Liveness {
-	return boundedStatusCall(p, runtime.Liveness{}, func() runtime.Liveness {
-		return runtime.ObserveLiveness(p.base, name, processNames)
-	})
+	key := livenessKey(name, processNames)
+	return boundedStatusCallSWR(p, runtime.Liveness{},
+		func() (runtime.Liveness, bool) {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			v, ok := p.lastLiveness[key]
+			return v, ok
+		},
+		func(v runtime.Liveness) {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			if p.lastLiveness == nil {
+				p.lastLiveness = map[string]runtime.Liveness{}
+			}
+			p.lastLiveness[key] = v
+		},
+		func() runtime.Liveness { return runtime.ObserveLiveness(p.base, name, processNames) },
+	)
 }
 
 func (p *statusProvider) Nudge(name string, content []runtime.ContentBlock) error {
