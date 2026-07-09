@@ -185,6 +185,22 @@ func waitForNSessionCreateEvents(t *testing.T, prov events.Provider, n int, time
 	t.Fatalf("timed out waiting for %d session create events (got %d)", n, len(evts))
 }
 
+// waitForPokeCount waits until fs.pokeCount reaches want. The async session
+// create handler emits the success event (which callers typically wait on
+// first) before it calls Poke, so a read of pokeCount immediately after the
+// event arrives can observe a stale value — poll instead.
+func waitForPokeCount(t *testing.T, fs *fakeState, want int32, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if fs.pokeCount.Load() == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("pokeCount = %d, want %d", fs.pokeCount.Load(), want)
+}
+
 func createTestSession(t *testing.T, store beads.Store, sp *runtime.Fake, title string) session.Info {
 	t.Helper()
 	mgr := session.NewManager(store, sp)
@@ -677,6 +693,25 @@ func waitForRecorderSubstring(t *testing.T, rec *syncResponseRecorder, want stri
 		time.Sleep(10 * time.Millisecond)
 	}
 	return rec.BodyString()
+}
+
+// syncLogBuffer is a thread-safe bytes.Buffer for use with log.SetOutput when
+// a background goroutine logs concurrently with the test reading the output.
+type syncLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 func TestHandleSessionList(t *testing.T) {
@@ -2493,9 +2528,7 @@ func TestHandleSessionCreateAsync(t *testing.T) {
 	if success.Session.Alias != "sky" {
 		t.Fatalf("Alias = %q, want %q", success.Session.Alias, "sky")
 	}
-	if fs.pokeCount != 1 {
-		t.Fatalf("pokeCount = %d, want 1", fs.pokeCount)
-	}
+	waitForPokeCount(t, fs, 1, testEventTimeout)
 }
 
 func TestHandleSessionCreateAsyncResultIsCommandable(t *testing.T) {
@@ -2798,8 +2831,8 @@ func TestHandleProviderSessionCreateRejectsAsync(t *testing.T) {
 	if !strings.Contains(w.Body.String(), "async session creation is only supported for configured agent templates") {
 		t.Fatalf("body = %q, want provider async guidance", w.Body.String())
 	}
-	if fs.pokeCount != 0 {
-		t.Fatalf("pokeCount = %d, want 0", fs.pokeCount)
+	if got := fs.pokeCount.Load(); got != 0 {
+		t.Fatalf("pokeCount = %d, want 0", got)
 	}
 }
 
@@ -4500,6 +4533,10 @@ func TestHandleSessionPermissionModeReturnsOverrideWithoutProviderDefault(t *tes
 	if success == nil {
 		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
+	// The async create handler emits the success event above before it calls
+	// Poke; drain that pending Poke before the permission-mode call below
+	// triggers its own, so the two don't race on fs.pokeCount.
+	waitForPokeCount(t, fs, 1, testEventTimeout)
 	suspendSessionForPermissionModeTest(t, fs, success.Session.ID)
 
 	req = newPostRequest(cityURL(fs, "/session/"+success.Session.ID+"/permission-mode"), strings.NewReader(`{"permission_mode":"plan"}`))
@@ -4711,7 +4748,7 @@ func TestHandleSessionMessageLogsLateProviderResultAfterTimeout(t *testing.T) {
 		sessionMessageAsyncTimeout = prevTimeout
 	})
 
-	var logs bytes.Buffer
+	var logs syncLogBuffer
 	oldOutput := log.Writer()
 	oldFlags := log.Flags()
 	log.SetOutput(&logs)
