@@ -26,6 +26,16 @@ const (
 	InstallUpgrade
 )
 
+// SourcePolicy validates a remote import source before packman resolves or
+// fetches it. It is applied to every source in the reachable closure — the
+// direct imports AND every transitive import discovered from a cached pack.toml
+// — before any `ResolveVersion` (git ls-remote) or `EnsureRepoInCache`
+// (clone/checkout) seam runs for that source. A non-nil error aborts the whole
+// sync before that source is touched, so an accepted top-level pack cannot
+// smuggle an internal, file, or link-local nested import past an API-layer
+// fence. A nil policy (the trusted CLI/local path) allows every source.
+type SourcePolicy func(source string) error
+
 type packConfig struct {
 	Imports map[string]config.Import `toml:"imports,omitempty"`
 }
@@ -90,7 +100,7 @@ func InstallLocked(cityRoot string) (*Lockfile, error) {
 		if pack.Commit == "" {
 			return nil, fmt.Errorf("lock entry %q is missing commit", source)
 		}
-		if _, err := EnsureRepoInCache(source, pack.Commit); err != nil {
+		if _, err := EnsureRepoInCache(cityRoot, source, pack.Commit); err != nil {
 			return nil, err
 		}
 	}
@@ -126,7 +136,7 @@ func EnsureBundledPacksCurrent(cityRoot string) error {
 		if pack.Commit == "" {
 			continue
 		}
-		if _, err := EnsureRepoInCache(source, pack.Commit); err != nil {
+		if _, err := EnsureRepoInCache(cityRoot, source, pack.Commit); err != nil {
 			return err
 		}
 	}
@@ -135,27 +145,38 @@ func EnsureBundledPacksCurrent(cityRoot string) error {
 
 // SyncLock resolves the reachable remote-import closure and returns the updated lock.
 func SyncLock(cityRoot string, imports map[string]config.Import, mode InstallMode) (*Lockfile, error) {
-	return syncLock(cityRoot, imports, mode, nil)
+	return syncLock(cityRoot, imports, mode, nil, nil)
+}
+
+// SyncLockWithPolicy is SyncLock with an untrusted-source policy applied to every
+// reachable source (direct and transitive) before it is resolved or fetched, so
+// an accepted public pack cannot pull an internal or file-backed nested import
+// past the caller's fence. A nil policy behaves exactly like SyncLock.
+func SyncLockWithPolicy(cityRoot string, imports map[string]config.Import, mode InstallMode, policy SourcePolicy) (*Lockfile, error) {
+	return syncLock(cityRoot, imports, mode, nil, policy)
 }
 
 // SyncLockSelectiveUpgrade refreshes only the listed remote sources while
 // preserving every other reachable import from the existing lock when possible.
 func SyncLockSelectiveUpgrade(cityRoot string, imports map[string]config.Import, upgradeSources map[string]struct{}) (*Lockfile, error) {
-	return syncLock(cityRoot, imports, InstallResolveIfNeeded, upgradeSources)
+	return syncLock(cityRoot, imports, InstallResolveIfNeeded, upgradeSources, nil)
 }
 
-func syncLock(cityRoot string, imports map[string]config.Import, mode InstallMode, upgradeSources map[string]struct{}) (*Lockfile, error) {
+func syncLock(cityRoot string, imports map[string]config.Import, mode InstallMode, upgradeSources map[string]struct{}, policy SourcePolicy) (*Lockfile, error) {
 	existing, err := ReadLockfile(fsys.OSFS{}, cityRoot)
 	if err != nil {
 		return nil, err
 	}
 
 	state := syncState{
+		cityRoot:       cityRoot,
 		mode:           mode,
 		existing:       existing,
 		upgradeSources: upgradeSources,
+		policy:         policy,
 		chosen:         make(map[string]LockedPack),
 		refreshed:      make(map[string]bool),
+		validated:      make(map[string]bool),
 	}
 
 	constraints, reachable, err := mergeDirectConstraints(imports)
@@ -188,11 +209,29 @@ func syncLock(cityRoot string, imports map[string]config.Import, mode InstallMod
 }
 
 type syncState struct {
+	cityRoot       string
 	mode           InstallMode
 	existing       *Lockfile
 	upgradeSources map[string]struct{}
+	policy         SourcePolicy
 	chosen         map[string]LockedPack
 	refreshed      map[string]bool
+	validated      map[string]bool
+}
+
+// checkPolicy runs the untrusted-source policy for source once per sync. It is
+// the single gate every source passes before resolveSource resolves it or
+// walkImport caches it, so a policy rejection aborts the sync before any git or
+// cache seam runs for that source — the transitive-import fence.
+func (s *syncState) checkPolicy(source string) error {
+	if s.policy == nil || s.validated[source] {
+		return nil
+	}
+	if err := s.policy(source); err != nil {
+		return err
+	}
+	s.validated[source] = true
+	return nil
 }
 
 func (s *syncState) ensureChosen(constraints map[string]string, reachable map[string]struct{}) (bool, error) {
@@ -216,6 +255,14 @@ func (s *syncState) ensureChosen(constraints map[string]string, reachable map[st
 }
 
 func (s *syncState) resolveSource(source, constraint string) (bool, error) {
+	// Fence the source before any resolution or cache fetch. resolveSource is the
+	// choke point every reachable source (direct and transitive) flows through
+	// before it is chosen, and walkImport only caches already-chosen sources, so
+	// gating here blocks both the ResolveVersion and EnsureRepoInCache seams.
+	if err := s.checkPolicy(source); err != nil {
+		return false, err
+	}
+
 	forceUpgrade := s.mode == InstallUpgrade
 	if !forceUpgrade && s.upgradeSources != nil {
 		_, forceUpgrade = s.upgradeSources[source]
@@ -247,7 +294,7 @@ func (s *syncState) resolveSource(source, constraint string) (bool, error) {
 		return false, fmt.Errorf("unknown install mode %d", s.mode)
 	}
 
-	resolved, err := ResolveVersion(source, constraint)
+	resolved, err := ResolveVersion(s.cityRoot, source, constraint)
 	if err != nil {
 		return false, err
 	}
@@ -326,7 +373,7 @@ func (s *syncState) walkImport(_ string, imp config.Import, constraints map[stri
 }
 
 func (s *syncState) cachedPackPath(source, commit string) (string, error) {
-	cachePath, err := EnsureRepoInCache(source, commit)
+	cachePath, err := EnsureRepoInCache(s.cityRoot, source, commit)
 	if err != nil {
 		return "", err
 	}

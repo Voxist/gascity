@@ -2443,7 +2443,7 @@ func TestFinalizeDrainAckStoppedSessionDoesNotEmitEventsWhenFinalMetadataFails(t
 
 	failingStore := &failSetMetadataBatchStore{Store: env.store, err: errors.New("metadata write failed")}
 	finalizeDrainAckStoppedSession(
-		"", env.cfg, failingStore, nil, &session, "worker", false,
+		"", env.cfg, failingStore, nil, &session, sessionpkg.InfoFromPersistedBead(session), "worker", false,
 		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
 	)
 
@@ -2470,7 +2470,7 @@ func TestFinalizeDrainAckStoppedSessionFallsThroughWhenCloseGateRacesWithAssignm
 
 	racingStore := &assignOnListStore{Store: env.store, sessionID: session.ID}
 	finalizeDrainAckStoppedSession(
-		"", env.cfg, racingStore, nil, &session, "worker", true,
+		"", env.cfg, racingStore, nil, &session, sessionpkg.InfoFromPersistedBead(session), "worker", true,
 		newFakeDrainOps(), env.dt, env.clk, env.rec, &env.stderr,
 	)
 
@@ -3923,7 +3923,7 @@ func reconcileExistingAsleepNamedSessionWithRoutedWork(t *testing.T, cfg *config
 	if err != nil {
 		t.Fatalf("loadSessionBeads: %v", err)
 	}
-	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessions, dsResult.ScaleCheckCounts))
+	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessionInfosFromBeads(sessions), dsResult.ScaleCheckCounts))
 	if poolDesired == nil {
 		poolDesired = make(map[string]int)
 	}
@@ -5619,6 +5619,46 @@ func TestReconcileSessionBeads_PreservedConfiguredNamedRateLimitRunsBeforeHeal(t
 	}
 }
 
+// TestResolvePreservedConfiguredNamedSessionTemplate_StoreOnlyClosedDuplicateExcluded
+// pins the one behavior the Step-4 infoByID feed can touch: the GC_SESSION_ID
+// resolution scan (template_resolve.go Step 7) picks the FIRST OpenInfos entry
+// whose session_name matches. A store-only-closed twin (info.Closed=true but a
+// live raw Status) sharing the preserved session's session_name, placed EARLIER
+// in the feed, must be filtered out by newSessionBeadSnapshotFromInfos so the
+// live preserved bead — not the closed twin — resolves GC_SESSION_ID.
+func TestResolvePreservedConfiguredNamedSessionTemplate_StoreOnlyClosedDuplicateExcluded(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		SessionSleep:  config.SessionSleepConfig{InteractiveResume: "60s"},
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	session := env.createSessionBead(sessionName, "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+	})
+	sessionInfo := sessionpkg.InfoFromPersistedBead(session)
+
+	// A store-only-closed twin sharing the same session_name, earlier in the
+	// feed. It would win the first-match GC_SESSION_ID scan if not filtered.
+	closedTwin := sessionInfo
+	closedTwin.ID = "closed-twin"
+	closedTwin.Closed = true
+
+	preservedTP, err := resolvePreservedConfiguredNamedSessionTemplate(".", env.cfg.Workspace.Name, env.cfg, env.sp, env.store, []sessionpkg.Info{closedTwin, sessionInfo}, sessionInfo, env.clk, io.Discard)
+	if err != nil {
+		t.Fatalf("resolve preserved named session: %v", err)
+	}
+	if got := preservedTP.Env["GC_SESSION_ID"]; got != session.ID {
+		t.Fatalf("GC_SESSION_ID = %q, want the live preserved bead ID %q (store-only-closed twin must be filtered from the feed)", got, session.ID)
+	}
+}
+
 func TestReconcileSessionBeads_PreservedRunningNamedSessionStillIdleDrains(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
@@ -5637,7 +5677,8 @@ func TestReconcileSessionBeads_PreservedRunningNamedSessionStillIdleDrains(t *te
 		namedSessionIdentityMetadata: "worker",
 		namedSessionModeMetadata:     "on_demand",
 	})
-	preservedTP, err := resolvePreservedConfiguredNamedSessionTemplate(".", env.cfg.Workspace.Name, env.cfg, env.sp, env.store, []beads.Bead{session}, session, env.clk, io.Discard)
+	sessionInfo := sessionpkg.InfoFromPersistedBead(session)
+	preservedTP, err := resolvePreservedConfiguredNamedSessionTemplate(".", env.cfg.Workspace.Name, env.cfg, env.sp, env.store, []sessionpkg.Info{sessionInfo}, sessionInfo, env.clk, io.Discard)
 	if err != nil {
 		t.Fatalf("resolve preserved named session: %v", err)
 	}
@@ -6762,14 +6803,64 @@ func TestTraceHealClearedPendingCreateLeaseRecordsDecision(t *testing.T) {
 	if rec.OutcomeCode != TraceOutcomeApplied {
 		t.Fatalf("outcome = %q, want %q", rec.OutcomeCode, TraceOutcomeApplied)
 	}
-	if got := rec.Fields["raw_reason_code"]; got != "heal_cleared_stale_lease" {
-		t.Fatalf("raw_reason_code = %#v, want heal_cleared_stale_lease", got)
+	if rec.ReasonCode != TraceReasonHealClearedStaleLease {
+		t.Fatalf("reason = %q, want %q", rec.ReasonCode, TraceReasonHealClearedStaleLease)
 	}
 	if got := rec.Fields["state_before"]; got != "creating" {
 		t.Fatalf("state_before = %#v, want creating", got)
 	}
 	if got := rec.Fields["state_after"]; got != "asleep" {
 		t.Fatalf("state_after = %#v, want asleep", got)
+	}
+}
+
+// TestRecordDecisionKeepsBackfilledCodesTyped proves the S26 collapse: codes
+// that the deleted normalize allowlists used to silently rewrite to "unknown"
+// (dumping the real value into a raw_*_code field) now land directly in the
+// typed primary fields, with no raw_*_code shadow left behind.
+func TestRecordDecisionKeepsBackfilledCodesTyped(t *testing.T) {
+	trace := &sessionReconcilerTraceCycle{
+		tracer: &SessionReconcilerTracer{
+			detail: map[string]TraceSource{"repo/worker": TraceSourceManual},
+		},
+		dropReasons:       map[string]int{},
+		pendingDetail:     map[string][]SessionReconcilerTraceRecord{},
+		pendingDropped:    map[string]int{},
+		templatesTouched:  map[string]struct{}{},
+		detailedTemplates: map[string]struct{}{},
+		decisionCounts:    map[string]int{},
+		operationCounts:   map[string]int{},
+		mutationCounts:    map[string]int{},
+		reasonCounts:      map[string]int{},
+		outcomeCounts:     map[string]int{},
+	}
+
+	trace.RecordDecision(
+		TraceSiteReconcilerDrainAck,
+		TraceReasonConfigDriftAttached,
+		TraceOutcomeCancelReconcilerAck,
+		"repo/worker",
+		"worker-1",
+		nil,
+	)
+
+	if len(trace.records) != 1 {
+		t.Fatalf("records = %d, want 1", len(trace.records))
+	}
+	rec := trace.records[0]
+	if rec.SiteCode != TraceSiteReconcilerDrainAck {
+		t.Fatalf("site = %q, want %q", rec.SiteCode, TraceSiteReconcilerDrainAck)
+	}
+	if rec.ReasonCode != TraceReasonConfigDriftAttached {
+		t.Fatalf("reason = %q, want %q", rec.ReasonCode, TraceReasonConfigDriftAttached)
+	}
+	if rec.OutcomeCode != TraceOutcomeCancelReconcilerAck {
+		t.Fatalf("outcome = %q, want %q", rec.OutcomeCode, TraceOutcomeCancelReconcilerAck)
+	}
+	for _, k := range []string{"raw_site_code", "raw_reason_code", "raw_outcome_code"} {
+		if _, ok := rec.Fields[k]; ok {
+			t.Fatalf("field %q present, want absent", k)
+		}
 	}
 }
 
@@ -9230,7 +9321,7 @@ func TestReconcileSessionBeads_FileStoreAlwaysNamedRecoversWithLeakedDuplicateOp
 	if err != nil {
 		t.Fatalf("loadSessionBeads: %v", err)
 	}
-	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessions, dsResult.ScaleCheckCounts))
+	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessionInfosFromBeads(sessions), dsResult.ScaleCheckCounts))
 	if poolDesired == nil {
 		poolDesired = make(map[string]int)
 	}
@@ -9366,7 +9457,7 @@ func reconcileConfiguredSessionsOnce(
 	if err != nil {
 		t.Fatalf("loadSessionBeads: %v", err)
 	}
-	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessions, dsResult.ScaleCheckCounts))
+	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessionInfosFromBeads(sessions), dsResult.ScaleCheckCounts))
 	if poolDesired == nil {
 		poolDesired = make(map[string]int)
 	}
@@ -9878,7 +9969,7 @@ func TestReconcileSessionBeads_BuildDesiredStateSkipsFailedCreatePoolSession(t *
 				t.Fatalf("loadSessionBeads: %v", err)
 			}
 			cfgNames := configuredSessionNames(cfg, cfg.EffectiveCityName(), store)
-			poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessions, dsResult.ScaleCheckCounts))
+			poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessionInfosFromBeads(sessions), dsResult.ScaleCheckCounts))
 			if poolDesired == nil {
 				poolDesired = make(map[string]int)
 			}
@@ -10005,7 +10096,7 @@ func TestReconcileSessionBeads_SyncReplacesFailedCreateNamedSession(t *testing.T
 		t.Fatalf("fresh named-session state = %q, want start-pending", fresh.Metadata["state"])
 	}
 
-	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessions, dsResult.ScaleCheckCounts))
+	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessionInfosFromBeads(sessions), dsResult.ScaleCheckCounts))
 	if poolDesired == nil {
 		poolDesired = make(map[string]int)
 	}

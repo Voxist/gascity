@@ -143,6 +143,19 @@ func (e *Editor) EditExpanded(fn func(raw, expanded *config.City) error) error {
 	return e.write(raw)
 }
 
+// Do runs fn while holding the Editor's mutation lock, serializing it against
+// every other Editor mutation of this city. Use it for city-config writes that
+// do not fit the load → mutate → validate → write callback shape — for example
+// a multi-file pack import that writes pack.toml, packs.lock, and sometimes
+// city.toml — so they still pass through the single per-city serialization
+// boundary the [Editor] provides. The Editor does not load, validate, or write
+// city.toml for a Do call; fn owns its own I/O.
+func (e *Editor) Do(fn func() error) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return fn()
+}
+
 func validateCityForEdit(cfg *config.City) error {
 	if err := config.ValidateAgents(cfg.Agents); err != nil {
 		return fmt.Errorf("%w: agents: %w", ErrValidation, err)
@@ -152,6 +165,9 @@ func validateCityForEdit(cfg *config.City) error {
 	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
 		return fmt.Errorf("%w: services: %w", ErrValidation, err)
+	}
+	if err := config.ValidateWebhooks(cfg.Webhooks); err != nil {
+		return fmt.Errorf("%w: webhooks: %w", ErrValidation, err)
 	}
 	if err := workspacesvc.ValidateRuntimeSupport(cfg.Services); err != nil {
 		return fmt.Errorf("%w: services: %w", ErrValidation, err)
@@ -1251,6 +1267,7 @@ type ProviderUpdate struct {
 	Env                map[string]string // nil = not set, non-nil = additive merge
 	OptionsSchemaMerge *string
 	OptionsSchema      []config.ProviderOption // nil = not set, non-nil = replace
+	OptionDefaults     map[string]string       // nil = not set, non-nil = additive merge
 }
 
 // CreateProvider adds a new city-level provider to the config.
@@ -1266,6 +1283,23 @@ func (e *Editor) CreateProvider(name string, spec config.ProviderSpec) error {
 		cfg.Providers[name] = spec
 		return nil
 	})
+}
+
+// mergeStringMapInto additively merges src into dst, lazily allocating dst
+// when it is nil. Keys present in src overwrite those in dst; an empty src
+// leaves dst unchanged. It returns the (possibly newly allocated) destination
+// so callers can assign it back onto the target field.
+func mergeStringMapInto(dst, src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return dst
+	}
+	if dst == nil {
+		dst = make(map[string]string, len(src))
+	}
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
 }
 
 // UpdateProvider partially updates an existing city-level provider.
@@ -1316,20 +1350,14 @@ func (e *Editor) UpdateProvider(name string, patch ProviderUpdate) error {
 		if patch.ReadyDelayMs != nil {
 			spec.ReadyDelayMs = *patch.ReadyDelayMs
 		}
-		if len(patch.Env) > 0 {
-			if spec.Env == nil {
-				spec.Env = make(map[string]string, len(patch.Env))
-			}
-			for k, v := range patch.Env {
-				spec.Env[k] = v
-			}
-		}
+		spec.Env = mergeStringMapInto(spec.Env, patch.Env)
 		if patch.OptionsSchemaMerge != nil {
 			spec.OptionsSchemaMerge = *patch.OptionsSchemaMerge
 		}
 		if patch.OptionsSchema != nil {
 			spec.OptionsSchema = append([]config.ProviderOption(nil), patch.OptionsSchema...)
 		}
+		spec.OptionDefaults = mergeStringMapInto(spec.OptionDefaults, patch.OptionDefaults)
 		cfg.Providers[name] = spec
 		return nil
 	})

@@ -903,7 +903,7 @@ func isStorelessMailProvider() bool {
 // sessionMailboxAddress / sessionMailboxAddresses delegate to the session-class
 // front-door codec (internal/session) so the session-bead metadata vocabulary
 // (alias / alias_history / session_name) lives in one place. The per-session-id
-// resolution paths route through InfoStore.MailboxAddress(es); these thin
+// resolution paths route through Store.MailboxAddress(es); these thin
 // wrappers remain for the list-scan sites that already hold a []beads.Bead.
 func sessionMailboxAddress(b beads.Bead) string {
 	return session.MailboxAddress(b)
@@ -931,7 +931,7 @@ func resolveMailIdentityCached(store beads.Store, identifier string, cache *mail
 		}
 		return "", err
 	}
-	address, err := session.NewInfoStore(beads.SessionStore{Store: store}).MailboxAddress(sessionID)
+	address, err := session.NewStore(beads.SessionStore{Store: store}).MailboxAddress(sessionID)
 	if err != nil {
 		return "", err
 	}
@@ -952,7 +952,7 @@ func resolveMailIdentityWithConfigCached(cityPath string, cfg *config.City, stor
 	if store != nil && cfg != nil {
 		sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, identifier)
 		if err == nil {
-			address, err := session.NewInfoStore(beads.SessionStore{Store: store}).MailboxAddress(sessionID)
+			address, err := session.NewStore(beads.SessionStore{Store: store}).MailboxAddress(sessionID)
 			if err != nil {
 				return "", err
 			}
@@ -1059,6 +1059,18 @@ type mailIdentitySessionCache struct {
 	fetched bool
 }
 
+func ambientMailTargetConfig() (string, *config.City) {
+	cityPath, err := resolveCity()
+	if err != nil {
+		return "", nil
+	}
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		return cityPath, nil
+	}
+	return cityPath, cfg
+}
+
 func listMailIdentitySessions(store beads.Store, cache *mailIdentitySessionCache) ([]beads.Bead, error) {
 	if cache == nil {
 		return session.ListAllSessionBeads(store, beads.ListQuery{})
@@ -1130,6 +1142,44 @@ func resolveMailTargets(store beads.Store, identifier string) (resolvedMailTarge
 	return resolveMailTargetsCached(store, identifier, nil)
 }
 
+func resolveMailTargetsWithConfig(cityPath string, cfg *config.City, store beads.Store, identifier string) (resolvedMailTarget, error) {
+	return resolveMailTargetsWithConfigCached(cityPath, cfg, store, identifier, nil)
+}
+
+func resolveMailTargetsWithConfigCached(cityPath string, cfg *config.City, store beads.Store, identifier string, cache *mailIdentitySessionCache) (resolvedMailTarget, error) {
+	if normalized := normalizeNamedSessionTarget(identifier); normalized == "" || normalized == "human" {
+		return resolvedMailTarget{display: "human", recipients: []string{"human"}}, nil
+	}
+	if store != nil && cfg != nil {
+		// Route the session-ID resolve and the mailbox-identity bead read through
+		// the session coordination-class store so a [beads.classes.sessions]
+		// relocation reaches mail target resolution. Identity at the default
+		// backend. (Mirrors cmd_nudge's sessStore routing; the sibling resolvers
+		// resolveMailTargetsCached / resolveMailIdentityWithConfigCached carry the
+		// same pre-existing gap and are swept on the mail DI pass.)
+		sessStore := cliSessionStore(store, cfg, cityPath)
+		sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, sessStore, identifier)
+		if err == nil {
+			b, err := sessStore.Get(sessionID)
+			if err != nil {
+				return resolvedMailTarget{}, err
+			}
+			addresses := sessionMailboxAddresses(b)
+			if len(addresses) == 0 {
+				return resolvedMailTarget{}, fmt.Errorf("session %q has no mailbox identity", identifier)
+			}
+			return resolvedMailTarget{
+				display:    addresses[0],
+				recipients: addresses,
+			}, nil
+		}
+		if !errors.Is(err, session.ErrSessionNotFound) {
+			return resolvedMailTarget{}, err
+		}
+	}
+	return resolveMailTargetsCached(store, identifier, cache)
+}
+
 func resolveMailTargetsCached(store beads.Store, identifier string, cache *mailIdentitySessionCache) (resolvedMailTarget, error) {
 	if normalized := normalizeNamedSessionTarget(identifier); normalized == "" || normalized == "human" {
 		return resolvedMailTarget{display: "human", recipients: []string{"human"}}, nil
@@ -1148,7 +1198,7 @@ func resolveMailTargetsCached(store beads.Store, identifier string, cache *mailI
 		}
 		return resolvedMailTarget{}, err
 	}
-	addresses, err := session.NewInfoStore(beads.SessionStore{Store: store}).MailboxAddresses(sessionID)
+	addresses, err := session.NewStore(beads.SessionStore{Store: store}).MailboxAddresses(sessionID)
 	if err != nil {
 		return resolvedMailTarget{}, err
 	}
@@ -1173,7 +1223,8 @@ func resolveMailTargetsForCommand(identifier string, stderr io.Writer, cmdName s
 		_ = code
 		return resolvedMailTarget{}, false
 	}
-	target, err := resolveMailTargets(store, identifier)
+	cityPath, cfg := ambientMailTargetConfig()
+	target, err := resolveMailTargetsWithConfig(cityPath, cfg, store, identifier)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return resolvedMailTarget{}, false
@@ -1197,9 +1248,10 @@ func resolveDefaultMailTargetsForCommand(stderr io.Writer, cmdName string) (reso
 	}
 	// Memoize the gc:session enumeration so multi-candidate retry shares one
 	// broad scan instead of issuing one per candidate (ga-q6ct Layer 2).
+	cityPath, cfg := ambientMailTargetConfig()
 	cache := &mailIdentitySessionCache{}
 	for _, c := range candidates {
-		target, err := resolveMailTargetsCached(store, c, cache)
+		target, err := resolveMailTargetsWithConfigCached(cityPath, cfg, store, c, cache)
 		if err == nil {
 			return target, true
 		}

@@ -1309,7 +1309,18 @@ func cityPostgresProjectionErrorCanBeBypassed(cityPath string, err error) bool {
 }
 
 func bdRuntimeEnvForRigWithError(cityPath string, cfg *config.City, rigPath string) (map[string]string, error) {
-	env, cityErr := bdRuntimeEnvWithError(cityPath)
+	return bdRuntimeEnvForRigWithErrorRecovery(cityPath, cfg, rigPath, true)
+}
+
+// bdRuntimeEnvForRigWithErrorNoRecovery is bdRuntimeEnvForRigWithError
+// without the managed-dolt recovery side effects; see
+// bdRuntimeEnvWithErrorNoRecovery for why (gascity ga-cdmx6x).
+func bdRuntimeEnvForRigWithErrorNoRecovery(cityPath string, cfg *config.City, rigPath string) (map[string]string, error) {
+	return bdRuntimeEnvForRigWithErrorRecovery(cityPath, cfg, rigPath, false)
+}
+
+func bdRuntimeEnvForRigWithErrorRecovery(cityPath string, cfg *config.City, rigPath string, allowRecovery bool) (map[string]string, error) {
+	env, cityErr := bdRuntimeEnvWithErrorRecovery(cityPath, allowRecovery)
 	rigPath = filepath.Clean(rigPath)
 	// Pin the rig store explicitly. The gc-beads-bd provider derives its Dolt
 	// data root from GC_CITY_PATH unless BEADS_DIR is set, so cwd-based
@@ -1333,7 +1344,7 @@ func bdRuntimeEnvForRigWithError(cityPath string, cfg *config.City, rigPath stri
 		mirrorBeadsDoltEnv(env)
 		return env, nil
 	}
-	if err := applyResolvedRigDoltEnv(env, cityPath, rigPath, explicitRig, true); err != nil {
+	if err := applyResolvedRigDoltEnv(env, cityPath, rigPath, explicitRig, allowRecovery); err != nil {
 		clearProjectedDoltEnv(env)
 		clearProjectedPostgresEnv(env)
 		mirrorBeadsDoltEnv(env)
@@ -1418,6 +1429,23 @@ func nativeStoreCanaryScopeName(cityPath string, cfg *config.City, scopeRoot str
 }
 
 func bdRuntimeEnvWithError(cityPath string) (map[string]string, error) {
+	return bdRuntimeEnvWithErrorRecovery(cityPath, true)
+}
+
+// bdRuntimeEnvWithErrorNoRecovery is bdRuntimeEnvWithError without the
+// managed-dolt recovery/health-check/autostart side effects: it reads
+// existing published or configured connection state only, and fails fast
+// (env still gets the non-Dolt opt-out vars set) when no managed server is
+// currently reachable. Recovering a managed dolt server is legitimate
+// work, but doing it from every concurrent, short-budget scoped-store
+// construction would multiply exactly the load a read-storm mitigation
+// exists to bound (gascity ga-cdmx6x) — those callers use this instead of
+// bdRuntimeEnvWithError.
+func bdRuntimeEnvWithErrorNoRecovery(cityPath string) (map[string]string, error) {
+	return bdRuntimeEnvWithErrorRecovery(cityPath, false)
+}
+
+func bdRuntimeEnvWithErrorRecovery(cityPath string, allowRecovery bool) (map[string]string, error) {
 	env := cityRuntimeEnvMapForCity(cityPath)
 	env["BEADS_DIR"] = filepath.Join(cityPath, ".beads")
 	env["GC_RIG"] = ""
@@ -1470,7 +1498,7 @@ func bdRuntimeEnvWithError(cityPath string) (map[string]string, error) {
 	} else if usedPostgres {
 		return env, nil
 	}
-	if err := applyResolvedCityDoltEnv(env, cityPath, true); err != nil {
+	if err := applyResolvedCityDoltEnv(env, cityPath, allowRecovery); err != nil {
 		clearProjectedDoltEnv(env)
 		mirrorBeadsDoltEnv(env)
 		if isRecoverableManagedDoltEnvError(err) {
@@ -1520,7 +1548,7 @@ func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 				clearProjectedDoltEnv(source)
 			}
 		}
-		keys := execProjectedBackendEnvKeys()
+		keys := execProjectedBackendCopyKeys()
 		keys = append(keys, "BEADS_DOLT_AUTO_START")
 		for _, key := range keys {
 			if value, ok := source[key]; ok {
@@ -1595,6 +1623,42 @@ func mirrorBeadsDoltEnv(env map[string]string) {
 		env["BEADS_DOLT_PASSWORD"] = pass
 	} else {
 		delete(env, "BEADS_DOLT_PASSWORD")
+	}
+	// Carry the hosted beads-gateway credential command into the projected env.
+	// bd authenticates to the gateway by running the helper named in
+	// BEADS_DOLT_CREDENTIAL_COMMAND; without it bd falls back to the static/root
+	// user and the gateway rejects the connection (MySQL Error 1045). That key
+	// contains "CREDENTIAL", so execenv.FilterInherited strips it from every
+	// gc-spawned bd subprocess and agent session. preserveHostedBeadsCredentialEnv
+	// re-adds it on the slice-merge paths (overlayEnvEntries / mergeRuntimeEnv),
+	// but only when it is already present in the pre-filter environ and only on
+	// those paths — the agent session env is built from this projected map, which
+	// does not carry the ambient value, and a controller that exports the helper
+	// under only the non-sensitive GC_DOLT_CRED_CMD (which survives filtering) has
+	// nothing for that pass to preserve. Mirror GC_DOLT_CRED_CMD into
+	// BEADS_DOLT_CREDENTIAL_COMMAND here (map value wins, else the ambient value
+	// of either key) so bd authenticates the same way the in-process native store
+	// does.
+	//
+	// Two intentional asymmetries with the sibling BEADS_DOLT_* branches above,
+	// kept deliberately (do not "normalize" them into the map->map convention):
+	//  1. Ambient fallback: this is the only branch that reads process env
+	//     (os.Getenv), because a controller commonly exports only the helper and
+	//     never seeds it into the projected map.
+	//  2. Preserve-not-clear: when no source exists this branch leaves any
+	//     existing target value untouched instead of deleting/emptying it. The
+	//     siblings clear their target to defeat stale tmux inheritance; the
+	//     credential key is instead preserved from ambient by
+	//     preserveHostedBeadsCredentialEnv on the slice-merge paths, so clearing
+	//     it here would fight that pass.
+	if cred := strings.TrimSpace(env["GC_DOLT_CRED_CMD"]); cred != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = cred
+	} else if cred := strings.TrimSpace(env["BEADS_DOLT_CREDENTIAL_COMMAND"]); cred != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = cred
+	} else if ambient := strings.TrimSpace(os.Getenv("GC_DOLT_CRED_CMD")); ambient != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = ambient
+	} else if ambient := strings.TrimSpace(os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND")); ambient != "" {
+		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = ambient
 	}
 }
 

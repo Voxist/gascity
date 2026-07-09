@@ -1029,7 +1029,7 @@ func TestOrderRunJSONFormulaSummary(t *testing.T) {
 	store := beads.NewMemStore()
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRunWithJSON(aa, "digest", "", "/city", beads.OrdersStore{Store: store}, nil, true, &stdout, &stderr)
+	code := doOrderRunWithJSON(aa, "digest", "", "/city", beads.OrdersStore{Store: store}, nil, true, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRunWithJSON = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1107,7 +1107,7 @@ func TestOrderRunJSONRejectsExecWithoutRunning(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRunWithJSON(aa, "release-exec", "", "/city", beads.OrdersStore{Store: beads.NewMemStore()}, nil, true, &stdout, &stderr)
+	code := doOrderRunWithJSON(aa, "release-exec", "", "/city", beads.OrdersStore{Store: beads.NewMemStore()}, nil, true, nil, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("doOrderRunWithJSON exec = %d, want 1", code)
 	}
@@ -1202,7 +1202,7 @@ on = "bead.closed"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderRun("release-exec", "", false, &stdout, &stderr)
+	code := cmdOrderRun("release-exec", "", false, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderRun = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2359,7 +2359,7 @@ prefix = "fe"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRunExec(a, cityDir, cfg, &stdout, &stderr)
+	code := doOrderRunExec(a, cityDir, cfg, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRunExec = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2432,7 +2432,7 @@ prefix = "ct"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRunExec(a, cityDir, cfg, &stdout, &stderr)
+	code := doOrderRunExec(a, cityDir, cfg, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRunExec = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2519,7 +2519,7 @@ prefix = "ct"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRunExec(a, cityDir, cfg, &stdout, &stderr)
+	code := doOrderRunExec(a, cityDir, cfg, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRunExec = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2579,7 +2579,7 @@ prefix = "ct"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRunExec(a, cityDir, cfg, &stdout, &stderr)
+	code := doOrderRunExec(a, cityDir, cfg, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRunExec = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2660,7 +2660,7 @@ prefix = "ct"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRunExec(a, cityDir, cfg, &stdout, &stderr)
+	code := doOrderRunExec(a, cityDir, cfg, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRunExec = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2690,7 +2690,7 @@ func TestOrderRunExecHonorsOrdersMaxTimeout(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	start := time.Now()
-	code := doOrderRunExec(a, cityDir, cfg, &stdout, &stderr)
+	code := doOrderRunExec(a, cityDir, cfg, nil, &stdout, &stderr)
 	elapsed := time.Since(start)
 	if code == 0 {
 		t.Fatalf("doOrderRunExec = 0, want timeout failure; stdout=%q stderr=%q", stdout.String(), stderr.String())
@@ -2723,7 +2723,7 @@ dolt.auto-start: false
 	a := orders.Order{Name: "pg-env", Trigger: "event", On: events.BeadClosed, Exec: "true"}
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRunExecTracked(a, cityDir, nil, orders.NewStore(beads.OrdersStore{Store: store}), eventLog, &stdout, &stderr)
+	code := doOrderRunExecTracked(a, cityDir, nil, orders.NewStore(beads.OrdersStore{Store: store}), eventLog, nil, &stdout, &stderr)
 	if code == 0 {
 		t.Fatalf("doOrderRunExecTracked = 0, want env failure; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
@@ -2776,7 +2776,7 @@ prefix = "fe"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRunExecTracked(a, cityDir, cfg, orders.NewStore(beads.OrdersStore{Store: store}), nil, &stdout, &stderr)
+	code := doOrderRunExecTracked(a, cityDir, cfg, orders.NewStore(beads.OrdersStore{Store: store}), nil, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doOrderRunExecTracked = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -2810,7 +2810,7 @@ dolt.auto-start: false
 
 	a := orders.Order{Name: "pg-env", Trigger: "cooldown", Interval: "1m", Exec: "true"}
 	var stdout, stderr bytes.Buffer
-	result := doOrderRunExecResult(a, cityDir, nil, &stdout, &stderr)
+	result := doOrderRunExecResult(a, cityDir, nil, nil, &stdout, &stderr)
 	if result.code == 0 {
 		t.Fatalf("doOrderRunExecResult = 0, want env failure; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
@@ -3609,5 +3609,78 @@ func TestOrderScopedName(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("orderScopedName(%q, %q) = %q, want %q", tc.name, tc.rig, got, tc.want)
 		}
+	}
+}
+
+// TestOrderCheckCooldownFastPathBypassesLastRunStore proves the cooldown
+// short-circuit: a recent order.fired event keeps a cooldown order not-due
+// without ever consulting the (slow, Dolt-backed) last-run store. The store
+// is rigged to error if queried, so a clean not-due result confirms the
+// fast path took over.
+func TestOrderCheckCooldownFastPathBypassesLastRunStore(t *testing.T) {
+	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
+	aa := []orders.Order{{
+		Name:     "digest",
+		Trigger:  "cooldown",
+		Interval: "24h",
+		Formula:  "mol-digest",
+	}}
+	// Any query against this store errors — it must not be reached.
+	failStore := labelFailListStore{
+		Store:     beads.NewMemStore(),
+		failLabel: "order-run:digest",
+	}
+	resolver := func(orders.Order) ([]beads.OrdersStore, error) {
+		return []beads.OrdersStore{{Store: failStore}}, nil
+	}
+
+	// Recent order.fired event, well within the 24h cooldown.
+	ep := events.NewFake()
+	ep.Record(events.Event{Type: events.OrderFired, Subject: "digest", Ts: now.Add(-1 * time.Hour)})
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderCheckWithStoresResolverScoped(t.TempDir(), &config.City{}, aa, now, ep, resolver, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderCheckWithStoresResolverScoped = %d, want 1 (cooldown active, not due); stderr: %s; stdout: %s", code, stderr.String(), stdout.String())
+	}
+	if strings.Contains(stderr.String(), "last run") {
+		t.Fatalf("last-run store was consulted despite in-window event; fast path did not bypass it:\n%s", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "cooldown") {
+		t.Fatalf("stdout missing not-due cooldown row:\n%s", stdout.String())
+	}
+}
+
+// TestOrderCheckCooldownStaleEventFallsThroughToLastRunStore proves the other
+// half of the guarantee: an order.fired event older than the cooldown interval
+// does not short-circuit, so the last-run store is still consulted (and here,
+// its error surfaces).
+func TestOrderCheckCooldownStaleEventFallsThroughToLastRunStore(t *testing.T) {
+	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
+	aa := []orders.Order{{
+		Name:     "digest",
+		Trigger:  "cooldown",
+		Interval: "24h",
+		Formula:  "mol-digest",
+	}}
+	failStore := labelFailListStore{
+		Store:     beads.NewMemStore(),
+		failLabel: "order-run:digest",
+	}
+	resolver := func(orders.Order) ([]beads.OrdersStore, error) {
+		return []beads.OrdersStore{{Store: failStore}}, nil
+	}
+
+	// Stale order.fired event, older than the 24h cooldown.
+	ep := events.NewFake()
+	ep.Record(events.Event{Type: events.OrderFired, Subject: "digest", Ts: now.Add(-25 * time.Hour)})
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderCheckWithStoresResolverScoped(t.TempDir(), &config.City{}, aa, now, ep, resolver, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderCheckWithStoresResolverScoped = %d, want 1 when last-run store errors after stale event; stdout: %s", code, stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "last run") {
+		t.Fatalf("stale event did not fall through to last-run store; expected last-run error in stderr:\n%s", stderr.String())
 	}
 }

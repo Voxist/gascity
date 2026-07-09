@@ -231,7 +231,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewServiceSecretsPermsCheck(cfg, cityPath))
 		register(doctor.NewSkillCollisionCheck(cfg, cityPath))
 		register(doctor.NewOrderFiringCurrentCheck(cfg, cityPath, doctor.WithOrderFiringCurrentLastRunFunc(doctorOrderFiringCurrentLastRunFunc(cityPath, cfg, opts.Stderr))))
-		register(newCodexHooksDriftCheck(codexHookWorkDirs(cityPath, cfg)))
+		register(newCodexHooksDriftCheck(cityPath, codexHookWorkDirs(cityPath, cfg)))
 		register(newBeadsProxiedCapabilityCheck(cfg))
 		// bd build pin: `bd --version` must contain [beads] expected_build
 		// (brew-clobber class). No-op when the pin is unset.
@@ -255,6 +255,12 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// Pack cache check (if config has remote packs).
 	if cfgErr == nil && cfg != nil && len(cfg.Packs) > 0 {
 		register(doctor.NewPackCacheCheck(cfg.Packs, cityPath))
+	}
+
+	// Pack-source credential check: validates credentials.toml load and reports
+	// which remote imports lack a matching rule.
+	if cfgErr == nil && cfg != nil {
+		register(doctor.NewPackCredentialsCheck(cfg.Imports))
 	}
 
 	// Infrastructure checks — universal dependencies.

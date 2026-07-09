@@ -6432,7 +6432,7 @@ func TestBuildDesiredState_RigOnDemandNamedSessionAssigneeWithRouteMaterializesN
 			if err != nil {
 				t.Fatalf("loadSessionBeads: %v", err)
 			}
-			poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessions, dsResult.ScaleCheckCounts))
+			poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, dsResult.AssignedWorkBeads, sessionInfosFromBeads(sessions), dsResult.ScaleCheckCounts))
 			if poolDesired == nil {
 				poolDesired = map[string]int{}
 			}
@@ -7871,7 +7871,7 @@ func TestBuildDesiredState_ScaleCheckErrorPreservesDormantAffectedPoolSessionWit
 
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		cfg,
-		PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.Open(), result.ScaleCheckCounts)),
+		PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.OpenInfos(), result.ScaleCheckCounts)),
 		snapshot,
 		result.PoolScaleCheckPartialTemplates,
 	)
@@ -11160,7 +11160,7 @@ func TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates(t *testing.T) {
 		snapshot := newSessionBeadSnapshot([]beads.Bead{activeSession})
 		poolDesired := retainScaleCheckPartialPoolDesired(
 			cfg,
-			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.Open(), result.ScaleCheckCounts)),
+			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.OpenInfos(), result.ScaleCheckCounts)),
 			snapshot,
 			result.PoolScaleCheckPartialTemplates,
 		)
@@ -11201,7 +11201,7 @@ func TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates(t *testing.T) {
 		snapshot := newSessionBeadSnapshot([]beads.Bead{awakeSession})
 		poolDesired := retainScaleCheckPartialPoolDesired(
 			cfg,
-			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.Open(), result.ScaleCheckCounts)),
+			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.OpenInfos(), result.ScaleCheckCounts)),
 			snapshot,
 			result.PoolScaleCheckPartialTemplates,
 		)
@@ -11233,7 +11233,7 @@ func TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates(t *testing.T) {
 		snapshot := newSessionBeadSnapshot([]beads.Bead{})
 		poolDesired := retainScaleCheckPartialPoolDesired(
 			cfg,
-			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.Open(), result.ScaleCheckCounts)),
+			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.OpenInfos(), result.ScaleCheckCounts)),
 			snapshot,
 			result.PoolScaleCheckPartialTemplates,
 		)
@@ -11270,7 +11270,7 @@ func TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates(t *testing.T) {
 		snapshot := newSessionBeadSnapshot([]beads.Bead{activeSession, creatingSession})
 		poolDesired := retainScaleCheckPartialPoolDesired(
 			cfg,
-			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.Open(), result.ScaleCheckCounts)),
+			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.OpenInfos(), result.ScaleCheckCounts)),
 			snapshot,
 			result.PoolScaleCheckPartialTemplates,
 		)
@@ -11342,7 +11342,7 @@ func TestBuildDesiredState_ScaleCheckPartialPoolBlocksNewCreates(t *testing.T) {
 		}
 		poolDesired := retainScaleCheckPartialPoolDesired(
 			cfg,
-			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.Open(), partialResult.ScaleCheckCounts)),
+			PoolDesiredCounts(ComputePoolDesiredStates(cfg, nil, snapshot.OpenInfos(), partialResult.ScaleCheckCounts)),
 			snapshot,
 			partialResult.PoolScaleCheckPartialTemplates,
 		)
@@ -11738,5 +11738,73 @@ func TestBuildDesiredState_AsleepNamedAliasHolderStaysSingle(t *testing.T) {
 	// pool standby (alias empty because it lost the alias-acquisition race).
 	if mayorEntries[0].ConfiguredNamedIdentity != "gastown.mayor" {
 		t.Fatalf("retained entry is not the named alias-holder: %+v", mayorEntries[0])
+	}
+}
+
+// TestBuildDesiredStateRecordsDemandSubPhases verifies the sub-phase operation
+// records emitted inside buildDesiredStateWithSessionBeads (sr-5rz /
+// gastownhall/gascity#2463): the aggregate load_demand_snapshot tick phase
+// regularly dominates the controller cycle, and these records are what make
+// its internal split (collection reads vs demand probes vs scale_check execs)
+// attributable from a trace instead of requiring an instrumented rebuild.
+func TestBuildDesiredStateRecordsDemandSubPhases(t *testing.T) {
+	// The non-tick path passes no trace; the recorder must be nil-safe.
+	recordDemandSubPhase(nil, "demand_snapshot.collect_open_session_beads", time.Now(), nil)
+
+	cityDir := t.TempDir()
+	tracer := newSessionReconcilerTracer(cityDir, "trace-town", io.Discard)
+	if !tracer.Enabled() {
+		t.Fatal("tracer should be enabled")
+	}
+	cycle := tracer.BeginCycle(TraceTickTriggerPatrol, "", time.Now().UTC(), &config.City{})
+	if cycle == nil {
+		t.Fatal("BeginCycle returned nil")
+	}
+
+	store := beads.NewMemStore()
+	sessionSnapshot, err := loadSessionBeadSnapshot(store)
+	if err != nil {
+		t.Fatalf("load session snapshot: %v", err)
+	}
+	var stderr strings.Builder
+	buildDesiredStateWithSessionBeads(
+		"trace-town", cityDir, time.Now().UTC(), &config.City{}, runtime.NewFake(),
+		store, nil, sessionSnapshot, cycle, &stderr,
+	)
+
+	if err := cycle.End(TraceCompletionCompleted, map[string]any{}); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+	if err := tracer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	records, err := ReadTraceRecords(traceCityRuntimeDir(cityDir), TraceFilter{})
+	if err != nil {
+		t.Fatalf("ReadTraceRecords: %v", err)
+	}
+	// Sub-phases that must fire on every store-backed build, even with an
+	// empty config (the scale/named demand probes only fire with matching
+	// agents, so they are intentionally not asserted here).
+	want := map[string]bool{
+		"demand_snapshot.collect_open_session_beads": false,
+		"demand_snapshot.collect_assigned_work":      false,
+		"demand_snapshot.collect_unassigned_routed":  false,
+		"demand_snapshot.evaluate_pending_pools":     false,
+	}
+	for i := range records {
+		r := &records[i]
+		if r.RecordType != TraceRecordOperation || r.SiteCode != TraceSiteDemandSnapshot {
+			continue
+		}
+		name, _ := r.Fields["operation_name"].(string)
+		if _, tracked := want[name]; tracked {
+			want[name] = true
+		}
+	}
+	for name, seen := range want {
+		if !seen {
+			t.Errorf("missing demand sub-phase operation record %q", name)
+		}
 	}
 }

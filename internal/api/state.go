@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -106,6 +107,21 @@ type State interface {
 	// CityBeadStore returns the city-level bead store for session beads.
 	// Returns nil if no store is available.
 	CityBeadStore() beads.Store
+
+	// ScopedStoreLike returns a throwaway, ctx-bound clone of existing when
+	// existing is (or wraps) a bd-CLI-shell-backed store: cancellation kills
+	// the backend bd subprocess instead of abandoning it to run past ctx's
+	// deadline, unlike existing's own long-lived runner (fixed to
+	// context.Background() at construction). Returns (nil, nil) when
+	// existing is not bd-CLI backed (e.g. a native, file, or in-memory
+	// store) — those have no subprocess to leak, so callers should keep
+	// reading through existing directly in that case.
+	//
+	// Read paths with their own short request budget (e.g. GET /status) use
+	// this instead of reading through the shared store so a slow bd command
+	// cannot pin a Dolt connection past the caller's own deadline
+	// (gascity ga-cdmx6x).
+	ScopedStoreLike(ctx context.Context, existing beads.Store) (beads.Store, error)
 
 	// NudgesBeadStore returns the store backing the nudge-queue shadow beads
 	// (gc:nudge). At the default backend this is the same store as
@@ -215,6 +231,7 @@ type ProviderUpdate struct {
 	Env                map[string]string // nil = not set, non-nil = additive merge
 	OptionsSchemaMerge *string
 	OptionsSchema      []config.ProviderOption // nil = not set, non-nil = replace
+	OptionDefaults     map[string]string       // nil = not set, non-nil = additive merge
 }
 
 // RawConfigProvider is optionally implemented by State to provide the
@@ -222,6 +239,23 @@ type ProviderUpdate struct {
 // /v0/config/explain endpoint to distinguish inline vs pack-derived agents.
 type RawConfigProvider interface {
 	RawConfig() *config.City
+}
+
+// WebhookDispatchProvider is optionally implemented by State to expose the live
+// order dispatcher the supervisor webhook receiver (E3) fires verified+matched
+// deliveries through. It is the H1/E0.5 dispatch seam: the dispatch machine lives
+// in cmd/gc (memoryOrderDispatcher.dispatchOne), which internal/api cannot import,
+// so the city runtime implements this accessor over the same dispatchOne core the
+// tick loop uses. A State that does not implement it disables webhook dispatch —
+// the receiver returns 503 rather than firing a stub, so the perimeter/verify/
+// match guards still run but no order is launched. Modeled on the optional
+// RawConfigProvider/AgentVisibilityWaiter capability pattern rather than a core
+// State method so the two production State implementers and the test fakes are not
+// all forced to grow a dispatcher they may not have.
+type WebhookDispatchProvider interface {
+	// WebhookDispatcher returns the order dispatcher, or nil when webhook dispatch
+	// is unavailable for this city.
+	WebhookDispatcher() orderdispatch.Dispatcher
 }
 
 // AgentVisibilityWaiter is an optional capability for states whose Config()
@@ -332,4 +366,18 @@ type FormulaMutator interface {
 	UpsertFormula(name string, content []byte) error
 	// DeleteFormula removes a city-local formula source.
 	DeleteFormula(name string) error
+}
+
+// ConfigWriteSerializer is an optional State extension that runs fn under the
+// per-city config write lock. Pack import add/remove mutate city config files
+// (pack.toml, packs.lock, and sometimes city.toml) outside the
+// configedit.Editor callback shape, so running them through this seam
+// serializes them against the agent/rig/provider/formula mutations that take
+// the same Editor lock — otherwise two concurrent net/http goroutines could
+// interleave load→mutate→write and lose an update or desync manifest and
+// lockfile. Like StateMutator it is type-asserted by handlers; a State that
+// does not implement it runs the mutation without extra serialization.
+type ConfigWriteSerializer interface {
+	// SerializeConfigWrite runs fn while holding the per-city config write lock.
+	SerializeConfigWrite(fn func() error) error
 }

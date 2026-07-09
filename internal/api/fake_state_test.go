@@ -1,10 +1,13 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/usage"
@@ -50,10 +54,16 @@ type fakeState struct {
 	autos             []orders.Order
 	allOrders         []orders.Order
 	services          workspacesvc.Registry
+	webhookDispatcher orderdispatch.Dispatcher // backs WebhookDispatchProvider; nil disables webhook dispatch
 	pokeCount         int
 	extmsgSvc         *extmsg.Services
 	adapterReg        *extmsg.AdapterRegistry
 	maintenance       MaintenanceProvider
+	// scopedStoreFn backs ScopedStoreLike. Nil (the default) returns
+	// (nil, nil) — "existing isn't bd-CLI backed, keep using it directly" —
+	// matching the real implementation's answer for the MemStore fakes most
+	// tests use.
+	scopedStoreFn func(ctx context.Context, existing beads.Store) (beads.Store, error)
 }
 
 func newFakeState(t testing.TB) *fakeState {
@@ -106,6 +116,13 @@ func (f *fakeState) StartedAt() time.Time                  { return f.startedAt 
 func (f *fakeState) IsQuarantined(sessionName string) bool { return f.quarantined[sessionName] }
 func (f *fakeState) ClearCrashHistory(sessionName string)  { delete(f.quarantined, sessionName) }
 func (f *fakeState) CityBeadStore() beads.Store            { return f.cityBeadStore }
+func (f *fakeState) ScopedStoreLike(ctx context.Context, existing beads.Store) (beads.Store, error) {
+	if f.scopedStoreFn == nil {
+		return nil, nil
+	}
+	return f.scopedStoreFn(ctx, existing)
+}
+
 func (f *fakeState) NudgesBeadStore() beads.NudgesStore {
 	if f.nudgesBeadStore != nil {
 		return beads.NudgesStore{Store: f.nudgesBeadStore}
@@ -141,8 +158,14 @@ func (f *fakeState) OrdersAll() []orders.Order {
 	}
 	return f.autos
 }
-func (f *fakeState) Poke()                                    { f.pokeCount++ }
-func (f *fakeState) ServiceRegistry() workspacesvc.Registry   { return f.services }
+func (f *fakeState) Poke()                                  { f.pokeCount++ }
+func (f *fakeState) ServiceRegistry() workspacesvc.Registry { return f.services }
+
+// WebhookDispatcher lets fakeState satisfy WebhookDispatchProvider so webhook
+// receiver tests can inject a fake dispatcher (or leave it nil to exercise the
+// dispatch-unavailable path).
+func (f *fakeState) WebhookDispatcher() orderdispatch.Dispatcher { return f.webhookDispatcher }
+
 func (f *fakeState) ExtMsgServices() *extmsg.Services         { return f.extmsgSvc }
 func (f *fakeState) AdapterRegistry() *extmsg.AdapterRegistry { return f.adapterReg }
 func (f *fakeState) MaintenanceLoop() MaintenanceProvider     { return f.maintenance }
@@ -158,6 +181,12 @@ func (f *fakeState) RawConfig() *config.City {
 type fakeMutatorState struct {
 	*fakeState
 	suspended map[string]bool
+
+	// serializeMu + serializeCalls make fakeMutatorState a ConfigWriteSerializer
+	// so pack handler tests exercise the real per-city write-lock seam and can
+	// assert mutations route through it.
+	serializeMu    sync.Mutex
+	serializeCalls atomic.Int32
 }
 
 func newFakeMutatorState(t *testing.T) *fakeMutatorState {
@@ -166,6 +195,15 @@ func newFakeMutatorState(t *testing.T) *fakeMutatorState {
 		fakeState: newFakeState(t),
 		suspended: make(map[string]bool),
 	}
+}
+
+// SerializeConfigWrite runs fn under a real lock and counts the call, mirroring
+// the production controllerState seam that shares the configedit.Editor lock.
+func (f *fakeMutatorState) SerializeConfigWrite(fn func() error) error {
+	f.serializeMu.Lock()
+	defer f.serializeMu.Unlock()
+	f.serializeCalls.Add(1)
+	return fn()
 }
 
 func (f *fakeMutatorState) SuspendAgent(name string) error { f.suspended[name] = true; return nil }
@@ -388,6 +426,14 @@ func (f *fakeMutatorState) UpdateProvider(name string, patch ProviderUpdate) err
 	}
 	if patch.OptionsSchema != nil {
 		spec.OptionsSchema = append([]config.ProviderOption(nil), patch.OptionsSchema...)
+	}
+	if len(patch.OptionDefaults) > 0 {
+		if spec.OptionDefaults == nil {
+			spec.OptionDefaults = make(map[string]string, len(patch.OptionDefaults))
+		}
+		for k, v := range patch.OptionDefaults {
+			spec.OptionDefaults[k] = v
+		}
 	}
 	f.cfg.Providers[name] = spec
 	return nil
