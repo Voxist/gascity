@@ -71,6 +71,7 @@ fork-rate
 dolt-noms-size
 dolt-journal-size
 dolt-config
+dolt-timeout-race
 dolt-version
 events-log
 events-log-size
