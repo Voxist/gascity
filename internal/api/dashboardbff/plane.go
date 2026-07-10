@@ -24,12 +24,24 @@ import (
 	"time"
 )
 
+// CityRef is a registered city's name and on-disk root path, as reported by
+// CityResolver.Cities for eager tailer warm-up at Plane.Start.
+type CityRef struct {
+	Name string
+	Path string
+}
+
 // CityResolver resolves a managed city name to its on-disk root path. The
 // supervisor's city registry implements this; resolving the path from the
 // registry (instead of joining the untrusted name onto a base) keeps
 // city-name path traversal out of the host-side plane entirely.
 type CityResolver interface {
 	CityPath(name string) (path string, ok bool)
+	// Cities returns every registered city so Plane.Start can eager-warm each
+	// city's run-view fold at startup (instead of on the operator's first
+	// click). It may be empty (no cities registered yet); cities registered
+	// after Start keep the lazy per-city start on their first request.
+	Cities() []CityRef
 }
 
 // Deps are the collaborators the /api plane needs.
@@ -62,6 +74,7 @@ type Plane struct {
 	exec       *execRunner
 	mux        *http.ServeMux
 	samplers   *samplerManager
+	runTailers *runTailerManager
 	localTools *localToolsCache
 
 	wg   sync.WaitGroup
@@ -73,6 +86,7 @@ type Plane struct {
 func New(deps Deps) *Plane {
 	p := &Plane{deps: deps, exec: newExecRunner(), mux: http.NewServeMux(), localTools: &localToolsCache{}}
 	p.samplers = newSamplerManager(deps, p.exec)
+	p.runTailers = newRunTailerManager(deps)
 	p.registerRoutes()
 	return p
 }
@@ -82,12 +96,19 @@ func New(deps Deps) *Plane {
 // middleware (logging, recovery, request-id, host/CORS) via Handler().
 func (p *Plane) Handler() http.Handler { return p.guard(p.mux) }
 
-// Start enables the per-city samplers. Each city's sampler is launched lazily
-// on first request for that city's data (matching the BFF's lazy per-city
-// runtime) and runs until ctx is canceled or Stop is called.
+// Start enables the per-city samplers and eager-warms every registered city's
+// run-view fold. Each city's sampler is launched lazily on first request for
+// that city's data (matching the BFF's lazy per-city runtime); the run tailers,
+// by contrast, are eager-started here for all served cities so the first run
+// view (and the first after a supervisor restart) is a warm read rather than a
+// cold ~5s replay. eagerWarmTailers is non-blocking — it only spawns each fold
+// goroutine — so Start stays fast and never waits on any city's cold load.
+// Everything runs until ctx is canceled or Stop is called.
 func (p *Plane) Start(ctx context.Context) {
 	ctx, p.stop = context.WithCancel(ctx)
 	p.samplers.enable(ctx, &p.wg)
+	p.runTailers.enable(ctx, &p.wg)
+	p.eagerWarmTailers()
 }
 
 // Stop signals the samplers to halt and waits for them to drain.
@@ -178,6 +199,9 @@ func (p *Plane) registerRoutes() {
 	p.registerHealth()
 	p.registerRunDiff()
 	p.registerSamplers()
+	p.registerRunSummary()
+	p.registerRunDetail()
+	p.registerRunDetailStream()
 }
 
 // resolveCityPath validates a city name and resolves its host root path. It
@@ -199,6 +223,21 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	h.Set("X-Frame-Options", "DENY")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// writeJSONBytes writes pre-marshaled JSON with the same headers and status as
+// writeJSON, for a caller that already holds json.Marshal(v) (the run-detail memo
+// serving its cached bytes). It appends the single trailing newline
+// json.Encoder.Encode emits, so the response is byte-identical to
+// writeJSON(w, status, v) for the same value.
+func writeJSONBytes(w http.ResponseWriter, status int, body []byte) {
+	h := w.Header()
+	h.Set("Content-Type", "application/json; charset=utf-8")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("X-Frame-Options", "DENY")
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
+	_, _ = w.Write([]byte{'\n'})
 }
 
 // apiHealthResponse is the GET /api/health body. Typed (not map[string]any) so

@@ -50,6 +50,7 @@ type PackConfig struct {
 	Agents        []Agent                     `toml:"agent,omitempty"`
 	NamedSessions []NamedSession              `toml:"named_session,omitempty"`
 	Services      []Service                   `toml:"service,omitempty"`
+	Webhooks      []Webhook                   `toml:"webhook,omitempty"`
 	Providers     map[string]ProviderSpec     `toml:"providers,omitempty"`
 	Upstreams     map[string]UpstreamSpec     `toml:"upstreams,omitempty"`
 	Runtimes      map[string]PackRuntimeEntry `toml:"runtimes,omitempty"`
@@ -624,6 +625,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 		allRequires = append(allRequires, reqs...)
 		allGlobals = append(allGlobals, globals...)
 		cfg.Services = append(cfg.Services, services...)
+		cfg.Webhooks = append(cfg.Webhooks, cachedPackWebhooks(cache, topoDir)...)
 		packName := tcPackName(fs, topoPath)
 		if packName == "" && len(cachedPackCommands(cache, topoDir)) > 0 {
 			return nil, nil, nil, fmt.Errorf("city pack %q: discovered commands require [pack].name for CLI binding", ref)
@@ -734,6 +736,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 			doctors := cachedPackDoctors(cache, impDir)
 			runtimes := cachedPackRuntimes(cache, impDir)
 			skills := cachedPackSkills(cache, impDir)
+			webhooks := cachedPackWebhooks(cache, impDir)
 			mcpTopoDirs := topoDirs
 
 			// by this import. Nested pack dependencies reached through
@@ -760,6 +763,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 				reqs = cachedPackLocalRequires(cache, impDir)
 				globals = cachedPackLocalGlobals(cache, impDir)
 				skills = filterSkillsByPackDir(skills, impDir)
+				webhooks = filterWebhooksBySourceDir(webhooks, impDir)
 				mcpTopoDirs = filterPackDirsByRoot(topoDirs, impDir)
 			}
 
@@ -839,6 +843,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 			allRequires = append(allRequires, reqs...)
 			allGlobals = append(allGlobals, globals...)
 			cfg.Services = append(cfg.Services, services...)
+			cfg.Webhooks = append(cfg.Webhooks, webhooks...)
 			cfg.PackCommands = appendDiscoveredCommands(cfg.PackCommands, commands...)
 			cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, doctors...)
 			// Register pack-declared runtimes city-wide (collisions error).
@@ -1100,6 +1105,7 @@ type packLoadResult struct {
 	upstreams      map[string]UpstreamSpec
 	localUpstreams map[string]UpstreamSpec
 	services       []Service
+	webhooks       []Webhook
 	topoDirs       []string
 	localTopoDirs  []string
 	requires       []PackRequirement
@@ -1272,6 +1278,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	var includedAgents []Agent
 	var includedNamedSessions []NamedSession
 	var includedServices []Service
+	var includedWebhooks []Webhook
 	var includedTopoDirs []string
 	var allRequires []PackRequirement
 	var includedGlobals []ResolvedPackGlobal
@@ -1300,6 +1307,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		includedAgents = append(includedAgents, incAgents...)
 		includedNamedSessions = append(includedNamedSessions, incNamedSessions...)
 		includedServices = append(includedServices, incServices...)
+		includedWebhooks = append(includedWebhooks, cachedPackWebhooks(cache, incTopoDir)...)
 		includedTopoDirs = append(includedTopoDirs, incTopoDirs...)
 		allRequires = append(allRequires, incReqs...)
 		includedGlobals = append(includedGlobals, incGlobals...)
@@ -1361,6 +1369,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		impDoctors := cachedPackDoctors(cache, impDir)
 		impRuntimes := cachedPackRuntimes(cache, impDir)
 		impSkills := cachedPackSkills(cache, impDir)
+		impWebhooks := cachedPackWebhooks(cache, impDir)
 
 		// When transitive = false, strip agents that came from the
 		// imported pack's nested dependencies. We keep only agents
@@ -1387,6 +1396,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 			impReqs = cachedPackLocalRequires(cache, impDir)
 			impGlobals = cachedPackLocalGlobals(cache, impDir)
 			impSkills = filterSkillsByPackDir(impSkills, impDir)
+			impWebhooks = filterWebhooksBySourceDir(impWebhooks, impDir)
 		}
 
 		// Stamp binding name on all agents and named sessions from this import.
@@ -1453,6 +1463,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		includedAgents = append(includedAgents, impAgents...)
 		includedNamedSessions = append(includedNamedSessions, impNamedSessions...)
 		includedServices = append(includedServices, impServices...)
+		includedWebhooks = append(includedWebhooks, impWebhooks...)
 		includedTopoDirs = append(includedTopoDirs, impTopoDirs...)
 		allRequires = append(allRequires, impReqs...)
 		includedGlobals = append(includedGlobals, impGlobals...)
@@ -1574,10 +1585,16 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		}
 	}
 
+	// Stamp this pack's own webhooks with pack provenance. The default-closed
+	// public pack-guard runs once post-composition in LoadWithIncludes; here we
+	// only record where each webhook came from.
+	webhooks := stampWebhookSource(tc.Webhooks, topoDir)
+
 	// Merge: included agents first (base), then parent agents (override).
 	includedAgents = append(includedAgents, agents...)
 	includedNamedSessions = append(includedNamedSessions, namedSessions...)
 	includedServices = append(includedServices, services...)
+	includedWebhooks = append(includedWebhooks, webhooks...)
 	includedCommands = append(includedCommands, commands...)
 	includedDoctors = append(includedDoctors, doctors...)
 	includedRuntimes = append(includedRuntimes, localRuntimes...)
@@ -1661,6 +1678,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		upstreams:      mergedUpstreams,
 		localUpstreams: tc.Upstreams,
 		services:       includedServices,
+		webhooks:       includedWebhooks,
 		topoDirs:       topoDirs,
 		localTopoDirs:  []string{topoDir},
 		requires:       allRequires,
@@ -1690,6 +1708,7 @@ func clonePackLoadResult(in *packLoadResult) *packLoadResult {
 		upstreams:      deepCopyUpstreamSpecs(in.upstreams),
 		localUpstreams: deepCopyUpstreamSpecs(in.localUpstreams),
 		services:       deepCopyServices(in.services),
+		webhooks:       deepCopyWebhooks(in.webhooks),
 		topoDirs:       append([]string(nil), in.topoDirs...),
 		localTopoDirs:  append([]string(nil), in.localTopoDirs...),
 		requires:       append([]PackRequirement(nil), in.requires...),
@@ -1876,9 +1895,16 @@ func applyInheritedPackAgentDefaults(agents []Agent, defaults AgentDefaults) {
 	}
 }
 
-func cachedPackCommands(cache *packLoadCache, topoDir string) []DiscoveredCommand {
+// cachedPackField resolves topoDir to an absolute cache key, looks up its
+// loaded pack result, and returns get(result). It holds the nil-cache guard,
+// absolute-path resolution, and cache-miss protocol once so each field
+// accessor is a one-line get closure. get must deep-copy any slice or map it
+// returns, preserving the copy-on-read contract the accessors rely on. The
+// zero value of T (nil for slices and maps) is returned on a miss.
+func cachedPackField[T any](cache *packLoadCache, topoDir string, get func(*packLoadResult) T) T {
+	var zero T
 	if cache == nil {
-		return nil
+		return zero
 	}
 	absDir, err := filepath.Abs(topoDir)
 	if err != nil {
@@ -1886,115 +1912,57 @@ func cachedPackCommands(cache *packLoadCache, topoDir string) []DiscoveredComman
 	}
 	result, ok := cache.results[absDir]
 	if !ok {
-		return nil
+		return zero
 	}
-	out := deepCopyCommands(result.commands)
-	return out
+	return get(result)
+}
+
+func cachedPackCommands(cache *packLoadCache, topoDir string) []DiscoveredCommand {
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) []DiscoveredCommand {
+		return deepCopyCommands(r.commands)
+	})
 }
 
 func cachedPackWarnings(cache *packLoadCache, topoDir string) []string {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	return append([]string(nil), result.warnings...)
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) []string {
+		return append([]string(nil), r.warnings...)
+	})
 }
 
 func cachedPackLocalWarnings(cache *packLoadCache, topoDir string) []string {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	return append([]string(nil), result.localWarnings...)
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) []string {
+		return append([]string(nil), r.localWarnings...)
+	})
 }
 
 func cachedPackLocalProviders(cache *packLoadCache, topoDir string) map[string]ProviderSpec {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	return deepCopyProviderSpecs(result.localProviders)
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) map[string]ProviderSpec {
+		return deepCopyProviderSpecs(r.localProviders)
+	})
 }
 
 func cachedPackLocalUpstreams(cache *packLoadCache, topoDir string) map[string]UpstreamSpec {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	return deepCopyUpstreamSpecs(result.localUpstreams)
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) map[string]UpstreamSpec {
+		return deepCopyUpstreamSpecs(r.localUpstreams)
+	})
 }
 
 func cachedPackLocalTopoDirs(cache *packLoadCache, topoDir string) []string {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	return append([]string(nil), result.localTopoDirs...)
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) []string {
+		return append([]string(nil), r.localTopoDirs...)
+	})
 }
 
 func cachedPackLocalRequires(cache *packLoadCache, topoDir string) []PackRequirement {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	return append([]PackRequirement(nil), result.localRequires...)
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) []PackRequirement {
+		return append([]PackRequirement(nil), r.localRequires...)
+	})
 }
 
 func cachedPackLocalGlobals(cache *packLoadCache, topoDir string) []ResolvedPackGlobal {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	return deepCopyResolvedPackGlobals(result.localGlobals)
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) []ResolvedPackGlobal {
+		return deepCopyResolvedPackGlobals(r.localGlobals)
+	})
 }
 
 func filterNamedSessionsBySourceDir(namedSessions []NamedSession, sourceDir string) []NamedSession {
@@ -2013,19 +1981,9 @@ func filterNamedSessionsBySourceDir(namedSessions []NamedSession, sourceDir stri
 }
 
 func cachedPackDoctors(cache *packLoadCache, topoDir string) []DiscoveredDoctor {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	out := deepCopyDoctors(result.doctors)
-	return out
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) []DiscoveredDoctor {
+		return deepCopyDoctors(r.doctors)
+	})
 }
 
 // isOSFileSystem reports whether fs is the real operating-system
@@ -2042,18 +2000,9 @@ func isOSFileSystem(fs fsys.FS) bool {
 }
 
 func cachedPackSkills(cache *packLoadCache, topoDir string) []DiscoveredSkillCatalog {
-	if cache == nil {
-		return nil
-	}
-	absDir, err := filepath.Abs(topoDir)
-	if err != nil {
-		absDir = topoDir
-	}
-	result, ok := cache.results[absDir]
-	if !ok {
-		return nil
-	}
-	return deepCopySkills(result.skills)
+	return cachedPackField(cache, topoDir, func(r *packLoadResult) []DiscoveredSkillCatalog {
+		return deepCopySkills(r.skills)
+	})
 }
 
 func filterCommandsByPackDir(commands []DiscoveredCommand, packDir string) []DiscoveredCommand {

@@ -239,8 +239,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// This is what real-world apps use to link beads to session logs.
 	sessionBeadID := ""
 	if p.sessionBeads != nil {
-		for _, b := range p.sessionBeads.Open() {
-			if b.Metadata["session_name"] == sessName {
+		for _, b := range p.sessionBeads.OpenInfos() {
+			if b.SessionNameMetadata == sessName {
 				sessionBeadID = b.ID
 				break
 			}
@@ -778,35 +778,16 @@ func sessionBackendEnvWithError(cityPath, rigRoot string, rigs []config.Rig) (ma
 // launch or nudge path, it marks the runtime env so SessionStart hooks can add
 // context without repeating the full startup prompt.
 func templateParamsToConfig(tp TemplateParams) runtime.Config {
-	var promptSuffix string
-	var promptFlag string
-	nudge := tp.Hints.Nudge
+	// SessionStart hooks can enrich context, but the startup prompt still needs
+	// a first-turn delivery mechanism. Without argv/flag/nudge delivery, freshly
+	// spawned workers sit idle at the provider prompt. The routing policy lives
+	// in the pure promptDelivery derivation.
+	delivery := promptDelivery(tp.Prompt, tp.IsACP, tp.ResolvedProvider, tp.Hints.Nudge)
+	promptSuffix := delivery.PromptSuffix
+	promptFlag := delivery.PromptFlag
+	nudge := delivery.Nudge
 	env := maps.Clone(tp.Env)
-	startupPromptDelivered := false
-	if tp.Prompt != "" {
-		// SessionStart hooks can enrich context, but the startup prompt still
-		// needs a first-turn delivery mechanism. Without argv/flag/nudge
-		// delivery, freshly spawned workers sit idle at the provider prompt.
-		switch {
-		case tp.IsACP:
-			nudge = prependStartupPromptToNudge(tp.Prompt, nudge)
-			startupPromptDelivered = true
-		case tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "none":
-			nudge = prependStartupPromptToNudge(tp.Prompt, nudge)
-			startupPromptDelivered = true
-		default:
-			promptSuffix = shellquote.Quote(tp.Prompt)
-			startupPromptDelivered = promptSuffix != ""
-			if tp.ResolvedProvider != nil && tp.ResolvedProvider.PromptMode == "flag" {
-				if tp.ResolvedProvider.PromptFlag != "" {
-					promptFlag = tp.ResolvedProvider.PromptFlag
-				} else {
-					startupPromptDelivered = false
-				}
-			}
-		}
-	}
-	if startupPromptDelivered {
+	if delivery.Delivered {
 		if env == nil {
 			env = map[string]string{}
 		}

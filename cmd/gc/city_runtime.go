@@ -30,6 +30,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -1186,7 +1187,7 @@ func (cr *CityRuntime) tick(
 	recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.initial", phaseStart, traceSessionSnapshotFields(sessionBeads))
 	if trace != nil && sessionBeads != nil {
 		trace.RecordSessionBaseline("", "", traceRecordPayload{
-			"open_count": len(sessionBeads.Open()),
+			"open_count": len(sessionBeads.OpenInfos()),
 		})
 		_ = trace.flushCurrentBatch(TraceDurabilityDurable)
 	}
@@ -2110,6 +2111,12 @@ func (cr *CityRuntime) reloadConfigTraced(
 		cr.standaloneRigStores = buildStandaloneRigStores(nextCfg, cr.cityPath, cr.stderr)
 	}
 
+	// Rebuild convergence scopes against the reloaded config so rigs added,
+	// removed, or rebound by this reload are honored live (#2403). New
+	// scopes repopulate their active index via the needsStartupReconcile
+	// path on the next tick.
+	cr.rebuildConvergenceHandler()
+
 	// Ensure drain tracker and provider-health gate are initialized when bead store becomes available.
 	if cr.cityBeadStore() != nil && cr.tomlPath != "" && cr.sessionDrains == nil {
 		cr.sessionDrains = newDrainTracker()
@@ -2278,12 +2285,11 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	poolDesired := result.PoolDesiredCounts
 	if poolDesired == nil {
 		phaseStart = time.Now()
-		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cr.cfg, cr.cityPath, sessionBeads.Open(), assignedWorkBeads, assignedWorkStoreRefs)
+		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
 		poolDesired = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(ComputePoolDesiredStatesTraced(
-				cr.cfg, poolWorkBeads, sessionBeads.Open(), result.ScaleCheckCounts, trace,
-			)),
+				cr.cfg, poolWorkBeads, sessionBeads.OpenInfos(), result.ScaleCheckCounts, trace)),
 			sessionBeads,
 			result.PoolScaleCheckPartialTemplates,
 		)
@@ -2338,6 +2344,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.sweep_undesired_pool_sessions", phaseStart, traceSessionSnapshotFields(sessionBeads))
 	}
 	open := sessionBeads.Open()
+	openInfos := sessionBeads.OpenInfos()
 
 	// Use cr.cityName consistently — it's the authoritative runtime name.
 	cityName := cr.cityName
@@ -2345,7 +2352,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	phaseStart = time.Now()
 	cfgNames := configuredSessionNamesWithSnapshot(cr.cfg, cityName, sessionBeads)
 
-	readyWaitSet, err := prepareWaitWakeStateForCityWithSnapshot(cr.cityPath, sessStore, time.Now(), sessionBeads)
+	readyWaitSet, err := prepareWaitWakeStateForCityWithSnapshot(cr.cityPath, sessStore, store, cr.nudgesBeadStore(), time.Now(), sessionBeads)
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: preparing waits: %v\n", cr.logPrefix, err) //nolint:errcheck
 		readyWaitSet = nil
@@ -2363,7 +2370,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	cr.recordReconcileTraceInputs(trace, open, desiredState, poolDesired, workSet, traceWorkRequested, readyWaitSet, result, recordPhase)
 
 	phaseStart = time.Now()
-	awakeAssignedWorkBeads, awakeAssignedStoreRefs := filterAssignedWorkBeadsForSessionWake(cr.cfg, cr.cityPath, open, assignedWorkBeads, assignedWorkStoreRefs)
+	awakeAssignedWorkBeads, awakeAssignedStoreRefs := filterAssignedWorkBeadsForSessionWake(cr.cfg, cr.cityPath, openInfos, assignedWorkBeads, assignedWorkStoreRefs)
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.filter_assigned_work_for_wake", phaseStart, map[string]any{
 		"assigned_work_bead_count":       len(assignedWorkBeads),
 		"awake_assigned_work_bead_count": len(awakeAssignedWorkBeads),
@@ -2405,13 +2412,27 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		"awake_assigned_work_bead_count": len(awakeAssignedWorkBeads),
 	})
 	cr.requestDeferredDrainFollowUpTick()
-	cr.recordReconcileTraceResults(trace, open, recordPhase)
-	phaseStart = time.Now()
-	dispatchSessionBeads, err := loadSessionBeadSnapshot(store)
+	// Load the post-reconcile session snapshot once and share it between the trace
+	// terminal-state read and the wait-nudge dispatch (this is the same snapshot the
+	// dispatch already loaded; moved up, not added). recordReconcileTraceResults sources
+	// each session's terminal state/sleep_reason from this authoritative store snapshot
+	// so the lockstep-drop (Step 5b+) can retire the raw metadata mirrors without staling
+	// the trace. This intentionally makes the trace MORE accurate than the prior raw
+	// open-bead read, which was already stale for woken sessions (preWakeCommit mirrors
+	// onto a discarded store.Get copy, never the open bead) and drain-completed sessions
+	// (completeDrain's mirror was already dropped).
+	// Post-reconcile session snapshot feeds trace + wait dispatch; read it from
+	// the typed session store (controller-parity fix, identity today).
+	dispatchSessionBeads, err := loadSessionBeadSnapshot(sessStore.Store)
 	if err != nil {
-		fmt.Fprintf(cr.stderr, "%s: dispatching wait nudges: %v\n", cr.logPrefix, err) //nolint:errcheck
-	} else if err := dispatchReadyWaitNudgesWithSnapshot(cr.cityPath, cr.cfg, store, time.Now(), dispatchSessionBeads); err != nil {
-		fmt.Fprintf(cr.stderr, "%s: dispatching wait nudges: %v\n", cr.logPrefix, err) //nolint:errcheck
+		fmt.Fprintf(cr.stderr, "%s: loading post-reconcile session snapshot: %v\n", cr.logPrefix, err) //nolint:errcheck
+	}
+	cr.recordReconcileTraceResults(trace, open, dispatchSessionBeads, recordPhase)
+	phaseStart = time.Now()
+	if err == nil {
+		if nudgeErr := dispatchReadyWaitNudgesWithSnapshot(cr.cityPath, cr.cfg, sessStore, cr.nudgesBeadStore(), time.Now(), dispatchSessionBeads); nudgeErr != nil {
+			fmt.Fprintf(cr.stderr, "%s: dispatching wait nudges: %v\n", cr.logPrefix, nudgeErr) //nolint:errcheck
+		}
 	}
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.dispatch_wait_nudges", phaseStart, traceSessionSnapshotFields(dispatchSessionBeads))
 	// Patrol-tick fallback for the supervisor nudge dispatcher: ensures
@@ -2421,7 +2442,16 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	cr.nudgeDispatchTick(ctx)
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_dispatch_tick", phaseStart, nil)
 
-	// Idle recovery: detect pool sessions stuck at the prompt after
+	// Idle recovery: re-nudge pool slots that are running but never claimed
+	// their assigned trigger bead. Gated to runtimes the controller cannot see
+	// activity for (herdr): tmux self-heals a missed startup nudge through its
+	// relaunch/respawn path and reports activity, so it neither needs nor runs
+	// this. See nudgeStalledPoolClaims for the churn-free state machine.
+	if !cr.sp.Capabilities().CanReportActivity {
+		phaseStart = time.Now()
+		nudgeStalledPoolClaims(cr.sp, cr.cfg, sessStore, open, assignedWorkBeads, time.Now(), cr.stdout)
+		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_stalled_pool_claims", phaseStart, nil)
+	}
 }
 
 // recordReconcileTraceInputs records the per-template baseline, the cycle input
@@ -2538,6 +2568,7 @@ func (cr *CityRuntime) recordReconcileTraceInputs(
 func (cr *CityRuntime) recordReconcileTraceResults(
 	trace *sessionReconcilerTraceCycle,
 	open []beads.Bead,
+	postReconcile *sessionBeadSnapshot,
 	recordPhase func(TraceSiteCode, string, time.Time, map[string]any),
 ) {
 	if trace == nil {
@@ -2549,9 +2580,26 @@ func (cr *CityRuntime) recordReconcileTraceResults(
 		if template == "" {
 			continue
 		}
+		// Terminal state/sleep_reason come off the authoritative post-reconcile store
+		// snapshot rather than the raw open bead. The raw open-bead read this replaces was
+		// already stale for some transitions (woken sessions kept their pre-wake state
+		// because preWakeCommit mirrors onto a discarded store.Get copy; drain-completed
+		// sessions kept "draining" because completeDrain no longer mirrors), so this is a
+		// deliberate accuracy improvement, not a byte-identical swap. It also decouples the
+		// trace from the raw metadata mirrors the lockstep drop (Step 5b+) is retiring. A
+		// bead absent from the snapshot (closed this tick — the snapshot excludes closed
+		// history) falls back to its open metadata, unchanged from the prior read.
+		state := bead.Metadata["state"]
+		sleepReason := bead.Metadata["sleep_reason"]
+		if postReconcile != nil {
+			if final, ok := postReconcile.FindByID(bead.ID); ok {
+				state = final.Metadata["state"]
+				sleepReason = final.Metadata["sleep_reason"]
+			}
+		}
 		trace.RecordSessionResult(template, bead.Metadata["session_name"], TraceOutcomeComplete, TraceCompletenessComplete, map[string]any{
-			"state":        bead.Metadata["state"],
-			"sleep_reason": bead.Metadata["sleep_reason"],
+			"state":        state,
+			"sleep_reason": sleepReason,
 		})
 	}
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.record_trace_session_results", phaseStart, map[string]any{
@@ -2721,14 +2769,14 @@ func poolSweepWouldDrain(sessionBeads *sessionBeadSnapshot, desiredState map[str
 	if sessionBeads == nil || cfg == nil {
 		return false
 	}
-	for _, bead := range sessionBeads.Open() {
-		if bead.Status == "closed" {
+	for _, info := range sessionBeads.OpenInfos() {
+		if info.Closed {
 			continue
 		}
-		if _, desired := desiredState[bead.Metadata["session_name"]]; desired {
+		if _, desired := desiredState[info.SessionNameMetadata]; desired {
 			continue
 		}
-		if isManualSessionBead(bead) || isNamedSessionBead(bead) {
+		if isManualSessionInfo(info) || isNamedSessionInfo(info) {
 			continue
 		}
 		return true
@@ -2750,14 +2798,14 @@ func sweepUndesiredPoolSessionBeads(
 	}
 	startupTimeout := cfg.Session.StartupTimeoutDuration()
 	var candidates []beads.Bead
-	for _, bead := range sessionBeads.Open() {
-		if bead.Status == "closed" {
+	for _, info := range sessionBeads.OpenInfos() {
+		if info.Closed {
 			continue
 		}
-		if _, desired := desiredState[bead.Metadata["session_name"]]; desired {
+		if _, desired := desiredState[info.SessionNameMetadata]; desired {
 			continue
 		}
-		if isManualSessionBead(bead) || isNamedSessionBead(bead) {
+		if isManualSessionInfo(info) || isNamedSessionInfo(info) {
 			continue
 		}
 		// Don't sweep beads that the reconciler still considers "start
@@ -2774,10 +2822,10 @@ func sweepUndesiredPoolSessionBeads(
 		// on the same tick it's created (no work assigned →
 		// GCSweepSessionBeads closes it), spinning the pool in a rapid
 		// create→sweep→recreate loop.
-		if pendingCreateClaimStillLeasedForSweep(bead, startupTimeout) {
+		if pendingCreateClaimStillLeasedForSweepInfo(info, startupTimeout) {
 			continue
 		}
-		if strings.TrimSpace(bead.Metadata["state"]) == "creating" && !isStaleCreating(bead) {
+		if strings.TrimSpace(info.MetadataState) == "creating" && !isStaleCreatingInfo(info) {
 			continue
 		}
 		// Age grace period for the post-creating, pre-wake window. After
@@ -2824,20 +2872,28 @@ func sweepUndesiredPoolSessionBeads(
 		// "mid-start" window. The atomicity requirement therefore only
 		// binds within a single binary (writers and sweep are the same
 		// process); the rollout needs no cross-version coordination.
-		if state := strings.TrimSpace(bead.Metadata["state"]); (state == "active" || state == "awake") &&
-			strings.TrimSpace(bead.Metadata["state_reason"]) == "creation_complete" {
-			if creationCompleteAt, ok := parseRFC3339Metadata(bead.Metadata["creation_complete_at"]); ok &&
+		if state := strings.TrimSpace(info.MetadataState); (state == "active" || state == "awake") &&
+			strings.TrimSpace(info.StateReason) == "creation_complete" {
+			if creationCompleteAt, ok := parseRFC3339Metadata(info.CreationCompleteAt); ok &&
 				time.Since(creationCompleteAt) < postCreateProtectionTimeout {
 				continue
 			}
 		}
-		template := normalizedSessionTemplate(bead, cfg)
+		template := normalizedSessionTemplateInfo(info, cfg)
 		agentCfg := findAgentByTemplate(cfg, template)
-		if agentCfg == nil || !isEphemeralSessionBead(bead) {
+		if agentCfg == nil || !isEphemeralSessionInfo(info) {
 			continue
 		}
 		processNames := config.AgentProcessNames(cfg, *agentCfg, exec.LookPath)
-		if running, err := poolSessionBeadRuntimeRunning(bead, sp, processNames); err == nil && running {
+		if running, err := poolSessionBeadRuntimeRunningInfo(info, sp, processNames); err == nil && running {
+			continue
+		}
+		// The candidate is threaded raw into GCSweepSessionBeads (a store close
+		// op, rule 3); recover the source bead by ID from the same snapshot. The
+		// projection is index-stable (OpenInfos()[i] == InfoFromPersistedBead(
+		// Open()[i])), so FindByID(info.ID) returns exactly this info's bead.
+		bead, ok := sessionBeads.FindByID(info.ID)
+		if !ok {
 			continue
 		}
 		candidates = append(candidates, bead)
@@ -2859,12 +2915,33 @@ func poolSessionBeadRuntimeRunning(bead beads.Bead, sp runtime.Provider, process
 	return runtime.ObserveLiveness(sp, name, processNames).Running, nil
 }
 
+// poolSessionBeadRuntimeRunningInfo is the session.Info sibling of
+// poolSessionBeadRuntimeRunning; it reads the RAW session_name
+// (Info.SessionNameMetadata) the same way the bead form does. Equivalence
+// is structural: identical body over the same raw field.
+func poolSessionBeadRuntimeRunningInfo(info sessionpkg.Info, sp runtime.Provider, processNames []string) (bool, error) {
+	if sp == nil {
+		return false, fmt.Errorf("pool session runtime check: %w", runtime.ErrSessionNotFound)
+	}
+	name := strings.TrimSpace(info.SessionNameMetadata)
+	if name == "" {
+		return false, fmt.Errorf("pool session runtime check missing session name: %w", runtime.ErrSessionNotFound)
+	}
+	return runtime.ObserveLiveness(sp, name, processNames).Running, nil
+}
+
 // pendingCreateClaimStillLeasedForSweep keeps pending_create_claim protection
 // aligned with the reconciler: start-in-flight claims stay protected for the
 // provider-start lease, never-started creates get the longer queue lease, and
 // stale claims stop blocking pool-slot recovery.
 func pendingCreateClaimStillLeasedForSweep(bead beads.Bead, startupTimeout time.Duration) bool {
 	return pendingCreateLeaseActive(bead, nil, startupTimeout)
+}
+
+// pendingCreateClaimStillLeasedForSweepInfo is the session.Info sibling of
+// pendingCreateClaimStillLeasedForSweep. Equivalence-proven.
+func pendingCreateClaimStillLeasedForSweepInfo(info sessionpkg.Info, startupTimeout time.Duration) bool {
+	return pendingCreateLeaseActiveInfo(info, nil, startupTimeout)
 }
 
 // isStaleCreating mirrors staleCreatingState in session_reconcile.go without
@@ -2881,6 +2958,18 @@ func isStaleCreating(bead beads.Bead) bool {
 		return true
 	}
 	return !now.Before(bead.CreatedAt.Add(staleCreatingStateTimeout))
+}
+
+// isStaleCreatingInfo is the session.Info mirror of isStaleCreating.
+func isStaleCreatingInfo(i sessionpkg.Info) bool {
+	now := time.Now()
+	if started, ok := parseRFC3339Metadata(i.PendingCreateStartedAt); ok {
+		return !now.Before(started.Add(staleCreatingStateTimeout))
+	}
+	if i.CreatedAt.IsZero() {
+		return true
+	}
+	return !now.Before(i.CreatedAt.Add(staleCreatingStateTimeout))
 }
 
 // parseRFC3339Metadata parses an RFC3339 timestamp metadata value. A missing,
@@ -2922,7 +3011,7 @@ func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
 	if sessionBeads == nil {
 		return
 	}
-	if _, err := dispatchAllQueuedNudges(cr.cityPath, cr.cfg, store.Store, cr.sp, sessionBeads); err != nil {
+	if _, err := dispatchAllQueuedNudges(cr.cityPath, cr.cfg, store.Store, cr.sessionsBeadStore().Store, cr.sp, sessionBeads); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: nudge dispatcher: %v\n", cr.logPrefix, err) //nolint:errcheck
 	}
 }
@@ -2977,12 +3066,12 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		sessionBeads,
 	)
 	open := filterSessionBeadsByName(updated, cfgNames)
-	poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(filteredCfg, cr.cityPath, open, wfcResult.AssignedWorkBeads, wfcResult.AssignedWorkStoreRefs)
+	openInfos := filterSessionInfosByName(updated, cfgNames)
+	poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(filteredCfg, cr.cityPath, openInfos, wfcResult.AssignedWorkBeads, wfcResult.AssignedWorkStoreRefs)
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		filteredCfg,
 		PoolDesiredCounts(ComputePoolDesiredStates(
-			filteredCfg, poolWorkBeads, open, wfcResult.ScaleCheckCounts,
-		)),
+			filteredCfg, poolWorkBeads, openInfos, wfcResult.ScaleCheckCounts)),
 		newSessionBeadSnapshot(open),
 		wfcResult.PoolScaleCheckPartialTemplates,
 	)
@@ -3081,7 +3170,7 @@ func traceSessionSnapshotFields(sessionBeads *sessionBeadSnapshot) map[string]an
 		return nil
 	}
 	return map[string]any{
-		"open_session_count": len(sessionBeads.Open()),
+		"open_session_count": len(sessionBeads.OpenInfos()),
 	}
 }
 
@@ -3146,6 +3235,23 @@ func filterSessionBeadsByName(snapshot *sessionBeadSnapshot, names map[string]bo
 	return filtered
 }
 
+// filterSessionInfosByName is the session.Info mirror of filterSessionBeadsByName:
+// it selects the same open sessions (matched on the RAW session_name metadata,
+// SessionNameMetadata) in the same order, for the pool-demand path that reads
+// typed Info fields.
+func filterSessionInfosByName(snapshot *sessionBeadSnapshot, names map[string]bool) []sessionpkg.Info {
+	if snapshot == nil || len(names) == 0 {
+		return nil
+	}
+	var filtered []sessionpkg.Info
+	for _, info := range snapshot.OpenInfos() {
+		if names[info.SessionNameMetadata] {
+			filtered = append(filtered, info)
+		}
+	}
+	return filtered
+}
+
 func (cr *CityRuntime) buildDesiredState(sessionBeads *sessionBeadSnapshot, trace *sessionReconcilerTraceCycle) DesiredStateResult {
 	// The desired-state build threads two store roles: the session-bead store the
 	// build-fn's leading store param flows into (sessions — it becomes
@@ -3187,16 +3293,15 @@ func (cr *CityRuntime) loadDemandSnapshot(
 	sessionFingerprint := sessionBeadSnapshotFingerprint(sessionBeads)
 	if cr.shouldRefreshDemandSnapshot(trigger, configChanged, sessionFingerprint) {
 		result := cr.buildDesiredState(sessionBeads, trace)
-		var openSessionBeads []beads.Bead
+		var openSessionInfos []sessionpkg.Info
 		if sessionBeads != nil {
-			openSessionBeads = sessionBeads.Open()
+			openSessionInfos = sessionBeads.OpenInfos()
 		}
-		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cr.cfg, cr.cityPath, openSessionBeads, result.AssignedWorkBeads, result.AssignedWorkStoreRefs)
+		poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cr.cfg, cr.cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStoreRefs)
 		result.PoolDesiredCounts = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(ComputePoolDesiredStatesTraced(
-				cr.cfg, poolWorkBeads, openSessionBeads, result.ScaleCheckCounts, trace,
-			)),
+				cr.cfg, poolWorkBeads, openSessionInfos, result.ScaleCheckCounts, trace)),
 			sessionBeads,
 			result.PoolScaleCheckPartialTemplates,
 		)
@@ -3409,11 +3514,11 @@ func (cr *CityRuntime) recordPreservedShutdownTrace() {
 	if trace == nil {
 		return
 	}
-	trace.recordOperation("lifecycle.shutdown.preserve_sessions", "", "", "", "retained", string(TraceOutcomeApplied), traceRecordPayload{
+	trace.RecordOperation(TraceSiteLifecycleShutdownPreserveSessions, TraceReasonRetained, TraceOutcomeApplied, "", "", "", 0, traceRecordPayload{
 		"city_path": cr.cityPath,
 		"city_name": cr.cityName,
 		"reason":    "supervisor_shutdown_preserve_mode",
-	}, "")
+	})
 	trace.end(TraceCompletionCompleted, traceRecordPayload{
 		"phase":     "shutdown",
 		"mode":      "preserve_sessions",

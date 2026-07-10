@@ -229,6 +229,12 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/order/{name}", (*Server).humaHandleOrderGet)
 	cityPost(sm, "/order/{name}/enable", (*Server).humaHandleOrderEnable)
 	cityPost(sm, "/order/{name}/disable", (*Server).humaHandleOrderDisable)
+	// Typed operator path to fire a trigger="webhook" order directly with typed
+	// params. Inherits write-auth/CSRF/read-only from cityPost (write-auth IS the
+	// auth here — no signature). Reuses the E6 sink + E0.5 dispatcher seam.
+	cityPost(sm, "/order/{name}/run", (*Server).humaHandleOrderRun, func(op *huma.Operation) {
+		op.DefaultStatus = http.StatusAccepted
+	})
 	cityGet(sm, "/orders/feed", (*Server).humaHandleOrdersFeed)
 
 	// Formulas.
@@ -248,6 +254,15 @@ func (sm *SupervisorMux) registerCityRoutes() {
 
 	// Packs.
 	cityGet(sm, "/packs", (*Server).humaHandlePackList)
+	cityRegister(sm, huma.Operation{
+		OperationID:   "add-pack",
+		Method:        http.MethodPost,
+		Path:          "/packs",
+		Summary:       "Add a pack",
+		Description:   "Imports a pack into the city by source (a remote git URL or registry ref), resolving + installing it so its templates compose into the city.",
+		DefaultStatus: http.StatusCreated,
+	}, (*Server).humaHandlePackAdd)
+	cityDelete(sm, "/packs/{name}", (*Server).humaHandlePackRemove)
 
 	// Sling.
 	cityPost(sm, "/sling", (*Server).humaHandleSling)

@@ -126,6 +126,11 @@ func (c *ConfigValidCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("rig validation: %v", err)
 		return r
 	}
+	if err := config.ValidateWebhooks(c.cfg.Webhooks); err != nil {
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("webhook validation: %v", err)
+		return r
+	}
 	if err := config.ValidateServices(c.cfg.Services); err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("service validation: %v", err)
@@ -249,6 +254,11 @@ func (c *BuiltinPackFamilyCheck) Run(_ *CheckContext) *CheckResult {
 	provider := c.cfg.Beads.Provider
 	if v := os.Getenv("GC_BEADS"); v != "" {
 		provider = v
+	}
+	if strings.EqualFold(strings.TrimSpace(c.cfg.Beads.Backend), "doltlite") {
+		r.Status = StatusOK
+		r.Message = "builtin bd/dolt pack family not required for doltlite backend"
+		return r
 	}
 	if !providerUsesBDDoltStore(provider) {
 		r.Status = StatusOK

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -122,7 +123,7 @@ func TestHandleStatusRefreshesAgedWarmBody(t *testing.T) {
 func TestBuildAndStoreStatusRecoversFromBuildPanic(t *testing.T) {
 	state := newFakeState(t)
 	s := &Server{state: state}
-	s.storeHealthComputer = func() *StatusStoreHealth {
+	s.storeHealthComputer = func(context.Context) *StatusStoreHealth {
 		panic("simulated build panic")
 	}
 
@@ -177,7 +178,7 @@ func TestBuildAndStoreStatusEscapesWedgedBuild(t *testing.T) {
 	unblock := make(chan struct{})
 	t.Cleanup(func() { close(unblock) })
 	s.storeHealthMu.Lock()
-	s.storeHealthComputer = func() *StatusStoreHealth {
+	s.storeHealthComputer = func(context.Context) *StatusStoreHealth {
 		<-unblock
 		return &StatusStoreHealth{SizeBytes: 1}
 	}
@@ -194,7 +195,7 @@ func TestBuildAndStoreStatusEscapesWedgedBuild(t *testing.T) {
 	// Swap in a non-blocking computer under the same lock the wedged
 	// goroutine already read past, so this reassignment cannot race it.
 	s.storeHealthMu.Lock()
-	s.storeHealthComputer = func() *StatusStoreHealth {
+	s.storeHealthComputer = func(context.Context) *StatusStoreHealth {
 		return &StatusStoreHealth{SizeBytes: 2}
 	}
 	s.storeHealthMu.Unlock()

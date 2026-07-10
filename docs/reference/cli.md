@@ -1785,6 +1785,7 @@ gc import
 |------------|-------------|
 | [gc import add](#gc-import-add) | Add a pack import |
 | [gc import check](#gc-import-check) | Validate installed pack import state |
+| [gc import credential](#gc-import-credential) | Manage pack-source git credentials |
 | [gc import install](#gc-import-install) | Install imports from pack.toml and packs.lock |
 | [gc import list](#gc-import-list) | List imported packs |
 | [gc import prune](#gc-import-prune) | Remove unreferenced clones from the global pack cache |
@@ -1842,6 +1843,57 @@ Validate installed pack import state
 ```
 gc import check
 ```
+
+## gc import credential
+
+Manage pack-source git credentials
+
+```
+gc import credential
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc import credential add](#gc-import-credential-add) | Register a pack-source credential |
+| [gc import credential list](#gc-import-credential-list) | List registered pack-source credentials |
+| [gc import credential remove](#gc-import-credential-remove) | Remove a registered pack-source credential |
+
+## gc import credential add
+
+Register a pack-source credential
+
+```
+gc import credential add <match> (--helper CMD | --token-file PATH | --token-env NAME | --ssh-key-file PATH) [--username NAME] [--global] [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--global` | bool |  | Write $GC_HOME/credentials.toml instead of the city file |
+| `--helper` | string |  | Command whose stdout is the token (executed per fetch) |
+| `--ssh-key-file` | string |  | Path to an SSH private key for git@/ssh:// sources |
+| `--token-env` | string |  | Name of an environment variable holding the token |
+| `--token-file` | string |  | Path to a file containing the token |
+| `--username` | string |  | Username sent to the remote (default x-access-token) |
+
+## gc import credential list
+
+List registered pack-source credentials
+
+```
+gc import credential list
+```
+
+## gc import credential remove
+
+Remove a registered pack-source credential
+
+```
+gc import credential remove <match> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--global` | bool |  | Remove from $GC_HOME/credentials.toml instead of the city file |
 
 ## gc import install
 
@@ -2429,6 +2481,9 @@ to the configured target (if any). Exec orders run their script directly
 write arbitrary stdout. Useful for testing orders or triggering them
 outside their normal schedule.
 Use --rig to disambiguate same-name orders in different rigs.
+Use --var key=value (repeatable) to pass args to the order: formula orders
+receive them as formula vars, exec orders as environment variables. A param
+declared required in [order.params] must be supplied or the run fails.
 
 ```
 gc order run <name> [flags]
@@ -2438,6 +2493,7 @@ gc order run <name> [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | JSON output (formula orders only; rejected for exec orders) |
 | `--rig` | string |  | rig name to disambiguate same-name orders |
+| `--var` | stringArray |  | order arg as key=value (repeatable): formula var / exec env |
 
 ## gc order show
 
@@ -3960,7 +4016,8 @@ The second argument is a bead ID, a formula name when --formula is set, or
 arbitrary text (which auto-creates a task bead).
 
 When target is omitted, the bead's rig prefix is used to look up the rig's
-default_sling_target from config. Requires --formula to have an explicit target.
+default_sling_targets (or default_sling_target) from config and one is chosen
+at random. Requires --formula to have an explicit target.
 Inline text also requires an explicit target.
 
 With --formula, the formula is instantiated and its root bead is routed to

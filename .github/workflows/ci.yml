@@ -175,7 +175,7 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.0.4"
+      BD_VERSION: "v1.1.0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -191,20 +191,28 @@ jobs:
         run: make check-native-dependency-surface
       - name: Event-export isolation guard
         run: make check-eventexport-isolation
+      - name: Open-core boundary guard
+        run: make check-core-boundary
       - name: Native DoltLite beads tests
         run: make test-native-doltlite-beads
-      - name: Get golangci-lint version for cache key
+      - name: Get golangci-lint + Go toolchain versions for cache key
         id: glint-version
         run: |
           version=$(grep -m1 '^GOLANGCI_LINT_VERSION := ' Makefile | awk '{print $3}')
           echo "version=${version}" >> "$GITHUB_OUTPUT"
+          # staticcheck (bundled in golangci-lint) caches type/CFG facts whose
+          # validity depends on the Go toolchain it was built with. Keying the
+          # cache on GOVERSION prevents a cache populated under one Go toolchain
+          # from being replayed under another, which produced a stale-fact
+          # SA5011 false-positive flood on main (ga-v7x9vk).
+          echo "goversion=$(go env GOVERSION)" >> "$GITHUB_OUTPUT"
       - name: Restore golangci-lint cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .cache/golangci-lint
-          key: ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-${{ hashFiles('go.sum', '.golangci.yml') }}
+          key: ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-${{ steps.glint-version.outputs.goversion }}-${{ hashFiles('go.sum', '.golangci.yml') }}
           restore-keys: |
-            ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-
+            ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-${{ steps.glint-version.outputs.goversion }}-
       - name: Lint
         env:
           GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
@@ -229,7 +237,7 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.0.4"
+      BD_VERSION: "v1.1.0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -258,7 +266,7 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.0.4"
+      BD_VERSION: "v1.1.0"
     strategy:
       fail-fast: false
       matrix:
@@ -290,7 +298,7 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.0.4"
+      BD_VERSION: "v1.1.0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -490,7 +498,7 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.0.4"
+      BD_VERSION: "v1.1.0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -622,7 +630,7 @@ jobs:
             command: ./scripts/test-integration-shard rest-full-16-of-16
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.0.4"
+      BD_VERSION: "v1.1.0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -1123,7 +1131,7 @@ jobs:
           GC_TEST_GASCITY_PACKS_REGISTRY: main
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.0.4"
+      BD_VERSION: "v1.1.0"
 
   # Dashboard SPA typecheck + tests + build. Runs on every push/PR
   # so TS drift against the spec (e.g. a query param tightening from
@@ -1149,6 +1157,9 @@ jobs:
         working-directory: internal/api/dashboardspa/web
       - name: Typecheck (tsc --noEmit)
         run: npm run typecheck
+        working-directory: internal/api/dashboardspa/web
+      - name: Typecheck test files (tsc -p tsconfig.test.json)
+        run: npm run --workspace gas-city-dashboard-frontend typecheck:test
         working-directory: internal/api/dashboardspa/web
       - name: Vitest
         run: npm run --workspace gas-city-dashboard-frontend test

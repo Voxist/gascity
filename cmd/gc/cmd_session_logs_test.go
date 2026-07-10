@@ -404,7 +404,7 @@ func TestResolveStoredSessionLogSource_UniqueWorkDirFallsBackBeyondLatestAlias(t
 		},
 	})
 
-	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, store, "mayor", []string{searchBase})
+	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, sessionFrontDoor(store), "mayor", []string{searchBase})
 	if !ok {
 		t.Fatal("resolveStoredSessionLogSource() = not found, want found")
 	}
@@ -451,7 +451,7 @@ func TestResolveStoredSessionLogSource_DoesNotCrossAmbiguousWorkDir(t *testing.T
 		},
 	})
 
-	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, store, "mayor", []string{searchBase})
+	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, sessionFrontDoor(store), "mayor", []string{searchBase})
 	if !ok {
 		t.Fatal("resolveStoredSessionLogSource() = not found, want found")
 	}
@@ -491,7 +491,7 @@ func TestResolveStoredSessionLogSource_CodexDoesNotUseAmbiguousWorkDirFallback(t
 		_ = store.Close(b.ID)
 	}
 
-	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, store, "workflows__codex-max-mc-one", []string{searchBase})
+	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, sessionFrontDoor(store), "workflows__codex-max-mc-one", []string{searchBase})
 	if !ok {
 		t.Fatal("resolveStoredSessionLogSource() = not found, want found")
 	}
@@ -503,6 +503,76 @@ func TestResolveStoredSessionLogSource_CodexDoesNotUseAmbiguousWorkDirFallback(t
 	}
 	if !strings.Contains(diagnostic, "ambiguous") {
 		t.Fatalf("resolveStoredSessionLogSource() diagnostic = %q, want ambiguous", diagnostic)
+	}
+}
+
+func TestResolveStoredSessionLogSource_CodexAmbiguousWorkDirUsesStartOrder(t *testing.T) {
+	workDir := t.TempDir()
+	firstStarted := time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC)
+	secondStarted := firstStarted.Add(2 * time.Minute)
+	store := beads.NewMemStoreFrom(2, []beads.Bead{
+		{
+			ID:        "gc-1",
+			Type:      session.BeadType,
+			Status:    "open",
+			Labels:    []string{session.LabelSession},
+			CreatedAt: firstStarted.Add(-time.Hour),
+			UpdatedAt: firstStarted,
+			Metadata: map[string]string{
+				"alias":         "workflows__codex-max-mc-one",
+				"provider":      "codex",
+				"provider_kind": "codex",
+				"session_name":  "workflows__codex-max-mc-one",
+				"state":         "awake",
+				"last_woke_at":  firstStarted.Format(time.RFC3339),
+				"work_dir":      workDir,
+			},
+		},
+		{
+			ID:        "gc-2",
+			Type:      session.BeadType,
+			Status:    "open",
+			Labels:    []string{session.LabelSession},
+			CreatedAt: secondStarted.Add(-time.Hour),
+			UpdatedAt: secondStarted,
+			Metadata: map[string]string{
+				"alias":         "workflows__codex-max-mc-two",
+				"provider":      "codex",
+				"provider_kind": "codex",
+				"session_name":  "workflows__codex-max-mc-two",
+				"state":         "awake",
+				"last_woke_at":  secondStarted.Format(time.RFC3339),
+				"work_dir":      workDir,
+			},
+		},
+	}, nil)
+
+	searchBase := t.TempDir()
+	dayDir := filepath.Join(searchBase, "2026", "05", "04")
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	firstPath := filepath.Join(dayDir, "rollout-first.jsonl")
+	if err := os.WriteFile(firstPath, []byte(fmt.Sprintf(`{"timestamp":%q,"type":"session_meta","payload":{"cwd":%q}}`+"\n", firstStarted.Format(time.RFC3339), workDir)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	secondPath := filepath.Join(dayDir, "rollout-second.jsonl")
+	if err := os.WriteFile(secondPath, []byte(fmt.Sprintf(`{"timestamp":%q,"type":"session_meta","payload":{"cwd":%q}}`+"\n", secondStarted.Format(time.RFC3339), workDir)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, provider, ok, diagnostic := resolveStoredSessionLogSource("", nil, sessionFrontDoor(store), "workflows__codex-max-mc-two", []string{searchBase})
+	if !ok {
+		t.Fatal("resolveStoredSessionLogSource() = not found, want found")
+	}
+	if diagnostic != "" {
+		t.Fatalf("resolveStoredSessionLogSource() diagnostic = %q, want empty", diagnostic)
+	}
+	if provider != "codex" {
+		t.Fatalf("resolveStoredSessionLogSource() provider = %q, want codex", provider)
+	}
+	if got != secondPath {
+		t.Fatalf("resolveStoredSessionLogSource() path = %q, want %q", got, secondPath)
 	}
 }
 
@@ -521,7 +591,7 @@ func TestCanFallbackStoredSessionLogByWorkDirUsesTargetedLookup(t *testing.T) {
 		},
 	})
 
-	ok := canFallbackStoredSessionLogByWorkDir(store, sessionLogContext{
+	ok := canFallbackStoredSessionLogByWorkDir(sessionFrontDoor(store), sessionLogContext{
 		sessionID: b.ID,
 		workDir:   workDir,
 		provider:  "codex",
@@ -557,7 +627,7 @@ func TestCanFallbackStoredSessionLogByWorkDirIgnoresAsleepPeersForLiveTarget(t *
 		},
 	})
 
-	ok := canFallbackStoredSessionLogByWorkDir(store, sessionLogContext{
+	ok := canFallbackStoredSessionLogByWorkDir(sessionFrontDoor(store), sessionLogContext{
 		sessionID: target.ID,
 		workDir:   workDir,
 		provider:  "codex",
@@ -864,7 +934,7 @@ func TestResolveSessionLogWorkDirByAlias(t *testing.T) {
 		},
 	})
 
-	got, ok := resolveSessionLogContext("", nil, store, "worker")
+	got, ok := resolveSessionLogContext("", nil, sessionFrontDoor(store), "worker")
 	if !ok {
 		t.Fatal("resolveSessionLogContext() = not found, want found")
 	}
@@ -885,7 +955,7 @@ func TestResolveSessionLogWorkDirBySessionName(t *testing.T) {
 		},
 	})
 
-	got, ok := resolveSessionLogContext("", nil, store, "s-gc-77")
+	got, ok := resolveSessionLogContext("", nil, sessionFrontDoor(store), "s-gc-77")
 	if !ok {
 		t.Fatal("resolveSessionLogContext() = not found, want found")
 	}
@@ -907,7 +977,7 @@ func TestResolveSessionLogWorkDirDoesNotUseClosedHistoricalAlias(t *testing.T) {
 	})
 	_ = store.Close(b.ID)
 
-	if got, ok := resolveSessionLogContext("", nil, store, "mayor"); ok {
+	if got, ok := resolveSessionLogContext("", nil, sessionFrontDoor(store), "mayor"); ok {
 		t.Fatalf("resolveSessionLogContext() = %+v, want not found for historical alias", got)
 	}
 }
@@ -982,7 +1052,7 @@ func TestResolveSessionLogContext_ReservedNamedTargetIgnoresClosedHistoricalBead
 	})
 	_ = store.Close(b.ID)
 
-	got, ok := resolveSessionLogContext(cityPath, cfg, store, "demo/witness")
+	got, ok := resolveSessionLogContext(cityPath, cfg, sessionFrontDoor(store), "demo/witness")
 	if ok {
 		t.Fatalf("resolveSessionLogContext() = %+v, want not found for reserved named target", got)
 	}

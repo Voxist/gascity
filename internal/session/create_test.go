@@ -16,7 +16,7 @@ import (
 func TestCreateSessionByteIdenticalConfiguredNamed(t *testing.T) {
 	mem := beads.NewMemStore()
 	rec := beadstest.NewRecordingStore(mem)
-	is := NewInfoStore(beads.SessionStore{Store: rec})
+	is := NewStore(beads.SessionStore{Store: rec})
 
 	// The metadata vocabulary the session_beads.go create site assembles inline
 	// for a configured-named (non-pool) session.
@@ -84,7 +84,7 @@ func TestCreateSessionByteIdenticalConfiguredNamed(t *testing.T) {
 func TestCreateSessionByteIdenticalPoolWithExplicitID(t *testing.T) {
 	mem := beads.NewMemStore()
 	rec := beadstest.NewRecordingStore(mem)
-	is := NewInfoStore(beads.SessionStore{Store: rec})
+	is := NewStore(beads.SessionStore{Store: rec})
 
 	meta := map[string]string{
 		"template":                  "tower/polecat",
@@ -137,8 +137,8 @@ func TestCreateSessionByteIdenticalPoolWithExplicitID(t *testing.T) {
 	if !reflect.DeepEqual(got.Labels, wantLabels) {
 		t.Errorf("Create bead Labels = %#v, want %#v", got.Labels, wantLabels)
 	}
-	if !reflect.DeepEqual(got.Metadata, meta) {
-		t.Errorf("Create bead Metadata = %#v, want %#v", got.Metadata, meta)
+	if !reflect.DeepEqual(got.Metadata, beads.StringMap(meta)) {
+		t.Errorf("Create bead Metadata = %#v, want %#v", got.Metadata, beads.StringMap(meta))
 	}
 }
 
@@ -152,7 +152,7 @@ func TestCreateSessionByteIdenticalPoolWithExplicitID(t *testing.T) {
 func TestCreateSessionByteIdenticalAdoptionBarrier(t *testing.T) {
 	mem := beads.NewMemStore()
 	rec := beadstest.NewRecordingStore(mem)
-	is := NewInfoStore(beads.SessionStore{Store: rec})
+	is := NewStore(beads.SessionStore{Store: rec})
 
 	// The metadata vocabulary runAdoptionBarrier assembles inline for an
 	// adopted running session (no template/pending_create_claim — the barrier
@@ -199,8 +199,8 @@ func TestCreateSessionByteIdenticalAdoptionBarrier(t *testing.T) {
 	if !reflect.DeepEqual(got.Labels, wantLabels) {
 		t.Errorf("Create bead Labels = %#v, want %#v", got.Labels, wantLabels)
 	}
-	if !reflect.DeepEqual(got.Metadata, meta) {
-		t.Errorf("Create bead Metadata = %#v, want %#v", got.Metadata, meta)
+	if !reflect.DeepEqual(got.Metadata, beads.StringMap(meta)) {
+		t.Errorf("Create bead Metadata = %#v, want %#v", got.Metadata, beads.StringMap(meta))
 	}
 }
 
@@ -209,7 +209,7 @@ func TestCreateSessionByteIdenticalAdoptionBarrier(t *testing.T) {
 // read newBead.ID after the raw Create).
 func TestCreateSessionReturnsAssignedID(t *testing.T) {
 	mem := beads.NewMemStore()
-	is := NewInfoStore(beads.SessionStore{Store: mem})
+	is := NewStore(beads.SessionStore{Store: mem})
 
 	id, err := is.CreateSession(CreateSpec{
 		Title:     "polecat",

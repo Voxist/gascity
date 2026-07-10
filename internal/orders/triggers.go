@@ -2,6 +2,7 @@ package orders
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -70,6 +71,10 @@ func CheckTriggerWithOptions(a Order, now time.Time, lastRunFn LastRunFunc, ep e
 		return checkEvent(a, ep, cursorFn)
 	case "manual":
 		return TriggerResult{Due: false, Reason: "manual trigger — use gc order run"}
+	case "webhook":
+		// Webhook-triggered orders are dispatched only by the supervisor webhook
+		// receiver; like manual, they are never tick-fired.
+		return TriggerResult{Due: false, Reason: "webhook trigger — dispatched by the webhook receiver"}
 	default:
 		return TriggerResult{Due: false, Reason: fmt.Sprintf("unknown trigger %q", a.Trigger)}
 	}
@@ -235,6 +240,8 @@ func mergeConditionEnv(environ, extra []string) []string {
 }
 
 // checkEvent checks if matching events exist after the last cursor position.
+// Events emitted by order-tracking beads (controller bookkeeping) are excluded
+// to prevent event orders from self-firing on their own tracking-bead lifecycle.
 func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult {
 	if ep == nil {
 		return TriggerResult{Due: false, Reason: "event: no events provider"}
@@ -251,10 +258,37 @@ func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult 
 	if err != nil {
 		return TriggerResult{Due: false, Reason: fmt.Sprintf("event: read error: %v", err)}
 	}
-	if len(matched) == 0 {
+	var count int
+	for _, e := range matched {
+		// Exclude the dispatcher's own order-tracking bookkeeping beads so an event
+		// order never self-fires on lifecycle events emitted by those beads (#3720).
+		if !payloadHasLabel(e.Payload, labelOrderTracking) {
+			count++
+		}
+	}
+	if count == 0 {
 		return TriggerResult{Due: false, Reason: "event: no matching events"}
 	}
-	return TriggerResult{Due: true, Reason: fmt.Sprintf("event: %d %s event(s)", len(matched), a.On)}
+	return TriggerResult{Due: true, Reason: fmt.Sprintf("event: %d %s event(s)", count, a.On)}
+}
+
+// payloadHasLabel reports whether a JSON bead payload contains the given label.
+func payloadHasLabel(payload json.RawMessage, label string) bool {
+	if len(payload) == 0 {
+		return false
+	}
+	var p struct {
+		Labels []string `json:"labels"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return false
+	}
+	for _, l := range p.Labels {
+		if l == label {
+			return true
+		}
+	}
+	return false
 }
 
 // MaxSeqFromLabels extracts the highest seq:<N> value from bead labels.

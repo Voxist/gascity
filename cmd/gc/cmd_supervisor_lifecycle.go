@@ -996,6 +996,10 @@ type supervisorServiceData struct {
 	SafeName      string
 	Path          string
 	ExtraEnv      []supervisorServiceEnvVar
+	// PortInUseExitCode is the exit code the supervisor returns on a duplicate
+	// API-port collision; the systemd unit lists it in RestartPreventExitStatus
+	// so a duplicate install does not crash-loop on the shared port.
+	PortInUseExitCode int
 }
 
 type supervisorServiceEnvVar struct {
@@ -1016,14 +1020,15 @@ func buildSupervisorServiceData() (*supervisorServiceData, error) {
 		xdgRuntimeDir = ""
 	}
 	return &supervisorServiceData{
-		GCPath:        gcPath,
-		LogPath:       supervisorLogPath(),
-		GCHome:        home,
-		XDGRuntimeDir: xdgRuntimeDir,
-		LaunchdLabel:  supervisorLaunchdLabel(),
-		SafeName:      sanitizeServiceName(filepath.Base(home)),
-		Path:          searchpath.ExpandPath(homeDir, goruntime.GOOS, os.Getenv("PATH")),
-		ExtraEnv:      supervisorServiceExtraEnv(),
+		GCPath:            gcPath,
+		LogPath:           supervisorLogPath(),
+		GCHome:            home,
+		XDGRuntimeDir:     xdgRuntimeDir,
+		LaunchdLabel:      supervisorLaunchdLabel(),
+		SafeName:          sanitizeServiceName(filepath.Base(home)),
+		Path:              searchpath.ExpandPath(homeDir, goruntime.GOOS, os.Getenv("PATH")),
+		ExtraEnv:          supervisorServiceExtraEnv(),
+		PortInUseExitCode: supervisorExitCodePortInUse,
 	}, nil
 }
 
@@ -1313,11 +1318,20 @@ func supervisorLaunchdLabel() string {
 
 func supervisorSystemdServiceName() string {
 	if suffix := supervisorServiceSuffix(); suffix != "" {
-		return "gascity-supervisor-" + suffix + ".service"
+		return supervisorSystemdUnitPrefix + suffix + ".service"
 	}
 	return defaultSupervisorSystemdUnit
 }
 
+// supervisorLaunchdTemplate has no equivalent of systemd's
+// RestartPreventExitStatus: launchd's KeepAlive dict below has no
+// per-exit-code / LastExitStatus key, so a duplicate supervisor that exits
+// with supervisorExitCodePortInUse (see cmd_supervisor.go) is still
+// "Crashed" (any nonzero exit) and gets restarted regardless of exit code.
+// The port-in-use message is worded accordingly on darwin (see
+// supervisorPortInUseMessage) instead of falsely claiming "without restart".
+// Real macOS duplicate-instance suppression is a different mechanism and is
+// tracked separately: gc-s53wv.
 const supervisorLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -1391,6 +1405,9 @@ RestartSec=5s
 # SoftResourceLimits) so the managed dolt server the supervisor spawns is not
 # capped at a low default FD limit under connection load (incident 2026-06-15).
 LimitNOFILE=8192:16384
+# A duplicate supervisor that loses the shared API port exits with this code.
+# Restarting it would just crash-loop forever (see ga-ceq), so don't.
+RestartPreventExitStatus={{.PortInUseExitCode}}
 StandardOutput=append:{{.LogPath}}
 StandardError=append:{{.LogPath}}
 Environment=GC_HOME="{{.GCHome}}"
@@ -1765,6 +1782,7 @@ func warnSupervisorSystemdWarmRefreshPreservedUnit(stderr io.Writer, service str
 }
 
 func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Writer) int {
+	sweepStaleIsolatedSupervisorServices(stderr)
 	content, err := renderSupervisorTemplate(supervisorLaunchdTemplate, data)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor install: rendering plist: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1835,6 +1853,7 @@ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Wri
 }
 
 func uninstallSupervisorLaunchd(_ *supervisorServiceData, stdout, stderr io.Writer) int {
+	sweepStaleIsolatedSupervisorServices(stderr)
 	path := supervisorLaunchdPlistPath()
 	active := supervisorLaunchdActive(supervisorLaunchdLabel())
 	if sockPath, _ := runningSupervisorSocket(); sockPath != "" {
@@ -1911,8 +1930,10 @@ func stopSupervisorSystemdForWarmRefresh(service string) ([]string, error) {
 }
 
 func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Writer) int {
+	sweepStaleIsolatedSupervisorServices(stderr)
 	// Check the binary guard before probing systemd so a refused install
-	// emits no systemctl calls.
+	// emits no systemctl calls for the install itself (the stale-service
+	// sweep above may still have issued best-effort systemctl calls).
 	path := supervisorSystemdServicePath()
 	existing, err := os.ReadFile(path)
 	hadCurrent := err == nil
@@ -2104,6 +2125,7 @@ func currentUsernameForSystemdHint() string {
 var currentUserForSystemdHint = osuser.Current
 
 func uninstallSupervisorSystemd(_ *supervisorServiceData, stdout, stderr io.Writer) int {
+	sweepStaleIsolatedSupervisorServices(stderr)
 	path := supervisorSystemdServicePath()
 	service := supervisorSystemdServiceName()
 	active := supervisorSystemctlActive(service)
