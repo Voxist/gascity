@@ -6633,8 +6633,10 @@ func freeLowLoopbackPort(t *testing.T) int {
 }
 
 func TestRunSupervisorWarnsOnEphemeralAPIPort(t *testing.T) {
-	gcHome := t.TempDir()
-	t.Setenv("GC_HOME", gcHome)
+	// GC_HOME deliberately avoids t.TempDir: a straggler writer leaked by an
+	// earlier test re-hydrates the bundled pack cache into the live GC_HOME
+	// and races TempDir's RemoveAll cleanup (vc-i44).
+	setLeakTolerantGCHome(t)
 	port := freeEphemeralLoopbackPort(t)
 	cfg := "[supervisor]\nport = " + strconv.Itoa(port) + "\n"
 	if err := os.WriteFile(supervisor.ConfigPath(), []byte(cfg), 0o644); err != nil {
@@ -6661,8 +6663,8 @@ func TestRunSupervisorWarnsOnEphemeralAPIPort(t *testing.T) {
 }
 
 func TestRunSupervisorNoWarningForLowAPIPort(t *testing.T) {
-	gcHome := t.TempDir()
-	t.Setenv("GC_HOME", gcHome)
+	// Same leak-tolerant GC_HOME rationale as the ephemeral-port sibling.
+	setLeakTolerantGCHome(t)
 	port := freeLowLoopbackPort(t)
 	cfg := "[supervisor]\nport = " + strconv.Itoa(port) + "\n"
 	if err := os.WriteFile(supervisor.ConfigPath(), []byte(cfg), 0o644); err != nil {
