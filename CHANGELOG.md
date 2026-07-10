@@ -22,6 +22,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Stop dispatch-budget starvation of short-interval orders: staleness-priority
+  admission + config-driven per-tick budget (vp-cixi.6 / PR #77; CHANGELOG and
+  derivation added retroactively by vc-wz5.4).** The order dispatcher's fixed
+  per-tick budget of 4 degraded every order to one fire per full ring rotation
+  on large rings (voxist-city: 122 orders × ~94s ticks ⇒ 30s orders fired every
+  33–90 min). `orderAdmissionOrder()` now admits most-overdue-first
+  (`elapsed ÷ interval`), which protects short-interval orders at any budget
+  size, and the budget is configurable via the new `[orders]
+  max_dispatches_per_tick` knob in city.toml (`*int`, nil/≤0 ⇒ default). The
+  shipped default of 32 is derived from voxist-city's ~122-order ring
+  (Σ over cooldown orders of 1/interval_min + headroom) and is NOT a
+  typical-city value; admission forks one subprocess per order with no
+  downstream concurrency bound, so the default is due to be re-derived
+  conservatively (with voxist-city's operational value moved to its own
+  city.toml) before any upstream contribution — capacity-gated follow-up
+  tracked in vc-wz5.4.
+
 - **Break the Dolt read-timeout death match: reap idle pooled connections
   client-side before the managed server kills them (vc-wz5.1).** The Go-native
   `internal/doltpool` pool bounded only a connection's total lifetime
