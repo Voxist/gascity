@@ -31,6 +31,58 @@ func shortSocketTempDir(t *testing.T, prefix string) string {
 	return testutil.ShortTempDir(t, prefix)
 }
 
+// setLeakTolerantGCHome points GC_HOME at a fresh per-test directory that is
+// NOT managed by t.TempDir, so this test's TempDir cleanup cannot be reddened
+// by a background writer the test does not own. Background work leaked by an
+// earlier test (e.g. an abandoned managed-city runtime whose config load
+// re-hydrates the bundled pack cache) resolves the repo cache from the
+// process-global GC_HOME env at write time and lands in whichever test's
+// GC_HOME is current when it fires; when that is a t.TempDir, Go's automatic
+// TempDir RemoveAll races the straggler and fails with "directory not empty"
+// even though the test's own assertions passed (vc-i44). The directory still
+// lives under the process-wide test temp root (TestMain repoints TMPDIR
+// there), so the end-of-run cleanup sweeps any residue the best-effort
+// removal below leaves behind.
+//
+// Use this instead of t.Setenv("GC_HOME", t.TempDir()) in tests that finish
+// quickly and do not assert on GC_HOME contents — the cheap insurance that
+// a straggler from an unrelated test cannot fail them.
+func setLeakTolerantGCHome(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "gc-home-leak-tolerant-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_HOME", dir)
+	t.Cleanup(func() {
+		// Best-effort: a straggler may still be writing here. Residue is
+		// removed with the test temp root after the whole run.
+		_ = os.RemoveAll(dir)
+	})
+	return dir
+}
+
+// TestSetLeakTolerantGCHomeIsOutsideTempDirManagement pins the property the
+// helper exists for: the GC_HOME it hands out must not live anywhere under
+// the calling test's TempDir root, or Go's automatic TempDir RemoveAll would
+// race straggler writers again (vc-i44). It also pre-seeds the exact shape a
+// straggler writes (a cache/repos subtree) and leaves it behind, proving
+// residue cannot fail the test.
+func TestSetLeakTolerantGCHomeIsOutsideTempDirManagement(t *testing.T) {
+	tempDirRoot := filepath.Dir(canonicalTestPath(t.TempDir()))
+	gcHome := setLeakTolerantGCHome(t)
+	if got := os.Getenv("GC_HOME"); got != gcHome {
+		t.Fatalf("GC_HOME = %q, want helper dir %q", got, gcHome)
+	}
+	canonHome := canonicalTestPath(gcHome)
+	if canonHome == tempDirRoot || strings.HasPrefix(canonHome, tempDirRoot+string(os.PathSeparator)) {
+		t.Fatalf("leak-tolerant GC_HOME %q must not live under the test's TempDir root %q — a straggler write there reddens TempDir cleanup (vc-i44)", gcHome, tempDirRoot)
+	}
+	if err := os.MkdirAll(filepath.Join(gcHome, "cache", "repos", "straggler"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func cmdGCTmuxSocketRoot(testTempRoot string) (string, string, error) {
 	parent, err := os.MkdirTemp("/tmp", "gct-")
 	if err != nil {
