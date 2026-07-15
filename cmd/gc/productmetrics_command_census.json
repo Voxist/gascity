@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 195,
+  "next_id": 198,
   "permanent_ids": [
     {
       "name": "help",
@@ -317,6 +317,21 @@
       "classification": "beads-show",
       "owner": "immediate",
       "id": 16
+    },
+    {
+      "path": "gc beads state",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "beads-state",
+      "owner": "immediate",
+      "id": 197
     },
     {
       "path": "gc build-image",
@@ -3045,6 +3060,52 @@
       "classification": "prompt-synth",
       "owner": "immediate",
       "id": 117
+    },
+    {
+      "path": "gc provider",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "structural",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "help",
+      "canonical_target": "@help",
+      "owner": "structural",
+      "id": 1
+    },
+    {
+      "path": "gc provider quota",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "provider-quota",
+      "owner": "immediate",
+      "id": 195
+    },
+    {
+      "path": "gc provider rotate-key",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "provider-rotate-key",
+      "owner": "immediate",
+      "id": 196
     },
     {
       "path": "gc register",

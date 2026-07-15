@@ -234,10 +234,6 @@ type partialAssignedWorkStore struct {
 
 type controllerDemandPartialStore struct {
 	*beads.MemStore
-	// assignedWorkReadSeen counts Ready calls so the fixture can let the first
-	// (collapsed assigned-work) read pass clean and inject a partial only on the
-	// later pool/scale-check controller-demand reads.
-	assignedWorkReadSeen int
 }
 
 func (s *controllerDemandPartialStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
@@ -245,23 +241,12 @@ func (s *controllerDemandPartialStore) Ready(query ...beads.ReadyQuery) ([]beads
 	if err != nil {
 		return nil, err
 	}
-	// The collapsed assigned-work scope read (P2.5 / #3218) and the
-	// pool/scale-check controller-demand reads now share the same unfiltered
-	// (Assignee=="" && Limit==0) shape, so this fixture distinguishes them by
-	// call ordinal: the first Ready call is the assigned-work collapse read,
-	// which must stay clean so the named scale_check partial does not escalate
-	// to StoreQueryPartial. The ordinal is not silently fragile to a reorder —
-	// it is guarded by divergent observable outcomes: an assigned-work partial
-	// sets result.StoreQueryPartial, while a scale_check partial sets only
-	// ScaleCheckPartialTemplates. If a future reorder made the assigned-work
-	// read the one that receives the injected partial, the caller's
-	// StoreQueryPartial assertion (asserted false in
-	// TestBuildDesiredState_NamedScaleCheckPartialDoesNotRetainGenericPoolSession)
-	// would flip true and fail the test rather than pass against the wrong call.
-	s.assignedWorkReadSeen++
-	if s.assignedWorkReadSeen == 1 {
-		return rows, nil
-	}
+	// Inject a partial only on the unfiltered controller-demand reads
+	// (Assignee=="" && Limit==0). The demand phase shares one full ready read
+	// per store across the assigned-work, scale-check, and named-session probes
+	// (readyDemandCache), so every such read observes the partial: the
+	// assigned-work collection is marked partial too (StoreQueryPartial), while
+	// the scoped template partials still fire (PoolScaleCheckPartialTemplates).
 	if len(query) == 0 || (query[0].Assignee == "" && query[0].Limit == 0) {
 		return rows, &beads.PartialResultError{Op: "bd ready", Err: errors.New("skipped corrupt controller demand bead")}
 	}

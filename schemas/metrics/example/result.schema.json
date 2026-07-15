@@ -204,7 +204,10 @@
               "context-use",
               "login",
               "logout",
-              "whoami"
+              "whoami",
+              "provider-quota",
+              "provider-rotate-key",
+              "beads-state"
             ]
           },
           "event_id": {
