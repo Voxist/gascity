@@ -85,6 +85,14 @@ const (
 	// interval (vp-cixi.6: 122 orders × ~94s ticks × old budget 4 ⇒ 30s
 	// orders fired every 33–90 min). Override via [orders]
 	// max_dispatches_per_tick in city.toml.
+	//
+	// NOTE(vc-wz5.4): 32 is voxist-city-sized (Σ over cooldown orders of
+	// 1/interval_min + headroom for its ~122-order ring), NOT a typical-city
+	// default. Each admitted order forks a subprocess with no downstream
+	// concurrency bound, so this value is a fork-storm envelope under load.
+	// Before any upstream contribution, restore a conservative core default
+	// (the DefaultMaxWakesPerTick=5 principle) and carry city-specific
+	// sizing in that city's own city.toml.
 	defaultMaxOrderDispatchesPerTick = 32
 	orderTrackingSweepCloseBudget    = 4
 

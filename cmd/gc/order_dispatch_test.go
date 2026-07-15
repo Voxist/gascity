@@ -9664,8 +9664,15 @@ func TestCarryLastRunCacheFrom(t *testing.T) {
 func TestOrderDispatchBudgetDefaultRaised(t *testing.T) {
 	// The old default of 4 starved short-interval orders on cities with
 	// large order rings (one fire per full rotation regardless of interval).
-	if defaultMaxOrderDispatchesPerTick < 32 {
-		t.Fatalf("defaultMaxOrderDispatchesPerTick = %d, want >= 32", defaultMaxOrderDispatchesPerTick)
+	// Guard only that floor: the default must stay above the old starvation
+	// value. Do NOT pin a high number here — the current 32 is voxist-city's
+	// ~122-order-ring sizing (Σ over cooldown orders of 1/interval_min +
+	// headroom), not a gascity-core invariant, and a conservative down-tune
+	// or upstream contribution must not fail CI (vc-wz5.4). Starvation
+	// resistance itself is pinned by
+	// TestOrderDispatchPrioritizesOverdueShortIntervalUnderBudget (budget=1).
+	if defaultMaxOrderDispatchesPerTick <= 4 {
+		t.Fatalf("defaultMaxOrderDispatchesPerTick = %d, want > 4 (the old starvation default)", defaultMaxOrderDispatchesPerTick)
 	}
 }
 
