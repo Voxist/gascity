@@ -257,15 +257,15 @@ const (
 	// TraceOutcomeChainWalk marks the provider-health gate failing over to an
 	// alternate provider from the configured failover_chain (vp #55), as opposed
 	// to skipping respawn when no healthy alternate exists.
-	TraceOutcomeChainWalk           TraceOutcomeCode = "chain_walk"
-	TraceOutcomeRelaunch            TraceOutcomeCode = "relaunch"
-	TraceOutcomeClear               TraceOutcomeCode = "clear"
-	TraceOutcomeUnhealthy           TraceOutcomeCode = "unhealthy"
-	TraceOutcomeRestart             TraceOutcomeCode = "restart"
-	TraceOutcomeScheduled           TraceOutcomeCode = "scheduled"
-	TraceOutcomeHoldDeferred        TraceOutcomeCode = "hold_deferred"
-	TraceOutcomeHeld                TraceOutcomeCode = "held"
-	TraceOutcomeHealed              TraceOutcomeCode = "healed"
+	TraceOutcomeChainWalk    TraceOutcomeCode = "chain_walk"
+	TraceOutcomeRelaunch     TraceOutcomeCode = "relaunch"
+	TraceOutcomeClear        TraceOutcomeCode = "clear"
+	TraceOutcomeUnhealthy    TraceOutcomeCode = "unhealthy"
+	TraceOutcomeRestart      TraceOutcomeCode = "restart"
+	TraceOutcomeScheduled    TraceOutcomeCode = "scheduled"
+	TraceOutcomeHoldDeferred TraceOutcomeCode = "hold_deferred"
+	TraceOutcomeHeld         TraceOutcomeCode = "held"
+	TraceOutcomeHealed       TraceOutcomeCode = "healed"
 
 	TraceOutcomeResolutionFailed    TraceOutcomeCode = "resolution_failed"
 	TraceOutcomeStartErrorConverged TraceOutcomeCode = "start_error_converged"
