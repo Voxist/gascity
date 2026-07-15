@@ -86,8 +86,8 @@ func configuredScopeIdentity(scopeRoot string) identity.ScopeIdentity {
 // than handing back a wrong-database store. This is the load-bearing safety pair
 // for the P2.3 canary lever: the lever opens the native store; this assertion
 // guarantees the open targeted the scope's real data.
-func openNativeStoreWithIdentityAssertion(ctx context.Context, scopeRoot string, env map[string]string, sink IdentityAlertSink) (beads.Store, error) {
-	store, err := beads.OpenNativeDoltStoreAt(ctx, scopeRoot, env)
+func openNativeStoreWithIdentityAssertion(ctx context.Context, scopeRoot string, env map[string]string, sink IdentityAlertSink, opts ...beads.NativeDoltStoreOption) (beads.Store, error) {
+	store, err := beads.OpenNativeDoltStoreAt(ctx, scopeRoot, env, opts...)
 	if err != nil {
 		return nil, err
 	}

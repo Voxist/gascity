@@ -544,8 +544,57 @@ func TestValidateRequiredParams(t *testing.T) {
 		t.Fatalf("error = %q, want it to name missing param pr", err.Error())
 	}
 
-	// A present-but-empty value still counts as supplied.
-	if err := ValidateRequiredParams(a, map[string]string{"repo": "octo/demo", "pr": ""}); err != nil {
-		t.Fatalf("ValidateRequiredParams with empty-but-present pr = %v, want nil", err)
+	// A present-but-empty value counts as MISSING: webhook arg extraction inserts
+	// the key even when the payload path resolved to "", so a required param that
+	// rendered empty must not be treated as supplied (else the order fires with an
+	// empty required value).
+	emptyErr := ValidateRequiredParams(a, map[string]string{"repo": "octo/demo", "pr": ""})
+	if emptyErr == nil {
+		t.Fatal("ValidateRequiredParams with empty-but-present pr = nil, want error (empty required value is not supplied)")
+	}
+	if !strings.Contains(emptyErr.Error(), "pr") {
+		t.Fatalf("error = %q, want it to name the empty required param pr", emptyErr.Error())
+	}
+
+	// A whitespace-only value is likewise treated as missing.
+	if err := ValidateRequiredParams(a, map[string]string{"repo": "octo/demo", "pr": "   "}); err == nil {
+		t.Fatal("ValidateRequiredParams with whitespace-only pr = nil, want error")
+	}
+}
+
+func TestParseCronTZ(t *testing.T) {
+	data := []byte(`
+[order]
+formula = "mol-digest-generate"
+trigger = "cron"
+schedule = "30 19 * * *"
+tz = "America/New_York"
+`)
+	a, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if a.TZ != "America/New_York" {
+		t.Errorf("TZ = %q, want %q", a.TZ, "America/New_York")
+	}
+}
+
+func TestValidateCronTZ(t *testing.T) {
+	a := Order{Name: "digest", Formula: "mol-digest", Trigger: "cron", Schedule: "30 19 * * *", TZ: "America/New_York"}
+	if err := Validate(a); err != nil {
+		t.Errorf("Validate: %v", err)
+	}
+}
+
+// A misspelled zone must fail order load loudly — a silent fallback would
+// move the order's schedule onto a different wall clock.
+func TestValidateCronBadTZ(t *testing.T) {
+	a := Order{Name: "digest", Formula: "mol-digest", Trigger: "cron", Schedule: "30 19 * * *", TZ: "America/New_Yrok"}
+	err := Validate(a)
+	if err == nil {
+		t.Fatal("Validate should fail: bad tz")
+	}
+	if !strings.Contains(err.Error(), `invalid tz "America/New_Yrok"`) {
+		t.Errorf("error = %q, want it to name the invalid tz", err)
 	}
 }

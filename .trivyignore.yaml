@@ -41,6 +41,15 @@ vulnerabilities:
       - "usr/local/bin/kubectl"
     expired_at: 2026-08-07
     statement: Upstream bd, br, dolt, and kubectl embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+). gh cleared by v2.94.0 (Go 1.26.4) on base-image rebuild.
+  - id: CVE-2026-39822
+    paths:
+      - "usr/local/bin/bd"
+      - "usr/local/bin/br"
+      - "usr/local/bin/dolt"
+      - "usr/local/bin/kubectl"
+      - "usr/bin/gh"
+    expired_at: 2026-08-07
+    statement: Go stdlib os.Root symlink CVE disclosed 2026-07; fixed in Go 1.26.5 / 1.25.12. bd, br, dolt (1.26.2) and kubectl pend upstream rebuilds; gh (cli/cli v2.94.0, Go 1.26.4) clears when upstream ships a 1.26.5+ build. gc itself builds with Go 1.26.5 as of this change (no waiver).
   - id: CVE-2026-39823
     paths:
       - "usr/local/bin/bd"

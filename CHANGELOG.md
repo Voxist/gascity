@@ -20,6 +20,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pre-heal step only. New file `cmd/gc/city_identity_map.go`; ~20 lines added to
   `ensureManagedDoltProjectIDWithRecorder`.
 
+### Upgrading Notes
+
+- **Every graph-owning store scope needs a `Dir`-matched `control-dispatcher`
+  agent.** Control beads now route to the dispatcher that owns their store scope
+  (city vs. rig) rather than falling back to the city dispatcher, and that
+  routing is fail-closed: a graph owned by `rig:X` whose scope has no exactly
+  `Dir`-matched `control-dispatcher` agent now fails before instantiation with an
+  `OrderFailed` event instead of silently stranding its control lane on a
+  dispatcher that cannot read the rig store. Deployments that previously limped
+  along through shared-store mis-routing must add a matching rig-scoped
+  `control-dispatcher` agent; the reconciler logs `control bead <id> in rig
+  store "X" has no configured control-dispatcher for its store scope` to name
+  the missing scope.
+
 ### Fixed
 
 - **Break the Dolt read-timeout death match: reap idle pooled connections

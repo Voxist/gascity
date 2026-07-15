@@ -52,6 +52,7 @@ func (a *testExtMsgAdapter) EnsureChildConversation(context.Context, extmsg.Conv
 func TestHandleExtMsgOutboundNotifiesPeerMembersAndMaterializesNamedSessions(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	t.Cleanup(srv.waitForBackground)
 
 	services := extmsg.NewServices(fs.cityBeadStore)
 	fs.extmsgSvc = &services
@@ -118,16 +119,9 @@ func TestHandleExtMsgOutboundNotifiesPeerMembersAndMaterializesNamedSessions(t *
 	if adapter.publishCalls[0].Text != "hello peers" {
 		t.Fatalf("publish text = %q, want hello peers", adapter.publishCalls[0].Text)
 	}
+	srv.waitForBackground()
 
-	var peerID string
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		peerID, err = session.ResolveSessionID(fs.cityBeadStore, "myrig/worker")
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	peerID, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker")
 	if err != nil {
 		t.Fatalf("ResolveSessionID(myrig/worker): %v", err)
 	}
@@ -139,47 +133,25 @@ func TestHandleExtMsgOutboundNotifiesPeerMembersAndMaterializesNamedSessions(t *
 	if peerSessionName == "" {
 		t.Fatal("materialized peer session missing session_name")
 	}
-	// Materialization commits the session bead before the runtime session is
-	// started (session.Manager create path: bead first, then provider Start),
-	// so a direct store reader can observe the resolvable bead before
-	// IsRunning flips true. Poll for running instead of checking once to avoid
-	// a load-dependent race (see ga-thgf8q).
-	running := false
-	deadline = time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if fs.sp.IsRunning(peerSessionName) {
-			running = true
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !running {
+	if !fs.sp.IsRunning(peerSessionName) {
 		t.Fatalf("peer session %q should be running after outbound publish", peerSessionName)
 	}
 
 	peerNudges := 0
-	deadline = time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		peerNudges = 0
-		calls := fs.sp.SnapshotCalls()
-		for _, call := range calls {
-			if call.Method != "Nudge" {
-				continue
-			}
-			if call.Name == source.SessionName {
-				t.Fatalf("source session should not receive peer publish nudge; calls=%#v", calls)
-			}
-			if call.Name == peerSessionName && strings.Contains(call.Message, "hello peers") {
-				peerNudges++
-			}
+	calls := fs.sp.SnapshotCalls()
+	for _, call := range calls {
+		if call.Method != "Nudge" {
+			continue
 		}
-		if peerNudges == 1 {
-			break
+		if call.Name == source.SessionName {
+			t.Fatalf("source session should not receive peer publish nudge; calls=%#v", calls)
 		}
-		time.Sleep(10 * time.Millisecond)
+		if call.Name == peerSessionName && strings.Contains(call.Message, "hello peers") {
+			peerNudges++
+		}
 	}
 	if peerNudges != 1 {
-		t.Fatalf("peer nudge count = %d, want 1; calls=%#v", peerNudges, fs.sp.SnapshotCalls())
+		t.Fatalf("peer nudge count = %d, want 1; calls=%#v", peerNudges, calls)
 	}
 }
 
@@ -302,6 +274,7 @@ func TestExtmsgNotifyMembersSuppressesDiscriminatorForRoutedParticipant(t *testi
 func TestHandleExtMsgOutboundNotifiesDeliveredConversationMembers(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
+	t.Cleanup(srv.waitForBackground)
 
 	services := extmsg.NewServices(fs.cityBeadStore)
 	fs.extmsgSvc = &services
@@ -361,16 +334,9 @@ func TestHandleExtMsgOutboundNotifiesDeliveredConversationMembers(t *testing.T) 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
+	srv.waitForBackground()
 
-	var peerID string
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		peerID, err = session.ResolveSessionID(fs.cityBeadStore, "myrig/worker")
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	peerID, err := session.ResolveSessionID(fs.cityBeadStore, "myrig/worker")
 	if err != nil {
 		t.Fatalf("ResolveSessionID(myrig/worker): %v", err)
 	}
@@ -384,7 +350,7 @@ func TestHandleExtMsgOutboundNotifiesDeliveredConversationMembers(t *testing.T) 
 	}
 
 	found := false
-	deadline = time.Now().Add(time.Second)
+	deadline := time.Now().Add(time.Second)
 	var calls []runtime.Call
 	for time.Now().Before(deadline) {
 		calls = fs.sp.SnapshotCalls()
@@ -397,7 +363,6 @@ func TestHandleExtMsgOutboundNotifiesDeliveredConversationMembers(t *testing.T) 
 		if found {
 			break
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
 	if !found {
 		t.Fatalf("delivered conversation peer nudge not found; calls=%#v", calls)
