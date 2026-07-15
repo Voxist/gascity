@@ -1586,18 +1586,22 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		if !desired {
 			var providerAlive bool
 			var livenessErr error
-			if (listRunErr == nil || listRunPartial) && visibleSet[name] {
-				// Fast path: a usable list snapshot already shows the session
-				// present, so it is alive without a per-session probe.
-				providerAlive = true
+			if (listRunErr == nil || listRunPartial) && sp != nil {
+				// Fast path: a real runtime provider produced a usable snapshot
+				// this tick, so the visibleSet map is an authoritative liveness
+				// signal — absence means dead. Decide from the O(1) snapshot with
+				// NO per-session probe (phantom-reap perf:
+				// TestReconcileSessionBeads_UsesVisibilitySnapshotForOrphanedSessions).
+				providerAlive = visibleSet[name]
 			} else {
-				// Absent from the list (or the list is unusable): list-absence is
-				// not an authoritative "dead" signal — sp may be nil and the list
-				// may be partial — so confirm with the per-session probe, which
+				// No usable snapshot (sp==nil ⇒ nothing observed the runtime this
+				// tick, or the list errored): list-absence is NOT an authoritative
+				// "dead" signal, so confirm with the per-session probe, which
 				// surfaces a liveness observation error. That error drives the
 				// fail-closed guards on the destructive !providerAlive paths below
 				// (pending-create rollback, failed-create close, drain-ack
-				// finalize, orphan close): an uncertain observation must not close.
+				// finalize, orphan close): an uncertain observation must not close
+				// (TestReconcileOrphanCloseFailsClosedOnLivenessError).
 				providerAlive, livenessErr = workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, id)
 				if livenessErr != nil {
 					providerAlive = false
