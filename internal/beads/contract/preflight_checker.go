@@ -7,6 +7,8 @@ import (
 	"runtime/debug"
 	"strings"
 
+	"golang.org/x/mod/module"
+
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -285,6 +287,15 @@ func (c PreflightChecker) checkVersionCompat(ctx PreflightBDContext, err error) 
 		// version must not take the native store offline — only a *confirmed*
 		// mismatch (below) should.
 		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd/beads schema compatible; linked library version unconfirmed (source build)", details)
+	}
+	if module.IsPseudoVersion("v" + libraryVersion) {
+		// A pseudo-versioned library is an untagged-commit pin. bd self-reports
+		// only a release label, never a commit, so a label comparison can
+		// neither confirm nor refute parity with it — the same reasoning as
+		// the source-build case above. The schema version stays the real
+		// compatibility signal; only a *confirmed* release-label mismatch
+		// (below) may take the native store offline.
+		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd/beads schema compatible; linked library version is an untagged-commit pin (pseudo-version)", details)
 	}
 	if strings.TrimPrefix(ctx.BDVersion, "v") != libraryVersion {
 		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckFail, "bd version differs from linked beads library version", details)
