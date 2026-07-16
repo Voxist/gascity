@@ -278,12 +278,15 @@ func TestCollectAssignedWorkBeadsCachedMatchesUncached(t *testing.T) {
 		}
 	}
 
-	// Legacy path probes one live read per assignee; the cached path collapses
-	// them to one backing read for the single store.
+	// Both paths collapse the per-assignee fan-out to a single backing Ready
+	// read for the single store: the direct path via the single-scope-read
+	// collapse in collectAssignedWorkBeads, the cached path via the shared
+	// readyDemandCache. The guarantee under test is that they agree on results
+	// (checked above), with neither exceeding one backing read.
 	uncachedReadyReads := len(uncachedStore.readyQueries)
 	cachedReadyReads := len(cachedStore.readyQueries)
-	if uncachedReadyReads < 3 {
-		t.Fatalf("expected legacy per-assignee fan-out (>=3 reads), got %d", uncachedReadyReads)
+	if uncachedReadyReads > 1 {
+		t.Fatalf("direct assigned-work path issued %d backing Ready reads, want <= 1 (single-scope collapse)", uncachedReadyReads)
 	}
 	if cachedReadyReads > 1 {
 		t.Fatalf("cached assigned-work path issued %d backing Ready reads, want <= 1", cachedReadyReads)

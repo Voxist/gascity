@@ -8679,16 +8679,16 @@ type scanListFailStore struct {
 }
 
 func (s scanListFailStore) List(q beads.ListQuery) ([]beads.Bead, error) {
-	if q.AllowScan {
+	if q.AllowScan || strings.HasPrefix(q.Label, "order-run:") {
 		return nil, s.err
 	}
 	return s.Store.List(q)
 }
 
-// TestHasOpenWorkStrictPropagatesOpenScanError pins the flat gate's
-// fail-closed contract for its whole-scope open scan: a store error must
-// surface to the caller (gateFailClosed blocks on non-timeout errors), never
-// silently read as "no open work".
+// TestHasOpenWorkStrictPropagatesOpenScanError pins the gate's fail-closed
+// contract for its open-work read: a store error listing the order-run beads
+// must surface to the caller (gateFailClosed blocks on non-timeout errors),
+// never silently read as "no open work".
 func TestHasOpenWorkStrictPropagatesOpenScanError(t *testing.T) {
 	base := beads.NewMemStore()
 
@@ -8709,7 +8709,7 @@ func TestHasOpenWorkStrictPropagatesOpenScanError(t *testing.T) {
 	if has {
 		t.Fatal("hasOpenWorkStrict returned true with open-scan error; caller must fail closed on the error")
 	}
-	if !strings.Contains(err.Error(), "listing open beads for order gate") {
+	if !strings.Contains(err.Error(), "listing order work beads") {
 		t.Fatalf("hasOpenWorkStrict err = %q, want open-scan context", err)
 	}
 }
@@ -8725,6 +8725,16 @@ func (s ancestorGetFailStore) Get(id string) (beads.Bead, error) {
 		return beads.Bead{}, s.err
 	}
 	return s.Store.Get(id)
+}
+
+func (s ancestorGetFailStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	// The wisp descendant walk lists a closed intermediate's children by
+	// ParentID; failing that read is the front door's ancestry-resolution
+	// error path.
+	if q.ParentID == s.failID {
+		return nil, s.err
+	}
+	return s.Store.List(q)
 }
 
 // TestHasOpenWorkStrictPropagatesAncestorGetError pins fail-closed for the
@@ -8762,7 +8772,7 @@ func TestHasOpenWorkStrictPropagatesAncestorGetError(t *testing.T) {
 	if has {
 		t.Fatal("hasOpenWorkStrict returned true with ancestor-get error; caller must fail closed on the error")
 	}
-	if !strings.Contains(err.Error(), "resolving wisp ancestry") {
+	if !strings.Contains(err.Error(), "checking open descendants of wisp") {
 		t.Fatalf("hasOpenWorkStrict err = %q, want ancestry context", err)
 	}
 }
