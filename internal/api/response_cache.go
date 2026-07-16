@@ -217,6 +217,37 @@ func cachedResponseAs[T any](s *Server, key string, index uint64) (T, bool) {
 	return cloneCachedValue[T](v)
 }
 
+// cachedResponseWithinAge returns the cached value for key when the entry
+// was stored within maxAge, regardless of the event index it was built at.
+// For endpoints whose rebuild fans out to external stores (status), the
+// exact-index lookup never hits on busy cities — every event advances the
+// index — so callers opt into a bounded-staleness window instead.
+func (s *Server) cachedResponseWithinAge(key string, maxAge time.Duration) (any, bool) {
+	if key == "" {
+		return nil, false
+	}
+	s.responseCacheMu.Lock()
+	defer s.responseCacheMu.Unlock()
+	if s.responseCacheEntries == nil {
+		return nil, false
+	}
+	entry, ok := s.responseCacheEntries[key]
+	if !ok || time.Since(entry.storedAt) > maxAge {
+		return nil, false
+	}
+	return entry.value, true
+}
+
+// cachedResponseWithinAgeAs is cachedResponseAs for age-bounded lookups.
+func cachedResponseWithinAgeAs[T any](s *Server, key string, maxAge time.Duration) (T, bool) {
+	v, ok := s.cachedResponseWithinAge(key, maxAge)
+	if !ok {
+		var zero T
+		return zero, false
+	}
+	return cloneCachedValue[T](v)
+}
+
 // cloneCachedValue deep-copies a cached value via a JSON roundtrip.
 //
 // The JSON roundtrip isolates concurrent readers: if a handler mutates

@@ -95,13 +95,16 @@ _cache_age_s; fallback-path JSON omits it.`,
 // the supervisor API when a controller is up and falls back to direct bd
 // multi-store reads otherwise.
 func cmdBeadsList(args []string, stdout, stderr io.Writer) int {
-	cityPath, err := resolveCity()
+	remoteC, isRemote, cityPath, err := resolveReadTarget()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc beads list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	format, rest := parseBeadFormat(args)
 	filters, _ := parseBeadFilters(rest)
+	if isRemote {
+		return routeBeadsList("", remoteC, "", format, filters, stdout, stderr)
+	}
 	c, reason := beadsListAPIClient(cityPath)
 	return routeBeadsList(cityPath, c, reason, format, filters, stdout, stderr)
 }
@@ -132,12 +135,12 @@ func routeBeadsList(cityPath string, c *api.Client, nilReason, format string, fi
 			logRoute(stderr, cmdName, "api", "")
 			return renderBeadsListFromAPI(cr, format, filters, stdout)
 		}
-		if !api.ShouldFallbackForRead(err) {
+		if !api.ShouldFallbackForRead(c, err) {
 			logRoute(stderr, cmdName, "api", "error")
 			fmt.Fprintf(stderr, "gc beads list: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
 	} else {
 		logRoute(stderr, cmdName, "fallback", nilReason)
 	}
@@ -187,7 +190,7 @@ func doBeadsListFallback(cityPath, format string, filters beadFilters, stdout, s
 // cmdBeadsShow is the CLI entry point for "gc beads show". Routes through
 // the supervisor API and falls back to a direct store lookup.
 func cmdBeadsShow(args []string, stdout, stderr io.Writer) int {
-	cityPath, err := resolveCity()
+	remoteC, isRemote, cityPath, err := resolveReadTarget()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc beads show: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -198,6 +201,9 @@ func cmdBeadsShow(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	beadID := rest[0]
+	if isRemote {
+		return routeBeadsShow("", remoteC, "", beadID, format, stdout, stderr)
+	}
 	c, reason := beadsShowAPIClient(cityPath)
 	return routeBeadsShow(cityPath, c, reason, beadID, format, stdout, stderr)
 }
@@ -219,12 +225,12 @@ func routeBeadsShow(cityPath string, c *api.Client, nilReason, beadID, format st
 			logRoute(stderr, cmdName, "api", "")
 			return renderBeadsShowFromAPI(cr, format, stdout)
 		}
-		if !api.ShouldFallbackForRead(err) {
+		if !api.ShouldFallbackForRead(c, err) {
 			logRoute(stderr, cmdName, "api", "error")
 			fmt.Fprintf(stderr, "gc beads show: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		logRoute(stderr, cmdName, "fallback", api.FallbackReason(err))
+		logRoute(stderr, cmdName, "fallback", api.FallbackReason(c, err))
 	} else {
 		logRoute(stderr, cmdName, "fallback", nilReason)
 	}

@@ -241,22 +241,27 @@ func buildBlockedSet(store beads.Store, allBeads []beads.Bead, closedIDs map[str
 func buildBeadsStateLiveSets(store beads.Store) (live, liveRigs map[string]bool) {
 	live = make(map[string]bool)
 	liveRigs = make(map[string]bool)
-	sessionBeads, err := session.ListAllSessionBeads(store, beads.ListQuery{IncludeClosed: false})
+	// Route through the sessions class front door rather than cracking raw
+	// session beads. Info's raw-metadata mirrors preserve exact behavior:
+	// SessionNameMetadata (not SessionName, which falls back to a derived name
+	// on empty metadata) and MetadataState (not State, which normalizes
+	// "drained" to "asleep").
+	sessions, err := session.NewStore(beads.SessionStore{Store: store}).ListAll(session.ListAllOptions{})
 	if err != nil {
 		return nil, nil
 	}
-	for _, sb := range sessionBeads {
-		if sb.Status == "closed" {
+	for _, si := range sessions {
+		if si.Closed {
 			continue
 		}
-		switch strings.ToLower(strings.TrimSpace(sb.Metadata["state"])) {
+		switch strings.ToLower(strings.TrimSpace(si.MetadataState)) {
 		case "suspended", "archived", "quarantined", "drained":
 			continue
 		}
-		if sessName := sb.Metadata["session_name"]; sessName != "" {
+		if sessName := si.SessionNameMetadata; sessName != "" {
 			live[sessName] = true
 		}
-		if tmpl := strings.TrimSpace(sb.Metadata["template"]); tmpl != "" {
+		if tmpl := strings.TrimSpace(si.Template); tmpl != "" {
 			if rig, _, ok := strings.Cut(tmpl, "/"); ok && rig != "" {
 				liveRigs[rig] = true
 			}

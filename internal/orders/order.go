@@ -41,6 +41,12 @@ type Order struct {
 	Interval string `toml:"interval,omitempty"`
 	// Schedule is a cron-like expression (for cron triggers).
 	Schedule string `toml:"schedule,omitempty"`
+	// TZ is the IANA time zone (e.g. "America/New_York") in which cron
+	// schedule fields are evaluated. Empty inherits the city-wide
+	// [workspace] timezone default (stamped at scan time), then falls back
+	// to the process-local zone. Invalid names are rejected at order
+	// validation — never silently ignored.
+	TZ string `toml:"tz,omitempty"`
 	// Check is a shell command that returns exit 0 when the formula should run (for condition triggers).
 	Check string `toml:"check,omitempty"`
 	// On is the event type to match (for event triggers). E.g., "bead.closed".
@@ -108,6 +114,7 @@ type orderDecode struct {
 	Gate        string                `toml:"gate,omitempty"`
 	Interval    string                `toml:"interval,omitempty"`
 	Schedule    string                `toml:"schedule,omitempty"`
+	TZ          string                `toml:"tz,omitempty"`
 	Check       string                `toml:"check,omitempty"`
 	On          string                `toml:"on,omitempty"`
 	Pool        string                `toml:"pool,omitempty"`
@@ -132,6 +139,7 @@ func (d orderDecode) normalized() Order {
 		Trigger:     trigger,
 		Interval:    d.Interval,
 		Schedule:    d.Schedule,
+		TZ:          d.TZ,
 		Check:       d.Check,
 		On:          d.On,
 		Pool:        d.Pool,
@@ -234,6 +242,13 @@ func Validate(a Order) error {
 			return fmt.Errorf("order %q: invalid timeout %q: %w", a.Name, a.Timeout, err)
 		}
 	}
+	// Validate tz if set. A bad zone must fail loudly at load time; a silent
+	// fallback would move the order's schedule to a different wall clock.
+	if a.TZ != "" {
+		if _, err := time.LoadLocation(a.TZ); err != nil {
+			return fmt.Errorf("order %q: invalid tz %q: %w", a.Name, a.TZ, err)
+		}
+	}
 	switch a.Trigger {
 	case "cooldown":
 		if a.Interval == "" {
@@ -273,13 +288,20 @@ func Validate(a Order) error {
 
 // MissingRequiredParams returns the names of declared-required params that are
 // absent from vars, sorted. It returns nil when every required param is present.
+//
+// A required param is "missing" when its key is absent OR its value is empty:
+// webhook arg extraction renders a template whose payload path does not resolve
+// to the empty string and still inserts the key, so a presence-only check would
+// fire an order with an empty required value. Treating empty-as-absent makes
+// `required = true` mean required-and-non-empty for both webhook dispatch and
+// `gc order run --var key=` (an explicitly-empty value is not a supplied value).
 func (a *Order) MissingRequiredParams(vars map[string]string) []string {
 	var missing []string
 	for name, p := range a.Params {
 		if !p.Required {
 			continue
 		}
-		if _, ok := vars[name]; !ok {
+		if strings.TrimSpace(vars[name]) == "" {
 			missing = append(missing, name)
 		}
 	}
