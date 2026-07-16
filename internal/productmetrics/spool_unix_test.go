@@ -5575,6 +5575,56 @@ type quarantineCollisionFixture struct {
 	namespaceMutations int
 }
 
+// mkdirDeepAt builds depth nested directories under parent and returns an open
+// descriptor for the deepest one, which the caller closes. It descends with
+// mkdirat/openat one component at a time, mirroring the traversal the purge code
+// under test performs. Building the same tree from a growing absolute path is
+// bounded by PATH_MAX (1024 on darwin, 4096 on linux) and cannot represent the
+// depths these fixtures need; fd-relative descent is bounded by NAME_MAX per
+// component instead. Only two descriptors are held at once so the tree stays
+// buildable under the low RLIMIT_NOFILE fixtures.
+func mkdirDeepAt(t *testing.T, parent string, depth int, mode uint32) int {
+	t.Helper()
+	current, err := unix.Open(parent, unixDirectoryOpenFlags, 0)
+	if err != nil {
+		t.Fatalf("open deep fixture parent %s: %v", parent, err)
+	}
+	for level := 0; level < depth; level++ {
+		name := fmt.Sprintf("d%03d", level)
+		if err := unix.Mkdirat(current, name, mode); err != nil {
+			_ = unix.Close(current)
+			t.Fatalf("mkdirat deep fixture level %d: %v", level, err)
+		}
+		next, err := unix.Openat(current, name, unixDirectoryOpenFlags, 0)
+		if err != nil {
+			_ = unix.Close(current)
+			t.Fatalf("openat deep fixture level %d: %v", level, err)
+		}
+		if err := unix.Close(current); err != nil {
+			_ = unix.Close(next)
+			t.Fatalf("close deep fixture level %d: %v", level, err)
+		}
+		current = next
+	}
+	return current
+}
+
+// writeFileAt creates name under directoryFD, for leaves too deep to address by path.
+func writeFileAt(t *testing.T, directoryFD int, name string, data []byte, mode uint32) {
+	t.Helper()
+	fd, err := unix.Openat(directoryFD, name, unix.O_CREAT|unix.O_WRONLY|unix.O_TRUNC|unix.O_CLOEXEC, mode)
+	if err != nil {
+		t.Fatalf("openat deep fixture file %s: %v", name, err)
+	}
+	if _, err := unix.Write(fd, data); err != nil {
+		_ = unix.Close(fd)
+		t.Fatalf("write deep fixture file %s: %v", name, err)
+	}
+	if err := unix.Close(fd); err != nil {
+		t.Fatalf("close deep fixture file %s: %v", name, err)
+	}
+}
+
 func newQuarantineCollisionFixture(t *testing.T, kind string) *quarantineCollisionFixture {
 	t.Helper()
 	home, _, _ := newRecordServiceFixture(t, testEventIDThree)
@@ -5617,15 +5667,10 @@ func newQuarantineCollisionFixture(t *testing.T, kind string) *quarantineCollisi
 		t.Fatal(err)
 	}
 	if kind == "deep-directory" || kind == "lax-deep-directory" {
-		path := blockerPath
-		for depth := 0; depth < 513; depth++ {
-			path = filepath.Join(path, fmt.Sprintf("d%03d", depth))
-			if err := os.Mkdir(path, 0o700); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if err := os.WriteFile(filepath.Join(path, "payload"), []byte("x"), 0o600); err != nil {
-			t.Fatal(err)
+		leaf := mkdirDeepAt(t, blockerPath, 513, 0o700)
+		writeFileAt(t, leaf, "payload", []byte("x"), 0o600)
+		if err := unix.Close(leaf); err != nil {
+			t.Fatalf("close deep fixture leaf: %v", err)
 		}
 	}
 	if kind == "lax-empty-directory" || kind == "lax-deep-directory" {
@@ -8064,20 +8109,18 @@ func TestSpoolDeepPurgeConvergesUnderLowFileDescriptorLimit(t *testing.T) {
 	if err := os.MkdirAll(deep, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for depth := 0; depth < 300; depth++ {
-		deep = filepath.Join(deep, fmt.Sprintf("d%03d", depth))
-		if err := os.Mkdir(deep, 0o700); err != nil {
-			t.Fatal(err)
+	deepLeaf := mkdirDeepAt(t, deep, 300, 0o700)
+	defer func() {
+		if err := unix.Close(deepLeaf); err != nil {
+			t.Errorf("close deep fixture leaf: %v", err)
 		}
-	}
-	if err := os.WriteFile(filepath.Join(deep, "payload"), []byte("deep"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	}()
+	writeFileAt(t, deepLeaf, "payload", []byte("deep"), 0o600)
 	sentinel := filepath.Join(t.TempDir(), "outside-sentinel")
 	if err := os.WriteFile(sentinel, []byte("outside"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(sentinel, filepath.Join(deep, "outside-link")); err != nil {
+	if err := unix.Symlinkat(sentinel, deepLeaf, "outside-link"); err != nil {
 		t.Fatal(err)
 	}
 	plainRoot := mustOpenMutableRoot(t, home)
@@ -10870,10 +10913,20 @@ func hasStrongFailClosedSpoolEvidence(root *storageRoot) bool {
 	return quotaErr == nil && present && quota == markers || activeErr == nil || retiredErr == nil || fallbackCursorErr == nil
 }
 
+// filesystemStateFingerprint walks root through os.Root, which resolves each
+// component fd-relative. Walking by absolute path instead is bounded by PATH_MAX
+// (1024 on darwin, 4096 on linux) and cannot fingerprint the deep trees the purge
+// fixtures build. Entries keep lstat semantics, so symbolic links are recorded
+// rather than followed.
 func filesystemStateFingerprint(t *testing.T, root string) string {
 	t.Helper()
+	opened, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = opened.Close() }()
 	var entries []string
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+	err = fs.WalkDir(opened.FS(), ".", func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -10881,11 +10934,7 @@ func filesystemStateFingerprint(t *testing.T, root string) string {
 		if err != nil {
 			return err
 		}
-		relative, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		entries = append(entries, fmt.Sprintf("%s|%v|%d|%d", relative, info.Mode(), info.Size(), info.ModTime().UnixNano()))
+		entries = append(entries, fmt.Sprintf("%s|%v|%d|%d", path, info.Mode(), info.Size(), info.ModTime().UnixNano()))
 		return nil
 	})
 	if err != nil {
