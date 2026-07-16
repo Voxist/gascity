@@ -36,6 +36,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`order-firing-current`: bound event reads to the check's own staleness
+  horizon, degrade corrupt archives to a visible warning, and close the
+  unknown-controller-start fail-open (vc-89s).** The doctor check read every
+  `order.fired` event ever recorded (29 archives / 1.3 GB on the reporting
+  city) plus a second full-history scan for `controller.started`, and one
+  truncated gzip archive hard-failed the whole check for days, masking the
+  real verdict. Archive pruning is now time-aware: `archiveOverlapsFilter`
+  skips archives whose rotation timestamp predates `Filter.Since` (never
+  pruning on `Until` — an archive's first-event time is unrecorded, so that
+  would silently drop events). The fired-events read is bounded at the
+  callsite by `3 × max(expected interval)`, semantically lossless because
+  staleness is declared at `age >= expected*3`; the order-run-history
+  fallback still recovers precise older timestamps. `controller.started` —
+  too rare for any window — uses the new newest-first, archive-spanning
+  `events.ReadLatestMatch`, correct for arbitrarily old starts at O(1
+  archive) typical cost. Unreadable archives now degrade to skip-plus-warning
+  via `events.ReadFilteredWithWarnings` and surface as **Warning (degraded)**
+  naming the skipped file — never `StatusError`, never a silent skip — and
+  the untested `never fired (controller start unknown)` path reports
+  `StatusWarning` instead of the false-green `StatusOK` on exactly the dead
+  orders the check exists to catch.
+
 - **Stop dispatch-budget starvation of short-interval orders: staleness-priority
   admission + config-driven per-tick budget (vp-cixi.6 / PR #77; CHANGELOG and
   derivation added retroactively by vc-wz5.4).** The order dispatcher's fixed

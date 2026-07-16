@@ -1,6 +1,9 @@
 package doctor
 
 import (
+	"bytes"
+	"compress/gzip"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -385,6 +388,10 @@ func TestOrderFiringCurrent_Overdue(t *testing.T) {
 }
 
 func TestOrderFiringCurrent_Stale(t *testing.T) {
+	// The 13h-old fire predates the events window (3 x the 4h interval), so
+	// the events path alone no longer sees it; the order-run-history
+	// fallback — always wired by the real doctor — recovers it and the
+	// verdict stays CRITICAL: stale (vc-89s P2 losslessness).
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	cityPath, cfg := orderFiringTestCity(t)
 	writeOrderFiringTestOrder(t, cityPath, "mol-dog-stale-db", "cron", "0 */4 * * *")
@@ -393,12 +400,128 @@ func TestOrderFiringCurrent_Stale(t *testing.T) {
 		events.Event{Type: events.OrderFired, Subject: "mol-dog-stale-db", Ts: now.Add(-13 * time.Hour)},
 	)
 
-	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	check := NewOrderFiringCurrentCheck(cfg, cityPath, WithOrderFiringCurrentLastRunFunc(func(orders.Order) (time.Time, error) {
+		return now.Add(-13 * time.Hour), nil
+	}))
+	check.clock = func() time.Time { return now }
+	result := check.Run(&CheckContext{CityPath: cityPath})
 	if result.Status != StatusError {
 		t.Fatalf("status = %v, want error; msg = %s; details = %v", result.Status, result.Message, result.Details)
 	}
 	if !strings.Contains(strings.Join(result.Details, "\n"), "(CRITICAL: stale)") {
 		t.Fatalf("details = %v, want stale detail", result.Details)
+	}
+}
+
+func TestOrderFiringCurrent_FireOutsideWindow_NeverOK(t *testing.T) {
+	// vc-89s P5: with the events read windowed, a fire older than the window
+	// is indistinguishable from never-fired on the events path. That must
+	// classify in the error family — never fall through to OK. (With the
+	// run-history fallback wired, TestOrderFiringCurrent_Stale above shows
+	// the precise timestamp is recovered instead.)
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "mol-dog-stale-db", "cron", "0 */4 * * *")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "mol-dog-stale-db", Ts: now.Add(-16 * time.Hour)},
+	)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusError {
+		t.Fatalf("status = %v, want error (a fire outside the window must never read as OK); msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+}
+
+func TestOrderFiringCurrent_UnknownControllerStart_FailsClosed(t *testing.T) {
+	// vc-89s C4: with no fire and no controller.started visible, the check
+	// used to report StatusOK — green on exactly the dead orders it exists
+	// to catch. "I don't know" must never read as "healthy".
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "mol-dog-stale-db", "cron", "0 */4 * * *")
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusWarning {
+		t.Fatalf("status = %v, want warning (fail closed on unknown controller start); msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if !strings.Contains(strings.Join(result.Details, "\n"), "controller start unknown") {
+		t.Fatalf("details = %v, want controller-start-unknown detail", result.Details)
+	}
+}
+
+func TestOrderFiringCurrent_CorruptArchive_DegradesToWarning(t *testing.T) {
+	// vc-89s DEFECT 2: one truncated archive used to hard-fail the whole
+	// check (StatusError), hiding the real verdict for days. It must degrade
+	// instead: Warning naming the skipped file — never StatusError, and
+	// never a silent OK over data the check did not see.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "mol-dog-stale-db", "cron", "0 */4 * * *")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-8 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "mol-dog-stale-db", Ts: now.Add(-1 * time.Hour)},
+	)
+	corrupt := writeOrderFiringCorruptArchive(t, cityPath, now.Add(-2*time.Hour), 1, 2)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusWarning {
+		t.Fatalf("status = %v, want warning (degraded, not hard failure); msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if !strings.Contains(strings.Join(result.Details, "\n"), corrupt) {
+		t.Fatalf("details = %v, want skipped-archive detail naming %s", result.Details, corrupt)
+	}
+}
+
+func TestOrderFiringCurrent_PrunesArchivesOlderThanWindow(t *testing.T) {
+	// vc-89s DEFECT 1/P2: the fired-events read is bounded by the check's own
+	// staleness horizon (3x the widest expected interval). An archive whose
+	// rotation timestamp predates that window must not even be opened —
+	// proven here because opening this one (corrupt) would surface a
+	// degraded warning.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "mol-dog-stale-db", "cron", "0 */4 * * *")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-8 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "mol-dog-stale-db", Ts: now.Add(-1 * time.Hour)},
+	)
+	writeOrderFiringCorruptArchive(t, cityPath, now.Add(-30*24*time.Hour), 1, 2)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, want OK (pre-window archive pruned unopened); msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if joined := strings.Join(result.Details, "\n"); strings.Contains(joined, "degraded") {
+		t.Fatalf("details = %v, want no degraded rows: the pre-window archive must be pruned without being opened", result.Details)
+	}
+}
+
+func TestOrderFiringCurrent_ControllerStartFoundBeyondWindowArchives(t *testing.T) {
+	// vc-89s C3: controller.started is rare — the newest record may live many
+	// archives back, far older than any fired-event window. The check must
+	// still find it (newest-first, archive-spanning) rather than fall into
+	// the unknown-start path.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "mol-dog-stale-db", "cron", "0 */4 * * *")
+	writeOrderFiringTestArchive(t, cityPath, now.Add(-40*24*time.Hour), 1, 1,
+		events.Event{Seq: 1, Type: events.ControllerStarted, Ts: now.Add(-40 * 24 * time.Hour)},
+	)
+	writeOrderFiringTestArchive(t, cityPath, now.Add(-20*24*time.Hour), 2, 2,
+		events.Event{Seq: 2, Type: events.OrderFired, Subject: "other-order", Ts: now.Add(-20 * 24 * time.Hour)},
+	)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusError {
+		t.Fatalf("status = %v, want error (never fired since a 40d-old controller start); msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	joined := strings.Join(result.Details, "\n")
+	if !strings.Contains(joined, "never fired since controller start") {
+		t.Fatalf("details = %v, want never-fired-since-start detail (start recovered from oldest archive)", result.Details)
+	}
+	if strings.Contains(joined, "controller start unknown") {
+		t.Fatalf("details = %v, controller start must be recovered from the archive, not unknown", result.Details)
 	}
 }
 
@@ -592,6 +715,50 @@ func writeOrderFiringTestEvents(t *testing.T, cityPath string, evts ...events.Ev
 	for _, e := range evts {
 		rec.Record(e)
 	}
+}
+
+// writeOrderFiringTestArchive writes evts as a canonically named rotation
+// archive next to the live events file, so the check's read path treats it
+// exactly like one produced by rotation.
+func writeOrderFiringTestArchive(t *testing.T, cityPath string, rotatedAt time.Time, firstSeq, lastSeq uint64, evts ...events.Event) {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	for _, e := range evts {
+		line, err := json.Marshal(e)
+		if err != nil {
+			t.Fatalf("marshal event: %v", err)
+		}
+		if _, err := gz.Write(append(line, '\n')); err != nil {
+			t.Fatalf("gzip write: %v", err)
+		}
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	writeOrderFiringArchiveFile(t, cityPath, rotatedAt, firstSeq, lastSeq, buf.Bytes())
+}
+
+// writeOrderFiringCorruptArchive writes a canonically named archive whose
+// body is not valid gzip — the truncated-rotation class from vc-89s. Opening
+// it fails, which is what lets tests prove whether an archive was opened.
+func writeOrderFiringCorruptArchive(t *testing.T, cityPath string, rotatedAt time.Time, firstSeq, lastSeq uint64) string {
+	t.Helper()
+	return writeOrderFiringArchiveFile(t, cityPath, rotatedAt, firstSeq, lastSeq, []byte{0x1f, 0x8b, 0x00, 0xde, 0xad, 0xbe, 0xef})
+}
+
+func writeOrderFiringArchiveFile(t *testing.T, cityPath string, rotatedAt time.Time, firstSeq, lastSeq uint64, body []byte) string {
+	t.Helper()
+	name := fmt.Sprintf("events.jsonl.archive-%s-seq-%d-%d.gz",
+		rotatedAt.UTC().Format("20060102T150405Z"), firstSeq, lastSeq)
+	dir := filepath.Join(cityPath, ".gc")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("creating runtime dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), body, 0o644); err != nil {
+		t.Fatalf("write archive %s: %v", name, err)
+	}
+	return name
 }
 
 func runOrderFiringCurrentTest(t *testing.T, cfg *config.City, cityPath string, now time.Time) *CheckResult {

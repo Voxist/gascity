@@ -121,6 +121,17 @@ func TestArchiveOverlapsFilter(t *testing.T) {
 		{"AfterSeq inside archive range", Filter{AfterSeq: 150}, true},
 		{"AfterSeq at archive last seq", Filter{AfterSeq: 200}, false},
 		{"AfterSeq above archive range", Filter{AfterSeq: 250}, false},
+		// vc-89s: Timestamp is the rotation instant — an upper bound on the
+		// archive's newest event — so an archive stamped before Since cannot
+		// contain in-window events and is safe to skip without gunzipping.
+		{"Since before archive timestamp keeps", Filter{Since: info.Timestamp.Add(-time.Hour)}, true},
+		{"Since equal to archive timestamp keeps", Filter{Since: info.Timestamp}, true},
+		{"Since after archive timestamp prunes", Filter{Since: info.Timestamp.Add(time.Hour)}, false},
+		{"Since prune composes with AfterSeq keep", Filter{AfterSeq: 50, Since: info.Timestamp.Add(time.Hour)}, false},
+		// The archive's FIRST event time is not recorded (only FirstSeq), so
+		// an archive stamped after Until may still hold in-window events —
+		// pruning on Until would silently drop them. Never prune on Until.
+		{"Until never prunes even when archive is newer", Filter{Until: info.Timestamp.Add(-time.Hour)}, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
