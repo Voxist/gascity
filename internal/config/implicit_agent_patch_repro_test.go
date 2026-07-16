@@ -155,9 +155,13 @@ suspended = false
 	}
 }
 
-// TestLoadWithIncludes_PatchTypoStillErrors verifies that a [[patches.agent]]
-// targeting a name that matches no existing or implicit agent still errors.
-func TestLoadWithIncludes_PatchTypoStillErrors(t *testing.T) {
+// TestLoadWithIncludes_PatchTypoWarnsAndSkips verifies that a [[patches.agent]]
+// targeting a name that matches no existing or implicit agent degrades to a
+// composition warning and a skipped patch instead of a load error (vc-quqf;
+// incident vc-9wa: one bad patch target aborted config load city-wide). This
+// test previously pinned the hard error; gc config lint now carries the
+// loud-failure contract pre-commit instead.
+func TestLoadWithIncludes_PatchTypoWarnsAndSkips(t *testing.T) {
 	dir := t.TempDir()
 	cityTOML := `
 [workspace]
@@ -173,12 +177,18 @@ suspended = true
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
-	if err == nil {
-		t.Fatal("expected error for typo patch target, got nil")
+	_, prov, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("typo patch target must warn and skip, not abort (vc-9wa): %v", err)
 	}
-	if !strings.Contains(err.Error(), "not found in merged config") {
-		t.Fatalf("unexpected error shape: %v", err)
+	var hit bool
+	for _, w := range prov.Warnings {
+		if IsUnresolvedAgentPatchWarning(w) && strings.Contains(w, `"not-a-real-agent"`) {
+			hit = true
+		}
+	}
+	if !hit {
+		t.Fatalf("no unresolved-patch warning for typo target; warnings: %q", prov.Warnings)
 	}
 }
 

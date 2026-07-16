@@ -526,13 +526,15 @@ func TestApplyDeferredRigPatchesRejectsShiftedAgentRange(t *testing.T) {
 	}
 }
 
-// TestLoadWithIncludes_PatchTargetingMissingRigAgentStillErrors verifies
-// that a misspelled [[patches.agent]] target still produces a clear
-// "not found in merged config" error after the ordering fix. Without
-// this check, the swap could mask typos by silently no-oping if the
-// patch list ever became deferral-friendly. The merged config sees both
-// city-scope and rig-scope pack agents before the error is raised.
-func TestLoadWithIncludes_PatchTargetingMissingRigAgentStillErrors(t *testing.T) {
+// TestLoadWithIncludes_PatchTargetingMissingRigAgentWarns verifies that a
+// misspelled [[patches.agent]] target still produces a clear
+// "not found in merged config" signal after the ordering fix — since
+// vc-quqf as a composition warning naming the target, not a load error
+// (incident vc-9wa: the hard abort bricked every gc command city-wide).
+// Without this check, the swap could mask typos by SILENTLY no-oping if
+// the patch list ever became deferral-friendly. The merged config sees
+// both city-scope and rig-scope pack agents before the warning is raised.
+func TestLoadWithIncludes_PatchTargetingMissingRigAgentWarns(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "city.toml", `
 [workspace]
@@ -560,15 +562,24 @@ name = "refinery"
 scope = "rig"
 `)
 
-	_, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
-	if err == nil {
-		t.Fatal("expected LoadWithIncludes to fail for nonexistent patch target")
+	_, prov, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("nonexistent patch target must warn and skip, not abort (vc-9wa): %v", err)
 	}
-	if !strings.Contains(err.Error(), "proj/gs.nonexistent") {
-		t.Errorf("error = %q, want mention of proj/gs.nonexistent", err)
+	var warning string
+	for _, w := range prov.Warnings {
+		if IsUnresolvedAgentPatchWarning(w) {
+			warning = w
+		}
 	}
-	if !strings.Contains(err.Error(), "not found") {
-		t.Errorf("error = %q, want mention of 'not found'", err)
+	if warning == "" {
+		t.Fatalf("no unresolved-patch warning for nonexistent target; warnings: %q", prov.Warnings)
+	}
+	if !strings.Contains(warning, "proj/gs.nonexistent") {
+		t.Errorf("warning = %q, want mention of proj/gs.nonexistent", warning)
+	}
+	if !strings.Contains(warning, "not found") {
+		t.Errorf("warning = %q, want mention of 'not found'", warning)
 	}
 }
 

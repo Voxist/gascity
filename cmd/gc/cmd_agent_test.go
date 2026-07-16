@@ -772,6 +772,21 @@ func TestStrictFatalLoadConfigWarningsKeepsMixedTableWarningsFatal(t *testing.T)
 	}
 }
 
+func TestEmitLoadCityConfigWarningsIncludesUnresolvedAgentPatch(t *testing.T) {
+	var buf bytes.Buffer
+	prov := &config.Provenance{Warnings: []string{
+		// 109 is the patches.agent index from the 2026-06-30 vc-9wa incident.
+		config.UnresolvedAgentPatchWarning(109, "", "platform-engineer"),
+	}}
+	emitLoadCityConfigWarnings(&buf, prov)
+	got := buf.String()
+	for _, want := range []string{"patches.agent[109]", `"platform-engineer"`, "patch skipped"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("emitLoadCityConfigWarnings output %q missing %q: a skipped [[patches.agent]] is the only runtime signal the patch did not apply (vc-quqf)", got, want)
+		}
+	}
+}
+
 func TestNonTestLoadCityConfigCallersPassWarningWriter(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {

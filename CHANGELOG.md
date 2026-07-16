@@ -62,6 +62,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   out of `KnownEventTypes` and the payload registry until the SSE projection
   follow-up (same deferral as `provider.health_gate_alert`); subscribers
   receive it via the custom-event envelope.
+- **`gc config lint`: pre-commit/CI gate for config problems the runtime load
+  degrades to warnings (vc-quqf).** Loads the fully resolved city config
+  (includes, packs, patches, overrides), prints every composition warning, and
+  exits non-zero when any `[[patches.agent]]` entry targets an agent that does
+  not resolve in the merged config (or on any hard load error). Pairs with the
+  graceful-degrade change below: the runtime keeps loading, lint keeps the typo
+  from merging.
 
 - **L0 pre-heal in `ensure-project-id`: auto-restore canonical project_id from
   `city.toml [identity_map]` when the DB confirms it but L1 was wiped (vp-cz7o.21).**
@@ -149,6 +156,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   label mismatch (`1.1.0` ≠ `1.1.1-0.20260704…`) would have re-taken the
   native store offline at the `version_compat` gate — the same
   label-vs-schema string-compare defect, one layer up.
+- **One unresolvable `[[patches.agent]]` target no longer aborts the city-wide
+  config load (vc-quqf; incident vc-9wa, 2026-06-30).** A patch whose
+  `{dir, name}` resolves to no agent in the merged config previously failed the
+  whole load — every `gc` command (hook/rig/bd-via-gc/scale) died at
+  `patches.agent[N] ... not found in merged config`, taking the city down over
+  one typo. Composition now emits a warning naming the offending
+  `patches.agent[N]` index plus `dir`/`name`, skips that patch, and applies the
+  rest; the warning prints on the standard config-load path of every `gc`
+  command, so the skipped patch stays visible at runtime. Scope is deliberately agent patches only: malformed entries (empty
+  `name`), and typos in `[[patches.rigs]]` / `[[patches.providers]]` /
+  `[[patches.named_session]]` / `[[patches.github_pr_monitor]]`, still
+  hard-error. `gc config lint` (new, above) reports the warning as a failure so
+  the typo still blocks pre-commit.
 
 - **Stop dispatch-budget starvation of short-interval orders: staleness-priority
   admission + config-driven per-tick budget (vp-cixi.6 / PR #77; CHANGELOG and

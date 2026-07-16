@@ -1,6 +1,9 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Patches holds all patch blocks from composition. Patches target existing
 // resources by identity key and modify specific fields. They are applied
@@ -330,7 +333,9 @@ func Fragments(items ...string) *[]string {
 // ApplyPatches applies all patches to the config. Patches target existing
 // resources by identity key. If a patch targets a nonexistent resource,
 // an error is returned. Patches are intentional — they never generate
-// collision warnings.
+// collision warnings. (The composition pipeline pre-filters unresolvable
+// [[patches.agent]] targets into load warnings before calling this — see
+// UnresolvedAgentPatchWarning; direct callers keep the strict contract.)
 func ApplyPatches(cfg *City, patches Patches) error {
 	for i, p := range patches.Agents {
 		if err := applyAgentPatch(cfg, &p); err != nil {
@@ -358,6 +363,26 @@ func ApplyPatches(cfg *City, patches Patches) error {
 		}
 	}
 	return nil
+}
+
+// UnresolvedAgentPatchWarning is the non-fatal composition warning emitted in
+// place of ApplyPatches' hard error when a [[patches.agent]] entry targets an
+// agent absent from the merged config (vc-quqf; incident vc-9wa: one bad
+// patch target aborted config load city-wide). index is the entry's position
+// in the merged [[patches.agent]] list, keeping the patches.agent[N] framing
+// of the strict error so operators can locate the offending block.
+func UnresolvedAgentPatchWarning(index int, dir, name string) string {
+	return fmt.Sprintf(
+		"patches.agent[%d]: agent %q not found in merged config; patch skipped (dir=%q name=%q)",
+		index, qualifiedNameFromPatch(dir, name), dir, name)
+}
+
+// IsUnresolvedAgentPatchWarning reports whether warning came from
+// UnresolvedAgentPatchWarning. gc config lint treats these warnings as
+// failures so an unresolvable patch target still blocks pre-commit.
+func IsUnresolvedAgentPatchWarning(warning string) bool {
+	return strings.HasPrefix(warning, "patches.agent[") &&
+		strings.Contains(warning, "not found in merged config; patch skipped")
 }
 
 func applyNamedSessionPatch(cfg *City, patch *NamedSessionPatch) error {

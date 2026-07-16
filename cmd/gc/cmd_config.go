@@ -54,7 +54,64 @@ config and "explain" to see where each value originated.`,
 	}
 	cmd.AddCommand(newConfigShowCmd(stdout, stderr))
 	cmd.AddCommand(newConfigExplainCmd(stdout, stderr))
+	cmd.AddCommand(newConfigLintCmd(stdout, stderr))
 	return cmd
+}
+
+func newConfigLintCmd(stdout, stderr io.Writer) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "lint",
+		Short: "Fail on config problems the runtime load degrades to warnings",
+		Long: `Validate the resolved city configuration for pre-commit and CI use.
+
+Loads city.toml with all includes, packs, patches, and overrides, prints
+every composition warning, and exits non-zero when the config carries
+problems that the runtime load deliberately degrades to warnings — e.g. a
+[[patches.agent]] entry whose (dir, name) target resolves to no agent in
+the merged config. At runtime one bad patch target warns and is skipped so
+it cannot abort every gc command city-wide (vc-9wa); lint is where it
+fails loudly instead. Hard load errors also fail.`,
+		Example: `  gc config lint`,
+		Args:    cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return exitForCode(doConfigLint(stdout, stderr))
+		},
+	}
+	return cmd
+}
+
+// doConfigLint loads the resolved city configuration and fails on hard load
+// errors or unresolved-patch-target warnings (vc-quqf).
+func doConfigLint(stdout, stderr io.Writer) int {
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc config lint: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := ensureLegacyNamedPacksCached(cityPath); err != nil {
+		fmt.Fprintf(stderr, "gc config lint: fetching packs: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	_, prov, err := loadConfigCommandCityConfig(cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc config lint: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	var failures int
+	for _, w := range prov.Warnings {
+		if config.IsUnresolvedAgentPatchWarning(w) {
+			failures++
+			fmt.Fprintf(stderr, "gc config lint: error: %s\n", w) //nolint:errcheck // best-effort stderr
+			continue
+		}
+		fmt.Fprintf(stderr, "gc config lint: warning: %s\n", w) //nolint:errcheck // best-effort stderr
+	}
+	if failures > 0 {
+		fmt.Fprintf(stderr, "gc config lint: %d unresolvable patch target(s); fix the {dir,name} or remove the patch\n", failures) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	fmt.Fprintf(stdout, "gc config lint: %s: ok\n", cityPath) //nolint:errcheck // best-effort stdout
+	return 0
 }
 
 func newConfigShowCmd(stdout, stderr io.Writer) *cobra.Command {
