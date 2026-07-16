@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
+# Gas City hooks for Kimi CLI.
+# Installed by gc into {workDir}/.kimi/hooks/gascity-session-start.py
+# Managed by `gc hooks install`; put custom Kimi hooks in separate files so
+# upgrades can replace this file safely.
 import json
 import os
 import subprocess
 import sys
+
+GC_KIMI_HOOK_VERSION = 1
 
 
 def main() -> int:
@@ -23,7 +29,11 @@ def main() -> int:
     if session_id:
         env["GC_PROVIDER_SESSION_ID"] = session_id
 
-    proc = subprocess.run(["gc", "prime", "--hook"], cwd=cwd, env=env)
+    # GC_BIN is the explicit override (the deployed binary gc exports into
+    # every agent process). The PATH prefix above stays for gc's own
+    # downstream tool resolution; it no longer selects which gc build runs.
+    gc_bin = env.get("GC_BIN") or "gc"
+    proc = subprocess.run([gc_bin, "prime", "--hook"], cwd=cwd, env=env)
     return proc.returncode
 
 
