@@ -140,6 +140,14 @@ func resolveOrderLocation(a Order, now time.Time) (*time.Location, error) {
 // wall-clock reading and must count as a single cron slot.
 const wallMinuteLayout = "2006-01-02 15:04"
 
+// eventTriggerZeroCursorTailLimit bounds the recent-tail read checkEvent uses
+// when an event order has a zero cursor (vp-8jig). It caps how many trailing
+// matching events are decoded from the active file so a fresh/reaped-cursor
+// order cannot re-decode the full rotated archive every tick. Large enough to
+// see a real non-tracking match past a run of order-tracking bookkeeping
+// events, small enough to stay cheap.
+const eventTriggerZeroCursorTailLimit = 512
+
 // checkCron uses minute-granularity matching against the schedule, WITH
 // catch-up. A scheduled occurrence fires if either (a) the current minute
 // matches, or (b) a scheduled minute elapsed since the last run without the
@@ -335,10 +343,31 @@ func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult 
 		cursor = cursorFn(a.ScopedName())
 	}
 
-	matched, err := ep.List(events.Filter{
+	filter := events.Filter{
 		Type:     a.On,
 		AfterSeq: cursor,
-	})
+	}
+	var matched []events.Event
+	var err error
+	if cursor == 0 {
+		// A zero cursor means this order has no persisted high-water mark: it
+		// has never fired, or its tracking bead (which carries the seq:<N>
+		// label) was reaped. Reading the full retained history every tick then
+		// decodes the entire event archive — multi-GB across rotated .gz files —
+		// which ratchets gc-supervisor RSS until the box is exhausted (vp-8jig).
+		// An event trigger reacts to NEW events, not weeks-old archived ones, so
+		// bound the read to the recent tail (active file only, no archives) when
+		// the provider supports it. Firing on a recent match makes the
+		// dispatcher stamp SetCursor(LatestSeq) on the tracking bead, so the
+		// next tick reads cheaply from that persisted cursor.
+		if tp, ok := ep.(events.TailProvider); ok {
+			matched, err = tp.ListTail(filter, eventTriggerZeroCursorTailLimit)
+		} else {
+			matched, err = ep.List(filter)
+		}
+	} else {
+		matched, err = ep.List(filter)
+	}
 	if err != nil {
 		return TriggerResult{Due: false, Reason: fmt.Sprintf("event: read error: %v", err)}
 	}
