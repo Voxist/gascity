@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -2617,6 +2618,10 @@ type sessionNudgeJSON struct {
 	Delivery      string `json:"delivery"`
 	Queued        bool   `json:"queued"`
 	Outcome       string `json:"outcome"`
+	// Path reports a non-default resolution/delivery path ("storeless-fallback"
+	// when the vl-3hb WS-B store-independent transport delivered); omitted on
+	// the normal store-backed path.
+	Path string `json:"path,omitempty"`
 }
 
 // cmdSessionNudge is the CLI entry point for "gc session nudge".
@@ -2624,6 +2629,9 @@ func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, jsonOutput bool,
 	target := args[0]
 	message := strings.Join(args[1:], " ")
 
+	if parseNudgeStorelessFlag(os.Getenv(nudgeStorelessFallbackEnv)) {
+		return sessionNudgeStorelessEntry(target, message, delivery, jsonOutput, stdout, stderr)
+	}
 	targetInfo, err := resolveNudgeTarget(target)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck // best-effort stderr

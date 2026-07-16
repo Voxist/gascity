@@ -122,6 +122,11 @@ type nudgeTarget struct {
 	sessionID         string
 	continuationEpoch string
 	sessionName       string
+	// storeless marks a target resolved via the runtime provider alone
+	// (vl-3hb WS-B fallback): delivery must not open the bead store — queue
+	// writes go straight to the flock'd state.json authority and the
+	// observability shadow bead is skipped.
+	storeless bool
 }
 
 type nudgeStatusJSON struct {
@@ -819,9 +824,10 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 			Delivery:      string(mode),
 			Queued:        false,
 			Outcome:       "delivered",
+			Path:          target.nudgePath(),
 		})
 	}
-	fmt.Fprintf(stdout, "Nudged %s\n", target.agentKey()) //nolint:errcheck
+	fmt.Fprintf(stdout, "Nudged %s%s\n", target.agentKey(), target.nudgePathSuffix()) //nolint:errcheck
 	return 0
 }
 
@@ -1038,7 +1044,17 @@ func deliverSessionNudgeWithProvider(target nudgeTarget, sp runtime.Provider, mo
 }
 
 func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, mode nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
-	if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))); err != nil {
+	item := newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))
+	var err error
+	if target.storeless {
+		// Storeless fallback: write the flock'd state.json authority directly.
+		// The shadow bead is observability-only and its store open is exactly
+		// the failure domain this path exists to avoid (vl-3hb WS-B).
+		err = enqueueQueuedNudgeInto(target.cityPath, beads.NudgesStore{}, item)
+	} else {
+		err = enqueueQueuedNudge(target.cityPath, item)
+	}
+	if err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
@@ -1061,9 +1077,10 @@ func writeQueuedSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, j
 			Delivery:      string(mode),
 			Queued:        true,
 			Outcome:       "queued",
+			Path:          target.nudgePath(),
 		})
 	}
-	fmt.Fprintf(stdout, "Queued nudge for %s\n", target.agentKey()) //nolint:errcheck
+	fmt.Fprintf(stdout, "Queued nudge for %s%s\n", target.agentKey(), target.nudgePathSuffix()) //nolint:errcheck
 	return 0
 }
 
@@ -1145,6 +1162,14 @@ func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTar
 	if err != nil {
 		return nudgeTarget{}, err
 	}
+	return resolveNudgeTargetViaStore(cityPath, cfg, identifier)
+}
+
+// resolveNudgeTargetViaStore is the store-touching resolution leg: open the
+// nudge bead store, materialize named sessions, and read the session bead.
+// Split out of resolveNudgeTarget so the storeless fallback can bound it
+// (resolveNudgeTargetViaStoreBounded) without changing the default path.
+func resolveNudgeTargetViaStore(cityPath string, cfg *config.City, identifier string) (nudgeTarget, error) {
 	store := openNudgeBeadStore(cityPath)
 	if store.Store != nil {
 		// Named-session materialization is a session WRITE, and the follow-up Get
@@ -1984,6 +2009,15 @@ func enqueueQueuedNudgeWithStore(cityPath string, store beads.NudgesStore, item 
 	if ownStore {
 		defer closeBeadStoreHandle(store.Store) //nolint:errcheck // best-effort
 	}
+	return enqueueQueuedNudgeInto(cityPath, store, item)
+}
+
+// enqueueQueuedNudgeInto writes item into the flock'd state.json queue
+// authority using exactly the store it is given — it never opens one itself.
+// A zero-value store is the store-independent transport (vl-3hb WS-B): the
+// shadow-bead save no-ops through the nil-receiver-safe front door and the
+// item's BeadID stays empty.
+func enqueueQueuedNudgeInto(cityPath string, store beads.NudgesStore, item queuedNudge) error {
 	var front *nudgequeue.Store
 	if store.Store != nil {
 		front = nudgeFrontDoor(store)
