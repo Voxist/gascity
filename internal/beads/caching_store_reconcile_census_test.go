@@ -97,6 +97,13 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"lifecycleMu": true, "lifecycleWG": true, "cancelFn": true, "stopCh": true,
 		"stopped": true, "latencyWindow": true, "latencyDriverActive": true,
 		"applyEventBeforeCommitForTest": true,
+		// Fork resilience/read-path state, orthogonal to the reconcile bead-state
+		// end-state the oracle compares: circuitTripped (breaker), availabilityGate
+		// (backing-transport gate), unavailableSkipLogged (reconcile-skip log
+		// dedupe), degradedReads (read-path counter of last-good-cache serves, not
+		// a reconcile delta).
+		"circuitTripped": true, "availabilityGate": true,
+		"unavailableSkipLogged": true, "degradedReads": true,
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CachingStore{}), comparedStore, excludedStore)
 
@@ -110,6 +117,10 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"SyncFailures": true, "ProblemCount": true, "LastProblemAt": true,
 		"LastProblem": true, "State": true, "StaggerOffsetMs": true,
 		"CurrentReconcileInterval": true, "LatencyP95Ms": true, "CadenceDriver": true,
+		// Fork read-path observability counter (last-good-cache serves during
+		// backing unavailability), not a reconcile delta — mirrors excluded
+		// SyncFailures/ReconcileRecoveries, not compared Adds/Removes/Updates.
+		"DegradedReads": true,
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CacheStats{}), comparedStats, excludedStats)
 }
