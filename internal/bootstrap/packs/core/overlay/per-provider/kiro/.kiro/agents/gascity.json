@@ -6,15 +6,15 @@
   "hooks": {
     "agentSpawn": [
       {
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc prime --hook"
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && \"${GC_BIN:-gc}\" prime --hook"
       }
     ],
     "userPromptSubmit": [
       {
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject"
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && \"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject"
       },
       {
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject"
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && \"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject"
       }
     ]
   }

@@ -7,7 +7,46 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 )
+
+// CanonicalGCPathPrefix is the env-setup prefix gc prepends to every managed
+// shell hook command. Package hooks aliases it (hooks.canonicalGCPathPrefix)
+// so the merge-identity normalization below can never drift from the managed
+// command recognizers.
+const CanonicalGCPathPrefix = `export PATH="$HOME/go/bin:$HOME/.local/bin:$PATH" && `
+
+// antigravityGCPathPrefix is the antigravity-shaped variant of the managed
+// PATH-export prefix (extra Homebrew entries; see the antigravity overlay's
+// .agents/hooks.json).
+const antigravityGCPathPrefix = `export PATH="$HOME/go/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH" && `
+
+// GCBinInvocationToken is the executable token managed shell hook commands
+// use to invoke gc: honour the GC_BIN pointer gc exports into every agent
+// process (the deployed binary), falling back to bare-`gc` PATH resolution
+// when GC_BIN is unset or empty (ADR-0027 §Option F; precedent: the opencode
+// plugin's `process.env.GC_BIN || "gc"`).
+const GCBinInvocationToken = `"${GC_BIN:-gc}"`
+
+// managedGCPathPrefixes guards identity normalization: only commands carrying
+// one of gc's exact managed PATH-export prefixes are treated as gc-emitted.
+// User-authored commands never have these exact prefixes.
+var managedGCPathPrefixes = []string{CanonicalGCPathPrefix, antigravityGCPathPrefix}
+
+// normalizeGCCommandIdentity maps the GC_BIN-honouring spelling of a managed
+// gc hook command onto its historical bare-`gc` spelling, for merge-identity
+// purposes only. Command-keyed hook entries (Cursor "command", Copilot
+// "bash") would otherwise change identity when the managed invocation token
+// changed, so re-projecting the template would append a duplicate hook next
+// to the stale entry instead of replacing it in place.
+func normalizeGCCommandIdentity(cmd string) string {
+	for _, prefix := range managedGCPathPrefixes {
+		if strings.HasPrefix(cmd, prefix) {
+			return prefix + strings.Replace(strings.TrimPrefix(cmd, prefix), GCBinInvocationToken+" ", "gc ", 1)
+		}
+	}
+	return cmd
+}
 
 // mergeablePaths is the set of relative paths that get JSON-level merge
 // instead of file-level overwrite when both base and overlay exist.
@@ -257,14 +296,14 @@ func hookEntryKey(entry map[string]any) (string, bool) {
 		if !sok {
 			return "", false
 		}
-		return "cmd:" + s, true
+		return "cmd:" + normalizeGCCommandIdentity(s), true
 	}
 	if v, ok := entry["bash"]; ok {
 		s, sok := v.(string)
 		if !sok {
 			return "", false
 		}
-		return "bash:" + s, true
+		return "bash:" + normalizeGCCommandIdentity(s), true
 	}
 	// Claude/Gemini wrapper shape: { "hooks": [ {type, command}, ... ] } with
 	// no top-level matcher/command. Pack overlays (e.g. model-advisor's

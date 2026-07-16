@@ -4,15 +4,30 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	iofs "io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
+
+// gcTokenJSON is gcInvocationToken as it appears in raw JSON bytes (quotes
+// escaped). Raw-byte assertions and fixture surgery on embedded JSON use this
+// spelling; assertions on parsed command strings use gcInvocationToken.
+var gcTokenJSON = jsonEscaped(gcInvocationToken)
+
+// jsonEscaped renders a command-string fragment as it appears inside raw
+// JSON bytes (double quotes escaped). Needed when string-replacing or
+// asserting against un-parsed settings files.
+func jsonEscaped(s string) string {
+	return strings.ReplaceAll(s, `"`, `\"`)
+}
 
 func claudeHookCommand(t *testing.T, data []byte, event string) string {
 	t.Helper()
@@ -124,8 +139,8 @@ func TestInstallClaude(t *testing.T) {
 		t.Error("claude settings should contain SessionStart hook")
 	}
 	sessionStartCommand := claudeHookCommand(t, runtimeData, "SessionStart")
-	if !strings.Contains(sessionStartCommand, "gc prime --hook --hook-format codex") {
-		t.Error("claude SessionStart hook should contain gc prime --hook --hook-format codex")
+	if !strings.Contains(sessionStartCommand, gcInvocationToken+" prime --hook --hook-format codex") {
+		t.Error("claude SessionStart hook should invoke prime --hook --hook-format codex via " + gcInvocationToken)
 	}
 	if !strings.Contains(sessionStartCommand, "GC_HOOK_EVENT_NAME=SessionStart") {
 		t.Error("claude SessionStart hook should mark managed hook event")
@@ -141,13 +156,13 @@ func TestInstallClaude(t *testing.T) {
 			return entries[0].Matcher
 		}())
 	}
-	if !strings.Contains(claudeHookCommand(t, runtimeData, "PreCompact"), `gc handoff --auto "context cycle"`) {
+	if !strings.Contains(claudeHookCommand(t, runtimeData, "PreCompact"), gcInvocationToken+` handoff --auto "context cycle"`) {
 		t.Error("claude PreCompact hook should use gc handoff --auto (not gc prime or restart handoff) on compaction")
 	}
-	if !strings.Contains(s, "gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject") {
+	if !strings.Contains(s, gcTokenJSON+" hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject") {
 		t.Error("claude settings should run nudge drain through gc hook run")
 	}
-	if !strings.Contains(s, "gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject") {
+	if !strings.Contains(s, gcTokenJSON+" hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject") {
 		t.Error("claude settings should run mail check through gc hook run")
 	}
 	if strings.Contains(s, "gc hook --inject") {
@@ -179,7 +194,7 @@ func TestInstallClaudeUpgradesStaleGeneratedFile(t *testing.T) {
 	// Build a realistic stale fixture: the embedded file stores the command
 	// as JSON, so the literal bytes contain escaped quotes. Matching that
 	// shape is what claudeFileNeedsUpgrade expects.
-	stale := strings.Replace(string(current), `gc handoff --auto \"context cycle\"`, `gc prime --hook`, 1)
+	stale := strings.Replace(string(current), gcTokenJSON+` handoff --auto \"context cycle\"`, `gc prime --hook`, 1)
 	if stale == string(current) {
 		t.Fatal("stale fixture did not diverge from current embedded config — check stale pattern")
 	}
@@ -192,7 +207,7 @@ func TestInstallClaudeUpgradesStaleGeneratedFile(t *testing.T) {
 
 	hookData := fs.Files["/city/hooks/claude.json"]
 	runtimeData := fs.Files["/city/.gc/settings.json"]
-	if !strings.Contains(claudeHookCommand(t, hookData, "PreCompact"), `gc handoff --auto "context cycle"`) {
+	if !strings.Contains(claudeHookCommand(t, hookData, "PreCompact"), gcInvocationToken+` handoff --auto "context cycle"`) {
 		t.Fatalf("upgraded claude hook missing gc handoff:\n%s", string(hookData))
 	}
 	if string(runtimeData) != string(hookData) {
@@ -206,7 +221,7 @@ func TestInstallClaudeUpgradesRestartingPreCompactHandoff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readEmbedded: %v", err)
 	}
-	stale := strings.Replace(string(current), `gc handoff --auto \"context cycle\"`, `gc handoff \"context cycle\"`, 1)
+	stale := strings.Replace(string(current), gcTokenJSON+` handoff --auto \"context cycle\"`, `gc handoff \"context cycle\"`, 1)
 	if stale == string(current) {
 		t.Fatal("stale fixture did not diverge from current embedded config — check stale pattern")
 	}
@@ -218,7 +233,7 @@ func TestInstallClaudeUpgradesRestartingPreCompactHandoff(t *testing.T) {
 	}
 
 	hookData := fs.Files["/city/hooks/claude.json"]
-	if !strings.Contains(claudeHookCommand(t, hookData, "PreCompact"), `gc handoff --auto "context cycle"`) {
+	if !strings.Contains(claudeHookCommand(t, hookData, "PreCompact"), gcInvocationToken+` handoff --auto "context cycle"`) {
 		t.Fatalf("upgraded claude hook missing gc handoff --auto:\n%s", string(hookData))
 	}
 }
@@ -229,7 +244,7 @@ func TestInstallClaudeUpgradesGeneratedFileMissingManagedSessionMarkers(t *testi
 	if err != nil {
 		t.Fatalf("readEmbedded: %v", err)
 	}
-	stale := strings.Replace(string(current), `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex`, `gc prime --hook`, 1)
+	stale := strings.Replace(string(current), `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart `+gcTokenJSON+` prime --hook --hook-format codex`, `gc prime --hook`, 1)
 	if stale == string(current) {
 		t.Fatal("stale fixture did not diverge from current embedded config — check SessionStart marker pattern")
 	}
@@ -260,7 +275,7 @@ func TestInstallClaudeUpgradesPreviousCanonicalSessionStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readEmbedded: %v", err)
 	}
-	stale := strings.Replace(string(current), sessionStartCurrentFormBody(""), sessionStartPreviousManagedFormBody, 1)
+	stale := strings.Replace(string(current), jsonEscaped(sessionStartCurrentFormBody("")), jsonEscaped(sessionStartPreviousManagedFormBody), 1)
 	if stale == string(current) {
 		t.Fatal("stale fixture did not diverge from current embedded config — check previous SessionStart pattern")
 	}
@@ -344,7 +359,7 @@ func TestInstallCodexUpgradesGeneratedFileMissingHookFormat(t *testing.T) {
 	if !strings.Contains(got, `"PreCompact"`) {
 		t.Errorf("upgraded codex hooks missing PreCompact:\n%s", got)
 	}
-	if !strings.Contains(got, `gc --city '/city' handoff --auto --hook-format codex \"context cycle\"`) {
+	if !strings.Contains(got, gcTokenJSON+` --city '/city' handoff --auto --hook-format codex \"context cycle\"`) {
 		t.Errorf("upgraded codex PreCompact missing auto handoff command:\n%s", got)
 	}
 }
@@ -373,7 +388,7 @@ func TestInstallCodexUpgradesSessionStartMissingManagedMarker(t *testing.T) {
 	if !strings.Contains(sessionStartCommand, "GC_HOOK_EVENT_NAME=SessionStart") {
 		t.Fatalf("upgraded codex SessionStart missing event marker: %s", sessionStartCommand)
 	}
-	if !strings.Contains(sessionStartCommand, "gc --city '/city' prime --hook --hook-format codex") {
+	if !strings.Contains(sessionStartCommand, gcInvocationToken+" --city '/city' prime --hook --hook-format codex") {
 		t.Fatalf("upgraded codex SessionStart missing hook format: %s", sessionStartCommand)
 	}
 }
@@ -461,10 +476,10 @@ func TestInstallCodexUpgradesManagedFileMissingPreCompact(t *testing.T) {
 	if !strings.Contains(got, `"PreCompact"`) {
 		t.Errorf("upgraded codex hooks missing PreCompact:\n%s", got)
 	}
-	if !strings.Contains(got, `gc --city '/city' handoff --auto --hook-format codex \"context cycle\"`) {
+	if !strings.Contains(got, gcTokenJSON+` --city '/city' handoff --auto --hook-format codex \"context cycle\"`) {
 		t.Errorf("upgraded codex PreCompact missing auto handoff command:\n%s", got)
 	}
-	if !strings.Contains(got, `gc --city '/city' hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format codex`) {
+	if !strings.Contains(got, gcTokenJSON+` --city '/city' hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format codex`) {
 		t.Errorf("upgraded codex UserPromptSubmit missing bounded mail check command:\n%s", got)
 	}
 }
@@ -542,9 +557,17 @@ func TestCodexHooksNeedManagedUpgrade(t *testing.T) {
 		t.Fatal("managed Codex hooks with stale city binding were not reported stale")
 	}
 
-	currentCity := []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/old/city' prime --hook --hook-format codex"}]}],"PreCompact":[{"hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc --city '/old/city' handoff --auto --hook-format codex \"context cycle\""}]}]}}`)
+	currentCity := []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart \"${GC_BIN:-gc}\" --city '/old/city' prime --hook --hook-format codex"}]}],"PreCompact":[{"hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && \"${GC_BIN:-gc}\" --city '/old/city' handoff --auto --hook-format codex \"context cycle\""}]}]}}`)
 	if CodexHooksNeedManagedUpgrade(currentCity, "/old/city") {
 		t.Fatal("managed Codex hooks already bound to requested city were reported stale")
+	}
+
+	// The pre-GC_BIN spelling — right city, right args, bare `gc` invocation
+	// token — must be reported stale so already-materialized files flip to
+	// the GC_BIN-honouring form on reconcile (ADR-0027 §Option F).
+	bareToken := []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/old/city' prime --hook --hook-format codex"}]}],"PreCompact":[{"hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc --city '/old/city' handoff --auto --hook-format codex \"context cycle\""}]}]}}`)
+	if !CodexHooksNeedManagedUpgrade(bareToken, "/old/city") {
+		t.Fatal("managed Codex hooks with bare-gc invocation token were not reported stale")
 	}
 
 	custom := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"FOO=1 gc mail check --inject --hook-format codex"}]}]}}`)
@@ -594,7 +617,7 @@ func TestInstallCodexUpgradePreservesCustomHooks(t *testing.T) {
 	if !strings.Contains(got, "--hook-format codex") {
 		t.Errorf("upgraded codex hooks missing Codex hook output format:\n%s", got)
 	}
-	if !strings.Contains(got, `gc --city '/city' prime --hook --hook-format codex`) {
+	if !strings.Contains(got, gcTokenJSON+` --city '/city' prime --hook --hook-format codex`) {
 		t.Errorf("upgraded codex hooks missing explicit city binding:\n%s", got)
 	}
 	if !strings.Contains(got, "printf custom-codex-hook") {
@@ -623,13 +646,13 @@ func TestInstallCodexRebindsManagedHooksAndAddsPreCompact(t *testing.T) {
 	}
 
 	got := string(fs.Files["/work/.codex/hooks.json"])
-	if !strings.Contains(got, `gc --city '/new city' prime --hook --hook-format codex`) {
+	if !strings.Contains(got, gcTokenJSON+` --city '/new city' prime --hook --hook-format codex`) {
 		t.Fatalf("SessionStart not rebound to current city:\n%s", got)
 	}
 	if !strings.Contains(got, `"PreCompact"`) {
 		t.Fatalf("managed codex upgrade missing PreCompact:\n%s", got)
 	}
-	if !strings.Contains(got, `gc --city '/new city' handoff --auto --hook-format codex \"context cycle\"`) {
+	if !strings.Contains(got, gcTokenJSON+` --city '/new city' handoff --auto --hook-format codex \"context cycle\"`) {
 		t.Fatalf("PreCompact not added for current city:\n%s", got)
 	}
 	if strings.Contains(got, "/old/city") {
@@ -661,10 +684,10 @@ func TestInstallCodexRebindsManagedHooksToCurrentCity(t *testing.T) {
 	}
 
 	got := string(fs.Files["/work/.codex/hooks.json"])
-	if !strings.Contains(got, `gc --city '/new city' prime --hook --hook-format codex`) {
+	if !strings.Contains(got, gcTokenJSON+` --city '/new city' prime --hook --hook-format codex`) {
 		t.Fatalf("SessionStart not rebound to current city:\n%s", got)
 	}
-	if !strings.Contains(got, `gc --city '/new city' handoff --auto --hook-format codex \"context cycle\"`) {
+	if !strings.Contains(got, gcTokenJSON+` --city '/new city' handoff --auto --hook-format codex \"context cycle\"`) {
 		t.Fatalf("PreCompact not rebound to current city:\n%s", got)
 	}
 	if strings.Contains(got, "/old/city") {
@@ -736,7 +759,7 @@ func TestInstallCodexPreservesExtraEnvOnManagedHooks(t *testing.T) {
 	}
 
 	got := string(fs.Files["/work/.codex/hooks.json"])
-	if !strings.Contains(got, `FOO=1 GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/city' prime --hook --hook-format codex`) {
+	if !strings.Contains(got, `FOO=1 GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart `+gcTokenJSON+` --city '/city' prime --hook --hook-format codex`) {
 		t.Fatalf("managed codex hook lost extra env prefix:\n%s", got)
 	}
 	if !strings.Contains(got, `"PreCompact"`) {
@@ -750,7 +773,7 @@ func TestUpgradeCodexHooksSkipsWhenDesiredPreCompactUnavailable(t *testing.T) {
     "SessionStart": [{
       "hooks": [{
         "type": "command",
-        "command": "GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"
+        "command": "GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart \"${GC_BIN:-gc}\" prime --hook --hook-format codex"
       }]
     }]
   }
@@ -844,7 +867,10 @@ func TestInstallClaudeUpgradesGeneratedFileWithCombinedKnownDrift(t *testing.T) 
 	if err != nil {
 		t.Fatalf("readEmbedded: %v", err)
 	}
-	stale := strings.Replace(string(current), `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex`, `gc prime --hook`, 1)
+	stale := strings.Replace(string(current), `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart `+gcTokenJSON+` prime --hook --hook-format codex`, `gc prime --hook`, 1)
+	if stale == string(current) {
+		t.Fatal("stale fixture did not diverge from current embedded config — check combined SessionStart command pattern")
+	}
 	stale = strings.Replace(stale, `"matcher": "startup"`, `"matcher": ""`, 1)
 	if stale == string(current) {
 		t.Fatal("stale fixture did not diverge from current embedded config — check combined SessionStart drift pattern")
@@ -884,8 +910,11 @@ func TestInstallClaudeUpgradesGeneratedFileWithAllKnownDrift(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readEmbedded: %v", err)
 	}
-	stale := strings.Replace(string(current), `gc handoff --auto \"context cycle\"`, `gc prime --hook`, 1)
-	stale = strings.Replace(stale, `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex`, `gc prime --hook --hook-format codex`, 1)
+	stale := strings.Replace(string(current), gcTokenJSON+` handoff --auto \"context cycle\"`, `gc prime --hook`, 1)
+	if stale == string(current) {
+		t.Fatal("stale fixture did not diverge from current embedded config — check PreCompact drift pattern")
+	}
+	stale = strings.Replace(stale, `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart `+gcTokenJSON+` prime --hook --hook-format codex`, `gc prime --hook --hook-format codex`, 1)
 	stale = strings.Replace(stale, `"matcher": "startup"`, `"matcher": ""`, 1)
 	if stale == string(current) {
 		t.Fatal("stale fixture did not diverge from current embedded config — check all known Claude drift patterns")
@@ -914,7 +943,7 @@ func TestInstallClaudeUpgradesGeneratedFileWithAllKnownDrift(t *testing.T) {
 			return entries[0].Matcher
 		}())
 	}
-	if !strings.Contains(claudeHookCommand(t, hookData, "PreCompact"), `gc handoff --auto "context cycle"`) {
+	if !strings.Contains(claudeHookCommand(t, hookData, "PreCompact"), gcInvocationToken+` handoff --auto "context cycle"`) {
 		t.Fatalf("upgraded all-drift PreCompact hook missing gc handoff:\n%s", string(hookData))
 	}
 	if string(runtimeData) != string(hookData) {
@@ -942,7 +971,7 @@ func TestInstallClaudeUpgradesPreCompactPreservingCustomHookEvent(t *testing.T) 
 	// Start from the canonical embedded shape, downgrade PreCompact to the
 	// bare-handoff legacy form, and inject a custom Stop hook event that
 	// is not part of the managed set.
-	stale := strings.Replace(string(current), `gc handoff --auto \"context cycle\"`, `gc handoff \"context cycle\"`, 1)
+	stale := strings.Replace(string(current), gcTokenJSON+` handoff --auto \"context cycle\"`, `gc handoff \"context cycle\"`, 1)
 	if stale == string(current) {
 		t.Fatal("PreCompact downgrade did not modify the fixture — check the legacy form pattern")
 	}
@@ -979,7 +1008,7 @@ func TestInstallClaudeUpgradesPreCompactPreservingCustomHookEvent(t *testing.T) 
 
 	// The managed PreCompact command must be upgraded to include --auto.
 	preCompactCmd := claudeHookCommand(t, runtime, "PreCompact")
-	if !strings.Contains(preCompactCmd, `gc handoff --auto "context cycle"`) {
+	if !strings.Contains(preCompactCmd, gcInvocationToken+` handoff --auto "context cycle"`) {
 		t.Fatalf("PreCompact command not upgraded to include --auto:\n%s", preCompactCmd)
 	}
 
@@ -1171,6 +1200,270 @@ func TestInstallClaudeDoesNotClobberUserChainedCommand(t *testing.T) {
 	}
 	if !foundUserOwned {
 		t.Fatalf("user-authored PreCompact chained command was rewritten — gc must not mutate &&-chained commands:\n%s", string(runtime))
+	}
+}
+
+// TestInstallClaudeUpgradesBareGCInvocationToken is the rollout test for the
+// GC_BIN invocation-token change (ADR-0027 §Option F). A fully materialized
+// pre-GC_BIN Claude settings file — every managed command spelled with the
+// bare `gc` token, exactly what every agent workspace carried before the
+// change — must flip to the `"${GC_BIN:-gc}"` spelling in one Install pass,
+// upgrading each entry in place rather than appending duplicates next to the
+// stale ones. Without the old→new upgrade rule the merge preserves the stale
+// commands forever (the "looks fixed, isn't" trap).
+func TestInstallClaudeUpgradesBareGCInvocationToken(t *testing.T) {
+	fs := fsys.NewFake()
+	current, err := readEmbedded("config/claude.json")
+	if err != nil {
+		t.Fatalf("readEmbedded: %v", err)
+	}
+	stale := strings.ReplaceAll(string(current), gcTokenJSON, "gc")
+	if stale == string(current) {
+		t.Fatal("stale fixture did not diverge from current embedded config — check the invocation-token pattern")
+	}
+	fs.Files["/city/hooks/claude.json"] = []byte(stale)
+	fs.Files["/city/.gc/settings.json"] = []byte(stale)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	hookData := fs.Files["/city/hooks/claude.json"]
+	runtimeData := fs.Files["/city/.gc/settings.json"]
+	for event, wantEntries := range map[string]int{
+		"SessionStart":     1,
+		"PreCompact":       1,
+		"UserPromptSubmit": 1,
+	} {
+		entries := claudeHookEntries(t, hookData, event)
+		if len(entries) != wantEntries {
+			t.Fatalf("%s entries = %d, want %d (in-place upgrade must not append duplicates):\n%s", event, len(entries), wantEntries, string(hookData))
+		}
+		for _, entry := range entries {
+			for _, h := range entry.Hooks {
+				if !strings.Contains(h.Command, gcInvocationToken) {
+					t.Fatalf("%s command not upgraded to %s: %q", event, gcInvocationToken, h.Command)
+				}
+			}
+		}
+	}
+	if strings.Contains(string(hookData), `&& gc `) || strings.Contains(string(hookData), `SessionStart gc `) {
+		t.Fatalf("bare gc invocation survived the upgrade:\n%s", string(hookData))
+	}
+	if string(runtimeData) != string(hookData) {
+		t.Fatalf("runtime Claude settings should mirror upgraded hook settings:\n%s", string(runtimeData))
+	}
+}
+
+// TestInstallCodexUpgradesBareGCInvocationToken is the codex counterpart of
+// the rollout test: a materialized pre-GC_BIN codex hooks.json upgrades every
+// managed command to the `"${GC_BIN:-gc}"` spelling in place.
+func TestInstallCodexUpgradesBareGCInvocationToken(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/work/.codex/hooks.json"] = []byte(`{
+  "hooks": {
+    "SessionStart": [{
+      "matcher": "startup",
+      "hooks": [{
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/city' prime --hook --hook-format codex"
+      }]
+    }],
+    "PreCompact": [{
+      "matcher": "",
+      "hooks": [{
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc --city '/city' handoff --auto --hook-format codex \"context cycle\""
+      }]
+    }],
+    "UserPromptSubmit": [{
+      "matcher": "",
+      "hooks": [{
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc --city '/city' hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format codex"
+      }, {
+        "type": "command",
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc --city '/city' hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format codex"
+      }]
+    }]
+  }
+}`)
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	got := string(fs.Files["/work/.codex/hooks.json"])
+	for _, want := range []string{
+		`GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart ` + gcTokenJSON + ` --city '/city' prime --hook --hook-format codex`,
+		gcTokenJSON + ` --city '/city' handoff --auto --hook-format codex \"context cycle\"`,
+		gcTokenJSON + ` --city '/city' hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format codex`,
+		gcTokenJSON + ` --city '/city' hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format codex`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("upgraded codex hooks missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, `&& gc `) || strings.Contains(got, `SessionStart gc `) {
+		t.Fatalf("bare gc invocation survived the codex upgrade:\n%s", got)
+	}
+	for event, wantEntries := range map[string]int{
+		"SessionStart":     1,
+		"PreCompact":       1,
+		"UserPromptSubmit": 1,
+	} {
+		if entries := claudeHookEntries(t, fs.Files["/work/.codex/hooks.json"], event); len(entries) != wantEntries {
+			t.Fatalf("%s entries = %d, want %d (in-place upgrade must not append duplicates):\n%s", event, len(entries), wantEntries, got)
+		}
+	}
+}
+
+// TestInstallClaudeDoesNotClobberGCBinLookalikeCommands extends the
+// user-authorship regression class (#2072) to the GC_BIN era: commands that
+// resemble the new managed spelling — a different parameter-expansion
+// variable, or the exact new token with user-appended arguments — must stay
+// untouched. Only the exact managed bodies in either spelling may upgrade.
+func TestInstallClaudeDoesNotClobberGCBinLookalikeCommands(t *testing.T) {
+	fs := fsys.NewFake()
+	userOwned := `{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && \"${MY_GC:-gc}\" prime --hook"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && \"${GC_BIN:-gc}\" handoff --auto \"context cycle\" --my-flag"
+          }
+        ]
+      }
+    ]
+  }
+}`
+	fs.Files["/city/.gc/settings.json"] = []byte(userOwned)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	runtime := string(fs.Files["/city/.gc/settings.json"])
+	if !strings.Contains(runtime, `\"${MY_GC:-gc}\" prime --hook`) {
+		t.Fatalf("user-authored ${MY_GC:-gc} lookalike was rewritten:\n%s", runtime)
+	}
+	if !strings.Contains(runtime, gcTokenJSON+` handoff --auto \"context cycle\" --my-flag`) {
+		t.Fatalf("user-authored suffix-appended new-token command was rewritten:\n%s", runtime)
+	}
+}
+
+// TestManagedShellHookFileNeedsGCBinUpgrade pins the overlay needs-upgrade
+// predicate for the write-once shell-hook providers (cursor, copilot, kiro):
+// exact pre-GC_BIN managed commands fire the rewrite; the current form,
+// user-edited variants, prefixless commands, and malformed JSON do not.
+func TestManagedShellHookFileNeedsGCBinUpgrade(t *testing.T) {
+	for name, tc := range map[string]struct {
+		data []byte
+		want bool
+	}{
+		"stale-command-key": {
+			data: []byte(`{"hooks":{"sessionStart":[{"command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc prime --hook"}]}}`),
+			want: true,
+		},
+		"stale-bash-key": {
+			data: []byte(`{"hooks":{"preCompact":[{"type":"command","bash":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc handoff --auto \"context cycle\"","timeoutSec":30}]}}`),
+			want: true,
+		},
+		"current-form": {
+			data: []byte(`{"hooks":{"sessionStart":[{"command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && \"${GC_BIN:-gc}\" prime --hook"}]}}`),
+			want: false,
+		},
+		"user-suffix-appended": {
+			data: []byte(`{"hooks":{"sessionStart":[{"command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc prime --hook --my-flag"}]}}`),
+			want: false,
+		},
+		"user-no-canonical-prefix": {
+			data: []byte(`{"hooks":{"sessionStart":[{"command":"gc prime --hook"}]}}`),
+			want: false,
+		},
+		"malformed": {
+			data: []byte(`{not-json`),
+			want: false,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := managedShellHookFileNeedsGCBinUpgrade(tc.data); got != tc.want {
+				t.Fatalf("managedShellHookFileNeedsGCBinUpgrade(%s) = %v, want %v", name, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestInstallOverlayUpgradesBareGCShellHookFiles verifies the write-once
+// overlay providers' existing files actually flip: a materialized pre-GC_BIN
+// hook file (the embedded template with the invocation token downgraded to
+// bare `gc`) is rewritten to the current template, with the original backed
+// up; a user-edited variant of the same file is preserved untouched.
+func TestInstallOverlayUpgradesBareGCShellHookFiles(t *testing.T) {
+	for provider, rel := range map[string]string{
+		"cursor":  ".cursor/hooks.json",
+		"copilot": ".github/hooks/gascity.json",
+		"kiro":    ".kiro/agents/gascity.json",
+	} {
+		t.Run(provider, func(t *testing.T) {
+			template, err := iofs.ReadFile(core.PackFS, path.Join("overlay", "per-provider", provider, rel))
+			if err != nil {
+				t.Fatalf("reading embedded %s template: %v", provider, err)
+			}
+			stale := strings.ReplaceAll(string(template), gcTokenJSON, "gc")
+			if stale == string(template) {
+				t.Fatalf("%s template carries no %s token — stale fixture did not diverge", provider, gcInvocationToken)
+			}
+
+			fs := fsys.NewFake()
+			dst := "/work/" + rel
+			fs.Files[dst] = []byte(stale)
+			if err := Install(fs, "/city", "/work", []string{provider}); err != nil {
+				t.Fatalf("Install: %v", err)
+			}
+			got := string(fs.Files[dst])
+			if !strings.Contains(got, gcTokenJSON) {
+				t.Fatalf("existing %s hook file was not upgraded to %s:\n%s", provider, gcInvocationToken, got)
+			}
+			if strings.Contains(got, `&& gc `) {
+				t.Fatalf("bare gc invocation survived the %s upgrade:\n%s", provider, got)
+			}
+			if backup := string(fs.Files[dst+".bak"]); backup != stale {
+				t.Fatalf("%s upgrade backup missing or wrong:\n%s", provider, backup)
+			}
+
+			// A user-edited variant (extra flag on one command) must be
+			// classified user-authored and preserved byte-for-byte.
+			fsUser := fsys.NewFake()
+			userEdited := strings.Replace(stale, "gc prime --hook", "gc prime --hook --my-flag", 1)
+			if userEdited == stale {
+				t.Fatalf("%s user-edited fixture did not diverge", provider)
+			}
+			fsUser.Files[dst] = []byte(userEdited)
+			if err := Install(fsUser, "/city", "/work", []string{provider}); err != nil {
+				t.Fatalf("Install (user-edited): %v", err)
+			}
+			if got := string(fsUser.Files[dst]); got != userEdited {
+				t.Fatalf("user-edited %s hook file was rewritten:\n%s", provider, got)
+			}
+			if _, ok := fsUser.Files[dst+".bak"]; ok {
+				t.Fatalf("user-edited %s hook file was backed up — implies an unwanted rewrite", provider)
+			}
+		})
 	}
 }
 
@@ -1679,7 +1972,7 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	codexHooks := fs.Files["/work/.codex/hooks.json"]
 	codexHooksText := string(codexHooks)
 	sessionStartCommand := codexHookCommand(t, codexHooks, "SessionStart")
-	if !strings.Contains(sessionStartCommand, `gc --city '/city' prime --hook --hook-format codex`) {
+	if !strings.Contains(sessionStartCommand, gcInvocationToken+` --city '/city' prime --hook --hook-format codex`) {
 		t.Fatalf("codex SessionStart hook command = %q, want city-bound gc prime --hook --hook-format codex", sessionStartCommand)
 	}
 	if !strings.Contains(sessionStartCommand, "GC_HOOK_EVENT_NAME=SessionStart") {
@@ -1691,12 +1984,12 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	if !strings.Contains(codexHooksText, `"PreCompact"`) {
 		t.Error("codex hooks should include PreCompact")
 	}
-	if !strings.Contains(codexHooksText, `gc --city '/city' handoff --auto --hook-format codex \"context cycle\"`) {
+	if !strings.Contains(codexHooksText, gcTokenJSON+` --city '/city' handoff --auto --hook-format codex \"context cycle\"`) {
 		t.Error("codex PreCompact should use auto handoff with Codex hook output format")
 	}
 	for _, want := range []string{
-		`gc --city '/city' hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format codex`,
-		`gc --city '/city' hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format codex`,
+		gcTokenJSON + ` --city '/city' hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format codex`,
+		gcTokenJSON + ` --city '/city' hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format codex`,
 	} {
 		if !strings.Contains(codexHooksText, want) {
 			t.Errorf("codex prompt hooks missing bounded command %q:\n%s", want, codexHooksText)
@@ -1713,16 +2006,16 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	}
 	for path, wants := range map[string][]string{
 		"/work/.github/hooks/gascity.json": {
-			`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
-			`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
+			gcTokenJSON + ` hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
+			gcTokenJSON + ` hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
 		},
 		"/work/.cursor/hooks.json": {
-			`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
-			`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
+			gcTokenJSON + ` hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
+			gcTokenJSON + ` hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
 		},
 		"/work/.kiro/agents/gascity.json": {
-			`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
-			`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
+			gcTokenJSON + ` hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
+			gcTokenJSON + ` hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,
 		},
 	} {
 		data := string(fs.Files[path])
@@ -1740,14 +2033,14 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	if !strings.Contains(copilotHooks, `"preCompact"`) {
 		t.Error("copilot hooks should include preCompact (closes #672 gap 3)")
 	}
-	if !strings.Contains(copilotHooks, `gc handoff --auto \"context cycle\"`) {
+	if !strings.Contains(copilotHooks, gcTokenJSON+` handoff --auto \"context cycle\"`) {
 		t.Error("copilot preCompact should use auto handoff")
 	}
 	antigravityHooks := string(fs.Files["/work/.agents/hooks.json"])
 	for hookName, wantCommand := range map[string]string{
-		"gascity-prime":       `GC_PROVIDER_SESSION_ID_REQUIRED=antigravity GC_PROVIDER_SESSION_ID=\"${ANTIGRAVITY_CONVERSATION_ID:-}\" GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format antigravity`,
-		"gascity-nudge-drain": "gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format antigravity",
-		"gascity-mail-check":  "gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format antigravity",
+		"gascity-prime":       `GC_PROVIDER_SESSION_ID_REQUIRED=antigravity GC_PROVIDER_SESSION_ID=\"${ANTIGRAVITY_CONVERSATION_ID:-}\" GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart ` + gcTokenJSON + ` prime --hook --hook-format antigravity`,
+		"gascity-nudge-drain": gcTokenJSON + " hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format antigravity",
+		"gascity-mail-check":  gcTokenJSON + " hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format antigravity",
 	} {
 		if !strings.Contains(antigravityHooks, `"`+hookName+`"`) {
 			t.Errorf("Antigravity hooks missing hook %q:\n%s", hookName, antigravityHooks)
@@ -1916,9 +2209,9 @@ func TestInstallAntigravityMergesExistingHooks(t *testing.T) {
 		`"custom-reminder"`,
 		`"command": "echo custom"`,
 		`"gascity-prime"`,
-		`gc prime --hook --hook-format antigravity`,
-		`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format antigravity`,
-		`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format antigravity`,
+		gcTokenJSON + ` prime --hook --hook-format antigravity`,
+		gcTokenJSON + ` hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format antigravity`,
+		gcTokenJSON + ` hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format antigravity`,
 	} {
 		if !strings.Contains(data, want) {
 			t.Errorf("merged Antigravity hooks missing %q:\n%s", want, data)
@@ -2378,7 +2671,7 @@ func TestInstallCodexWritesCanonicalJSON(t *testing.T) {
 	if bytes.Contains(data, []byte(`\u0026`)) {
 		t.Fatalf("codex hook escaped command operator:\n%s", data)
 	}
-	if !bytes.Contains(data, []byte(` && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/city' prime`)) {
+	if !bytes.Contains(data, []byte(` && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart `+gcTokenJSON+` --city '/city' prime`)) {
 		t.Fatalf("codex hook missing literal command operator:\n%s", data)
 	}
 	if !bytes.HasSuffix(data, []byte("\n")) {
