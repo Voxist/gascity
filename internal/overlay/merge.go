@@ -22,7 +22,7 @@ const CanonicalGCPathPrefix = `export PATH="$HOME/go/bin:$HOME/.local/bin:$PATH"
 const antigravityGCPathPrefix = `export PATH="$HOME/go/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH" && `
 
 // GCBinInvocationToken is the executable token managed shell hook commands
-// use to invoke gc: honour the GC_BIN pointer gc exports into every agent
+// use to invoke gc: honor the GC_BIN pointer gc exports into every agent
 // process (the deployed binary), falling back to bare-`gc` PATH resolution
 // when GC_BIN is unset or empty (ADR-0027 §Option F; precedent: the opencode
 // plugin's `process.env.GC_BIN || "gc"`).
@@ -33,7 +33,7 @@ const GCBinInvocationToken = `"${GC_BIN:-gc}"`
 // User-authored commands never have these exact prefixes.
 var managedGCPathPrefixes = []string{CanonicalGCPathPrefix, antigravityGCPathPrefix}
 
-// normalizeGCCommandIdentity maps the GC_BIN-honouring spelling of a managed
+// normalizeGCCommandIdentity maps the GC_BIN-honoring spelling of a managed
 // gc hook command onto its historical bare-`gc` spelling, for merge-identity
 // purposes only. Command-keyed hook entries (Cursor "command", Copilot
 // "bash") would otherwise change identity when the managed invocation token

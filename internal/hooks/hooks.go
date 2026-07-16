@@ -1515,7 +1515,7 @@ func upgradeClaudeHookEntry(event string, entry map[string]any) bool {
 const canonicalGCPathPrefix = overlay.CanonicalGCPathPrefix
 
 // gcInvocationToken is the executable token managed shell hook commands use
-// to invoke gc. `"${GC_BIN:-gc}"` honours the GC_BIN pointer gc exports into
+// to invoke gc. `"${GC_BIN:-gc}"` honors the GC_BIN pointer gc exports into
 // every agent process (the deployed binary), degrading to bare-`gc` PATH
 // resolution when GC_BIN is unset or empty (ADR-0027 §Option F; precedent:
 // the opencode plugin's `process.env.GC_BIN || "gc"`). The PATH-export
@@ -1529,7 +1529,7 @@ const gcInvocationToken = overlay.GCBinInvocationToken
 const gcInvocationTokenParsed = `${GC_BIN:-gc}`
 
 // isGCInvocationToken reports whether a parsed command token invokes gc:
-// the historical bare `gc` or the current GC_BIN-honouring form. Exact
+// the historical bare `gc` or the current GC_BIN-honoring form. Exact
 // match only — wrappers and lookalike tokens stay unrecognized so managed
 // upgrades never rewrite user-authored commands.
 func isGCInvocationToken(token string) bool {

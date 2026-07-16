@@ -564,7 +564,7 @@ func TestCodexHooksNeedManagedUpgrade(t *testing.T) {
 
 	// The pre-GC_BIN spelling — right city, right args, bare `gc` invocation
 	// token — must be reported stale so already-materialized files flip to
-	// the GC_BIN-honouring form on reconcile (ADR-0027 §Option F).
+	// the GC_BIN-honoring form on reconcile (ADR-0027 §Option F).
 	bareToken := []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/old/city' prime --hook --hook-format codex"}]}],"PreCompact":[{"hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc --city '/old/city' handoff --auto --hook-format codex \"context cycle\""}]}]}}`)
 	if !CodexHooksNeedManagedUpgrade(bareToken, "/old/city") {
 		t.Fatal("managed Codex hooks with bare-gc invocation token were not reported stale")

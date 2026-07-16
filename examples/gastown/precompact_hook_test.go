@@ -124,11 +124,18 @@ func hookCommands(raw any) []string {
 func containsGCHandoff(command string) bool {
 	fields := strings.Fields(command)
 	for i := 0; i < len(fields)-1; i++ {
-		if fields[i] == "gc" && fields[i+1] == "handoff" {
+		if isGCInvocationField(fields[i]) && fields[i+1] == "handoff" {
 			return true
 		}
 	}
 	return false
+}
+
+// isGCInvocationField reports whether a whitespace-delimited command field
+// invokes gc: the GC_BIN-honoring token managed hooks emit today or the
+// historical bare `gc` (ADR-0027 §Option F).
+func isGCInvocationField(field string) bool {
+	return field == `"${GC_BIN:-gc}"` || field == "gc"
 }
 
 func hasAutoFlag(command string) bool {

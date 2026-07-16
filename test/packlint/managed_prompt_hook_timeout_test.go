@@ -29,9 +29,28 @@ import (
 // the provider can abandon the hook before the fail-open code is returned.
 const managedHookWrapperWaitDelay = 2 * time.Second
 
-// managedWrapperMarker identifies a `gc hook run` wrapper command body within a
-// shipped hook config string.
-const managedWrapperMarker = "gc hook run --timeout"
+// managedWrapperMarkers identify a `gc hook run` wrapper command body within a
+// decoded hook config string, in either invocation-token spelling: the
+// GC_BIN-honoring form managed hooks emit today or the historical bare `gc`
+// (ADR-0027 §Option F).
+var managedWrapperMarkers = []string{
+	`"${GC_BIN:-gc}" hook run --timeout`,
+	"gc hook run --timeout",
+}
+
+// rawWrapperPrefilter loosely matches raw (still JSON-escaped) file bytes,
+// used only to skip files with no wrapper commands; token-precise matching
+// happens on decoded strings via containsManagedWrapperMarker.
+const rawWrapperPrefilter = "hook run --timeout"
+
+func containsManagedWrapperMarker(s string) bool {
+	for _, marker := range managedWrapperMarkers {
+		if strings.Contains(s, marker) {
+			return true
+		}
+	}
+	return false
+}
 
 func TestManagedPromptHookTimeoutExceedsWrapper(t *testing.T) {
 	root := repoRoot()
@@ -51,7 +70,7 @@ func TestManagedPromptHookTimeoutExceedsWrapper(t *testing.T) {
 		if err != nil {
 			return fmt.Errorf("reading %s: %w", path, err)
 		}
-		if !strings.Contains(string(data), managedWrapperMarker) {
+		if !strings.Contains(string(data), rawWrapperPrefilter) {
 			return nil
 		}
 		var doc any
@@ -117,7 +136,7 @@ func walkHookTimeoutNodes(node any, fn func(wrapperCmd string, providerTimeoutSe
 	case map[string]any:
 		wrapperCmd := ""
 		for _, val := range v {
-			if s, ok := val.(string); ok && strings.Contains(s, managedWrapperMarker) {
+			if s, ok := val.(string); ok && containsManagedWrapperMarker(s) {
 				wrapperCmd = s
 				break
 			}

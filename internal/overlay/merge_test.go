@@ -290,7 +290,7 @@ func TestMergeSettingsJSON_GCBinTokenIdentity(t *testing.T) {
 			}
 			got := arr[0].(map[string]any)[tc.key].(string)
 			if got != tc.prefix+GCBinInvocationToken+` prime --hook` {
-				t.Fatalf("merged command = %q, want the GC_BIN-honouring spelling", got)
+				t.Fatalf("merged command = %q, want the GC_BIN-honoring spelling", got)
 			}
 		})
 	}
