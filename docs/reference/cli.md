@@ -4652,7 +4652,9 @@ gc unregister [path|name] [flags]
 
 Print the gc version string.
 
-Use --long to include git commit and build date metadata.
+Use --long to include git commit, build date, linked beads library, and
+build-base lineage metadata (base is "unstamped" for builds not produced
+via 'make artifact').
 
 ```
 gc version [flags]

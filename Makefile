@@ -104,6 +104,48 @@ ifeq ($(shell uname),Darwin)
 	@scripts/sign-darwin-local.sh $(BUILD_DIR)/$(BINARY)
 endif
 
+## artifact: build a provenance-named gc artifact (requires BASE_REF=<remote>/<branch>, e.g. Voxist/main)
+## The filename is machine-derived from the ACTUAL build commit (rev-parse
+## HEAD); the base branch's name is refused as the token unless HEAD is in
+## BASE_REF's lineage (the gc-main-20260710-77916fc6c trap). The binary gets
+## its commit and a main.buildBase lineage stamp via ldflags (visible in
+## `gc version --long`), a .buildinfo.json manifest beside it, and its
+## self-reported commit is verified against HEAD after the build. A dirty
+## tree fails unless ALLOW_DIRTY=1, which names the artifact -dirty instead.
+##
+## Builds pass -buildvcs=false: Go's own VCS stamping is untrustworthy from
+## linked worktrees — nested under this repo dir it embeds the MAIN
+## checkout's HEAD/dirty state (how a worktree build at eb743642c once
+## embedded 50e120757), outside it embeds nothing. The later -X main.commit
+## wins over the $(COMMIT) one in $(LDFLAGS) and carries the full sha plus
+## an explicit -dirty suffix.
+ARTIFACT_DIR ?= $(BUILD_DIR)
+.PHONY: artifact
+artifact:
+	@set -e; \
+	if [ -z "$(BASE_REF)" ]; then \
+		echo "ERROR: BASE_REF is required, e.g. 'make artifact BASE_REF=Voxist/main' — the lineage claim must name the remote (git remote -v)" >&2; \
+		exit 2; \
+	fi; \
+	exports=$$(go run ./cmd/artifactname -repo . -base '$(BASE_REF)' -binary '$(BINARY)' $(if $(ALLOW_DIRTY),-allow-dirty,)) || exit $$?; \
+	eval "$$exports"; \
+	if [ -z "$$ARTIFACT_NAME" ] || [ -z "$$ARTIFACT_COMMIT_STAMP" ]; then \
+		echo "ERROR: artifactname emitted no usable exports" >&2; \
+		exit 1; \
+	fi; \
+	mkdir -p "$(ARTIFACT_DIR)"; \
+	echo "building $(ARTIFACT_DIR)/$$ARTIFACT_NAME"; \
+	go build -buildvcs=false -ldflags "$(LDFLAGS) -X main.commit=$$ARTIFACT_COMMIT_STAMP -X main.buildBase=$$ARTIFACT_BASE_STAMP" -o "$(ARTIFACT_DIR)/$$ARTIFACT_NAME" ./cmd/gc; \
+	if [ "$$(uname)" = "Darwin" ]; then scripts/sign-darwin-local.sh "$(ARTIFACT_DIR)/$$ARTIFACT_NAME"; fi; \
+	go run ./cmd/writebuildmanifest -binary "$(ARTIFACT_DIR)/$$ARTIFACT_NAME" -repo "$(CURDIR)"; \
+	reported=$$("$(ARTIFACT_DIR)/$$ARTIFACT_NAME" version --json | sed -n 's/.*"commit":"\([^"]*\)".*/\1/p'); \
+	if [ "$$reported" != "$$ARTIFACT_COMMIT_STAMP" ]; then \
+		echo "ERROR: binary self-reports commit '$$reported', expected '$$ARTIFACT_COMMIT_STAMP' — refusing to trust this artifact" >&2; \
+		exit 1; \
+	fi; \
+	"$(ARTIFACT_DIR)/$$ARTIFACT_NAME" version --long; \
+	echo "OK: $(ARTIFACT_DIR)/$$ARTIFACT_NAME (self-reported commit verified == HEAD)"
+
 ## check-self-contained: assert the built gc binary is self-contained (Linux/Nix ICU rpath).
 ## Only enforced when the Nix/Flox ICU block above fired (_NIX_ICU_DEV set):
 ## on those hosts a binary without an ICU RUNPATH loads interactively (the
