@@ -414,22 +414,95 @@ func TestOrderFiringCurrent_Stale(t *testing.T) {
 }
 
 func TestOrderFiringCurrent_FireOutsideWindow_NeverOK(t *testing.T) {
-	// vc-89s P5: with the events read windowed, a fire older than the window
-	// is indistinguishable from never-fired on the events path. That must
-	// classify in the error family — never fall through to OK. (With the
-	// run-history fallback wired, TestOrderFiringCurrent_Stale above shows
-	// the precise timestamp is recovered instead.)
+	// vc-89s C9 / AC 5a: the windowed read returns zero both for "never
+	// fired" and for "fired before the window", and classifyOrderFiring's
+	// uptime-grace branch returns OK whenever the controller restarted within
+	// 1.5x the expected interval. Because the window is 3x the widest
+	// interval, the controller start is ALWAYS inside the window on that
+	// branch — so a recent restart is the one regime where the fail-open is
+	// reachable, and the regime this test must run in: order fired 16h ago
+	// (outside the 12h window, 3 missed cycles), controller restarted 1h ago
+	// (inside the 6h grace period). The check must recover the true last
+	// fire and classify it stale — never report OK.
+	//
+	// Both production shapes of "no run record" are covered: lastRun unwired
+	// (nil func) and wired-but-empty — orders.LastRunAcross returns
+	// (zero, nil) both for an empty store slice and for an order with no
+	// record, so run history must not be the verdict's only guard.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	variants := map[string][]OrderFiringCurrentOption{
+		"lastRun-unwired": nil,
+		"lastRun-wired-but-empty": {WithOrderFiringCurrentLastRunFunc(func(orders.Order) (time.Time, error) {
+			return time.Time{}, nil
+		})},
+	}
+	for name, opts := range variants {
+		t.Run(name, func(t *testing.T) {
+			cityPath, cfg := orderFiringTestCity(t)
+			writeOrderFiringTestOrder(t, cityPath, "mol-dog-stale-db", "cron", "0 */4 * * *")
+			writeOrderFiringTestEvents(t, cityPath,
+				events.Event{Type: events.ControllerStarted, Ts: now.Add(-1 * time.Hour)},
+				events.Event{Type: events.OrderFired, Subject: "mol-dog-stale-db", Ts: now.Add(-16 * time.Hour)},
+			)
+
+			check := NewOrderFiringCurrentCheck(cfg, cityPath, opts...)
+			check.clock = func() time.Time { return now }
+			result := check.Run(&CheckContext{CityPath: cityPath})
+			if result.Status != StatusError {
+				t.Fatalf("status = %v, want error (a fire outside the window must never read as OK); msg = %s; details = %v", result.Status, result.Message, result.Details)
+			}
+			if !strings.Contains(strings.Join(result.Details, "\n"), "(CRITICAL: stale)") {
+				t.Fatalf("details = %v, want the true last fire recovered and classified stale", result.Details)
+			}
+		})
+	}
+}
+
+func TestOrderFiringCurrent_NeverFired_RecentRestart_OtherOrdersHistory_StaysWithinFirstCycle(t *testing.T) {
+	// The C9 disambiguation must separate subjects: full history holds fires
+	// for OTHER orders only, so the monitored order has genuinely never fired
+	// and the within-first-cycle grace verdict is legitimate. The
+	// disambiguating read must not borrow another order's fire, and clean
+	// (readable) history must not degrade the verdict.
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	cityPath, cfg := orderFiringTestCity(t)
 	writeOrderFiringTestOrder(t, cityPath, "mol-dog-stale-db", "cron", "0 */4 * * *")
+	writeOrderFiringTestArchive(t, cityPath, now.Add(-16*time.Hour), 1, 1,
+		events.Event{Seq: 1, Type: events.OrderFired, Subject: "other-order", Ts: now.Add(-16 * time.Hour)},
+	)
 	writeOrderFiringTestEvents(t, cityPath,
-		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
-		events.Event{Type: events.OrderFired, Subject: "mol-dog-stale-db", Ts: now.Add(-16 * time.Hour)},
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-1 * time.Hour)},
 	)
 
 	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
-	if result.Status != StatusError {
-		t.Fatalf("status = %v, want error (a fire outside the window must never read as OK); msg = %s; details = %v", result.Status, result.Message, result.Details)
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, want OK (genuinely never fired, controller within first cycle); msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if !strings.Contains(strings.Join(result.Details, "\n"), "within first cycle") {
+		t.Fatalf("details = %v, want within-first-cycle message", result.Details)
+	}
+}
+
+func TestOrderFiringCurrent_NeverFired_RecentRestart_CorruptHistory_DegradesNotOK(t *testing.T) {
+	// A corrupt archive outside the events window is invisible to the
+	// windowed read (pruned unopened), but the C9 disambiguating read must
+	// consult it — and when it cannot, "never fired" is no longer proven, so
+	// the grace-OK verdict must degrade to Warning naming the skipped file
+	// (fail closed, vc-89s Constraint 2), never OK.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "mol-dog-stale-db", "cron", "0 */4 * * *")
+	corrupt := writeOrderFiringCorruptArchive(t, cityPath, now.Add(-16*time.Hour), 1, 2)
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-1 * time.Hour)},
+	)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusWarning {
+		t.Fatalf("status = %v, want warning (unreadable history under a never-fired verdict must degrade); msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	if !strings.Contains(strings.Join(result.Details, "\n"), corrupt) {
+		t.Fatalf("details = %v, want degraded detail naming %s", result.Details, corrupt)
 	}
 }
 
@@ -763,7 +836,15 @@ func writeOrderFiringArchiveFile(t *testing.T, cityPath string, rotatedAt time.T
 
 func runOrderFiringCurrentTest(t *testing.T, cfg *config.City, cityPath string, now time.Time) *CheckResult {
 	t.Helper()
-	check := NewOrderFiringCurrentCheck(cfg, cityPath)
+	// Mirror the shipping doctor, which always wires run history
+	// (cmd_doctor.go). "No record" in production is (zero, nil) — the
+	// LastRunAcross contract — not an unwired nil func, so tests routed
+	// through this harness exercise the prod shape (vc-89s AC 5a). The
+	// unwired shape is covered explicitly where a test's subject is the
+	// fallback itself.
+	check := NewOrderFiringCurrentCheck(cfg, cityPath, WithOrderFiringCurrentLastRunFunc(func(orders.Order) (time.Time, error) {
+		return time.Time{}, nil
+	}))
 	check.clock = func() time.Time { return now }
 	return check.Run(&CheckContext{CityPath: cityPath})
 }

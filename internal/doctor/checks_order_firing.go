@@ -179,6 +179,31 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 			blockingErrors++
 			continue
 		}
+		if lastFired.IsZero() {
+			// The window gave IsZero a second meaning: "never fired" OR
+			// "last fired before the window". classifyOrderFiring's
+			// uptime-grace branch is only sound for the first — the
+			// controller start is always inside the window on that branch,
+			// so the ambiguity routes critically stale orders to OK after
+			// any recent restart. Run history cannot carry the distinction
+			// either: LastRunAcross returns (zero, nil) for "no record"
+			// too. Disambiguate with one newest-first full-history probe,
+			// paid only for orders already suspected stale (vc-89s C9).
+			ev, ok, probeWarnings, probeErr := events.ReadLatestMatch(eventPath, events.Filter{Type: events.OrderFired, Subject: order.ScopedName()})
+			degraded = appendUniqueStrings(degraded, probeWarnings)
+			if probeErr != nil {
+				worst = worseStatus(worst, StatusError)
+				result.Details = append(result.Details, fmt.Sprintf("%s: cannot read order history: %v", orderDisplayName(order), probeErr))
+				if firstNonOK == "" {
+					firstNonOK = orderHistoryHintTarget(order)
+				}
+				blockingErrors++
+				continue
+			}
+			if ok {
+				lastFired = ev.Ts
+			}
+		}
 		status, severity, detail := classifyOrderFiring(order, now, mo.expected, lastFired, startedAt)
 		worst = worseStatus(worst, status)
 		result.Details = append(result.Details, detail)

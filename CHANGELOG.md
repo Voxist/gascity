@@ -46,9 +46,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   skips archives whose rotation timestamp predates `Filter.Since` (never
   pruning on `Until` — an archive's first-event time is unrecorded, so that
   would silently drop events). The fired-events read is bounded at the
-  callsite by `3 × max(expected interval)`, semantically lossless because
-  staleness is declared at `age >= expected*3`; the order-run-history
-  fallback still recovers precise older timestamps. `controller.started` —
+  callsite by `3 × max(expected interval)`; because the window makes
+  `IsZero` ambiguous ("never fired" vs "fired before the window" — and the
+  classifier's uptime-grace branch would turn that ambiguity into a
+  false green after any recent controller restart, plan vc-89s C9), a
+  windowed zero is disambiguated with one newest-first
+  `events.ReadLatestMatch` probe, paid only for orders already suspected
+  stale; when that history is unreadable the verdict degrades to Warning,
+  never OK. `controller.started` —
   too rare for any window — uses the new newest-first, archive-spanning
   `events.ReadLatestMatch`, correct for arbitrarily old starts at O(1
   archive) typical cost. Unreadable archives now degrade to skip-plus-warning
