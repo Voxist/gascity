@@ -1,6 +1,7 @@
 package storehealth
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -264,6 +265,54 @@ func TestLastMaintenanceUsesListTailWhenAvailable(t *testing.T) {
 	}
 	if recorder.lastTailLimit <= 0 || recorder.lastTailLimit > 32 {
 		t.Fatalf("ListTail called with limit = %d, want a small bounded N in (0,32]", recorder.lastTailLimit)
+	}
+	if !ts.Equal(newer) {
+		t.Fatalf("ts = %v, want %v", ts, newer)
+	}
+	if status != "failed" {
+		t.Fatalf("status = %q, want failed", status)
+	}
+}
+
+// listOnlyProvider implements events.Provider but deliberately not
+// events.TailProvider, exercising LastMaintenance's fallback path for
+// backings that cannot do a bounded tail read (e.g. events.Multiplexer
+// today).
+type listOnlyProvider struct {
+	fake      *events.Fake
+	listCalls int
+}
+
+func (p *listOnlyProvider) Record(e events.Event) { p.fake.Record(e) }
+
+func (p *listOnlyProvider) List(filter events.Filter) ([]events.Event, error) {
+	p.listCalls++
+	return p.fake.List(filter)
+}
+
+func (p *listOnlyProvider) LatestSeq() (uint64, error) { return p.fake.LatestSeq() }
+
+func (p *listOnlyProvider) Watch(ctx context.Context, afterSeq uint64) (events.Watcher, error) {
+	return p.fake.Watch(ctx, afterSeq)
+}
+
+func (p *listOnlyProvider) Close() error { return p.fake.Close() }
+
+func TestLastMaintenanceFallsBackToListForNonTailProvider(t *testing.T) {
+	provider := &listOnlyProvider{fake: events.NewFake()}
+	older := time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 4, 8, 3, 0, 0, 0, time.UTC)
+
+	payloadDone, _ := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 1})
+	payloadFail, _ := json.Marshal(events.StoreMaintenanceFailedPayload{Stage: "gc"})
+
+	provider.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: older, Payload: payloadDone})
+	provider.Record(events.Event{Type: events.StoreMaintenanceFailed, Ts: newer, Payload: payloadFail})
+
+	ts, status := LastMaintenance(provider)
+
+	if provider.listCalls == 0 {
+		t.Fatalf("LastMaintenance did not fall back to List for a non-TailProvider backing")
 	}
 	if !ts.Equal(newer) {
 		t.Fatalf("ts = %v, want %v", ts, newer)
