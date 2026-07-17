@@ -826,6 +826,17 @@ func statusListStoreWithTimeout(ctx context.Context, state State, store beads.St
 			return
 		} else if scoped != nil {
 			readStore = scoped
+		} else if ctxLister, ok := store.(beads.CtxLister); ok {
+			// No bd-CLI-backed scoped clone available (native/Doltlite,
+			// CachingStore-over-Doltlite, mem stores) -- ScopedStoreLike's
+			// bd-CLI-only clone resolution has nothing to offer those. store
+			// honors ctx directly, so call ListCtx with reqCtx instead of
+			// falling through to the ctx-less List below: cancellation now
+			// aborts the in-flight backend read/query instead of abandoning
+			// this goroutine past reqCtx's deadline.
+			rows, err := ctxLister.ListCtx(reqCtx, query)
+			done <- listResult{rows: rows, err: err}
+			return
 		}
 		rows, err := readStore.List(query)
 		done <- listResult{rows: rows, err: err}
