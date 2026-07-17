@@ -47,6 +47,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on stderr and as `"path": "storeless-fallback"` in `--json` output. With the
   flag unset the behavior is unchanged. New file
   `cmd/gc/cmd_nudge_storeless.go`.
+- **Host-load event stream + slow-tick doctor check (vp-qvqk / defects 3+1).**
+  The controller now emits a periodic `host.load_sample` event (load1/5/15,
+  logical cores, runnable-process count, summed per-process %CPU) at patrol
+  cadence from its own goroutine, so a wedged reconcile tick cannot stall the
+  series that attributes the wedge. Runnable + %CPU ride alongside the load
+  averages because Darwin's load average also counts uninterruptible waits —
+  load alone cannot discriminate CPU oversubscription from blocked-on-I/O.
+  The supervisor doctor gains a `slow_ticks` check that reads the tick
+  heartbeat's `threshold_breach` flag over the doctor window and emits a
+  `doctor.alert` when any tick breached — the consumer that makes the flag
+  load-bearing (it was previously emitted and never read). New event type
+  `host.load_sample` carries a typed payload struct but is deliberately left
+  out of `KnownEventTypes` and the payload registry until the SSE projection
+  follow-up (same deferral as `provider.health_gate_alert`); subscribers
+  receive it via the custom-event envelope.
 
 - **L0 pre-heal in `ensure-project-id`: auto-restore canonical project_id from
   `city.toml [identity_map]` when the DB confirms it but L1 was wiped (vp-cz7o.21).**
@@ -58,6 +73,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   intervention. The 3-layer `decideReconcile` contract is unchanged; L0 is a
   pre-heal step only. New file `cmd/gc/city_identity_map.go`; ~20 lines added to
   `ensureManagedDoltProjectIDWithRecorder`.
+
+### Changed
+
+- **Controller tick heartbeat: emit every tick, breach threshold relative to
+  the patrol interval (vp-qvqk / defects 2+1).** `controller.tick_completed`
+  now fires once per completed tick instead of on breach-or-every-10th: the
+  sampled stream was a biased sample (fast ticks silently omitted), so any
+  period/median arithmetic over it was valid only while every tick breached —
+  a coincidence that would have flipped into a phantom regression the moment
+  the controller got healthy. The `threshold_breach` flag is now computed
+  against 2× the configured `[daemon] patrol_interval` (falling back to the
+  legacy absolute 5s only when the interval is unknown or non-positive)
+  instead of a constant 5s that had been ON for 100% of ticks in a 30-55s
+  regime. Consumers of `threshold_breach` should expect it to mean "lost
+  cadence for a full interval", not "took more than 5 seconds".
 
 ### Upgrading Notes
 

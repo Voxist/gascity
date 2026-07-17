@@ -659,7 +659,7 @@ export type ControllerTickCompletedPayload = {
      */
     phase: string;
     /**
-     * True when emitted due to a duration-threshold breach rather than the patrol multiple.
+     * True when the tick's duration reached the slow-tick threshold (a multiple of the configured patrol interval).
      */
     threshold_breach?: boolean;
 };

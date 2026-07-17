@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -103,6 +105,100 @@ func TestDoctorSubsetNoHeartbeatNoTickAlert(t *testing.T) {
 
 	if got := len(alertsOfCheck(t, ep, supervisordoctor.CheckNameTickAge)); got != 0 {
 		t.Fatalf("tick_age alerts = %d, want 0 (no heartbeat yet)", got)
+	}
+}
+
+// recordTickEvent records a controller.tick_completed event with a typed
+// payload at ts.
+func recordTickEvent(t *testing.T, ep *events.Fake, ts time.Time, breach bool, durationMs int64) {
+	t.Helper()
+	payload, err := json.Marshal(events.ControllerTickCompletedPayload{
+		DurationMs:      durationMs,
+		Phase:           "patrol",
+		ThresholdBreach: breach,
+	})
+	if err != nil {
+		t.Fatalf("marshal tick payload: %v", err)
+	}
+	ep.Record(events.Event{Type: events.ControllerTickCompleted, Ts: ts, Payload: payload})
+}
+
+// TestDoctorSubsetSlowTicksBreachEmitsAlert asserts breached ticks inside
+// the doctor window produce a slow_ticks doctor.alert — the consumer that
+// makes the heartbeat's threshold_breach flag load-bearing (vp-qvqk
+// defect 1: the flag was emitted and never read).
+func TestDoctorSubsetSlowTicksBreachEmitsAlert(t *testing.T) {
+	cfg := &config.City{}
+	cfg.Daemon.PatrolInterval = "30s"
+	cs, ep := newDoctorTestState(t, cfg)
+
+	now := time.Date(2026, 7, 17, 1, 30, 0, 0, time.UTC)
+	// Two breached ticks and one clean tick inside the default 10m window.
+	recordTickEvent(t, ep, now.Add(-8*time.Minute), true, 443000)
+	recordTickEvent(t, ep, now.Add(-5*time.Minute), false, 32000)
+	recordTickEvent(t, ep, now.Add(-2*time.Minute), true, 91000)
+
+	prev := supervisorDoctorClock
+	supervisorDoctorClock = func() time.Time { return now }
+	defer func() { supervisorDoctorClock = prev }()
+
+	evaluateCityDoctorSubset(cs, io.Discard)
+
+	alerts := alertsOfCheck(t, ep, supervisordoctor.CheckNameSlowTicks)
+	if len(alerts) != 1 {
+		t.Fatalf("slow_ticks alerts = %d, want 1", len(alerts))
+	}
+	if alerts[0].City != "testcity" {
+		t.Errorf("alert city = %q, want testcity", alerts[0].City)
+	}
+	if !strings.Contains(alerts[0].Detail, "2 of 3") {
+		t.Errorf("alert detail = %q, want it to count 2 of 3 breached ticks", alerts[0].Detail)
+	}
+}
+
+// TestDoctorSubsetSlowTicksCleanWindowNoAlert asserts an all-clean window
+// stays quiet.
+func TestDoctorSubsetSlowTicksCleanWindowNoAlert(t *testing.T) {
+	cfg := &config.City{}
+	cfg.Daemon.PatrolInterval = "30s"
+	cs, ep := newDoctorTestState(t, cfg)
+
+	now := time.Date(2026, 7, 17, 1, 30, 0, 0, time.UTC)
+	recordTickEvent(t, ep, now.Add(-4*time.Minute), false, 31000)
+	recordTickEvent(t, ep, now.Add(-2*time.Minute), false, 47000)
+
+	prev := supervisorDoctorClock
+	supervisorDoctorClock = func() time.Time { return now }
+	defer func() { supervisorDoctorClock = prev }()
+
+	evaluateCityDoctorSubset(cs, io.Discard)
+
+	if got := len(alertsOfCheck(t, ep, supervisordoctor.CheckNameSlowTicks)); got != 0 {
+		t.Fatalf("slow_ticks alerts = %d, want 0 (clean window)", got)
+	}
+}
+
+// TestDoctorSubsetSlowTicksOldBreachOutsideWindowNoAlert asserts a breach
+// older than the doctor window does not re-alert forever.
+func TestDoctorSubsetSlowTicksOldBreachOutsideWindowNoAlert(t *testing.T) {
+	cfg := &config.City{}
+	cfg.Daemon.PatrolInterval = "30s"
+	cs, ep := newDoctorTestState(t, cfg)
+
+	now := time.Date(2026, 7, 17, 1, 30, 0, 0, time.UTC)
+	// Breach 2h ago — far outside the default 10m window. A fresh clean
+	// tick keeps the tick-age check quiet so this isolates slow_ticks.
+	recordTickEvent(t, ep, now.Add(-2*time.Hour), true, 443000)
+	recordTickEvent(t, ep, now.Add(-1*time.Minute), false, 30000)
+
+	prev := supervisorDoctorClock
+	supervisorDoctorClock = func() time.Time { return now }
+	defer func() { supervisorDoctorClock = prev }()
+
+	evaluateCityDoctorSubset(cs, io.Discard)
+
+	if got := len(alertsOfCheck(t, ep, supervisordoctor.CheckNameSlowTicks)); got != 0 {
+		t.Fatalf("slow_ticks alerts = %d, want 0 (breach outside window)", got)
 	}
 }
 
