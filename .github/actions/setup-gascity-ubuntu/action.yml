@@ -15,8 +15,9 @@ inputs:
     required: true
   bd-version:
     description: >-
-      Beads release version to install. Empty string means the caller builds or
-      installs bd itself (used by the cross-version contract "current" cell).
+      Beads pin to install: a release tag or a 40-hex source commit. Empty
+      string means the caller builds or installs bd itself (used by the
+      cross-version contract "current" cell).
     required: false
     default: ""
   install-claude-cli:
@@ -47,7 +48,7 @@ runs:
       shell: bash
       run: ${{ github.action_path }}/../../scripts/install-dolt-archive.sh "${{ inputs.dolt-version }}"
 
-    - name: Install released bd v${{ inputs.bd-version }}
+    - name: Install pinned bd ${{ inputs.bd-version }}
       # Skip when no version is given: the contract cross-version "current" cell
       # builds bd from source instead of installing a released tarball.
       if: ${{ inputs.bd-version != '' }}

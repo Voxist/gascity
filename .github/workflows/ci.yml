@@ -233,7 +233,7 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.1.0"
+      BD_VERSION: "e97839a2e1c0de305bf64a01b997f2f314591aa4" # bd commit with schema 0054; lockstep with go.mod beads pin (deps.env, vp-kpoi)
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -262,7 +262,7 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.1.0"
+      BD_VERSION: "e97839a2e1c0de305bf64a01b997f2f314591aa4" # bd commit with schema 0054; lockstep with go.mod beads pin (deps.env, vp-kpoi)
     strategy:
       fail-fast: false
       matrix:
@@ -522,7 +522,7 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.1.0"
+      BD_VERSION: "e97839a2e1c0de305bf64a01b997f2f314591aa4" # bd commit with schema 0054; lockstep with go.mod beads pin (deps.env, vp-kpoi)
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -615,7 +615,7 @@ jobs:
             command: ./scripts/test-integration-shard rest-smoke-2-of-2
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.1.0"
+      BD_VERSION: "e97839a2e1c0de305bf64a01b997f2f314591aa4" # bd commit with schema 0054; lockstep with go.mod beads pin (deps.env, vp-kpoi)
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -642,7 +642,7 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.1.0"
+      BD_VERSION: "e97839a2e1c0de305bf64a01b997f2f314591aa4" # bd commit with schema 0054; lockstep with go.mod beads pin (deps.env, vp-kpoi)
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu

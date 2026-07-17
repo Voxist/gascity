@@ -5,7 +5,10 @@ usage() {
   cat >&2 <<'USAGE'
 Usage: install-bd-archive.sh VERSION [--cache]
 
-Downloads a bd release tarball, verifies its pinned SHA-256, and installs bd.
+Installs bd. VERSION is either a release tag (vX.Y.Z) — downloads the release
+tarball and verifies its pinned SHA-256 — or a 40-hex gastownhall/beads
+commit — builds bd from source at that commit, for pinning a schema-migration
+level that no release carries yet (see deps.env BD_VERSION).
 Use --cache on self-hosted runners to install under RUNNER_TOOL_CACHE/HOME
 and add that bin directory to GITHUB_PATH.
 USAGE
@@ -34,6 +37,15 @@ while (($#)); do
   esac
   shift
 done
+
+# A 40-hex VERSION is a beads commit: no release tarball exists for it, so bd
+# is built from source at that commit. The commit hash itself pins the exact
+# source tree (git content addressing), standing in for the tarball SHA-256
+# pin of the release path.
+build_from_source=false
+if [[ "$version" =~ ^[0-9a-f]{40}$ ]]; then
+  build_from_source=true
+fi
 
 case "$(uname -s)" in
   Darwin) os=darwin ;;
@@ -99,7 +111,7 @@ github_release_asset_sha() {
 }
 
 archive="beads_${version_no_v}_${platform_tuple}.tar.gz"
-if [[ -z "$expected_sha" ]]; then
+if ! $build_from_source && [[ -z "$expected_sha" ]]; then
   expected_sha="$(github_release_asset_sha "gastownhall/beads" "$version" "$archive")"
   if [[ -z "$expected_sha" ]]; then
     echo "No bd checksum found for ${version}/${platform_tuple}" >&2
@@ -148,6 +160,22 @@ fi
 target="${bin_dir}/bd"
 if [[ -x "$target" ]]; then
   echo "Reusing cached bd ${version} at ${target}"
+elif $build_from_source; then
+  if ! command -v go >/dev/null 2>&1; then
+    echo "go is required to build bd from source at commit ${version}" >&2
+    exit 1
+  fi
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  git clone --filter=blob:none https://github.com/gastownhall/beads "${tmp}/beads-src"
+  git -C "${tmp}/beads-src" checkout "$version"
+  # Same build shape as ci.yml's cross-version contract cells.
+  go -C "${tmp}/beads-src" build -tags gms_pure_go -o "${tmp}/bd" ./cmd/bd
+  if $use_cache; then
+    install_binary "${tmp}/bd" "$target"
+  else
+    install_binary_with_sudo_fallback "${tmp}/bd" "$target"
+  fi
 else
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
