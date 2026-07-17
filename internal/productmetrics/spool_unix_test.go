@@ -8080,7 +8080,12 @@ func TestDualControlCleanupPreemptsDeepTreeStarvation(t *testing.T) {
 func TestSpoolDeepPurgeConvergesUnderLowFileDescriptorLimit(t *testing.T) {
 	const helperEnvironment = "GC_PRODUCTMETRICS_LOW_NOFILE_HELPER"
 	if os.Getenv(helperEnvironment) != "1" {
-		ctx, cancel := context.WithTimeout(context.Background(), 4*testutil.ExecRaceTimeout)
+		// The deadline bounds the helper's entire run — fixture build, up to 128
+		// bounded-progress sweeps over the 300-deep tree at RLIMIT_NOFILE=128, and
+		// deep cleanup — not just a subprocess start. The sweep loop is
+		// syscall-bound (~47s wall, ~16s CPU measured on a contended darwin host),
+		// so 12x keeps hang detection without failing loaded runners.
+		ctx, cancel := context.WithTimeout(context.Background(), 12*testutil.ExecRaceTimeout)
 		defer cancel()
 		command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSpoolDeepPurgeConvergesUnderLowFileDescriptorLimit$")
 		command.Env = append(os.Environ(), helperEnvironment+"=1")
