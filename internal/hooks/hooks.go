@@ -33,10 +33,11 @@ var configFS embed.FS
 var supported = []string{"claude", "codex", "gemini", "antigravity", "kiro", "opencode", "mimocode", "groq", "cerebras", "copilot", "cursor", "pi", "omp", "kimi"}
 
 const (
-	managedPiHookVersion       = 7
+	managedPiHookVersion       = 8
 	managedOpenCodeHookVersion = 5
 	managedMimoCodeHookVersion = 2
-	managedOmpHookVersion      = 2
+	managedOmpHookVersion      = 3
+	managedKimiHookVersion     = 1
 )
 
 var (
@@ -44,6 +45,7 @@ var (
 	opencodeHookVersionPattern = regexp.MustCompile(`\bGC_OPENCODE_HOOK_VERSION\s*=\s*([0-9]+)\b`)
 	mimocodeHookVersionPattern = regexp.MustCompile(`\bGC_MIMOCODE_HOOK_VERSION\s*=\s*([0-9]+)\b`)
 	ompHookVersionPattern      = regexp.MustCompile(`\bGC_OMP_HOOK_VERSION\s*=\s*([0-9]+)\b`)
+	kimiHookVersionPattern     = regexp.MustCompile(`\bGC_KIMI_HOOK_VERSION\s*=\s*([0-9]+)\b`)
 )
 
 // unwiredHookProviders lists provider names whose own CLIs do expose a
@@ -248,6 +250,9 @@ func overlayManagedNeedsUpgrade(provider, rel string) func([]byte) bool {
 	if provider == "kiro" && rel == path.Join(".kiro", "agents", "gascity.json") {
 		return managedShellHookFileNeedsGCBinUpgrade
 	}
+	if provider == "kimi" && rel == path.Join(".kimi", "hooks", "gascity-session-start.py") {
+		return kimiHookNeedsUpgrade
+	}
 	return nil
 }
 
@@ -337,6 +342,7 @@ func piHookNeedsUpgrade(existing []byte) bool {
 		return false
 	}
 	if piHookVersion(content) < managedPiHookVersion ||
+		!strings.Contains(content, `process.env.GC_BIN || "gc"`) ||
 		!strings.Contains(content, "gc prime --hook") ||
 		!strings.Contains(content, "gc hook --inject") ||
 		!strings.Contains(content, "gc handoff --auto") ||
@@ -442,6 +448,7 @@ func ompHookNeedsUpgrade(existing []byte) bool {
 		return false
 	}
 	if ompHookVersion(content) < managedOmpHookVersion ||
+		!strings.Contains(content, `process.env.GC_BIN || "gc"`) ||
 		!strings.Contains(content, "gascityOmpExtension") ||
 		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") ||
 		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
@@ -467,6 +474,34 @@ func ompHookNeedsUpgrade(existing []byte) bool {
 
 func ompHookVersion(content string) int {
 	match := ompHookVersionPattern.FindStringSubmatch(content)
+	if len(match) != 2 {
+		return 0
+	}
+	version, err := strconv.Atoi(match[1])
+	if err != nil {
+		return 0
+	}
+	return version
+}
+
+// kimiHookNeedsUpgrade reports whether an existing managed Kimi SessionStart
+// hook predates the current managed version. The first managed generation
+// shipped without a header or version marker, so its GC_MANAGED_SESSION_HOOK
+// env wiring doubles as the managed signature there; files carrying neither
+// signature are user-authored and never upgraded.
+func kimiHookNeedsUpgrade(existing []byte) bool {
+	content := string(existing)
+	managed := strings.Contains(content, "Gas City hooks for Kimi CLI.") ||
+		(strings.Contains(content, `env["GC_MANAGED_SESSION_HOOK"] = "1"`) &&
+			strings.Contains(content, `env["GC_PROVIDER_SESSION_ID_REQUIRED"] = "kimi"`))
+	if !managed {
+		return false
+	}
+	return kimiHookVersion(content) < managedKimiHookVersion
+}
+
+func kimiHookVersion(content string) int {
+	match := kimiHookVersionPattern.FindStringSubmatch(content)
 	if len(match) != 2 {
 		return 0
 	}

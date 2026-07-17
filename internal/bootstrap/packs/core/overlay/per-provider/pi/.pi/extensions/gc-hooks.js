@@ -16,14 +16,18 @@ const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const GC_PI_HOOK_VERSION = 7;
+const GC_PI_HOOK_VERSION = 8;
+const GC_BIN = process.env.GC_BIN || "gc";
+// GC_BIN is the explicit override (the deployed binary gc exports into every
+// agent process). The PATH prefix stays for gc's own downstream tool
+// resolution; it no longer selects which gc build runs.
 const PATH_PREFIX =
   `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`;
 let mirrorTempCounter = 0;
 
 function run(args, cwd, extraEnv = {}) {
   try {
-    return execFileSync("gc", args, {
+    return execFileSync(GC_BIN, args, {
       cwd: cwd || process.cwd(),
       encoding: "utf-8",
       timeout: 30000,
@@ -46,7 +50,7 @@ function logRunFailure(args, cwd, err) {
       (err && (err.code || err.signal || err.message)) || "unknown error";
     console.error(
       "gc-hooks run:",
-      `gc ${args.join(" ")}`,
+      `${GC_BIN} ${args.join(" ")}`,
       "cwd",
       cwd || process.cwd(),
       "failed:",

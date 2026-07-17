@@ -331,6 +331,8 @@ func TestBundledPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		`pi.on("session_compact"`,
 		`pi.on("before_agent_start"`,
 		"GC_PI_HOOK_VERSION",
+		`process.env.GC_BIN || "gc"`,
+		"execFileSync(GC_BIN, args",
 		"gc hook --inject",
 		`run(["prime", "--hook"], ctx.cwd, providerSessionEnv(ctx))`,
 		"GC_PROVIDER_SESSION_ID",
@@ -363,7 +365,9 @@ func TestBundledOmpHookPublishesProviderSessionID(t *testing.T) {
 	data := readBundledPackFileForTest(t, "core", "overlay/per-provider/omp/.omp/hooks/gc-hook.ts")
 	for _, want := range []string{
 		`import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent"`,
-		`const GC_OMP_HOOK_VERSION = 2`,
+		`const GC_OMP_HOOK_VERSION = 3`,
+		`process.env.GC_BIN || "gc"`,
+		`execFileSync(GC_BIN, args`,
 		`export default function gascityOmpExtension(pi: ExtensionAPI)`,
 		`pi.on("session_start"`,
 		`pi.on("session_compact"`,
@@ -387,6 +391,23 @@ func TestBundledOmpHookPublishesProviderSessionID(t *testing.T) {
 		if strings.Contains(data, legacy) {
 			t.Errorf("bundled OMP hook still contains legacy API marker %q:\n%s", legacy, data)
 		}
+	}
+}
+
+func TestBundledKimiHookHonoursGCBin(t *testing.T) {
+	data := readBundledPackFileForTest(t, "core", "overlay/per-provider/kimi/.kimi/hooks/gascity-session-start.py")
+	for _, want := range []string{
+		"Gas City hooks for Kimi CLI.",
+		"GC_KIMI_HOOK_VERSION",
+		`gc_bin = env.get("GC_BIN") or "gc"`,
+		`subprocess.run([gc_bin, "prime", "--hook"]`,
+	} {
+		if !strings.Contains(data, want) {
+			t.Errorf("bundled Kimi hook missing GC_BIN marker %q:\n%s", want, data)
+		}
+	}
+	if strings.Contains(data, `subprocess.run(["gc"`) {
+		t.Errorf("bundled Kimi hook still invokes bare gc (discards GC_BIN):\n%s", data)
 	}
 }
 

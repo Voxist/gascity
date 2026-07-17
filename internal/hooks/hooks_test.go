@@ -2130,16 +2130,22 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	}
 	kimiHook := string(fs.Files["/work/.kimi/hooks/gascity-session-start.py"])
 	for _, want := range []string{
+		"Gas City hooks for Kimi CLI.",
+		"GC_KIMI_HOOK_VERSION = 1",
 		`payload.get("session_id")`,
 		`GC_PROVIDER_SESSION_ID`,
 		`GC_PROVIDER_SESSION_ID_REQUIRED`,
 		`GC_MANAGED_SESSION_HOOK`,
 		`GC_HOOK_EVENT_NAME`,
-		`gc", "prime", "--hook`,
+		`gc_bin = env.get("GC_BIN") or "gc"`,
+		`subprocess.run([gc_bin, "prime", "--hook"]`,
 	} {
 		if !strings.Contains(kimiHook, want) {
 			t.Errorf("Kimi SessionStart hook missing marker %q:\n%s", want, kimiHook)
 		}
+	}
+	if strings.Contains(kimiHook, `subprocess.run(["gc"`) {
+		t.Errorf("Kimi SessionStart hook still invokes bare gc (discards GC_BIN):\n%s", kimiHook)
 	}
 	var kiroAgent struct {
 		Name   string `json:"name"`
@@ -2251,7 +2257,9 @@ func TestInstallPiHookUsesCurrentExtensionAPI(t *testing.T) {
 		`pi.on("session_start"`,
 		`pi.on("session_compact"`,
 		`pi.on("before_agent_start"`,
-		"const GC_PI_HOOK_VERSION = 7",
+		"const GC_PI_HOOK_VERSION = 8",
+		`process.env.GC_BIN || "gc"`,
+		"execFileSync(GC_BIN, args",
 		"gc hook --inject",
 		`run(["prime", "--hook"], ctx.cwd, providerSessionEnv(ctx))`,
 		"GC_PROVIDER_SESSION_ID",
@@ -2269,6 +2277,7 @@ func TestInstallPiHookUsesCurrentExtensionAPI(t *testing.T) {
 	}
 	for _, legacy := range []string{
 		"module.exports = {",
+		`execFileSync("gc"`,
 		`"session.created"`,
 		`"session.compacted"`,
 		`"session.deleted"`,
@@ -2313,7 +2322,8 @@ func TestPiHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 // gc prime --hook
 // gc hook --inject
 // gc handoff --auto
-const GC_PI_HOOK_VERSION = 7;
+const GC_PI_HOOK_VERSION = 8;
+const GC_BIN = process.env.GC_BIN || "gc";
 run(["prime", "--hook"], ctx.cwd, providerSessionEnv(ctx));
 run(["hook", "--inject"], ctx.cwd);
 run(["handoff", "--auto", "context cycle"], ctx.cwd);
@@ -2323,9 +2333,11 @@ GC_PROVIDER_SESSION_ID_REQUIRED;
 stdio: ["ignore", "pipe", "inherit"];
 function providerSessionEnv(ctx) {}
 `)
-	stale := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 7"), []byte("GC_PI_HOOK_VERSION = 6"), 1)
-	future := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 7"), []byte("GC_PI_HOOK_VERSION = 8"), 1)
+	stale := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 8"), []byte("GC_PI_HOOK_VERSION = 7"), 1)
+	future := bytes.Replace(current, []byte("GC_PI_HOOK_VERSION = 8"), []byte("GC_PI_HOOK_VERSION = 9"), 1)
 	missingStderrForward := bytes.Replace(current, []byte(`stdio: ["ignore", "pipe", "inherit"];
+`), nil, 1)
+	missingGCBin := bytes.Replace(current, []byte(`const GC_BIN = process.env.GC_BIN || "gc";
 `), nil, 1)
 
 	if !piHookNeedsUpgrade(stale) {
@@ -2339,6 +2351,9 @@ function providerSessionEnv(ctx) {}
 	}
 	if !piHookNeedsUpgrade(missingStderrForward) {
 		t.Fatal("Pi hook without child stderr forwarding did not request upgrade")
+	}
+	if !piHookNeedsUpgrade(missingGCBin) {
+		t.Fatal("Pi hook discarding GC_BIN did not request upgrade")
 	}
 }
 
@@ -2367,7 +2382,9 @@ export default {
 		t.Fatal("legacy OMP object-export hook was preserved; expected managed upgrade")
 	}
 	for _, want := range []string{
-		"const GC_OMP_HOOK_VERSION = 2",
+		"const GC_OMP_HOOK_VERSION = 3",
+		`process.env.GC_BIN || "gc"`,
+		"execFileSync(GC_BIN, args",
 		`export default function gascityOmpExtension(pi: ExtensionAPI)`,
 		`pi.on("session_start"`,
 		`pi.on("session_compact"`,
@@ -2389,7 +2406,8 @@ export default {
 
 func TestOMPHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 	current := []byte(`// Gas City hooks for Oh My Pi (OMP).
-const GC_OMP_HOOK_VERSION = 2;
+const GC_OMP_HOOK_VERSION = 3;
+const GC_BIN = process.env.GC_BIN || "gc";
 function logRunFailure(args: string[], cwd: string | undefined, err: unknown) {}
 function providerSessionEnv(ctx: { sessionManager?: { getSessionId?: () => string } }): Record<string, string> {}
 export default function gascityOmpExtension(pi: ExtensionAPI) {
@@ -2401,9 +2419,11 @@ GC_PROVIDER_SESSION_ID;
 GC_PROVIDER_SESSION_ID_REQUIRED;
 stdio: ["ignore", "pipe", "inherit"];
 `)
-	stale := bytes.Replace(current, []byte("GC_OMP_HOOK_VERSION = 2"), []byte("GC_OMP_HOOK_VERSION = 1"), 1)
-	future := bytes.Replace(current, []byte("GC_OMP_HOOK_VERSION = 2"), []byte("GC_OMP_HOOK_VERSION = 3"), 1)
+	stale := bytes.Replace(current, []byte("GC_OMP_HOOK_VERSION = 3"), []byte("GC_OMP_HOOK_VERSION = 2"), 1)
+	future := bytes.Replace(current, []byte("GC_OMP_HOOK_VERSION = 3"), []byte("GC_OMP_HOOK_VERSION = 4"), 1)
 	missingRequiredProvider := bytes.Replace(current, []byte("GC_PROVIDER_SESSION_ID_REQUIRED;\n"), nil, 1)
+	missingGCBin := bytes.Replace(current, []byte(`const GC_BIN = process.env.GC_BIN || "gc";
+`), nil, 1)
 
 	if !ompHookNeedsUpgrade(stale) {
 		t.Fatal("stale OMP hook version did not request upgrade")
@@ -2416,6 +2436,9 @@ stdio: ["ignore", "pipe", "inherit"];
 	}
 	if !ompHookNeedsUpgrade(missingRequiredProvider) {
 		t.Fatal("OMP hook without required provider session marker did not request upgrade")
+	}
+	if !ompHookNeedsUpgrade(missingGCBin) {
+		t.Fatal("OMP hook discarding GC_BIN did not request upgrade")
 	}
 }
 
@@ -2597,6 +2620,110 @@ func TestInstallMimoCodeHookPreservesUserAuthoredPlugin(t *testing.T) {
 	}
 	if got := string(fs.Files["/work/.mimocode/plugin/gascity.js"]); got != string(custom) {
 		t.Fatalf("user-authored MiMo Code plugin was overwritten:\n%s", got)
+	}
+}
+
+// legacyKimiSessionStartHook is the first managed generation of the Kimi
+// SessionStart hook verbatim: no managed header, no version marker, and a
+// bare-gc invocation that discards GC_BIN behind a go/bin-first PATH.
+var legacyKimiSessionStartHook = []byte(`#!/usr/bin/env python3
+import json
+import os
+import subprocess
+import sys
+
+
+def main() -> int:
+    try:
+        payload = json.load(sys.stdin)
+    except Exception:
+        payload = {}
+
+    session_id = str(payload.get("session_id") or "").strip()
+    cwd = str(payload.get("cwd") or os.getcwd()).strip() or os.getcwd()
+
+    env = os.environ.copy()
+    home = env.get("HOME", "")
+    env["PATH"] = f"{home}/go/bin:{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:" + env.get("PATH", "")
+    env["GC_MANAGED_SESSION_HOOK"] = "1"
+    env["GC_HOOK_EVENT_NAME"] = "SessionStart"
+    env["GC_PROVIDER_SESSION_ID_REQUIRED"] = "kimi"
+    if session_id:
+        env["GC_PROVIDER_SESSION_ID"] = session_id
+
+    proc = subprocess.run(["gc", "prime", "--hook"], cwd=cwd, env=env)
+    return proc.returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+`)
+
+func TestKimiHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
+	current := []byte(`#!/usr/bin/env python3
+# Gas City hooks for Kimi CLI.
+GC_KIMI_HOOK_VERSION = 1
+gc_bin = env.get("GC_BIN") or "gc"
+`)
+	stale := bytes.Replace(current, []byte("GC_KIMI_HOOK_VERSION = 1"), []byte("GC_KIMI_HOOK_VERSION = 0"), 1)
+	future := bytes.Replace(current, []byte("GC_KIMI_HOOK_VERSION = 1"), []byte("GC_KIMI_HOOK_VERSION = 2"), 1)
+
+	if !kimiHookNeedsUpgrade(legacyKimiSessionStartHook) {
+		t.Fatal("first-generation managed Kimi hook (headerless, bare gc) did not request upgrade")
+	}
+	if !kimiHookNeedsUpgrade(stale) {
+		t.Fatal("stale Kimi hook version did not request upgrade")
+	}
+	if kimiHookNeedsUpgrade(current) {
+		t.Fatal("current Kimi hook version requested upgrade")
+	}
+	if kimiHookNeedsUpgrade(future) {
+		t.Fatal("newer Kimi hook version requested downgrade")
+	}
+}
+
+func TestInstallKimiHookUpgradesLegacyManagedFile(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/work/.kimi/hooks/gascity-session-start.py"] = legacyKimiSessionStartHook
+
+	if err := Install(fs, "/city", "/work", []string{"kimi"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	data := string(fs.Files["/work/.kimi/hooks/gascity-session-start.py"])
+	if data == string(legacyKimiSessionStartHook) {
+		t.Fatal("legacy managed Kimi hook was preserved; expected managed upgrade")
+	}
+	for _, want := range []string{
+		"Gas City hooks for Kimi CLI.",
+		"GC_KIMI_HOOK_VERSION = 1",
+		`gc_bin = env.get("GC_BIN") or "gc"`,
+		`subprocess.run([gc_bin, "prime", "--hook"]`,
+	} {
+		if !strings.Contains(data, want) {
+			t.Errorf("upgraded Kimi hook missing marker %q:\n%s", want, data)
+		}
+	}
+	backup := string(fs.Files["/work/.kimi/hooks/gascity-session-start.py.bak"])
+	if backup != string(legacyKimiSessionStartHook) {
+		t.Fatalf("legacy Kimi hook backup = %q, want original legacy content", backup)
+	}
+}
+
+func TestInstallKimiHookPreservesUserAuthoredFile(t *testing.T) {
+	fs := fsys.NewFake()
+	custom := []byte(`#!/usr/bin/env python3
+import subprocess
+
+subprocess.run(["my-wrapper", "prime"])
+`)
+	fs.Files["/work/.kimi/hooks/gascity-session-start.py"] = custom
+
+	if err := Install(fs, "/city", "/work", []string{"kimi"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if got := string(fs.Files["/work/.kimi/hooks/gascity-session-start.py"]); got != string(custom) {
+		t.Fatalf("user-authored Kimi hook was overwritten:\n%s", got)
 	}
 }
 
