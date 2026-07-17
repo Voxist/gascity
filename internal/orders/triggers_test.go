@@ -732,3 +732,103 @@ func TestCheckTriggerCronBadTZFailsClosed(t *testing.T) {
 		t.Errorf("due=%v reason=%q, want fail-closed with a bad-tz reason", res.Due, res.Reason)
 	}
 }
+
+// spyEventProvider wraps a Provider and records whether checkEvent read the
+// full retained history (List) or the bounded recent tail (ListTail).
+type spyEventProvider struct {
+	events.Provider
+	tp            events.TailProvider
+	listCalls     int
+	listTailCalls int
+}
+
+func (s *spyEventProvider) List(f events.Filter) ([]events.Event, error) {
+	s.listCalls++
+	return s.Provider.List(f)
+}
+
+func (s *spyEventProvider) ListTail(f events.Filter, limit int) ([]events.Event, error) {
+	s.listTailCalls++
+	return s.tp.ListTail(f, limit)
+}
+
+func newSpyEventProvider(t *testing.T, evts []events.Event) *spyEventProvider {
+	t.Helper()
+	base := newEventsProvider(t, evts)
+	tp, ok := base.(events.TailProvider)
+	if !ok {
+		t.Fatalf("test provider does not implement events.TailProvider")
+	}
+	return &spyEventProvider{Provider: base, tp: tp}
+}
+
+// TestCheckTriggerEventZeroCursorReadsBoundedTail pins the vp-8jig fix: an
+// event order with a zero cursor must NOT scan the full retained history every
+// tick (which decodes the multi-GB rotated archive and ratchets supervisor
+// RSS). It reads the bounded recent tail instead, and still fires on a recent
+// matching non-tracking event.
+func TestCheckTriggerEventZeroCursorReadsBoundedTail(t *testing.T) {
+	spy := newSpyEventProvider(t, []events.Event{
+		{Type: "bead.created"},
+		{Type: "bead.closed"},
+	})
+	a := Order{Name: "convoy-check", Trigger: "event", On: "bead.closed"}
+
+	res := checkEvent(a, spy, nil) // nil cursorFn ⇒ cursor 0
+
+	if spy.listCalls != 0 {
+		t.Errorf("checkEvent called List %d× on a zero cursor; want a bounded ListTail read, not a full-history scan", spy.listCalls)
+	}
+	if spy.listTailCalls != 1 {
+		t.Errorf("checkEvent called ListTail %d×, want 1 (bounded tail read on zero cursor)", spy.listTailCalls)
+	}
+	if !res.Due {
+		t.Errorf("checkEvent Due = false (%s), want true — a recent matching non-tracking event exists", res.Reason)
+	}
+}
+
+// TestCheckTriggerEventZeroCursorTrackingOnlyNotDue is the exact vp-8jig
+// scenario: the only recent matching events are order-tracking bookkeeping
+// beads (excluded), so the order is not due — and it still uses the bounded
+// tail read rather than a full-history scan.
+func TestCheckTriggerEventZeroCursorTrackingOnlyNotDue(t *testing.T) {
+	trackingPayload := json.RawMessage(`{"labels":["order-tracking"]}`)
+	spy := newSpyEventProvider(t, []events.Event{
+		{Type: "bead.closed", Payload: trackingPayload},
+		{Type: "bead.closed", Payload: trackingPayload},
+	})
+	a := Order{Name: "convoy-check", Trigger: "event", On: "bead.closed"}
+
+	res := checkEvent(a, spy, nil)
+
+	if spy.listCalls != 0 {
+		t.Errorf("checkEvent called List %d× on a zero cursor; want bounded ListTail only", spy.listCalls)
+	}
+	if res.Due {
+		t.Errorf("checkEvent Due = true, want false — the only matches are excluded order-tracking beads")
+	}
+}
+
+// TestCheckTriggerEventPositiveCursorReadsFull confirms the normal (non-zero
+// cursor) path is unchanged: it reads via List with the AfterSeq filter, so the
+// archive-skip fast path applies and no behavior regresses.
+func TestCheckTriggerEventPositiveCursorReadsFull(t *testing.T) {
+	spy := newSpyEventProvider(t, []events.Event{
+		{Type: "bead.closed", Seq: 1},
+		{Type: "bead.closed", Seq: 2},
+	})
+	a := Order{Name: "convoy-check", Trigger: "event", On: "bead.closed"}
+	cursorFn := func(string) uint64 { return 1 }
+
+	res := checkEvent(a, spy, cursorFn)
+
+	if spy.listTailCalls != 0 {
+		t.Errorf("checkEvent called ListTail %d× with a positive cursor; want the normal List path", spy.listTailCalls)
+	}
+	if spy.listCalls != 1 {
+		t.Errorf("checkEvent called List %d×, want 1 (normal AfterSeq-filtered read)", spy.listCalls)
+	}
+	if !res.Due {
+		t.Errorf("checkEvent Due = false (%s), want true — event seq 2 is after cursor 1", res.Reason)
+	}
+}
