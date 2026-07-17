@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Provenance-correct release artifacts: `make artifact` + provenance in
+  `gc version` (vp-q1ho).** New `make artifact BASE_REF=<remote>/<branch>`
+  builds a gc binary whose filename is machine-derived from the ACTUAL build
+  commit (`gc-<token>-<UTC date>-<sha>[-dirty]`) and refuses the base
+  branch's name as the token when HEAD is not in the base's lineage — the
+  `gc-main-20260710-77916fc6c` trap (filename claimed main + 77916fc6c; the
+  binary carried neither). BASE_REF must be a remote-tracking ref because a
+  lineage claim that does not name its remote is unfalsifiable (`origin`
+  here is the upstream, not the fork). The build passes `-buildvcs=false`
+  and injects commit + base-lineage stamps via ldflags: Go's own VCS
+  stamping is untrustworthy from linked worktrees (verified live — nested
+  under the repo dir it embeds the MAIN checkout's HEAD/dirty state, outside
+  it embeds nothing). Post-build the target verifies the binary's
+  self-reported commit against HEAD and writes the `.buildinfo.json`
+  manifest beside the artifact (`cmd/writebuildmanifest`). `gc version
+  --long`/`--json` now also report the linked `github.com/steveyegge/beads`
+  library version and the build-base stamp (`base:
+  Voxist/main@eb743642c+0-0`, or `unstamped`), so "what exactly is
+  deployed?" is answerable from the binary itself — three installed gc
+  binaries once linked three different beads libraries while all
+  self-reporting the same version string. New `cmd/artifactname` +
+  `internal/provenance` artifact derivation.
+
 - **L0 pre-heal in `ensure-project-id`: auto-restore canonical project_id from
   `city.toml [identity_map]` when the DB confirms it but L1 was wiped (vp-cz7o.21).**
   `gc dolt-state ensure-project-id` now reads a new L0 layer — the

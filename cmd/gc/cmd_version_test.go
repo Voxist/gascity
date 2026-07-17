@@ -42,6 +42,67 @@ func TestResolveBuildMetadataUsesModuleVersion(t *testing.T) {
 	}
 }
 
+func TestResolveBeadsVersion(t *testing.T) {
+	beads := "github.com/steveyegge/beads"
+	tests := []struct {
+		name string
+		ok   bool
+		info *debug.BuildInfo
+		want string
+	}{
+		{name: "no build info", ok: false, info: nil, want: "unknown"},
+		{name: "dep absent", ok: true, info: &debug.BuildInfo{}, want: "unknown"},
+		{
+			name: "dep present",
+			ok:   true,
+			info: &debug.BuildInfo{Deps: []*debug.Module{{Path: beads, Version: "v1.1.0"}}},
+			want: "v1.1.0",
+		},
+		{
+			name: "replace wins",
+			ok:   true,
+			info: &debug.BuildInfo{Deps: []*debug.Module{{
+				Path:    beads,
+				Version: "v1.1.0",
+				Replace: &debug.Module{Path: beads, Version: "v1.1.1-0.20260704062855-e97839a2e1c0"},
+			}}},
+			want: "v1.1.1-0.20260704062855-e97839a2e1c0",
+		},
+		{
+			name: "local dir replace has no version",
+			ok:   true,
+			info: &debug.BuildInfo{Deps: []*debug.Module{{
+				Path:    beads,
+				Version: "v1.1.0",
+				Replace: &debug.Module{Path: "../beads"},
+			}}},
+			want: "../beads",
+		},
+	}
+	for _, tt := range tests {
+		if got := resolveBeadsVersion(tt.ok, tt.info); got != tt.want {
+			t.Errorf("%s: resolveBeadsVersion = %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestFormatLongVersion(t *testing.T) {
+	// Unstamped builds (plain go build / make build) must say so explicitly:
+	// silence here is how three binaries claiming "1.1.1" hid three
+	// different beads libraries.
+	got := formatLongVersion("1.1.1", "50e120757-dirty", "2026-07-07T17:48:08Z", "v1.1.0", "")
+	want := "1.1.1 (commit: 50e120757-dirty, built: 2026-07-07T17:48:08Z, beads: v1.1.0, base: unstamped)"
+	if got != want {
+		t.Errorf("formatLongVersion unstamped = %q, want %q", got, want)
+	}
+
+	got = formatLongVersion("1.1.1", "eb743642c", "2026-07-16T10:00:00Z", "v1.1.0", "Voxist/main@eb743642c+0-0")
+	want = "1.1.1 (commit: eb743642c, built: 2026-07-16T10:00:00Z, beads: v1.1.0, base: Voxist/main@eb743642c+0-0)"
+	if got != want {
+		t.Errorf("formatLongVersion stamped = %q, want %q", got, want)
+	}
+}
+
 func TestResolveBuildMetadataUsesVCSSettings(t *testing.T) {
 	info := &debug.BuildInfo{
 		Settings: []debug.BuildSetting{
