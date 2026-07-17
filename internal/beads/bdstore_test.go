@@ -2323,6 +2323,31 @@ func TestBdStoreListRetryBoundedReturnsErrorAfterExhaustion(t *testing.T) {
 	}
 }
 
+// TestBdStoreListCtxHonoursCancelledContext asserts the optional CtxLister
+// capability rejects an already-canceled context before shelling out to the
+// bd subprocess at all — mirroring DoltliteReadStore.ListCtx's pre-flight
+// ctx.Err() check (T-007/T-008) — instead of the abandoning-goroutine
+// pattern statusListStoreWithTimeout uses around ctx-less Store.List.
+func TestBdStoreListCtxHonoursCancelledContext(t *testing.T) {
+	calls := 0
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		calls++
+		return []byte(`[]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := s.ListCtx(ctx, beads.ListQuery{AllowScan: true})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ListCtx(canceled ctx) error = %v, want context.Canceled", err)
+	}
+	if calls != 0 {
+		t.Fatalf("ListCtx(canceled ctx) invoked the bd subprocess %d time(s), want 0", calls)
+	}
+}
+
 // --- Ready ---
 
 func TestBdStoreReady(t *testing.T) {
