@@ -4340,6 +4340,10 @@ type ctxListerMemStore struct {
 	*MemStore
 	listCalls    int
 	listCtxCalls int
+	// entered, when non-nil, is closed the instant ListCtx starts waiting on
+	// ctx.Done() — lets a caller synchronize a cancel() with the call actually
+	// blocking, without a fixed sleep race.
+	entered chan struct{}
 }
 
 func (m *ctxListerMemStore) List(query ListQuery) ([]Bead, error) {
@@ -4349,17 +4353,20 @@ func (m *ctxListerMemStore) List(query ListQuery) ([]Bead, error) {
 
 func (m *ctxListerMemStore) ListCtx(ctx context.Context, _ ListQuery) ([]Bead, error) {
 	m.listCtxCalls++
+	if m.entered != nil {
+		close(m.entered)
+	}
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
 
 func TestCachingStoreListCtxHonorsContextOnLivePath(t *testing.T) {
-	backing := &ctxListerMemStore{MemStore: NewMemStore()}
+	backing := &ctxListerMemStore{MemStore: NewMemStore(), entered: make(chan struct{})}
 	cache := NewCachingStoreForTest(backing, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		time.Sleep(20 * time.Millisecond)
+		<-backing.entered
 		cancel()
 	}()
 
