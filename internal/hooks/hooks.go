@@ -253,6 +253,9 @@ func overlayManagedNeedsUpgrade(provider, rel string) func([]byte) bool {
 	if provider == "kimi" && rel == path.Join(".kimi", "hooks", "gascity-session-start.py") {
 		return kimiHookNeedsUpgrade
 	}
+	if provider == "gemini" && rel == path.Join(".gemini", "settings.json") {
+		return geminiSettingsNeedsGCBinUpgrade
+	}
 	return nil
 }
 
@@ -276,7 +279,7 @@ func managedShellHookFileNeedsGCBinUpgrade(existing []byte) bool {
 	if err := json.Unmarshal(existing, &root); err != nil {
 		return false
 	}
-	stale, foreign := classifyGCManagedOverlayCommands(root)
+	stale, foreign := classifyGCManagedOverlayCommands(root, isManagedOverlayCommand)
 	return stale > 0 && !foreign
 }
 
@@ -284,7 +287,11 @@ func managedShellHookFileNeedsGCBinUpgrade(existing []byte) bool {
 // under v, counting commands in the exact stale (bare-`gc`) managed spelling
 // and reporting whether any command is not an exact managed command body in
 // either spelling (foreign ⇒ user-authored content somewhere in the file).
-func classifyGCManagedOverlayCommands(v any) (stale int, foreign bool) {
+// isManaged recognizes a shape's exact managed command bodies for a given
+// invocation token, so the same walk serves both the prefix-carrying shell
+// shapes (isManagedOverlayCommand) and the prefixless Gemini shape
+// (isManagedGeminiCommand).
+func classifyGCManagedOverlayCommands(v any, isManaged func(command, token string) bool) (stale int, foreign bool) {
 	switch node := v.(type) {
 	case map[string]any:
 		for key, val := range node {
@@ -293,22 +300,22 @@ func classifyGCManagedOverlayCommands(v any) (stale int, foreign bool) {
 				switch {
 				case !ok:
 					foreign = true
-				case isManagedOverlayCommand(command, "gc"):
+				case isManaged(command, "gc"):
 					stale++
-				case isManagedOverlayCommand(command, gcInvocationToken):
+				case isManaged(command, gcInvocationToken):
 					// Current spelling — managed, nothing to do.
 				default:
 					foreign = true
 				}
 				continue
 			}
-			s, f := classifyGCManagedOverlayCommands(val)
+			s, f := classifyGCManagedOverlayCommands(val, isManaged)
 			stale += s
 			foreign = foreign || f
 		}
 	case []any:
 		for _, elem := range node {
-			s, f := classifyGCManagedOverlayCommands(elem)
+			s, f := classifyGCManagedOverlayCommands(elem, isManaged)
 			stale += s
 			foreign = foreign || f
 		}
@@ -334,6 +341,41 @@ func isManagedOverlayCommand(command, token string) bool {
 		return true
 	}
 	return false
+}
+
+// isManagedGeminiCommand reports whether command is exactly one of the managed
+// Gemini hook commands gc emits, spelled with the given invocation token.
+// Unlike the shell-shaped overlays (cursor/copilot/kiro), Gemini's
+// settings.json carries NO canonical PATH-export prefix — its bare `gc`
+// resolved from the agent's ambient PATH — so the whole command is the managed
+// body and there is no prefix to strip. Every managed body carries the
+// --hook-format gemini suffix.
+func isManagedGeminiCommand(command, token string) bool {
+	switch command {
+	case token + ` prime --hook --hook-format gemini`,
+		token + ` hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format gemini`,
+		token + ` hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format gemini`:
+		return true
+	}
+	return false
+}
+
+// geminiSettingsNeedsGCBinUpgrade reports whether a managed Gemini
+// .gemini/settings.json still carries the pre-GC_BIN bare-`gc` spelling of a
+// managed command (vp-ythc). It mirrors managedShellHookFileNeedsGCBinUpgrade
+// for the prefixless, wrapper-shaped Gemini file: it fires only when every
+// managed "command" in the file is an exact managed Gemini command body (in
+// either invocation-token spelling) and at least one still uses the stale
+// bare-`gc` spelling. Any deviation anywhere — an edited, added, or wrapped
+// command — classifies the file user-authored and leaves it untouched.
+// writeEmbeddedManaged backs up any file it rewrites.
+func geminiSettingsNeedsGCBinUpgrade(existing []byte) bool {
+	var root any
+	if err := json.Unmarshal(existing, &root); err != nil {
+		return false
+	}
+	stale, foreign := classifyGCManagedOverlayCommands(root, isManagedGeminiCommand)
+	return stale > 0 && !foreign
 }
 
 func piHookNeedsUpgrade(existing []byte) bool {

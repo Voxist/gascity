@@ -849,3 +849,57 @@ func TestMergeSettingsJSON_NoWrap_LeavesBareEntries(t *testing.T) {
 		t.Errorf("bare entry was wrapped without WithWrapBareHooks: %v", arr[0])
 	}
 }
+
+// TestMergeSettingsJSON_GeminiReplacesInPlace verifies vp-ythc AC#3: flipping
+// the Gemini settings template's managed commands from bare `gc` to
+// "${GC_BIN:-gc}" and re-projecting it over an already-materialized bare-gc
+// file REPLACES the managed hooks in place rather than appending a duplicate.
+// Gemini's hook entries carry a top-level "matcher" key, so identity keys on
+// the matcher (unchanged by the spelling flip) — unlike the command-keyed
+// shell shapes (Cursor "command"/Copilot "bash"), Gemini needs no
+// normalizeGCCommandIdentity handling to stay idempotent under re-projection.
+func TestMergeSettingsJSON_GeminiReplacesInPlace(t *testing.T) {
+	base := []byte(`{
+		"tools": {"shell": {"enableInteractiveShell": false}},
+		"hooks": {
+			"SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "gc prime --hook --hook-format gemini"}]}],
+			"BeforeAgent": [{"matcher": "", "hooks": [
+				{"type": "command", "command": "gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format gemini"},
+				{"type": "command", "command": "gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format gemini"}
+			]}]
+		}
+	}`)
+	over := []byte(`{
+		"tools": {"shell": {"enableInteractiveShell": false}},
+		"hooks": {
+			"SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "\"${GC_BIN:-gc}\" prime --hook --hook-format gemini"}]}],
+			"BeforeAgent": [{"matcher": "", "hooks": [
+				{"type": "command", "command": "\"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format gemini"},
+				{"type": "command", "command": "\"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format gemini"}
+			]}]
+		}
+	}`)
+	merged, err := MergeSettingsJSON(base, over)
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+	if !bytes.Contains(merged, []byte(`${GC_BIN:-gc}`)) {
+		t.Fatalf("merged gemini settings did not adopt the GC_BIN spelling:\n%s", merged)
+	}
+	if bytes.Contains(merged, []byte(`"gc prime --hook --hook-format gemini"`)) {
+		t.Fatalf("bare-gc SessionStart command survived — replace-in-place failed:\n%s", merged)
+	}
+	// A re-key on the spelling flip would have appended a second matcher=""
+	// entry; assert each category holds exactly one entry.
+	var doc struct {
+		Hooks map[string][]any `json:"hooks"`
+	}
+	if err := json.Unmarshal(merged, &doc); err != nil {
+		t.Fatalf("unmarshal merged: %v", err)
+	}
+	for _, cat := range []string{"SessionStart", "BeforeAgent"} {
+		if n := len(doc.Hooks[cat]); n != 1 {
+			t.Fatalf("%s should hold exactly 1 entry after replace-in-place, got %d:\n%s", cat, n, merged)
+		}
+	}
+}

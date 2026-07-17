@@ -11,7 +11,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "gc prime --hook --hook-format gemini"
+            "command": "\"${GC_BIN:-gc}\" prime --hook --hook-format gemini"
           }
         ]
       }
@@ -22,7 +22,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "gc prime --hook --hook-format gemini"
+            "command": "\"${GC_BIN:-gc}\" prime --hook --hook-format gemini"
           }
         ]
       }
@@ -33,11 +33,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format gemini"
+            "command": "\"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format gemini"
           },
           {
             "type": "command",
-            "command": "gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format gemini"
+            "command": "\"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format gemini"
           }
         ]
       }
