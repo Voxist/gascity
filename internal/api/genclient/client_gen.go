@@ -1204,7 +1204,7 @@ type ControllerTickCompletedPayload struct {
 	// Phase Tick trigger phase: patrol, poke, control-dispatcher, etc.
 	Phase string `json:"phase"`
 
-	// ThresholdBreach True when emitted due to a duration-threshold breach rather than the patrol multiple.
+	// ThresholdBreach True when the tick's duration reached the slow-tick threshold (a multiple of the configured patrol interval).
 	ThresholdBreach *bool `json:"threshold_breach,omitempty"`
 }
 

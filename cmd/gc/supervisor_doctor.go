@@ -104,6 +104,25 @@ func evaluateCityDoctorSubset(state api.State, _ io.Writer) {
 		alerts = append(alerts, *a)
 	}
 
+	// Slow ticks: consume the heartbeat's threshold_breach flag (vp-qvqk —
+	// a canary nothing reads carries no signal). The window is this city's
+	// doctor cadence, so each pass reviews roughly the ticks since the
+	// previous one.
+	window := cfg.Doctor.SupervisorIntervalOrDefault()
+	if window <= 0 {
+		window = defaultSupervisorDoctorInterval
+	}
+	breaches, samples, slowestMs := recentTickBreaches(ep, window)
+	if a := supervisordoctor.CheckSlowTicksFor(supervisordoctor.SlowTicksInput{
+		City:        cityName,
+		BreachCount: breaches,
+		SampleCount: samples,
+		SlowestMs:   slowestMs,
+		Window:      window,
+	}); a != nil {
+		alerts = append(alerts, *a)
+	}
+
 	// S6 connection ceiling: scopes × (pool+1) ≤ 0.8 × max_connections.
 	// collectStage1ScopeRoots dedups colliding rig paths, so the count never
 	// over-estimates the connection ceiling when two rigs resolve to the same
@@ -154,6 +173,57 @@ func lastControllerTickAge(ep events.Provider, _ string) (time.Duration, bool) {
 		age = 0
 	}
 	return age, true
+}
+
+// maxTickEventsScanned bounds the slow-tick window read. At one heartbeat
+// per tick and patrol-cadence ticks, a 10m doctor window holds ~20
+// events; 512 leaves an order of magnitude of headroom without letting a
+// pathological log turn the doctor pass into a full scan.
+const maxTickEventsScanned = 512
+
+// recentTickBreaches inspects the controller.tick_completed events inside
+// the trailing window and returns how many carried threshold_breach, how
+// many were inspected, and the slowest duration seen. A nil provider or
+// read error yields zeros so the slow-ticks check is skipped rather than
+// firing a false positive. Events whose payload does not decode to the
+// tick payload are not counted as samples.
+func recentTickBreaches(ep events.Provider, window time.Duration) (breaches, samples int, slowestMs int64) {
+	if ep == nil || window <= 0 {
+		return 0, 0, 0
+	}
+	filter := events.Filter{
+		Type:  events.ControllerTickCompleted,
+		Since: supervisorDoctorClock().Add(-window),
+	}
+	var list []events.Event
+	var err error
+	if tp, ok := ep.(events.TailProvider); ok {
+		list, err = tp.ListTail(filter, maxTickEventsScanned)
+	} else {
+		filter.Limit = maxTickEventsScanned
+		list, err = ep.List(filter)
+	}
+	if err != nil {
+		return 0, 0, 0
+	}
+	for _, e := range list {
+		decoded, _, derr := events.DecodePayload(e.Type, e.Payload)
+		if derr != nil {
+			continue
+		}
+		p, ok := decoded.(events.ControllerTickCompletedPayload)
+		if !ok {
+			continue
+		}
+		samples++
+		if p.DurationMs > slowestMs {
+			slowestMs = p.DurationMs
+		}
+		if p.ThresholdBreach {
+			breaches++
+		}
+	}
+	return breaches, samples, slowestMs
 }
 
 // agentConfigDirRoots returns the agent config-dir roots the isolation check

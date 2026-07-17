@@ -119,13 +119,6 @@ type CityRuntime struct {
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
 
-	// tickCount counts completed reconcile ticks for the controller
-	// heartbeat. controller.tick_completed is emitted at a patrol multiple
-	// (every tickHeartbeatEvery ticks) or when a tick's duration breaches
-	// tickHeartbeatSlowThreshold — never on every tick. Single-goroutine
-	// (the reconcile loop owns it); no synchronization needed.
-	tickCount uint64
-
 	convScopes          map[string]*convergenceScope // nil until bead store available; keyed by rig name ("" = city/HQ)
 	convScopesMu        sync.RWMutex                 // guards convScopes map pointer
 	convergenceReqCh    chan convergenceRequest      // receives CLI commands from controller.sock
@@ -718,6 +711,10 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// Host-load series runs on its own goroutine at patrol cadence: a
+	// wedged tick must not stall the stream that attributes the wedge.
+	go cr.hostLoadSampler(ctx, interval)
+
 	// Start the supervisor nudge dispatcher when configured. The wake-socket
 	// listener feeds nudgeWakeCh on every producer enqueue, giving sub-second
 	// dispatch latency. Patrol-tick fallback inside cr.tick() guarantees
@@ -848,37 +845,55 @@ func (cr *CityRuntime) safeTick(fn func(), trigger string) (panicked bool) {
 	return false
 }
 
-// Controller heartbeat cadence. The tick_completed event is the
-// supervisor doctor's tick-age signal; emitting it every tick would make
-// the event log a hot path, so it fires on a patrol multiple or when a
-// tick runs slow.
+// Controller heartbeat. Every completed tick emits a
+// controller.tick_completed event: the stream is both the supervisor
+// doctor's tick-age/slow-tick signal and the fleet's tick-duration
+// series, and an unsampled stream is the only shape consumers can do
+// period/median arithmetic on without de-biasing (vp-qvqk — the earlier
+// breach-or-every-10th sampling silently omitted fast ticks, so the
+// series was complete only while every tick breached). One event per
+// tick is patrol-cadence volume (~2/min at the 30s default), not a hot
+// path.
 const (
-	// tickHeartbeatEvery emits one heartbeat per this many completed ticks.
-	tickHeartbeatEvery = 10
-	// tickHeartbeatSlowThreshold forces an out-of-cadence heartbeat when a
-	// single tick exceeds it, so a degrading controller surfaces before the
-	// next scheduled heartbeat.
-	tickHeartbeatSlowThreshold = 5 * time.Second
+	// tickSlowIntervalMultiple flags a tick as slow when its duration
+	// reaches this many patrol intervals. Scaling with the configured
+	// cadence keeps the canary calibrated to the regime it watches — the
+	// old absolute 5s threshold was ON for 100% of ticks in a 30-55s
+	// regime, a constant carrying zero bits. At 2× the loop has lost
+	// cadence for a full interval, the leading indicator of the doctor's
+	// 3×-patrol tick-age alert.
+	tickSlowIntervalMultiple = 2
+	// tickSlowFallbackThreshold is the slow-tick threshold when the
+	// patrol interval is unknown or non-positive, so the breach flag can
+	// never degenerate to always-true.
+	tickSlowFallbackThreshold = 5 * time.Second
 )
 
-// recordTickHeartbeat emits a controller.tick_completed event at a patrol
-// multiple or on a duration-threshold breach. It is the controller
-// heartbeat the supervisor-cadence doctor reads to compute tick age
-// (plan item 1.9). Best-effort: a nil recorder is a no-op.
-func (cr *CityRuntime) recordTickHeartbeat(trigger string, dur time.Duration) {
-	cr.tickCount++
-	breach := dur >= tickHeartbeatSlowThreshold
-	onMultiple := cr.tickCount%tickHeartbeatEvery == 0
-	if !breach && !onMultiple {
-		return
+// slowTickThreshold returns the duration at or above which a completed
+// tick is flagged (threshold_breach) in its heartbeat event.
+func (cr *CityRuntime) slowTickThreshold() time.Duration {
+	if cr.cfg == nil {
+		return tickSlowFallbackThreshold
 	}
+	if interval := cr.cfg.Daemon.PatrolIntervalDuration(); interval > 0 {
+		return time.Duration(tickSlowIntervalMultiple) * interval
+	}
+	return tickSlowFallbackThreshold
+}
+
+// recordTickHeartbeat emits a controller.tick_completed event for every
+// completed tick. It is the controller heartbeat the supervisor-cadence
+// doctor reads to compute tick age and surface slow ticks (plan item
+// 1.9); ThresholdBreach marks ticks at or past slowTickThreshold.
+// Best-effort: a nil recorder is a no-op.
+func (cr *CityRuntime) recordTickHeartbeat(trigger string, dur time.Duration) {
 	if cr.rec == nil {
 		return
 	}
 	payload, err := json.Marshal(events.ControllerTickCompletedPayload{
 		DurationMs:      dur.Milliseconds(),
 		Phase:           trigger,
-		ThresholdBreach: breach,
+		ThresholdBreach: dur >= cr.slowTickThreshold(),
 	})
 	if err != nil {
 		return

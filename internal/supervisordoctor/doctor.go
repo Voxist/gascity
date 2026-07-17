@@ -24,6 +24,7 @@ import (
 // Check names, used as the doctor.alert "check" field.
 const (
 	CheckNameTickAge              = "tick_age"
+	CheckNameSlowTicks            = "slow_ticks"
 	CheckNameAgentConfigIsolation = "agent_config_isolation"
 	CheckNameS6ConnectionCeiling  = "s6_connection_ceiling"
 )
@@ -75,6 +76,43 @@ func CheckTickAgeFor(in TickAgeInput) *Alert {
 		Subject: in.City,
 		Detail: fmt.Sprintf("last controller tick %s ago exceeds %d×patrol (%s); controller heartbeat is stale",
 			in.LastTickAge.Round(time.Second), tickAgeRedMultiple, threshold),
+	}
+}
+
+// SlowTicksInput holds one city's recent tick-duration facts, gathered
+// from the controller.tick_completed events inside the doctor's
+// inspection window.
+type SlowTicksInput struct {
+	// City is the city name (alert subject).
+	City string
+	// BreachCount is how many inspected ticks carried threshold_breach —
+	// the controller flags a tick whose duration reached a multiple of
+	// its own patrol interval.
+	BreachCount int
+	// SampleCount is the total tick events inspected in the window.
+	SampleCount int
+	// SlowestMs is the largest duration_ms among the inspected events.
+	SlowestMs int64
+	// Window is the trailing inspection window the counts cover.
+	Window time.Duration
+}
+
+// CheckSlowTicksFor returns an Alert when any inspected tick in the
+// window breached the controller's slow-tick threshold. The breach flag
+// is computed by the controller against its own patrol interval; this
+// check is what makes the flag load-bearing — an emitted-but-never-read
+// canary carries no signal (vp-qvqk). Returns nil when nothing was
+// sampled or no sampled tick breached.
+func CheckSlowTicksFor(in SlowTicksInput) *Alert {
+	if in.SampleCount <= 0 || in.BreachCount <= 0 {
+		return nil
+	}
+	return &Alert{
+		Check:   CheckNameSlowTicks,
+		Subject: in.City,
+		Detail: fmt.Sprintf("%d of %d controller ticks in the last %s breached the slow-tick threshold (slowest %s); the reconcile loop is degrading",
+			in.BreachCount, in.SampleCount, in.Window.Round(time.Second),
+			(time.Duration(in.SlowestMs) * time.Millisecond).Round(time.Millisecond)),
 	}
 }
 

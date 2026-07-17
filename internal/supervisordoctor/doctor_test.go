@@ -32,6 +32,36 @@ func TestCheckTickAgeFor(t *testing.T) {
 	}
 }
 
+func TestCheckSlowTicksFor(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      SlowTicksInput
+		wantRed bool
+	}{
+		{"no samples skips", SlowTicksInput{City: "c", BreachCount: 0, SampleCount: 0, Window: 10 * time.Minute}, false},
+		{"clean window not red", SlowTicksInput{City: "c", BreachCount: 0, SampleCount: 20, SlowestMs: 4000, Window: 10 * time.Minute}, false},
+		{"one breach is red", SlowTicksInput{City: "c", BreachCount: 1, SampleCount: 20, SlowestMs: 443000, Window: 10 * time.Minute}, true},
+		{"all breached is red", SlowTicksInput{City: "c", BreachCount: 20, SampleCount: 20, SlowestMs: 55000, Window: 10 * time.Minute}, true},
+		// A breach count with zero samples is contradictory gatherer input;
+		// skip rather than alert on it.
+		{"breaches without samples skips", SlowTicksInput{City: "c", BreachCount: 3, SampleCount: 0, Window: 10 * time.Minute}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := CheckSlowTicksFor(tc.in)
+			if (got != nil) != tc.wantRed {
+				t.Fatalf("CheckSlowTicksFor red=%v, want %v (alert=%+v)", got != nil, tc.wantRed, got)
+			}
+			if got != nil && got.Check != CheckNameSlowTicks {
+				t.Errorf("alert check = %q, want %q", got.Check, CheckNameSlowTicks)
+			}
+			if got != nil && got.Subject != tc.in.City {
+				t.Errorf("alert subject = %q, want %q", got.Subject, tc.in.City)
+			}
+		})
+	}
+}
+
 func TestCheckS6ConnectionCeiling(t *testing.T) {
 	tests := []struct {
 		name    string

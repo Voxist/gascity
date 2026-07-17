@@ -50,10 +50,13 @@ const (
 	// transition (closed/open/half-open), wired from the breaker
 	// registry's state-change callback.
 	BreakerStateChanged = "breaker.state_changed"
-	// ControllerTickCompleted is the controller heartbeat. It is emitted
-	// at a patrol multiple or when a tick's duration breaches a threshold
-	// — never on every tick — so the supervisor doctor can compute tick
-	// age without the event log itself becoming a hot path.
+	// ControllerTickCompleted is the controller heartbeat, emitted once
+	// per completed reconcile tick. The unsampled stream is both the
+	// supervisor doctor's tick-age/slow-tick signal and a sound basis for
+	// tick-period arithmetic — the earlier breach-or-every-10th sampling
+	// made it a biased sample that was complete only by coincidence
+	// (vp-qvqk). One event per tick is patrol-cadence volume, not a hot
+	// path.
 	ControllerTickCompleted = "controller.tick_completed"
 	// DoctorAlert fires when the supervisor-cadence doctor evaluates a
 	// cheap check to red. It is the detector that closes the
@@ -122,13 +125,14 @@ func (BreakerStateChangedPayload) IsEventPayload() {}
 
 // ControllerTickCompletedPayload is the typed payload for
 // controller.tick_completed events — the controller heartbeat. Duration
-// and Phase identify what work the tick did; ThresholdBreach is true when
-// the event was emitted because the tick exceeded the duration threshold
-// rather than because it landed on the patrol multiple.
+// and Phase identify what work the tick did; ThresholdBreach flags a tick
+// whose duration reached the slow-tick threshold (a multiple of the
+// configured patrol interval — see the controller heartbeat constants),
+// which the supervisor doctor's slow_ticks check consumes.
 type ControllerTickCompletedPayload struct {
 	DurationMs      int64  `json:"duration_ms" doc:"Wall-clock duration of the completed tick, in milliseconds."`
 	Phase           string `json:"phase" doc:"Tick trigger phase: patrol, poke, control-dispatcher, etc."`
-	ThresholdBreach bool   `json:"threshold_breach,omitempty" doc:"True when emitted due to a duration-threshold breach rather than the patrol multiple."`
+	ThresholdBreach bool   `json:"threshold_breach,omitempty" doc:"True when the tick's duration reached the slow-tick threshold (a multiple of the configured patrol interval)."`
 }
 
 // IsEventPayload marks ControllerTickCompletedPayload as an events.Payload variant.
