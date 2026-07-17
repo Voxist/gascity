@@ -3,6 +3,7 @@
 package beads
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -217,7 +218,7 @@ func (s *DoltliteReadStore) CloseStore() error {
 }
 
 func (s *DoltliteReadStore) Get(id string) (Bead, error) {
-	beads, err := s.queryIssues(ListQuery{AllowScan: true, IncludeClosed: true, TierMode: TierBoth}, "i.id = ?", []any{id}, 1)
+	beads, err := s.queryIssues(context.Background(), ListQuery{AllowScan: true, IncludeClosed: true, TierMode: TierBoth}, "i.id = ?", []any{id}, 1)
 	if err != nil {
 		return Bead{}, err
 	}
@@ -236,7 +237,7 @@ func (s *DoltliteReadStore) GetSessionBead(id string) (Bead, error) {
 			}
 		}
 	}
-	beads, err := s.queryIssues(ListQuery{
+	beads, err := s.queryIssues(context.Background(), ListQuery{
 		AllowScan:     true,
 		IncludeClosed: true,
 		SkipLabels:    true,
@@ -266,7 +267,7 @@ func (s *DoltliteReadStore) ListSessionBeads() ([]Bead, error) {
 	if hash != "" && hash == s.sessionHash && s.sessionCache != nil {
 		return cloneBeads(s.sessionCache), nil
 	}
-	rows, err := s.queryIssues(ListQuery{
+	rows, err := s.queryIssues(context.Background(), ListQuery{
 		Type:       "session",
 		SkipLabels: true,
 	}, "", nil, 0)
@@ -279,13 +280,25 @@ func (s *DoltliteReadStore) ListSessionBeads() ([]Bead, error) {
 }
 
 func (s *DoltliteReadStore) List(query ListQuery) ([]Bead, error) {
+	return s.ListCtx(context.Background(), query)
+}
+
+// ListCtx implements the optional CtxLister capability: a cancelled or
+// expired ctx aborts the in-flight SQLite query via QueryContext instead of
+// letting a caller's abandoned goroutine (statusListStoreWithTimeout) keep
+// this store's single connection (db.SetMaxOpenConns(1)) busy past the
+// caller's own deadline.
+func (s *DoltliteReadStore) ListCtx(ctx context.Context, query ListQuery) ([]Bead, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := query.Validate(); err != nil {
 		return nil, err
 	}
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("bd list: %w", ErrQueryRequiresScan)
 	}
-	return s.queryIssues(query, "", nil, query.Limit)
+	return s.queryIssues(ctx, query, "", nil, query.Limit)
 }
 
 func (s *DoltliteReadStore) ListOpen(status ...string) ([]Bead, error) {
@@ -372,7 +385,7 @@ func (s *DoltliteReadStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	// alignment because honoring rq.TierMode here also needs the wisp
 	// dependency graph modeled in the ready blocker predicate. Tracked as
 	// follow-up ga-4ax9bj.
-	out, err := s.queryIssuesOrderedInTables(q, []doltliteTableSet{doltliteIssueTables}, readyWhere, readyArgs, q.Limit, "ORDER BY COALESCE(i.priority, 2) ASC, i.created_at ASC, i.id ASC")
+	out, err := s.queryIssuesOrderedInTables(context.Background(), q, []doltliteTableSet{doltliteIssueTables}, readyWhere, readyArgs, q.Limit, "ORDER BY COALESCE(i.priority, 2) ASC, i.created_at ASC, i.id ASC")
 	if err != nil {
 		return nil, err
 	}
@@ -611,7 +624,7 @@ func (s *DoltliteReadStore) SetMetadataBatch(id string, kvs map[string]string) e
 	}
 	current, err := s.GetSessionBead(id)
 	if err != nil {
-		rows, queryErr := s.queryIssues(ListQuery{
+		rows, queryErr := s.queryIssues(context.Background(), ListQuery{
 			AllowScan:     true,
 			IncludeClosed: true,
 			SkipLabels:    true,
@@ -864,18 +877,18 @@ func scanDep(rows interface{ Scan(...any) error }) (Dep, error) {
 	return dep, nil
 }
 
-func (s *DoltliteReadStore) queryIssues(query ListQuery, extraWhere string, extraArgs []any, limit int) ([]Bead, error) {
-	return s.queryIssuesOrdered(query, extraWhere, extraArgs, limit, "")
+func (s *DoltliteReadStore) queryIssues(ctx context.Context, query ListQuery, extraWhere string, extraArgs []any, limit int) ([]Bead, error) {
+	return s.queryIssuesOrdered(ctx, query, extraWhere, extraArgs, limit, "")
 }
 
-func (s *DoltliteReadStore) queryIssuesOrdered(query ListQuery, extraWhere string, extraArgs []any, limit int, orderBy string) ([]Bead, error) {
-	return s.queryIssuesOrderedInTables(query, doltliteTableSetsForMode(query.TierMode), extraWhere, extraArgs, limit, orderBy)
+func (s *DoltliteReadStore) queryIssuesOrdered(ctx context.Context, query ListQuery, extraWhere string, extraArgs []any, limit int, orderBy string) ([]Bead, error) {
+	return s.queryIssuesOrderedInTables(ctx, query, doltliteTableSetsForMode(query.TierMode), extraWhere, extraArgs, limit, orderBy)
 }
 
 // queryIssuesOrderedInTables runs the query against an explicit list of table
 // sets. Callers passing a custom orderBy must pass a single table set: the
 // merged path re-sorts only when orderBy is empty.
-func (s *DoltliteReadStore) queryIssuesOrderedInTables(query ListQuery, sets []doltliteTableSet, extraWhere string, extraArgs []any, limit int, orderBy string) ([]Bead, error) {
+func (s *DoltliteReadStore) queryIssuesOrderedInTables(ctx context.Context, query ListQuery, sets []doltliteTableSet, extraWhere string, extraArgs []any, limit int, orderBy string) ([]Bead, error) {
 	if err := query.Validate(); err != nil {
 		return nil, err
 	}
@@ -894,7 +907,7 @@ func (s *DoltliteReadStore) queryIssuesOrderedInTables(query ListQuery, sets []d
 	// keeps the default TierIssues bounded path O(limit) rather than spanning
 	// full matching history (#3449 review).
 	if doltliteCanSelectBoundedTopN(query, sets, extraWhere, limit, orderBy) {
-		return s.queryBoundedTopN(query, sets, limit)
+		return s.queryBoundedTopN(ctx, query, sets, limit)
 	}
 	merged := make([]Bead, 0)
 	seen := make(map[string]struct{})
@@ -918,7 +931,7 @@ func (s *DoltliteReadStore) queryIssuesOrderedInTables(query ListQuery, sets []d
 		if query.SeekAfter != nil {
 			tableLimit = 0
 		}
-		rows, err := s.queryIssueTable(query, tables, extraWhere, extraArgs, tableLimit, orderBy)
+		rows, err := s.queryIssueTable(ctx, query, tables, extraWhere, extraArgs, tableLimit, orderBy)
 		if err != nil {
 			return nil, err
 		}
@@ -965,15 +978,15 @@ func doltliteCanSelectBoundedTopN(query ListQuery, sets []doltliteTableSet, extr
 
 // queryBoundedTopN resolves a bounded multi-table read by selecting the exact
 // global top-N ids in one SQL statement and hydrating only those ids.
-func (s *DoltliteReadStore) queryBoundedTopN(query ListQuery, sets []doltliteTableSet, limit int) ([]Bead, error) {
-	ids, err := s.selectBoundedTopNIDs(query, sets, limit)
+func (s *DoltliteReadStore) queryBoundedTopN(ctx context.Context, query ListQuery, sets []doltliteTableSet, limit int) ([]Bead, error) {
+	ids, err := s.selectBoundedTopNIDs(ctx, query, sets, limit)
 	if err != nil {
 		return nil, err
 	}
 	if len(ids) == 0 {
 		return []Bead{}, nil
 	}
-	merged, err := s.hydrateBeadsByID(query, sets, ids)
+	merged, err := s.hydrateBeadsByID(ctx, query, sets, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -990,7 +1003,7 @@ func (s *DoltliteReadStore) queryBoundedTopN(query ListQuery, sets []doltliteTab
 // rows — anti-joined against the matching issues set exactly as List dedupes
 // and as countDurableWisps counts — under one global ORDER BY/LIMIT, so the
 // SQL bound stays O(limit) instead of hydrating full matching history (#3449).
-func (s *DoltliteReadStore) selectBoundedTopNIDs(query ListQuery, sets []doltliteTableSet, limit int) ([]string, error) {
+func (s *DoltliteReadStore) selectBoundedTopNIDs(ctx context.Context, query ListQuery, sets []doltliteTableSet, limit int) ([]string, error) {
 	// The issues-table predicates back both the issues union leg and the wisps
 	// dedupe anti-join, so the wisp leg excludes exactly the ids a matching
 	// issues row already contributes (List's "issues win" cross-table dedupe).
@@ -1045,7 +1058,7 @@ func (s *DoltliteReadStore) selectBoundedTopNIDs(query ListQuery, sets []doltlit
 	sqlText := "SELECT id FROM (" + strings.Join(unionParts, " UNION ALL ") +
 		") ORDER BY created_at " + order + ", id " + order +
 		fmt.Sprintf(" LIMIT %d", limit)
-	rows, err := s.db.Query(sqlText, args...)
+	rows, err := s.db.QueryContext(ctx, sqlText, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1080,7 +1093,7 @@ const doltliteMaxHydrateIDsPerChunk = 16000
 // SQLite bound-parameter limit. The dedupe spans every chunk and table set, so
 // an issues-table row still wins over its wisp twin regardless of where the
 // chunk boundaries fall.
-func (s *DoltliteReadStore) hydrateBeadsByID(query ListQuery, sets []doltliteTableSet, ids []string) ([]Bead, error) {
+func (s *DoltliteReadStore) hydrateBeadsByID(ctx context.Context, query ListQuery, sets []doltliteTableSet, ids []string) ([]Bead, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -1098,7 +1111,7 @@ func (s *DoltliteReadStore) hydrateBeadsByID(query ListQuery, sets []doltliteTab
 			for i, id := range chunk {
 				args[i] = id
 			}
-			rows, err := s.queryIssueTable(query, tables, "i.id IN ("+placeholders+")", args, 0, "")
+			rows, err := s.queryIssueTable(ctx, query, tables, "i.id IN ("+placeholders+")", args, 0, "")
 			if err != nil {
 				return nil, err
 			}
@@ -1318,7 +1331,7 @@ func (s *DoltliteReadStore) buildDoltliteTableQuery(query ListQuery, tables dolt
 	return doltliteTableQuery{flags: flags, where: where, args: args, parentJoin: parentJoin}, nil
 }
 
-func (s *DoltliteReadStore) queryIssueTable(query ListQuery, tables doltliteTableSet, extraWhere string, extraArgs []any, limit int, orderBy string) ([]Bead, error) {
+func (s *DoltliteReadStore) queryIssueTable(ctx context.Context, query ListQuery, tables doltliteTableSet, extraWhere string, extraArgs []any, limit int, orderBy string) ([]Bead, error) {
 	if tables.wisps && !s.tableExists(tables.issues) {
 		return nil, nil
 	}
@@ -1353,7 +1366,7 @@ func (s *DoltliteReadStore) queryIssueTable(query ListQuery, tables doltliteTabl
 	if limit > 0 {
 		sqlText += fmt.Sprintf(" LIMIT %d", limit)
 	}
-	rows, err := s.db.Query(sqlText, tq.args...)
+	rows, err := s.db.QueryContext(ctx, sqlText, tq.args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1370,7 +1383,7 @@ func (s *DoltliteReadStore) queryIssueTable(query ListQuery, tables doltliteTabl
 		return nil, err
 	}
 	if !query.SkipLabels {
-		if err := s.hydrateLabels(beads, tables.labels); err != nil {
+		if err := s.hydrateLabels(ctx, beads, tables.labels); err != nil {
 			return nil, err
 		}
 	}
@@ -1577,7 +1590,7 @@ func (s *DoltliteReadStore) tableHasColumn(table, column string) (bool, error) {
 	return true, nil
 }
 
-func (s *DoltliteReadStore) hydrateLabels(beads []Bead, labelTable string) error {
+func (s *DoltliteReadStore) hydrateLabels(ctx context.Context, beads []Bead, labelTable string) error {
 	if len(beads) == 0 {
 		return nil
 	}
@@ -1588,7 +1601,7 @@ func (s *DoltliteReadStore) hydrateLabels(beads []Bead, labelTable string) error
 		args = append(args, beads[i].ID)
 	}
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(args)), ",")
-	rows, err := s.db.Query(`SELECT issue_id, label FROM `+labelTable+` WHERE issue_id IN (`+placeholders+`)`, args...)
+	rows, err := s.db.QueryContext(ctx, `SELECT issue_id, label FROM `+labelTable+` WHERE issue_id IN (`+placeholders+`)`, args...)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
