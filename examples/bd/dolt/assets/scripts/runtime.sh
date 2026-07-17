@@ -264,3 +264,88 @@ PY
     return 124
   fi
 }
+
+# --- gc-managed Dolt push orphan-reaping (vc-ewyro) -------------------------
+# A client-side push bound (run_bounded) or an order-cancel SIGKILLs the dolt
+# CLIENT, but the dolt sql-server keeps executing the orphaned CALL DOLT_PUSH:
+# it does not cancel a running query when the client connection drops. The
+# orphan holds a server worker and contends on the shared multi-database server
+# for as long as the push would have taken, starving every other order that
+# touches Dolt (vc-ewyro: an order-cancel mid-push left a va backup push running
+# ~3600s server-side, wedging gc-CLI and the whole order patrol on the shared
+# 9-DB server). The client bound alone cannot stop it — the server side must be
+# killed explicitly.
+#
+# Each managed push is tagged /* gc-dolt-sync:<pid>:<db> */; Dolt preserves the
+# comment verbatim in information_schema.processlist.info and reports the
+# executing sub-statement of a `USE db; CALL ...` batch (i.e. `CALL ...`), so
+# the exact orphan is reaped by matching the tag. GC_DOLT_PUSH_TAG_PREFIX is the
+# single source of truth for the marker, shared by the tagger and the reaper so
+# the two cannot silently drift.
+GC_DOLT_PUSH_TAG_PREFIX="gc-dolt-sync"
+
+# dolt_push_tag DB — the reap marker for a push of DB from THIS run.
+dolt_push_tag() {
+  printf '%s:%s:%s' "$GC_DOLT_PUSH_TAG_PREFIX" "$$" "$1"
+}
+
+# reap_dolt_push_by_tag EXACT_TAG [BOUND_SECS] — KILL the server-side push
+# carrying EXACT_TAG ("gc-dolt-sync:<pid>:<db>"). Used the instant a push's own
+# client bound fires (exit 124): the owning script is still alive but its dolt
+# CLIENT was killed, so the orphan is reaped directly by its unique tag — no
+# liveness check needed. The `info LIKE 'CALL %'` guard scopes to a running push
+# statement, which also excludes this helper's own SELECT. Every dolt call is
+# short-bounded (default 15s): a metadata SELECT + a KILL are cheap and are NOT
+# queued behind the push's data transfer, so the reaper never blocks on the
+# saturated server it is relieving. Best-effort — a failure never propagates.
+reap_dolt_push_by_tag() {
+  _rdp_tag="$1"
+  _rdp_bound="${2:-15}"
+  [ -n "$_rdp_tag" ] && [ -n "${GC_DOLT_PORT:-}" ] || return 0
+  export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
+  _rdp_host="${GC_DOLT_HOST:-127.0.0.1}"
+  _rdp_ids=$(run_bounded "$_rdp_bound" dolt --host "$_rdp_host" --port "$GC_DOLT_PORT" \
+    --user "${GC_DOLT_USER:-root}" --no-tls sql --result-format csv \
+    -q "SELECT id FROM information_schema.processlist WHERE info LIKE '%$_rdp_tag%' AND info LIKE 'CALL %'" 2>/dev/null \
+    | awk -F, 'NR > 1 { gsub(/^"|"$/, "", $1); if ($1 ~ /^[0-9]+$/) print $1 }') || return 0
+  for _rdp_id in $_rdp_ids; do
+    if run_bounded "$_rdp_bound" dolt --host "$_rdp_host" --port "$GC_DOLT_PORT" \
+        --user "${GC_DOLT_USER:-root}" --no-tls sql -q "KILL $_rdp_id" >/dev/null 2>&1; then
+      printf '  gc dolt: reaped orphaned server-side push (connection %s)\n' "$_rdp_id" >&2
+    fi
+  done
+}
+
+# reap_dead_owner_pushes [BOUND_SECS] — start-of-run SWEEP: KILL every gc-managed
+# push whose OWNING process (the <pid> in its /* gc-dolt-sync:<pid>:<db> */ tag)
+# is no longer alive — a push stranded on the server by a previous run that
+# crashed or was cancelled mid-push. This is the dominant orphan path: an order
+# context-deadline SIGTERMs the whole script (its client bound never fires) while
+# the sql-server keeps running the push. Doing it here, outside any signal
+# handler, avoids the process-group / blocking-before-exit / exit-code
+# fragilities of a TERM trap.
+#
+# Liveness (kill -0), not age, is the discriminator, so a concurrently-running
+# sync OR compact push with a LIVE owner is never touched — no cross-command
+# false-reap and no threshold tuning (both commands share GC_DOLT_PUSH_TAG_PREFIX
+# so the sweep cleans up either). The owning pid is extracted server-side with
+# SUBSTRING_INDEX so the id,pid rows stay clean numeric CSV even though `info`
+# itself contains commas. Bounded + best-effort.
+reap_dead_owner_pushes() {
+  _rdo_bound="${1:-15}"
+  [ -n "${GC_DOLT_PORT:-}" ] || return 0
+  export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
+  _rdo_host="${GC_DOLT_HOST:-127.0.0.1}"
+  run_bounded "$_rdo_bound" dolt --host "$_rdo_host" --port "$GC_DOLT_PORT" \
+    --user "${GC_DOLT_USER:-root}" --no-tls sql --result-format csv \
+    -q "SELECT id, SUBSTRING_INDEX(SUBSTRING_INDEX(info, '$GC_DOLT_PUSH_TAG_PREFIX:', -1), ':', 1) AS pid FROM information_schema.processlist WHERE info LIKE '%$GC_DOLT_PUSH_TAG_PREFIX:%' AND info LIKE 'CALL %'" 2>/dev/null \
+    | awk -F, 'NR > 1 { gsub(/^"|"$/, "", $1); gsub(/^"|"$/, "", $2); if ($1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/) print $1, $2 }' \
+    | while read -r _rdo_id _rdo_pid; do
+        kill -0 "$_rdo_pid" 2>/dev/null && continue
+        if run_bounded "$_rdo_bound" dolt --host "$_rdo_host" --port "$GC_DOLT_PORT" \
+            --user "${GC_DOLT_USER:-root}" --no-tls sql -q "KILL $_rdo_id" >/dev/null 2>&1; then
+          printf '  gc dolt: reaped stranded push from dead run (connection %s, owner pid %s)\n' "$_rdo_id" "$_rdo_pid" >&2
+        fi
+      done
+  return 0
+}

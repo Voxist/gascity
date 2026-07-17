@@ -113,6 +113,52 @@ func writeSyncFakeDoltFirstPush(t *testing.T, dir, branch string) string {
 	return installFFFakeDolt(t, dir, body)
 }
 
+// writeSyncFakeDoltPushTimeout models a fast-forward push (ahead=2, behind=0)
+// whose CALL DOLT_PUSH exits 124 (the client bound fired) while the server-side
+// push is left running orphaned. The reaper's processlist query returns
+// connection 42 ONLY when it carries BOTH the gc-dolt-sync tag AND the
+// `'CALL %'` scope guard, so a regression that drops the tag, drops the guard,
+// or inverts the scoping yields no id and fails the reap assertion — the test
+// exercises the real predicate rather than an unconditional id.
+func writeSyncFakeDoltPushTimeout(t *testing.T, dir string) string {
+	t.Helper()
+	branch := "main"
+	logPath := filepath.Join(dir, "dolt.log")
+	aheadPat := "dolt_log('remotes/origin/" + branch + ".." + branch + "')"
+	behindPat := "dolt_log('" + branch + "..remotes/origin/" + branch + "')"
+	body := fakeDoltHeader(logPath, branch) +
+		"  *\"CALL DOLT_FETCH(\"*) exit 0 ;;\n" +
+		"  *\"" + aheadPat + "\"*) printf 'n\\n2\\n' ; exit 0 ;;\n" +
+		"  *\"" + behindPat + "\"*) printf 'n\\n0\\n' ; exit 0 ;;\n" +
+		// reaper SELECT: well-formed (tag + guard) -> orphan connection 42.
+		"  *\"gc-dolt-sync:\"*\"'CALL %'\"*) printf 'id\\n42\\n' ; exit 0 ;;\n" +
+		// the push itself times out (client bound fired).
+		"  *\"CALL DOLT_PUSH(\"*) printf 'context deadline exceeded\\n' >&2 ; exit 124 ;;\n" +
+		"esac\nexit 0\n"
+	return installFFFakeDolt(t, dir, body)
+}
+
+// writeSyncFakeDoltStartupSweep models an up-to-date DB (no push) with one push
+// present on the server carrying owner pid ownerPID. The start-of-run sweep's
+// processlist query returns "id,pid" (42,ownerPID) ONLY when it carries both
+// the gc-dolt-sync tag AND the `'CALL %'` scope guard, so a dropped tag/guard
+// fails the assertion. Whether connection 42 is reaped depends on whether
+// ownerPID is alive (kill -0), which the caller controls.
+func writeSyncFakeDoltStartupSweep(t *testing.T, dir string, ownerPID int) string {
+	t.Helper()
+	branch := "main"
+	logPath := filepath.Join(dir, "dolt.log")
+	aheadPat := "dolt_log('remotes/origin/" + branch + ".." + branch + "')"
+	behindPat := "dolt_log('" + branch + "..remotes/origin/" + branch + "')"
+	body := fakeDoltHeader(logPath, branch) +
+		"  *\"CALL DOLT_FETCH(\"*) exit 0 ;;\n" +
+		"  *\"" + aheadPat + "\"*) printf 'n\\n0\\n' ; exit 0 ;;\n" +
+		"  *\"" + behindPat + "\"*) printf 'n\\n0\\n' ; exit 0 ;;\n" +
+		"  *\"gc-dolt-sync:\"*\"'CALL %'\"*) printf 'id,pid\\n42," + fmt.Sprintf("%d", ownerPID) + "\\n' ; exit 0 ;;\n" +
+		"esac\nexit 0\n"
+	return installFFFakeDolt(t, dir, body)
+}
+
 func pushed(log string) bool { return strings.Contains(log, "DOLT_PUSH") }
 
 func readLog(t *testing.T, logPath string) string {
@@ -134,6 +180,60 @@ func TestSyncAheadOnlyFastForwardPushes(t *testing.T) {
 	}
 	if strings.Contains(log, "--force") {
 		t.Fatalf("ahead-only push must not use --force.\nlog:\n%s", log)
+	}
+}
+
+func TestSyncPushTimeoutReapsOrphanedServerSidePush(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := writeSyncFakeDoltPushTimeout(t, binDir)
+	out := runFFSync(t, binDir, "--db", "app")
+	log := readLog(t, logPath)
+	if !strings.Contains(log, "CALL DOLT_PUSH('origin', 'main')") {
+		t.Fatalf("expected a fast-forward push attempt.\nout:\n%s\nlog:\n%s", out, log)
+	}
+	if !strings.Contains(log, "gc-dolt-sync:") {
+		t.Fatalf("push must be tagged with the reap marker.\nlog:\n%s", log)
+	}
+	// After the client-side 124 timeout, the orphaned server-side push
+	// (connection 42) must be reaped with a KILL so it stops contending on the
+	// shared server (vc-ewyro). The fake only yields id 42 for a well-formed
+	// reaper query, so a broken tag/guard would surface here as a missing KILL.
+	if !strings.Contains(log, "KILL 42") {
+		t.Fatalf("orphaned server-side push must be reaped with KILL 42.\nout:\n%s\nlog:\n%s", out, log)
+	}
+	if !strings.Contains(out, "reaped orphaned server-side push") {
+		t.Fatalf("expected an operator-visible reap notice.\nout:\n%s", out)
+	}
+}
+
+func TestSyncStartupSweepReapsStrandedPush(t *testing.T) {
+	binDir := t.TempDir()
+	// A push whose owner pid is far above any assignable pid (INT_MAX): kill -0
+	// fails, so the owner is dead and the stranded push must be reaped.
+	logPath := writeSyncFakeDoltStartupSweep(t, binDir, 2147483647)
+	out := runFFSync(t, binDir, "--db", "app")
+	log := readLog(t, logPath)
+	if pushed(log) {
+		t.Fatalf("up-to-date DB must NOT push.\nout:\n%s\nlog:\n%s", out, log)
+	}
+	// The start-of-run sweep must reap the dead-owner orphan (connection 42) —
+	// the signal-handler-free cover for the order-cancel orphan path (vc-ewyro).
+	if !strings.Contains(log, "KILL 42") {
+		t.Fatalf("startup sweep must reap the dead-owner push with KILL 42.\nout:\n%s\nlog:\n%s", out, log)
+	}
+}
+
+func TestSyncStartupSweepSparesLiveOwnerPush(t *testing.T) {
+	binDir := t.TempDir()
+	// The push's owner is this live test process, standing in for a concurrently
+	// running sync/compact push. A live owner (kill -0 succeeds) means the push
+	// is healthy, not orphaned, so the sweep must NOT reap it — otherwise a sync
+	// tick would kill a healthy concurrent compact force-push (review finding).
+	logPath := writeSyncFakeDoltStartupSweep(t, binDir, os.Getpid())
+	out := runFFSync(t, binDir, "--db", "app")
+	log := readLog(t, logPath)
+	if strings.Contains(log, "KILL") {
+		t.Fatalf("a push with a LIVE owner must NOT be reaped.\nout:\n%s\nlog:\n%s", out, log)
 	}
 }
 
