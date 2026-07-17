@@ -560,17 +560,27 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// InjectImplicitAgents at line 593), so [[patches.agent]] entries that
 	// target a not-yet-present implicit agent are partitioned into
 	// deferredAgentPatches and applied immediately after injection.
-	// Patches that match neither an existing agent nor a future implicit
-	// identity stay in nowPatches so ApplyPatches hard-errors on typos.
+	// Entries that match neither an existing agent nor a future implicit
+	// identity degrade to a composition warning and are skipped: one bad
+	// patch target must not abort the city-wide config load (vc-quqf,
+	// incident vc-9wa). gc config lint reports the warning as a failure so
+	// the typo still blocks pre-commit. Malformed entries (empty name) stay
+	// in nowPatches so ApplyPatches keeps hard-erroring on them.
 	var deferredAgentPatches []AgentPatch
+	var deferredAgentPatchIndexes []int
 	if len(root.Patches.Agents) > 0 {
 		implicitIDs := implicitAgentIdentities(root)
 		var nowPatches []AgentPatch
-		for _, p := range root.Patches.Agents {
-			if !agentPatchMatchesExisting(root, &p) && implicitIDs[agentKey{p.Dir, p.Name}] {
-				deferredAgentPatches = append(deferredAgentPatches, p)
-			} else {
+		for i, p := range root.Patches.Agents {
+			switch {
+			case p.Name == "" || agentPatchMatchesExisting(root, &p):
 				nowPatches = append(nowPatches, p)
+			case implicitIDs[agentKey{p.Dir, p.Name}]:
+				deferredAgentPatches = append(deferredAgentPatches, p)
+				deferredAgentPatchIndexes = append(deferredAgentPatchIndexes, i)
+			default:
+				prov.Warnings = appendUnique(prov.Warnings,
+					UnresolvedAgentPatchWarning(i, p.Dir, p.Name))
 			}
 		}
 		root.Patches.Agents = nowPatches
@@ -629,11 +639,23 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	InjectImplicitAgents(root)
 
 	// Apply patches that targeted provider-derived implicit agents, now
-	// present after injection. A patch that still cannot be resolved is a
-	// genuine typo — surface it with the same error framing as ApplyPatches.
+	// present after injection. A patch that still cannot be resolved gets
+	// the same skip-with-warning treatment as the main partition above
+	// (vc-quqf) — injection is identity-predicted, so this leg is defensive.
 	if len(deferredAgentPatches) > 0 {
-		if err := ApplyPatches(root, Patches{Agents: deferredAgentPatches}); err != nil {
-			return nil, nil, fmt.Errorf("applying patches: %w", err)
+		var resolvable []AgentPatch
+		for j, p := range deferredAgentPatches {
+			if agentPatchMatchesExisting(root, &p) {
+				resolvable = append(resolvable, p)
+				continue
+			}
+			prov.Warnings = appendUnique(prov.Warnings,
+				UnresolvedAgentPatchWarning(deferredAgentPatchIndexes[j], p.Dir, p.Name))
+		}
+		if len(resolvable) > 0 {
+			if err := ApplyPatches(root, Patches{Agents: resolvable}); err != nil {
+				return nil, nil, fmt.Errorf("applying patches: %w", err)
+			}
 		}
 	}
 

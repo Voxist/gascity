@@ -665,6 +665,7 @@ gc config
 | Subcommand | Description |
 |------------|-------------|
 | [gc config explain](#gc-config-explain) | Show resolved config with provenance annotations |
+| [gc config lint](#gc-config-lint) | Fail on config problems the runtime load degrades to warnings |
 | [gc config show](#gc-config-show) | Dump the resolved city configuration as TOML |
 
 ## gc config explain
@@ -704,6 +705,28 @@ gc config explain -f overlay.toml --agent polecat
 | `--json` | bool |  | emit JSON (requires --provider) |
 | `--provider` | string |  | explain a provider's resolved chain instead of agents |
 | `--rig` | string |  | filter to agents in this rig |
+
+## gc config lint
+
+Validate the resolved city configuration for pre-commit and CI use.
+
+Loads city.toml with all includes, packs, patches, and overrides, prints
+every composition warning, and exits non-zero when the config carries
+problems that the runtime load deliberately degrades to warnings — e.g. a
+[[patches.agent]] entry whose (dir, name) target resolves to no agent in
+the merged config. At runtime one bad patch target warns and is skipped so
+it cannot abort every gc command city-wide (vc-9wa); lint is where it
+fails loudly instead. Hard load errors also fail.
+
+```
+gc config lint
+```
+
+**Example:**
+
+```
+gc config lint
+```
 
 ## gc config show
 

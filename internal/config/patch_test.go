@@ -668,6 +668,9 @@ name = "worker"
 	}
 }
 
+// Since vc-quqf a patch targeting a nonexistent agent degrades to a
+// composition warning and is skipped (incident vc-9wa: the hard abort
+// bricked config load city-wide); the rest of the config still loads.
 func TestLoadWithIncludes_PatchTargetMissing(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
@@ -682,12 +685,24 @@ dir = "hw"
 name = "ghost"
 suspended = true
 `)
-	_, _, err := LoadWithIncludes(fs, "/city/city.toml")
-	if err == nil {
-		t.Fatal("expected error for patch targeting nonexistent agent")
+	cfg, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("patch targeting nonexistent agent must warn and skip, not abort (vc-9wa): %v", err)
 	}
-	if !strings.Contains(err.Error(), "hw/ghost") {
-		t.Errorf("error = %q, want mention of hw/ghost", err)
+	if len(cfg.Agents) == 0 || cfg.Agents[0].Name != "mayor" {
+		t.Error("rest of the config should load despite the skipped patch")
+	}
+	var warning string
+	for _, w := range prov.Warnings {
+		if IsUnresolvedAgentPatchWarning(w) {
+			warning = w
+		}
+	}
+	if warning == "" {
+		t.Fatalf("no unresolved-patch warning; warnings: %q", prov.Warnings)
+	}
+	if !strings.Contains(warning, "hw/ghost") {
+		t.Errorf("warning = %q, want mention of hw/ghost", warning)
 	}
 }
 

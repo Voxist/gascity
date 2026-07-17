@@ -144,6 +144,13 @@ func shouldEmitLoadCityConfigWarning(warning string) bool {
 	if config.IsLegacyWorkspaceFieldWarning(warning) {
 		return false
 	}
+	// A skipped [[patches.agent]] must surface on every load path: since
+	// vc-quqf the runtime degrades an unresolvable target to this warning
+	// instead of aborting the load (vc-9wa), so emitting it here is the only
+	// runtime signal that the patch did not apply.
+	if config.IsUnresolvedAgentPatchWarning(warning) {
+		return true
+	}
 	if strings.Contains(warning, "both [agent_defaults] and [agents] are present") {
 		return true
 	}
