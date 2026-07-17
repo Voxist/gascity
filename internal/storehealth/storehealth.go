@@ -104,10 +104,18 @@ func WalkSize(path string) int64 {
 // "failed") of the most-recent store-maintenance event in provider.
 // Zero time and empty status when no events, provider is nil, or the
 // provider returns an error.
+//
+// When ep implements events.TailProvider, only the trailing
+// lastMaintenanceTailLimit matching events per type are read, instead of
+// materializing the full event log — the production FileRecorder backing
+// implements TailProvider, so the status path gets a bounded read for
+// free. Providers that don't implement it (e.g. Multiplexer) fall back to
+// the full ep.List scan.
 func LastMaintenance(ep events.Provider) (time.Time, string) {
 	if ep == nil {
 		return time.Time{}, ""
 	}
+	tp, hasTail := ep.(events.TailProvider)
 	var (
 		latestTs     time.Time
 		latestStatus string
@@ -119,7 +127,15 @@ func LastMaintenance(ep events.Provider) (time.Time, string) {
 		{events.StoreMaintenanceDone, "success"},
 		{events.StoreMaintenanceFailed, "failed"},
 	} {
-		evts, err := ep.List(events.Filter{Type: spec.typ})
+		var (
+			evts []events.Event
+			err  error
+		)
+		if hasTail {
+			evts, err = tp.ListTail(events.Filter{Type: spec.typ}, lastMaintenanceTailLimit)
+		} else {
+			evts, err = ep.List(events.Filter{Type: spec.typ})
+		}
 		if err != nil {
 			continue
 		}
@@ -132,5 +148,8 @@ func LastMaintenance(ep events.Provider) (time.Time, string) {
 	}
 	return latestTs, latestStatus
 }
+
+// lastMaintenanceTailLimit bounds the ListTail read in LastMaintenance.
+const lastMaintenanceTailLimit = 8
 
 const bytesPerMB = 1_000_000

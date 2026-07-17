@@ -221,3 +221,54 @@ func TestLastMaintenanceNoEvents(t *testing.T) {
 		t.Fatalf("LastMaintenance(empty) = (%v,%q), want (zero,\"\")", ts, status)
 	}
 }
+
+// tailCallRecorder wraps a *events.Fake and records whether List or
+// ListTail was invoked, so tests can assert LastMaintenance prefers the
+// bounded ListTail path when the provider implements events.TailProvider.
+type tailCallRecorder struct {
+	*events.Fake
+	listCalls     int
+	listTailCalls int
+	lastTailLimit int
+}
+
+func (r *tailCallRecorder) List(filter events.Filter) ([]events.Event, error) {
+	r.listCalls++
+	return r.Fake.List(filter)
+}
+
+func (r *tailCallRecorder) ListTail(filter events.Filter, limit int) ([]events.Event, error) {
+	r.listTailCalls++
+	r.lastTailLimit = limit
+	return r.Fake.ListTail(filter, limit)
+}
+
+func TestLastMaintenanceUsesListTailWhenAvailable(t *testing.T) {
+	recorder := &tailCallRecorder{Fake: events.NewFake()}
+	older := time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 4, 8, 3, 0, 0, 0, time.UTC)
+
+	payloadDone, _ := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 1})
+	payloadFail, _ := json.Marshal(events.StoreMaintenanceFailedPayload{Stage: "gc"})
+
+	recorder.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: older, Payload: payloadDone})
+	recorder.Record(events.Event{Type: events.StoreMaintenanceFailed, Ts: newer, Payload: payloadFail})
+
+	ts, status := LastMaintenance(recorder)
+
+	if recorder.listTailCalls == 0 {
+		t.Fatalf("LastMaintenance did not call ListTail when provider implements TailProvider")
+	}
+	if recorder.listCalls != 0 {
+		t.Fatalf("LastMaintenance called List %d time(s), want 0 when ListTail is available", recorder.listCalls)
+	}
+	if recorder.lastTailLimit <= 0 || recorder.lastTailLimit > 32 {
+		t.Fatalf("ListTail called with limit = %d, want a small bounded N in (0,32]", recorder.lastTailLimit)
+	}
+	if !ts.Equal(newer) {
+		t.Fatalf("ts = %v, want %v", ts, newer)
+	}
+	if status != "failed" {
+		t.Fatalf("status = %q, want failed", status)
+	}
+}
