@@ -43,13 +43,13 @@ func TestCodexHooksDriftCheckPassesCurrentHooks(t *testing.T) {
     "SessionStart": [{
       "hooks": [{
         "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city %s prime --hook --hook-format codex"
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart \"${GC_BIN:-gc}\" --city %s prime --hook --hook-format codex"
       }]
     }],
     "PreCompact": [{
       "hooks": [{
         "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc --city %s handoff --auto --hook-format codex \"context cycle\""
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && \"${GC_BIN:-gc}\" --city %s handoff --auto --hook-format codex \"context cycle\""
       }]
     }]
   }
@@ -152,7 +152,9 @@ func TestCodexHooksDriftCheckFixBindsAgentWorkDirToCityRoot(t *testing.T) {
 		t.Fatalf("read hooks: %v", err)
 	}
 	got := string(data)
-	if !strings.Contains(got, `gc --city `) {
+	// Raw JSON bytes, so the quotes around the invocation token appear
+	// \"-escaped; adjacency proves --city is bound to the managed gc call.
+	if !strings.Contains(got, `\"${GC_BIN:-gc}\" --city `) {
 		t.Fatalf("fixed hooks missing explicit --city binding:\n%s", got)
 	}
 	if !strings.Contains(got, shellquote.Quote(cityDir)) {

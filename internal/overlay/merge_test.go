@@ -251,6 +251,70 @@ func TestMergeSettingsJSON_BashIdentity(t *testing.T) {
 	}
 }
 
+// TestMergeSettingsJSON_GCBinTokenIdentity pins the merge-identity
+// normalization for the GC_BIN invocation-token change: a managed gc command
+// keeps the same identity whether spelled with bare `gc` or with
+// GCBinInvocationToken, so re-projecting the new template replaces the stale
+// entry in place instead of appending a duplicate hook beside it. Commands
+// without gc's exact managed PATH-export prefix are never treated as
+// gc-emitted, so user commands that merely mention the token keep distinct
+// identities.
+func TestMergeSettingsJSON_GCBinTokenIdentity(t *testing.T) {
+	for name, tc := range map[string]struct {
+		key    string
+		prefix string
+	}{
+		"cursor-command-key":  {key: "command", prefix: CanonicalGCPathPrefix},
+		"copilot-bash-key":    {key: "bash", prefix: CanonicalGCPathPrefix},
+		"antigravity-command": {key: "command", prefix: `export PATH="$HOME/go/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH" && `},
+	} {
+		t.Run(name, func(t *testing.T) {
+			oldEntry := map[string]any{tc.key: tc.prefix + `gc prime --hook`}
+			newEntry := map[string]any{tc.key: tc.prefix + GCBinInvocationToken + ` prime --hook`, "timeout": 30}
+			base := map[string]any{"hooks": map[string]any{"sessionStart": []any{oldEntry}}}
+			over := map[string]any{"hooks": map[string]any{"sessionStart": []any{newEntry}}}
+			baseJSON, _ := json.Marshal(base)
+			overJSON, _ := json.Marshal(over)
+
+			result, err := MergeSettingsJSON(baseJSON, overJSON)
+			if err != nil {
+				t.Fatalf("MergeSettingsJSON: %v", err)
+			}
+			var doc map[string]any
+			if err := json.Unmarshal(result, &doc); err != nil {
+				t.Fatalf("unmarshal result: %v", err)
+			}
+			arr := doc["hooks"].(map[string]any)["sessionStart"].([]any)
+			if len(arr) != 1 {
+				t.Fatalf("sessionStart entries = %d, want 1 (old spelling replaced in place, not duplicated):\n%s", len(arr), result)
+			}
+			got := arr[0].(map[string]any)[tc.key].(string)
+			if got != tc.prefix+GCBinInvocationToken+` prime --hook` {
+				t.Fatalf("merged command = %q, want the GC_BIN-honoring spelling", got)
+			}
+		})
+	}
+
+	// Without the canonical managed prefix the two spellings stay distinct
+	// identities — user-authored commands are never identity-collapsed.
+	base := `{"hooks":{"sessionStart":[{"command":"gc prime --hook"}]}}`
+	overDoc := map[string]any{"hooks": map[string]any{"sessionStart": []any{
+		map[string]any{"command": GCBinInvocationToken + ` prime --hook`},
+	}}}
+	over, _ := json.Marshal(overDoc)
+	result, err := MergeSettingsJSON([]byte(base), over)
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(result, &doc); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if arr := doc["hooks"].(map[string]any)["sessionStart"].([]any); len(arr) != 2 {
+		t.Fatalf("prefixless entries = %d, want 2 (no identity collapse without the managed prefix):\n%s", len(arr), result)
+	}
+}
+
 func TestMergeSettingsJSON_EmptyBase(t *testing.T) {
 	over := `{"hooks": {"Stop": [{"matcher": "", "hooks": []}]}}`
 	result, err := MergeSettingsJSON([]byte(`{}`), []byte(over))

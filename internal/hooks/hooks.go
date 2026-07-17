@@ -239,7 +239,96 @@ func overlayManagedNeedsUpgrade(provider, rel string) func([]byte) bool {
 	if provider == "omp" && rel == path.Join(".omp", "hooks", "gc-hook.ts") {
 		return ompHookNeedsUpgrade
 	}
+	if provider == "cursor" && rel == path.Join(".cursor", "hooks.json") {
+		return managedShellHookFileNeedsGCBinUpgrade
+	}
+	if provider == "copilot" && rel == path.Join(".github", "hooks", "gascity.json") {
+		return managedShellHookFileNeedsGCBinUpgrade
+	}
+	if provider == "kiro" && rel == path.Join(".kiro", "agents", "gascity.json") {
+		return managedShellHookFileNeedsGCBinUpgrade
+	}
 	return nil
+}
+
+// managedShellHookFileNeedsGCBinUpgrade reports whether a managed JSON hook
+// overlay still carries the pre-GC_BIN spelling of a managed gc shell
+// command (canonical PATH-export prefix + bare `gc` invocation). It fires
+// the managed rewrite for the shell-shaped overlay providers whose hook
+// files are otherwise written once and preserved (cursor, copilot, kiro).
+//
+// The rewrite replaces the whole file with the current template (pi/omp
+// precedent for write-once overlays), so the gate is all-or-nothing tight:
+// it fires only when the file is recognizably the machine-materialized
+// artifact — every "command"/"bash" value is an exact managed command body
+// under the exact canonical prefix, in either invocation-token spelling —
+// and at least one command still uses the stale bare-`gc` spelling. Any
+// deviation anywhere (an edited, added, wrapped, or prefixless command)
+// classifies the file user-authored and leaves it untouched.
+// writeEmbeddedManaged backs up any file it rewrites.
+func managedShellHookFileNeedsGCBinUpgrade(existing []byte) bool {
+	var root any
+	if err := json.Unmarshal(existing, &root); err != nil {
+		return false
+	}
+	stale, foreign := classifyGCManagedOverlayCommands(root)
+	return stale > 0 && !foreign
+}
+
+// classifyGCManagedOverlayCommands walks every "command"/"bash" string value
+// under v, counting commands in the exact stale (bare-`gc`) managed spelling
+// and reporting whether any command is not an exact managed command body in
+// either spelling (foreign ⇒ user-authored content somewhere in the file).
+func classifyGCManagedOverlayCommands(v any) (stale int, foreign bool) {
+	switch node := v.(type) {
+	case map[string]any:
+		for key, val := range node {
+			if key == "command" || key == "bash" {
+				command, ok := val.(string)
+				switch {
+				case !ok:
+					foreign = true
+				case isManagedOverlayCommand(command, "gc"):
+					stale++
+				case isManagedOverlayCommand(command, gcInvocationToken):
+					// Current spelling — managed, nothing to do.
+				default:
+					foreign = true
+				}
+				continue
+			}
+			s, f := classifyGCManagedOverlayCommands(val)
+			stale += s
+			foreign = foreign || f
+		}
+	case []any:
+		for _, elem := range node {
+			s, f := classifyGCManagedOverlayCommands(elem)
+			stale += s
+			foreign = foreign || f
+		}
+	}
+	return stale, foreign
+}
+
+// isManagedOverlayCommand reports whether command is exactly one of the
+// managed shell hook commands gc emits for the write-once overlay providers
+// (cursor, copilot, kiro), spelled with the given invocation token and
+// carrying the exact canonical PATH-export prefix.
+func isManagedOverlayCommand(command, token string) bool {
+	body := commandBodyAfterCanonicalPrefix(command)
+	if body == command {
+		// No canonical PATH-export prefix — user-authored.
+		return false
+	}
+	switch body {
+	case token + ` prime --hook`,
+		token + ` handoff --auto "context cycle"`,
+		token + ` hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
+		token + ` hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`:
+		return true
+	}
+	return false
 }
 
 func piHookNeedsUpgrade(existing []byte) bool {
@@ -921,7 +1010,7 @@ func upgradeCodexHookCommand(event, command, cityDir string) (string, bool) {
 }
 
 func managedPromptHookRunPrefix(cityDir string) string {
-	return `gc ` + codexCityFlag(cityDir) + `hook run --timeout 15s --timeout-exit-code 0 -- `
+	return gcInvocationToken + ` ` + codexCityFlag(cityDir) + `hook run --timeout 15s --timeout-exit-code 0 -- `
 }
 
 func upgradeManagedPromptHookCommand(command, hookFormat, cityDir string) (string, bool) {
@@ -1042,7 +1131,7 @@ func parseGCCommandBody(body string) (map[string]string, []string, bool) {
 		env[key] = value
 		i++
 	}
-	if i >= len(tokens) || tokens[i] != "gc" {
+	if i >= len(tokens) || !isGCInvocationToken(tokens[i]) {
 		return nil, nil, false
 	}
 	args := tokens[i+1:]
@@ -1093,7 +1182,7 @@ func parseManagedGCCommand(command string) (string, map[string]string, []string,
 		envTokens = append(envTokens, tokens[i])
 		i++
 	}
-	if i >= len(tokens) || tokens[i] != "gc" {
+	if i >= len(tokens) || !isGCInvocationToken(tokens[i]) {
 		return "", nil, nil, false
 	}
 	if len(envTokens) > 0 && prefix == "" && !hasManagedEnv {
@@ -1421,7 +1510,31 @@ func upgradeClaudeHookEntry(event string, entry map[string]any) bool {
 // canonicalGCPathPrefix is the env-setup prefix gc prepends to every
 // managed hook command. Legacy command bodies always appear either bare
 // or with this prefix; user-wrapped variants never have this exact prefix.
-const canonicalGCPathPrefix = `export PATH="$HOME/go/bin:$HOME/.local/bin:$PATH" && `
+// Aliases overlay.CanonicalGCPathPrefix so the merge-identity normalization
+// in package overlay can never drift from the recognizers here.
+const canonicalGCPathPrefix = overlay.CanonicalGCPathPrefix
+
+// gcInvocationToken is the executable token managed shell hook commands use
+// to invoke gc. `"${GC_BIN:-gc}"` honors the GC_BIN pointer gc exports into
+// every agent process (the deployed binary), degrading to bare-`gc` PATH
+// resolution when GC_BIN is unset or empty (ADR-0027 §Option F; precedent:
+// the opencode plugin's `process.env.GC_BIN || "gc"`). The PATH-export
+// prefix stays: it serves the gc process's own downstream tool resolution
+// (bd/dolt/git); once gc is invoked via GC_BIN the go/bin-first ordering no
+// longer selects which gc build runs.
+const gcInvocationToken = overlay.GCBinInvocationToken
+
+// gcInvocationTokenParsed is gcInvocationToken as shellquote.Split yields it
+// inside a parsed command: surrounding quotes consumed, no expansion.
+const gcInvocationTokenParsed = `${GC_BIN:-gc}`
+
+// isGCInvocationToken reports whether a parsed command token invokes gc:
+// the historical bare `gc` or the current GC_BIN-honoring form. Exact
+// match only — wrappers and lookalike tokens stay unrecognized so managed
+// upgrades never rewrite user-authored commands.
+func isGCInvocationToken(token string) bool {
+	return token == "gc" || token == gcInvocationTokenParsed
+}
 
 // commandBodyAfterCanonicalPrefix returns the portion of command following
 // the canonical gc PATH-export prefix if present, else returns command
@@ -1442,6 +1555,12 @@ func commandBodyAfterCanonicalPrefix(command string) string {
 // All recognition paths require exact-body match — gc has only ever
 // emitted these tokens as the complete command body, never with
 // trailing args.
+//
+// Both invocation-token spellings are recognized: the equalsLegacyCommandBody
+// cases match the historical bare-`gc` bodies verbatim, and the parse-based
+// isCodex*/codexManagedPromptTarget cases match current-form bodies in either
+// spelling because parseGCCommandBody accepts `gc` and `${GC_BIN:-gc}` alike
+// (isGCInvocationToken).
 func isLegacyGCManagedCommand(event, command string) bool {
 	body := commandBodyAfterCanonicalPrefix(command)
 	switch event {
@@ -1472,17 +1591,31 @@ func isLegacyGCManagedCommand(event, command string) bool {
 // with additional arguments, update this constant alongside the
 // emission site so legacy detection remains tight.
 func sessionStartCurrentFormBody(cityDir string) string {
-	return `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc ` + codexCityFlag(cityDir) + `prime --hook --hook-format codex`
+	return `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart ` + gcInvocationToken + ` ` + codexCityFlag(cityDir) + `prime --hook --hook-format codex`
 }
 
 const sessionStartPreviousManagedFormBody = `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook`
+
+// sessionStartBareGCFormBody is the pre-GC_BIN spelling of the current
+// SessionStart form: identical to sessionStartCurrentFormBody("") except it
+// invokes bare `gc`. Every Claude settings file materialized before the
+// GC_BIN invocation-token change carries exactly this body; recognizing it
+// as a legacy form is what lets those files upgrade in place — without it
+// they would be classified user-authored and never flip to the deployed
+// binary (the ADR-0027 "looks fixed, isn't" trap).
+const sessionStartBareGCFormBody = `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex`
 
 // preCompactCurrentFormBody is the canonical current-form managed PreCompact
 // command body (post-canonical-PATH-prefix). If gc ever extends this command
 // with additional arguments, update this constant alongside the emission site.
 func preCompactCurrentFormBody(cityDir string) string {
-	return `gc ` + codexCityFlag(cityDir) + `handoff --auto --hook-format codex "context cycle"`
+	return gcInvocationToken + ` ` + codexCityFlag(cityDir) + `handoff --auto --hook-format codex "context cycle"`
 }
+
+// preCompactClaudeCurrentFormBody is the canonical current-form managed
+// PreCompact command body for Claude settings (no codex hook-format flag),
+// kept in sync with the PreCompact entry in config/claude.json.
+const preCompactClaudeCurrentFormBody = gcInvocationToken + ` handoff --auto "context cycle"`
 
 // equalsLegacyCommandBody reports whether the command body is exactly the
 // legacy token. gc historically emitted these tokens as the complete
@@ -1511,31 +1644,33 @@ func equalsLegacyCommandBody(command, token string) bool {
 // rewritten.
 func upgradeClaudeHookCommand(event, command string) (string, bool) {
 	body := commandBodyAfterCanonicalPrefix(command)
+	prefix := strings.TrimSuffix(command, body)
 	switch event {
 	case "PreCompact":
-		// Older legacy: PreCompact used `gc prime --hook` before
-		// `gc handoff` was introduced. Upgrade to the current
-		// `gc handoff --auto "context cycle"` form. Tested first
-		// because it changes the same trailing token the bare-handoff
-		// form would otherwise patch.
-		if equalsLegacyCommandBody(body, `gc prime --hook`) {
-			return strings.Replace(command, `gc prime --hook`, `gc handoff --auto "context cycle"`, 1), true
-		}
-		// Legacy: bare `gc handoff "context cycle"` (no --auto)
-		// requests a controller restart on every Claude Code
-		// compaction event, killing the session (gc-flp1). Upstream
-		// fix landed in commit 7b3b913a; this patches existing cities.
-		if equalsLegacyCommandBody(body, `gc handoff "context cycle"`) {
-			return strings.Replace(command, `gc handoff "context cycle"`, `gc handoff --auto "context cycle"`, 1), true
+		// Legacy forms, oldest first: PreCompact used `gc prime --hook`
+		// before `gc handoff` was introduced; bare `gc handoff
+		// "context cycle"` (no --auto) requests a controller restart on
+		// every Claude Code compaction event, killing the session
+		// (gc-flp1; upstream fix commit 7b3b913a); and `gc handoff
+		// --auto "context cycle"` is the pre-GC_BIN spelling of the
+		// current form — right arguments, stale bare-`gc` invocation
+		// token, so it runs whatever build ~/go/bin holds instead of
+		// the deployed binary (ADR-0027).
+		if equalsLegacyCommandBody(body, `gc prime --hook`) ||
+			equalsLegacyCommandBody(body, `gc handoff "context cycle"`) ||
+			equalsLegacyCommandBody(body, `gc handoff --auto "context cycle"`) {
+			return prefix + preCompactClaudeCurrentFormBody, true
 		}
 	case "SessionStart":
 		// Legacy: bare `gc prime --hook` without the
 		// GC_MANAGED_SESSION_HOOK / GC_HOOK_EVENT_NAME env vars the
-		// current managed form expects.
+		// current managed form expects; the env-prefixed previous
+		// form; and the pre-GC_BIN spelling of the current form
+		// (bare `gc` invocation token — see sessionStartBareGCFormBody).
 		if equalsLegacyCommandBody(body, `gc prime --hook`) ||
 			equalsLegacyCommandBody(body, `gc prime --hook --hook-format codex`) ||
-			equalsLegacyCommandBody(body, sessionStartPreviousManagedFormBody) {
-			prefix := strings.TrimSuffix(command, body)
+			equalsLegacyCommandBody(body, sessionStartPreviousManagedFormBody) ||
+			equalsLegacyCommandBody(body, sessionStartBareGCFormBody) {
 			return prefix + sessionStartCurrentFormBody(""), true
 		}
 	case "UserPromptSubmit":
