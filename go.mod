@@ -21,7 +21,7 @@ require (
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
-	github.com/steveyegge/beads v1.1.0
+	github.com/steveyegge/beads v1.1.1-0.20260704062855-e97839a2e1c0
 	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp v0.19.0
@@ -31,6 +31,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.43.0
 	go.opentelemetry.io/otel/sdk/log v0.19.0
 	go.opentelemetry.io/otel/sdk/metric v1.43.0
+	golang.org/x/mod v0.35.0
 	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.45.0
 	golang.org/x/term v0.43.0
@@ -214,7 +215,6 @@ require (
 	go.yaml.in/yaml/v4 v4.0.0-rc.4 // indirect
 	golang.org/x/crypto v0.52.0 // indirect
 	golang.org/x/exp v0.0.0-20240205201215-2c58cdc269a3 // indirect
-	golang.org/x/mod v0.35.0 // indirect
 	golang.org/x/net v0.54.0 // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
 	golang.org/x/telemetry v0.0.0-20260409153401-be6f6cb8b1fa // indirect

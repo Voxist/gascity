@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -91,8 +92,12 @@ func TestConditionalWritesGraduationRealDepsEnv(t *testing.T) {
 	if _, err := os.Stat(realDepsEnv); err != nil {
 		t.Fatalf("repo-root deps.env unreadable: %v", err)
 	}
-	if v, present, err := depsEnvValue(realDepsEnv, "BD_VERSION"); err != nil || !present || !strings.HasPrefix(v, "v") {
-		t.Fatalf("real deps.env BD_VERSION = %q present=%v err=%v, want a v-prefixed tag", v, present, err)
+	// BD_VERSION is a v-prefixed release tag, or a full 40-hex beads commit
+	// while the schema-bridge pin is in effect (see deps.env). Either way the
+	// graduation gate below keys on the anchor variable, not on BD_VERSION.
+	if v, present, err := depsEnvValue(realDepsEnv, "BD_VERSION"); err != nil || !present ||
+		(!strings.HasPrefix(v, "v") && !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(v)) {
+		t.Fatalf("real deps.env BD_VERSION = %q present=%v err=%v, want a v-prefixed tag or a 40-hex beads commit", v, present, err)
 	}
 
 	floor, present, err := depsEnvValue(realDepsEnv, anchor)

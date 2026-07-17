@@ -20,11 +20,19 @@ import (
 // emitted ahead of the pinned 1.0.4 floor) could merge green. This test makes
 // deps.env the single source of truth and fails loudly the moment an anchor
 // moves without the others.
+//
+// BD_VERSION comes in two shapes. Normally it is a v-prefixed release tag,
+// installed from a SHA-pinned tarball. In bridge mode (ADR-0026 C5) it is a
+// full 40-hex beads commit built from source, used only while gc's linked
+// beads library needs a schema-migration level no release carries; the bridge
+// contract adds a lockstep requirement against go.mod's beads pseudo-version
+// so the raw bd binary and the linked library can never sit at different
+// migration levels (the skew that broke the store-consistency suite in #87).
 func TestBDVersionPins(t *testing.T) {
 	root := repoRoot(t)
 	env := readDotenv(t, filepath.Join(root, "deps.env"))
 
-	bdVersion := env["BD_VERSION"]         // installable default (v-prefixed release tag)
+	bdVersion := env["BD_VERSION"]         // installable default (release tag, or 40-hex beads commit in bridge mode)
 	bdPrev := env["BD_PREV_VERSION"]       // min-supported matrix cell (downloadable)
 	bdCurrent := env["BD_CURRENT_VERSION"] // bleeding-edge matrix cell (built from source)
 	bdCurrentRef := env["BD_CURRENT_REF"]  // beads commit the current cell builds from
@@ -49,6 +57,34 @@ func TestBDVersionPins(t *testing.T) {
 		t.Fatalf("deps.env BD_CURRENT_VERSION = %q, want a semver token", bdCurrent)
 	}
 
+	// Bridge-mode detection: a 40-hex BD_VERSION pins a beads commit built from
+	// source instead of a release tarball.
+	bdVersionIsCommit := regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(bdVersion)
+
+	// Lockstep with the linked library. The bd binary CI installs and the beads
+	// library gc links must carry the same schema-migration level: a go.mod
+	// pseudo-version (untagged beads commit) alongside a released BD_VERSION —
+	// or vice versa — is exactly the raw-bd/linked-lib skew the
+	// StoreConsistentAcrossRawBdGcBdAndProviderStore tests fail on. Exiting the
+	// bridge therefore means repinning go.mod AND BD_VERSION in one change.
+	goMod := readFile(t, root, "go.mod")
+	modMatch := regexp.MustCompile(`(?m)^\s*github\.com/steveyegge/beads\s+(\S+)`).FindStringSubmatch(goMod)
+	if modMatch == nil {
+		t.Fatal("go.mod missing a github.com/steveyegge/beads require line")
+	}
+	linkedBeads := modMatch[1]
+	// All three pseudo-version shapes end in <sep><timestamp>-<short12> where
+	// <sep> is "-" (v0.0.0-…) or "." (vX.Y.Z-0.… / vX.Y.Z-pre.0.…).
+	pseudo := regexp.MustCompile(`[-.]\d{14}-([0-9a-f]{12})$`).FindStringSubmatch(linkedBeads)
+	switch {
+	case bdVersionIsCommit && pseudo == nil:
+		t.Fatalf("deps.env BD_VERSION pins beads commit %s but go.mod links released beads %s; the bd binary and the linked library must move together", bdVersion, linkedBeads)
+	case bdVersionIsCommit && !strings.HasPrefix(bdVersion, pseudo[1]):
+		t.Fatalf("deps.env BD_VERSION = %s but go.mod's beads pseudo-version %s pins commit %s; the bd binary and the linked library must pin the SAME beads commit", bdVersion, linkedBeads, pseudo[1])
+	case !bdVersionIsCommit && pseudo != nil:
+		t.Fatalf("go.mod links untagged beads commit %s (%s) but deps.env BD_VERSION = %s installs a release; pin BD_VERSION to the same commit, or move go.mod to a release tag", pseudo[1], linkedBeads, bdVersion)
+	}
+
 	// Anchor roles, kept as distinct contracts so a promotion cannot quietly
 	// collapse them:
 	//   BD_PREV_VERSION -- the minimum-supported bd (the matrix floor cell).
@@ -64,9 +100,16 @@ func TestBDVersionPins(t *testing.T) {
 			bdMin, bdPrev, strings.TrimPrefix(bdPrev, "v"))
 	}
 	// The installable default may move ahead of the floor but never behind it.
-	if deps.CompareVersions(bdVersion, bdPrev) < 0 {
-		t.Fatalf("deps.env BD_VERSION = %q is older than BD_PREV_VERSION = %q; the installable default must be at least the minimum-supported version",
-			bdVersion, bdPrev)
+	// A commit pin has no semver of its own; its floor standing is carried by
+	// the pseudo-version go.mod derives from the same commit
+	// (vX.Y.Z-0.<timestamp>-<short>), whose base version CompareVersions reads.
+	installableForFloor := bdVersion
+	if bdVersionIsCommit {
+		installableForFloor = linkedBeads
+	}
+	if deps.CompareVersions(installableForFloor, bdPrev) < 0 {
+		t.Fatalf("deps.env BD_VERSION = %q (comparable as %q) is older than BD_PREV_VERSION = %q; the installable default must be at least the minimum-supported version",
+			bdVersion, installableForFloor, bdPrev)
 	}
 
 	// The ready-projection feature floor (#3135's regressing surface) must exist
@@ -93,13 +136,15 @@ func TestBDVersionPins(t *testing.T) {
 	}
 
 	// Every released bd that the required CI paths install from a tarball must
-	// carry a pinned SHA for every os/arch, never the API fallback. That is both
-	// the minimum-supported cell (BD_PREV_VERSION) and the installable default
-	// (BD_VERSION): they are the same value today but may diverge on a promotion,
-	// and main CI installs BD_VERSION directly. Deduplicate when they are equal.
+	// carry a pinned SHA for every os/arch, never the API fallback. That is the
+	// minimum-supported cell (BD_PREV_VERSION) always, and the installable
+	// default (BD_VERSION) when it is a release; a bridge-mode commit pin is
+	// built from source, where the 40-hex commit itself pins the exact tree
+	// (git content addressing) in place of a tarball SHA. Deduplicate when the
+	// two release values are equal.
 	install := readFile(t, root, ".github/scripts/install-bd-archive.sh")
 	requiredReleases := []string{bdPrev}
-	if bdVersion != bdPrev {
+	if !bdVersionIsCommit && bdVersion != bdPrev {
 		requiredReleases = append(requiredReleases, bdVersion)
 	}
 	for _, release := range requiredReleases {

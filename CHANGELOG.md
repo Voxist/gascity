@@ -131,6 +131,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the untested `never fired (controller start unknown)` path reports
   `StatusWarning` instead of the false-green `StatusOK` on exactly the dead
   orders the check exists to catch.
+- **Restore the native beads store fleet-wide: move the linked beads library
+  past migration 0054, and stop `version_compat` failing on pseudo-version
+  pins (vp-kpoi).** The deployed `bd` binary migrated every store to schema
+  v54 while gc's linked `github.com/steveyegge/beads` v1.1.0 tops out at
+  migration 0053, so `native_open` refused every rig scope ("database is at
+  v54, binary knows up to v53") and every store op silently fell back to the
+  exec store — degraded for 6 days at ~130 warns/hour. No published beads tag
+  contains 0054, so go.mod now pins the first upstream commit that does:
+  `v1.1.1-0.20260704062855-e97839a2e1c0` (an explicitly time-boxed bridge
+  until upstream cuts a tag ≥0054). The preflight `version_compat` check now
+  treats a pseudo-versioned linked library like a source build: an
+  untagged-commit pin carries no release label comparable to bd's
+  self-reported version, so the label comparison can neither confirm nor
+  refute parity — the schema version (asserted in the same check and again at
+  native open) stays the real compatibility signal. Without that carve-out the
+  label mismatch (`1.1.0` ≠ `1.1.1-0.20260704…`) would have re-taken the
+  native store offline at the `version_compat` gate — the same
+  label-vs-schema string-compare defect, one layer up.
 
 - **Stop dispatch-budget starvation of short-interval orders: staleness-priority
   admission + config-driven per-tick budget (vp-cixi.6 / PR #77; CHANGELOG and

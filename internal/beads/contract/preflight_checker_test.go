@@ -528,3 +528,39 @@ func TestCheckVersionCompatSourceBuild(t *testing.T) {
 		})
 	}
 }
+
+// TestCheckVersionCompatPseudoVersion verifies that a pseudo-versioned linked
+// library (an untagged-commit pin) does not take the native store offline.
+// bd self-reports only a release label, never a commit, so a label comparison
+// against a pseudo-version can neither confirm nor refute parity — the schema
+// version is the real compatibility signal (validated by this check's schema
+// assertion and again at native open). Only a *confirmed* release-label
+// mismatch may fail the check.
+func TestCheckVersionCompatPseudoVersion(t *testing.T) {
+	validCtx := func(bdVersion string) PreflightBDContext {
+		return PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: bdVersion, SchemaVersion: 54}
+	}
+	tests := []struct {
+		name       string
+		libVersion string
+		ctx        PreflightBDContext
+		want       PreflightCheckState
+	}{
+		{"pseudo-version pin vs release-label bd — unconfirmable, pass", "v1.1.1-0.20260704062855-e97839a2e1c0", validCtx("1.1.0"), PreflightCheckPass},
+		{"pseudo-version already trimmed of v — still pass", "1.1.1-0.20260704062855-e97839a2e1c0", validCtx("1.1.0"), PreflightCheckPass},
+		{"pseudo-version with missing bd version stays warn", "v1.1.1-0.20260704062855-e97839a2e1c0", validCtx(""), PreflightCheckWarn},
+		{"non-pseudo prerelease label still compares — mismatch fails", "1.1.1-rc.1", validCtx("1.1.0"), PreflightCheckFail},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := PreflightChecker{BeadsLibraryVersion: tt.libVersion}
+			got := c.checkVersionCompat(tt.ctx, nil)
+			if got.ID != PreflightCheckVersionCompat {
+				t.Fatalf("ID = %q, want %q", got.ID, PreflightCheckVersionCompat)
+			}
+			if got.State != tt.want {
+				t.Fatalf("state = %q, want %q (summary: %q)", got.State, tt.want, got.Summary)
+			}
+		})
+	}
+}

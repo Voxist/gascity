@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.1.0"
+      BD_VERSION: "e97839a2e1c0de305bf64a01b997f2f314591aa4" # bd commit with schema 0054; lockstep with go.mod beads pin (deps.env, vp-kpoi)
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu

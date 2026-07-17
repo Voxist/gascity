@@ -14,7 +14,7 @@ inputs:
     description: Dolt version to install (without leading v)
     required: true
   bd-version:
-    description: Beads release version to install (with leading v)
+    description: "Beads pin to install: release tag (with leading v) or 40-hex source commit"
     required: true
   install-claude-cli:
     description: Whether to install the Claude CLI
@@ -113,7 +113,7 @@ runs:
       shell: bash
       run: ${{ github.action_path }}/../../scripts/install-dolt-archive.sh "${{ inputs.dolt-version }}" --cache
 
-    - name: Install released bd v${{ inputs.bd-version }}
+    - name: Install pinned bd ${{ inputs.bd-version }}
       shell: bash
       run: ${{ github.action_path }}/../../scripts/install-bd-archive.sh "${{ inputs.bd-version }}" --cache
 

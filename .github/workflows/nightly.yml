@@ -10,7 +10,7 @@ permissions:
 
 env:
   DOLT_VERSION: "2.1.7"
-  BD_VERSION: "v1.1.0"
+  BD_VERSION: "e97839a2e1c0de305bf64a01b997f2f314591aa4" # bd commit with schema 0054; lockstep with go.mod beads pin (deps.env, vp-kpoi)
 
 jobs:
   tier-b:
@@ -89,7 +89,7 @@ jobs:
     timeout-minutes: 30
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.1.0"
+      BD_VERSION: "e97839a2e1c0de305bf64a01b997f2f314591aa4" # bd commit with schema 0054; lockstep with go.mod beads pin (deps.env, vp-kpoi)
       GC_BEADS: sqlite
       GC_ACCEPTANCE_BEADS_PROVIDER: sqlite
     steps:
