@@ -224,3 +224,59 @@ pipeline or any chain-of-evidence metadata.
   a separate deferred item (`#1896 follow-up` per the existing comment) and is
   out of scope here; Fix 2's `CtxLister` makes its abandon path cancellable as a
   side effect, but it is not the target of this plan.
+
+## Status
+
+- [x] T-001 — failing test: LastMaintenance calls ListTail on a TailProvider   ✅ green at 3a7bf61d9
+- [x] T-002 — LastMaintenance ListTail path + max-Ts selection + List fallback   ✅ green at 3a7bf61d9
+- [x] T-003 — failing test: LastMaintenance falls back to List for non-TailProvider   ✅ green at c71c363ec
+- [x] T-004 — confirm T-003 covered by T-002 (no new code)   ✅ green at c71c363ec
+- [x] T-005 — failing test: LastMaintenance reads bounded work on a 10k-event backing   ✅ green at f19cdbcc1
+- [x] T-006 — tune + document tail limit (8, safety margin vs backward wall-clock step)   ✅ green at f19cdbcc1
+- [x] T-007 — failing test: DoltliteReadStore.ListCtx honors cancelled ctx   ✅ green at c2a3d7cf8
+- [x] T-008 — DoltliteReadStore.ListCtx threads ctx through queryIssues chain   ✅ green at c2a3d7cf8
+- [x] T-009 — failing test: CachingStore.ListCtx honors ctx on Live/ParentID path   ✅ green at 76ea6a483
+- [x] T-010 — CachingStore.ListCtx routes backing reads through CtxLister when available   ✅ green at 76ea6a483
+- [x] T-011 — failing test: BdStore.ListCtx honors cancelled ctx (pre-flight)   ✅ green at 0e5af5913
+- [x] T-012 — BdStore.ListCtx pre-flight ctx.Err() check   ✅ green at 0e5af5913
+- [x] T-013 — failing test: statusListStoreWithTimeout calls ListCtx directly for CtxLister stores   ✅ green at ee56202c7
+- [x] T-014 — CtxLister fast path in statusListStoreWithTimeout (ScopedStoreLike priority preserved)   ✅ green at ee56202c7
+- [x] T-015 — doc comment rewrite + abandon-fallback regression test   ✅ green at 7b64030bd
+- [x] T-016 — full suite + vet   ✅ green — see verification notes below
+- [ ] T-017 — live pprof verification on a running supervisor — **deferred to operator**, not run by the executor (restarting the supervisor is shared-infrastructure, high-blast-radius; see bd note on vp-35ae)
+
+### T-016 verification notes
+
+`go build ./...` and `go vet ./...` are clean. `go test ./internal/api/...
+./internal/beads/... ./internal/storehealth/...`, `go test -tags
+gascity_native_beads ./internal/beads/...`, and `go test
+./internal/testpolicy/resourcecensus/...` are all green. A targeted run of
+every status/store-health test in `cmd/gc` (`TestCityStatus*`,
+`TestDoRigStatus*`, `TestRouteCityStatus*`, `TestRouteRigStatus*`,
+`TestStoreHealth*`, `TestControllerStatus*`, `TestLiveRowCount*`,
+`TestCollectStoreHealth*`, `TestRenderStoreHealthBlock*`,
+`TestSnapshotFromStatusView*`) is green.
+
+A full unsharded `go test ./...` locally hits two pre-existing, unrelated
+failures — confirmed independent of this plan's diff:
+- `cmd/gc` times out at the default 10 m test timeout (goroutine dump shows
+  it stuck in the unrelated `TestPackCommandCobraHelpAndUnknownParity` CLI
+  help test). This package is CI-sharded into 12 parts precisely because it
+  does not fit the default timeout unsharded; the targeted status-test subset
+  above completes in ~8 s.
+- `internal/productmetrics` fails 2-3 tests (nondeterministic across runs)
+  on deeply-nested-directory purge/quarantine cases with `mkdir: file name
+  too long` / `too many open files` — a macOS path-length (`PATH_MAX`) and
+  ulimit artifact in an unrelated subsystem (product-usage spool), not
+  touched by this plan's diff.
+
+**Also found and fixed during T-016 (not a plan task):** this worktree's
+`gc/vp-35ae` branch had been created from `origin/main` (the gastownhall
+upstream fork point, commit `a93023093`) instead of `Voxist/main` — the
+known trap documented for this repo (stale/diverged `origin` remote). This
+made the branch 205 commits behind the real PR target and caused a
+spurious `resourcecensus` census-drift failure plus a 109-file diff full of
+unrelated commits. Fixed via `git rebase --onto Voxist/main a93023093
+HEAD` (clean, no conflicts; verified unpushed, no dependent PR). Post-rebase
+the diff against `Voxist/main` is exactly the 12 files this plan touches,
+and `resourcecensus` passes.
