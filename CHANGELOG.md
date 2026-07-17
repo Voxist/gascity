@@ -31,6 +31,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   binaries once linked three different beads libraries while all
   self-reporting the same version string. New `cmd/artifactname` +
   `internal/provenance` artifact derivation.
+- **Storeless fallback for `gc session nudge`: bounded store attempt +
+  store-independent delivery, feature-flagged default-off (vl-3hb WS-B /
+  vp-4c86).** ADR-0024 designates `gc session nudge` as the fallback delivery
+  path when bd work-discovery is down, but its target resolution and shadow
+  enqueue route through the same bead store (and shared Dolt server) as
+  discovery, so a store-level degradation used to take out discovery and its
+  designated backup together. With `GC_NUDGE_STORELESS_FALLBACK=1` (or
+  `true`/`yes`/`on`), the store-touching resolution leg runs under a bounded
+  budget (3s); on budget exhaustion, a store-slow classification, or an
+  authoritative miss, the target is re-resolved from the live runtime provider
+  alone and delivery goes store-independent — queued nudges write the flock'd
+  `state.json` authority directly (observability shadow bead skipped, `BeadID`
+  empty), live nudges deliver provider-only. The CLI reports the degraded path
+  on stderr and as `"path": "storeless-fallback"` in `--json` output. With the
+  flag unset the behavior is unchanged. New file
+  `cmd/gc/cmd_nudge_storeless.go`.
 
 - **L0 pre-heal in `ensure-project-id`: auto-restore canonical project_id from
   `city.toml [identity_map]` when the DB confirms it but L1 was wiped (vp-cz7o.21).**
