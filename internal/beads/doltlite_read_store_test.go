@@ -2094,6 +2094,9 @@ func TestDoltliteReindexStoreRejectsNonDoltlite(t *testing.T) {
 	}
 	if err := ReindexDoltliteStore(dir); err == nil {
 		t.Fatal("ReindexDoltliteStore accepted a non-doltlite store, want error")
+	}
+}
+
 // TestDoltliteReadStoreListCtxHonorsCancelledContext asserts ListCtx honors a
 // pre-cancelled context by returning immediately without running the query,
 // instead of the abandoning-goroutine pattern statusListStoreWithTimeout uses

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -49,19 +50,26 @@ func (s *countingReadyStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, err
 // resolution does not cover). ListCtx blocks until ctx is done, then returns
 // ctx.Err() -- proving cancellation actually propagates into the store call
 // rather than being observed only after an unrelated completion.
+//
+// Call counters are atomics, not plain ints: statusListStoreWithTimeout
+// races the spawned ListCtx goroutine against its own reqCtx.Done() case and
+// returns on whichever fires first, so a test reading these fields after the
+// call returns has no happens-before edge to the goroutine's increment --
+// only the shared context-cancellation event orders both, and siblings of a
+// common event aren't ordered relative to each other.
 type ctxListerWorkStore struct {
 	*beads.MemStore
-	listCalls    int
-	listCtxCalls int
+	listCalls    atomic.Int32
+	listCtxCalls atomic.Int32
 }
 
 func (s *ctxListerWorkStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	s.listCalls++
+	s.listCalls.Add(1)
 	return s.MemStore.List(query)
 }
 
 func (s *ctxListerWorkStore) ListCtx(ctx context.Context, _ beads.ListQuery) ([]beads.Bead, error) {
-	s.listCtxCalls++
+	s.listCtxCalls.Add(1)
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
@@ -318,11 +326,11 @@ func TestStatusListStoreWithTimeoutCancelsCtxLister(t *testing.T) {
 	if elapsed > 2*time.Second {
 		t.Fatalf("statusListStoreWithTimeout blocked %s, want bounded by statusStoreReadTimeout", elapsed)
 	}
-	if store.listCtxCalls == 0 {
+	if store.listCtxCalls.Load() == 0 {
 		t.Fatal("statusListStoreWithTimeout did not call store.ListCtx")
 	}
-	if store.listCalls != 0 {
-		t.Fatalf("statusListStoreWithTimeout called store.List %d time(s), want 0 (should prefer ListCtx)", store.listCalls)
+	if calls := store.listCalls.Load(); calls != 0 {
+		t.Fatalf("statusListStoreWithTimeout called store.List %d time(s), want 0 (should prefer ListCtx)", calls)
 	}
 }
 
