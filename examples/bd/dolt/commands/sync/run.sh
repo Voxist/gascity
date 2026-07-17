@@ -464,10 +464,14 @@ sync_database_sql() {
     refspec_arg="$local_branch:$remote_branch"
   fi
 
+  # Tag the push so an orphaned server-side CALL DOLT_PUSH (client bound fired,
+  # or the order was cancelled mid-push) can be reaped precisely — Dolt
+  # preserves the comment in processlist.info. See reap_dolt_push_by_tag.
+  push_tag=$(dolt_push_tag "$name")
   if [ "$force" = true ]; then
-    push_query="USE \`$name\`; CALL DOLT_PUSH('--force', '--set-upstream', '$remote_name', '$refspec_arg')"
+    push_query="USE \`$name\`; CALL DOLT_PUSH('--force', '--set-upstream', '$remote_name', '$refspec_arg') /* $push_tag */"
   else
-    push_query="USE \`$name\`; CALL DOLT_PUSH('$remote_name', '$refspec_arg')"
+    push_query="USE \`$name\`; CALL DOLT_PUSH('$remote_name', '$refspec_arg') /* $push_tag */"
   fi
   push_rc=0
   # Guard mktemp: under `set -e` a bare `$(mktemp)` failure (unwritable or
@@ -498,6 +502,10 @@ sync_database_sql() {
     # "cannot run bounded command" marker, so the stderr replay below
     # disambiguates the two at zero extra mechanism.
     echo "  $name: TIMEOUT after ${push_timeout}s — push manually or increase timeout (GC_DOLT_SYNC_PUSH_TIMEOUT_SECS)" >&2
+    # The client bound killed our dolt client, but the server-side push keeps
+    # running orphaned — reap this run's tagged push so it stops contending on
+    # the shared server (vc-ewyro). Short-bounded; never blocks the patrol.
+    reap_dolt_push_by_tag "$push_tag"
   else
     echo "  $name: ERROR: push failed (exit $push_rc)" >&2
   fi
@@ -609,6 +617,17 @@ fi
 exit_code=0
 server_running=false
 is_running && server_running=true
+
+# Start-of-run sweep (vc-ewyro): reap any gc-managed push stranded on the shared
+# server by a previous run that crashed or was cancelled mid-push — the dominant
+# orphan path, where an order context-deadline SIGTERMs the script (its client
+# bound never fires) while the server keeps running the push. Reaps by
+# owner-pid liveness, so a concurrently-running sync/compact push is spared.
+# Only meaningful in SQL/server mode; short-bounded and best-effort.
+if [ "$server_running" = true ]; then
+  reap_dead_owner_pushes
+fi
+
 if [ -d "$data_dir" ]; then
   for d in "$data_dir"/*/; do
     [ ! -d "$d/.dolt" ] && continue

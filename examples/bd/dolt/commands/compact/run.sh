@@ -904,11 +904,16 @@ push_remote_refspec() {
     refspec_arg="$local_branch:$remote_branch"
   fi
   export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
+  # Tag the push so an orphaned server-side CALL DOLT_PUSH (client bound fired,
+  # or the compact order was cancelled mid-push) can be reaped precisely — the
+  # same shared-server starvation as vc-ewyro, via a different command. Dolt
+  # preserves the comment in processlist.info; see reap_dolt_push_by_tag.
+  compact_push_tag=$(dolt_push_tag "$db")
   run_bounded "$push_timeout" \
     dolt --host "$host" --port "$GC_DOLT_PORT" \
     --user "$GC_DOLT_USER" --no-tls \
     --use-db "$db" \
-    sql -r tabular -q "CALL DOLT_PUSH('--force', '--set-upstream', '$remote', '$refspec_arg')"
+    sql -r tabular -q "CALL DOLT_PUSH('--force', '--set-upstream', '$remote', '$refspec_arg') /* $compact_push_tag */"
 }
 
 # preflight_counts — write "<table> <count> <value-hash>" lines for the user
@@ -1676,6 +1681,13 @@ push_remote_after_compaction() {
   push_err_tmp=$(mktemp)
   push_remote_refspec "$db" "$remote" "$local_branch" "$remote_branch" >/dev/null 2>"$push_err_tmp" || push_rc=$?
   if [ "$push_rc" -ne 0 ]; then
+    if [ "$push_rc" -eq 124 ]; then
+      # Client bound fired; the server-side force-push keeps running orphaned —
+      # reap it so it stops contending on the shared server (vc-ewyro). A
+      # mid-push order-cancel (script SIGKILLed) is instead swept at the start of
+      # the next gc dolt sync tick, which reaps any gc-dolt-sync-tagged push.
+      reap_dolt_push_by_tag "$compact_push_tag"
+    fi
     printf 'compact: db=%s remote=%s push failed rc=%s after local compaction\n' \
       "$db" "$remote" "$push_rc" >&2
     emit_error_file "$db" "$push_err_tmp"
