@@ -150,6 +150,16 @@ func LastMaintenance(ep events.Provider) (time.Time, string) {
 }
 
 // lastMaintenanceTailLimit bounds the ListTail read in LastMaintenance.
+// Production maintenance events are emitted by a single sequential loop
+// (supervisor.StoreMaintenanceLoop.emitRunEvent) with Ts set to the run's
+// FinishedAt wall-clock time, so insertion order tracks Ts order under
+// normal operation — a limit of 1 would suffice for that case alone. The
+// limit is 8, not 1, purely as a safety margin against a backward
+// wall-clock step (NTP correction, manual clock change) between two
+// consecutive runs, which the max-Ts selection above can absorb as long
+// as the true latest event is still within the tail window. 8 stays a
+// small constant independent of event-log size, so it preserves the
+// bounded-read property this fix exists for.
 const lastMaintenanceTailLimit = 8
 
 const bytesPerMB = 1_000_000
