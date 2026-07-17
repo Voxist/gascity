@@ -79,11 +79,30 @@ func ReadAll(path string) ([]Event, error) {
 
 // ReadFiltered reads events from path and sibling archives, returning
 // only those matching all non-zero fields in filter. Archives whose
-// seq window is fully excluded by the filter's AfterSeq predicate are
-// skipped without gunzipping. Returns (nil, nil) if no events exist.
-// Scanner errors return the events parsed before the error alongside
-// the error.
+// seq window is excluded by the filter's AfterSeq predicate, or whose
+// rotation timestamp predates the filter's Since, are skipped without
+// gunzipping. Returns (nil, nil) if no events exist. Scanner errors
+// return the events parsed before the error alongside the error, and
+// an unreadable archive fails the read (fail-fast contract, preserved
+// for existing callers — see ReadFilteredWithWarnings for the variant
+// health checks should use).
 func ReadFiltered(path string, filter Filter) ([]Event, error) {
+	evts, _, err := readFilteredCore(path, filter, true)
+	return evts, err
+}
+
+// ReadFilteredWithWarnings is ReadFiltered with archive-level errors
+// degraded to skips: an unreadable archive (truncated gzip, torn write)
+// no longer poisons the whole read. Each skip is reported as a warning
+// naming the archive, so callers can surface a DEGRADED verdict instead
+// of choosing between a hard failure and a silently wrong answer — one
+// corrupt archive masked a real doctor verdict for days (vc-89s).
+// Live-file errors still fail the read.
+func ReadFilteredWithWarnings(path string, filter Filter) ([]Event, []string, error) {
+	return readFilteredCore(path, filter, false)
+}
+
+func readFilteredCore(path string, filter Filter, failFast bool) ([]Event, []string, error) {
 	dir := filepath.Dir(path)
 	archives, err := archiveFilesIn(dir)
 	if err != nil {
@@ -94,6 +113,7 @@ func ReadFiltered(path string, filter Filter) ([]Event, error) {
 	}
 
 	var result []Event
+	var warnings []string
 	for _, info := range archives {
 		if !archiveOverlapsFilter(info, filter) {
 			continue
@@ -107,22 +127,26 @@ func ReadFiltered(path string, filter Filter) ([]Event, error) {
 			return !limitReached(len(result), filter)
 		})
 		if err != nil {
-			return result, fmt.Errorf("reading archive %q: %w", info.Basename, err)
+			if failFast {
+				return result, warnings, fmt.Errorf("reading archive %q: %w", info.Basename, err)
+			}
+			warnings = append(warnings, fmt.Sprintf("skipped unreadable archive %q: %v", info.Basename, err))
+			continue
 		}
 		if limitReached(len(result), filter) {
-			return result, nil
+			return result, warnings, nil
 		}
 	}
 
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if len(result) == 0 {
-				return nil, nil
+			if len(result) == 0 && warnings == nil {
+				return nil, nil, nil
 			}
-			return result, nil
+			return result, warnings, nil
 		}
-		return result, fmt.Errorf("reading events: %w", err)
+		return result, warnings, fmt.Errorf("reading events: %w", err)
 	}
 	defer f.Close() //nolint:errcheck // read-only file
 
@@ -142,9 +166,9 @@ func ReadFiltered(path string, filter Filter) ([]Event, error) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return result, fmt.Errorf("scanning events: %w", err)
+		return result, warnings, fmt.Errorf("scanning events: %w", err)
 	}
-	return result, nil
+	return result, warnings, nil
 }
 
 // ReadFilteredWithInFlight is ReadFiltered plus events still stranded in
@@ -426,6 +450,74 @@ func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) 
 		reversed[i], reversed[j] = reversed[j], reversed[i]
 	}
 	return reversed, nil
+}
+
+// ReadLatestMatch returns the newest event matching filter, scanning the
+// live file tail-first and then sibling archives newest-first, stopping
+// at the first archive that yields a match. ok is false when no match
+// exists anywhere. This is the primitive for "latest occurrence of a
+// rare event" queries (e.g. controller.started, ~2 events across weeks):
+// a Since window is unsafe there — it returns zero matches whenever the
+// event predates the window — and an oldest-first full scan pays for the
+// entire history to answer a question about its newest entry (vc-89s).
+// Unreadable archives are skipped with a warning (same degraded contract
+// as ReadFilteredWithWarnings); the search continues into older archives,
+// so a corrupt newest archive can only make the answer OLDER, never
+// silently absent when an older record exists.
+func ReadLatestMatch(path string, filter Filter) (Event, bool, []string, error) {
+	f, err := os.Open(path)
+	if err != nil && !os.IsNotExist(err) {
+		return Event{}, false, nil, fmt.Errorf("reading events tail: %w", err)
+	}
+	if err == nil {
+		info, statErr := f.Stat()
+		if statErr != nil {
+			f.Close() //nolint:errcheck // read-only file
+			return Event{}, false, nil, fmt.Errorf("stat events tail: %w", statErr)
+		}
+		tail, tailErr := readFilteredTailFromFile(f, info.Size(), filter, 1)
+		f.Close() //nolint:errcheck // read-only file
+		if tailErr != nil {
+			return Event{}, false, nil, tailErr
+		}
+		if len(tail) > 0 {
+			return tail[0], true, nil, nil
+		}
+	}
+
+	archives, err := archiveFilesIn(filepath.Dir(path))
+	if err != nil {
+		// Dir unlistable (usually: doesn't exist) — no archives to consult.
+		return Event{}, false, nil, nil
+	}
+	var warnings []string
+	for i := len(archives) - 1; i >= 0; i-- {
+		info := archives[i]
+		if !archiveOverlapsFilter(info, filter) {
+			continue
+		}
+		// Within an archive events are oldest-first, so the whole archive
+		// is streamed and the last match kept — O(1 archive) for the
+		// typical rare-event query, independent of total history size.
+		var last Event
+		var found bool
+		archivePath := filepath.Join(filepath.Dir(path), info.Basename)
+		err := streamArchive(archivePath, filter, func(e Event) bool {
+			if matchesFilter(e, filter) {
+				last = e
+				found = true
+			}
+			return true
+		})
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("skipped unreadable archive %q: %v", info.Basename, err))
+			continue
+		}
+		if found {
+			return last, true, warnings, nil
+		}
+	}
+	return Event{}, false, warnings, nil
 }
 
 // ReadLatestSeq returns the highest complete event Seq visible in the

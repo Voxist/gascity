@@ -90,33 +90,26 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 		return result
 	}
 
-	eventPath := filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl")
-	firedEvents, err := events.ReadFiltered(eventPath, events.Filter{Type: events.OrderFired})
-	if err != nil {
-		result.Status = StatusError
-		result.Message = fmt.Sprintf("read order firing events: %v", err)
-		return result
-	}
-	startedAt, err := latestControllerStartedAt(eventPath)
-	if err != nil {
-		result.Status = StatusError
-		result.Message = fmt.Sprintf("read controller start events: %v", err)
-		return result
-	}
-
 	now := c.clock()
 	if now.IsZero() {
 		now = time.Now()
 	}
 	cronIntervals := map[string]time.Duration{}
-	worst := StatusOK
-	monitored := 0
-	var firstNonOK string
-	// Track severity contributions across error-level entries. Warnings should
-	// stay visible without converting an advisory error into a blocking gate.
-	var blockingErrors, advisoryErrors int
 	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg)
 
+	// Resolve expected intervals before touching the event log so the read
+	// below can be bounded by the check's own staleness horizon:
+	// classifyOrderFiring declares stale at age >= expected*3, so no fire
+	// older than 3x the widest interval can change any verdict. The window is
+	// semantically lossless for this check while pruning the read to
+	// O(recent) instead of all recorded history (vc-89s).
+	type monitoredOrder struct {
+		order    orders.Order
+		expected time.Duration
+		err      error
+	}
+	var monitored []monitoredOrder
+	var maxExpected time.Duration
 	for _, order := range allOrders {
 		if order.Trigger != "cron" && order.Trigger != "cooldown" {
 			continue
@@ -124,18 +117,59 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 		if orderFiringCurrentOrderSuspended(suspendedRigs, order) {
 			continue
 		}
-		monitored++
-		expected, err := expectedIntervalForOrder(order, cronIntervals)
-		if err != nil {
+		mo := monitoredOrder{order: order}
+		mo.expected, mo.err = expectedIntervalForOrder(order, cronIntervals)
+		if mo.err == nil && mo.expected > maxExpected {
+			maxExpected = mo.expected
+		}
+		monitored = append(monitored, mo)
+	}
+	if len(monitored) == 0 {
+		result.Status = StatusOK
+		result.Message = "no cron or cooldown orders"
+		return result
+	}
+
+	eventPath := filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl")
+	firedFilter := events.Filter{Type: events.OrderFired}
+	if maxExpected > 0 {
+		firedFilter.Since = now.Add(-3 * maxExpected)
+	}
+	// Archive corruption degrades to skip+warning instead of failing the
+	// whole check — one truncated gzip masked the real verdict for days
+	// (vc-89s). Live-file errors still fail loudly.
+	firedEvents, firedWarnings, err := events.ReadFilteredWithWarnings(eventPath, firedFilter)
+	if err != nil {
+		result.Status = StatusError
+		result.Message = fmt.Sprintf("read order firing events: %v", err)
+		return result
+	}
+	startedAt, startWarnings, err := latestControllerStartedAt(eventPath)
+	if err != nil {
+		result.Status = StatusError
+		result.Message = fmt.Sprintf("read controller start events: %v", err)
+		return result
+	}
+	degraded := appendUniqueStrings(firedWarnings, startWarnings)
+
+	worst := StatusOK
+	var firstNonOK string
+	// Track severity contributions across error-level entries. Warnings should
+	// stay visible without converting an advisory error into a blocking gate.
+	var blockingErrors, advisoryErrors int
+
+	for _, mo := range monitored {
+		order := mo.order
+		if mo.err != nil {
 			worst = worseStatus(worst, StatusError)
-			result.Details = append(result.Details, fmt.Sprintf("%s: cannot compute expected interval: %v", orderDisplayName(order), err))
+			result.Details = append(result.Details, fmt.Sprintf("%s: cannot compute expected interval: %v", orderDisplayName(order), mo.err))
 			if firstNonOK == "" {
 				firstNonOK = orderHistoryHintTarget(order)
 			}
 			blockingErrors++
 			continue
 		}
-		lastFired, err := c.latestOrderFiredAt(firedEvents, order, expected, now)
+		lastFired, err := c.latestOrderFiredAt(firedEvents, order, mo.expected, now)
 		if err != nil {
 			worst = worseStatus(worst, StatusError)
 			result.Details = append(result.Details, fmt.Sprintf("%s: cannot read order history: %v", orderDisplayName(order), err))
@@ -145,7 +179,32 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 			blockingErrors++
 			continue
 		}
-		status, severity, detail := classifyOrderFiring(order, now, expected, lastFired, startedAt)
+		if lastFired.IsZero() {
+			// The window gave IsZero a second meaning: "never fired" OR
+			// "last fired before the window". classifyOrderFiring's
+			// uptime-grace branch is only sound for the first — the
+			// controller start is always inside the window on that branch,
+			// so the ambiguity routes critically stale orders to OK after
+			// any recent restart. Run history cannot carry the distinction
+			// either: LastRunAcross returns (zero, nil) for "no record"
+			// too. Disambiguate with one newest-first full-history probe,
+			// paid only for orders already suspected stale (vc-89s C9).
+			ev, ok, probeWarnings, probeErr := events.ReadLatestMatch(eventPath, events.Filter{Type: events.OrderFired, Subject: order.ScopedName()})
+			degraded = appendUniqueStrings(degraded, probeWarnings)
+			if probeErr != nil {
+				worst = worseStatus(worst, StatusError)
+				result.Details = append(result.Details, fmt.Sprintf("%s: cannot read order history: %v", orderDisplayName(order), probeErr))
+				if firstNonOK == "" {
+					firstNonOK = orderHistoryHintTarget(order)
+				}
+				blockingErrors++
+				continue
+			}
+			if ok {
+				lastFired = ev.Ts
+			}
+		}
+		status, severity, detail := classifyOrderFiring(order, now, mo.expected, lastFired, startedAt)
 		worst = worseStatus(worst, status)
 		result.Details = append(result.Details, detail)
 		if status != StatusOK {
@@ -162,12 +221,6 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	if monitored == 0 {
-		result.Status = StatusOK
-		result.Message = "no cron or cooldown orders"
-		return result
-	}
-
 	result.Status = worst
 	switch worst {
 	case StatusOK:
@@ -176,6 +229,17 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 		result.Message = "scheduled orders are overdue"
 	case StatusError:
 		result.Message = "scheduled orders are stale"
+	}
+	// Skipped archives mean the verdict may rest on incomplete history —
+	// surface them, and never leave the check green over data it did not see.
+	if len(degraded) > 0 {
+		for _, w := range degraded {
+			result.Details = append(result.Details, "degraded: "+w)
+		}
+		if result.Status == StatusOK {
+			result.Status = StatusWarning
+			result.Message = "order event history degraded (skipped unreadable archives)"
+		}
 	}
 	if blockingErrors == 0 && advisoryErrors > 0 {
 		result.Severity = SeverityAdvisory
@@ -523,18 +587,35 @@ func cronRangeForDoctor(rangePart string, lowerBound, upperBound int) (int, int,
 	}
 }
 
-func latestControllerStartedAt(eventPath string) (time.Time, error) {
-	startEvents, err := events.ReadFiltered(eventPath, events.Filter{Type: events.ControllerStarted})
-	if err != nil {
-		return time.Time{}, err
+func latestControllerStartedAt(eventPath string) (time.Time, []string, error) {
+	// controller.started is rare (single-digit count across weeks of
+	// history), so a Since window would come back empty whenever uptime
+	// exceeds it, and an oldest-first full scan pays for the entire history
+	// to answer a question about its newest entry. ReadLatestMatch walks
+	// newest-first with early exit and spans archives, staying correct for
+	// an arbitrarily old controller start (vc-89s).
+	ev, ok, warnings, err := events.ReadLatestMatch(eventPath, events.Filter{Type: events.ControllerStarted})
+	if err != nil || !ok {
+		return time.Time{}, warnings, err
 	}
-	var latest time.Time
-	for _, event := range startEvents {
-		if event.Ts.After(latest) {
-			latest = event.Ts
+	return ev.Ts, warnings, nil
+}
+
+// appendUniqueStrings appends items from extra not already present in base,
+// preserving order. Both event reads walk the same archive set, so a corrupt
+// archive would otherwise be reported once per read.
+func appendUniqueStrings(base, extra []string) []string {
+	seen := make(map[string]bool, len(base))
+	for _, s := range base {
+		seen[s] = true
+	}
+	for _, s := range extra {
+		if !seen[s] {
+			seen[s] = true
+			base = append(base, s)
 		}
 	}
-	return latest, nil
+	return base
 }
 
 func (c *OrderFiringCurrentCheck) latestOrderFiredAt(evts []events.Event, order orders.Order, expected time.Duration, now time.Time) (time.Time, error) {
@@ -572,7 +653,11 @@ func classifyOrderFiring(order orders.Order, now time.Time, expected time.Durati
 	name := orderDisplayName(order)
 	if lastFired.IsZero() {
 		if controllerStarted.IsZero() {
-			return StatusOK, SeverityBlocking, fmt.Sprintf("%s: never fired (controller start unknown)", name)
+			// Fail closed: no fire and no controller start visible means the
+			// check cannot see its data (empty or truncated history), not
+			// that the order is healthy. Reporting OK here green-lit exactly
+			// the dead orders this check exists to catch (vc-89s C4).
+			return StatusWarning, SeverityBlocking, fmt.Sprintf("%s: never fired (controller start unknown)", name)
 		}
 		uptime := nonNegativeDuration(now.Sub(controllerStarted))
 		if uptime >= expected+expected/2 {

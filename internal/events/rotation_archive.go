@@ -123,12 +123,21 @@ func parseLegacyArchiveBasename(name string) (time.Time, error) {
 	return ts.UTC(), nil
 }
 
-// archiveOverlapsFilter reports whether the archive's seq range can
-// possibly contain events that satisfy filter. The skip-fast read path
-// uses this to avoid gunzipping archives whose entire window has
-// already been excluded by the caller's AfterSeq predicate.
+// archiveOverlapsFilter reports whether the archive's seq range or time
+// window can possibly contain events that satisfy filter. The skip-fast
+// read path uses this to avoid gunzipping archives whose entire window
+// has already been excluded by the caller's AfterSeq or Since predicate.
 func archiveOverlapsFilter(info archiveInfo, filter Filter) bool {
 	if filter.AfterSeq > 0 && info.LastSeq <= filter.AfterSeq {
+		return false
+	}
+	// Timestamp is the rotation instant — an upper bound on the archive's
+	// newest event — so the archive is safe to skip only when that bound
+	// predates Since. Never prune on Until: the archive's FIRST event time
+	// is not recorded (only FirstSeq), so an archive stamped after Until
+	// may still hold in-window events; pruning there would silently drop
+	// them (vc-89s).
+	if !filter.Since.IsZero() && info.Timestamp.Before(filter.Since) {
 		return false
 	}
 	return true
