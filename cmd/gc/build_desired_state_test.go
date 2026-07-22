@@ -5456,6 +5456,11 @@ func TestSelectOrCreatePoolSessionBead_SerializesAliasCheckAndCreate(t *testing.
 		case <-store.secondCreateStarted:
 			close(store.releaseSecondCreate)
 		case <-time.After(time.Second):
+			// Unblock a straggler G2 that reaches store.Create() after this
+			// deadline, so it cannot block forever on releaseSecondCreate and
+			// leak a goroutine. The create is already too late to satisfy the
+			// assertion, so the test still fails — this only prevents the leak.
+			close(store.releaseSecondCreate)
 			t.Fatal("second pool create did not start after first create completed")
 		}
 	}
@@ -5540,6 +5545,11 @@ func TestCreatePoolSessionBeadWithGuardedAliasSerializesResolvedTmuxAlias(t *tes
 		case <-store.secondCreateStarted:
 			close(store.releaseSecondCreate)
 		case <-time.After(time.Second):
+			// Unblock a straggler G2 that reaches store.Create() after this
+			// deadline, so it cannot block forever on releaseSecondCreate and
+			// leak a goroutine. The create is already too late to satisfy the
+			// assertion, so the test still fails — this only prevents the leak.
+			close(store.releaseSecondCreate)
 			t.Fatal("second pool create did not start after first create completed")
 		}
 	}
