@@ -158,6 +158,45 @@ func (s *blockingPoolCreateStore) Create(bead beads.Bead) (beads.Bead, error) {
 	return s.MemStore.Create(bead)
 }
 
+// awaitSerializedSecondCreate drives the two-goroutine pool-create serialization
+// handshake against a blockingPoolCreateStore: it waits for the first create to
+// reach the store, asserts the second create does NOT reach it before the first
+// finishes (the alias lock must serialize them), then releases both. serializeMsg
+// is the failure message for the serialization-violation case, which is the only
+// part that differs between callers.
+//
+// Every failure path closes BOTH release channels before failing, so a straggler
+// goroutine that reaches store.Create() after a timeout can never block forever on
+// an un-closed release channel and leak (the leak class this guards against). The
+// create is already too late to satisfy the assertion, so the test still fails —
+// closing only prevents the leak.
+func awaitSerializedSecondCreate(t *testing.T, store *blockingPoolCreateStore, serializeMsg string) {
+	t.Helper()
+	select {
+	case <-store.firstCreateStarted:
+	case <-time.After(time.Second):
+		close(store.releaseFirstCreate)
+		close(store.releaseSecondCreate)
+		t.Fatal("first pool create did not start")
+	}
+
+	select {
+	case <-store.secondCreateStarted:
+		close(store.releaseFirstCreate)
+		close(store.releaseSecondCreate)
+		t.Fatal(serializeMsg)
+	case <-time.After(150 * time.Millisecond):
+		close(store.releaseFirstCreate)
+		select {
+		case <-store.secondCreateStarted:
+			close(store.releaseSecondCreate)
+		case <-time.After(time.Second):
+			close(store.releaseSecondCreate)
+			t.Fatal("second pool create did not start after first create completed")
+		}
+	}
+}
+
 type demandListCountingStore struct {
 	beads.Store
 	liveInProgressIssueLists int
@@ -5439,26 +5478,8 @@ func TestSelectOrCreatePoolSessionBead_SerializesAliasCheckAndCreate(t *testing.
 	go create()
 	go create()
 
-	select {
-	case <-store.firstCreateStarted:
-	case <-time.After(time.Second):
-		t.Fatal("first pool create did not start")
-	}
-
-	select {
-	case <-store.secondCreateStarted:
-		close(store.releaseFirstCreate)
-		close(store.releaseSecondCreate)
-		t.Fatal("second pool create reached the store before first create finished; alias lock did not serialize create")
-	case <-time.After(150 * time.Millisecond):
-		close(store.releaseFirstCreate)
-		select {
-		case <-store.secondCreateStarted:
-			close(store.releaseSecondCreate)
-		case <-time.After(time.Second):
-			t.Fatal("second pool create did not start after first create completed")
-		}
-	}
+	awaitSerializedSecondCreate(t, store,
+		"second pool create reached the store before first create finished; alias lock did not serialize create")
 
 	for i := 0; i < 2; i++ {
 		select {
@@ -5523,26 +5544,8 @@ func TestCreatePoolSessionBeadWithGuardedAliasSerializesResolvedTmuxAlias(t *tes
 	go create("worker-1", 1)
 	go create("worker-2", 2)
 
-	select {
-	case <-store.firstCreateStarted:
-	case <-time.After(time.Second):
-		t.Fatal("first pool create did not start")
-	}
-
-	select {
-	case <-store.secondCreateStarted:
-		close(store.releaseFirstCreate)
-		close(store.releaseSecondCreate)
-		t.Fatal("second pool create reached the store before first tmux_alias create finished")
-	case <-time.After(150 * time.Millisecond):
-		close(store.releaseFirstCreate)
-		select {
-		case <-store.secondCreateStarted:
-			close(store.releaseSecondCreate)
-		case <-time.After(time.Second):
-			t.Fatal("second pool create did not start after first create completed")
-		}
-	}
+	awaitSerializedSecondCreate(t, store,
+		"second pool create reached the store before first tmux_alias create finished")
 
 	seen := map[string]bool{}
 	for i := 0; i < 2; i++ {
