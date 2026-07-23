@@ -207,7 +207,8 @@
               "whoami",
               "provider-quota",
               "provider-rotate-key",
-              "beads-state"
+              "beads-state",
+              "config-lint"
             ]
           },
           "event_id": {
