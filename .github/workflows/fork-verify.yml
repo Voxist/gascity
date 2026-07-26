@@ -1,7 +1,7 @@
 name: fork-verify
 
-# Minimal fork-only CI for gascity forks. Verifies WIP feature branches
-# WITHOUT upstream's Blacksmith
+# Minimal fork-only CI for bourgois/gascity. Verifies WIP feature branches
+# (e.g. cross-store work delivery, vp-kvp) WITHOUT upstream's Blacksmith
 # self-hosted runners, runner-policy gating, or secrets — none of which a fork
 # has. ubuntu-latest compiles the Dolt go-icu-regex CGO dependency cleanly; the
 # `unicode/regex.h` build failure is macOS-only (icu4c@78 header layout), so a
@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.0.4"
+      BD_VERSION: "v1.0.5"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -35,9 +35,9 @@ jobs:
         run: go build ./...
       - name: Vet changed package
         run: go vet ./cmd/gc/...
-      - name: Unit tests — cross-store work delivery
+      - name: Unit tests — cross-store work delivery (vp-kvp stages i/ii/iii)
         run: go test ./cmd/gc/ -run 'TestFilterAssignedWorkBeads|TestAssignedWork|TestFirstStoreWithWork|TestCrossStoreClaimDir|TestRunBDForBead|TestGateOpenWorkBounded|TestCrossStorePipeline' -count=1 -v
-      - name: Unit tests — cross-store reachability predicate + fail-loud guard
+      - name: Unit tests — cross-store reachability predicate + fail-loud guard (vp-kvp stage i)
         run: |
           go test ./internal/agentutil/ -run 'TestAgentReachesWorkflowStore|TestAgentIsCrossStoreEligible' -count=1 -v
           go test ./internal/sling/ -run 'TestValidateBuiltInRouteStoreReachableAllowsCityScopedTarget|TestDoSlingRefusesCrossStore' -count=1 -v

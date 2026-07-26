@@ -60,6 +60,7 @@ func ValidateDurations(cfg *City, source string) []string {
 	// Daemon config durations.
 	check("[daemon]", "patrol_interval", cfg.Daemon.PatrolInterval)
 	check("[daemon]", "restart_window", cfg.Daemon.RestartWindow)
+	check("[daemon]", "status_snapshot_timeout", cfg.Daemon.StatusSnapshotTimeout)
 	check("[daemon]", "session_circuit_breaker_window", cfg.Daemon.SessionCircuitBreakerWindow)
 	check("[daemon]", "session_circuit_breaker_reset_after", cfg.Daemon.SessionCircuitBreakerResetAfter)
 	check("[daemon]", "shutdown_timeout", cfg.Daemon.ShutdownTimeout)
@@ -88,6 +89,20 @@ func ValidateDurations(cfg *City, source string) []string {
 				source, name, policy.Storage, BeadStorageHistory, BeadStorageNoHistory, BeadStorageEphemeral))
 		}
 	}
+
+	// Beads resilience (circuit breaker) durations.
+	check("[beads.resilience]", "open_base", cfg.Beads.Resilience.OpenBase)
+	check("[beads.resilience]", "open_max", cfg.Beads.Resilience.OpenMax)
+	check("[beads.resilience]", "half_open_interval", cfg.Beads.Resilience.HalfOpenInterval)
+	check("[beads.resilience]", "max_admission_wait", cfg.Beads.Resilience.MaxAdmissionWait)
+
+	// Doctor (supervisor-cadence) durations.
+	check("[doctor]", "supervisor_interval", cfg.Doctor.SupervisorInterval)
+
+	// Store health patrol durations.
+	check("[storehealth]", "interval", cfg.StoreHealth.Interval)
+	check("[storehealth]", "reap_cooldown", cfg.StoreHealth.ReapCooldown)
+	check("[storehealth]", "write_probe_interval", cfg.StoreHealth.WriteProbeInterval)
 
 	// Chat sessions config durations.
 	check("[chat_sessions]", "idle_timeout", cfg.ChatSessions.IdleTimeout)

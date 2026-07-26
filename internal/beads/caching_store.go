@@ -42,12 +42,13 @@ type CachingStore struct {
 	mutationSeq     uint64
 	primePartialErr error
 
-	reconciling  atomic.Bool
-	syncFailures int
-	stats        CacheStats
-	onChange     func(eventType, beadID, runID, sessionID, stepID string, payload json.RawMessage)
-	problemf     func(string)
-	problemLog   map[string]cacheProblemLogState
+	reconciling    atomic.Bool
+	syncFailures   int
+	circuitTripped bool
+	stats          CacheStats
+	onChange       func(eventType, beadID, runID, sessionID, stepID string, payload json.RawMessage)
+	problemf       func(string)
+	problemLog     map[string]cacheProblemLogState
 
 	// lastReconcileLogAt rate-limits the per-reconcile success log line
 	// emitted by runReconciliation. Without this, a busy cache at SMALL
@@ -76,6 +77,17 @@ type CachingStore struct {
 	// pressure is independent and not reflected here. Demotion happens
 	// once the rolling window has drained — see recomputeCadenceLocked.
 	latencyDriverActive bool
+
+	// availabilityGate, when set, reports backing-store transport
+	// availability (the per-scope circuit breaker). See
+	// SetAvailabilityGate. Guarded by mu.
+	availabilityGate AvailabilityGate
+	// unavailableSkipLogged dedupes the reconcile-skip problem log to one
+	// entry per unavailable episode. Guarded by mu.
+	unavailableSkipLogged bool
+	// degradedReads counts reads served from last-good cache while the
+	// availability gate reported the store unavailable.
+	degradedReads atomic.Int64
 
 	applyEventBeforeCommitForTest func()
 }
@@ -135,6 +147,9 @@ type CacheStats struct {
 	// "latency" (P95 above the high-water mark), or "both" (bead count
 	// and latency both push to MEDIUM).
 	CadenceDriver string
+	// DegradedReads counts reads served from last-good cache while the
+	// availability gate reported the backing store unavailable.
+	DegradedReads int64
 }
 
 const (
@@ -146,6 +161,8 @@ const (
 	cacheReconcileIntervalLarge     = 120 * time.Second
 	cacheProblemLogWindow           = time.Minute
 	cacheReconcileFailureBackoff    = time.Minute
+	cacheReconcileBaseBackoff       = 2 * time.Second
+	cacheReconcileMaxBackoff        = 10 * time.Minute
 	// cacheReconcileSuccessLogWindow rate-limits the per-reconcile success
 	// log line. Reuses the one-minute pattern from cacheProblemLogWindow so
 	// the reconciler's footprint in the operator-visible log stays bounded
@@ -586,6 +603,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	}
 	c.state = cacheLive
 	c.syncFailures = 0
+	c.circuitTripped = false
 	c.stats.SyncFailures = 0
 	c.primePartialErr = partialErr
 	c.markFreshLocked(now)
@@ -807,6 +825,7 @@ func (c *CachingStore) Stats() CacheStats {
 	default:
 		s.State = "uninitialized"
 	}
+	s.DegradedReads = c.degradedReads.Load()
 	return s
 }
 

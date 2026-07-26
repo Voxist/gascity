@@ -580,6 +580,8 @@ func TestSessionReconcilePhaseTraceUsesDistinctSites(t *testing.T) {
 		nil,
 		newDrainTracker(),
 		nil, // gate (*providerHealthGate) — ADR-0013 A1 M3a
+		nil, // registry (*providerHealthRegistry) — T-012
+		nil, // failoverChain (*[]string) — T-014
 		nil,
 		nil,
 		false,

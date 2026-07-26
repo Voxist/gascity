@@ -3931,7 +3931,7 @@ func reconcileExistingAsleepNamedSessionWithRoutedWork(t *testing.T, cfg *config
 
 	woken := reconcileSessionBeadsAtPathWithNamedDemand(
 		context.Background(), cityPath, sessions, dsResult.State, cfgNames, cfg, sp,
-		store, nil, dsResult.AssignedWorkBeads, nil, nil, newDrainTracker(), nil, poolDesired,
+		store, nil, dsResult.AssignedWorkBeads, nil, nil, newDrainTracker(), nil, nil, nil, poolDesired,
 		dsResult.NamedSessionDemand, dsResult.StoreQueryPartial, nil, cfg.EffectiveCityName(),
 		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
 	)
@@ -10135,6 +10135,33 @@ func TestPoolDesiredLimitsWakeWork(t *testing.T) {
 	}
 }
 
+func TestReconcileSessionBeads_UsesVisibilitySnapshotForOrphanedSessions(t *testing.T) {
+	env := newReconcilerTestEnv()
+	// N=5 asleep session beads, none in desired state — these are the phantom
+	// accumulation scenario that drives probe timeout.
+	var sessions []beads.Bead
+	for i := 0; i < 5; i++ {
+		name := fmt.Sprintf("phantom-%d", i)
+		sessions = append(sessions, env.createSessionBead(name, "worker"))
+	}
+	// Fake runtime has no running sessions — all five are true phantoms.
+
+	env.reconcile(sessions)
+
+	if got := env.sp.CountCalls("ListRunning", ""); got != 1 {
+		t.Errorf("ListRunning calls = %d, want 1 (one O(1) snapshot per tick)", got)
+	}
+	isRunningCalls := 0
+	for _, c := range env.sp.SnapshotCalls() {
+		if c.Method == "IsRunning" {
+			isRunningCalls++
+		}
+	}
+	if isRunningCalls != 0 {
+		t.Errorf("IsRunning calls = %d, want 0 (must use visibleSet map, not per-session probe)", isRunningCalls)
+	}
+}
+
 // PR #209 -- skipped for now. Drained beads don't block capacity (all
 // selection paths skip them). Closing would break gc attach on drained
 // sessions. Tracked as a future cleanup task.
@@ -10142,3 +10169,165 @@ func TestPoolDesiredLimitsWakeWork(t *testing.T) {
 // Regression: poolDesired derived from desiredState counts ALL session beads
 // (including discovered ones), inflating the desired count. This test verifies
 // that derivePoolDesired only counts pool sessions, not all discovered beads.
+
+// TestReconcilerUsesLiveRegistry verifies that when a *providerHealthRegistry
+// is passed directly to the reconciler (no provider-health.json on disk), a
+// provider marked red in the registry causes spawn to be skipped.
+func TestReconcilerUsesLiveRegistry(t *testing.T) {
+	cityPath := t.TempDir() // no provider-health.json — file-based gate would fail-open
+	reg := newProviderHealthRegistry()
+	base := time.Now()
+	for i := range 3 {
+		reg.RecordResponse("claude", 429, base.Add(time.Duration(i)*time.Second))
+	}
+	if healthy, present := reg.Check("claude"); !present || healthy {
+		t.Fatalf("precondition: claude must be red in registry, got healthy=%v present=%v", healthy, present)
+	}
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	dt := newDrainTracker()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+	desiredState := map[string]TemplateParams{
+		"worker": {
+			Command:          "test-cmd",
+			SessionName:      "worker",
+			TemplateName:     "worker",
+			ResolvedProvider: &config.ResolvedProvider{Name: "claude"},
+		},
+	}
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "worker",
+			"agent_name":           "worker",
+			"template":             "worker",
+			"live_hash":            runtime.LiveFingerprint(runtime.Config{Command: "test-cmd"}),
+			"generation":           "1",
+			"instance_token":       "test-token",
+			"state":                "creating",
+			"pending_create_claim": "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+
+	gate := newProviderHealthGate()
+	var stdout, stderr bytes.Buffer
+
+	woken := reconcileSessionBeadsTracedWithNamedDemand(
+		context.Background(), cityPath, []beads.Bead{session}, desiredState,
+		map[string]bool{"worker": true}, cfg, sp, store, nil, nil, nil, nil,
+		dt, gate, reg, nil, // gate + live registry; no failoverChain
+		map[string]int{"worker": 1}, nil, false, nil, "", nil, clk, events.Discard,
+		0, 0, &stdout, &stderr, nil,
+	)
+
+	if woken != 0 {
+		t.Fatalf("expected woken=0 with claude red in live registry (no provider-health.json), got %d", woken)
+	}
+	if sp.IsRunning("worker") {
+		t.Fatal("worker session must not be spawned when provider claude is red in live registry")
+	}
+}
+
+// TestReconcilerChainWalkSelectsAlternate verifies that when the configured
+// provider is red and a failover chain is provided, the reconciler selects the
+// next healthy provider and spawns the session (not skips it).
+func TestReconcilerChainWalkSelectsAlternate(t *testing.T) {
+	cityPath := t.TempDir()
+	reg := newProviderHealthRegistry()
+	base := time.Now()
+	// Mark claude red (3 consecutive 429s within 5 min).
+	for i := range 3 {
+		reg.RecordResponse("claude", 429, base.Add(time.Duration(i)*time.Second))
+	}
+	if healthy, present := reg.Check("claude"); !present || healthy {
+		t.Fatalf("precondition: claude must be red, got healthy=%v present=%v", healthy, present)
+	}
+	// zai has no recorded failures — registry fail-open treats it as healthy.
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	dt := newDrainTracker()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "worker", Provider: "claude"}},
+		Providers: map[string]config.ProviderSpec{
+			"claude": {}, // no Command — avoids binary lookPath check
+			"zai":    {}, // no Command — avoids binary lookPath check
+		},
+	}
+
+	const proxyBaseURL = "http://localhost:12345"
+	desiredState := map[string]TemplateParams{
+		"worker": {
+			Command:          "test-cmd",
+			SessionName:      "worker",
+			TemplateName:     "worker",
+			ResolvedProvider: &config.ResolvedProvider{Name: "claude"},
+			// Simulate what buildDesiredState injects when the model proxy is running.
+			Env: map[string]string{
+				"GC_PROVIDER":        "claude",
+				"ANTHROPIC_BASE_URL": proxyBaseURL + "/proxy/claude",
+			},
+		},
+	}
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":         "worker",
+			"agent_name":           "worker",
+			"template":             "worker",
+			"live_hash":            runtime.LiveFingerprint(runtime.Config{Command: "test-cmd"}),
+			"generation":           "1",
+			"instance_token":       "test-token",
+			"state":                "creating",
+			"pending_create_claim": "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+
+	gate := newProviderHealthGate()
+	var stdout, stderr bytes.Buffer
+	woken := reconcileSessionBeadsTracedWithNamedDemand(
+		context.Background(), cityPath, []beads.Bead{session}, desiredState,
+		map[string]bool{"worker": true}, cfg, sp, store, nil, nil, nil, nil,
+		dt, gate, reg, []string{"claude", "zai"},
+		map[string]int{"worker": 1}, nil, false, nil, "", nil, clk, events.Discard,
+		0, 0, &stdout, &stderr, nil,
+	)
+
+	if woken == 0 {
+		t.Fatal("expected session to be spawned via zai failover, but woken=0")
+	}
+	if !sp.IsRunning("worker") {
+		t.Fatal("worker session must be spawned when claude is red but zai is available in chain")
+	}
+	calls := sp.SnapshotCalls()
+	var startCall *runtime.Call
+	for i := range calls {
+		if calls[i].Method == "Start" && calls[i].Name == "worker" {
+			startCall = &calls[i]
+		}
+	}
+	if startCall == nil {
+		t.Fatal("no Start call recorded for worker")
+	}
+	if got := startCall.Config.Env["GC_PROVIDER"]; got != "zai" {
+		t.Errorf("expected GC_PROVIDER=zai in spawned session env after chain-walk, got %q", got)
+	}
+	wantURL := proxyBaseURL + "/proxy/zai"
+	if got := startCall.Config.Env["ANTHROPIC_BASE_URL"]; got != wantURL {
+		t.Errorf("expected ANTHROPIC_BASE_URL=%q after chain-walk to zai, got %q", wantURL, got)
+	}
+}

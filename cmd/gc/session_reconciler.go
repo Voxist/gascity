@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"os"
 	"runtime/debug"
 	"strings"
@@ -857,7 +858,7 @@ func reconcileSessionBeadsAtPath(
 	stdout, stderr io.Writer,
 ) int {
 	return reconcileSessionBeadsAtPathWithNamedDemand(
-		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, nil,
+		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, nil, nil, nil,
 		poolDesired, nil, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr,
 	)
 }
@@ -877,6 +878,8 @@ func reconcileSessionBeadsAtPathWithNamedDemand(
 	readyWaitSet map[string]bool,
 	dt *drainTracker,
 	gate *providerHealthGate,
+	registry *providerHealthRegistry,
+	failoverChain []string,
 	poolDesired map[string]int,
 	namedSessionDemand map[string]bool,
 	storeQueryPartial bool,
@@ -890,7 +893,7 @@ func reconcileSessionBeadsAtPathWithNamedDemand(
 	stdout, stderr io.Writer,
 ) int {
 	return reconcileSessionBeadsTracedWithNamedDemand(
-		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, gate,
+		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, gate, registry, failoverChain,
 		poolDesired, namedSessionDemand, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, nil,
 	)
 }
@@ -924,7 +927,7 @@ func reconcileSessionBeadsTraced(
 	startOptions ...startExecutionOption,
 ) int {
 	return reconcileSessionBeadsTracedWithNamedDemand(
-		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, nil,
+		ctx, cityPath, sessions, desiredState, configuredNames, cfg, sp, store, dops, assignedWorkBeads, rigStores, readyWaitSet, dt, nil, nil, nil,
 		poolDesired, nil, storeQueryPartial, workSet, cityName, it, clk, rec, startupTimeout, driftDrainTimeout, stdout, stderr, trace,
 		startOptions...,
 	)
@@ -945,6 +948,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	readyWaitSet map[string]bool,
 	dt *drainTracker,
 	gate *providerHealthGate,
+	registry *providerHealthRegistry,
+	failoverChain []string,
 	poolDesired map[string]int,
 	namedSessionDemand map[string]bool,
 	storeQueryPartial bool,
@@ -977,7 +982,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	}
 	// Load provider-health snapshot once per tick (ADR-0013 A1 M3a).
 	// All per-session gate checks in Phase 2 use this snapshot — no I/O per session.
-	phSnap := loadProviderHealthSnapshot(cityPath)
+	// When the live registry is available it supersedes the file-based snapshot.
+	var phSnap *providerHealthSnapshot
+	if registry != nil {
+		phSnap = registry.Snapshot()
+	} else {
+		phSnap = loadProviderHealthSnapshot(cityPath)
+	}
 	reconcileOpts := startExecutionOptions{}
 	for _, apply := range startOptions {
 		if apply != nil {
@@ -1135,6 +1146,23 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 		rollbackPendingCreate(session, store, clk.Now().UTC(), stderr)
 	}
+	// O(1) tmux ls snapshot instead of O(n) per-session has-session probes.
+	// With 80+ phantoms the per-session path saturates the 50 ms probe budget
+	// → partial status → the spawn/phantom vicious cycle (vp-g0z1).
+	var listedRunning []string
+	var listRunErr error
+	if sp != nil {
+		listedRunning, listRunErr = sp.ListRunning("")
+	}
+	listRunPartial := listRunErr != nil && runtime.IsPartialListError(listRunErr)
+	visibleSet := make(map[string]bool, len(listedRunning))
+	if listRunErr == nil || listRunPartial {
+		for _, sn := range listedRunning {
+			if sn = strings.TrimSpace(sn); sn != "" {
+				visibleSet[sn] = true
+			}
+		}
+	}
 	phaseStart = time.Now()
 	for i := range ordered {
 		if ctx != nil && ctx.Err() != nil {
@@ -1175,9 +1203,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Handle BEFORE heal/stability to avoid false crash detection —
 		// a running session that leaves the desired set is not a crash.
 		if !desired {
-			providerAlive, err := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, session.ID)
-			if err != nil {
-				providerAlive = false
+			var (
+				providerAlive bool
+				err           error
+			)
+			if listRunErr == nil || listRunPartial {
+				providerAlive = visibleSet[name]
+			} else {
+				providerAlive, err = workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, session.ID)
+				if err != nil {
+					providerAlive = false
+				}
 			}
 			// Run this before configured named-session preservation. A stale
 			// state=creating bead with an expired pending-create lease would
@@ -2508,15 +2544,46 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// Registry absent or no fresh entry — fail-open, log once per provider per tick.
 					fmt.Fprintf(stderr, "session reconciler: provider-health registry unavailable for %q; treating as green\n", phProvider) //nolint:errcheck
 				} else if !phHealthy {
-					gate.recordRedSkip(phProvider, clk.Now().UTC(), func(p, epID string, since time.Time, count int) {
-						emitProviderHealthGateAlert(rec, stdout, p, epID, since, count)
-					})
+					// Attempt chain-walk: select next healthy provider from failover chain.
+					alternate := ""
+					if registry != nil && len(failoverChain) > 0 {
+						alternate = registry.SelectHealthy(failoverChain)
+					}
+					if alternate == "" || alternate == phProvider {
+						gate.recordRedSkip(phProvider, clk.Now().UTC(), func(p, epID string, since time.Time, count int) {
+							emitProviderHealthGateAlert(rec, stdout, p, epID, since, count)
+						})
+						if trace != nil {
+							trace.recordDecision("reconciler.session.provider_health_gate", target.tp.TemplateName, name, "provider_red", "respawn_skipped", traceRecordPayload{
+								"provider": phProvider,
+							}, nil, "")
+						}
+						continue // skip startCandidates; wake budget is NOT consumed
+					}
+					// Override tp with the alternate provider so the spawn path uses it.
+					altRP := *target.tp.ResolvedProvider
+					altRP.Name = alternate
+					target.tp.ResolvedProvider = &altRP
+					if target.tp.Env == nil {
+						target.tp.Env = map[string]string{}
+					} else {
+						target.tp.Env = maps.Clone(target.tp.Env)
+					}
+					target.tp.Env["GC_PROVIDER"] = alternate
+					// Redirect the model proxy URL to route through the alternate provider.
+					// buildDesiredState sets ANTHROPIC_BASE_URL = proxyAddr+"/proxy/"+original;
+					// chain-walk must rewrite the trailing provider segment.
+					if u := target.tp.Env["ANTHROPIC_BASE_URL"]; u != "" {
+						if i := strings.LastIndexByte(u, '/'); i >= 0 {
+							target.tp.Env["ANTHROPIC_BASE_URL"] = u[:i+1] + alternate
+						}
+					}
 					if trace != nil {
-						trace.recordDecision("reconciler.session.provider_health_gate", target.tp.TemplateName, name, "provider_red", "respawn_skipped", traceRecordPayload{
-							"provider": phProvider,
+						trace.recordDecision("reconciler.session.provider_health_gate", target.tp.TemplateName, name, "provider_red", "chain_walk", traceRecordPayload{
+							"original_provider": phProvider,
+							"alternate":         alternate,
 						}, nil, "")
 					}
-					continue // skip startCandidates; wake budget is NOT consumed
 				}
 			}
 

@@ -202,12 +202,26 @@ type partialAssignedWorkStore struct {
 
 type controllerDemandPartialStore struct {
 	*beads.MemStore
+	// assignedWorkReadSeen counts Ready calls so the fixture can let the first
+	// (collapsed assigned-work) read pass clean and inject a partial only on the
+	// later pool/scale-check controller-demand reads.
+	assignedWorkReadSeen int
 }
 
 func (s *controllerDemandPartialStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 	rows, err := s.MemStore.Ready(query...)
 	if err != nil {
 		return nil, err
+	}
+	// The collapsed assigned-work scope read (P2.5 / #3218) and the
+	// pool/scale-check controller-demand reads now share the same unfiltered
+	// (Assignee=="" && Limit==0) shape. This fixture models a partial on the
+	// downstream scale-check/pool-demand read only; the first Ready call is the
+	// assigned-work collapse read, which must stay clean so the named
+	// scale_check partial does not escalate to StoreQueryPartial.
+	s.assignedWorkReadSeen++
+	if s.assignedWorkReadSeen == 1 {
+		return rows, nil
 	}
 	if len(query) == 0 || (query[0].Assignee == "" && query[0].Limit == 0) {
 		return rows, &beads.PartialResultError{Op: "bd ready", Err: errors.New("skipped corrupt controller demand bead")}
@@ -1049,6 +1063,51 @@ func TestDefaultScaleCheckCountsCountsUnassignedRoutedTaskWisp(t *testing.T) {
 	}
 	if got := counts[template]; got != 1 {
 		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1 for task-shaped wisp", template, got)
+	}
+}
+
+// TestDefaultScaleCheckCountsCountsTypelessRoutedRigPoolBacklog reproduces the
+// Platform-team "4 ready → scaler sees 1" report against the live voxist-city
+// shape: a rig-scoped executor pool with no custom scale_check and a BACKLOG of
+// N unclaimed, routed-to-the-rig-template beads in the rig store. Two details
+// match production exactly and are what earlier TestDefaultScaleCheckCounts
+// tests do NOT cover: (a) the beads are TYPE-UNSET (the live vw store shows
+// type=None), so readyExcludeTypes must not drop them; (b) there are MULTIPLE
+// of them. The default demand probe is authoritative + unclamped for a
+// no-scale_check pool, so it must size to the WHOLE backlog (N) — if it returns
+// < N, the pool sizes to a fraction of its queue and trickles (the 4→1).
+func TestDefaultScaleCheckCountsCountsTypelessRoutedRigPoolBacklog(t *testing.T) {
+	const template = "voxist-web/voxist.executor"
+	const backlog = 4
+	backing := beads.NewMemStore()
+	for i := 0; i < backlog; i++ {
+		if _, err := backing.Create(beads.Bead{
+			Title: "routed executor work",
+			// Type intentionally UNSET — matches the live vw store (type=None).
+			Status: "open",
+			Metadata: map[string]string{
+				"gc.routed_to": template,
+			},
+		}); err != nil {
+			t.Fatalf("create routed bead %d: %v", i, err)
+		}
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	counts, _, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:voxist-web",
+		store:    cache,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
+	}
+	if got := counts[template]; got != backlog {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want %d "+
+			"(Platform 4→1: a no-scale_check rig pool must size to its whole routed-unclaimed backlog, not a fraction)",
+			template, got, backlog)
 	}
 }
 
@@ -2060,15 +2119,16 @@ func TestCollectAssignedWorkBeads_ReadyProbeStillRunsForOtherAssignees(t *testin
 			t.Fatalf("collected work IDs = %#v, want %s", gotIDs, want)
 		}
 	}
-	queried := make(map[string]bool)
-	for _, query := range store.readyQueries {
-		queried[query.Assignee] = true
+	// The per-assignee Ready fan-out is collapsed to a single unfiltered scope
+	// read (P2.5 / #3218); the assignee set is applied in memory. The
+	// active-assignee exclusion is now observable in the bead output above
+	// (readyWork is collected, activeWork via the in-progress pass), not in the
+	// query shape. Assert the collapse invariant on the read itself.
+	if len(store.readyQueries) != 1 {
+		t.Fatalf("Ready read count = %d (queries=%#v), want exactly 1 collapsed scope read", len(store.readyQueries), store.readyQueries)
 	}
-	if queried["worker-active"] || queried[activeSession.ID] {
-		t.Fatalf("Ready queries = %#v, want no probe for active assignee", store.readyQueries)
-	}
-	if !queried["worker-ready"] {
-		t.Fatalf("Ready queries = %#v, want probe for worker-ready", store.readyQueries)
+	if store.readyQueries[0].Assignee != "" {
+		t.Fatalf("collapsed Ready query carried Assignee %q, want an unfiltered scope read", store.readyQueries[0].Assignee)
 	}
 }
 
@@ -2118,12 +2178,14 @@ func TestCollectAssignedWorkBeads_ReadyProbeIncludesActiveSessionAssignees(t *te
 	if len(got) != 1 || got[0].ID != readyWork.ID {
 		t.Fatalf("got = %#v, want ready active-session work %s", got, readyWork.ID)
 	}
-	queried := make(map[string]bool)
-	for _, query := range store.readyQueries {
-		queried[query.Assignee] = true
+	// The active session's ready work is now selected by the in-memory assignee
+	// partition over a single collapsed scope read (P2.5 / #3218); its inclusion
+	// is observable in the bead output above, not in a per-assignee query.
+	if len(store.readyQueries) != 1 {
+		t.Fatalf("Ready read count = %d (queries=%#v), want exactly 1 collapsed scope read", len(store.readyQueries), store.readyQueries)
 	}
-	if !queried["worker-active"] {
-		t.Fatalf("Ready queries = %#v, want probe for active session assignee", store.readyQueries)
+	if store.readyQueries[0].Assignee != "" {
+		t.Fatalf("collapsed Ready query carried Assignee %q, want an unfiltered scope read", store.readyQueries[0].Assignee)
 	}
 }
 
@@ -5032,15 +5094,19 @@ func TestSelectOrCreatePoolSessionBead_SerializesAliasCheckAndCreate(t *testing.
 	}
 
 	for i := 0; i < 2; i++ {
-		result := <-results
-		if result.err != nil {
-			t.Fatalf("selectOrCreatePoolSessionBead result %d: %v", i+1, result.err)
-		}
-		if result.bead.ID == "" {
-			t.Fatalf("selectOrCreatePoolSessionBead result %d returned empty bead", i+1)
-		}
-		if result.slot != 1 {
-			t.Fatalf("selectOrCreatePoolSessionBead result %d slot = %d, want 1", i+1, result.slot)
+		select {
+		case result := <-results:
+			if result.err != nil {
+				t.Fatalf("selectOrCreatePoolSessionBead result %d: %v", i+1, result.err)
+			}
+			if result.bead.ID == "" {
+				t.Fatalf("selectOrCreatePoolSessionBead result %d returned empty bead", i+1)
+			}
+			if result.slot != 1 {
+				t.Fatalf("selectOrCreatePoolSessionBead result %d slot = %d, want 1", i+1, result.slot)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("selectOrCreatePoolSessionBead result %d: timed out waiting for goroutine to complete", i+1)
 		}
 	}
 

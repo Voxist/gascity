@@ -277,6 +277,9 @@ type City struct {
 	// Doctor configures gc doctor thresholds and policy toggles
 	// (worktree size warnings, nested-worktree auto-prune).
 	Doctor DoctorConfig `toml:"doctor,omitempty"`
+	// StoreHealth configures the controller-internal store health patrol
+	// (probe matrix, reap rate-limit, write-path conformance probe).
+	StoreHealth StoreHealthConfig `toml:"storehealth,omitempty"`
 	// Maintenance configures periodic store-maintenance loops.
 	Maintenance MaintenanceConfig `toml:"maintenance,omitempty"`
 	// Services declares workspace-owned HTTP services mounted on the
@@ -754,6 +757,9 @@ type AgentOverride struct {
 	WakeMode *string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
 	// MouseMode overrides whether tmux mouse mode is preserved ("on" or "off").
 	MouseMode *string `toml:"mouse_mode,omitempty" jsonschema:"enum=on,enum=off"`
+	// Tier overrides the agent's provider-governor tier classification
+	// ("claude-required" or "overflow-ok").
+	Tier *string `toml:"tier,omitempty" jsonschema:"enum=claude-required,enum=overflow-ok"`
 	// InjectFragmentsAppend appends to the agent's inject_fragments list.
 	InjectFragmentsAppend []string `toml:"inject_fragments_append,omitempty"`
 	// MaxActiveSessions overrides the agent-level cap on concurrent sessions.
@@ -1348,16 +1354,274 @@ type BeadsConfig struct {
 	// and avoids bd ready/list flags that are unavailable or incomplete in bd
 	// 1.0.4.
 	BDCompatibility string `toml:"bd_compatibility,omitempty" jsonschema:"enum=bd-1.0.4,enum=bd-1.0.5"`
+	// Proxied routes bd through the pooling db-proxy (ProxiedServerMode,
+	// external backend) instead of direct ServerMode, eliminating the per-call
+	// bd→dolt connection churn (#1978: ~71 new connections/sec to the managed
+	// dolt server). Defaults to false = current direct ServerMode, byte-for-byte
+	// identical, so existing cities are unaffected. Requires a bd build that
+	// supports `bd init --proxied-server` (external); when the resolved bd lacks
+	// it, gascity falls back to server mode and a doctor check flags it, so a
+	// city paired with a standard bd never breaks.
+	Proxied *bool `toml:"proxied,omitempty" jsonschema:"default=false"`
+	// ProxyPoolSize is the warm backend-connection pool size the db-proxy keeps
+	// per (capabilities, database) key when Proxied is true. Defaults to 4.
+	// The proxy is shared per workspace root, so all agents of a scope share one
+	// warm pool; the size is frozen by the first bd invocation that spawns the
+	// proxy (changing it requires restarting the db-proxy-child).
+	ProxyPoolSize *int `toml:"proxy_pool_size,omitempty" jsonschema:"default=4"`
+	// ProxyIdleTimeout is how long a db-proxy-child stays alive with no active
+	// client before it shuts down. The bd default (30s) is tuned for one busy
+	// workspace; gascity touches many scopes sparsely (controller patrol probes
+	// every rig once per interval), starving any finite timeout so the proxy
+	// spawns, serves one op, idle-dies, and respawns on the next touch — pure
+	// churn that never reaches the warm-pool steady state. gascity therefore
+	// defaults to "0" (never idle) and owns the proxy lifecycle: proxies stay
+	// warm for the city's lifetime and are reaped on `gc stop`. Operators who
+	// want gc to relinquish that ownership can set a finite Go duration string.
+	// Read by bd as BEADS_PROXY_IDLE_TIMEOUT.
+	ProxyIdleTimeout *string `toml:"proxy_idle_timeout,omitempty" jsonschema:"default=0"`
+	// ExpectedBuild pins the bd build this city expects: a token (version or
+	// build identifier) that must appear verbatim in `bd --version` output.
+	// The beads-expected-build doctor check compares them so a brew upgrade
+	// or a rebuild from the wrong branch clobbering a custom bd is caught at
+	// doctor cadence instead of as a runtime mystery. Empty disables the
+	// check.
+	ExpectedBuild string `toml:"expected_build,omitempty"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
 	Policies map[string]BeadPolicyConfig `toml:"policies,omitempty"`
+	// Resilience configures the transport circuit breaker that guards bd
+	// subprocess and store operations ([beads.resilience]).
+	Resilience BeadsResilienceConfig `toml:"resilience,omitempty"`
+	// NativeStoreCanaryScopes lists the scope names (city name or rig names) for
+	// which the in-process NativeDoltStore is canaried, scope by scope, without
+	// flipping any global store mode. It is the P2.3 env-projection canary lever:
+	// when a scope is listed, the gc beads env projection ensures the native
+	// server-mode Dolt keys (BEADS_DOLT_SERVER_MODE/HOST/PORT) are projected from
+	// the managed-server live handle so the scope can open the native store, and
+	// the post-open identity assertion guarantees a silent-empty or misrouted DB
+	// is detected immediately. Defaults to empty (OFF) and is purely additive: an
+	// unlisted scope's env projection is byte-for-byte unchanged. The operator
+	// can layer additional scopes at runtime without editing committed config via
+	// the GC_BEADS_NATIVE_STORE_CANARY environment variable (comma-separated
+	// scope names); env entries union with this list.
+	NativeStoreCanaryScopes []string `toml:"native_store_canary_scopes,omitempty"`
+}
+
+// BeadsResilienceConfig holds circuit breaker settings for transport-class
+// bead store failures. The breaker trips a (scope, opClass) circuit after
+// ConsecutiveFailures consecutive transport failures, backs off with full
+// jitter between OpenBase and OpenMax, and admits one recovery probe per
+// HalfOpenInterval. Disabling it restores pre-breaker behavior (every
+// operation dials the store).
+type BeadsResilienceConfig struct {
+	// Enabled toggles the breaker. Defaults to true.
+	Enabled *bool `toml:"enabled,omitempty" jsonschema:"default=true"`
+	// ConsecutiveFailures is how many consecutive transport-class failures
+	// trip the breaker. Defaults to 3.
+	ConsecutiveFailures int `toml:"consecutive_failures,omitempty" jsonschema:"default=3"`
+	// OpenBase is the initial open-state backoff cap as a duration string.
+	// Defaults to "1s".
+	OpenBase string `toml:"open_base,omitempty" jsonschema:"default=1s"`
+	// OpenMax caps the open-state backoff as a duration string. Defaults
+	// to "60s".
+	OpenMax string `toml:"open_max,omitempty" jsonschema:"default=60s"`
+	// HalfOpenInterval is the minimum spacing between recovery probes
+	// while half-open, as a duration string. Defaults to "15s".
+	HalfOpenInterval string `toml:"half_open_interval,omitempty" jsonschema:"default=15s"`
+	// MaxInflightPerScope bounds concurrent bd subprocesses per scope. The
+	// admission semaphore blocks the (n+1)th bd call for a scope until one
+	// in flight returns, capping the subprocess amplifier (plan item 1.9).
+	// Defaults to 4. Non-positive disables the per-scope cap.
+	MaxInflightPerScope int `toml:"max_inflight_per_scope,omitempty" jsonschema:"default=4"`
+	// MaxInflightGlobal bounds concurrent bd subprocesses across all scopes
+	// in the city. Defaults to 16. Non-positive disables the global cap.
+	MaxInflightGlobal int `toml:"max_inflight_global,omitempty" jsonschema:"default=16"`
+	// MaxAdmissionWait bounds how long the admission semaphore waits for a
+	// free slot before failing fast, as a duration string. When the caps are
+	// saturated by bd subprocesses wedged on a backend transport timeout, a
+	// bounded wait prevents reconcile fan-out from blocking the controller
+	// tick indefinitely: an admission that cannot be granted within this
+	// window fails like an open breaker (typed ErrStoreUnavailable, zero
+	// subprocesses). Defaults to "30s". A non-positive value (e.g. "0s")
+	// restores the pre-bound behavior of blocking forever.
+	MaxAdmissionWait string `toml:"max_admission_wait,omitempty" jsonschema:"default=30s"`
+}
+
+// EnabledOrDefault reports whether the breaker is enabled (default true).
+func (r BeadsResilienceConfig) EnabledOrDefault() bool {
+	return r.Enabled == nil || *r.Enabled
+}
+
+// ConsecutiveFailuresOrDefault returns the trip threshold, falling back to
+// 3 when unset or non-positive.
+func (r BeadsResilienceConfig) ConsecutiveFailuresOrDefault() int {
+	if r.ConsecutiveFailures > 0 {
+		return r.ConsecutiveFailures
+	}
+	return 3
+}
+
+// OpenBaseOrDefault returns the parsed OpenBase, falling back to 1s when
+// unset, unparseable, or non-positive. Invalid values surface as warnings
+// from ValidateDurations at load time.
+func (r BeadsResilienceConfig) OpenBaseOrDefault() time.Duration {
+	return positiveDurationOrDefault(r.OpenBase, time.Second)
+}
+
+// OpenMaxOrDefault returns the parsed OpenMax, falling back to 60s when
+// unset, unparseable, or non-positive.
+func (r BeadsResilienceConfig) OpenMaxOrDefault() time.Duration {
+	return positiveDurationOrDefault(r.OpenMax, 60*time.Second)
+}
+
+// HalfOpenIntervalOrDefault returns the parsed HalfOpenInterval, falling
+// back to 15s when unset, unparseable, or non-positive.
+func (r BeadsResilienceConfig) HalfOpenIntervalOrDefault() time.Duration {
+	return positiveDurationOrDefault(r.HalfOpenInterval, 15*time.Second)
+}
+
+// MaxInflightPerScopeOrDefault returns the per-scope bd admission limit,
+// falling back to 4 when unset. A negative value disables the cap (returns
+// 0); an explicit 0 also disables it.
+func (r BeadsResilienceConfig) MaxInflightPerScopeOrDefault() int {
+	if r.MaxInflightPerScope < 0 {
+		return 0
+	}
+	if r.MaxInflightPerScope == 0 {
+		return 4
+	}
+	return r.MaxInflightPerScope
+}
+
+// MaxInflightGlobalOrDefault returns the global bd admission limit, falling
+// back to 16 when unset. A negative value disables the cap (returns 0); an
+// explicit 0 also disables it.
+func (r BeadsResilienceConfig) MaxInflightGlobalOrDefault() int {
+	if r.MaxInflightGlobal < 0 {
+		return 0
+	}
+	if r.MaxInflightGlobal == 0 {
+		return 16
+	}
+	return r.MaxInflightGlobal
+}
+
+// MaxAdmissionWaitOrDefault returns the parsed MaxAdmissionWait, falling
+// back to 30s when unset or unparseable. A non-positive value (e.g. "0s" or
+// a negative duration) is preserved verbatim to mean "block forever",
+// disabling the bounded-wait fail-fast. Unparseable values surface as
+// warnings from ValidateDurations at load time.
+func (r BeadsResilienceConfig) MaxAdmissionWaitOrDefault() time.Duration {
+	if r.MaxAdmissionWait == "" {
+		return 30 * time.Second
+	}
+	v, err := time.ParseDuration(r.MaxAdmissionWait)
+	if err != nil {
+		return 30 * time.Second
+	}
+	return v
+}
+
+// positiveDurationOrDefault parses value as a Go duration, returning def
+// when value is empty, unparseable, or non-positive.
+func positiveDurationOrDefault(value string, def time.Duration) time.Duration {
+	if value == "" {
+		return def
+	}
+	v, err := time.ParseDuration(value)
+	if err != nil || v <= 0 {
+		return def
+	}
+	return v
+}
+
+// NativeStoreCanaryEnvVar is the operator override that unions additional scope
+// names (comma-separated) into NativeStoreCanaryScopes at resolution time. It
+// lets an operator canary a scope without editing committed city config.
+const NativeStoreCanaryEnvVar = "GC_BEADS_NATIVE_STORE_CANARY"
+
+// NativeStoreCanaryScopeSet returns the set of scope names the native-store
+// canary is enabled for, unioning the configured NativeStoreCanaryScopes with
+// any names supplied via the NativeStoreCanaryEnvVar environment variable. Names
+// are trimmed; blank names are dropped. The returned map is never nil so callers
+// can membership-test without a nil guard. Resolution is a pure set union — no
+// judgment call is made about which scopes belong in the canary; that is the
+// operator's configuration.
+func (b BeadsConfig) NativeStoreCanaryScopeSet(envValue string) map[string]struct{} {
+	set := make(map[string]struct{}, len(b.NativeStoreCanaryScopes))
+	add := func(name string) {
+		if trimmed := strings.TrimSpace(name); trimmed != "" {
+			set[trimmed] = struct{}{}
+		}
+	}
+	for _, name := range b.NativeStoreCanaryScopes {
+		add(name)
+	}
+	for _, name := range strings.Split(envValue, ",") {
+		add(name)
+	}
+	return set
+}
+
+// NativeStoreCanaryEnabledForScope reports whether the native-store canary is
+// enabled for scopeName, given the configured scopes plus the operator env
+// override value. It is a membership test (a threshold compare), not a judgment.
+func (b BeadsConfig) NativeStoreCanaryEnabledForScope(scopeName, envValue string) bool {
+	scopeName = strings.TrimSpace(scopeName)
+	if scopeName == "" {
+		return false
+	}
+	_, ok := b.NativeStoreCanaryScopeSet(envValue)[scopeName]
+	return ok
 }
 
 // EventHooksEnabled reports whether bead event hooks should be installed.
 // Unset preserves the current default of enabled hooks.
 func (b BeadsConfig) EventHooksEnabled() bool {
 	return b.EventHooks == nil || *b.EventHooks
+}
+
+// ProxiedEnabled reports whether bd should run in pooling ProxiedServerMode.
+// Unset preserves the current default of direct ServerMode (false).
+func (b BeadsConfig) ProxiedEnabled() bool {
+	return b.Proxied != nil && *b.Proxied
+}
+
+// defaultBeadsProxyPoolSize is the warm pool size used when Proxied is on and
+// ProxyPoolSize is unset or non-positive.
+const defaultBeadsProxyPoolSize = 4
+
+// ProxyPoolSizeOrDefault returns the configured pool size, or the default when
+// unset/non-positive.
+func (b BeadsConfig) ProxyPoolSizeOrDefault() int {
+	if b.ProxyPoolSize != nil && *b.ProxyPoolSize > 0 {
+		return *b.ProxyPoolSize
+	}
+	return defaultBeadsProxyPoolSize
+}
+
+// defaultBeadsProxyIdleTimeout is the proxy idle-shutdown timeout used when
+// Proxied is on and ProxyIdleTimeout is unset/blank. "0" disables idle
+// shutdown: gascity owns the db-proxy lifecycle (Option 2), keeping each proxy
+// warm for the city's lifetime and reaping it on `gc stop`
+// (reapProxiedChildrenForCity). A never-idle proxy eliminates the
+// spawn/serve/idle-die/respawn churn that any finite timeout suffers under
+// sparse controller probes; a crash at worst leaves a still-usable warm proxy,
+// which the next stop reaps. Operators who do not want gc to own the lifecycle
+// can still set a finite proxy_idle_timeout explicitly.
+const defaultBeadsProxyIdleTimeout = "0"
+
+// ProxyIdleTimeoutOrDefault returns the configured proxy idle timeout, or the
+// default when unset/blank.
+func (b BeadsConfig) ProxyIdleTimeoutOrDefault() string {
+	if b.ProxyIdleTimeout != nil {
+		if v := strings.TrimSpace(*b.ProxyIdleTimeout); v != "" {
+			return v
+		}
+	}
+	return defaultBeadsProxyIdleTimeout
 }
 
 const (
@@ -1497,6 +1761,12 @@ type SessionConfig struct {
 	// alive-idle period for the city; values below 5m are clamped to 5m.
 	// Duration string (e.g. "30m"). Unset/zero disables it.
 	ProgressStallTimeout string `toml:"progress_stall_timeout,omitempty"`
+	// PendingCreateTTL bounds how long a start-pending session bead may wait
+	// for its runtime to be created and adopted. The controller reaps open
+	// start-pending beads older than this TTL whose session name has no live
+	// runtime, preventing duplicate pending records from jamming adoption.
+	// Duration string (e.g., "30m", "1h"). Defaults to "30m".
+	PendingCreateTTL string `toml:"pending_create_ttl,omitempty" jsonschema:"default=30m"`
 	// Socket specifies the tmux socket name for per-city isolation.
 	// When set, all tmux commands use "tmux -L <socket>" to connect to
 	// a dedicated server. When empty, defaults to the city name
@@ -1571,6 +1841,19 @@ func (s *SessionConfig) StartupTimeoutDuration() time.Duration {
 	d, err := time.ParseDuration(s.StartupTimeout)
 	if err != nil {
 		return 60 * time.Second
+	}
+	return d
+}
+
+// PendingCreateTTLDuration returns the start-pending session bead TTL as a
+// time.Duration. Defaults to 30m if empty or unparseable.
+func (s *SessionConfig) PendingCreateTTLDuration() time.Duration {
+	if s.PendingCreateTTL == "" {
+		return 30 * time.Minute
+	}
+	d, err := time.ParseDuration(s.PendingCreateTTL)
+	if err != nil {
+		return 30 * time.Minute
 	}
 	return d
 }
@@ -2174,6 +2457,20 @@ type DoctorConfig struct {
 	// Checks holds city-local inline doctor checks declared via
 	// [[doctor.check]] in city.toml.
 	Checks []LocalDoctorCheck `toml:"check,omitempty"`
+
+	// SupervisorInterval is the cadence at which the supervisor evaluates
+	// the cheap doctor subset (tick-age, agent_config_isolation, S6
+	// ceiling, plus any registered provenance/port-consistency checks) and
+	// publishes doctor.alert on red. Duration string. Defaults to "10m".
+	// Without this, every doctor-based retirement is detection at human
+	// cadence — the exact vigilance gap that produced incidents 5 and 11.
+	SupervisorInterval string `toml:"supervisor_interval,omitempty" jsonschema:"default=10m"`
+}
+
+// SupervisorIntervalOrDefault returns the parsed supervisor-cadence doctor
+// interval, falling back to 10m when unset, unparseable, or non-positive.
+func (c DoctorConfig) SupervisorIntervalOrDefault() time.Duration {
+	return positiveDurationOrDefault(c.SupervisorInterval, 10*time.Minute)
 }
 
 const (
@@ -2206,6 +2503,61 @@ func (c DoctorConfig) WorktreeRigErrorBytes() int64 {
 		return warn
 	}
 	return n
+}
+
+// StoreHealthConfig configures the controller-internal store health patrol
+// (city-scale architecture plan item 1.5). Every threshold is mechanical
+// (durations and counts) so the patrol holds no judgment calls in Go.
+type StoreHealthConfig struct {
+	// Enabled toggles the patrol. Defaults to true. Disabling restores the
+	// pre-patrol behavior (no two-probe matrix, no auto-reap).
+	Enabled *bool `toml:"enabled,omitempty" jsonschema:"default=true"`
+	// Interval is the per-scope probe cadence as a duration string.
+	// Defaults to "30s".
+	Interval string `toml:"interval,omitempty" jsonschema:"default=30s"`
+	// ConsecutiveFails is how many consecutive A-fail∧B-ok cycles confirm a
+	// proxy poison before forensics + reap. Defaults to 3.
+	ConsecutiveFails int `toml:"consecutive_fails,omitempty" jsonschema:"default=3"`
+	// ReapCooldown is the minimum spacing between reaps for one scope as a
+	// duration string. A second poison inside the window is alert-only with
+	// forensics kept. Defaults to "10m".
+	ReapCooldown string `toml:"reap_cooldown,omitempty" jsonschema:"default=10m"`
+	// WriteProbeInterval is the cadence of the write-path conformance probe
+	// (create+close one ephemeral bead of each RequiredCustomType) as a
+	// duration string. Defaults to "10m".
+	WriteProbeInterval string `toml:"write_probe_interval,omitempty" jsonschema:"default=10m"`
+}
+
+// StoreHealthEnabledOrDefault reports whether the patrol is enabled
+// (default true).
+func (c StoreHealthConfig) StoreHealthEnabledOrDefault() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// IntervalOrDefault returns the parsed probe interval, falling back to 30s.
+func (c StoreHealthConfig) IntervalOrDefault() time.Duration {
+	return positiveDurationOrDefault(c.Interval, 30*time.Second)
+}
+
+// ConsecutiveFailsOrDefault returns the confirm threshold, falling back to
+// 3 when unset or non-positive.
+func (c StoreHealthConfig) ConsecutiveFailsOrDefault() int {
+	if c.ConsecutiveFails > 0 {
+		return c.ConsecutiveFails
+	}
+	return 3
+}
+
+// ReapCooldownOrDefault returns the parsed reap cooldown, falling back to
+// 10m.
+func (c StoreHealthConfig) ReapCooldownOrDefault() time.Duration {
+	return positiveDurationOrDefault(c.ReapCooldown, 10*time.Minute)
+}
+
+// WriteProbeIntervalOrDefault returns the parsed write-probe interval,
+// falling back to 10m.
+func (c StoreHealthConfig) WriteProbeIntervalOrDefault() time.Duration {
+	return positiveDurationOrDefault(c.WriteProbeInterval, 10*time.Minute)
 }
 
 // parseHumanSize parses sizes like "10GB", "500 MB", "1024" (bytes
@@ -2338,6 +2690,12 @@ type DaemonConfig struct {
 	// RestartWindow is the sliding time window for counting restarts.
 	// Duration string (e.g., "30s", "5m", "1h"). Defaults to "1h".
 	RestartWindow string `toml:"restart_window,omitempty" jsonschema:"default=1h"`
+	// StatusSnapshotTimeout bounds how long `gc status` (and the controller's
+	// StatusView build) wait for the session-bead snapshot load before
+	// continuing with a runtime-only ("partial") status. On a large store the
+	// default 3s is too tight and silently degrades status output; raise it
+	// (e.g. "15s") on big/loaded cities. Duration string. Defaults to "3s".
+	StatusSnapshotTimeout string `toml:"status_snapshot_timeout,omitempty" jsonschema:"default=3s"`
 	// SessionCircuitBreaker enables the named-session respawn circuit breaker.
 	// When enabled, the controller suppresses no-progress named-session respawns
 	// after the configured restart threshold is exceeded.
@@ -2414,6 +2772,18 @@ type DaemonConfig struct {
 	// Nil (unset) defaults to 8. Set higher for workspaces with a fast
 	// dedicated dolt server, or lower to reduce contention on slow storage.
 	ProbeConcurrency *int `toml:"probe_concurrency,omitempty" jsonschema:"default=8"`
+	// OnBootStagger is the pause inserted between successive per-agent
+	// on_boot lifecycle hooks at controller/supervisor startup. on_boot
+	// hooks run bd list/query/update to reopen stranded in_progress beads;
+	// firing every agent template's hook back-to-back (and across many
+	// rigs booting at once) bursts the shared dolt connection pool into
+	// saturation ("closing bad idle connection: EOF", multi-second
+	// reconciles, hooks killed on timeout). A small stagger spreads the
+	// priming load so the pool is not hit all-at-once. Duration string
+	// (e.g., "250ms", "1s"). Empty (unset) defaults to
+	// DefaultOnBootStagger; "0" or "0s" disables staggering (restores the
+	// historical back-to-back behavior).
+	OnBootStagger string `toml:"on_boot_stagger,omitempty" jsonschema:"default=250ms"`
 	// MaxWakesPerTick caps how many sessions the reconciler may start in a
 	// single tick. Fresh generic pool session-bead creation uses the same
 	// budget so the controller does not materialize more ordinary pool sessions
@@ -2471,6 +2841,11 @@ type DaemonConfig struct {
 	// accumulate without bound across pool recycles. Set to false to
 	// retain worktrees for post-session diagnostics.
 	AutoPruneWorkerDir *bool `toml:"auto_prune_worker_dir,omitempty" jsonschema:"default=true"`
+	// FailoverChain is the ordered list of provider names the controller walks
+	// when the primary provider is red in the live health registry. The first
+	// healthy entry is used; if all entries are red the spawn is skipped.
+	// When empty, failover is disabled and the primary provider is used directly.
+	FailoverChain []string `toml:"failover_chain,omitempty"`
 }
 
 // AutoRestartOnDriftEnabled reports whether the supervisor should be
@@ -2519,6 +2894,14 @@ func (d *DaemonConfig) PatrolIntervalDuration() time.Duration {
 		return 30 * time.Second
 	}
 	return dur
+}
+
+// StatusSnapshotTimeoutDuration returns the bound for the `gc status`
+// session-bead snapshot load. Empty or unparseable values fall back to 3s
+// (the historical default); a non-positive value also falls back so status
+// never blocks indefinitely.
+func (d *DaemonConfig) StatusSnapshotTimeoutDuration() time.Duration {
+	return positiveDurationOrDefault(d.StatusSnapshotTimeout, 3*time.Second)
 }
 
 // TickDebounceDuration returns the tick-debounce window as a
@@ -2687,6 +3070,29 @@ func (d *DaemonConfig) ProbeConcurrencyOrDefault() int {
 		return 1
 	}
 	return *d.ProbeConcurrency
+}
+
+// DefaultOnBootStagger is the pause inserted between successive per-agent
+// on_boot hooks when [daemon].on_boot_stagger is unset. Small enough that
+// a city with a handful of pool agents adds negligible boot latency, large
+// enough to spread the bd/dolt connection-priming burst that otherwise
+// saturates the shared pool. See vp-hsau.
+const DefaultOnBootStagger = 250 * time.Millisecond
+
+// OnBootStaggerDuration returns the inter-hook pause for on_boot priming.
+// Empty (unset) defaults to DefaultOnBootStagger. An explicit "0"/"0s"
+// disables staggering, restoring the historical back-to-back behavior.
+// Invalid or negative values fall back to DefaultOnBootStagger (not
+// disabled) — only an explicit zero opts out.
+func (d *DaemonConfig) OnBootStaggerDuration() time.Duration {
+	if d.OnBootStagger == "" {
+		return DefaultOnBootStagger
+	}
+	v, err := time.ParseDuration(d.OnBootStagger)
+	if err != nil || v < 0 {
+		return DefaultOnBootStagger
+	}
+	return v // may be 0 (disabled)
 }
 
 // DefaultMaxWakesPerTick is the per-tick wake budget the reconciler uses
@@ -2980,6 +3386,17 @@ func normalizeAgentDefaultsAlias(cfg *City, meta toml.MetaData) {
 const (
 	// AgentLifecycleOneShot marks an agent command as intentionally short-lived.
 	AgentLifecycleOneShot = "one_shot"
+)
+
+const (
+	// AgentTierClaudeRequired marks an agent whose work needs Claude-class
+	// model quality; the provider governor serves it from the governed
+	// Claude account pool (alternation / model-degrade / cascade).
+	AgentTierClaudeRequired = "claude-required"
+	// AgentTierOverflowOK marks an agent whose work tolerates overflow
+	// vendors; the governor always routes it to the configured overflow
+	// pool, preserving the Claude weekly cap for claude-required work.
+	AgentTierOverflowOK = "overflow-ok"
 )
 
 // Agent defines a configured agent in the city.
@@ -3288,6 +3705,14 @@ type Agent struct {
 	// sessions; "off" or empty preserves the SDK's default mouse-off startup
 	// behavior for headless sessions.
 	MouseMode string `toml:"mouse_mode,omitempty" jsonschema:"enum=on,enum=off"`
+	// Tier classifies this agent's provider-quality requirement for the
+	// provider governor (internal/providergov). "claude-required" agents
+	// are served from the governed Claude account pool; "overflow-ok"
+	// agents always run on the configured overflow vendor pool, which
+	// stretches the Claude weekly cap. Empty means unclassified: the
+	// governor does not steer this agent and its configured provider
+	// applies unchanged.
+	Tier string `toml:"tier,omitempty" jsonschema:"enum=claude-required,enum=overflow-ok"`
 	// SleepAfterIdleSource records which config layer supplied SleepAfterIdle.
 	// Runtime-only — not persisted to TOML or JSON.
 	SleepAfterIdleSource string `toml:"-" json:"-"`
@@ -4562,6 +4987,14 @@ func ValidateAgents(agents []Agent) error {
 			// valid
 		default:
 			return fmt.Errorf("agent %q: mouse_mode must be \"on\", \"off\", or empty, got %q", a.QualifiedName(), a.MouseMode)
+		}
+		// Tier enum.
+		switch a.Tier {
+		case "", AgentTierClaudeRequired, AgentTierOverflowOK:
+			// valid
+		default:
+			return fmt.Errorf("agent %q: tier must be %q, %q, or empty, got %q",
+				a.QualifiedName(), AgentTierClaudeRequired, AgentTierOverflowOK, a.Tier)
 		}
 		if a.MinActiveSessions != nil && *a.MinActiveSessions < 0 {
 			return fmt.Errorf("agent %q: min_active_sessions must be >= 0", a.Name)

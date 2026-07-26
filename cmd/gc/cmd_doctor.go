@@ -214,6 +214,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		if workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
 			register(newDoltTopologyCheck(cityPath, cfg))
 			register(newDoltDriftCheck(cityPath, cfg))
+			register(newPortFileConsistencyCheck(cityPath, cfg))
 		}
 		register(doctor.NewConfigValidCheck(cfg))
 		register(doctor.NewLegacySuspendedFieldCheck(cfg))
@@ -231,6 +232,11 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewSkillCollisionCheck(cfg, cityPath))
 		register(doctor.NewOrderFiringCurrentCheck(cfg, cityPath, doctor.WithOrderFiringCurrentLastRunFunc(doctorOrderFiringCurrentLastRunFunc(cityPath, cfg, opts.Stderr))))
 		register(newCodexHooksDriftCheck(codexHookWorkDirs(cityPath, cfg)))
+		register(newBeadsProxiedCapabilityCheck(cfg))
+		// bd build pin: `bd --version` must contain [beads] expected_build
+		// (brew-clobber class). No-op when the pin is unset.
+		register(doctor.NewBeadsExpectedBuildCheck(cfg.Beads.ExpectedBuild))
+		register(newNativeStoreCanaryIdentityCheck(cityPath, cfg))
 		register(doctor.NewRigPackCoverageCheck(cfg, cityPath))
 		register(newPackRuntimesDoctorCheck(cfg))
 		register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
@@ -259,11 +265,20 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	register(doctor.NewBinaryCheck("jq", "", exec.LookPath))
 	register(doctor.NewBinaryCheck("pgrep", "", exec.LookPath))
 	register(doctor.NewBinaryCheck("lsof", "", exec.LookPath))
+	// Deploy provenance: the running binary must match the build manifest
+	// `make install` wrote next to it, and that commit must be
+	// ancestor-or-equal of the source repo's lineage ref. Degrades to a
+	// warning when no manifest/repo is available on this machine.
+	register(doctor.NewDeployProvenanceCheck())
 	// beads.role must be set before any bd command runs; check it here so
 	// the missing-role error appears before the downstream data/Dolt checks
 	// that will all fail for the same root cause.
 	if initNeedsBdTooling(cityPath) {
 		register(&doctor.BeadsRoleCheck{})
+		// Post-install contract probe: `bd context` must resolve from the
+		// city root (the gc-hook dead-drop signature). Non-fatal advisory
+		// because some stores legitimately have no city-root context.
+		register(doctor.NewBdContextProbeCheck())
 	}
 
 	// Controller check + supervisor HTTP check + session checks (gated by controller state).
@@ -293,6 +308,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(newBacklogDepthCheck(cityPath, storeFactory))
 		register(newOrderTrackingRetentionCheck(cityPath, storeFactory))
 		register(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
+		register(&prDeliveryDoctorCheck{cityPath: cityPath, newStore: storeFactory})
 	}
 	register(newDoctorDoltServerCheck(cityPath, opts.SkipCityDoltCheck))
 	// Host-level fork-rate watch: surfaces the per-command data-plane fork storm
@@ -339,6 +355,12 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 
 	// Custom types check — city store.
 	register(doctor.NewCustomTypesCheck(cityPath, "city"))
+	// Custom-types preflight — data-gates any native-store (dolt_mode_safe)
+	// flip by reading the city store's fully-resolved registered type set.
+	// Skipped in GC_DOLT=skip environments, matching the sibling Dolt checks.
+	if !gcDoltSkip() {
+		register(doctor.NewCustomTypesPreflightCheck(cityPath, "city"))
+	}
 
 	// Per-rig checks. Skip effectively-suspended rigs — opening their
 	// bead store triggers bd auto-start of orphan Dolt servers (ga-wzk).
@@ -354,11 +376,18 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			register(doctor.NewRigPathCheck(rig))
 			register(doctor.NewRigGitCheck(rig))
 			register(doctor.NewRigRootBranchCheck(rig))
+			register(doctor.NewRigIdentityTriadCheck(cityPath, rig))
 			register(doctor.NewRigBDSplitStoreCheck(cityPath, rig))
 			register(doctor.NewRigBeadsCheck(cityPath, rig, storeFactory))
 			register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || gcDoltSkip()))
 			// Custom types check — rig store.
 			register(doctor.NewCustomTypesCheck(rig.Path, rig.Name))
+			// Custom-types preflight — data-gates a native-store flip for
+			// this rig scope; skipped for non-managed-bdstore rigs and in
+			// GC_DOLT=skip environments, matching the sibling Dolt checks.
+			if rigUsesManagedBdStoreContract(cityPath, rig) && !gcDoltSkip() {
+				register(doctor.NewCustomTypesPreflightCheck(rig.Path, rig.Name))
+			}
 			// Dolt-backup registration catches the silent gap left by
 			// `gc rig add` before the rig is eligible for mol-dog backup
 			// automation. Gated to match the sibling dolt-server check:

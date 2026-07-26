@@ -12,8 +12,8 @@ import (
 
 func TestRunDoltCleanup_HumanOutputShowsAllWireframeSections(t *testing.T) {
 	fs := fsys.NewFake()
-	fs.Files["/city/.beads/dolt-server.port"] = []byte("28231\n")
 	fs.Files["/city/.beads/metadata.json"] = []byte(`{"dolt_database":"hq"}`)
+	putCanonicalCityConfig(fs)
 	putFakeDirTree(fs, "/city/.beads/dolt/.dolt_dropped_databases", map[string]int64{
 		"db_old/data": 4096,
 	})
@@ -30,6 +30,8 @@ func TestRunDoltCleanup_HumanOutputShowsAllWireframeSections(t *testing.T) {
 	opts := cleanupOptions{
 		Rigs:              rigs,
 		FS:                fs,
+		CityPath:          "/city",
+		LiveResolve:       fakeLiveResolve(),
 		JSON:              false, // human mode
 		DoltClient:        client,
 		HomeDir:           "/home/u",
@@ -254,7 +256,9 @@ func (e *erroringCleanupClient) ListDatabases(_ context.Context) ([]string, erro
 func (e *erroringCleanupClient) DropDatabase(_ context.Context, _ string) error {
 	return errBoom("drop-boom")
 }
+
 func (e *erroringCleanupClient) PurgeDroppedDatabases(_ context.Context, _ string) error { return nil }
+
 func (e *erroringCleanupClient) ProbeLiveSessions(_ context.Context) (map[string]int, error) {
 	return map[string]int{}, nil
 }

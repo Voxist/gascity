@@ -65,6 +65,7 @@ const (
 	DeferredRoutedToMetadataKey          = "gc.deferred_routed_to"
 	DeferredTypeMetadataKey              = "gc.deferred_type"
 	DetachedMetadataKey                  = "gc.detached"
+	DoNotAutoRouteMetadataKey            = "gc.do_not_auto_route"
 	DrainContextMetadataKey              = "gc.drain_context"
 	DrainContinuationGroupMetadataKey    = "gc.drain_continuation_group"
 	DrainControlIDMetadataKey            = "gc.drain_control_id"
@@ -129,6 +130,9 @@ const (
 	PackRootMetadataKey                  = "gc.pack_root"
 	PackWorkspaceMetadataKey             = "gc.pack_workspace"
 	PerDispatchModelMetadataKey          = "gc.per_dispatch_model"
+	PhaseEnteredAtMetadataKey            = "gc.phase_entered_at"
+	PhaseHistoryMetadataKey              = "gc.phase_history"
+	PhaseMetadataKey                     = "gc.phase"
 	RalphStepIDMetadataKey               = "gc.ralph_step_id"
 	ReasoningMetadataKey                 = "gc.reasoning"
 	RequiredArtifactMetadataKey          = "gc.required_artifact"
@@ -167,6 +171,8 @@ const (
 	TriggerBeadIDMetadataKey             = "gc.trigger_bead_id"
 	TriggerBeadStoreRefMetadataKey       = "gc.trigger_bead_store_ref"
 	TruncatedMetadataKey                 = "gc.truncated"
+	VoteFieldMetadataKey                 = "gc.vote_field"
+	WardenEscalatedMetadataKey           = "gc.warden_escalated"
 	WorkBranchMetadataKey                = "gc.work_branch"
 	WorkCommitMetadataKey                = "gc.work_commit"
 	WorkDirMetadataKey                   = "gc.work_dir"
@@ -261,6 +267,7 @@ var KnownMetadataKeys = []string{
 	DeferredRoutedToMetadataKey,
 	DeferredTypeMetadataKey,
 	DetachedMetadataKey,
+	DoNotAutoRouteMetadataKey,
 	DrainContextMetadataKey,
 	DrainContinuationGroupMetadataKey,
 	DrainControlIDMetadataKey,
@@ -325,6 +332,9 @@ var KnownMetadataKeys = []string{
 	PackRootMetadataKey,
 	PackWorkspaceMetadataKey,
 	PerDispatchModelMetadataKey,
+	PhaseEnteredAtMetadataKey,
+	PhaseHistoryMetadataKey,
+	PhaseMetadataKey,
 	RalphStepIDMetadataKey,
 	ReasoningMetadataKey,
 	RequiredArtifactMetadataKey,
@@ -363,6 +373,8 @@ var KnownMetadataKeys = []string{
 	TriggerBeadIDMetadataKey,
 	TriggerBeadStoreRefMetadataKey,
 	TruncatedMetadataKey,
+	VoteFieldMetadataKey,
+	WardenEscalatedMetadataKey,
 	WorkBranchMetadataKey,
 	WorkCommitMetadataKey,
 	WorkDirMetadataKey,

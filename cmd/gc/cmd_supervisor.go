@@ -1370,11 +1370,31 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		notifySdState(stderr, sdnotify.Watchdog)
 	}
 
-	// Initial reconcile.
+	// safeDoctorSubset wraps the supervisor-cadence doctor subset with
+	// panic recovery (plan item 1.9). It runs independently of the store
+	// path so it can detect failures an in-band sentinel cannot.
+	safeDoctorSubset := func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(stderr, "gc supervisor: doctor subset panicked: %v\n", r) //nolint:errcheck
+			}
+		}()
+		runSupervisorDoctorSubset(registry, stderr)
+	}
+
+	// Doctor cadence runs on its own ticker so a slow reconcile cannot
+	// starve detection and vice versa.
+	doctorTicker := time.NewTicker(supervisorDoctorIntervalFor(registry))
+	defer doctorTicker.Stop()
+
+	// Initial reconcile + doctor pass on startup.
 	safeReconcile()
+	safeDoctorSubset()
 
 	for {
 		select {
+		case <-doctorTicker.C:
+			safeDoctorSubset()
 		case <-ticker.C:
 			safeReconcile()
 		case req := <-reconcileCh:
@@ -1970,6 +1990,7 @@ func reconcileCities(
 		cityRuntime.setControllerState(cs)
 		cs.startBeadEventWatcher(cityCtx)
 		cs.startMaintenanceLoop(cityCtx)
+		cs.startStoreHealthPatrol(cityCtx)
 
 		// Run pool on_boot hooks (same as runController does).
 		if err := runPostPrepareStep("running_pool_on_boot", func() error {
@@ -2326,6 +2347,26 @@ func loadSupervisorCityConfig(cityPath string) (*config.City, *config.Provenance
 // prepareCityForSupervisor runs the critical city initialization steps
 // that cmd_start.go performs before runController. Without these, cities
 // would have no formulas, no bead stores, and no resolved rig paths.
+// beadStoreStartAttempts bounds how many times the supervisor retries the
+// managed bead-store start before giving up. Retrying rides out a transient
+// dolt unavailability (saturation / mid-restart) instead of crashing and
+// triggering a KeepAlive relaunch that re-bounces dolt (incident 2026-06-15).
+const beadStoreStartAttempts = 5
+
+// beadStoreStartBackoff returns the wait before the next bead-store start
+// retry (3s, 6s, 12s, 24s capped) — ~45s total ride-out, enough for a saturated
+// dolt to drain idle connections (read_timeout) or finish a restart.
+func beadStoreStartBackoff(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	d := 3 * time.Second << uint(attempt-1)
+	if backoffMax := 24 * time.Second; d > backoffMax {
+		d = backoffMax
+	}
+	return d
+}
+
 func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stderr io.Writer, progress func(string)) error {
 	runStep := func(status string, fn func() error) error {
 		if progress != nil && status != "" {
@@ -2364,10 +2405,30 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 
 	// Resolve rig paths and start bead store lifecycle.
 	resolveRigPaths(cityPath, cfg.Rigs)
-	if err := runStep("starting_bead_store", func() error {
-		return startBeadsLifecycle(cityPath, cityName, cfg, stderr)
-	}); err != nil {
-		return fmt.Errorf("beads lifecycle: %w", err)
+	// Retry the bead-store start with backoff before giving up. A transient
+	// dolt unavailability (connection saturation, or dolt mid-restart) must not
+	// crash the supervisor: KeepAlive would relaunch it and re-bounce dolt — the
+	// amplifier that turned a dolt blip into a multi-minute fleet outage
+	// (incident 2026-06-15). Riding out the blip lets the managed dolt settle so
+	// a later attempt succeeds; a genuine failure still surfaces once the
+	// attempts are exhausted.
+	var beadStoreErr error
+	for attempt := 1; attempt <= beadStoreStartAttempts; attempt++ {
+		beadStoreErr = runStep("starting_bead_store", func() error {
+			return startBeadsLifecycle(cityPath, cityName, cfg, stderr)
+		})
+		if beadStoreErr == nil {
+			break
+		}
+		if attempt < beadStoreStartAttempts {
+			wait := beadStoreStartBackoff(attempt)
+			fmt.Fprintf(stderr, "gc supervisor: city '%s': bead store start attempt %d/%d failed: %v; retrying in %s\n", //nolint:errcheck
+				cityName, attempt, beadStoreStartAttempts, beadStoreErr, wait)
+			time.Sleep(wait)
+		}
+	}
+	if beadStoreErr != nil {
+		return fmt.Errorf("beads lifecycle: %w", beadStoreErr)
 	}
 
 	// Post-startup bead provider health check.

@@ -57,6 +57,7 @@ gc [flags]
 | [gc pack](#gc-pack) | Manage remote pack sources |
 | [gc prime](#gc-prime) | Output the behavioral prompt for an agent |
 | [gc prompt](#gc-prompt) | Author and inspect agent prompt templates |
+| [gc provider](#gc-provider) | Provider governor utilities |
 | [gc register](#gc-register) | Register a city with the machine-wide supervisor |
 | [gc reload](#gc-reload) | Reload the current city's config without restarting the city/controller |
 | [gc restart](#gc-restart) | Restart all agent sessions in the city |
@@ -306,6 +307,7 @@ gc beads
 | [gc beads health](#gc-beads-health) | Check beads provider health |
 | [gc beads list](#gc-beads-list) | List beads (API-routed with bd fallback) |
 | [gc beads show](#gc-beads-show) | Show a single bead (API-routed with bd fallback) |
+| [gc beads state](#gc-beads-state) | Classify beads by effective state |
 
 ## gc beads city
 
@@ -420,6 +422,34 @@ gc beads show <bead-id>
 gc beads show ga-abc
 gc beads show ga-abc --json
 ```
+
+## gc beads state
+
+Classify every bead into one of 16 effective states and display
+the results grouped by state with owner and count.
+
+Anomaly states (orphaned, ready-unrouted, routed-stalled-dispatch, unknown)
+are prefixed with '!' in table output.
+
+```
+gc beads state [flags]
+```
+
+**Example:**
+
+```
+gc beads state
+gc beads state --json
+gc beads state --state routed-waiting
+gc beads state --ids
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--ids` | bool |  | include bead IDs in table output |
+| `--json` | bool |  | emit JSON result |
+| `--rig` | string |  | limit to beads routed to this rig |
+| `--state` | string |  | show only beads in this effective state |
 
 ## gc build-image
 
@@ -1204,14 +1234,16 @@ gc doctor --explain-postgres-auth
 
 gc dolt-cleanup is the Go-side implementation of the operational Dolt
 cleanup tool. It resolves the Dolt server port via the AD-04 chain
-(--port &gt; city dolt.port &gt; &lt;rigRoot&gt;/.beads/dolt-server.port &gt; 3307),
-drops stale test/agent databases, calls DOLT_PURGE_DROPPED_DATABASES
-to reclaim disk, and reaps orphaned dolt sql-server processes left
-over from leaked test harnesses. Invalid explicit ports and unreadable
-or invalid city/rig port settings fail closed before cleanup stages run;
-only absent rig port files can reach the legacy default. The legacy
-default is a connection fallback only; it does not protect port 3307
-from orphan-process reaping.
+(--port &gt; city dolt.port &gt; live managed dolt [runtime handle, then
+process table] &gt; 3307); .beads/dolt-server.port is a bd compatibility
+status file and is never consulted. It drops stale test/agent
+databases, calls DOLT_PURGE_DROPPED_DATABASES to reclaim disk, and
+reaps orphaned dolt sql-server processes left over from leaked test
+harnesses. Invalid explicit ports, invalid city port settings, and
+live-resolution errors (ambiguous listeners, discovery failures) fail
+closed before cleanup stages run; only a clean live-resolution miss can
+reach the legacy default. The legacy default is a connection fallback
+only; it does not protect port 3307 from orphan-process reaping.
 
 Dry-run by default. Pass --force to actually drop, purge, and kill.
 Pass --max-orphan-dbs with --force to refuse all destructive cleanup
@@ -2361,12 +2393,18 @@ subtrees whose open descendants are also older than --stale-after. Pass one
 or more scoped order names when --include-wisps is set; wisp recovery is
 order-scoped to avoid scanning unrelated beads.
 
+When the number of eligible closed-bead deletions exceeds
+GC_BULK_DELETE_CONFIRM_THRESHOLD (default 20), --confirm is required to
+proceed. This guard prevents accidental mass-deletes without an explicit
+operator acknowledgement.
+
 ```
 gc order sweep-tracking [order ...] [flags]
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--confirm` | bool |  | confirm bulk deletion when eligible count &gt; GC_BULK_DELETE_CONFIRM_THRESHOLD (default 20) |
 | `--dry-run` | bool |  | report stale order-tracking and order wisp beads without closing them |
 | `--include-wisps` | bool |  | also close stale order-run wisp subtrees with open descendants |
 | `--quiet` | bool |  | suppress success output |
@@ -2773,6 +2811,68 @@ gc prompt synth [flags]
 | `--wait-timeout` | duration | `10m0s` | in slingued mode with --wait, abort after this duration |
 | `--write` | bool |  | write to &lt;city&gt;/agents/&lt;role&gt;/prompt.template.md instead of stdout (direct mode only; slingued mode always writes) |
 | `--writer-agent` | string |  | Gas City agent to delegate the synth to via mol-prompt-synth (default: empty = direct mode, no agent) |
+
+## gc provider
+
+Provider governor utilities.
+
+The provider governor reads each Claude account's subscription usage
+(quota) and resolves which provider should serve each agent tier.
+Accounts are configured per provider in city.toml:
+
+    [providers.claude]
+    quota_monitor      = true
+    monitor_config_dir = "~/.gc/monitor-claude"
+
+The monitoring credential is a full OAuth login (scope user:profile)
+created once per account with:
+
+    CLAUDE_CONFIG_DIR=~/.gc/monitor-claude claude login
+
+```
+gc provider
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc provider quota](#gc-provider-quota) | Show Claude account quota states and per-tier provider decisions |
+| [gc provider rotate-key](#gc-provider-rotate-key) | Rotate a provider API key across tmux global env and live sessions |
+
+## gc provider quota
+
+Show Claude account quota states and per-tier provider decisions
+
+```
+gc provider quota [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--active` | string |  | provider name of the currently-active Claude account (alternation stay/flip input) |
+| `--base-url` | string | `https://api.anthropic.com` | API origin serving /api/oauth/usage |
+| `--flip-threshold` | float64 | `85` | five-hour utilization percent above which the active account flips to its sibling |
+| `--interval` | duration | `2m0s` | poll interval used with --poll |
+| `--json` | bool |  | output as JSON |
+| `--overflow` | stringSlice |  | overflow vendor pool in priority order (e.g. zai,openrouter) |
+| `--poll` | bool |  | keep polling on an interval, recording provider.* events to the city event log |
+| `--timeout` | duration | `10s` | per-account usage request timeout |
+
+## gc provider rotate-key
+
+Propagate a new API key into the tmux server global env and every live session
+that uses the named provider, without requiring a tmux kill-server.
+
+Running agent processes that already hold the old key in-process will pick up
+the new key on their next natural restart (drain/respawn), not immediately.
+Use --dry-run to preview what would change before writing.
+
+```
+gc provider rotate-key <provider> <newkey> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dry-run` | bool |  | Print what would change without writing to tmux |
 
 ## gc register
 

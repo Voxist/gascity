@@ -660,6 +660,88 @@ name = "mayor"
 	}
 }
 
+func TestBeadsProxiedGateAccessors(t *testing.T) {
+	// Default (nil) => gate off, pool size default 4 (byte-identical legacy).
+	var zero BeadsConfig
+	if zero.ProxiedEnabled() {
+		t.Error("ProxiedEnabled() = true for nil, want false")
+	}
+	if got := zero.ProxyPoolSizeOrDefault(); got != defaultBeadsProxyPoolSize {
+		t.Errorf("ProxyPoolSizeOrDefault() = %d, want %d", got, defaultBeadsProxyPoolSize)
+	}
+
+	tru, fls := true, false
+	if !(BeadsConfig{Proxied: &tru}).ProxiedEnabled() {
+		t.Error("ProxiedEnabled() = false for proxied=true")
+	}
+	if (BeadsConfig{Proxied: &fls}).ProxiedEnabled() {
+		t.Error("ProxiedEnabled() = true for proxied=false")
+	}
+
+	n6, n0, neg := 6, 0, -3
+	if got := (BeadsConfig{ProxyPoolSize: &n6}).ProxyPoolSizeOrDefault(); got != 6 {
+		t.Errorf("ProxyPoolSizeOrDefault(6) = %d, want 6", got)
+	}
+	// Non-positive sizes fall back to the default rather than producing an
+	// unusable pool.
+	if got := (BeadsConfig{ProxyPoolSize: &n0}).ProxyPoolSizeOrDefault(); got != defaultBeadsProxyPoolSize {
+		t.Errorf("ProxyPoolSizeOrDefault(0) = %d, want %d", got, defaultBeadsProxyPoolSize)
+	}
+	if got := (BeadsConfig{ProxyPoolSize: &neg}).ProxyPoolSizeOrDefault(); got != defaultBeadsProxyPoolSize {
+		t.Errorf("ProxyPoolSizeOrDefault(-3) = %d, want %d", got, defaultBeadsProxyPoolSize)
+	}
+}
+
+func TestParseBeadsProxiedSection(t *testing.T) {
+	cfg, err := Parse([]byte("[workspace]\nname = \"t\"\n\n[beads]\nproxied = true\nproxy_pool_size = 8\nproxy_idle_timeout = \"15m\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !cfg.Beads.ProxiedEnabled() {
+		t.Error("proxied not parsed as true")
+	}
+	if got := cfg.Beads.ProxyPoolSizeOrDefault(); got != 8 {
+		t.Errorf("proxy_pool_size = %d, want 8", got)
+	}
+	if got := cfg.Beads.ProxyIdleTimeoutOrDefault(); got != "15m" {
+		t.Errorf("proxy_idle_timeout = %q, want 15m", got)
+	}
+}
+
+func TestParseBeadsExpectedBuild(t *testing.T) {
+	cfg, err := Parse([]byte("[workspace]\nname = \"t\"\n\n[beads]\nexpected_build = \"1.0.5-pooling\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.Beads.ExpectedBuild; got != "1.0.5-pooling" {
+		t.Errorf("expected_build = %q, want %q", got, "1.0.5-pooling")
+	}
+}
+
+func TestParseBeadsExpectedBuildAbsent(t *testing.T) {
+	cfg, err := Parse([]byte("[workspace]\nname = \"t\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Beads.ExpectedBuild != "" {
+		t.Errorf("expected_build = %q, want empty when unset", cfg.Beads.ExpectedBuild)
+	}
+}
+
+func TestBeadsProxyIdleTimeoutAccessor(t *testing.T) {
+	if got := (BeadsConfig{}).ProxyIdleTimeoutOrDefault(); got != defaultBeadsProxyIdleTimeout {
+		t.Errorf("default = %q, want %q", got, defaultBeadsProxyIdleTimeout)
+	}
+	blank := "  "
+	if got := (BeadsConfig{ProxyIdleTimeout: &blank}).ProxyIdleTimeoutOrDefault(); got != defaultBeadsProxyIdleTimeout {
+		t.Errorf("blank = %q, want default %q", got, defaultBeadsProxyIdleTimeout)
+	}
+	v := "5m"
+	if got := (BeadsConfig{ProxyIdleTimeout: &v}).ProxyIdleTimeoutOrDefault(); got != "5m" {
+		t.Errorf("set = %q, want 5m", got)
+	}
+}
+
 func TestMarshalOmitsEmptyBeadsSection(t *testing.T) {
 	c := DefaultCity("test")
 	data, err := c.Marshal()
@@ -3325,6 +3407,24 @@ func TestValidateAgentsMouseMode(t *testing.T) {
 	}
 }
 
+func TestValidateAgentsTier(t *testing.T) {
+	for _, tier := range []string{"", "claude-required", "overflow-ok"} {
+		t.Run("valid_"+tier, func(t *testing.T) {
+			if err := ValidateAgents([]Agent{{Name: "worker", Tier: tier}}); err != nil {
+				t.Fatalf("ValidateAgents tier %q: %v", tier, err)
+			}
+		})
+	}
+
+	err := ValidateAgents([]Agent{{Name: "worker", Tier: "platinum"}})
+	if err == nil {
+		t.Fatal("ValidateAgents invalid tier: got nil error")
+	}
+	if !strings.Contains(err.Error(), "tier") {
+		t.Fatalf("ValidateAgents error = %v, want tier context", err)
+	}
+}
+
 func TestValidateAgentsMissingName(t *testing.T) {
 	agents := []Agent{{MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5)}}
 	err := ValidateAgents(agents)
@@ -3461,6 +3561,41 @@ name = "mayor"
 	got := cfg.Daemon.PatrolIntervalDuration()
 	if got != 30*time.Second {
 		t.Errorf("PatrolIntervalDuration() = %v, want 30s", got)
+	}
+}
+
+func TestDaemonOnBootStaggerDefault(t *testing.T) {
+	d := DaemonConfig{}
+	if got := d.OnBootStaggerDuration(); got != DefaultOnBootStagger {
+		t.Errorf("OnBootStaggerDuration() = %v, want %v (default)", got, DefaultOnBootStagger)
+	}
+}
+
+func TestDaemonOnBootStaggerCustom(t *testing.T) {
+	d := DaemonConfig{OnBootStagger: "1s"}
+	if got := d.OnBootStaggerDuration(); got != time.Second {
+		t.Errorf("OnBootStaggerDuration() = %v, want 1s", got)
+	}
+}
+
+func TestDaemonOnBootStaggerDisabled(t *testing.T) {
+	d := DaemonConfig{OnBootStagger: "0"}
+	if got := d.OnBootStaggerDuration(); got != 0 {
+		t.Errorf("OnBootStaggerDuration() = %v, want 0 (explicit disable)", got)
+	}
+}
+
+func TestDaemonOnBootStaggerInvalidFallsBack(t *testing.T) {
+	d := DaemonConfig{OnBootStagger: "not-a-duration"}
+	if got := d.OnBootStaggerDuration(); got != DefaultOnBootStagger {
+		t.Errorf("OnBootStaggerDuration() = %v, want %v (default on invalid)", got, DefaultOnBootStagger)
+	}
+}
+
+func TestDaemonOnBootStaggerNegativeFallsBack(t *testing.T) {
+	d := DaemonConfig{OnBootStagger: "-200ms"}
+	if got := d.OnBootStaggerDuration(); got != DefaultOnBootStagger {
+		t.Errorf("OnBootStaggerDuration() = %v, want %v (default on negative)", got, DefaultOnBootStagger)
 	}
 }
 
@@ -5640,6 +5775,50 @@ func TestSessionSetupTimeoutInvalid(t *testing.T) {
 	got := s.SetupTimeoutDuration()
 	if got != 10*time.Second {
 		t.Errorf("SetupTimeoutDuration() = %v, want 10s (default for invalid)", got)
+	}
+}
+
+func TestSessionPendingCreateTTLDefault(t *testing.T) {
+	s := SessionConfig{}
+	got := s.PendingCreateTTLDuration()
+	if got != 30*time.Minute {
+		t.Errorf("PendingCreateTTLDuration() = %v, want 30m", got)
+	}
+}
+
+func TestSessionPendingCreateTTLCustom(t *testing.T) {
+	s := SessionConfig{PendingCreateTTL: "45m"}
+	got := s.PendingCreateTTLDuration()
+	if got != 45*time.Minute {
+		t.Errorf("PendingCreateTTLDuration() = %v, want 45m", got)
+	}
+}
+
+func TestSessionPendingCreateTTLInvalid(t *testing.T) {
+	s := SessionConfig{PendingCreateTTL: "not-a-duration"}
+	got := s.PendingCreateTTLDuration()
+	if got != 30*time.Minute {
+		t.Errorf("PendingCreateTTLDuration() = %v, want 30m (default for invalid)", got)
+	}
+}
+
+func TestParseSessionPendingCreateTTL(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test-city"
+
+[session]
+pending_create_ttl = "1h"
+
+[[agent]]
+name = "mayor"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.Session.PendingCreateTTLDuration(); got != time.Hour {
+		t.Errorf("PendingCreateTTLDuration() = %v, want 1h", got)
 	}
 }
 
@@ -7941,5 +8120,28 @@ func TestCityWithProvidersInstallsKimiHooksByDefault(t *testing.T) {
 				t.Fatalf("Workspace.InstallAgentHooks = %v, want %v", got, want)
 			}
 		})
+	}
+}
+
+// TestFailoverChainConfig verifies that failover_chain in [daemon] is parsed
+// into DaemonConfig.FailoverChain.
+func TestFailoverChainConfig(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+failover_chain = ["claude", "zai"]
+
+[[agent]]
+name = "worker"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	want := []string{"claude", "zai"}
+	if !reflect.DeepEqual(cfg.Daemon.FailoverChain, want) {
+		t.Fatalf("Daemon.FailoverChain = %v, want %v", cfg.Daemon.FailoverChain, want)
 	}
 }

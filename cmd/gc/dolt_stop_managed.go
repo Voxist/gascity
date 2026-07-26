@@ -60,6 +60,13 @@ func managedDoltStopPollInterval(gracePeriod time.Duration) time.Duration {
 }
 
 func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedState bool) (managedDoltStopReport, error) {
+	// When proxied mode is on, gc owns the never-idle db-proxy lifecycle; reap
+	// the proxies fronting this managed Dolt on a genuine stop (clearPublishedState
+	// distinguishes a real shutdown from a recovery restart, which leaves proxies
+	// to respawn on demand). Deferred so it runs on every return path.
+	if clearPublishedState {
+		defer reapProxiedChildrenForCityPath(cityPath)
+	}
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
 		return managedDoltStopReport{}, err

@@ -6432,3 +6432,129 @@ func TestWarnIfClosedOrderTrackingBacklogLarge_SilentOnNilStore(_ *testing.T) {
 	// nil store: must not panic.
 	warnIfClosedOrderTrackingBacklogLarge(nil, io.Discard)
 }
+
+// TestCityRuntime_StartsModelProxy verifies that when failover_chain is
+// non-empty, newCityRuntime starts the in-process model proxy and stores its
+// bound address in cr.modelProxyAddr.
+func TestCityRuntime_StartsModelProxy(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	stubManagedDoltStoreOpeners(t)
+	sp := runtime.NewFake()
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath: t.TempDir(),
+		CityName: "test-city",
+		Cfg: &config.City{
+			Daemon: config.DaemonConfig{
+				FailoverChain: []string{"claude"},
+			},
+		},
+		SP: sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:              newDrainOps(sp),
+		Rec:               events.Discard,
+		Stdout:            io.Discard,
+		Stderr:            io.Discard,
+		ManagedDoltHealth: func(string) error { return nil },
+		ManagedDoltOwned:  func(string) (bool, error) { return true, nil },
+		ManagedDoltPort:   func(string) string { return "" },
+	})
+	if cr.modelProxyAddr == "" {
+		t.Fatal("modelProxyAddr is empty — model proxy not started when failover_chain is set")
+	}
+}
+
+// TestBuildDesiredState_InjectsProxyBaseURL verifies that when modelProxyAddr
+// is set on the CityRuntime, buildDesiredState rewrites each session's
+// ANTHROPIC_BASE_URL to route through the local model proxy.
+func TestBuildDesiredState_InjectsProxyBaseURL(t *testing.T) {
+	const proxyAddr = "http://localhost:12345"
+	const providerName = "claude"
+
+	cr := &CityRuntime{
+		modelProxyAddr: proxyAddr,
+		buildFn: func(_ *config.City, _ runtime.Provider, _ beads.Store) DesiredStateResult {
+			return DesiredStateResult{
+				State: map[string]TemplateParams{
+					"worker": {
+						Command:          "test-cmd",
+						SessionName:      "worker",
+						ResolvedProvider: &config.ResolvedProvider{Name: providerName},
+					},
+				},
+			}
+		},
+	}
+
+	result := cr.buildDesiredState(nil, nil)
+
+	tp, ok := result.State["worker"]
+	if !ok {
+		t.Fatal("worker missing from desired state")
+	}
+	want := proxyAddr + "/proxy/" + providerName
+	got := tp.Env["ANTHROPIC_BASE_URL"]
+	if got != want {
+		t.Fatalf("ANTHROPIC_BASE_URL = %q, want %q", got, want)
+	}
+}
+
+// TestOrderTrackingRetentionWatchdogSkipsStaleBackup verifies that the watchdog
+// skips bulk deletion and emits a warning when the city backup is stale.
+func TestOrderTrackingRetentionWatchdogSkipsStaleBackup(t *testing.T) {
+	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+
+	// Write a stale backup_state.json (48h old — past the 24h default threshold).
+	cityPath := t.TempDir()
+	backupDir := filepath.Join(cityPath, ".beads", "backup")
+	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+		t.Fatalf("mkdir backup dir: %v", err)
+	}
+	staleTS := now.Add(-48 * time.Hour).Format(time.RFC3339)
+	backupState := `{"last_dolt_commit":"abc","timestamp":"` + staleTS + `"}`
+	if err := os.WriteFile(filepath.Join(backupDir, "backup_state.json"), []byte(backupState), 0o644); err != nil {
+		t.Fatalf("write backup_state.json: %v", err)
+	}
+
+	// Seed eligible beads (8d old, past 7d TTL, enough to exceed retain-10 floor).
+	seed := make([]beads.Bead, 0, minClosedOrderTrackingRetained+1)
+	for i := range minClosedOrderTrackingRetained + 1 {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("guard-%02d", i),
+			Title:     "order:guard",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-8*24*time.Hour + time.Duration(i)*time.Minute),
+			Labels:    []string{"order-run:guard", labelOrderTracking},
+			Ephemeral: true,
+		})
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+
+	var stderrBuf bytes.Buffer
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cityPath:            cityPath,
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              &stderrBuf,
+		logPrefix:           "gc test",
+		// Zero last: watchdog would fire if not for the backup gate.
+	}
+	cr.runOrderTrackingRetentionWatchdog(now)
+
+	// No beads should have been deleted — backup gate must block the sweep.
+	if _, err := store.Get("guard-00"); err != nil {
+		t.Fatalf("guard-00 should be preserved when backup is stale: %v", err)
+	}
+	// A non-empty warning must appear on stderr.
+	got := stderrBuf.String()
+	if got == "" {
+		t.Fatalf("want a backup-stale warning on stderr, got empty output")
+	}
+	if !strings.Contains(got, "backup") {
+		t.Fatalf("stderr = %q, want 'backup' in warning", got)
+	}
+}

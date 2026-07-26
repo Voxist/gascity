@@ -1407,6 +1407,94 @@ func TestReadDoltDatabase(t *testing.T) {
 	}
 }
 
+func TestReadMetadataProjectID(t *testing.T) {
+	fs := fsys.OSFS{}
+
+	t.Run("returns_id_when_present", func(t *testing.T) {
+		dir := t.TempDir()
+		beadsDir := filepath.Join(dir, ".beads")
+		if err := fs.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := fs.WriteFile(filepath.Join(beadsDir, "metadata.json"),
+			[]byte(`{"backend":"dolt","project_id":"abc-123"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got, ok, err := ReadMetadataProjectID(fs, dir)
+		if err != nil {
+			t.Fatalf("error = %v", err)
+		}
+		if !ok || got != "abc-123" {
+			t.Fatalf("got (%q, %v), want (%q, true)", got, ok, "abc-123")
+		}
+	})
+
+	t.Run("returns_false_when_project_id_absent", func(t *testing.T) {
+		dir := t.TempDir()
+		beadsDir := filepath.Join(dir, ".beads")
+		if err := fs.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := fs.WriteFile(filepath.Join(beadsDir, "metadata.json"),
+			[]byte(`{"backend":"dolt"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got, ok, err := ReadMetadataProjectID(fs, dir)
+		if err != nil {
+			t.Fatalf("error = %v", err)
+		}
+		if ok || got != "" {
+			t.Fatalf("got (%q, %v), want (\"\", false)", got, ok)
+		}
+	})
+
+	t.Run("returns_false_when_file_absent", func(t *testing.T) {
+		dir := t.TempDir()
+		got, ok, err := ReadMetadataProjectID(fs, dir)
+		if err != nil {
+			t.Fatalf("error = %v", err)
+		}
+		if ok || got != "" {
+			t.Fatalf("got (%q, %v), want (\"\", false)", got, ok)
+		}
+	})
+
+	t.Run("returns_error_on_malformed_json", func(t *testing.T) {
+		dir := t.TempDir()
+		beadsDir := filepath.Join(dir, ".beads")
+		if err := fs.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := fs.WriteFile(filepath.Join(beadsDir, "metadata.json"),
+			[]byte(`{not valid json`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, _, err := ReadMetadataProjectID(fs, dir)
+		if err == nil {
+			t.Fatal("want error on malformed JSON, got nil")
+		}
+	})
+
+	t.Run("trims_whitespace_from_id", func(t *testing.T) {
+		dir := t.TempDir()
+		beadsDir := filepath.Join(dir, ".beads")
+		if err := fs.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := fs.WriteFile(filepath.Join(beadsDir, "metadata.json"),
+			[]byte(`{"project_id":"  spaced-id  "}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got, ok, err := ReadMetadataProjectID(fs, dir)
+		if err != nil {
+			t.Fatalf("error = %v", err)
+		}
+		if !ok || got != "spaced-id" {
+			t.Fatalf("got (%q, %v), want (%q, true)", got, ok, "spaced-id")
+		}
+	})
+}
+
 func countLineOccurrences(text, needle string) int {
 	count := 0
 	for _, line := range strings.Split(text, "\n") {

@@ -1128,7 +1128,14 @@ var supervisorServiceFixedEnvKeys = map[string]bool{
 }
 
 func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
-	env := make(map[string]string)
+	// Default PYTHONDONTWRITEBYTECODE=1 into every generated supervisor plist so
+	// Python invoked by controller-spawned scripts (orders, hooks, cached-import
+	// pack tooling) never writes __pycache__/*.pyc into the import-cache
+	// worktrees. Those byte-compiled files would otherwise reappear after every
+	// restart and — together with the cache-dirty gate — wedge the city behind a
+	// perpetual "run gc import install" loop (vp-gny3). A GC_SUPERVISOR_ENV
+	// opt-in for the same key still overrides this default below.
+	env := map[string]string{"PYTHONDONTWRITEBYTECODE": "1"}
 	explicitEnvKeys := supervisorServiceExplicitEnvKeys(os.Getenv("GC_SUPERVISOR_ENV"))
 	explicitEnvKeySet := make(map[string]bool, len(explicitEnvKeys))
 	for _, key := range explicitEnvKeys {
@@ -1352,6 +1359,16 @@ const supervisorLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
         <string>{{xmlesc .Value}}</string>
         {{end}}
     </dict>
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>8192</integer>
+    </dict>
+    <key>HardResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>16384</integer>
+    </dict>
 </dict>
 </plist>
 `
@@ -1369,6 +1386,10 @@ KillMode=process
 ExecStart={{systemdpath .GCPath}} supervisor run
 Restart=always
 RestartSec=5s
+# Raise the file-descriptor limit (parallel to the launchd plist's
+# SoftResourceLimits) so the managed dolt server the supervisor spawns is not
+# capped at a low default FD limit under connection load (incident 2026-06-15).
+LimitNOFILE=8192:16384
 StandardOutput=append:{{.LogPath}}
 StandardError=append:{{.LogPath}}
 Environment=GC_HOME="{{.GCHome}}"

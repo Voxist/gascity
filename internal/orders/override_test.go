@@ -254,6 +254,73 @@ func TestApplyOverrides_RiglessHintExcludesUnrelatedOrders(t *testing.T) {
 	}
 }
 
+// TestApplyOverrides_DegradeNotFatal is the vp-ia7c regression guard: a
+// single unknown override must be skipped with a reported warning while every
+// valid override — including ones positioned AFTER the bad entry — is still
+// applied. This is the blast-radius fix for the outage where one dangling
+// [[orders.overrides]] entry made the entire order config fail to load and
+// the dispatcher enumerated 0 orders.
+func TestApplyOverrides_DegradeNotFatal(t *testing.T) {
+	t.Parallel()
+
+	disabled := boolPtr(false)
+	tenSec := strPtr("10s")
+
+	aa := []Order{
+		{Name: "patrol", Rig: ""},
+		{Name: "sweeper", Rig: ""},
+	}
+	overrides := []Override{
+		{Name: "patrol", Rig: "", Enabled: disabled}, // valid, before the bad one
+		{Name: "ghost", Rig: ""},                     // unknown — must be skipped, not fatal
+		{Name: "sweeper", Rig: "", Interval: tenSec}, // valid, AFTER the bad one
+	}
+
+	err := ApplyOverrides(aa, overrides)
+
+	// A warning error is returned describing the skipped override...
+	if err == nil {
+		t.Fatal("expected a non-nil warning error reporting the skipped override")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, `"ghost"`) || !strings.Contains(msg, "not found") {
+		t.Errorf("error should name the skipped override and say 'not found'; got %q", msg)
+	}
+	if !strings.Contains(msg, "orders.overrides[1]") {
+		t.Errorf("error should keep the original override index; got %q", msg)
+	}
+
+	// ...but the valid overrides on BOTH sides of the bad one are applied.
+	if aa[0].Enabled == nil || *aa[0].Enabled {
+		t.Errorf("valid override before the bad entry was not applied: patrol.Enabled=%v", aa[0].Enabled)
+	}
+	if aa[1].Interval != "10s" {
+		t.Errorf("valid override after the bad entry was not applied: sweeper.Interval=%q, want 10s", aa[1].Interval)
+	}
+}
+
+// TestApplyOverrides_AllValidSucceeds confirms config load succeeds (nil
+// error) when every override matches, so the degrade path doesn't leak a
+// spurious warning on the happy path.
+func TestApplyOverrides_AllValidSucceeds(t *testing.T) {
+	t.Parallel()
+
+	aa := []Order{{Name: "patrol", Rig: ""}, {Name: "sweeper", Rig: ""}}
+	overrides := []Override{
+		{Name: "patrol", Rig: "", Enabled: boolPtr(false)},
+		{Name: "sweeper", Rig: "", Interval: strPtr("5s")},
+	}
+	if err := ApplyOverrides(aa, overrides); err != nil {
+		t.Fatalf("all-valid overrides must succeed, got: %v", err)
+	}
+	if aa[0].Enabled == nil || *aa[0].Enabled {
+		t.Error("patrol should be disabled")
+	}
+	if aa[1].Interval != "5s" {
+		t.Errorf("sweeper interval = %q, want 5s", aa[1].Interval)
+	}
+}
+
 // TestApplyOverrides_PreservesNotFoundSubstring is a regression guard for
 // cmd/gc/order_dispatch_test.go's TestBuildOrderDispatcherOverrideNotFoundNonFatal,
 // which asserts strings.Contains(stderr, "not found"). If we change the

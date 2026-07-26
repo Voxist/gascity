@@ -1,6 +1,7 @@
 package orders
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -44,13 +45,25 @@ type Override struct {
 //     regardless of rig.
 //   - otherwise:     matches only the order with that exact rig.
 //
-// Returns an error if an override targets a nonexistent order (following
-// the agent override pattern where unmatched targets are errors, not
-// silent no-ops).
+// Degrade-not-fatal contract: a single unmatched (or empty-name) override
+// must NOT abort the whole override pass. Every valid override is applied
+// regardless of where the bad one sits in the slice, and the unmatched ones
+// are collected into a single joined error so the caller can warn-and-skip
+// them. This is the blast-radius fix for the outage where one stale
+// [[orders.overrides]] entry naming a removed order made the ENTIRE order
+// config fail to load → the dispatcher enumerated 0 orders → no agents
+// (vp-ia7c). Callers route the returned error to a warning sink (e.g.
+// ScanOptions.OnOverrideError) instead of failing config load.
+//
+// The returned error (when non-nil) wraps one error per skipped override via
+// errors.Join, preserving the per-index "...not found" / "name is required"
+// wording so existing substring assertions keep matching.
 func ApplyOverrides(aa []Order, overrides []Override) error {
+	var skipped []error
 	for i, ov := range overrides {
 		if ov.Name == "" {
-			return fmt.Errorf("orders.overrides[%d]: name is required", i)
+			skipped = append(skipped, fmt.Errorf("orders.overrides[%d]: name is required (skipped)", i))
+			continue
 		}
 		found := false
 		for j := range aa {
@@ -64,10 +77,10 @@ func ApplyOverrides(aa []Order, overrides []Override) error {
 			found = true
 		}
 		if !found {
-			return notFoundError(i, ov, aa)
+			skipped = append(skipped, notFoundError(i, ov, aa))
 		}
 	}
-	return nil
+	return errors.Join(skipped...)
 }
 
 func rigMatches(ovRig, orderRig string) bool {

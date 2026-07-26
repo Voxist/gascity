@@ -253,11 +253,22 @@ func cadenceTransitionDriver(prevDriver, nextDriver string) string {
 }
 
 func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
+	// Breaker open with no recovery probe due: stay idle for a poll
+	// interval instead of burning a full bd scan against a store that is
+	// known unreachable. Probe-due cycles still run — the reconcile scan
+	// is the recovery probe.
+	if g := c.availabilityGateRef(); g != nil && !g.Available() && !g.ProbeDue() {
+		return cacheReconcilePollInterval
+	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if c.syncFailures >= maxCacheSyncFailures && !c.stats.LastProblemAt.IsZero() {
-		dueAt := c.stats.LastProblemAt.Add(cacheReconcileFailureBackoff)
+	if c.syncFailures > 0 && !c.stats.LastProblemAt.IsZero() {
+		backoff := cacheReconcileBaseBackoff << uint(c.syncFailures)
+		if backoff > cacheReconcileMaxBackoff || backoff <= 0 {
+			backoff = cacheReconcileMaxBackoff
+		}
+		dueAt := c.stats.LastProblemAt.Add(backoff)
 		if !now.Before(dueAt) {
 			return 0
 		}
@@ -284,6 +295,12 @@ func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
 }
 
 func (c *CachingStore) runReconciliation() {
+	// Breaker open: skip the cycle cheaply (one problem entry per
+	// episode) unless a recovery probe is due, in which case the scan
+	// below doubles as the probe.
+	if c.reconcileUnavailableSkip() {
+		return
+	}
 	start := time.Now()
 
 	c.mu.RLock()
@@ -298,6 +315,10 @@ func (c *CachingStore) runReconciliation() {
 		c.syncFailures++
 		if (IsPartialResult(err) || c.syncFailures >= maxCacheSyncFailures) && (c.state == cacheLive || c.state == cachePartial) {
 			c.state = cacheDegraded
+			if !c.circuitTripped {
+				c.circuitTripped = true
+				c.problemf(fmt.Sprintf("circuit-breaker tripped rig=%s syncFailures=%d", c.idPrefix, c.syncFailures))
+			}
 		}
 		c.recordProblemLocked("reconcile cache", err)
 		c.recordReconcileLatencyLocked(bdLatency)

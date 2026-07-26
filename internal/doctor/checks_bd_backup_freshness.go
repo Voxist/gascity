@@ -141,6 +141,24 @@ func (c *BdBackupFreshnessCheck) freshnessScanTargets() []bdBackupFreshnessTarge
 	return targets
 }
 
+// BulkDeleteSafe reports whether it is safe to perform a bulk bead deletion
+// given the current backup freshness across all managed scopes. It returns
+// safe=false and a human-readable reason when any managed scope has a stale
+// last sync (older than maxAge). Scopes with no backup_state.json at all are
+// treated as safe — "no backup configured" is a different concern (DoltBackupCheck).
+func BulkDeleteSafe(cityPath string, cfg *config.City, maxAge time.Duration, now time.Time) (bool, string) {
+	scopeRoots := managedDoltScopeRootsForConfig(cityPath, cfg, nil)
+	for _, scopeRoot := range scopeRoots {
+		scopeRoot = filepath.Clean(scopeRoot)
+		label := bdBackupScopeLabel(cityPath, scopeRoot)
+		beadsDir := filepath.Join(scopeRoot, ".beads")
+		if finding, ok := scanBackupFreshness(label, beadsDir, now, maxAge); ok {
+			return false, finding
+		}
+	}
+	return true, ""
+}
+
 // scanBackupFreshness reads <beadsDir>/backup/backup_state.json and returns a
 // finding when the last sync is older than maxAge or the timestamp cannot be
 // read. A missing backup_state.json returns ("", false) — not this check's job.

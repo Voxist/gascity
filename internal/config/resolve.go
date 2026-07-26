@@ -322,6 +322,12 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	if city.ACPCommand != "" {
 		result.ACPCommand = city.ACPCommand
 	}
+	if city.QuotaMonitor != nil {
+		result.QuotaMonitor = cloneBoolPtr(city.QuotaMonitor)
+	}
+	if city.MonitorConfigDir != "" {
+		result.MonitorConfigDir = city.MonitorConfigDir
+	}
 
 	// Slice fields: replace entirely when non-nil.
 	if city.Args != nil {

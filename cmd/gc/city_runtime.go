@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
@@ -107,8 +111,21 @@ type CityRuntime struct {
 	asyncStops         asyncStartTracker
 	demandSnapshot     *runtimeDemandSnapshot
 
+	// modelProxyAddr is the bound address of the in-process model proxy (e.g.
+	// "http://localhost:54321"). Empty when the proxy is not running.
+	modelProxyAddr    string
+	providerHealthReg *providerHealthRegistry
+	modelProxyServer  *http.Server
+
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
+
+	// tickCount counts completed reconcile ticks for the controller
+	// heartbeat. controller.tick_completed is emitted at a patrol multiple
+	// (every tickHeartbeatEvery ticks) or when a tick's duration breaches
+	// tickHeartbeatSlowThreshold — never on every tick. Single-goroutine
+	// (the reconcile loop owns it); no synchronization needed.
+	tickCount uint64
 
 	convScopes          map[string]*convergenceScope // nil until bead store available; keyed by rig name ("" = city/HQ)
 	convScopesMu        sync.RWMutex                 // guards convScopes map pointer
@@ -342,6 +359,24 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	if err := cr.svc.Reload(); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: service init: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
+	if len(p.Cfg.Daemon.FailoverChain) > 0 {
+		upstreams := make(map[string]string, len(p.Cfg.Providers))
+		for name, spec := range p.Cfg.Providers {
+			if u := spec.Env["ANTHROPIC_BASE_URL"]; u != "" {
+				upstreams[name] = u
+			}
+		}
+		reg := newProviderHealthRegistry()
+		srv := &http.Server{Handler: newModelProxyHandler(reg, upstreams)}
+		if ln, err := net.Listen("tcp", "localhost:0"); err != nil {
+			fmt.Fprintf(cr.stderr, "%s: model proxy listen: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		} else {
+			cr.modelProxyAddr = "http://" + ln.Addr().String()
+			cr.providerHealthReg = reg
+			cr.modelProxyServer = srv
+			go srv.Serve(ln) //nolint:errcheck
+		}
+	}
 	return cr
 }
 
@@ -363,11 +398,14 @@ func (cr *CityRuntime) crashTrack() crashTracker {
 func (cr *CityRuntime) run(ctx context.Context) {
 	defer cr.shutdown()
 
-	dirty := cr.configDirty
-	if dirty == nil {
-		dirty = &atomic.Bool{}
-		cr.configDirty = dirty
+	// configDirty is normally non-nil (newCityRuntime substitutes a fresh
+	// *atomic.Bool when the caller passes none), but controllerLoop constructs
+	// CityRuntime via a struct literal. Initialize the shared field here so the
+	// config watcher and the run loop observe the same atomic.
+	if cr.configDirty == nil {
+		cr.configDirty = &atomic.Bool{}
 	}
+	dirty := cr.configDirty
 
 	if cr.tomlPath != "" {
 		cr.restartConfigWatcher()
@@ -558,6 +596,9 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		if reapStaleSessionBeads(cr.cityBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) > 0 {
 			sessionBeads = cr.loadSessionBeadSnapshot()
 		}
+		if reapPhantomSessionBeads(cr.cityBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) > 0 {
+			sessionBeads = cr.loadSessionBeadSnapshot()
+		}
 		result := cr.buildDesiredState(sessionBeads, startupTrace)
 		sessionBeads = cr.loadSessionBeadSnapshot()
 		result = refreshDesiredStateWithSessionBeads(
@@ -647,9 +688,11 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		// previous value on exit so nested ticks don't lose context.
 		prev := beads.SetReconcilerTickTrigger(trigger)
 		defer beads.RestoreReconcilerTickTrigger(prev)
+		tickStart := time.Now()
 		cr.safeTick(func() {
 			cr.tick(ctx, dirty, &lastProviderName, cityRoot, &prevPoolRunning, trigger)
 		}, trigger)
+		cr.recordTickHeartbeat(trigger, time.Since(tickStart))
 	}
 	if dirty.Load() {
 		runTick("startup-poke")
@@ -790,6 +833,49 @@ func (cr *CityRuntime) safeTick(fn func(), trigger string) (panicked bool) {
 	}()
 	fn()
 	return false
+}
+
+// Controller heartbeat cadence. The tick_completed event is the
+// supervisor doctor's tick-age signal; emitting it every tick would make
+// the event log a hot path, so it fires on a patrol multiple or when a
+// tick runs slow.
+const (
+	// tickHeartbeatEvery emits one heartbeat per this many completed ticks.
+	tickHeartbeatEvery = 10
+	// tickHeartbeatSlowThreshold forces an out-of-cadence heartbeat when a
+	// single tick exceeds it, so a degrading controller surfaces before the
+	// next scheduled heartbeat.
+	tickHeartbeatSlowThreshold = 5 * time.Second
+)
+
+// recordTickHeartbeat emits a controller.tick_completed event at a patrol
+// multiple or on a duration-threshold breach. It is the controller
+// heartbeat the supervisor-cadence doctor reads to compute tick age
+// (plan item 1.9). Best-effort: a nil recorder is a no-op.
+func (cr *CityRuntime) recordTickHeartbeat(trigger string, dur time.Duration) {
+	cr.tickCount++
+	breach := dur >= tickHeartbeatSlowThreshold
+	onMultiple := cr.tickCount%tickHeartbeatEvery == 0
+	if !breach && !onMultiple {
+		return
+	}
+	if cr.rec == nil {
+		return
+	}
+	payload, err := json.Marshal(events.ControllerTickCompletedPayload{
+		DurationMs:      dur.Milliseconds(),
+		Phase:           trigger,
+		ThresholdBreach: breach,
+	})
+	if err != nil {
+		return
+	}
+	cr.rec.Record(events.Event{
+		Type:    events.ControllerTickCompleted,
+		Actor:   eventActor(),
+		Subject: cr.cityName,
+		Payload: payload,
+	})
 }
 
 // startupReadinessWatchdog emits a warning + goroutine dump to stderr
@@ -1110,6 +1196,14 @@ func (cr *CityRuntime) tick(
 		sessionBeads = cr.loadSessionBeadSnapshot()
 		recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.after_reap", phaseStart, traceSessionSnapshotFields(sessionBeads))
 	}
+	phaseStart = time.Now()
+	phantomReaped := reapPhantomSessionBeads(cr.cityBeadStore(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr)
+	recordPhase(TraceSiteControllerTickPhase, "reap_phantom_session_beads", phaseStart, map[string]any{"reaped": phantomReaped})
+	if phantomReaped > 0 {
+		phaseStart = time.Now()
+		sessionBeads = cr.loadSessionBeadSnapshot()
+		recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.after_phantom_reap", phaseStart, traceSessionSnapshotFields(sessionBeads))
+	}
 	if cr.cfg.Daemon.AutoReapClosedBeadWorktreesEnabled() {
 		phaseStart = time.Now()
 		beadWorktreesReaped := reapClosedBeadWorktrees(cr.cityPath, cr.cfg, cr.rigBeadStores(), cr.rec, cr.stderr)
@@ -1425,6 +1519,19 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	}
 }
 
+// bulkDeleteMaxAge returns the maximum backup age allowed for bulk bead
+// deletions. Configurable via GC_BACKUP_MAX_AGE_FOR_BULK_DELETE (integer
+// seconds); defaults to 86400 s (24 h).
+func bulkDeleteMaxAge(_ *config.City) time.Duration {
+	if s := os.Getenv("GC_BACKUP_MAX_AGE_FOR_BULK_DELETE"); s != "" {
+		var secs int
+		if _, err := fmt.Sscanf(s, "%d", &secs); err == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	return 24 * time.Hour
+}
+
 // runOrderTrackingRetentionWatchdog deletes closed order-tracking beads that
 // are past their TTL (defaulting to 7d) and beyond the retain-10 floor, at
 // most once every orderTrackingRetentionWatchdogInterval. It deletes at most
@@ -1435,6 +1542,15 @@ func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(now time.Time) {
 		return
 	}
 	cr.orderTrackingRetentionWatchdogLast = now
+
+	if cr.cityPath != "" {
+		if safe, reason := doctor.BulkDeleteSafe(cr.cityPath, cr.cfg, bulkDeleteMaxAge(cr.cfg), now); !safe {
+			if cr.stderr != nil {
+				fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: skipping bulk delete — %s\n", cr.logPrefix, reason) //nolint:errcheck // best-effort stderr
+			}
+			return
+		}
+	}
 
 	stores, _, closeOpened, storeErr := cr.orderTrackingSweepStores()
 	defer closeOpened()
@@ -1447,7 +1563,8 @@ func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(now time.Time) {
 
 	policy := orderTrackingRetentionPolicyForConfig(cr.cfg)
 	deleted, sweepErr := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
-		stores, now, policy, nil, orderTrackingRetentionWatchdogDeleteBudget)
+		stores, now, policy, nil, orderTrackingRetentionWatchdogDeleteBudget,
+	)
 	if err := errors.Join(storeErr, sweepErr); err != nil && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
@@ -2144,7 +2261,8 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		poolDesired = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(ComputePoolDesiredStatesTraced(
-				cr.cfg, poolWorkBeads, sessionBeads.Open(), result.ScaleCheckCounts, trace)),
+				cr.cfg, poolWorkBeads, sessionBeads.Open(), result.ScaleCheckCounts, trace,
+			)),
 			sessionBeads,
 			result.PoolScaleCheckPartialTemplates,
 		)
@@ -2220,6 +2338,8 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		ctx, cr.cityPath, open, desiredState, cfgNames, cr.cfg, cr.sp, store,
 		cr.dops,
 		awakeAssignedWorkBeads, rigStores, readyWaitSet, cr.sessionDrains, cr.providerHealthGate,
+		cr.providerHealthReg,
+		cr.cfg.Daemon.FailoverChain,
 		poolDesired,
 		result.NamedSessionDemand,
 		result.snapshotQueryPartial(),
@@ -2805,7 +2925,8 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		filteredCfg,
 		PoolDesiredCounts(ComputePoolDesiredStates(
-			filteredCfg, poolWorkBeads, open, wfcResult.ScaleCheckCounts)),
+			filteredCfg, poolWorkBeads, open, wfcResult.ScaleCheckCounts,
+		)),
 		newSessionBeadSnapshot(open),
 		wfcResult.PoolScaleCheckPartialTemplates,
 	)
@@ -2828,6 +2949,8 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		nil, // control-dispatcher ticks only need ownership continuity, not main-tick assigned/ready snapshots
 		cr.sessionDrains,
 		cr.providerHealthGate,
+		cr.providerHealthReg,
+		cr.cfg.Daemon.FailoverChain,
 		poolDesired,
 		wfcResult.NamedSessionDemand,
 		false, // storeQueryPartial: config-change path doesn't query work beads
@@ -2968,10 +3091,25 @@ func filterSessionBeadsByName(snapshot *sessionBeadSnapshot, names map[string]bo
 func (cr *CityRuntime) buildDesiredState(sessionBeads *sessionBeadSnapshot, trace *sessionReconcilerTraceCycle) DesiredStateResult {
 	store := cr.cityBeadStore()
 	rigStores := cr.rigBeadStores()
+	var result DesiredStateResult
 	if cr.buildFnWithSessionBeads != nil {
-		return cr.buildFnWithSessionBeads(cr.cfg, cr.sp, store, rigStores, sessionBeads, trace)
+		result = cr.buildFnWithSessionBeads(cr.cfg, cr.sp, store, rigStores, sessionBeads, trace)
+	} else {
+		result = cr.buildFn(cr.cfg, cr.sp, store)
 	}
-	return cr.buildFn(cr.cfg, cr.sp, store)
+	if cr.modelProxyAddr != "" {
+		for name, tp := range result.State {
+			if tp.ResolvedProvider == nil {
+				continue
+			}
+			if tp.Env == nil {
+				tp.Env = make(map[string]string)
+			}
+			tp.Env["ANTHROPIC_BASE_URL"] = cr.modelProxyAddr + "/proxy/" + tp.ResolvedProvider.Name
+			result.State[name] = tp
+		}
+	}
+	return result
 }
 
 func (cr *CityRuntime) loadDemandSnapshot(
@@ -2991,7 +3129,8 @@ func (cr *CityRuntime) loadDemandSnapshot(
 		result.PoolDesiredCounts = retainScaleCheckPartialPoolDesired(
 			cr.cfg,
 			PoolDesiredCounts(ComputePoolDesiredStatesTraced(
-				cr.cfg, poolWorkBeads, openSessionBeads, result.ScaleCheckCounts, trace)),
+				cr.cfg, poolWorkBeads, openSessionBeads, result.ScaleCheckCounts, trace,
+			)),
 			sessionBeads,
 			result.PoolScaleCheckPartialTemplates,
 		)
@@ -3230,6 +3369,9 @@ func (cr *CityRuntime) shutdown() {
 		}
 		if cr.trace != nil {
 			_ = cr.trace.Close()
+		}
+		if cr.modelProxyServer != nil {
+			_ = cr.modelProxyServer.Close()
 		}
 		if cr.svc != nil {
 			// Workspace-service proxies are process-group-bound, not preserved

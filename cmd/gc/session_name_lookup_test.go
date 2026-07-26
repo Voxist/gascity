@@ -523,3 +523,152 @@ func TestDerivePoolSessionNameRejectsInvalidCollisionSuffix(t *testing.T) {
 		t.Fatal("derivePoolSessionName: want error when collision suffix would exceed explicit session name length")
 	}
 }
+
+func TestCreatePoolSessionBead_ReusesOpenStartPendingSlotBead(t *testing.T) {
+	store := beads.NewMemStore()
+	now := time.Date(2026, 5, 1, 9, 15, 0, 0, time.UTC)
+	identity := poolSessionCreateIdentity{AgentName: "gascity/claude-1", Slot: 1}
+
+	first, err := createPoolSessionBead(store, "gascity/claude", now, identity)
+	if err != nil {
+		t.Fatalf("createPoolSessionBead (first): %v", err)
+	}
+
+	later := now.Add(5 * time.Minute)
+	second, err := createPoolSessionBead(store, "gascity/claude", later, identity)
+	if err != nil {
+		t.Fatalf("createPoolSessionBead (second): %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("second create minted new bead %s, want reuse of %s", second.ID, first.ID)
+	}
+	if got, want := second.Metadata["pending_create_started_at"], pendingCreateStartedAtNow(later); got != want {
+		t.Errorf("reused pending_create_started_at = %q, want refreshed %q", got, want)
+	}
+
+	open, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("loadSessionBeads: %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("open session beads = %d, want 1 (no duplicate per pool slot)", len(open))
+	}
+	stored, err := store.Get(first.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", first.ID, err)
+	}
+	if got, want := stored.Metadata["pending_create_started_at"], pendingCreateStartedAtNow(later); got != want {
+		t.Errorf("stored pending_create_started_at = %q, want refreshed %q", got, want)
+	}
+}
+
+func TestCreatePoolSessionBead_DifferentSlotCreatesFresh(t *testing.T) {
+	store := beads.NewMemStore()
+	now := time.Date(2026, 5, 1, 9, 15, 0, 0, time.UTC)
+
+	first, err := createPoolSessionBead(store, "gascity/claude", now, poolSessionCreateIdentity{AgentName: "gascity/claude-1", Slot: 1})
+	if err != nil {
+		t.Fatalf("createPoolSessionBead (slot 1): %v", err)
+	}
+	second, err := createPoolSessionBead(store, "gascity/claude", now, poolSessionCreateIdentity{AgentName: "gascity/claude-2", Slot: 2})
+	if err != nil {
+		t.Fatalf("createPoolSessionBead (slot 2): %v", err)
+	}
+	if second.ID == first.ID {
+		t.Fatalf("slot 2 reused slot 1 bead %s, want fresh bead", first.ID)
+	}
+}
+
+func TestCreatePoolSessionBead_NoSlotSkipsReuse(t *testing.T) {
+	store := beads.NewMemStore()
+	now := time.Date(2026, 5, 1, 9, 15, 0, 0, time.UTC)
+
+	first, err := createPoolSessionBead(store, "gascity/claude", now, poolSessionCreateIdentity{})
+	if err != nil {
+		t.Fatalf("createPoolSessionBead (first): %v", err)
+	}
+	second, err := createPoolSessionBead(store, "gascity/claude", now, poolSessionCreateIdentity{})
+	if err != nil {
+		t.Fatalf("createPoolSessionBead (second): %v", err)
+	}
+	if second.ID == first.ID {
+		t.Fatalf("slotless create reused bead %s, want fresh bead (canonical-singleton dedup is out of scope)", first.ID)
+	}
+}
+
+func TestCreatePoolSessionBead_ClosedPendingBeadNotReused(t *testing.T) {
+	store := beads.NewMemStore()
+	now := time.Date(2026, 5, 1, 9, 15, 0, 0, time.UTC)
+	identity := poolSessionCreateIdentity{AgentName: "gascity/claude-1", Slot: 1}
+
+	first, err := createPoolSessionBead(store, "gascity/claude", now, identity)
+	if err != nil {
+		t.Fatalf("createPoolSessionBead (first): %v", err)
+	}
+	if err := store.Close(first.ID); err != nil {
+		t.Fatalf("store.Close(%s): %v", first.ID, err)
+	}
+
+	second, err := createPoolSessionBead(store, "gascity/claude", now, identity)
+	if err != nil {
+		t.Fatalf("createPoolSessionBead (second): %v", err)
+	}
+	if second.ID == first.ID {
+		t.Fatalf("closed bead %s was reused, want fresh bead", first.ID)
+	}
+}
+
+func TestCreatePoolSessionBead_NonStartPendingStateNotReused(t *testing.T) {
+	store := beads.NewMemStore()
+	now := time.Date(2026, 5, 1, 9, 15, 0, 0, time.UTC)
+	identity := poolSessionCreateIdentity{AgentName: "gascity/claude-1", Slot: 1}
+
+	for _, state := range []string{"creating", "active", "asleep", "drained"} {
+		t.Run(state, func(t *testing.T) {
+			first, err := createPoolSessionBead(store, "gascity/claude", now, identity)
+			if err != nil {
+				t.Fatalf("createPoolSessionBead (first): %v", err)
+			}
+			if err := store.SetMetadata(first.ID, "state", state); err != nil {
+				t.Fatalf("SetMetadata state=%s: %v", state, err)
+			}
+
+			second, err := createPoolSessionBead(store, "gascity/claude", now, identity)
+			if err != nil {
+				t.Fatalf("createPoolSessionBead (second): %v", err)
+			}
+			if second.ID == first.ID {
+				t.Fatalf("state=%s bead %s was reused, want fresh bead", state, first.ID)
+			}
+			// Reset for the next subtest: retire both beads.
+			if err := store.Close(first.ID); err != nil {
+				t.Fatalf("store.Close(%s): %v", first.ID, err)
+			}
+			if err := store.Close(second.ID); err != nil {
+				t.Fatalf("store.Close(%s): %v", second.ID, err)
+			}
+		})
+	}
+}
+
+func TestCreatePoolSessionBead_WokenPendingBeadNotReused(t *testing.T) {
+	store := beads.NewMemStore()
+	now := time.Date(2026, 5, 1, 9, 15, 0, 0, time.UTC)
+	identity := poolSessionCreateIdentity{AgentName: "gascity/claude-1", Slot: 1}
+
+	first, err := createPoolSessionBead(store, "gascity/claude", now, identity)
+	if err != nil {
+		t.Fatalf("createPoolSessionBead (first): %v", err)
+	}
+	if err := store.SetMetadata(first.ID, "last_woke_at", now.Format(time.RFC3339)); err != nil {
+		t.Fatalf("SetMetadata last_woke_at: %v", err)
+	}
+
+	second, err := createPoolSessionBead(store, "gascity/claude", now, identity)
+	if err != nil {
+		t.Fatalf("createPoolSessionBead (second): %v", err)
+	}
+	if second.ID == first.ID {
+		t.Fatalf("woken bead %s was reused, want fresh bead", first.ID)
+	}
+}

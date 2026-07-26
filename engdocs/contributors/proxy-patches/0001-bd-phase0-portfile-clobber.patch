@@ -1,0 +1,188 @@
+From 48118a1e5ca2de3b92f548a74e0754c50f864c6f Mon Sep 17 00:00:00 2001
+From: bourgois <karel@voxist.com>
+Date: Sat, 6 Jun 2026 18:17:33 +0200
+Subject: [PATCH] fix(dolt): proxied routed store must not clobber
+ dolt-server.port
+
+The proxied-server routed store (newProxiedServerRoutedStore) opens a
+ServerMode DoltStore pointed at the db-proxy's ephemeral listener so legacy
+store-based commands (list, ready, update, --claim, close) work through the
+proxy. newServerMode then persisted that listener port into
+.beads/dolt-server.port via EnsurePortFile, because the connection looks like
+a localhost server.
+
+That file is the canonical-server discovery hint. Writing the proxy's
+ephemeral port there means it is clobbered on the next reconcile and goes
+stale the moment the proxy idle-dies and respawns on a new port. Any reader
+that resolves the endpoint from the file then targets a dead listener, which
+manifests downstream as silent connection failures.
+
+Add Config.RoutedThroughProxy, set it in newProxiedServerRoutedStore, and
+gate the port-file persist on it via shouldPersistPortFileForConfig so only
+the canonical local dolt sql-server records its port. Pure-Go unit test
+covers the persist matrix.
+---
+ cmd/bd/uow_factory.go                         |  8 ++
+ .../storage/dolt/port_file_persist_test.go    | 76 +++++++++++++++++++
+ internal/storage/dolt/store.go                | 29 ++++++-
+ 3 files changed, 112 insertions(+), 1 deletion(-)
+ create mode 100644 internal/storage/dolt/port_file_persist_test.go
+
+diff --git a/cmd/bd/uow_factory.go b/cmd/bd/uow_factory.go
+index 0ae07b29e..0cfa75e20 100644
+--- a/cmd/bd/uow_factory.go
++++ b/cmd/bd/uow_factory.go
+@@ -56,6 +56,14 @@ func newProxiedServerRoutedStore(ctx context.Context, beadsDir string) (storage.
+ 		ServerUser: "root",
+ 		// AutoStart stays false: the proxy owns the backend lifecycle. We must
+ 		// never try to spawn a dolt server for the proxy's listener port.
++		//
++		// RoutedThroughProxy stops newServerMode from persisting pf.Port (the
++		// ephemeral proxy listener) into .beads/dolt-server.port. That file is
++		// the canonical-server discovery hint; a proxy port written there is
++		// clobbered on the next reconcile and goes stale when the proxy respawns
++		// on a new port, breaking endpoint resolution for any reader that trusts
++		// it.
++		RoutedThroughProxy: true,
+ 	}
+ 	return dolt.New(ctx, cfg)
+ }
+diff --git a/internal/storage/dolt/port_file_persist_test.go b/internal/storage/dolt/port_file_persist_test.go
+new file mode 100644
+index 000000000..9f129cad1
+--- /dev/null
++++ b/internal/storage/dolt/port_file_persist_test.go
+@@ -0,0 +1,76 @@
++package dolt
++
++import (
++	"os"
++	"testing"
++)
++
++// TestShouldPersistPortFileForConfig guards the proxied-server port-file clobber
++// fix. A proxied routed store (RoutedThroughProxy) connects to an ephemeral
++// db-proxy listener; its port must never be persisted into
++// .beads/dolt-server.port, which is the canonical-server discovery hint. Before
++// the fix, newServerMode wrote the proxy's listener port there, so the file went
++// stale the moment the proxy respawned on a new port and any reader that trusted
++// it targeted a dead endpoint.
++func TestShouldPersistPortFileForConfig(t *testing.T) {
++	// The decision keys off BEADS_DOLT_SERVER_PORT / BEADS_DOLT_PORT; clear both
++	// so the env-override branch does not mask the RoutedThroughProxy logic.
++	for _, k := range []string{"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"} {
++		if orig, ok := os.LookupEnv(k); ok {
++			t.Cleanup(func() { _ = os.Setenv(k, orig) })
++			_ = os.Unsetenv(k)
++		}
++	}
++
++	tests := []struct {
++		name string
++		cfg  *Config
++		want bool
++	}{
++		{
++			name: "canonical local server persists",
++			cfg:  &Config{ServerHost: "127.0.0.1", ServerPort: 48770},
++			want: true,
++		},
++		{
++			name: "proxied routed store does not persist",
++			cfg:  &Config{ServerHost: "127.0.0.1", ServerPort: 50534, RoutedThroughProxy: true},
++			want: false,
++		},
++		{
++			name: "remote host never persists",
++			cfg:  &Config{ServerHost: "db.example.com", ServerPort: 3306},
++			want: false,
++		},
++		{
++			name: "nil config is safe",
++			cfg:  nil,
++			want: false,
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			if got := shouldPersistPortFileForConfig(tt.cfg); got != tt.want {
++				t.Fatalf("shouldPersistPortFileForConfig() = %v, want %v", got, tt.want)
++			}
++		})
++	}
++}
++
++// TestShouldPersistPortFileForConfig_EnvOverrideSuppresses confirms an explicit
++// port override still suppresses the persist even for a canonical local server,
++// preserving the pre-existing shouldPersistResolvedPortFile contract.
++func TestShouldPersistPortFileForConfig_EnvOverrideSuppresses(t *testing.T) {
++	if orig, ok := os.LookupEnv("BEADS_DOLT_PORT"); ok {
++		t.Cleanup(func() { _ = os.Setenv("BEADS_DOLT_PORT", orig) })
++	} else {
++		t.Cleanup(func() { _ = os.Unsetenv("BEADS_DOLT_PORT") })
++	}
++	_ = os.Setenv("BEADS_DOLT_PORT", "48770")
++
++	cfg := &Config{ServerHost: "127.0.0.1", ServerPort: 48770}
++	if shouldPersistPortFileForConfig(cfg) {
++		t.Fatal("expected env port override to suppress port-file persist")
++	}
++}
+diff --git a/internal/storage/dolt/store.go b/internal/storage/dolt/store.go
+index 081f0ac6d..ee0c3643c 100644
+--- a/internal/storage/dolt/store.go
++++ b/internal/storage/dolt/store.go
+@@ -246,6 +246,14 @@ type Config struct {
+ 	// automatically if one isn't running. Disabled under orchestrator (GT_ROOT set).
+ 	AutoStart bool
+ 
++	// RoutedThroughProxy indicates ServerHost/ServerPort point at a db-proxy
++	// listener (the proxied-server routed store), not the canonical dolt
++	// sql-server. The proxy port is ephemeral and reassigned on every respawn,
++	// so it must never be persisted into .beads/dolt-server.port — that file is
++	// the discovery hint for the real server and gets clobbered/stale if a
++	// forwarder port lands in it. Set by newProxiedServerRoutedStore.
++	RoutedThroughProxy bool
++
+ 	// MaxOpenConns overrides the connection pool size (0 = default 10).
+ 	// Set to 1 for branch isolation in tests (DOLT_CHECKOUT is session-level).
+ 	MaxOpenConns int
+@@ -1120,7 +1128,11 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
+ 		}
+ 	}
+ 
+-	if isLocalHost(cfg.ServerHost) && shouldPersistResolvedPortFile() {
++	// Persist the resolved port only when this store targets the canonical local
++	// dolt sql-server. A proxied routed store connects to an ephemeral db-proxy
++	// listener; persisting that port clobbers the real server's discovery hint
++	// and goes stale the moment the proxy respawns.
++	if shouldPersistPortFileForConfig(cfg) {
+ 		beadsDir := cfg.BeadsDir
+ 		if beadsDir == "" && cfg.Path != "" {
+ 			beadsDir = filepath.Dir(cfg.Path)
+@@ -1150,6 +1162,21 @@ func shouldPersistResolvedPortFile() bool {
+ 	return os.Getenv("BEADS_DOLT_SERVER_PORT") == "" && os.Getenv("BEADS_DOLT_PORT") == ""
+ }
+ 
++// shouldPersistPortFileForConfig reports whether a freshly-opened server-mode
++// store should record its resolved port into .beads/dolt-server.port. Only the
++// canonical local dolt sql-server qualifies. A proxied routed store
++// (RoutedThroughProxy) targets an ephemeral db-proxy listener whose port must
++// never become the on-disk discovery hint: it is clobbered on the next
++// reconcile and goes stale when the proxy respawns on a new port, breaking
++// endpoint resolution for any reader that trusts the file. An explicit port
++// override (BEADS_DOLT_SERVER_PORT / BEADS_DOLT_PORT) also suppresses the write.
++func shouldPersistPortFileForConfig(cfg *Config) bool {
++	if cfg == nil {
++		return false
++	}
++	return isLocalHost(cfg.ServerHost) && shouldPersistResolvedPortFile() && !cfg.RoutedThroughProxy
++}
++
+ // verifyProjectIdentity checks that the database belongs to the expected project.
+ // If both the local metadata.json and the database have a project_id, they must match.
+ // Returns nil if verification passes or is not applicable (missing IDs = old setup).
+-- 
+2.54.0
+

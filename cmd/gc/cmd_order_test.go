@@ -1217,7 +1217,7 @@ prefix = "fe"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, []string{"rig-digest:rig:frontend"}, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, []string{"rig-digest:rig:frontend"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderSweepTracking = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1283,7 +1283,7 @@ prefix = "fe"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, nil, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderSweepTracking = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1347,7 +1347,7 @@ prefix = "ct"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, nil, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderSweepTracking = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1421,7 +1421,7 @@ delete_after_close = "1ns"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Hour, false, false, false, nil, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Hour, false, false, false, false, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderSweepTracking = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1504,7 +1504,7 @@ delete_after_close = "1ns"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Hour, true, false, false, nil, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Hour, true, false, false, false, nil, &stdout, &stderr)
 	if code == 0 {
 		t.Fatalf("cmdOrderSweepTracking = 0, want failure")
 	}
@@ -1568,7 +1568,7 @@ prefix = "fe"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, []string{"cleanup"}, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, []string{"cleanup"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderSweepTracking = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1628,7 +1628,7 @@ prefix = "ct"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, true, false, []string{"cleanup"}, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, true, false, false, []string{"cleanup"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderSweepTrackingWithOptions = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1682,7 +1682,7 @@ prefix = "fe"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, []string{"rig-digest:rig:frontend"}, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, []string{"rig-digest:rig:frontend"}, &stdout, &stderr)
 	if code == 0 {
 		t.Fatalf("cmdOrderSweepTracking = 0, want failure; stdout: %s stderr: %s", stdout.String(), stderr.String())
 	}
@@ -3550,5 +3550,115 @@ func TestOrderScopedName(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("orderScopedName(%q, %q) = %q, want %q", tc.name, tc.rig, got, tc.want)
 		}
+	}
+}
+
+// TestOrderSweepTrackingRequiresConfirm verifies that cmdOrderSweepTrackingWithOptions
+// returns exit 1 with a descriptive message when the number of eligible deletions
+// exceeds GC_BULK_DELETE_CONFIRM_THRESHOLD and confirm=false.
+func TestOrderSweepTrackingRequiresConfirm(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	// Set threshold low (1) so a single eligible retention bead triggers the guard.
+	t.Setenv("GC_BULK_DELETE_CONFIRM_THRESHOLD", "1")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_CITY_ROOT", cityDir)
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	t.Chdir(cityDir)
+
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+`)
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed 12 closed order-tracking beads (10d old > 7d TTL, exceeds retain-10 floor → 2 eligible).
+	// Write JSON directly: store.Create always forces Status="open" and CreatedAt=time.Now(),
+	// which would make the count gate see 0 eligible closed beads.
+	now := time.Now()
+	type fileStoreJSON struct {
+		Seq   int          `json:"seq"`
+		Beads []beads.Bead `json:"beads"`
+	}
+	n := minClosedOrderTrackingRetained + 2
+	seedBeads := make([]beads.Bead, n)
+	for i := range n {
+		seedBeads[i] = beads.Bead{
+			ID:        fmt.Sprintf("sg-%02d", i),
+			Title:     "order:sweep-guard",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-10*24*time.Hour + time.Duration(i)*time.Minute),
+			Labels:    []string{"order-run:sweep-guard", labelOrderTracking},
+			Ephemeral: true,
+		}
+	}
+	seedData, err := json.Marshal(fileStoreJSON{Seq: n, Beads: seedBeads})
+	if err != nil {
+		t.Fatalf("marshal seed beads: %v", err)
+	}
+	beadsPath := filepath.Join(cityDir, ".gc", "beads.json")
+	if err := os.WriteFile(beadsPath, seedData, 0o644); err != nil {
+		t.Fatalf("write seed beads.json: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	// confirm=false: should return 1 and print descriptive message.
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("cmdOrderSweepTrackingWithOptions (no confirm) = %d, want 1; stderr: %s stdout: %s", code, stderr.String(), stdout.String())
+	}
+	got := stderr.String()
+	if !strings.Contains(got, "confirm") {
+		t.Fatalf("stderr = %q, want '--confirm' hint in message", got)
+	}
+	if !strings.Contains(got, "GC_BULK_DELETE_CONFIRM_THRESHOLD") {
+		t.Fatalf("stderr = %q, want GC_BULK_DELETE_CONFIRM_THRESHOLD in message", got)
+	}
+}
+
+// TestOrderSweepTrackingConfirmGateFailsClosedOnCountError verifies that when
+// countClosedOrderTrackingRetentionEligible fails (store read error), the confirm
+// gate returns exit 1 with a descriptive message rather than proceeding unguarded.
+func TestOrderSweepTrackingConfirmGateFailsClosedOnCountError(t *testing.T) {
+	// A failing exec script makes store.List() return an error, exercising the
+	// countErr != nil fail-closed path without requiring a real beads provider.
+	failScript := filepath.Join(t.TempDir(), "gc-beads-fail")
+	if err := os.WriteFile(failScript, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("write fail script: %v", err)
+	}
+	t.Setenv("GC_BEADS", "exec:"+failScript)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_CITY_ROOT", cityDir)
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	t.Chdir(cityDir)
+
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+`)
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, nil, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("cmdOrderSweepTrackingWithOptions (count error) = %d, want 1; stderr: %s stdout: %s", code, stderr.String(), stdout.String())
+	}
+	got := stderr.String()
+	if !strings.Contains(got, "cannot count eligible beads for confirm gate") {
+		t.Fatalf("stderr = %q, want 'cannot count eligible beads for confirm gate' in message", got)
 	}
 }
