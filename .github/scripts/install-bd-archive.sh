@@ -38,13 +38,24 @@ while (($#)); do
   shift
 done
 
-# A 40-hex VERSION is a beads commit: no release tarball exists for it, so bd
-# is built from source at that commit. The commit hash itself pins the exact
-# source tree (git content addressing), standing in for the tarball SHA-256
-# pin of the release path.
+# Which commit to build, if any.
+#
+# BD_SOURCE_REF (optional) builds bd from that commit while VERSION stays a real
+# version string. deps.env used to conflate the two — it put a commit SHA in
+# BD_VERSION — which forced every consumer to treat a version field as a ref.
+# Splitting them mirrors contrib/k8s/Dockerfile.agent's existing ARG model.
+#
+# A 40-hex VERSION is still honoured for backwards compatibility: no release
+# tarball exists for it, so bd is built from source at that commit. The commit
+# hash pins the exact source tree (git content addressing), standing in for the
+# tarball SHA-256 pin of the release path.
+source_ref="${BD_SOURCE_REF:-}"
 build_from_source=false
-if [[ "$version" =~ ^[0-9a-f]{40}$ ]]; then
+if [[ -n "$source_ref" ]]; then
   build_from_source=true
+elif [[ "$version" =~ ^[0-9a-f]{40}$ ]]; then
+  build_from_source=true
+  source_ref="$version"
 fi
 
 case "$(uname -s)" in
@@ -152,7 +163,12 @@ install_binary_with_sudo_fallback() {
 
 if $use_cache; then
   cache_root="${RUNNER_TOOL_CACHE:-$HOME/.local}"
-  bin_dir="${cache_root}/gascity-bd/${version}/${platform_tuple}/bin"
+  # Include the source ref in the cache key: with VERSION now a real version
+  # string, a cached RELEASE build of v1.1.0 must never be reused for a
+  # source-pinned build of the same version.
+  cache_slug="${version}"
+  if [[ -n "$source_ref" ]]; then cache_slug="${version}-src-${source_ref:0:12}"; fi
+  bin_dir="${cache_root}/gascity-bd/${cache_slug}/${platform_tuple}/bin"
 else
   bin_dir="${BD_INSTALL_BIN_DIR:-/usr/local/bin}"
 fi
@@ -162,13 +178,13 @@ if [[ -x "$target" ]]; then
   echo "Reusing cached bd ${version} at ${target}"
 elif $build_from_source; then
   if ! command -v go >/dev/null 2>&1; then
-    echo "go is required to build bd from source at commit ${version}" >&2
+    echo "go is required to build bd from source at commit ${source_ref}" >&2
     exit 1
   fi
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
   git clone --filter=blob:none https://github.com/gastownhall/beads "${tmp}/beads-src"
-  git -C "${tmp}/beads-src" checkout "$version"
+  git -C "${tmp}/beads-src" checkout "$source_ref"
   # Same build shape as ci.yml's cross-version contract cells.
   go -C "${tmp}/beads-src" build -tags gms_pure_go -o "${tmp}/bd" ./cmd/bd
   if $use_cache; then

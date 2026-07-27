@@ -36,6 +36,7 @@ func TestBDVersionPins(t *testing.T) {
 	bdPrev := env["BD_PREV_VERSION"]       // min-supported matrix cell (downloadable)
 	bdCurrent := env["BD_CURRENT_VERSION"] // bleeding-edge matrix cell (built from source)
 	bdCurrentRef := env["BD_CURRENT_REF"]  // beads commit the current cell builds from
+	bdSourceRef := env["BD_SOURCE_REF"]    // beads commit the installable default builds from (bridge mode)
 
 	if bdVersion == "" {
 		t.Fatal("deps.env missing BD_VERSION")
@@ -57,9 +58,20 @@ func TestBDVersionPins(t *testing.T) {
 		t.Fatalf("deps.env BD_CURRENT_VERSION = %q, want a semver token", bdCurrent)
 	}
 
-	// Bridge-mode detection: a 40-hex BD_VERSION pins a beads commit built from
-	// source instead of a release tarball.
-	bdVersionIsCommit := regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(bdVersion)
+	// Bridge-mode detection. The installable default is built from source when
+	// deps.env carries BD_SOURCE_REF — the version/ref split that mirrors the
+	// BD_CURRENT_VERSION/BD_CURRENT_REF pair above, so BD_VERSION can stay a real
+	// version string instead of holding a commit SHA. A 40-hex BD_VERSION is the
+	// legacy spelling of the same thing and is still honoured.
+	commitRE := regexp.MustCompile(`^[0-9a-f]{40}$`)
+	bridgeRef := bdSourceRef
+	if bridgeRef == "" && commitRE.MatchString(bdVersion) {
+		bridgeRef = bdVersion
+	}
+	if bdSourceRef != "" && !commitRE.MatchString(bdSourceRef) {
+		t.Fatalf("deps.env BD_SOURCE_REF = %q, want a full 40-char gastownhall/beads commit SHA", bdSourceRef)
+	}
+	bdVersionIsCommit := bridgeRef != ""
 
 	// Lockstep with the linked library. The bd binary CI installs and the beads
 	// library gc links must carry the same schema-migration level: a go.mod
@@ -78,11 +90,11 @@ func TestBDVersionPins(t *testing.T) {
 	pseudo := regexp.MustCompile(`[-.]\d{14}-([0-9a-f]{12})$`).FindStringSubmatch(linkedBeads)
 	switch {
 	case bdVersionIsCommit && pseudo == nil:
-		t.Fatalf("deps.env BD_VERSION pins beads commit %s but go.mod links released beads %s; the bd binary and the linked library must move together", bdVersion, linkedBeads)
-	case bdVersionIsCommit && !strings.HasPrefix(bdVersion, pseudo[1]):
-		t.Fatalf("deps.env BD_VERSION = %s but go.mod's beads pseudo-version %s pins commit %s; the bd binary and the linked library must pin the SAME beads commit", bdVersion, linkedBeads, pseudo[1])
+		t.Fatalf("deps.env pins beads commit %s but go.mod links released beads %s; the bd binary and the linked library must move together", bridgeRef, linkedBeads)
+	case bdVersionIsCommit && !strings.HasPrefix(bridgeRef, pseudo[1]):
+		t.Fatalf("deps.env pins beads commit %s but go.mod's beads pseudo-version %s pins commit %s; the bd binary and the linked library must pin the SAME beads commit", bridgeRef, linkedBeads, pseudo[1])
 	case !bdVersionIsCommit && pseudo != nil:
-		t.Fatalf("go.mod links untagged beads commit %s (%s) but deps.env BD_VERSION = %s installs a release; pin BD_VERSION to the same commit, or move go.mod to a release tag", pseudo[1], linkedBeads, bdVersion)
+		t.Fatalf("go.mod links untagged beads commit %s (%s) but deps.env installs release %s; set BD_SOURCE_REF to the same commit, or move go.mod to a release tag", pseudo[1], linkedBeads, bdVersion)
 	}
 
 	// Anchor roles, kept as distinct contracts so a promotion cannot quietly

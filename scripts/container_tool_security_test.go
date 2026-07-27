@@ -65,28 +65,26 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 
 func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	const (
-		bdSourceRef    = "8e4e59d39f3459a43cf21a3236a13eca4dd874f7"
-		bdSourceSHA256 = "63597b6b368d7d26ba3fc570ae3b2fa4cd8a5155d4716cae13d178a560808d5a"
-		bdBuild        = "8e4e59d39"
+		// FORK DIVERGENCE — TIME-BOXED BRIDGE (ADR-0026 C5, vp-kpoi, ga-kgluj).
+		// Upstream pins bd source at 8e4e59d39 / sha 63597b6b… / build 8e4e59d39.
+		// That commit tops out at schema migration 0053, but gc's linked beads
+		// library (go.mod v1.1.1-0.20260704062855-e97839a2e1c0) carries 0054, so
+		// an image built from upstream's ref ships a bd that skews from the linked
+		// lib. These three move together and revert together: when a bd release
+		// carries 0054, restore upstream's values here, set deps.env BD_VERSION to
+		// that tag, drop BD_SOURCE_REF/BD_SOURCE_SHA256, and repin go.mod.
+		// BD_VERSION itself is NOT diverged — the pinned commit declares 1.1.0.
+		bdSourceRef    = "e97839a2e1c0de305bf64a01b997f2f314591aa4"
+		bdSourceSHA256 = "e40acdcbca7bdc08b986113692e11be7a533b9fced326c20e786f141c29996f1"
+		bdBuild        = "e97839a2e"
 		bdBranch       = "HEAD"
 		grpcVersion    = "1.82.1"
 	)
 
 	root := repoRoot(t)
 	bdVersion := readDotenv(t, root+"/deps.env")["BD_VERSION"]
-	// MERGE INTENT (v1.4.0 resync): upstream added this test asserting the
-	// v1.1.0 release tag. This fork deliberately pins a gastownhall/beads COMMIT
-	// instead — see the TIME-BOXED BRIDGE rationale in deps.env (ADR-0026 C5,
-	// vp-kpoi): gc's linked beads library carries schema migration 0054 while
-	// bd v1.1.0 tops out at 0053, so a released bd would skew from the linked
-	// lib and break the raw-bd/gc-bd/provider-store consistency contract.
-	//
-	// Accept either form. When the bd pin is returned to a release tag >= 0054
-	// (upstream has since cut v1.1.2 — see WS-2c), delete this branch and
-	// restore upstream's exact assertion, so the divergence retires with the pin.
-	const bdCommitPin = "e97839a2e1c0de305bf64a01b997f2f314591aa4"
-	if bdVersion != "v1.1.0" && bdVersion != bdCommitPin {
-		t.Fatalf("deps.env BD_VERSION = %q, want v1.1.0 or the documented TIME-BOXED commit pin %q", bdVersion, bdCommitPin)
+	if bdVersion != "v1.1.0" {
+		t.Fatalf("deps.env BD_VERSION = %q, want v1.1.0 for the pinned source build", bdVersion)
 	}
 
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")

@@ -25,13 +25,17 @@ const (
 	// auto-merged both sides' changes, so the resulting shape hashes to neither
 	// the fork's nor upstream's previous value — the correct action is to
 	// re-derive from the merged workflow rather than adopt either side's stale pin.
-	expectedCIExecutionHash     = "d316ebebefe2505a5e17d8d849c7c7adc74dc457f79cd24f7a5033858075a408"
+	// Re-derived again for ga-kgluj: splitting BD_VERSION into BD_VERSION +
+	// BD_SOURCE_REF adds a job-level env key, and env is part of the execution
+	// shape this pin guards — so the tripwire firing here is correct behaviour,
+	// not noise.
+	expectedCIExecutionHash     = "41d38414857d74ccb3d7faffe10deb0c27e92aaf87bfeafb94351bacf7ffe1b7"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
 	// --theirs on this file would have adopted upstream's pin and failed. Each
 	// pin is an independent tripwire and must be re-derived on its own.
-	expectedNightlyExecutionHash = "79c17c6febb370f371c80fc09c9e6d73b5c7ff8da891a23691dbdc60b3050d75"
+	expectedNightlyExecutionHash = "383509972a3f0c73b6d5653040de042b4d183a650cc32a0a4c14439899a97d5d"
 	expectedSetupActionHash      = "b7864038195cd054aee7fccfa903cab335b375bcab1a35239c17c5da7d32c07e"
 )
 
