@@ -19,10 +19,16 @@ ARG BASE_IMAGE=gc-agent-base:latest
 
 FROM golang:1.26.5-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651 AS bd-builder
 
+# TIME-BOXED BRIDGE (ADR-0026 C5, vp-kpoi) — keep in lockstep with deps.env.
+# BD_VERSION is the version string the pinned source declares; BD_SOURCE_REF is
+# the commit built from. Upstream's ref (8e4e59d39) tops out at schema migration
+# 0053, but gc's linked beads library carries 0054, so a 0053 bd in this image
+# would skew from the linked lib. Repointed at the same commit go.mod pins.
+# Revert all three to upstream's values once a release carries 0054.
 ARG BD_VERSION=v1.1.0
-ARG BD_SOURCE_REF=8e4e59d39f3459a43cf21a3236a13eca4dd874f7
-ARG BD_SOURCE_SHA256=63597b6b368d7d26ba3fc570ae3b2fa4cd8a5155d4716cae13d178a560808d5a
-ARG BD_BUILD=8e4e59d39
+ARG BD_SOURCE_REF=e97839a2e1c0de305bf64a01b997f2f314591aa4
+ARG BD_SOURCE_SHA256=e40acdcbca7bdc08b986113692e11be7a533b9fced326c20e786f141c29996f1
+ARG BD_BUILD=e97839a2e
 ARG BD_BRANCH=HEAD
 ARG GRPC_VERSION=1.82.1
 
