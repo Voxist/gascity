@@ -54,14 +54,19 @@ When working here, assume three codebases matter:
 
 Use git history deliberately when a feature appears missing or regressed:
 
+In this fork the remotes are **inverted from the usual convention**: `origin`
+is upstream (`gastownhall/gascity`) and the fork is `fork`/`Voxist`
+(`Voxist/gascity`). There is no remote named `upstream`. The beads fork
+follows the same shape: `origin` is `gastownhall/beads`, the fork is `bfork`.
+
 ```bash
 git remote -v
-git fetch upstream
+git fetch --all --prune
 git log --all --oneline --decorate --grep '<keyword>'
 git log --all --oneline --decorate -- <path>
 git show <commit>:<path>
-git diff upstream/main...HEAD -- <path>
-git range-diff upstream/main...HEAD
+git diff origin/main...HEAD -- <path>
+git range-diff origin/main...HEAD
 ```
 
 Useful search targets:
@@ -217,7 +222,7 @@ Read **`engdocs/architecture/api-control-plane.md`** and
 - `internal/extmsg/` (external-messaging emitters)
 - Anything that affects `internal/api/openapi.json`,
   `docs/reference/schema/openapi.json`, or the generated TS types under
-  `cmd/gc/dashboard/web/src/generated/`
+  `internal/api/dashboardspa/web/shared/src/generated/gc-supervisor-client/`
 
 Load-bearing invariants enforced by CI (violating any fails the
 build; full rationale is in the architecture docs):
@@ -449,10 +454,10 @@ Before considering any task complete:
   prints `.githooks`) and has run for the staged change
 - `make dashboard-check` passes for any change touching `internal/api/`,
   `internal/api/openapi.json`, `docs/reference/schema/openapi.*`,
-  `cmd/gc/dashboard/`, or generated dashboard types
+  `internal/api/dashboardspa/`, or generated dashboard types
 - The dashboard starts locally and serves the app for dashboard/API-schema
   changes; use `npm run preview -- --host 127.0.0.1 --port <port>` from
-  `cmd/gc/dashboard/web` after `make dashboard-check`
+  `internal/api/dashboardspa/web` after `make dashboard-check`
 - Every exported function has a doc comment
 - No premature abstractions
 - Tests cover happy path AND edge cases

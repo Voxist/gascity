@@ -27,22 +27,23 @@ runs the fast CI-equivalent gates for local changes: `make lint`,
 `make vet`, and `make test` for Go changes, and `make check-docs` for
 Markdown/docs/spec changes.
 
-**Dashboard SPA.** The dashboard at `cmd/gc/dashboard/web/` is a
+**Dashboard SPA.** The dashboard at `internal/api/dashboardspa/web/` is a
 TypeScript SPA that talks directly to the supervisor's OpenAPI-typed
 endpoints. When `internal/api/openapi.json` or files under
-`cmd/gc/dashboard/web/src/` change, the hook regenerates
-`cmd/gc/dashboard/web/src/generated/schema.d.ts` (TS types from the
-spec) and rebuilds `cmd/gc/dashboard/web/dist/` (the compiled bundle
-that the Go static server embeds via `go:embed`). The hook needs
-Node / npm on your PATH; if npm is missing, the hook warns and
-skips the rebuild (CI enforces it). The hook runs dashboard typecheck,
-Vitest, and production build for dashboard/API-schema changes. Run
-`make dashboard-dev` to
-iterate with Vite HMR, `make dashboard-build` to produce a fresh
-bundle, `make dashboard-check` for typecheck + build + test. For
-dashboard or API-schema changes, also smoke the built app with
+`internal/api/dashboardspa/web/` change, regenerate the typed client at
+`internal/api/dashboardspa/web/shared/src/generated/gc-supervisor-client/`
+and rebuild `internal/api/dashboardspa/dist/` (the compiled bundle the
+supervisor embeds via `go:embed` in
+`internal/api/dashboardspa/embed.go`). `make dashboard-ci` enforces both:
+it fails if the generated client or the embedded `dist/` is stale. The
+hooks need Node / npm on your PATH; if npm is missing, the hook warns and
+skips the rebuild (CI enforces it). Run `make dashboard-dev` to iterate
+with Vite HMR, `make dashboard-build` to produce a fresh bundle, and
+`make dashboard-check` for typecheck + build + test. For dashboard or
+API-schema changes, also smoke the built app with
 `npm run preview -- --host 127.0.0.1 --port <port>` from
-`cmd/gc/dashboard/web/` and load the served page before pushing.
+`internal/api/dashboardspa/web/frontend/` and load the served page before
+pushing.
 
 ## Development Workflow
 
