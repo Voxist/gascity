@@ -79,6 +79,23 @@ const (
 
 	completedOrderTrackingCloseReason = "order dispatch completed: tracking bead lifecycle finished"
 
+	// orderTrackingHistoryIndexLimit bounds the per-tick cooldown-history
+	// index read (RecentRunsAll). Since created-order sorts push their limit
+	// to the backing search, this is the number of rows fetched AND hydrated
+	// every tick per store — 2048 cost ~0.64s/store/tick on a 22k-run
+	// retention corpus (sr-dp9o). Upstream lowered this to 256, covering ~1h
+	// of runs at the srv city's peak cadence, with an order older than the
+	// window paying one limit-pushed LIMIT-1 LastRun fallback that cachedLastRun
+	// then remembers across ticks.
+	//
+	// MERGE INTENT (v1.4.0 resync): kept the fork's 2048 rather than taking
+	// upstream's 256. This constant has NO config override (see the call site
+	// in trackOrderRuns), so lowering it is an unescapable behavior change on
+	// a live fleet that has already had a dispatch-starvation incident
+	// (vp-cixi.6: a 131-order ring at ~94s ticks, where 256 covers only ~13min
+	// of runs, not the ~1h upstream sized for). The fork's raise is pending
+	// upstream as PR #3961 — settle the value there, on measurements, not by
+	// silently inheriting it during a merge.
 	orderTrackingHistoryIndexLimit = 2048
 	// defaultMaxOrderDispatchesPerTick bounds per-tick admission cost, not
 	// execution (dispatchOne already runs async). It must comfortably exceed
@@ -88,14 +105,21 @@ const (
 	// orders fired every 33–90 min). Override via [orders]
 	// max_dispatches_per_tick in city.toml.
 	//
-	// NOTE(vc-wz5.4): 32 is voxist-city-sized (Σ over cooldown orders of
-	// 1/interval_min + headroom for its ~122-order ring), NOT a typical-city
-	// default. Each admitted order forks a subprocess with no downstream
-	// concurrency bound, so this value is a fork-storm envelope under load.
-	// Before any upstream contribution, restore a conservative core default
-	// (the DefaultMaxWakesPerTick=5 principle) and carry city-specific
-	// sizing in that city's own city.toml.
-	defaultMaxOrderDispatchesPerTick = 32
+	// MERGE INTENT (v1.4.0 resync): down-tuned from the fork's 32, but NOT to
+	// upstream's 4. NOTE(vc-wz5.4) asked for a conservative core default because
+	// 32 is voxist-city-sized (~122-order ring) and each admitted order forks a
+	// subprocess with no downstream concurrency bound. But 4 is precisely the old
+	// starvation default that vp-cixi.6 fixed: at that budget a large ring
+	// degrades every order to one fire per full rotation regardless of interval.
+	// TestOrderDispatchBudgetDefaultRaised guards that floor explicitly — it
+	// permits a down-tune or an upstream contribution, and only requires > 4.
+	//
+	// 5 is the value NOTE(vc-wz5.4) itself named (the DefaultMaxWakesPerTick=5
+	// principle): conservative for a typical city, above the starvation floor.
+	// Behavior here is unchanged either way — voxist-city carries its own sizing
+	// explicitly (city.toml [orders] max_dispatches_per_tick = 32, derived from
+	// measured demand of ~32.2 orders due per tick over a 131-order ring).
+	defaultMaxOrderDispatchesPerTick = 5
 	orderTrackingSweepCloseBudget    = 4
 
 	// orderTrackingRetentionWatchdogInterval is the minimum time between
@@ -614,12 +638,24 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			}
 			continue
 		}
+		// Thread the dispatch tick's context into the condition check so a
+		// shutdown, reload, or canceled tick interrupts a slow check promptly
+		// instead of waiting out its (now operator-configurable) check_timeout.
+		triggerOpts.ConditionCtx = ctx
 		result := orders.CheckTriggerWithOptions(a, now, lastRunFn, m.ep, cursorFn, triggerOpts)
 		if lastRunErr != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: reading last run for %s: %v", a.ScopedName(), lastRunErr)
 			continue
 		}
 		if !result.Due {
+			// A condition check killed by its deadline never proves its
+			// condition, so the order silently never fires. Surface that
+			// distinctly (normal "condition false" is not logged) so a check
+			// outgrowing its budget is diagnosable instead of invisible
+			// (ga-ocypq2). Raise the order's check_timeout to fix.
+			if a.Trigger == "condition" && strings.Contains(result.Reason, orders.ConditionCheckTimedOutMarker) {
+				logDispatchError(m.stderr, "gc: order dispatch: %s %s — raise check_timeout if the check needs a slow store read", a.ScopedName(), result.Reason)
+			}
 			continue
 		}
 		if lastRunFromCache && orderTriggerUsesLastRun(a) {

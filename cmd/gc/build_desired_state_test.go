@@ -914,7 +914,7 @@ func TestDefaultScaleCheckDemandCarriesTriggerBeadID(t *testing.T) {
 		t.Fatalf("create routed bead: %v", err)
 	}
 
-	counts, demand, _, errs := defaultScaleCheckCountsAndDemand([]defaultScaleCheckTarget{{
+	counts, demand, _, errs := defaultScaleCheckCountsAndDemand(nil, []defaultScaleCheckTarget{{
 		template: template,
 		storeKey: "rig:gascity",
 		store:    store,
@@ -939,6 +939,91 @@ func TestDefaultScaleCheckDemandCarriesTriggerBeadID(t *testing.T) {
 	}
 	if got := demand[template].StoreRefs[work.ID]; got != "rig:gascity" {
 		t.Fatalf("StoreRefs[%s] = %q, want rig:gascity", work.ID, got)
+	}
+}
+
+// TestDefaultScaleCheckCountsAndDemandNormalizesInstanceSuffixedRouteTarget
+// reproduces a writer that stamps gc.routed_to with an instance-suffixed pool
+// identity directly (e.g. `bd update --set-metadata gc.routed_to=hello-world/polecat-1`),
+// bypassing gc sling's write-side normalization (agentutil.NormalizePoolRouteTarget,
+// applied in doSling). Without read-side normalization, the raw instance name never
+// matches group.templates (keyed by the base template), so the demand is silently
+// dropped and the pool never scales up.
+func TestDefaultScaleCheckCountsAndDemandNormalizesInstanceSuffixedRouteTarget(t *testing.T) {
+	const template = "hello-world/polecat"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "hello-world", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)},
+		},
+	}
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:  "directly routed to instance slot",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey: template + "-1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create instance-routed bead: %v", err)
+	}
+
+	counts, demand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(cfg, []defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:hello-world",
+		store:    store,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCountsAndDemand errs = %v", errs)
+	}
+	if len(partialTemplates) != 0 {
+		t.Fatalf("partialTemplates = %v, want none", partialTemplates)
+	}
+	if got := counts[template]; got != 1 {
+		t.Fatalf("defaultScaleCheckCountsAndDemand[%q] = %d, want 1 for an instance-suffixed gc.routed_to matching the base template", template, got)
+	}
+	if got := demand[template].WorkBeadIDs; !reflect.DeepEqual(got, []string{work.ID}) {
+		t.Fatalf("WorkBeadIDs = %v, want [%s]", got, work.ID)
+	}
+}
+
+// TestDefaultScaleCheckCountsAndDemandLeavesUnmatchedInstanceSuffixAlone guards
+// against over-normalization: an instance number outside the agent's configured
+// capacity, or a suffix on an agent that isn't multi-session, is not a pool
+// instance identity and must not be rewritten or counted against the base
+// template.
+func TestDefaultScaleCheckCountsAndDemandLeavesUnmatchedInstanceSuffixAlone(t *testing.T) {
+	const template = "hello-world/polecat"
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "hello-world", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)},
+		},
+	}
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:  "routed beyond configured capacity",
+		Type:   "task",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey: template + "-99",
+		},
+	}); err != nil {
+		t.Fatalf("create out-of-range instance-routed bead: %v", err)
+	}
+
+	counts, _, _, errs := defaultScaleCheckCountsAndDemand(cfg, []defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:hello-world",
+		store:    store,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCountsAndDemand errs = %v", errs)
+	}
+	if got := counts[template]; got != 0 {
+		t.Fatalf("defaultScaleCheckCountsAndDemand[%q] = %d, want 0 for an out-of-range instance suffix", template, got)
 	}
 }
 
@@ -4122,6 +4207,122 @@ func TestRealizePoolDesiredSessionsBindsTriggerBeadToFreshSession(t *testing.T) 
 	}
 }
 
+// TestRealizePoolDesiredSessionsRebindPreservesDistinctWorkDirPerSlot pins
+// gastownhall/gascity ga-vqs6xr: realizePoolDesiredSessions resolves
+// qualifiedName := cfgAgent.QualifiedName() ONCE, outside the Phase C
+// finalize loop, and passes that same loop-invariant base name into
+// bindPoolSessionTriggerBead for every item. A FRESH multi-slot create
+// does not exercise this: selectOrPlanPoolSessionBead (Phase A) already
+// resolves the correct per-slot qualifiedInstance and bakes it into the
+// bead's initial trigger/work_dir metadata via poolTriggerMetadata, and
+// computePoolTriggerBindingPatch's same-trigger guard (oldWorkBeadID ==
+// workBeadID, true immediately after such a create) then preserves that
+// correct value instead of recomputing it.
+//
+// The bug surfaces on REBIND: an already-existing pool session (its own
+// distinct, previously-correct work_dir already on the bead) reassigned to
+// a NEW work bead in the same tick as a sibling slot's rebind. That is a
+// genuine oldWorkBeadID != workBeadID transition, so the preservation guard
+// does not fire, and bindPoolSessionTriggerBead recomputes the work dir from
+// the stale base qualifiedName shared by every item in the loop — collapsing
+// what should be two distinct per-slot directories onto the same base path.
+func TestRealizePoolDesiredSessionsRebindPreservesDistinctWorkDirPerSlot(t *testing.T) {
+	store := beads.NewMemStore()
+	workDir1 := filepath.Join(t.TempDir(), "worker-1")
+	workDir2 := filepath.Join(t.TempDir(), "worker-2")
+	reusable1, err := store.Create(beads.Bead{
+		Title:  "worker reusable 1",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":                        "worker",
+			"agent_name":                      "worker-1",
+			"alias":                           "worker-1",
+			"session_name":                    "worker-reusable-1",
+			"state":                           string(sessionpkg.StateAsleep),
+			"pool_slot":                       "1",
+			poolManagedMetadataKey:            boolMetadata(true),
+			beadmeta.TriggerBeadIDMetadataKey: "gp-old-1",
+			beadmeta.WorkDirMetadataKey:       workDir1,
+			beadmeta.LegacyWorkDirMetadataKey: workDir1,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reusable2, err := store.Create(beads.Bead{
+		Title:  "worker reusable 2",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":                        "worker",
+			"agent_name":                      "worker-2",
+			"alias":                           "worker-2",
+			"session_name":                    "worker-reusable-2",
+			"state":                           string(sessionpkg.StateAsleep),
+			"pool_slot":                       "2",
+			poolManagedMetadataKey:            boolMetadata(true),
+			beadmeta.TriggerBeadIDMetadataKey: "gp-old-2",
+			beadmeta.WorkDirMetadataKey:       workDir2,
+			beadmeta.LegacyWorkDirMetadataKey: workDir2,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			WorkDir:           ".gc/workspaces/{{.AgentBase}}",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(2),
+		}},
+	}
+	snapshot := &sessionBeadSnapshot{}
+	snapshot.addInfo(sessiontest.SeedBead(t, reusable1))
+	snapshot.addInfo(sessiontest.SeedBead(t, reusable2))
+	var stderr bytes.Buffer
+	bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+	bp.sessionBeads = snapshot
+
+	realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+		Template: "worker",
+		Requests: []SessionRequest{
+			{Template: "worker", Tier: "resume", SessionBeadID: reusable1.ID, WorkBeadID: "gp-new-1", WorkBeadTitle: "Fix A"},
+			{Template: "worker", Tier: "resume", SessionBeadID: reusable2.ID, WorkBeadID: "gp-new-2", WorkBeadTitle: "Fix B"},
+		},
+	}, map[string]TemplateParams{}, &stderr)
+
+	stored1, err := store.Get(reusable1.ID)
+	if err != nil {
+		t.Fatalf("Get(session 1): %v", err)
+	}
+	stored2, err := store.Get(reusable2.ID)
+	if err != nil {
+		t.Fatalf("Get(session 2): %v", err)
+	}
+	got1 := stored1.Metadata[beadmeta.WorkDirMetadataKey]
+	got2 := stored2.Metadata[beadmeta.WorkDirMetadataKey]
+	if got1 == "" || got2 == "" {
+		t.Fatalf("work dir metadata missing after rebind: session1=%q session2=%q; stderr=%q", got1, got2, stderr.String())
+	}
+	if got1 == got2 {
+		t.Fatalf("sessions 1 and 2 both bound to %s %q after rebind; want distinct per-slot identity (were %q and %q before rebind)", beadmeta.WorkDirMetadataKey, got1, workDir1, workDir2)
+	}
+	legacy1 := stored1.Metadata[beadmeta.LegacyWorkDirMetadataKey]
+	legacy2 := stored2.Metadata[beadmeta.LegacyWorkDirMetadataKey]
+	if legacy1 == "" || legacy2 == "" {
+		t.Fatalf("legacy work_dir metadata missing after rebind: session1=%q session2=%q", legacy1, legacy2)
+	}
+	if legacy1 == legacy2 {
+		t.Fatalf("sessions 1 and 2 both bound to legacy %s %q after rebind; want distinct per-slot identity", beadmeta.LegacyWorkDirMetadataKey, legacy1)
+	}
+}
+
 func TestRealizePoolDesiredSessionsHonorsExplicitPackWorkspace(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := &config.City{
@@ -4182,7 +4383,7 @@ func TestRealizePoolDesiredSessionsRebindUpdatesPackWorkspaceMetadata(t *testing
 			"agent_name":                            "worker-7",
 			"alias":                                 "worker-7",
 			"session_name":                          "worker-reusable",
-			"state":                                 "awake",
+			"state":                                 string(sessionpkg.StateAsleep),
 			"pool_slot":                             "7",
 			poolManagedMetadataKey:                  boolMetadata(true),
 			beadmeta.TriggerBeadIDMetadataKey:       "gp-old",
@@ -4437,8 +4638,8 @@ func TestRealizePoolDesiredSessionsRefundsFreshCreateBudgetAfterFailure(t *testi
 	}
 }
 
-func TestBuildDesiredStateFairSharesFreshPoolCreatesAcrossPools(t *testing.T) {
-	maxWakes := 2
+func TestBuildDesiredStateTranslatesFloorDemandIntoCreateBudget(t *testing.T) {
+	maxWakes := 1
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
@@ -4454,8 +4655,8 @@ func TestBuildDesiredStateFairSharesFreshPoolCreatesAcrossPools(t *testing.T) {
 			{
 				Name:              "zulu",
 				StartCommand:      "true",
-				ScaleCheck:        "printf 5",
-				MinActiveSessions: intPtr(0),
+				ScaleCheck:        "printf 0",
+				MinActiveSessions: intPtr(1),
 				MaxActiveSessions: intPtr(5),
 			},
 		},
@@ -4468,115 +4669,11 @@ func TestBuildDesiredStateFairSharesFreshPoolCreatesAcrossPools(t *testing.T) {
 	for _, tp := range result.State {
 		counts[tp.TemplateName]++
 	}
-	if got := counts["alpha"]; got != 1 {
-		t.Fatalf("alpha fresh creates = %d, want 1 under fair shared budget; counts=%v stderr=%q", got, counts, stderr.String())
+	if got := counts["alpha"]; got != 0 {
+		t.Fatalf("alpha fresh creates = %d, want 0 while floor demand consumes the only token; counts=%v stderr=%q", got, counts, stderr.String())
 	}
 	if got := counts["zulu"]; got != 1 {
-		t.Fatalf("zulu fresh creates = %d, want 1 under fair shared budget; counts=%v stderr=%q", got, counts, stderr.String())
-	}
-}
-
-// TestFairPoolSessionCreateSharesReservesFloorFirst guards against cold-pool
-// floor starvation: a cold pool's min_active_sessions floor request must get a
-// create-budget token before
-// a warm pool's larger elastic scale-check demand, regardless of the round-robin
-// seed. Before the fix the floor competed equally in the round-robin and was
-// starved (cold pools never spawned their floor).
-func TestFairPoolSessionCreateSharesReservesFloorFirst(t *testing.T) {
-	// "alpha" sorts first and has large elastic demand; "zulu" sorts last and
-	// has only a single floor-guarantee request. With budget=1 the floor must
-	// still win for every seed.
-	states := []PoolDesiredState{
-		{Template: "alpha", Requests: []SessionRequest{{Tier: "new"}, {Tier: "new"}, {Tier: "new"}}},
-		{Template: "zulu", Requests: []SessionRequest{{Tier: "new", FloorGuarantee: true}}},
-	}
-	for seed := uint64(0); seed < 5; seed++ {
-		shares, _ := fairPoolSessionCreateShares(states, 1, seed)
-		if shares["zulu"] != 1 {
-			t.Errorf("seed=%d: floor pool zulu got %d budget, want 1 (floor reserved before elastic)", seed, shares["zulu"])
-		}
-		if shares["alpha"] != 0 {
-			t.Errorf("seed=%d: elastic alpha got %d budget, want 0 (budget consumed by floor)", seed, shares["alpha"])
-		}
-	}
-
-	// Surplus budget beyond the reserved floor still flows to elastic demand,
-	// and a floor-only template is not topped up past its single request.
-	shares, spare := fairPoolSessionCreateShares(states, 3, 0)
-	if shares["zulu"] != 1 {
-		t.Errorf("floor pool zulu got %d, want 1 (not topped up past its single request)", shares["zulu"])
-	}
-	if shares["alpha"] != 2 {
-		t.Errorf("elastic alpha got %d of surplus, want 2", shares["alpha"])
-	}
-	if spare != 0 {
-		t.Errorf("spare=%d, want 0 (all budget allocated)", spare)
-	}
-}
-
-// TestFairPoolSessionCreateSharesReservesElasticSliceFromFloorSaturation guards
-// against the inverse of the floor guarantee: when floor-bearing demand meets or
-// exceeds the budget, the Phase-1 floor reservation must NOT consume the whole
-// budget and zero out elastic pools. A high-demand elastic pool (e.g. a rig
-// executor with a full rig-store queue, min=0) sitting behind ~budget floor pools
-// would otherwise get zero create tokens every tick and never spawn — the
-// voxist-city vw-executor starvation. The elastic reserve (limit/4) guarantees it
-// a share for every seed.
-func TestFairPoolSessionCreateSharesReservesElasticSliceFromFloorSaturation(t *testing.T) {
-	var states []PoolDesiredState
-	for i := 0; i < 8; i++ {
-		states = append(states, PoolDesiredState{
-			Template: fmt.Sprintf("rig%d/reviewer", i),
-			Requests: []SessionRequest{{Tier: "new", FloorGuarantee: true}},
-		})
-	}
-	// One elastic pool (no floor) with demand 6, like a backed-up rig executor.
-	elastic := PoolDesiredState{Template: "voxist-web/executor"}
-	for j := 0; j < 6; j++ {
-		elastic.Requests = append(elastic.Requests, SessionRequest{Tier: "new"})
-	}
-	states = append(states, elastic)
-
-	const budget = 8 // floors (8) >= budget: Phase 1 alone would consume it all.
-	wantReserve := budget / 4
-	for seed := uint64(0); seed < uint64(len(states)); seed++ {
-		shares, _ := fairPoolSessionCreateShares(states, budget, seed)
-		if got := shares["voxist-web/executor"]; got < wantReserve {
-			t.Fatalf("seed=%d: elastic pool starved by floor saturation (got %d), want >= %d (reserved elastic slice)", seed, got, wantReserve)
-		}
-	}
-}
-
-// TestFairPoolSessionCreateSharesRotatesFloorReservation guards the Phase-1 floor
-// reservation against deterministic starvation: when floor-bearing templates
-// exceed the budget, the seed must rotate which floors are reserved so that no
-// (e.g. alphabetically-late) floor template is permanently starved across ticks.
-func TestFairPoolSessionCreateSharesRotatesFloorReservation(t *testing.T) {
-	// Three floor-bearing templates, budget 1 -> only one floor reserved per tick.
-	// Over rotating seeds every template must be reserved at least once.
-	states := []PoolDesiredState{
-		{Template: "alpha", Requests: []SessionRequest{{Tier: "new", FloorGuarantee: true}}},
-		{Template: "mike", Requests: []SessionRequest{{Tier: "new", FloorGuarantee: true}}},
-		{Template: "zulu", Requests: []SessionRequest{{Tier: "new", FloorGuarantee: true}}},
-	}
-	reserved := map[string]bool{}
-	for seed := uint64(0); seed < 6; seed++ {
-		shares, _ := fairPoolSessionCreateShares(states, 1, seed)
-		total := 0
-		for tmpl, n := range shares {
-			if n > 0 {
-				reserved[tmpl] = true
-				total += n
-			}
-		}
-		if total != 1 {
-			t.Errorf("seed=%d: total floor reservations=%d, want 1 (budget=1)", seed, total)
-		}
-	}
-	for _, tmpl := range []string{"alpha", "mike", "zulu"} {
-		if !reserved[tmpl] {
-			t.Errorf("floor template %q never reserved across seeds (deterministic starvation)", tmpl)
-		}
+		t.Fatalf("zulu fresh creates = %d, want 1 from translated floor demand; counts=%v stderr=%q", got, counts, stderr.String())
 	}
 }
 
@@ -11688,6 +11785,47 @@ func TestCollectOpenUnassignedRoutedWorkKeepsSameIDAcrossStoreScopes(t *testing.
 	}
 	if len(refs) != 2 || refs[0] != "city:test-city" || refs[1] != "rig:city" {
 		t.Fatalf("store refs = %v, want [city:test-city rig:city]", refs)
+	}
+}
+
+func TestSelectReadyUnassignedRoutedWorkUsesDemandStoreScope(t *testing.T) {
+	candidates := []beads.Bead{
+		{ID: "same-id", Status: "open", Title: "city copy"},
+		{ID: "same-id", Status: "open", Title: "rig copy"},
+	}
+	refs := []string{"city:test-city", "rig:fixture"}
+	demand := map[string]scaleCheckDemand{
+		"fixture/worker": {
+			WorkBeadIDs: []string{"same-id"},
+			StoreRefs:   map[string]string{"same-id": "rig:fixture"},
+		},
+	}
+
+	got, gotRefs := selectReadyUnassignedRoutedWork(candidates, refs, demand)
+	if len(got) != 1 || got[0].Title != "rig copy" {
+		t.Fatalf("selected work = %#v, want only rig copy", got)
+	}
+	if len(gotRefs) != 1 || gotRefs[0] != "rig:fixture" {
+		t.Fatalf("selected refs = %v, want [rig:fixture]", gotRefs)
+	}
+}
+
+func TestSelectReadyUnassignedRoutedWorkNormalizesCityRef(t *testing.T) {
+	candidates := []beads.Bead{{ID: "city-ready", Status: "open"}}
+	refs := []string{"city:test-city"}
+	demand := map[string]scaleCheckDemand{
+		"worker": {
+			WorkBeadIDs: []string{"city-ready"},
+			StoreRefs:   map[string]string{"city-ready": "city"},
+		},
+	}
+
+	got, gotRefs := selectReadyUnassignedRoutedWork(candidates, refs, demand)
+	if len(got) != 1 || got[0].ID != "city-ready" {
+		t.Fatalf("selected work = %#v, want city-ready", got)
+	}
+	if len(gotRefs) != 1 || gotRefs[0] != "city:test-city" {
+		t.Fatalf("selected refs = %v, want [city:test-city]", gotRefs)
 	}
 }
 

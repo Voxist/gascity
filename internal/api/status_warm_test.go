@@ -123,7 +123,7 @@ func TestHandleStatusRefreshesAgedWarmBody(t *testing.T) {
 func TestBuildAndStoreStatusRecoversFromBuildPanic(t *testing.T) {
 	state := newFakeState(t)
 	s := &Server{state: state}
-	s.storeHealthComputer = func(context.Context) *StatusStoreHealth {
+	s.storeHealthComputer = func(context.Context) (*StatusStoreHealth, error) {
 		panic("simulated build panic")
 	}
 
@@ -178,9 +178,9 @@ func TestBuildAndStoreStatusEscapesWedgedBuild(t *testing.T) {
 	unblock := make(chan struct{})
 	t.Cleanup(func() { close(unblock) })
 	s.storeHealthMu.Lock()
-	s.storeHealthComputer = func(context.Context) *StatusStoreHealth {
+	s.storeHealthComputer = func(context.Context) (*StatusStoreHealth, error) {
 		<-unblock
-		return &StatusStoreHealth{SizeBytes: 1}
+		return &StatusStoreHealth{SizeBytes: 1}, nil
 	}
 	s.storeHealthMu.Unlock()
 
@@ -195,8 +195,8 @@ func TestBuildAndStoreStatusEscapesWedgedBuild(t *testing.T) {
 	// Swap in a non-blocking computer under the same lock the wedged
 	// goroutine already read past, so this reassignment cannot race it.
 	s.storeHealthMu.Lock()
-	s.storeHealthComputer = func(context.Context) *StatusStoreHealth {
-		return &StatusStoreHealth{SizeBytes: 2}
+	s.storeHealthComputer = func(context.Context) (*StatusStoreHealth, error) {
+		return &StatusStoreHealth{SizeBytes: 2}, nil
 	}
 	s.storeHealthMu.Unlock()
 

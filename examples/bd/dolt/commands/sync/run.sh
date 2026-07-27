@@ -618,13 +618,33 @@ exit_code=0
 server_running=false
 is_running && server_running=true
 
+# Does this run have at least one database it will actually sync? Mirrors the
+# selection filters of the sync loop below (.dolt present, not a system schema,
+# matches --db, not .no-sync). A run whose databases are all excluded must not
+# contact the server at all — "excluded from sync" means no server traffic on
+# its behalf, not merely no push.
+has_syncable_database() {
+  [ -d "$data_dir" ] || return 1
+  for _d in "$data_dir"/*/; do
+    [ ! -d "$_d/.dolt" ] && continue
+    _name="$(basename "$_d")"
+    case "$(printf '%s' "$_name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) continue ;; esac
+    [ -n "$db_filter" ] && [ "$_name" != "$db_filter" ] && continue
+    [ -f "$_d/.no-sync" ] && continue
+    return 0
+  done
+  return 1
+}
+
 # Start-of-run sweep (vc-ewyro): reap any gc-managed push stranded on the shared
 # server by a previous run that crashed or was cancelled mid-push — the dominant
 # orphan path, where an order context-deadline SIGTERMs the script (its client
 # bound never fires) while the server keeps running the push. Reaps by
 # owner-pid liveness, so a concurrently-running sync/compact push is spared.
 # Only meaningful in SQL/server mode; short-bounded and best-effort.
-if [ "$server_running" = true ]; then
+# Gated on there being real work: sweeping is maintenance for a run that is
+# about to push, so a pure-skip run stays silent (ga-zf03v).
+if [ "$server_running" = true ] && has_syncable_database; then
   reap_dead_owner_pushes
 fi
 

@@ -132,6 +132,12 @@ func TestArchiveOverlapsFilter(t *testing.T) {
 		// an archive stamped after Until may still hold in-window events —
 		// pruning on Until would silently drop them. Never prune on Until.
 		{"Until never prunes even when archive is newer", Filter{Until: info.Timestamp.Add(-time.Hour)}, true},
+		{"BeforeSeq above archive range", Filter{BeforeSeq: 250}, true},
+		{"BeforeSeq inside archive range", Filter{BeforeSeq: 150}, true},
+		{"BeforeSeq just above archive first seq", Filter{BeforeSeq: 101}, true},
+		{"BeforeSeq at archive first seq", Filter{BeforeSeq: 100}, false},
+		{"BeforeSeq below archive range", Filter{BeforeSeq: 50}, false},
+		{"AfterSeq and BeforeSeq window inside range", Filter{AfterSeq: 120, BeforeSeq: 180}, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

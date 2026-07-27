@@ -64,6 +64,8 @@ const (
 	RuntimeBuiltinCatalog = "runtime.builtin"
 	// runtimeDoubleBoundaryPath is the designated runtime.Provider double source.
 	runtimeDoubleBoundaryPath = "internal/runtime/fake.go"
+	// runtimeContractWaiverOwner owns the remaining production-runtime gaps.
+	runtimeContractWaiverOwner = "ga-80po0c.3"
 
 	// MarkdownStart begins the generated TESTING.md table.
 	MarkdownStart = "<!-- BEGIN CHECKED RUNTIME PROVIDER LEDGER -->"
@@ -94,6 +96,13 @@ type ProofRef struct {
 	Test         string
 	Runner       SymbolRef
 	AllowedCalls []SymbolRef
+
+	// Scope optionally narrows what a proved claim establishes when a
+	// source-bound constructor is proved on one execution path but not its
+	// whole surface. It is rendered alongside the proved status so the ledger
+	// does not overstate coverage — for example a router composition proved on
+	// its default route while its alternate route is covered by focused tests.
+	Scope string
 }
 
 // Waiver is a temporary, owned exception to an applicable contract.
@@ -154,33 +163,37 @@ func Catalog() []Entry {
 			"subprocess", "exact:subprocess", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/subprocess", "NewSeamBacked"),
-				"ga-80po0c.1.2",
-				"NewSeamBacked exact production-constructor proof binding is deferred to ga-80po0c.1.2",
+				"NewSeamBacked selects a distinct reachable empty-cityPath branch with shared /tmp state; the WithDir proof does not exercise that composition",
 			),
-			waivedRuntime(
+			provedRuntime(
 				repoSymbol("internal/runtime/subprocess", "NewSeamBackedWithDir"),
-				"ga-80po0c.1.2",
-				"NewSeamBackedWithDir exact production-constructor proof binding is deferred to ga-80po0c.1.2",
+				"internal/runtime/subprocess/seam_conformance_test.go",
+				"TestSubprocessSeamConformance",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				repoSymbol("internal/testutil", "ShortTempDir"),
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 		),
 		builtin(
 			"acp", "exact:acp", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBacked"),
-				"ga-80po0c.3",
-				"full conformance covers the raw ACP provider, not the NewSeamBacked production composition",
+				"NewSeamBacked always uses shared os.TempDir()/gc-acp state; the WithDir proof does not exercise that composition",
 			),
-			waivedRuntime(
+			provedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBackedWithDir"),
-				"ga-80po0c.3",
-				"full conformance covers the raw ACP provider, not the NewSeamBackedWithDir production composition",
+				"internal/runtime/acp/conformance_test.go",
+				"TestACPConformance",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				repoSymbol("internal/runtime/acp", "acpConformanceCommand"),
+				repoSymbol("internal/runtime/acp", "acpConformanceDir"),
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 		),
 		builtin(
 			"t3bridge", "exact:t3bridge", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				"ga-80po0c.3",
 				"the production T3 bridge composition has focused tests but no full shared runtime contract",
 			),
 		),
@@ -188,7 +201,6 @@ func Catalog() []Entry {
 			"k8s", "exact:k8s", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/k8s", "NewSeamBacked"),
-				"ga-80po0c.3",
 				"the actual K8s production composition has no full shared runtime contract",
 			),
 		),
@@ -196,7 +208,6 @@ func Catalog() []Entry {
 			"herdr", "exact:herdr", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/herdr", "New"),
-				"ga-80po0c.3",
 				"the existing full conformance run skips in short mode or when the herdr executable is absent",
 			),
 		),
@@ -204,20 +215,21 @@ func Catalog() []Entry {
 			"hybrid", "exact:hybrid", nil,
 			waivedRuntime(
 				repoSymbol("cmd/gc", "newHybridProvider"),
-				"ga-80po0c.3",
 				"cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract",
 			),
 		),
 		builtin(
 			"exec", "prefix:exec:", nil,
-			waivedRuntime(
+			provedRuntime(
 				repoSymbol("internal/runtime/exec", "NewSeamBacked"),
-				"ga-80po0c.3",
-				"full conformance covers the raw exec provider, not the production seam-backed prefix composition",
+				"internal/runtime/exec/exec_test.go",
+				"TestExecConformance",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				repoSymbol("internal/runtime/exec", "execConformanceScript"),
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				"ga-80po0c.3",
 				"the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract",
 			),
 		),
@@ -225,7 +237,6 @@ func Catalog() []Entry {
 			"ssh", "prefix:ssh:", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/ssh", "NewSeamBacked"),
-				"ga-80po0c.3",
 				"the production SSH composition has no full shared runtime contract",
 			),
 		),
@@ -233,7 +244,6 @@ func Catalog() []Entry {
 			"tmux", "exact:tmux", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/tmux", "NewSeamBackedWithConfig"),
-				"ga-80po0c.3",
 				"the existing full conformance run skips when the tmux executable is absent",
 			),
 		),
@@ -247,9 +257,14 @@ func Catalog() []Entry {
 				Function: "resolveSessionTransportProvider",
 				Reason:   "conditional transport composition is outside the runtime registry",
 			},
-			Claims: []ContractClaim{waivedRuntime(autoConstructor,
-				"ga-80po0c.3",
-				"the production auto base/ACP composition has no full shared runtime contract",
+			Claims: []ContractClaim{provedRuntimeScoped(
+				autoConstructor,
+				"internal/runtime/auto/conformance_test.go",
+				"TestAutoConformance",
+				"default-route conformance; ACP route covered by focused auto routing tests",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				repoSymbol("internal/runtime", "NewFake"),
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			)},
 		},
 	}
@@ -299,13 +314,19 @@ func provedRuntime(constructor SymbolRef, file, test string, allowedCalls ...Sym
 	}
 }
 
-func waivedRuntime(constructor SymbolRef, owner, reason string) ContractClaim {
+func provedRuntimeScoped(constructor SymbolRef, file, test, scope string, allowedCalls ...SymbolRef) ContractClaim {
+	claim := provedRuntime(constructor, file, test, allowedCalls...)
+	claim.Proof.Scope = scope
+	return claim
+}
+
+func waivedRuntime(constructor SymbolRef, reason string) ContractClaim {
 	return ContractClaim{
 		Constructor: constructor,
 		Contract:    ContractRuntimeProvider,
 		Disposition: DispositionWaived,
 		Waiver: &Waiver{
-			Owner:   owner,
+			Owner:   runtimeContractWaiverOwner,
 			Expires: time.Date(2026, time.August, 12, 0, 0, 0, 0, time.UTC),
 			Reason:  reason,
 		},
@@ -674,6 +695,9 @@ func renderClaim(claim ContractClaim) string {
 	case DispositionProved:
 		if claim.Proof == nil {
 			return "proved (invalid: no proof)"
+		}
+		if scope := strings.TrimSpace(claim.Proof.Scope); scope != "" {
+			return fmt.Sprintf("proved by %s#%s (%s)", claim.Proof.File, claim.Proof.Test, scope)
 		}
 		return fmt.Sprintf("proved by %s#%s", claim.Proof.File, claim.Proof.Test)
 	case DispositionWaived:

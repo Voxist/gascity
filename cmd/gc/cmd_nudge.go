@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -306,15 +307,15 @@ func newNudgePollCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long:   "Poll and deliver queued nudges for sessions that need an out-of-band delivery fallback. Used internally.",
 		Args:   cobra.MaximumNArgs(1),
 		Hidden: true,
-		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdNudgePoll(args, sessionName, interval, quiescence, stdout, stderr) != 0 {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if cmdNudgePoll(args, sessionName, interval, quiescence, cmd.Flags().Changed("interval"), stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&sessionName, "session", "", "runtime session name (defaults to $GC_SESSION_NAME)")
-	cmd.Flags().DurationVar(&interval, "interval", defaultNudgePollInterval, "poll interval")
+	cmd.Flags().DurationVar(&interval, "interval", defaultNudgePollInterval, "poll interval (overrides [session] nudge_poll_interval)")
 	cmd.Flags().DurationVar(&quiescence, "quiescence", defaultNudgePollQuiescence, "minimum inactivity before injecting")
 	return cmd
 }
@@ -614,7 +615,24 @@ func configureNudgePollRuntime(stderr io.Writer) func() {
 	}
 }
 
-func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.Duration, _ io.Writer, stderr io.Writer) int {
+// resolveNudgePollInterval picks the poller cycle interval: an explicitly
+// passed --interval flag wins; otherwise a positive [session]
+// nudge_poll_interval from the city config; otherwise the passed default.
+func resolveNudgePollInterval(cityPath string, flagValue time.Duration, flagExplicit bool) time.Duration {
+	if flagExplicit {
+		return flagValue
+	}
+	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	if err != nil || cfg == nil {
+		return flagValue
+	}
+	if d := cfg.Session.NudgePollIntervalDuration(); d > 0 {
+		return d
+	}
+	return flagValue
+}
+
+func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.Duration, intervalExplicit bool, _ io.Writer, stderr io.Writer) int {
 	targetID := os.Getenv("GC_ALIAS")
 	if targetID == "" {
 		targetID = os.Getenv("GC_SESSION_ID")
@@ -638,6 +656,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		fmt.Fprintln(stderr, "gc nudge poll: session name unavailable") //nolint:errcheck
 		return 1
 	}
+	interval = resolveNudgePollInterval(target.cityPath, interval, intervalExplicit)
 
 	release, err := acquireNudgePollerLease(target.cityPath, target.sessionName, target.pollerKey())
 	if err != nil {
@@ -2001,6 +2020,10 @@ func takeQueuedNudgesByID(items []queuedNudge, id string, removed []queuedNudge)
 }
 
 func enqueueQueuedNudgeWithStore(cityPath string, store beads.NudgesStore, item queuedNudge) error {
+	return enqueueQueuedNudgeWithStoreAndClock(cityPath, store, item, clock.Real{})
+}
+
+func enqueueQueuedNudgeWithStoreAndClock(cityPath string, store beads.NudgesStore, item queuedNudge, clk clock.Clock) error {
 	ownStore := false
 	if store.Store == nil {
 		store = openNudgeBeadStore(cityPath)
@@ -2009,7 +2032,7 @@ func enqueueQueuedNudgeWithStore(cityPath string, store beads.NudgesStore, item 
 	if ownStore {
 		defer closeBeadStoreHandle(store.Store) //nolint:errcheck // best-effort
 	}
-	return enqueueQueuedNudgeInto(cityPath, store, item)
+	return enqueueQueuedNudgeIntoWithClock(cityPath, store, item, clk)
 }
 
 // enqueueQueuedNudgeInto writes item into the flock'd state.json queue
@@ -2017,7 +2040,18 @@ func enqueueQueuedNudgeWithStore(cityPath string, store beads.NudgesStore, item 
 // A zero-value store is the store-independent transport (vl-3hb WS-B): the
 // shadow-bead save no-ops through the nil-receiver-safe front door and the
 // item's BeadID stays empty.
+//
+// MERGE INTENT (v1.4.0 resync): upstream added this clockless storeless-transport
+// entry point while the fork added clock injection (enqueueQueuedNudgeWithStoreAndClock,
+// exercised with a fake clock by sling_nudge_backlog_test and sling_nudge_budget_test).
+// The clean merge wired upstream's clockless signature to the fork's clock-using
+// body, which did not compile. Split so both survive: this keeps upstream's
+// contract for its two callers, and the clock-aware variant below carries the body.
 func enqueueQueuedNudgeInto(cityPath string, store beads.NudgesStore, item queuedNudge) error {
+	return enqueueQueuedNudgeIntoWithClock(cityPath, store, item, clock.Real{})
+}
+
+func enqueueQueuedNudgeIntoWithClock(cityPath string, store beads.NudgesStore, item queuedNudge, clk clock.Clock) error {
 	var front *nudgequeue.Store
 	if store.Store != nil {
 		front = nudgeFrontDoor(store)
@@ -2030,15 +2064,15 @@ func enqueueQueuedNudgeInto(cityPath string, store beads.NudgesStore, item queue
 		item.BeadID = beadID
 	}
 	err = withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
-		now := time.Now()
+		now := clk.Now()
 		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
-		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
+		if err := recoverExpiredInFlightNudgesWithClock(state, front, now, deadline, clk); err != nil {
 			return err
 		}
-		if err := pruneExpiredQueuedNudges(state, front, now, deadline); err != nil {
+		if err := pruneExpiredQueuedNudgesWithClock(state, front, now, deadline, clk); err != nil {
 			return err
 		}
-		if err := pruneDeadQueuedNudges(state, front, now, deadline); err != nil {
+		if err := pruneDeadQueuedNudgesWithClock(state, front, now, deadline, clk); err != nil {
 			return err
 		}
 		if queuedNudgeExists(state, item.ID) {
@@ -2053,7 +2087,7 @@ func enqueueQueuedNudgeInto(cityPath string, store beads.NudgesStore, item queue
 			}
 			filtered := state.Pending[:0]
 			for i, existing := range state.Pending {
-				if time.Now().After(deadline) {
+				if clk.Now().After(deadline) {
 					filtered = append(filtered, state.Pending[i:]...)
 					break
 				}
@@ -2075,7 +2109,7 @@ func enqueueQueuedNudgeInto(cityPath string, store beads.NudgesStore, item queue
 			// This causes at most one redundant delivery, not data corruption.
 			inFlight := state.InFlight[:0]
 			for i, existing := range state.InFlight {
-				if time.Now().After(deadline) {
+				if clk.Now().After(deadline) {
 					inFlight = append(inFlight, state.InFlight[i:]...)
 					break
 				}
@@ -2353,9 +2387,13 @@ func noMaintenanceDeadline() time.Time {
 }
 
 func pruneExpiredQueuedNudges(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time) error {
+	return pruneExpiredQueuedNudgesWithClock(state, front, now, deadline, clock.Real{})
+}
+
+func pruneExpiredQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time, clk clock.Clock) error {
 	filtered := state.Pending[:0]
 	for i, item := range state.Pending {
-		if time.Now().After(deadline) {
+		if clk.Now().After(deadline) {
 			filtered = append(filtered, state.Pending[i:]...)
 			break
 		}
@@ -2378,9 +2416,13 @@ func pruneExpiredQueuedNudges(state *nudgeQueueState, front *nudgequeue.Store, n
 }
 
 func recoverExpiredInFlightNudges(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time) error {
+	return recoverExpiredInFlightNudgesWithClock(state, front, now, deadline, clock.Real{})
+}
+
+func recoverExpiredInFlightNudgesWithClock(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time, clk clock.Clock) error {
 	filtered := state.InFlight[:0]
 	for i, item := range state.InFlight {
-		if time.Now().After(deadline) {
+		if clk.Now().After(deadline) {
 			filtered = append(filtered, state.InFlight[i:]...)
 			break
 		}
@@ -2412,10 +2454,14 @@ func recoverExpiredInFlightNudges(state *nudgeQueueState, front *nudgequeue.Stor
 // when a durable terminal bead record exists in the store. Items without a confirmed terminal
 // bead are retained so terminal history is not lost if the bead store write failed.
 func pruneDeadQueuedNudges(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time) error {
+	return pruneDeadQueuedNudgesWithClock(state, front, now, deadline, clock.Real{})
+}
+
+func pruneDeadQueuedNudgesWithClock(state *nudgeQueueState, front *nudgequeue.Store, now, deadline time.Time, clk clock.Clock) error {
 	cutoff := now.Add(-defaultQueuedNudgeDeadRetention)
 	filtered := state.Dead[:0]
 	for i, item := range state.Dead {
-		if time.Now().After(deadline) {
+		if clk.Now().After(deadline) {
 			filtered = append(filtered, state.Dead[i:]...)
 			break
 		}

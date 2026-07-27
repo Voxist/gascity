@@ -9,6 +9,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // doltProcRigOwner reports which registered rig owns a discovered dolt
@@ -778,4 +780,34 @@ func readWithTimeout(path string) ([]byte, error) {
 // process) is the caller's responsibility to interpret as "already gone".
 func killProcess(pid int, sig syscall.Signal) error {
 	return syscall.Kill(pid, sig)
+}
+
+// loadRigDoltPorts reads each rig's recorded dolt-server.port.
+//
+// MERGE INTENT (v1.4.0 resync): restored from upstream. The fork replaced this
+// file-based port set with live-state detection (doltProcRigOwner + the live
+// resolver), which is the better primary signal. But the reaper's protected-port
+// set feeds a DESTRUCTIVE path — SIGKILL plus DataDir removal — and dropping the
+// recorded ports left a port with no attributable live process unprotected.
+// protectedDoltPortsForReap now seeds from this and lets live state overlay it,
+// so protection is the union of both rather than either alone.
+func loadRigDoltPorts(rigs []resolverRig, fs fsys.FS) map[int]string {
+	out := map[int]string{}
+	for _, rig := range rigs {
+		path := filepath.Join(rig.Path, ".beads", "dolt-server.port")
+		data, err := fs.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		text := strings.TrimSpace(string(data))
+		if text == "" {
+			continue
+		}
+		port, err := strconv.Atoi(text)
+		if err != nil || !validDoltPort(port) {
+			continue
+		}
+		out[port] = rig.Name
+	}
+	return out
 }

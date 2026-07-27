@@ -1433,6 +1433,12 @@ type BeadsConfig struct {
 	// loud degrade otherwise), or "require" (CAS or a typed refusal). Empty
 	// defaults to "off". Any other value fails config load.
 	ConditionalWrites string `toml:"conditional_writes,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
+	// GuardedRelease selects the ownership-release discipline for work beads:
+	// "off" (legacy, owner-blind bd update/unclaim), "auto" (fence-guarded
+	// release verbs where the bd binary is capable, loud degrade otherwise), or
+	// "require" (guarded release or a typed refusal). Empty defaults to "off".
+	// Any other value fails config load.
+	GuardedRelease string `toml:"guarded_release,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
@@ -1706,6 +1712,18 @@ func (b BeadsConfig) NormalizedConditionalWrites() string {
 	return b.ConditionalWrites
 }
 
+// NormalizedGuardedRelease returns the configured guarded-release value,
+// mapping ONLY the empty string to the built-in default "off". Like
+// NormalizedConditionalWrites, an unknown non-empty value passes through
+// verbatim rather than collapsing to the default: it is rejected upstream (by
+// internal/rollout on resolve), because a typo must never silently mean "off".
+func (b BeadsConfig) NormalizedGuardedRelease() string {
+	if b.GuardedRelease == "" {
+		return "off"
+	}
+	return b.GuardedRelease
+}
+
 // UsesBD105CLISemantics reports whether bd-backed code may rely on bd 1.0.5
 // command-line behavior.
 func (b BeadsConfig) UsesBD105CLISemantics() bool {
@@ -1795,12 +1813,28 @@ type SessionConfig struct {
 	// SetupTimeout is the per-command/script timeout for session setup and
 	// pre_start commands. Duration string (e.g., "10s", "30s"). Defaults to "10s".
 	SetupTimeout string `toml:"setup_timeout,omitempty" jsonschema:"default=10s"`
+	// SetupMaxTimeout enables an activity-aware budget for session setup and
+	// pre_start commands. When set (e.g. "10m"), a setup command is no longer
+	// killed after setup_timeout of wall clock; instead setup_timeout bounds
+	// how long it may run without producing output (idle budget) and
+	// setup_max_timeout bounds its total runtime regardless of output (the
+	// runaway ceiling). A slow but healthy command — a large worktree checkout
+	// streaming progress — survives, while a hung one still dies after
+	// setup_timeout of silence. Duration string. Empty (the default) keeps
+	// the fixed setup_timeout deadline.
+	SetupMaxTimeout string `toml:"setup_max_timeout,omitempty"`
 	// NudgeReadyTimeout is how long to wait for the agent to be ready before
 	// sending nudge text. Duration string. Defaults to "10s".
 	NudgeReadyTimeout string `toml:"nudge_ready_timeout,omitempty" jsonschema:"default=10s"`
 	// NudgeRetryInterval is the retry interval between nudge readiness polls.
 	// Duration string. Defaults to "500ms".
 	NudgeRetryInterval string `toml:"nudge_retry_interval,omitempty" jsonschema:"default=500ms"`
+	// NudgePollInterval is the cycle interval for the per-session nudge
+	// poller sidecar (`gc nudge poll`). Each cycle observes the session and
+	// checks the queued-nudge state, so on hosts running many sessions a
+	// longer interval trades nudge-delivery latency for less standing load.
+	// Duration string. Unset means the poller's built-in default (2s).
+	NudgePollInterval string `toml:"nudge_poll_interval,omitempty" jsonschema:"default=2s"`
 	// NudgeLockTimeout is how long to wait to acquire the per-session nudge lock.
 	// Duration string. Defaults to "30s".
 	NudgeLockTimeout string `toml:"nudge_lock_timeout,omitempty" jsonschema:"default=30s"`
@@ -1827,6 +1861,12 @@ type SessionConfig struct {
 	// runtime, preventing duplicate pending records from jamming adoption.
 	// Duration string (e.g., "30m", "1h"). Defaults to "30m".
 	PendingCreateTTL string `toml:"pending_create_ttl,omitempty" jsonschema:"default=30m"`
+	// ClaimHolderStallTimeout, when set, enables progress-aware recycling of a
+	// desired, alive session that holds in-progress work but has stopped making
+	// progress. Because recycling a claim-holder interrupts work, set this above
+	// the longest legitimate quiet period. Values below 5m are clamped to 5m.
+	// Duration string (e.g. "20m"). Unset/zero disables it.
+	ClaimHolderStallTimeout string `toml:"claim_holder_stall_timeout,omitempty"`
 	// Socket specifies the tmux socket name for per-city isolation.
 	// When set, all tmux commands use "tmux -L <socket>" to connect to
 	// a dedicated server. When empty, defaults to the city name
@@ -1877,6 +1917,13 @@ func (s *SessionConfig) SetupTimeoutDuration() time.Duration {
 	return durationOr(s.SetupTimeout, 10*time.Second)
 }
 
+// SetupMaxTimeoutDuration returns the activity-aware setup ceiling as a
+// time.Duration. Zero — the feature disabled, keeping the fixed
+// setup_timeout deadline — if empty or unparseable.
+func (s *SessionConfig) SetupMaxTimeoutDuration() time.Duration {
+	return durationOr(s.SetupMaxTimeout, 0)
+}
+
 // NudgeReadyTimeoutDuration returns the nudge ready timeout as a time.Duration.
 // Defaults to 10s if empty or unparseable.
 func (s *SessionConfig) NudgeReadyTimeoutDuration() time.Duration {
@@ -1887,6 +1934,20 @@ func (s *SessionConfig) NudgeReadyTimeoutDuration() time.Duration {
 // Defaults to 500ms if empty or unparseable.
 func (s *SessionConfig) NudgeRetryIntervalDuration() time.Duration {
 	return durationOr(s.NudgeRetryInterval, 500*time.Millisecond)
+}
+
+// NudgePollIntervalDuration returns the configured nudge poller cycle
+// interval, or 0 when unset, unparseable, or non-positive — 0 means "not
+// configured" and callers fall back to their built-in default.
+func (s *SessionConfig) NudgePollIntervalDuration() time.Duration {
+	if s.NudgePollInterval == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(s.NudgePollInterval)
+	if err != nil || d <= 0 {
+		return 0
+	}
+	return d
 }
 
 // NudgeLockTimeoutDuration returns the nudge lock timeout as a time.Duration.
@@ -1922,6 +1983,13 @@ func (s *SessionConfig) PendingCreateTTLDuration() time.Duration {
 // the behavior.
 func (s *SessionConfig) ProgressStallTimeoutDuration() time.Duration {
 	return durationFloorOr(s.ProgressStallTimeout, 0, ProgressStallTimeoutMinimum)
+}
+
+// ClaimHolderStallTimeoutDuration returns the claim-holder stall recycle
+// timeout, or 0 when unset, non-positive, or unparseable. Positive values
+// below ProgressStallTimeoutMinimum are clamped to that safety floor.
+func (s *SessionConfig) ClaimHolderStallTimeoutDuration() time.Duration {
+	return durationFloorOr(s.ClaimHolderStallTimeout, 0, ProgressStallTimeoutMinimum)
 }
 
 // DebounceMsOrDefault returns the debounce interval in milliseconds.
@@ -2271,9 +2339,11 @@ type FormulasConfig struct {
 type OrdersConfig struct {
 	// Skip lists order names to exclude from scanning.
 	Skip []string `toml:"skip,omitempty"`
-	// MaxTimeout is an operator hard cap on per-order timeouts.
-	// No order gets more than this duration. Go duration string (e.g., "60s").
-	// Empty means uncapped (no override).
+	// MaxTimeout is an operator hard cap on the per-order dispatch timeout: no
+	// order's dispatched exec/formula runs longer than this. Go duration string
+	// (e.g., "60s"). Empty means uncapped (no override). This bounds the dispatch
+	// timeout only; a condition trigger's check_timeout is a separate probe
+	// deadline and is not capped here.
 	MaxTimeout string `toml:"max_timeout,omitempty"`
 	// MaxDispatchesPerTick caps how many due orders the dispatcher admits
 	// per controller tick. Unset (nil) or <=0 uses the built-in default. On
@@ -2316,6 +2386,11 @@ type OrderOverride struct {
 	Pool *string `toml:"pool,omitempty"`
 	// Timeout overrides the per-order timeout. Go duration string.
 	Timeout *string `toml:"timeout,omitempty"`
+	// CheckTimeout overrides the condition trigger's check-command deadline.
+	// Go duration string. Lets a deployment tune check_timeout for a scanned
+	// shared-pack order (e.g. a slow-store queue check) without editing the
+	// pack source.
+	CheckTimeout *string `toml:"check_timeout,omitempty"`
 	// Idempotent overrides whether the order's dispatch is safe to repeat.
 	// Idempotent orders fail open when the open-work gate times out (#2893).
 	Idempotent *bool `toml:"idempotent,omitempty"`
@@ -2869,6 +2944,29 @@ type DaemonConfig struct {
 	// home directories (agent template directories) are never touched.
 	// Defaults to false. Set to true to enable automated worktree cleanup.
 	AutoReapClosedBeadWorktrees *bool `toml:"auto_reap_closed_bead_worktrees,omitempty" jsonschema:"default=false"`
+	// AutoReapClosedBeadWorktreesDryRun makes the reconciler patrol run the
+	// full worktree-reap classification each tick — discovery, closed-bead
+	// match, liveness gate, and git-safety probes — but emit
+	// bead.worktree.reap_skipped events describing what it WOULD reap and
+	// what it protected, without removing anything. This is the safe
+	// staged-rollout surface: an operator enables dry-run first, confirms via
+	// `gc events` that no live worktree appears in the would-reap set, then
+	// enables AutoReapClosedBeadWorktrees for real removal. Dry-run has no
+	// effect when AutoReapClosedBeadWorktrees is already true (real removal
+	// supersedes it). Defaults to false.
+	AutoReapClosedBeadWorktreesDryRun *bool `toml:"auto_reap_closed_bead_worktrees_dry_run,omitempty" jsonschema:"default=false"`
+	// AutoReapClosedBeadWorktreesMinAgeMinutes is the minimum worktree age,
+	// in minutes, before a closed-bead worktree becomes eligible for reap
+	// classification at all (borrow-veto scan and beyond). This quarantines
+	// a worktree against the race between its creation and its owning
+	// bead's gc.work_dir/work_dir metadata being stamped by the next
+	// reconcile pass — without it, a just-created worktree could look
+	// unclaimed to the borrow-veto scan before the metadata that would
+	// protect it has been written. Nil (unset) defaults to
+	// DefaultAutoReapClosedBeadWorktreesMinAgeMinutes. Zero disables the
+	// quarantine entirely (every closed-bead worktree is immediately
+	// eligible for the rest of the gate chain, regardless of age).
+	AutoReapClosedBeadWorktreesMinAgeMinutes *int `toml:"auto_reap_closed_bead_worktrees_min_age_minutes,omitempty" jsonschema:"default=10"`
 	// StartReadyTimeout is how long `gc start` and `gc register` wait for
 	// the supervisor to report the city as Running. Cities with many
 	// registered or adopted sessions take longer to start because the
@@ -2925,6 +3023,34 @@ func (d *DaemonConfig) AutoReapClosedBeadWorktreesEnabled() bool {
 		return false
 	}
 	return *d.AutoReapClosedBeadWorktrees
+}
+
+// AutoReapClosedBeadWorktreesDryRunEnabled reports whether the patrol should
+// run the worktree-reap classification and emit would-reap/protected events
+// without removing anything. Defaults to false when the field is unset (nil).
+// Real removal (AutoReapClosedBeadWorktreesEnabled) supersedes dry-run: when
+// both are set, the reaper deletes for real, so callers should treat dry-run
+// as active only when this is true AND real reaping is off.
+func (d *DaemonConfig) AutoReapClosedBeadWorktreesDryRunEnabled() bool {
+	if d.AutoReapClosedBeadWorktreesDryRun == nil {
+		return false
+	}
+	return *d.AutoReapClosedBeadWorktreesDryRun
+}
+
+// DefaultAutoReapClosedBeadWorktreesMinAgeMinutes is the quarantine window
+// applied when AutoReapClosedBeadWorktreesMinAgeMinutes is unset.
+const DefaultAutoReapClosedBeadWorktreesMinAgeMinutes = 10
+
+// AutoReapClosedBeadWorktreesMinAge returns the minimum worktree age before a
+// closed-bead worktree is eligible for reap classification. Defaults to
+// DefaultAutoReapClosedBeadWorktreesMinAgeMinutes when unset; an explicit
+// zero disables the quarantine.
+func (d *DaemonConfig) AutoReapClosedBeadWorktreesMinAge() time.Duration {
+	if d.AutoReapClosedBeadWorktreesMinAgeMinutes == nil {
+		return time.Duration(DefaultAutoReapClosedBeadWorktreesMinAgeMinutes) * time.Minute
+	}
+	return time.Duration(*d.AutoReapClosedBeadWorktreesMinAgeMinutes) * time.Minute
 }
 
 // AutoPruneWorkerDirEnabled reports whether the reconciler should remove a
@@ -4702,7 +4828,7 @@ func GastownCity(name, provider, startCommand string) City {
 
 // GascityCityWithProviders returns a minimal managed city that imports the
 // public gascity planning/implementation skills pack: a single mayor agent
-// plus [imports.gascity] (skills and formulas) pinned to the registry release.
+// plus [imports.gc] (skills, formulas, and commands) pinned to the registry release.
 // The gascity formulas route their steps to role agents (gc.run-operator,
 // gc.requirements-planner, ...) that ship in the separate gc-roles subpack, so
 // the template also seeds that pack as a default rig import bound "gc" — every
@@ -4712,7 +4838,7 @@ func GastownCity(name, provider, startCommand string) City {
 func GascityCityWithProviders(name, defaultProvider string, providers []string) City {
 	city := WizardCityWithProviders(name, defaultProvider, providers)
 	city.Imports = map[string]Import{
-		"gascity": {
+		"gc": {
 			Source:  PublicGascityPackSource,
 			Version: PublicGascityPackVersion,
 		},
@@ -4846,6 +4972,9 @@ func Parse(data []byte) (*City, error) {
 	if err := validateConditionalWrites(cfg.Beads.ConditionalWrites); err != nil {
 		return nil, err
 	}
+	if err := validateGuardedRelease(cfg.Beads.GuardedRelease); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
 }
 
@@ -4860,6 +4989,22 @@ func validateConditionalWrites(raw string) error {
 	}
 	if _, err := gate.ParseMode(raw); err != nil {
 		return fmt.Errorf("beads.conditional_writes: %w", err)
+	}
+	return nil
+}
+
+// validateGuardedRelease rejects an out-of-enum beads.guarded_release value at
+// load time. Like conditional_writes, this gate selects a correctness
+// discipline: a typo silently meaning "off" would leave an operator believing
+// ownership-fenced release is enforced while every release runs owner-blind, so
+// the config fails to load instead. The empty string (unset) is valid and
+// defaults to off.
+func validateGuardedRelease(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	if _, err := gate.ParseMode(raw); err != nil {
+		return fmt.Errorf("beads.guarded_release: %w", err)
 	}
 	return nil
 }
