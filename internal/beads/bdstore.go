@@ -2279,6 +2279,26 @@ func (s *BdStore) DeleteBatch(ids []string) error {
 
 // List returns beads matching the query via bd list and bd query.
 func (s *BdStore) List(query ListQuery) ([]Bead, error) {
+	return s.ListCtx(context.Background(), query)
+}
+
+// ListCtx implements the optional CtxLister capability: an already-canceled
+// or expired ctx is rejected before the bd subprocess is spawned. Unlike
+// DoltliteReadStore.ListCtx (which gets genuine mid-query cancellation for
+// free from database/sql's QueryContext), CommandRunner
+// (func(dir, name string, args ...string) ([]byte, error)) carries no ctx
+// parameter, so this is a pre-flight check only — it cannot abort a bd
+// subprocess already in flight. That gap is already closed on the
+// production status path by ScopedStoreLike (gascity ga-cdmx6x), which
+// resolves a throwaway BdStore clone bound to the request ctx via
+// ExecCommandRunnerWithEnvContext before a bd-CLI-backed store is ever read;
+// callers wiring the CtxLister fast path (T-013/T-014) must keep preferring
+// that clone for bd-CLI-backed stores rather than routing through this
+// pre-flight-only path.
+func (s *BdStore) ListCtx(ctx context.Context, query ListQuery) ([]Bead, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("bd list: %w", ErrQueryRequiresScan)
 	}

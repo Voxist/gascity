@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -39,6 +40,55 @@ type countingReadyStore struct {
 func (s *countingReadyStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 	s.readyCalls++
 	return s.MemStore.Ready(query...)
+}
+
+// ctxListerWorkStore embeds *beads.MemStore and adds a context-cancellable
+// ListCtx so tests can verify statusListStoreWithTimeout prefers a store's
+// own beads.CtxLister.ListCtx over the abandoning goroutine's ctx-less List,
+// when ScopedStoreLike has nothing to offer (answers (nil, nil) -- e.g. a
+// native Doltlite-backed store, which ScopedStoreLike's bd-CLI-only clone
+// resolution does not cover). ListCtx blocks until ctx is done, then returns
+// ctx.Err() -- proving cancellation actually propagates into the store call
+// rather than being observed only after an unrelated completion.
+//
+// Call counters are atomics, not plain ints: statusListStoreWithTimeout
+// races the spawned ListCtx goroutine against its own reqCtx.Done() case and
+// returns on whichever fires first, so a test reading these fields after the
+// call returns has no happens-before edge to the goroutine's increment --
+// only the shared context-cancellation event orders both, and siblings of a
+// common event aren't ordered relative to each other.
+type ctxListerWorkStore struct {
+	*beads.MemStore
+	listCalls    atomic.Int32
+	listCtxCalls atomic.Int32
+}
+
+func (s *ctxListerWorkStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.listCalls.Add(1)
+	return s.MemStore.List(query)
+}
+
+func (s *ctxListerWorkStore) ListCtx(ctx context.Context, _ beads.ListQuery) ([]beads.Bead, error) {
+	s.listCtxCalls.Add(1)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// blockingListOnlyStore implements neither a bd-CLI-backed ScopedStoreLike
+// clone nor beads.CtxLister -- it is the plain, ctx-less List fallback that
+// statusListStoreWithTimeout's abandoning-goroutine pattern must still
+// bound via reqCtx.Done(), even though the goroutine itself keeps blocking
+// in List past the deadline (mirrors contextBlindReadyStore's Ready analog).
+type blockingListOnlyStore struct {
+	*beads.MemStore
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingListOnlyStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	close(s.entered)
+	<-s.release
+	return nil, nil
 }
 
 func newSessionBead(sessionName string) beads.Bead {
@@ -242,6 +292,85 @@ func TestStatusListStoreWithTimeoutSurfacesScopedStoreResolutionError(t *testing
 	_, err := statusListStoreWithTimeout(context.Background(), state, beads.NewMemStore(), beads.ListQuery{AllowScan: true})
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("statusListStoreWithTimeout error = %v, want it to contain the resolution error", err)
+	}
+}
+
+// TestStatusListStoreWithTimeoutCancelsCtxLister proves statusListStoreWithTimeout
+// calls store.ListCtx directly -- not the ctx-less List the abandoning
+// goroutine pattern uses -- when store implements beads.CtxLister and
+// ScopedStoreLike answers (nil, nil) (the store isn't bd-CLI-backed, so the
+// existing ga-cdmx6x scoped-clone mitigation doesn't apply to it; that
+// mitigation keeps taking priority for bd-CLI-backed stores -- see
+// TestStatusListStoreWithTimeoutUsesScopedStoreWhenAvailable). A canceled
+// request budget must cancel the read (ListCtx observes reqCtx.Done()) and
+// return within ~statusStoreReadTimeout with a partial-error containing
+// "timed out", proving no goroutine is left blocking past the deadline.
+func TestStatusListStoreWithTimeoutCancelsCtxLister(t *testing.T) {
+	oldTimeout := statusStoreReadTimeout
+	statusStoreReadTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { statusStoreReadTimeout = oldTimeout })
+
+	store := &ctxListerWorkStore{MemStore: beads.NewMemStore()}
+	state := newFakeState(t)
+	// scopedStoreFn left nil: defaults to (nil, nil), matching a native
+	// Doltlite-backed store -- ScopedStoreLike's bd-CLI-only clone
+	// resolution has nothing to offer it.
+
+	start := time.Now()
+	_, err := statusListStoreWithTimeout(context.Background(), state, store, beads.ListQuery{AllowScan: true})
+	elapsed := time.Since(start)
+
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("statusListStoreWithTimeout error = %v, want a timed-out error", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("statusListStoreWithTimeout blocked %s, want bounded by statusStoreReadTimeout", elapsed)
+	}
+	if store.listCtxCalls.Load() == 0 {
+		t.Fatal("statusListStoreWithTimeout did not call store.ListCtx")
+	}
+	if calls := store.listCalls.Load(); calls != 0 {
+		t.Fatalf("statusListStoreWithTimeout called store.List %d time(s), want 0 (should prefer ListCtx)", calls)
+	}
+}
+
+// TestStatusListStoreWithTimeoutAbandonFallbackBounded is the T-015
+// regression test for the fallback that remains when neither mitigation in
+// statusListStoreWithTimeout's doc comment applies: a store that is neither
+// bd-CLI-backed (no ScopedStoreLike clone) nor beads.CtxLister-capable is
+// read via the ctx-less List, and the function must still return promptly
+// once statusStoreReadTimeout elapses -- even though the abandoned
+// goroutine's List call keeps blocking in the background.
+func TestStatusListStoreWithTimeoutAbandonFallbackBounded(t *testing.T) {
+	oldTimeout := statusStoreReadTimeout
+	statusStoreReadTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { statusStoreReadTimeout = oldTimeout })
+
+	store := &blockingListOnlyStore{
+		MemStore: beads.NewMemStore(),
+		entered:  make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+	t.Cleanup(func() { close(store.release) })
+	state := newFakeState(t)
+	// scopedStoreFn left nil: defaults to (nil, nil) -- not bd-CLI-backed.
+	// store has no ListCtx -- not beads.CtxLister-capable either. Neither
+	// mitigation applies, so this exercises the plain abandoning goroutine.
+
+	start := time.Now()
+	_, err := statusListStoreWithTimeout(context.Background(), state, store, beads.ListQuery{AllowScan: true})
+	elapsed := time.Since(start)
+
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("statusListStoreWithTimeout error = %v, want a timed-out error", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("statusListStoreWithTimeout blocked %s, want bounded by statusStoreReadTimeout", elapsed)
+	}
+	select {
+	case <-store.entered:
+	default:
+		t.Fatal("blockingListOnlyStore.List was never entered")
 	}
 }
 

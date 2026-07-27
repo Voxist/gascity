@@ -4329,3 +4329,82 @@ func TestCachingStoreReadyReturnsCanonicalOrder(t *testing.T) {
 		t.Fatalf("cachedReadyOnly limit-3 order = %v, want %v", ids, want[:3])
 	}
 }
+
+// ctxListerMemStore embeds *MemStore and adds a context-cancellable ListCtx
+// so tests can verify CachingStore.ListCtx routes ctx-less backing reads
+// through a CtxLister backing's ListCtx instead of its ctx-less List.
+// ListCtx blocks until ctx is done, then returns ctx.Err() — proving a
+// cancellation actually propagates into the backing call rather than being
+// observed only after an unrelated completion.
+type ctxListerMemStore struct {
+	*MemStore
+	listCalls    int
+	listCtxCalls int
+	// entered, when non-nil, is closed the instant ListCtx starts waiting on
+	// ctx.Done() — lets a caller synchronize a cancel() with the call actually
+	// blocking, without a fixed sleep race.
+	entered chan struct{}
+}
+
+func (m *ctxListerMemStore) List(query ListQuery) ([]Bead, error) {
+	m.listCalls++
+	return m.MemStore.List(query)
+}
+
+func (m *ctxListerMemStore) ListCtx(ctx context.Context, _ ListQuery) ([]Bead, error) {
+	m.listCtxCalls++
+	if m.entered != nil {
+		close(m.entered)
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestCachingStoreListCtxHonorsContextOnLivePath(t *testing.T) {
+	backing := &ctxListerMemStore{MemStore: NewMemStore(), entered: make(chan struct{})}
+	cache := NewCachingStoreForTest(backing, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-backing.entered
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := cache.ListCtx(ctx, ListQuery{Live: true, AllowScan: true})
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ListCtx(Live) error = %v, want context.Canceled", err)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("ListCtx(Live) took %v to return after cancellation, want a prompt return", elapsed)
+	}
+	if backing.listCtxCalls == 0 {
+		t.Fatalf("CachingStore.ListCtx did not call backing.ListCtx on the query.Live path")
+	}
+	if backing.listCalls != 0 {
+		t.Fatalf("CachingStore.ListCtx called backing.List %d time(s) on the query.Live path, want 0 (should prefer ListCtx)", backing.listCalls)
+	}
+}
+
+// TestCachingStoreListCtxServesCachePathWithoutTouchingBacking asserts the
+// active-bead cache path (neither Live nor ParentID) answers from the
+// in-memory cache and never calls the backing store at all, ctx-aware or
+// not — a live cache needs no ctx since it does no I/O.
+func TestCachingStoreListCtxServesCachePathWithoutTouchingBacking(t *testing.T) {
+	backing := &ctxListerMemStore{MemStore: NewMemStore()}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	backing.listCalls = 0
+	backing.listCtxCalls = 0
+
+	if _, err := cache.ListCtx(context.Background(), ListQuery{AllowScan: true}); err != nil {
+		t.Fatalf("ListCtx(active): %v", err)
+	}
+	if backing.listCalls != 0 || backing.listCtxCalls != 0 {
+		t.Fatalf("ListCtx(active) touched the backing store (List=%d, ListCtx=%d), want 0/0 — the cache path needs no backing I/O", backing.listCalls, backing.listCtxCalls)
+	}
+}

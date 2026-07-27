@@ -1,6 +1,7 @@
 package storehealth
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -219,5 +220,158 @@ func TestLastMaintenanceNoEvents(t *testing.T) {
 	ts, status := LastMaintenance(ep)
 	if !ts.IsZero() || status != "" {
 		t.Fatalf("LastMaintenance(empty) = (%v,%q), want (zero,\"\")", ts, status)
+	}
+}
+
+// tailCallRecorder wraps a *events.Fake and records whether List or
+// ListTail was invoked, so tests can assert LastMaintenance prefers the
+// bounded ListTail path when the provider implements events.TailProvider.
+type tailCallRecorder struct {
+	*events.Fake
+	listCalls     int
+	listTailCalls int
+	lastTailLimit int
+}
+
+func (r *tailCallRecorder) List(filter events.Filter) ([]events.Event, error) {
+	r.listCalls++
+	return r.Fake.List(filter)
+}
+
+func (r *tailCallRecorder) ListTail(filter events.Filter, limit int) ([]events.Event, error) {
+	r.listTailCalls++
+	r.lastTailLimit = limit
+	return r.Fake.ListTail(filter, limit)
+}
+
+func TestLastMaintenanceUsesListTailWhenAvailable(t *testing.T) {
+	recorder := &tailCallRecorder{Fake: events.NewFake()}
+	older := time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 4, 8, 3, 0, 0, 0, time.UTC)
+
+	payloadDone, _ := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 1})
+	payloadFail, _ := json.Marshal(events.StoreMaintenanceFailedPayload{Stage: "gc"})
+
+	recorder.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: older, Payload: payloadDone})
+	recorder.Record(events.Event{Type: events.StoreMaintenanceFailed, Ts: newer, Payload: payloadFail})
+
+	ts, status := LastMaintenance(recorder)
+
+	if recorder.listTailCalls == 0 {
+		t.Fatalf("LastMaintenance did not call ListTail when provider implements TailProvider")
+	}
+	if recorder.listCalls != 0 {
+		t.Fatalf("LastMaintenance called List %d time(s), want 0 when ListTail is available", recorder.listCalls)
+	}
+	if recorder.lastTailLimit <= 0 || recorder.lastTailLimit > 32 {
+		t.Fatalf("ListTail called with limit = %d, want a small bounded N in (0,32]", recorder.lastTailLimit)
+	}
+	if !ts.Equal(newer) {
+		t.Fatalf("ts = %v, want %v", ts, newer)
+	}
+	if status != "failed" {
+		t.Fatalf("status = %q, want failed", status)
+	}
+}
+
+// listOnlyProvider implements events.Provider but deliberately not
+// events.TailProvider, exercising LastMaintenance's fallback path for
+// backings that cannot do a bounded tail read (e.g. events.Multiplexer
+// today).
+type listOnlyProvider struct {
+	fake      *events.Fake
+	listCalls int
+}
+
+func (p *listOnlyProvider) Record(e events.Event) { p.fake.Record(e) }
+
+func (p *listOnlyProvider) List(filter events.Filter) ([]events.Event, error) {
+	p.listCalls++
+	return p.fake.List(filter)
+}
+
+func (p *listOnlyProvider) LatestSeq() (uint64, error) { return p.fake.LatestSeq() }
+
+func (p *listOnlyProvider) Watch(ctx context.Context, afterSeq uint64) (events.Watcher, error) {
+	return p.fake.Watch(ctx, afterSeq)
+}
+
+func (p *listOnlyProvider) Close() error { return p.fake.Close() }
+
+func TestLastMaintenanceFallsBackToListForNonTailProvider(t *testing.T) {
+	provider := &listOnlyProvider{fake: events.NewFake()}
+	older := time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 4, 8, 3, 0, 0, 0, time.UTC)
+
+	payloadDone, _ := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 1})
+	payloadFail, _ := json.Marshal(events.StoreMaintenanceFailedPayload{Stage: "gc"})
+
+	provider.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: older, Payload: payloadDone})
+	provider.Record(events.Event{Type: events.StoreMaintenanceFailed, Ts: newer, Payload: payloadFail})
+
+	ts, status := LastMaintenance(provider)
+
+	if provider.listCalls == 0 {
+		t.Fatalf("LastMaintenance did not fall back to List for a non-TailProvider backing")
+	}
+	if !ts.Equal(newer) {
+		t.Fatalf("ts = %v, want %v", ts, newer)
+	}
+	if status != "failed" {
+		t.Fatalf("status = %q, want failed", status)
+	}
+}
+
+// boundedCallRecorder wraps a *events.Fake and records the number of
+// events returned by each List/ListTail call, so tests can assert
+// LastMaintenance's read is bounded independent of total log size.
+type boundedCallRecorder struct {
+	*events.Fake
+	listCalls      int
+	listTailCalls  int
+	maxListTailLen int
+}
+
+func (r *boundedCallRecorder) List(filter events.Filter) ([]events.Event, error) {
+	r.listCalls++
+	return r.Fake.List(filter)
+}
+
+func (r *boundedCallRecorder) ListTail(filter events.Filter, limit int) ([]events.Event, error) {
+	r.listTailCalls++
+	evts, err := r.Fake.ListTail(filter, limit)
+	if len(evts) > r.maxListTailLen {
+		r.maxListTailLen = len(evts)
+	}
+	return evts, err
+}
+
+func TestLastMaintenanceBoundedTailRead(t *testing.T) {
+	const totalEvents = 10_000
+
+	recorder := &boundedCallRecorder{Fake: events.NewFake()}
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	payload, _ := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 1})
+
+	var latest time.Time
+	for i := 0; i < totalEvents; i++ {
+		ts := base.Add(time.Duration(i) * time.Minute)
+		recorder.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: ts, Payload: payload})
+		latest = ts
+	}
+
+	ts, status := LastMaintenance(recorder)
+
+	if recorder.listCalls != 0 {
+		t.Fatalf("LastMaintenance called List %d time(s) against a %d-event backing, want 0 — List materializes the full matching history", recorder.listCalls, totalEvents)
+	}
+	if recorder.maxListTailLen > lastMaintenanceTailLimit {
+		t.Fatalf("ListTail returned %d events, want <= lastMaintenanceTailLimit (%d) regardless of the %d-event backing size", recorder.maxListTailLen, lastMaintenanceTailLimit, totalEvents)
+	}
+	if !ts.Equal(latest) {
+		t.Fatalf("ts = %v, want %v (the most recently recorded maintenance event)", ts, latest)
+	}
+	if status != "success" {
+		t.Fatalf("status = %q, want success", status)
 	}
 }

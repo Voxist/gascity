@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -972,7 +973,7 @@ func TestDoltliteReadStoreBoundedTopNAvoidsFullHistoryHydration(t *testing.T) {
 	// (not all five matches), proving the SQL LIMIT is applied during selection
 	// rather than after hydrating full matching history.
 	sets := doltliteTableSetsForMode(TierIssues)
-	ids, err := store.selectBoundedTopNIDs(ListQuery{Label: "bt", Sort: SortCreatedDesc}, sets, 3)
+	ids, err := store.selectBoundedTopNIDs(context.Background(), ListQuery{Label: "bt", Sort: SortCreatedDesc}, sets, 3)
 	if err != nil {
 		t.Fatalf("selectBoundedTopNIDs: %v", err)
 	}
@@ -1257,14 +1258,14 @@ func TestDoltliteReadStoreCustomOrderByRejectsMultiTableSet(t *testing.T) {
 		t.Fatalf("TierIssues table sets = %d, want >= 2 to exercise the guard", len(sets))
 	}
 	const customOrder = "ORDER BY i.created_at ASC, i.id ASC"
-	if _, err := store.queryIssuesOrderedInTables(ListQuery{AllowScan: true}, sets, "", nil, 0, customOrder); err == nil {
+	if _, err := store.queryIssuesOrderedInTables(context.Background(), ListQuery{AllowScan: true}, sets, "", nil, 0, customOrder); err == nil {
 		t.Fatal("custom orderBy with multiple table sets should error, got nil")
 	} else if !strings.Contains(err.Error(), "single table set") {
 		t.Fatalf("error = %q, want it to mention the single-table-set invariant", err)
 	}
 
 	// The same custom orderBy against a single table set is allowed.
-	if _, err := store.queryIssuesOrderedInTables(ListQuery{AllowScan: true}, []doltliteTableSet{doltliteIssueTables}, "", nil, 0, customOrder); err != nil {
+	if _, err := store.queryIssuesOrderedInTables(context.Background(), ListQuery{AllowScan: true}, []doltliteTableSet{doltliteIssueTables}, "", nil, 0, customOrder); err != nil {
 		t.Fatalf("custom orderBy with a single table set should succeed, got %v", err)
 	}
 }
@@ -2093,5 +2094,22 @@ func TestDoltliteReindexStoreRejectsNonDoltlite(t *testing.T) {
 	}
 	if err := ReindexDoltliteStore(dir); err == nil {
 		t.Fatal("ReindexDoltliteStore accepted a non-doltlite store, want error")
+	}
+}
+
+// TestDoltliteReadStoreListCtxHonorsCancelledContext asserts ListCtx honors a
+// pre-cancelled context by returning immediately without running the query,
+// instead of the abandoning-goroutine pattern statusListStoreWithTimeout uses
+// around ctx-less Store.List.
+func TestDoltliteReadStoreListCtxHonorsCancelledContext(t *testing.T) {
+	store, cleanup := newTestDoltliteReadStore(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := store.ListCtx(ctx, ListQuery{AllowScan: true})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ListCtx(cancelled ctx) error = %v, want context.Canceled", err)
 	}
 }
