@@ -1408,6 +1408,44 @@ func TestManagedShellHookFileNeedsGCBinUpgrade(t *testing.T) {
 	}
 }
 
+// TestGeminiSettingsNeedsGCBinUpgrade pins the Gemini needs-upgrade predicate
+// (vp-ythc): a fully-managed bare-gc settings.json (or a partially-upgraded
+// one) fires the rewrite; the current ${GC_BIN:-gc} form, user-edited
+// variants, any file carrying a foreign command, and malformed JSON do not.
+// Gemini carries no PATH-export prefix and uses the wrapper (matcher-keyed)
+// shape, so this is a distinct recognizer from the shell-shaped
+// managedShellHookFileNeedsGCBinUpgrade.
+func TestGeminiSettingsNeedsGCBinUpgrade(t *testing.T) {
+	const staleManaged = `{"tools":{"shell":{"enableInteractiveShell":false}},"hooks":{` +
+		`"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"gc prime --hook --hook-format gemini"}]}],` +
+		`"BeforeAgent":[{"matcher":"","hooks":[` +
+		`{"type":"command","command":"gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format gemini"},` +
+		`{"type":"command","command":"gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format gemini"}]}]}}`
+	currentManaged := strings.ReplaceAll(staleManaged, `"command":"gc `, `"command":"\"${GC_BIN:-gc}\" `)
+	mixed := strings.Replace(staleManaged, `"command":"gc prime`, `"command":"\"${GC_BIN:-gc}\" prime`, 1)
+	userSuffix := strings.Replace(staleManaged, `nudge drain --inject --hook-format gemini`, `nudge drain --inject --hook-format gemini --my-flag`, 1)
+	userWrapped := strings.Replace(staleManaged, `"command":"gc prime --hook --hook-format gemini"`, `"command":"my-wrapper gc prime --hook --hook-format gemini"`, 1)
+
+	for name, tc := range map[string]struct {
+		data []byte
+		want bool
+	}{
+		"stale-all-managed":       {data: []byte(staleManaged), want: true},
+		"mixed-stale-and-current": {data: []byte(mixed), want: true},
+		"current-form":            {data: []byte(currentManaged), want: false},
+		"user-suffix-appended":    {data: []byte(userSuffix), want: false},
+		"user-wrapped-command":    {data: []byte(userWrapped), want: false},
+		"no-managed-commands":     {data: []byte(`{"tools":{"shell":{"enableInteractiveShell":false}}}`), want: false},
+		"malformed":               {data: []byte(`{not-json`), want: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := geminiSettingsNeedsGCBinUpgrade(tc.data); got != tc.want {
+				t.Fatalf("geminiSettingsNeedsGCBinUpgrade(%s) = %v, want %v", name, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestInstallOverlayUpgradesBareGCShellHookFiles verifies the write-once
 // overlay providers' existing files actually flip: a materialized pre-GC_BIN
 // hook file (the embedded template with the invocation token downgraded to
@@ -1464,6 +1502,71 @@ func TestInstallOverlayUpgradesBareGCShellHookFiles(t *testing.T) {
 				t.Fatalf("user-edited %s hook file was backed up — implies an unwanted rewrite", provider)
 			}
 		})
+	}
+}
+
+// TestInstallOverlayUpgradesBareGCGeminiSettings mirrors the shell-hook upgrade
+// test for the Gemini shape (vp-ythc). Gemini carries NO canonical PATH-export
+// prefix (its bare gc resolved from the agent's ambient PATH) and uses the
+// wrapper (matcher-keyed) settings shape, so it needs its own recognizer: an
+// already-materialized bare-gc settings.json upgrades in place, while a
+// user-edited variant is preserved byte-for-byte.
+func TestInstallOverlayUpgradesBareGCGeminiSettings(t *testing.T) {
+	rel := ".gemini/settings.json"
+	template, err := iofs.ReadFile(core.PackFS, path.Join("overlay", "per-provider", "gemini", rel))
+	if err != nil {
+		t.Fatalf("reading embedded gemini template: %v", err)
+	}
+	stale := strings.ReplaceAll(string(template), gcTokenJSON, "gc")
+	if stale == string(template) {
+		t.Fatalf("gemini template carries no %s token — stale fixture did not diverge", gcInvocationToken)
+	}
+
+	fs := fsys.NewFake()
+	dst := "/work/" + rel
+	fs.Files[dst] = []byte(stale)
+	if err := Install(fs, "/city", "/work", []string{"gemini"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	got := string(fs.Files[dst])
+	for _, want := range []string{
+		gcTokenJSON + ` prime --hook --hook-format gemini`,
+		gcTokenJSON + ` hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format gemini`,
+		gcTokenJSON + ` hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format gemini`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("gemini settings not upgraded to %s (%q):\n%s", gcInvocationToken, want, got)
+		}
+	}
+	for _, bare := range []string{
+		`"gc prime --hook --hook-format gemini"`,
+		`"gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format gemini"`,
+		`"gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format gemini"`,
+	} {
+		if strings.Contains(got, bare) {
+			t.Fatalf("bare gc survived gemini upgrade (%q):\n%s", bare, got)
+		}
+	}
+	if backup := string(fs.Files[dst+".bak"]); backup != stale {
+		t.Fatalf("gemini upgrade backup missing or wrong:\n%s", backup)
+	}
+
+	// A user-edited variant (extra flag on one command) must be classified
+	// user-authored and preserved byte-for-byte.
+	fsUser := fsys.NewFake()
+	userEdited := strings.Replace(stale, "gc prime --hook --hook-format gemini", "gc prime --hook --hook-format gemini --my-flag", 1)
+	if userEdited == stale {
+		t.Fatalf("gemini user-edited fixture did not diverge")
+	}
+	fsUser.Files[dst] = []byte(userEdited)
+	if err := Install(fsUser, "/city", "/work", []string{"gemini"}); err != nil {
+		t.Fatalf("Install (user-edited): %v", err)
+	}
+	if got := string(fsUser.Files[dst]); got != userEdited {
+		t.Fatalf("user-edited gemini settings was rewritten:\n%s", got)
+	}
+	if _, ok := fsUser.Files[dst+".bak"]; ok {
+		t.Fatalf("user-edited gemini settings was backed up — implies an unwanted rewrite")
 	}
 }
 
@@ -1997,11 +2100,24 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	}
 	geminiHooks := string(fs.Files["/work/.gemini/settings.json"])
 	for _, want := range []string{
-		`gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format gemini`,
-		`gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format gemini`,
+		gcTokenJSON + ` prime --hook --hook-format gemini`,
+		gcTokenJSON + ` hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format gemini`,
+		gcTokenJSON + ` hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format gemini`,
 	} {
 		if !strings.Contains(geminiHooks, want) {
 			t.Errorf("gemini prompt hooks missing bounded command %q:\n%s", want, geminiHooks)
+		}
+	}
+	// gemini carries no canonical PATH-export prefix, so a bare `gc` resolved
+	// from the agent's ambient PATH — discarding the GC_BIN pointer entirely
+	// (vp-ythc). No bare-gc managed body may survive.
+	for _, bare := range []string{
+		`"gc prime --hook --hook-format gemini"`,
+		`"gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format gemini"`,
+		`"gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format gemini"`,
+	} {
+		if strings.Contains(geminiHooks, bare) {
+			t.Errorf("gemini hook still invokes bare gc (discards GC_BIN) %q:\n%s", bare, geminiHooks)
 		}
 	}
 	for path, wants := range map[string][]string{

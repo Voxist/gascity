@@ -411,6 +411,32 @@ func TestBundledKimiHookHonoursGCBin(t *testing.T) {
 	}
 }
 
+func TestBundledGeminiHookHonoursGCBin(t *testing.T) {
+	data := readBundledPackFileForTest(t, "core", "overlay/per-provider/gemini/.gemini/settings.json")
+	// gemini's settings.json is a JSON hook file (like cursor/copilot/kiro) but
+	// carries NO PATH-export prefix — its bare gc resolved from the agent's
+	// ambient PATH, discarding GC_BIN entirely (vp-ythc). Every managed command
+	// must invoke ${GC_BIN:-gc}. The raw JSON escapes the token's quotes.
+	for _, want := range []string{
+		`\"${GC_BIN:-gc}\" prime --hook --hook-format gemini`,
+		`\"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format gemini`,
+		`\"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format gemini`,
+	} {
+		if !strings.Contains(data, want) {
+			t.Errorf("bundled Gemini settings missing GC_BIN marker %q:\n%s", want, data)
+		}
+	}
+	for _, bare := range []string{
+		`"gc prime --hook --hook-format gemini"`,
+		`"gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format gemini"`,
+		`"gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format gemini"`,
+	} {
+		if strings.Contains(data, bare) {
+			t.Errorf("bundled Gemini settings still invokes bare gc (discards GC_BIN) %q:\n%s", bare, data)
+		}
+	}
+}
+
 func TestBundledBuiltinPackOrdersScanWithoutWarnings(t *testing.T) {
 	dir := t.TempDir()
 
