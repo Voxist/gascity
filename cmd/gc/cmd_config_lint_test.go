@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -13,8 +14,7 @@ import (
 func TestConfigLintFailsOnUnresolvedAgentPatch(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()
-	t.Chdir(dir)
-	if err := os.MkdirAll(".gc", 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
 	writeCityToml(t, dir, `[workspace]
@@ -27,7 +27,7 @@ suspended = true
 `)
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"config", "lint"}, &stdout, &stderr)
+	code := run([]string{"config", "lint", "--city", dir}, &stdout, &stderr)
 	if code == 0 {
 		t.Fatalf("run(config lint) = 0, want non-zero; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
@@ -42,14 +42,13 @@ suspended = true
 func TestConfigLintPassesCleanConfig(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()
-	t.Chdir(dir)
-	if err := os.MkdirAll(".gc", 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
 	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"config", "lint"}, &stdout, &stderr)
+	code := run([]string{"config", "lint", "--city", dir}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run(config lint) = %d, want 0; stderr=%q", code, stderr.String())
 	}
@@ -61,14 +60,13 @@ func TestConfigLintPassesCleanConfig(t *testing.T) {
 func TestConfigLintFailsOnLoadError(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()
-	t.Chdir(dir)
-	if err := os.MkdirAll(".gc", 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
 	writeCityToml(t, dir, "[[[not toml")
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"config", "lint"}, &stdout, &stderr)
+	code := run([]string{"config", "lint", "--city", dir}, &stdout, &stderr)
 	if code == 0 {
 		t.Fatalf("run(config lint) = 0 on unparseable city.toml, want non-zero; stdout=%q", stdout.String())
 	}
