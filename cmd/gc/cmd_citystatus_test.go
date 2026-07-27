@@ -915,6 +915,59 @@ func TestControllerStatusForCityReturnsSupervisorModeWhenProbeSucceedsAfterUnkno
 	}
 }
 
+// TestCityStatusAPIClientRoutesToSupervisorWhenAPIClientNil proves the
+// vp-m84x fallthrough: on a supervisor-managed city with no standalone [api]
+// port, apiClient(cityPath) returns nil (standaloneControllerClient needs
+// cfg.API.Port > 0 — see TestAPIClientRouting's
+// "controller-alive-no-api-port-returns-nil" case), and before this fix
+// cityStatusAPIClient stopped there — status reads always took the slow
+// local-probe fallback even though the supervisor hosts a warm StatusView.
+// It must now fall through to supervisorCityAPIClient, mirroring the
+// maintenanceAPIClient precedent (ga-tp7, see
+// TestMaintenanceAPIClientRoutesToSupervisor).
+func TestCityStatusAPIClientRoutesToSupervisorWhenAPIClientNil(t *testing.T) {
+	t.Setenv("GC_HOME", filepath.Join(t.TempDir(), "gc-home"))
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// No [api] section => cfg.API.Port is 0 => standaloneControllerClient
+	// returns nil for this city regardless of controller liveness.
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"bright-lights\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityPath, "bright-lights"); err != nil {
+		t.Fatalf("register city: %v", err)
+	}
+
+	origControllerAlive := apiRouteControllerAliveHook
+	oldAlive := supervisorAliveHook
+	oldRunning := supervisorCityRunningHook
+	// Simulate the supervisor's in-process controller responding to ping (the
+	// production condition apiClient sees for a supervisor-managed city).
+	apiRouteControllerAliveHook = func(string) int { return 4242 }
+	supervisorAliveHook = func() int { return 4321 }
+	supervisorCityRunningHook = func(string) (bool, string, bool) { return true, "", true }
+	t.Cleanup(func() {
+		apiRouteControllerAliveHook = origControllerAlive
+		supervisorAliveHook = oldAlive
+		supervisorCityRunningHook = oldRunning
+	})
+
+	if got := apiClient(cityPath); got != nil {
+		t.Fatalf("apiClient(%q) = %#v, want nil (no [api] port configured)", cityPath, got)
+	}
+
+	c, reason := cityStatusAPIClient(cityPath)
+	if c == nil {
+		t.Fatalf("cityStatusAPIClient(%q) client = nil, want the supervisor-managed client", cityPath)
+	}
+	if reason != "" {
+		t.Fatalf("cityStatusAPIClient(%q) reason = %q, want empty", cityPath, reason)
+	}
+}
+
 type listErrorStore struct {
 	beads.Store
 }

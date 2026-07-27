@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -336,6 +337,55 @@ dir = "frontend"
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	return cityPath
+}
+
+// TestRigStatusAPIClientRoutesToSupervisorWhenAPIClientNil mirrors
+// TestCityStatusAPIClientRoutesToSupervisorWhenAPIClientNil (cmd_citystatus_test.go)
+// for rigStatusAPIClient: on a supervisor-managed city with no standalone
+// [api] port, apiClient(cityPath) returns nil, and before the vp-m84x fix
+// rigStatusAPIClient stopped there instead of falling through to
+// supervisorCityAPIClient.
+func TestRigStatusAPIClientRoutesToSupervisorWhenAPIClientNil(t *testing.T) {
+	t.Setenv("GC_HOME", filepath.Join(t.TempDir(), "gc-home"))
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// No [api] section => cfg.API.Port is 0 => standaloneControllerClient
+	// returns nil for this city regardless of controller liveness.
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"bright-lights\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityPath, "bright-lights"); err != nil {
+		t.Fatalf("register city: %v", err)
+	}
+
+	origControllerAlive := apiRouteControllerAliveHook
+	oldAlive := supervisorAliveHook
+	oldRunning := supervisorCityRunningHook
+	// Simulate the supervisor's in-process controller responding to ping (the
+	// production condition apiClient sees for a supervisor-managed city).
+	apiRouteControllerAliveHook = func(string) int { return 4242 }
+	supervisorAliveHook = func() int { return 4321 }
+	supervisorCityRunningHook = func(string) (bool, string, bool) { return true, "", true }
+	t.Cleanup(func() {
+		apiRouteControllerAliveHook = origControllerAlive
+		supervisorAliveHook = oldAlive
+		supervisorCityRunningHook = oldRunning
+	})
+
+	if got := apiClient(cityPath); got != nil {
+		t.Fatalf("apiClient(%q) = %#v, want nil (no [api] port configured)", cityPath, got)
+	}
+
+	c, reason := rigStatusAPIClient(cityPath)
+	if c == nil {
+		t.Fatalf("rigStatusAPIClient(%q) client = nil, want the supervisor-managed client", cityPath)
+	}
+	if reason != "" {
+		t.Fatalf("rigStatusAPIClient(%q) reason = %q, want empty", cityPath, reason)
+	}
 }
 
 func TestRouteRigStatus_SixRowMatrix(t *testing.T) {
