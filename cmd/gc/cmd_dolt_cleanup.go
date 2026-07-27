@@ -109,10 +109,16 @@ type CleanupReapedReport struct {
 // identified for termination. Reason is set for deleted-scope targets
 // (deleted cwd, vanished --config) and empty for the classic
 // test-config-path allowlist match where the path itself is the explanation.
+// DataDir is set only when classifyDoltProcess independently allowlisted a
+// --data-dir value (see reapDataDir in dolt_cleanup_reaper.go) — it narrows
+// an already-decided reap Action, never a second classification path. A
+// non-empty DataDir alone does not trigger removal: runReapStage removes it
+// only after this target's kill is confirmed.
 type CleanupReapTarget struct {
 	PID        int    `json:"pid"`
 	ConfigPath string `json:"config_path"`
 	Reason     string `json:"reason,omitempty"`
+	DataDir    string `json:"data_dir,omitempty"`
 }
 
 // CleanupSummary aggregates totals across the three steps.
@@ -228,6 +234,10 @@ type cleanupOptions struct {
 	ActiveTestRoots   []string
 	KillProcess       func(pid int, sig syscall.Signal) error
 	ReapGracePeriod   time.Duration
+	// RemoveDataDir removes a reap target's data directory once its kill is
+	// confirmed (see runReapStage). Defaults to os.RemoveAll. Injectable for
+	// tests.
+	RemoveDataDir func(path string) error
 }
 
 // runDoltCleanup is the testable core of the `gc dolt-cleanup` command. It
@@ -391,7 +401,7 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 	}
 	report.Reaped.Targets = nil
 	for _, t := range plan.Reap {
-		report.Reaped.Targets = append(report.Reaped.Targets, CleanupReapTarget{PID: t.PID, ConfigPath: t.ConfigPath, Reason: t.Reason})
+		report.Reaped.Targets = append(report.Reaped.Targets, CleanupReapTarget{PID: t.PID, ConfigPath: t.ConfigPath, Reason: t.Reason, DataDir: t.DataDir})
 	}
 
 	if !opts.Force {
@@ -407,6 +417,10 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 	grace := opts.ReapGracePeriod
 	if grace <= 0 {
 		grace = 250 * time.Millisecond
+	}
+	removeDataDir := opts.RemoveDataDir
+	if removeDataDir == nil {
+		removeDataDir = os.RemoveAll
 	}
 
 	reaped := 0
@@ -458,8 +472,15 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 		gone[target.PID] = true
 	}
 	for _, target := range plan.Reap {
-		if gone[target.PID] {
-			reaped++
+		if !gone[target.PID] {
+			continue
+		}
+		reaped++
+		if target.DataDir == "" {
+			continue
+		}
+		if err := removeDataDir(target.DataDir); err != nil {
+			recordReapDataDirError(report, target.PID, target.DataDir, err)
 		}
 	}
 	report.Reaped.Count = reaped
@@ -474,7 +495,22 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 // file has lied in production, and a lying file fails to protect the REAL
 // listener — live state cannot.
 func protectedDoltPortsForReap(opts cleanupOptions, procs []DoltProcInfo) map[int]string {
-	ports := map[int]string{}
+	// MERGE INTENT (v1.4.0 resync): protect on the UNION of both sources.
+	//
+	// The fork replaced upstream's file-based port set (loadRigDoltPorts) with
+	// live-state detection, which is the better default and matches the "no
+	// status files — query live state" principle. But dropping the file-based
+	// seed opened a real gap in a DESTRUCTIVE path: a port recorded in a rig's
+	// dolt-server.port that is not attributable to a live rig-owned process was
+	// no longer protected, so the reaper would SIGKILL it and remove its
+	// DataDir. The asymmetry is decisive — over-protecting costs a skipped reap,
+	// under-protecting costs a data directory.
+	//
+	// Seed from the recorded ports, then let live state overlay/refine them.
+	ports := loadRigDoltPorts(opts.Rigs, opts.FS)
+	if ports == nil {
+		ports = map[int]string{}
+	}
 	liveResolve := opts.LiveResolve
 	if liveResolve == nil {
 		liveResolve = newLiveDoltPortResolver().resolve
@@ -622,6 +658,20 @@ func recordReapSignalError(report *CleanupReport, pid int, sig syscall.Signal, e
 	report.Summary.ErrorsTotal++
 }
 
+// recordReapDataDirError records a failed data-directory removal for an
+// already-confirmed-killed reap target. Mirrors recordReapSignalError; the
+// process is gone either way, so this never blocks or reverses the kill —
+// it only surfaces the removal failure for operator follow-up.
+func recordReapDataDirError(report *CleanupReport, pid int, dataDir string, err error) {
+	report.Reaped.Errors = append(report.Reaped.Errors, fmt.Sprintf("pid %d data-dir %s: %v", pid, dataDir, err))
+	report.Errors = append(report.Errors, CleanupError{
+		Stage: "reap",
+		Name:  fmt.Sprintf("pid %d data-dir", pid),
+		Error: err.Error(),
+	})
+	report.Summary.ErrorsTotal++
+}
+
 func reapSignalName(sig syscall.Signal) string {
 	switch sig {
 	case syscall.SIGTERM:
@@ -713,11 +763,15 @@ func emitOrphansSection(report CleanupReport, stdout io.Writer) {
 		if path == "" {
 			path = "(no --config flag)"
 		}
+		dataDir := ""
+		if t.DataDir != "" {
+			dataDir = fmt.Sprintf(" [data-dir %s]", t.DataDir)
+		}
 		if t.Reason != "" {
-			fmt.Fprintf(stdout, "  PID %d  %s — %s\n", t.PID, path, t.Reason) //nolint:errcheck
+			fmt.Fprintf(stdout, "  PID %d  %s — %s%s\n", t.PID, path, t.Reason, dataDir) //nolint:errcheck
 			continue
 		}
-		fmt.Fprintf(stdout, "  PID %d  %s\n", t.PID, path) //nolint:errcheck
+		fmt.Fprintf(stdout, "  PID %d  %s%s\n", t.PID, path, dataDir) //nolint:errcheck
 	}
 }
 
@@ -949,7 +1003,7 @@ can still return successfully after emitting the report.`,
 				host = "127.0.0.1"
 			}
 			if fatalPortResolutionError(resolution) == nil {
-				client, openErr := newSQLCleanupDoltClient(host, strconv.Itoa(resolution.Port))
+				client, openErr := newSQLCleanupDoltClient(cityPath, host, strconv.Itoa(resolution.Port))
 				if openErr != nil {
 					opts.DoltClientOpenErr = openErr
 				} else {

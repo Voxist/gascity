@@ -109,6 +109,15 @@ func (s *Server) buildAndStoreStatus(lite bool) StatusBody {
 		// leaks until it returns; making the reads ctx-cancellable is the
 		// separate root fix (vp-e0hv plan, fix 2).
 		s.statusBuildSF.Forget(key)
+		// MERGE INTENT (v1.4.0 resync): forget the INNER store-health flight too.
+		// The fork's wedged-leader escape predates upstream's storeHealthFlight
+		// coalescing, so it only forgot this outer key. A build wedged inside
+		// cachedStoreHealth leaves a live "refresh" leader behind, and the next
+		// attempt — started precisely because we forgot the outer key — joins
+		// that wedged inner leader and hangs again. Forgetting only one of the
+		// two nested flights makes the escape hatch a no-op for exactly the case
+		// it exists to handle.
+		s.storeHealthFlight.Forget(storeHealthFlightKey)
 		if entry, ok := s.warmStatusBody(lite); ok {
 			return entry.body
 		}

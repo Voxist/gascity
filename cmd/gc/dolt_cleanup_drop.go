@@ -4,8 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/doltauth"
 )
 
 // CleanupDoltClient is the SQL surface the cleanup engine needs. The
@@ -178,8 +181,27 @@ type sqlCleanupDoltClient struct {
 // newSQLCleanupDoltClient opens a connection to the resolved Dolt server.
 // The backing *sql.DB is the shared pooled handle from internal/doltpool;
 // Close() on the client is a no-op.
-func newSQLCleanupDoltClient(host, port string) (CleanupDoltClient, error) {
-	db, err := managedDoltOpenDB(host, port, "root")
+//
+// MERGE INTENT (v1.4.0 resync): took upstream's shape. It is a superset — the
+// Dolt user is resolved via doltauth rather than hardcoded "root", and the
+// resolver/opener are injectable for tests — while still opening through
+// managedDoltOpenDB, so the fork's pooled-handle behavior is unchanged.
+func newSQLCleanupDoltClient(cityPath, host, port string) (CleanupDoltClient, error) {
+	return openSQLCleanupDoltClient(cityPath, host, port, doltauth.Resolve, managedDoltOpenDB)
+}
+
+type (
+	cleanupDoltAuthResolver func(scopeRoot, fallbackUser, host string, port int) doltauth.Resolved
+	cleanupDoltDBOpener     func(host, port, user string) (*sql.DB, error)
+)
+
+func openSQLCleanupDoltClient(cityPath, host, port string, resolve cleanupDoltAuthResolver, open cleanupDoltDBOpener) (CleanupDoltClient, error) {
+	portNum, err := strconv.Atoi(strings.TrimSpace(port))
+	if err != nil {
+		return nil, fmt.Errorf("invalid dolt port %q: %w", port, err)
+	}
+	user := resolve(cityPath, "root", host, portNum).User
+	db, err := open(host, port, user)
 	if err != nil {
 		return nil, fmt.Errorf("open dolt connection: %w", err)
 	}

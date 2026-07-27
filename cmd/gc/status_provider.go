@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -21,6 +22,7 @@ var (
 type statusProvider struct {
 	base     runtime.Provider
 	warnOnce sync.Once
+	partial  atomic.Bool
 
 	// Last-known-good liveness signals, served on a probe timeout so a slow
 	// (but not hung) runtime renders its last observed state instead of a false
@@ -42,6 +44,21 @@ func livenessKey(name string, processNames []string) string {
 
 var _ runtime.RelaunchProvider = (*statusProvider)(nil)
 
+func statusProviderPartial(sp any) bool {
+	p, ok := sp.(*statusProvider)
+	return ok && p.partial.Load()
+}
+
+func markStatusProviderPartial(sp any) {
+	if p, ok := sp.(*statusProvider); ok {
+		p.partial.Store(true)
+	}
+}
+
+func (p *statusProvider) StatusPartial() bool {
+	return p.partial.Load()
+}
+
 func newBoundedStatusProvider(base runtime.Provider) runtime.Provider {
 	if sp, ok := base.(*statusProvider); ok {
 		return sp
@@ -61,6 +78,7 @@ func boundedStatusCall[T any](p *statusProvider, fallback T, fn func() T) T {
 	case result := <-resultCh:
 		return result
 	case <-time.After(statusProviderCallTimeout):
+		p.partial.Store(true)
 		p.warnOnce.Do(statusProviderTimeoutWarning)
 		return fallback
 	}
@@ -92,6 +110,14 @@ func boundedStatusCallSWR[T any](p *statusProvider, zero T, load func() (T, bool
 	case result := <-resultCh:
 		return result
 	case <-time.After(statusProviderCallTimeout):
+		// MERGE INTENT (v1.4.0 resync): mark partial here too. The fork wrote this
+		// stale-while-revalidate wrapper before upstream added the `partial` flag
+		// to boundedStatusCall, so the merge left the SWR timeout path serving
+		// last-known-good WITHOUT reporting the result as partial. Serving a stale
+		// value is still a partial answer — without this, `gc status` renders
+		// last-observed liveness with no indication it is stale, which is exactly
+		// the false-confidence the partial flag exists to prevent.
+		p.partial.Store(true)
 		p.warnOnce.Do(statusProviderTimeoutWarning)
 		if last, ok := load(); ok {
 			return last

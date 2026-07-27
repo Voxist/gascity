@@ -27,6 +27,11 @@ type MemStore struct {
 	// against a store that reports incapable at runtime (no interface-stripping
 	// wrapper — see the class_store optional-capability lesson).
 	DisableConditionalWrites bool
+
+	// localStrings holds clone-local key-value data set via SetLocalString,
+	// keyed by bead ID then key. Deliberately excluded from
+	// restoreFrom/snapshot so FileStore's disk persistence never touches it.
+	localStrings map[string]map[string]string
 }
 
 var _ ConditionalAssignmentReleaser = (*MemStore)(nil)
@@ -93,9 +98,10 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 	if b.Type == "" {
 		b.Type = "task"
 	}
-	b.CreatedAt = time.Now()
+	b.CreatedAt = time.Now().Round(0)
 	b.UpdatedAt = b.CreatedAt
-	b.Revision = 1 // first version; every subsequent mutation bumps it
+	b.Revision = 1   // first version; every subsequent mutation bumps it
+	b.ClaimFence = 0 // no ownership history yet; the first claim bumps it to 1
 
 	stored := cloneBead(b)
 	m.beads = append(m.beads, stored)
@@ -129,10 +135,36 @@ func (m *MemStore) indexOfLocked(id string) int {
 	return -1
 }
 
+// isOwnershipTransition reports whether an update changes a bead's ownership
+// context — an assignee change, or a reopen (closed→open, after which a fresh
+// claim starts a new ownership generation). It mirrors beads'
+// issueops.IsOwnershipTransition so the ClaimFence bump discipline matches the
+// bd-backed store. Deliberate exclusions: a close is not a transition (guarded
+// verbs reject closed rows anyway, and bumping on close would invalidate a
+// legitimate ownership snapshot for no gain); an in_progress→open change that
+// keeps the assignee is not one either — the row stays claimable only by the
+// same owner, and the eventual release bumps at the real boundary.
+func isOwnershipTransition(oldStatus, oldAssignee string, opts UpdateOpts) bool {
+	if opts.Assignee != nil && *opts.Assignee != oldAssignee {
+		return true
+	}
+	// A reopen is closed→a real non-closed status. An empty status string is not
+	// a status write beads recognizes (its IsOwnershipTransition short-circuits
+	// on statusStr == ""), so exclude it here too to keep the predicates literally
+	// aligned.
+	if opts.Status != nil && *opts.Status != "" && oldStatus == "closed" && *opts.Status != "closed" {
+		return true
+	}
+	return false
+}
+
 // applyUpdateLocked applies the non-nil fields of opts to the bead at index i,
-// stamps UpdatedAt, and bumps the revision. The caller must hold m.mu. It is
-// shared by Update and UpdateIfMatch so both bump identically.
+// stamps UpdatedAt, bumps the revision, and — when the update is an ownership
+// transition (assignee change or reopen) — bumps the ownership fence. The
+// caller must hold m.mu. It is shared by Update and UpdateIfMatch so both bump
+// identically.
 func (m *MemStore) applyUpdateLocked(i int, opts UpdateOpts) {
+	oldStatus, oldAssignee := m.beads[i].Status, m.beads[i].Assignee
 	if opts.Title != nil {
 		m.beads[i].Title = *opts.Title
 	}
@@ -180,6 +212,9 @@ func (m *MemStore) applyUpdateLocked(i int, opts UpdateOpts) {
 	}
 	m.beads[i].UpdatedAt = time.Now()
 	m.beads[i].Revision++
+	if isOwnershipTransition(oldStatus, oldAssignee, opts) {
+		m.beads[i].ClaimFence++
+	}
 }
 
 // Update modifies fields of an existing bead. Only non-nil fields in opts
@@ -211,6 +246,7 @@ func (m *MemStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 		m.beads[i].Assignee = ""
 		m.beads[i].UpdatedAt = time.Now()
 		m.beads[i].Revision++
+		m.beads[i].ClaimFence++ // clearing an owner is an ownership transition
 		return true, nil
 	}
 	return false, nil
@@ -245,9 +281,16 @@ func (m *MemStore) Reopen(id string) error {
 			if m.beads[i].Status == "open" {
 				return nil
 			}
+			wasClosed := m.beads[i].Status == "closed"
 			m.beads[i].Status = "open"
 			m.beads[i].UpdatedAt = time.Now()
 			m.beads[i].Revision++
+			if wasClosed {
+				// closed→open starts a new ownership generation; an
+				// in_progress→open reopen keeps the same owner and is not a
+				// transition.
+				m.beads[i].ClaimFence++
+			}
 			return nil
 		}
 	}
@@ -506,6 +549,49 @@ func (m *MemStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	return fmt.Errorf("setting metadata batch on %q: %w", id, ErrNotFound)
 }
 
+// beadExistsLocked reports whether id is present. Caller must hold m.mu.
+func (m *MemStore) beadExistsLocked(id string) bool {
+	for _, b := range m.beads {
+		if b.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// SetLocalString sets a clone-local string value for a bead. See
+// Store.SetLocalString. Never touches Bead.Metadata or UpdatedAt.
+func (m *MemStore) SetLocalString(id, key, value string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.beadExistsLocked(id) {
+		return fmt.Errorf("setting local string on %q: %w", id, ErrNotFound)
+	}
+	if value == "" {
+		delete(m.localStrings[id], key)
+		return nil
+	}
+	if m.localStrings == nil {
+		m.localStrings = make(map[string]map[string]string)
+	}
+	if m.localStrings[id] == nil {
+		m.localStrings[id] = make(map[string]string)
+	}
+	m.localStrings[id][key] = value
+	return nil
+}
+
+// GetLocalString returns the clone-local string value for a bead. See
+// Store.GetLocalString.
+func (m *MemStore) GetLocalString(id, key string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.beadExistsLocked(id) {
+		return "", fmt.Errorf("getting local string on %q: %w", id, ErrNotFound)
+	}
+	return m.localStrings[id][key], nil
+}
+
 // Tx executes fn sequentially against the MemStore.
 func (m *MemStore) Tx(_ string, fn func(Tx) error) error {
 	return runSequentialTx(m, fn)
@@ -518,6 +604,7 @@ func (m *MemStore) Delete(id string) error {
 	for i, b := range m.beads {
 		if b.ID == id {
 			m.beads = append(m.beads[:i], m.beads[i+1:]...)
+			delete(m.localStrings, id)
 			return nil
 		}
 	}

@@ -126,6 +126,18 @@ type Bead struct {
 	// backing store until reconcile or CAS-failure eviction; callers read it only
 	// through ConditionalWriter (equality-only; see the revision contract).
 	Revision int64 `json:"-"`
+	// ClaimFence is the store-internal ownership fence: a monotonic counter
+	// bumped ONLY on ownership transitions — a claim/unclaim/release, an
+	// assignee change, or a reopen (closed→open) — never by content mutations
+	// (title, notes, metadata) or a close. It mirrors beads' claim_fence column
+	// (migration 0055) so GC-side guarded-release paths and their unit tests are
+	// non-vacuous: a guarded release compares it (bd --if-fence) and a stale
+	// incarnation holding an old fence gets a typed conflict instead of
+	// unclaiming a bead a fresh owner already re-claimed. Like Revision it is
+	// json:"-" (off every HTTP/SSE wire path); the native Mem/File stores
+	// maintain it per bead and FileStore persists it out of band. A bd-backed
+	// store leaves it 0 until the pinned bd emits claim_fence.
+	ClaimFence int64 `json:"-"`
 }
 
 // UpdateOpts specifies which fields to change. Nil pointers are skipped.
@@ -622,6 +634,38 @@ type Store interface {
 	// batch contents to be idempotent and tolerate partial writes.
 	// Returns ErrNotFound if the bead does not exist.
 	SetMetadataBatch(id string, kvs map[string]string) error
+
+	// SetLocalString sets a clone-local string value for a bead, keyed by an
+	// arbitrary string key. Unlike SetMetadata, values written here are never
+	// synced through Dolt/git and are never visible in Bead.Metadata — they
+	// live only in this store's local clone (in-memory, or a local sidecar
+	// file for on-disk stores). Use this for ephemeral, high-churn, or
+	// clone-specific data where cross-clone durability is unnecessary or
+	// actively undesirable (e.g. synced_at, last_woke_at,
+	// pending_create_claim — illustrative examples, not an exhaustive list).
+	// Setting value to "" clears the key. Writing here never touches the
+	// bead's UpdatedAt, since that field is Dolt-synced and a clone-local
+	// write must not appear as a durable change to other clones.
+	//
+	// Implementations that already hold the bead set in process (MemStore,
+	// FileStore) return ErrNotFound for an unknown id, matching SetMetadata.
+	// Implementations backed by an external process (BdStore, NativeDoltStore)
+	// do not perform that check here: doing so would require exactly the
+	// synchronous round-trip this method exists to avoid for high-churn
+	// writes. Callers must not rely on this method to validate bead
+	// existence; validate via Get first if that matters.
+	SetLocalString(id, key, value string) error
+
+	// GetLocalString returns the clone-local string value previously set by
+	// SetLocalString for the given bead and key, scoped to this store's
+	// local clone. Returns "" with a nil error if the key was never set, was
+	// cleared, or was set by a different clone — not ErrNotFound — mirroring
+	// the empty-string-means-absent convention SetLocalString uses for
+	// clearing. As with SetLocalString, only in-process implementations
+	// additionally return ErrNotFound for an unknown bead id; external-store
+	// implementations return "", nil instead. Callers must not rely on this
+	// method to validate bead existence.
+	GetLocalString(id, key string) (string, error)
 
 	// Tx executes fn inside a single logical transaction identified by
 	// commitMsg. Implementations without native transaction support may execute

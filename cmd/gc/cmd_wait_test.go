@@ -258,12 +258,10 @@ func TestWaitListJSONFiltersState(t *testing.T) {
 	}
 }
 
-func TestWaitListJSONFiltersSessionWithSessionScopedLookup(t *testing.T) {
+func TestWaitListJSONSessionFilterWiresFileStore(t *testing.T) {
 	_, store := setupWaitJSONTestCity(t)
 	targetWait := createTestWaitBeadForSession(t, store, "target-session", waitStatePending)
-	for i := 0; i < waitLookupLimit; i++ {
-		createTestWaitBeadForSession(t, store, "other-session", waitStatePending)
-	}
+	otherWait := createTestWaitBeadForSession(t, store, "other-session", waitStatePending)
 
 	var stdout, stderr bytes.Buffer
 	if code := cmdWaitList("", "target-session", true, &stdout, &stderr); code != 0 {
@@ -273,6 +271,9 @@ func TestWaitListJSONFiltersSessionWithSessionScopedLookup(t *testing.T) {
 	payload := decodeWaitListJSON(t, stdout.Bytes())
 	if len(payload.Waits) != 1 || payload.Waits[0].ID != targetWait.ID || payload.Waits[0].SessionID != "target-session" {
 		t.Fatalf("waits = %+v, want only target %s", payload.Waits, targetWait.ID)
+	}
+	if strings.Contains(stdout.String(), otherWait.ID) {
+		t.Fatalf("wait list output included non-target wait %s: %s", otherWait.ID, stdout.String())
 	}
 }
 
@@ -596,11 +597,12 @@ var (
 	waitTestRealBDCached   string
 	waitTestRealBDErr      error
 
-	managedBdWaitTemplateOnce sync.Once
-	managedBdWaitTemplatePath string
-	managedBdWaitTemplateErr  error
+	managedBdWaitTemplateOnce sync.Once //nolint:unused // exercised by native_dolt_rebind_integration_test.go
+	managedBdWaitTemplatePath string    //nolint:unused // exercised by native_dolt_rebind_integration_test.go
+	managedBdWaitTemplateErr  error     //nolint:unused // exercised by native_dolt_rebind_integration_test.go
 )
 
+//nolint:unused // exercised by native_dolt_rebind_integration_test.go
 func waitTestEnv(overrides map[string]string) []string {
 	env := map[string]string{}
 	for _, entry := range sanitizedBaseEnv() {
@@ -705,60 +707,34 @@ func TestLoadWaitBeadsByLabelReportsLookupLimit(t *testing.T) {
 	}
 }
 
-func TestCmdWaitListSessionFilterUsesSessionScopedLookup(t *testing.T) {
-	cityDir := t.TempDir()
-	writePhase0InterfaceCity(t, cityDir, `[workspace]
-name = "test-city"
-
-[beads]
-provider = "file"
-`)
-	t.Setenv("GC_CITY", cityDir)
-	t.Setenv("GC_DIR", t.TempDir())
-	t.Setenv("GC_BEADS", "file")
-
-	store, err := openCityStoreAt(cityDir)
-	if err != nil {
-		t.Fatalf("openCityStoreAt: %v", err)
-	}
-	targetWait, err := store.Create(beads.Bead{
-		Title:  "target wait",
-		Type:   waitBeadType,
-		Labels: []string{waitBeadLabel, "session:target-session"},
-		Metadata: map[string]string{
-			"session_id": "target-session",
-			"state":      waitStatePending,
-			"kind":       "manual",
-		},
-	})
-	if err != nil {
-		t.Fatalf("Create(target wait): %v", err)
-	}
-	for i := 0; i < waitLookupLimit; i++ {
-		if _, err := store.Create(beads.Bead{
-			Title:  fmt.Sprintf("other wait %d", i),
-			Type:   waitBeadType,
-			Labels: []string{waitBeadLabel, "session:other-session"},
-			Metadata: map[string]string{
-				"session_id": "other-session",
-				"state":      waitStatePending,
-				"kind":       "manual",
-			},
-		}); err != nil {
-			t.Fatalf("Create(other wait %d): %v", i, err)
-		}
-	}
+func TestDoWaitListFromSessionStoreUsesSessionScopedLookup(t *testing.T) {
+	mem := beads.NewMemStore()
+	targetWait := createTestWaitBeadForSession(t, mem, "target-session", waitStatePending)
+	otherWait := createTestWaitBeadForSession(t, mem, "other-session", waitStatePending)
+	store := &waitListQueryCaptureStore{Store: mem}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdWaitList("", "target-session", false, &stdout, &stderr)
+	code := doWaitListFromSessionStore(sessionFrontDoor(store), "/test/city", "", "target-session", false, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdWaitList = %d, want 0; stderr=%s", code, stderr.String())
+		t.Fatalf("doWaitListFromSessionStore = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), targetWait.ID) {
 		t.Fatalf("wait list output missing target wait %s:\nstdout=%s\nstderr=%s", targetWait.ID, stdout.String(), stderr.String())
 	}
-	if strings.Contains(stdout.String(), "other-session") {
-		t.Fatalf("wait list output included non-target session:\n%s", stdout.String())
+	if strings.Contains(stdout.String(), otherWait.ID) {
+		t.Fatalf("wait list output included non-target wait %s:\n%s", otherWait.ID, stdout.String())
+	}
+	if len(store.queries) != 1 {
+		t.Fatalf("List calls = %d, want 1; queries=%#v", len(store.queries), store.queries)
+	}
+	wantQuery := beads.ListQuery{
+		Status: "open",
+		Label:  "session:target-session",
+		Limit:  waitLookupLimit + 1,
+		Sort:   beads.SortCreatedDesc,
+	}
+	if !reflect.DeepEqual(store.queries[0], wantQuery) {
+		t.Fatalf("List query = %#v, want %#v", store.queries[0], wantQuery)
 	}
 }
 
@@ -806,6 +782,7 @@ prefix = "fe"
 	return rigPath, nil
 }
 
+//nolint:unused // exercised by native_dolt_rebind_integration_test.go
 func managedBdWaitTestTemplate(t *testing.T, bdPath, doltPath string) string {
 	t.Helper()
 	managedBdWaitTemplateOnce.Do(func() {
@@ -2394,8 +2371,130 @@ start_command = "true"
 	}
 }
 
+func TestDoSessionWait_RegistersReadyWaitForRigDependency(t *testing.T) {
+	const (
+		sessionID = "gcg-session-1"
+		depID     = "ga-dep-1"
+		originID  = "gcg-origin-1"
+	)
+	now := time.Date(2026, time.July, 16, 6, 30, 0, 0, time.UTC)
+	cityStore := waitPrefixedStore{
+		Store: beads.NewMemStoreFrom(1, []beads.Bead{{
+			ID:        sessionID,
+			Title:     "worker session",
+			Type:      sessionBeadType,
+			Status:    "open",
+			Labels:    []string{sessionBeadLabel},
+			CreatedAt: now.Add(-time.Minute),
+			UpdatedAt: now.Add(-time.Minute),
+			Revision:  1,
+			Metadata: map[string]string{
+				"session_name":       "worker",
+				"continuation_epoch": "1",
+			},
+		}}, nil),
+		prefix: "gcg",
+	}
+	rigStore := waitPrefixedStore{
+		Store: beads.NewMemStoreFrom(1, []beads.Bead{{
+			ID:        depID,
+			Title:     "rig dependency",
+			Type:      "task",
+			Status:    "closed",
+			CreatedAt: now.Add(-time.Minute),
+			UpdatedAt: now.Add(-time.Minute),
+			Revision:  1,
+		}}, nil),
+		prefix: "ga",
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doSessionWait(sessionID, []string{depID}, false, "block", false, &stdout, &stderr, sessionWaitDeps{
+		sessions:         sessionFrontDoor(cityStore),
+		dependencies:     newWaitDependencyStoreSet(cityStore, map[string]beads.Store{"frontend": rigStore}),
+		now:              func() time.Time { return now },
+		createdBySession: originID,
+	})
+	if code != 0 {
+		t.Fatalf("doSessionWait() = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "already ready") {
+		t.Fatalf("stdout = %q, want already-ready result", got)
+	}
+
+	waits, err := cityStore.ListByLabel("session:"+sessionID, 0)
+	if err != nil {
+		t.Fatalf("ListByLabel(wait): %v", err)
+	}
+	if len(waits) != 1 {
+		t.Fatalf("wait count = %d, want 1", len(waits))
+	}
+	wait := waits[0]
+	if wait.Status != "open" {
+		t.Fatalf("wait status = %q, want open", wait.Status)
+	}
+	for key, want := range map[string]string{
+		"state":              waitStateReady,
+		"created_at":         now.Format(time.RFC3339),
+		"ready_at":           now.Format(time.RFC3339),
+		"dep_ids":            depID,
+		"dep_mode":           "all",
+		"created_by_session": originID,
+	} {
+		if got := wait.Metadata[key]; got != want {
+			t.Fatalf("wait metadata[%q] = %q, want %q", key, got, want)
+		}
+	}
+	if wait.Description != "block" {
+		t.Fatalf("wait description = %q, want block", wait.Description)
+	}
+}
+
 func TestCmdSessionWait_AllowsRigDependencyBeads(t *testing.T) {
-	cityPath, rigPath := setupManagedBdWaitTestCity(t)
+	setWaitTestFileBeads(t)
+	prevCityFlag, prevRigFlag := cityFlag, rigFlag
+	cityFlag = ""
+	rigFlag = ""
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		rigFlag = prevRigFlag
+	})
+
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "frontend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig): %v", err)
+	}
+	cityToml := `[workspace]
+name = "gascity"
+prefix = "gc"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	cityFlag = cityPath
+	if err := ensureScopedFileStoreLayout(cityPath); err != nil {
+		t.Fatalf("ensureScopedFileStoreLayout: %v", err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityPath); err != nil {
+		t.Fatalf("ensurePersistedScopeLocalFileStore(city): %v", err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(rigPath); err != nil {
+		t.Fatalf("ensurePersistedScopeLocalFileStore(rig): %v", err)
+	}
+	dep := beads.Bead{ID: "fe-1", Title: "rig dep", Status: "closed", Type: "task"}
+	writeTestFileStoreBeads(t, rigPath, []beads.Bead{dep})
 
 	cityStore, err := openCityStoreAt(cityPath)
 	if err != nil {
@@ -2417,15 +2516,12 @@ func TestCmdSessionWait_AllowsRigDependencyBeads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session bead: %v", err)
 	}
-	dep, err := rigStore.Create(beads.Bead{Title: "rig dep"})
+	gotDep, err := rigStore.Get(dep.ID)
 	if err != nil {
-		t.Fatalf("create rig dep bead: %v", err)
+		t.Fatalf("get rig dep bead: %v", err)
 	}
-	if err := rigStore.Close(dep.ID); err != nil {
-		t.Fatalf("close rig dep bead: %v", err)
-	}
-	if got := beadPrefix(nil, dep.ID); got != "fe" {
-		t.Fatalf("rig dep prefix = %q, want %q", got, "fe")
+	if gotDep.Status != "closed" {
+		t.Fatalf("rig dep status = %q, want closed", gotDep.Status)
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -2575,7 +2671,7 @@ func TestPrepareWaitWakeState_ResolvesRigDependencyBeads(t *testing.T) {
 	}
 }
 
-func setupFreshManagedBdWaitTestCity(t *testing.T) (string, string) {
+func setupFreshManagedBdWaitTestCity(t *testing.T) string {
 	t.Helper()
 	configureIsolatedRuntimeEnv(t)
 
@@ -2596,8 +2692,9 @@ func setupFreshManagedBdWaitTestCity(t *testing.T) (string, string) {
 	t.Setenv("DOLT_ROOT_PATH", homeDir)
 	t.Setenv("PATH", strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)))
 
+	reexecGC := reexecGCTestBinaryForTests(t)
 	oldResolve := resolveProviderLifecycleGCBinary
-	resolveProviderLifecycleGCBinary = func() string { return currentGCBinaryForTests(t) }
+	resolveProviderLifecycleGCBinary = func() string { return reexecGC }
 	t.Cleanup(func() { resolveProviderLifecycleGCBinary = oldResolve })
 
 	prevCityFlag, prevRigFlag := cityFlag, rigFlag
@@ -2609,8 +2706,7 @@ func setupFreshManagedBdWaitTestCity(t *testing.T) (string, string) {
 	})
 
 	cityPath := shortSocketTempDir(t, "gc-bd-city-")
-	rigPath, err := writeManagedBdWaitTestCityScaffold(cityPath)
-	if err != nil {
+	if _, err := writeManagedBdWaitTestCityScaffold(cityPath); err != nil {
 		t.Fatalf("writeManagedBdWaitTestCityScaffold: %v", err)
 	}
 	t.Setenv("GC_CITY", cityPath)
@@ -2625,15 +2721,13 @@ func setupFreshManagedBdWaitTestCity(t *testing.T) (string, string) {
 	if err := initAndHookDir(cityPath, cityPath, "gc"); err != nil {
 		t.Fatalf("initAndHookDir(city): %v", err)
 	}
-	if err := initAndHookDir(cityPath, rigPath, "fe"); err != nil {
-		t.Fatalf("initAndHookDir(rig): %v", err)
-	}
 	if err := publishManagedDoltRuntimeState(cityPath); err != nil {
 		t.Fatalf("publishManagedDoltRuntimeState: %v", err)
 	}
-	return cityPath, rigPath
+	return cityPath
 }
 
+//nolint:unused // exercised by native_dolt_rebind_integration_test.go
 func setupManagedBdWaitTestCity(t *testing.T) (string, string) {
 	t.Helper()
 	skipSlowCmdGCTest(t, "requires a managed bd/dolt lifecycle city; run make test-cmd-gc-process for full coverage")

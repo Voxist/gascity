@@ -13,6 +13,11 @@ import (
 	"time"
 )
 
+// readRotationDir is the directory snapshot used by rotation catch-up readers.
+// It is indirected so tests can deterministically promote a rotating file at
+// the listing boundary instead of racing a gzip goroutine.
+var readRotationDir = os.ReadDir
+
 // Filter specifies predicates for ReadFiltered. Zero values are ignored.
 type Filter struct {
 	Type     string    // match events with this Type
@@ -21,13 +26,21 @@ type Filter struct {
 	Since    time.Time // match events at or after this time
 	Until    time.Time // match events at or before this time
 	AfterSeq uint64    // match events with Seq > AfterSeq (0 = no filter)
-	Limit    int       // cap results at this count (0 or negative = unlimited)
+	// BeforeSeq matches events with Seq < BeforeSeq (0 = no filter). The
+	// keyset page boundary for descending event walks: the log is
+	// append-only and seq-ordered, so "strictly before this seq" is a
+	// stable resume point regardless of concurrent appends.
+	BeforeSeq uint64
+	Limit     int // cap results at this count (0 or negative = unlimited)
 }
 
 // matchesFilter reports whether e satisfies all non-zero predicates in f.
 // It does not enforce Limit — that is applied by the caller.
 func matchesFilter(e Event, f Filter) bool {
 	if f.AfterSeq > 0 && e.Seq <= f.AfterSeq {
+		return false
+	}
+	if f.BeforeSeq > 0 && e.Seq >= f.BeforeSeq {
 		return false
 	}
 	if f.Type != "" && e.Type != f.Type {
@@ -87,7 +100,7 @@ func ReadAll(path string) ([]Event, error) {
 // for existing callers — see ReadFilteredWithWarnings for the variant
 // health checks should use).
 func ReadFiltered(path string, filter Filter) ([]Event, error) {
-	evts, _, err := readFilteredCore(path, filter, true)
+	evts, _, _, err := readFilteredCore(path, filter, true)
 	return evts, err
 }
 
@@ -99,10 +112,35 @@ func ReadFiltered(path string, filter Filter) ([]Event, error) {
 // corrupt archive masked a real doctor verdict for days (vc-89s).
 // Live-file errors still fail the read.
 func ReadFilteredWithWarnings(path string, filter Filter) ([]Event, []string, error) {
-	return readFilteredCore(path, filter, false)
+	evts, warnings, _, err := readFilteredCore(path, filter, false)
+	return evts, warnings, err
 }
 
-func readFilteredCore(path string, filter Filter, failFast bool) ([]Event, []string, error) {
+type eventSeqWindow struct {
+	first uint64
+	last  uint64
+}
+
+// readFilteredTracked is ReadFiltered plus the archive windows present in its
+// initial directory snapshot. ReadFilteredWithInFlight uses that set to avoid
+// reopening stable archives (including later windows after a Limit is reached)
+// while still detecting an archive promoted after this scan.
+func readFilteredTracked(path string, filter Filter) ([]Event, map[eventSeqWindow]struct{}, error) {
+	evts, _, listed, err := readFilteredCore(path, filter, true)
+	return evts, listed, err
+}
+
+// readFilteredCore is the shared implementation behind ReadFiltered,
+// ReadFilteredWithWarnings and readFilteredTracked.
+//
+// MERGE INTENT (v1.4.0 resync): the fork renamed this function from
+// readFilteredTracked to readFilteredCore and repurposed the second return for
+// degraded-read warnings (vc-89s); upstream kept the original name and used
+// that slot for the archive seq-window set consumed by ReadFilteredWithInFlight.
+// Both features are load-bearing and neither is a superset, so the core now
+// returns BOTH and each wrapper takes what it needs. Picking either side alone
+// would have silently dropped a shipped feature.
+func readFilteredCore(path string, filter Filter, failFast bool) ([]Event, []string, map[eventSeqWindow]struct{}, error) {
 	dir := filepath.Dir(path)
 	archives, err := archiveFilesIn(dir)
 	if err != nil {
@@ -114,6 +152,10 @@ func readFilteredCore(path string, filter Filter, failFast bool) ([]Event, []str
 
 	var result []Event
 	var warnings []string
+	listed := make(map[eventSeqWindow]struct{}, len(archives))
+	for _, info := range archives {
+		listed[eventSeqWindow{first: info.FirstSeq, last: info.LastSeq}] = struct{}{}
+	}
 	for _, info := range archives {
 		if !archiveOverlapsFilter(info, filter) {
 			continue
@@ -128,13 +170,13 @@ func readFilteredCore(path string, filter Filter, failFast bool) ([]Event, []str
 		})
 		if err != nil {
 			if failFast {
-				return result, warnings, fmt.Errorf("reading archive %q: %w", info.Basename, err)
+				return result, warnings, listed, fmt.Errorf("reading archive %q: %w", info.Basename, err)
 			}
 			warnings = append(warnings, fmt.Sprintf("skipped unreadable archive %q: %v", info.Basename, err))
 			continue
 		}
 		if limitReached(len(result), filter) {
-			return result, warnings, nil
+			return result, warnings, listed, nil
 		}
 	}
 
@@ -142,11 +184,11 @@ func readFilteredCore(path string, filter Filter, failFast bool) ([]Event, []str
 	if err != nil {
 		if os.IsNotExist(err) {
 			if len(result) == 0 && warnings == nil {
-				return nil, nil, nil
+				return nil, nil, listed, nil
 			}
-			return result, warnings, nil
+			return result, warnings, listed, nil
 		}
-		return result, warnings, fmt.Errorf("reading events: %w", err)
+		return result, warnings, listed, fmt.Errorf("reading events: %w", err)
 	}
 	defer f.Close() //nolint:errcheck // read-only file
 
@@ -166,9 +208,9 @@ func readFilteredCore(path string, filter Filter, failFast bool) ([]Event, []str
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return result, warnings, fmt.Errorf("scanning events: %w", err)
+		return result, warnings, listed, fmt.Errorf("scanning events: %w", err)
 	}
-	return result, warnings, nil
+	return result, warnings, listed, nil
 }
 
 // ReadFilteredWithInFlight is ReadFiltered plus events still stranded in
@@ -185,104 +227,71 @@ func readFilteredCore(path string, filter Filter, failFast bool) ([]Event, []str
 // and its source rotating file coexist, an event can appear in both. The result
 // is de-duplicated by seq and returned in seq order. Intended for the AfterSeq
 // catch-up path; a positive Filter.Limit bounds only ReadFiltered's own scan,
-// not the merged in-flight events.
+// not newly discovered rotation sources merged by the recovery pass.
 func ReadFilteredWithInFlight(path string, filter Filter) ([]Event, error) {
-	base, baseErr := ReadFiltered(path, filter)
-	inflight, inErr := readInFlightRotating(path, filter)
-	if len(inflight) == 0 {
+	base, listedArchives, baseErr := readFilteredTracked(path, filter)
+	rotated, rotationErr := readRotationSources(path, filter, listedArchives)
+	if len(rotated) == 0 {
 		if baseErr == nil {
-			return base, inErr
+			return base, rotationErr
 		}
 		return base, baseErr
 	}
-	merged := mergeEventsBySeq(base, inflight)
+	merged := mergeEventsBySeq(base, rotated)
 	if baseErr != nil {
 		return merged, baseErr
 	}
-	return merged, inErr
+	return merged, rotationErr
 }
 
-// readInFlightRotating reads events matching filter from any in-flight rotation
-// files (events.jsonl.rotating-<ts>-seq-<a>-<b>) beside path — the plain-JSONL
-// renames of a just-rotated active log the background gzip has not yet promoted
-// to a canonical .gz archive. Files whose seq window is fully excluded by
-// filter.AfterSeq are skipped without opening. Results are in seq order across
-// rotating files (sorted by FirstSeq; each file is internally seq ordered).
-// Returns (nil, nil) when nothing is rotating — the overwhelmingly common case.
-func readInFlightRotating(path string, filter Filter) ([]Event, error) {
+// readRotationSources performs the post-active directory scan across BOTH
+// canonical archives and in-flight rotating files. A rotation promotion can
+// land after readFilteredTracked's archive snapshot: reading only rotating
+// files here would then see neither the old source nor the newly-installed
+// archive. listBackfillSources closes that gap, and openSegmentReader closes the
+// second gap where a listed rotating source is promoted before open by falling
+// back to its derived archive path.
+//
+// Stable archives present in the base scan's snapshot are skipped by seq
+// window, so the normal cold-load path pays only a second directory listing
+// rather than decoding the full archive history twice. That includes later
+// archives the base intentionally did not open after satisfying Filter.Limit.
+func readRotationSources(path string, filter Filter, listedArchives map[eventSeqWindow]struct{}) ([]Event, error) {
 	dir := filepath.Dir(path)
-	entries, err := os.ReadDir(dir)
+	sources, err := listBackfillSources(dir, filter.AfterSeq)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
 		return nil, err
 	}
-	type rotatingFile struct {
-		name     string
-		firstSeq uint64
-	}
-	var files []rotatingFile
-	for _, e := range entries {
-		if e.IsDir() || !hasRotatingPrefix(e.Name()) {
-			continue
-		}
-		_, first, last, ok := parseRotatingBasename(e.Name())
-		if !ok {
-			// Legacy rotating file without a seq window; the startup orphan
-			// reaper promotes it — a live reader skips it rather than guess.
-			continue
-		}
-		if filter.AfterSeq > 0 && last <= filter.AfterSeq {
-			continue
-		}
-		files = append(files, rotatingFile{name: e.Name(), firstSeq: first})
-	}
-	if len(files) == 0 {
+	if len(sources) == 0 {
 		return nil, nil
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].firstSeq < files[j].firstSeq })
 
 	var result []Event
-	for _, rf := range files {
-		evts, err := readPlainJSONLFiltered(filepath.Join(dir, rf.name), filter)
+	maxSeq := filter.AfterSeq
+	for _, src := range sources {
+		if src.kind == sourceArchive {
+			if _, ok := listedArchives[eventSeqWindow{first: src.firstSeq, last: src.lastSeq}]; ok {
+				continue
+			}
+		}
+		reader, err := openSegmentReader(src)
 		if err != nil {
-			return result, fmt.Errorf("reading in-flight rotation %q: %w", rf.name, err)
+			return result, fmt.Errorf("reading rotation source %q: %w", filepath.Base(src.path), err)
 		}
-		result = append(result, evts...)
-	}
-	return result, nil
-}
-
-// readPlainJSONLFiltered reads every filter-matching event from a plain-JSONL
-// events file, scanning the whole file from the start. Unlike ReadFrom it keeps
-// no byte offset; unlike the active-file scan in ReadFiltered it does not honor
-// Filter.Limit (its only caller merges the result under an AfterSeq filter).
-func readPlainJSONLFiltered(path string, filter Filter) ([]Event, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	defer f.Close() //nolint:errcheck // read-only file
-
-	var result []Event
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		var e Event
-		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
-			continue // skip malformed lines (partial write mid-rename)
-		}
-		if !matchesFilter(e, filter) {
+		if reader == nil {
 			continue
 		}
-		result = append(result, e)
-	}
-	if err := scanner.Err(); err != nil {
-		return result, fmt.Errorf("scanning: %w", err)
+		for {
+			done, readErr := reader.readInto(filter, &maxSeq, &result, backfillBatch)
+			if readErr != nil {
+				reader.close()
+				return result, fmt.Errorf("reading rotation source %q: %w", filepath.Base(src.path), readErr)
+			}
+			if done {
+				break
+			}
+		}
+		reader.close()
 	}
 	return result, nil
 }

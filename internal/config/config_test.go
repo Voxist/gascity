@@ -1288,9 +1288,10 @@ func TestGastownCity(t *testing.T) {
 func TestGascityCitySeedsRolesDefaultRigImport(t *testing.T) {
 	c := GascityCityWithProviders("bright-lights", "claude", []string{"claude"})
 
-	// City-scope formulas/skills import is unchanged.
-	if len(c.Imports) != 1 || c.Imports["gascity"].Source != PublicGascityPackSource || c.Imports["gascity"].Version != PublicGascityPackVersion {
-		t.Errorf("Imports = %v, want gascity=%s %s", c.Imports, PublicGascityPackSource, PublicGascityPackVersion)
+	// City-scope formulas, skills, and commands use the gc binding expected by
+	// role prompts such as `gc gc claim`.
+	if len(c.Imports) != 1 || c.Imports["gc"].Source != PublicGascityPackSource || c.Imports["gc"].Version != PublicGascityPackVersion {
+		t.Errorf("Imports = %v, want gc=%s %s", c.Imports, PublicGascityPackSource, PublicGascityPackVersion)
 	}
 
 	// Roles ride along as a default rig import, bound "gc" so the formula's
@@ -2429,6 +2430,9 @@ esac
 }
 
 func TestEffectiveSlingQueryPoolNameOverride(t *testing.T) {
+	// Pool instance: the stamped gc.routed_to must be the collapsed PoolName
+	// (template identity), not the raw per-instance QualifiedName() — matching
+	// the PoolName-first idiom in poolDemandTarget/effectiveOnDeath/effectiveOnBoot.
 	a := Agent{
 		Name:              "dog-1",
 		Dir:               "hello-world",
@@ -2436,9 +2440,20 @@ func TestEffectiveSlingQueryPoolNameOverride(t *testing.T) {
 		PoolName: "hello-world/dog",
 	}
 	got := a.EffectiveSlingQuery()
-	want := "bd update {} --set-metadata gc.routed_to=hello-world/dog-1"
+	want := "bd update {} --set-metadata gc.routed_to=hello-world/dog"
 	if got != want {
 		t.Errorf("EffectiveSlingQuery() = %q, want %q", got, want)
+	}
+}
+
+func TestDefaultSlingQueryPoolNameCollapse(t *testing.T) {
+	// Same PoolName-collapse idiom, asserted directly against DefaultSlingQuery()
+	// rather than through the EffectiveSlingQuery() wrapper.
+	a := Agent{Name: "dog-1", Dir: "hello-world", PoolName: "hello-world/dog"}
+	got := a.DefaultSlingQuery()
+	want := "bd update {} --set-metadata gc.routed_to=hello-world/dog"
+	if got != want {
+		t.Errorf("DefaultSlingQuery() = %q, want %q", got, want)
 	}
 }
 
@@ -3787,6 +3802,56 @@ func TestDaemonAutoReapClosedBeadWorktreesExplicitFalse(t *testing.T) {
 	d := DaemonConfig{AutoReapClosedBeadWorktrees: &v}
 	if d.AutoReapClosedBeadWorktreesEnabled() {
 		t.Errorf("AutoReapClosedBeadWorktreesEnabled() = true, want false (kill switch)")
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesDryRunDefault(t *testing.T) {
+	d := DaemonConfig{}
+	if d.AutoReapClosedBeadWorktreesDryRunEnabled() {
+		t.Errorf("AutoReapClosedBeadWorktreesDryRunEnabled() = true, want false (default)")
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesDryRunExplicitTrue(t *testing.T) {
+	v := true
+	d := DaemonConfig{AutoReapClosedBeadWorktreesDryRun: &v}
+	if !d.AutoReapClosedBeadWorktreesDryRunEnabled() {
+		t.Errorf("AutoReapClosedBeadWorktreesDryRunEnabled() = false, want true")
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesDryRunExplicitFalse(t *testing.T) {
+	v := false
+	d := DaemonConfig{AutoReapClosedBeadWorktreesDryRun: &v}
+	if d.AutoReapClosedBeadWorktreesDryRunEnabled() {
+		t.Errorf("AutoReapClosedBeadWorktreesDryRunEnabled() = true, want false (kill switch)")
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesMinAgeMinutesDefault(t *testing.T) {
+	d := DaemonConfig{}
+	got := d.AutoReapClosedBeadWorktreesMinAge()
+	want := time.Duration(DefaultAutoReapClosedBeadWorktreesMinAgeMinutes) * time.Minute
+	if got != want {
+		t.Errorf("AutoReapClosedBeadWorktreesMinAge() = %v, want %v (default)", got, want)
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesMinAgeMinutesExplicitValue(t *testing.T) {
+	v := 30
+	d := DaemonConfig{AutoReapClosedBeadWorktreesMinAgeMinutes: &v}
+	got := d.AutoReapClosedBeadWorktreesMinAge()
+	if got != 30*time.Minute {
+		t.Errorf("AutoReapClosedBeadWorktreesMinAge() = %v, want 30m", got)
+	}
+}
+
+func TestDaemonAutoReapClosedBeadWorktreesMinAgeMinutesExplicitZeroDisables(t *testing.T) {
+	v := 0
+	d := DaemonConfig{AutoReapClosedBeadWorktreesMinAgeMinutes: &v}
+	got := d.AutoReapClosedBeadWorktreesMinAge()
+	if got != 0 {
+		t.Errorf("AutoReapClosedBeadWorktreesMinAge() = %v, want 0 (quarantine disabled)", got)
 	}
 }
 
@@ -6171,6 +6236,46 @@ name = "a"
 	}
 	if got := cfg.Session.DisplayMsOrDefault(); got != 8000 {
 		t.Errorf("DisplayMsOrDefault() = %d, want 8000", got)
+	}
+}
+
+func TestParseSessionNudgePollInterval(t *testing.T) {
+	toml := `
+[workspace]
+name = "test"
+
+[session]
+nudge_poll_interval = "15s"
+
+[[agent]]
+name = "a"
+`
+	cfg, err := Parse([]byte(toml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.Session.NudgePollIntervalDuration(); got != 15*time.Second {
+		t.Errorf("NudgePollIntervalDuration() = %v, want 15s", got)
+	}
+}
+
+func TestNudgePollIntervalDurationUnsetOrInvalid(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+	}{
+		{"unset", ""},
+		{"unparseable", "banana"},
+		{"zero", "0s"},
+		{"negative", "-5s"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &SessionConfig{NudgePollInterval: tc.value}
+			if got := s.NudgePollIntervalDuration(); got != 0 {
+				t.Errorf("NudgePollIntervalDuration() = %v, want 0 (unconfigured)", got)
+			}
+		})
 	}
 }
 

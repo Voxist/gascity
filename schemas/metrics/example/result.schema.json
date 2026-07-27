@@ -205,10 +205,11 @@
               "login",
               "logout",
               "whoami",
-              "provider-quota",
+              "runtime-heartbeat",
               "provider-rotate-key",
               "beads-state",
-              "config-lint"
+              "config-lint",
+              "provider-quota"
             ]
           },
           "event_id": {

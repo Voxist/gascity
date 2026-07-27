@@ -241,13 +241,20 @@ func issuePrefixForScope(scopeRoot, cityPath string, cfg *config.City) string {
 	if cfg == nil {
 		return ""
 	}
-	scopeRoot = filepath.Clean(scopeRoot)
-	if filepath.Clean(cityPath) == scopeRoot {
+	// MERGE INTENT (v1.4.0 resync): normalize both sides of the comparison the
+	// same way. resolveStoreScopeRoot now resolves symlinks (upstream added it so
+	// a city reached through a linked path yields the same scope root), while this
+	// fork-only function still cleaned without resolving. On macOS t.TempDir()
+	// returns /var/... which is a symlink to /private/var/..., so the resolved rig
+	// path never matched the unresolved scope root and every configured prefix
+	// silently fell through to "".
+	scopeRoot = normalizeStoreScopeRoot(scopeRoot)
+	if normalizeStoreScopeRoot(cityPath) == scopeRoot {
 		return config.EffectiveHQPrefix(cfg)
 	}
 	for i := range cfg.Rigs {
 		rigPath := resolveStoreScopeRoot(cityPath, cfg.Rigs[i].Path)
-		if filepath.Clean(rigPath) == scopeRoot {
+		if normalizeStoreScopeRoot(rigPath) == scopeRoot {
 			return cfg.Rigs[i].EffectivePrefix()
 		}
 	}

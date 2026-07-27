@@ -19,9 +19,18 @@ const (
 	// approximating shell semantics: any execution change requires explicit
 	// policy review, while workflow, job, step, and input descriptions remain
 	// free to change. A failure prints the projection and candidate digest.
-	expectedCITriggersHash       = "d1a8bcd089019589658d8f154af9c26a70877285d84a384c2dcea299efc9554a"
-	expectedCIExecutionHash      = "dbe8492ca70610bb5e35468395f27be6ad1168246cd7b908fe000ce78f61af29"
-	expectedNightlyTriggersHash  = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
+	expectedCITriggersHash = "d1a8bcd089019589658d8f154af9c26a70877285d84a384c2dcea299efc9554a"
+	// MERGE INTENT (v1.4.0 resync): re-derived, not picked. This pin is a
+	// tripwire over the CI workflow's semantic execution shape. .github/workflows/ci.yml
+	// auto-merged both sides' changes, so the resulting shape hashes to neither
+	// the fork's nor upstream's previous value — the correct action is to
+	// re-derive from the merged workflow rather than adopt either side's stale pin.
+	expectedCIExecutionHash     = "d316ebebefe2505a5e17d8d849c7c7adc74dc457f79cd24f7a5033858075a408"
+	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
+	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
+	// value: nightly.yml merged to the fork's execution shape, so wholesale
+	// --theirs on this file would have adopted upstream's pin and failed. Each
+	// pin is an independent tripwire and must be re-derived on its own.
 	expectedNightlyExecutionHash = "79c17c6febb370f371c80fc09c9e6d73b5c7ff8da891a23691dbdc60b3050d75"
 	expectedSetupActionHash      = "b7864038195cd054aee7fccfa903cab335b375bcab1a35239c17c5da7d32c07e"
 )
@@ -87,6 +96,13 @@ var requiredFilterPaths = map[string][]string{
 		"internal/**",
 		"examples/gastown/**",
 	},
+	"credential_provider": {
+		"go.mod",
+		"go.sum",
+		"internal/credentialprovider/**",
+		"internal/testenv/**",
+		"internal/testutil/**",
+	},
 	"integration": {
 		"go.mod",
 		"go.sum",
@@ -95,6 +111,7 @@ var requiredFilterPaths = map[string][]string{
 		"**/*.go",
 		"scripts/test-integration-shard",
 		"scripts/test-go-test-shard",
+		"scripts/runtime-tmux-tests.manifest",
 		"scripts/go-test-observable",
 		"examples/gastown/**",
 	},
