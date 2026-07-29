@@ -253,6 +253,9 @@ func cadenceTransitionDriver(prevDriver, nextDriver string) string {
 }
 
 func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
+	if g := c.availabilityGateRef(); g != nil && !g.Available() && !g.ProbeDue() {
+		return cacheReconcilePollInterval
+	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -288,6 +291,9 @@ func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
 }
 
 func (c *CachingStore) runReconciliation() {
+	if c.reconcileUnavailableSkip() {
+		return
+	}
 	start := time.Now()
 
 	c.mu.RLock()

@@ -1281,6 +1281,44 @@
         ],
         "type": "object"
       },
+      "BreakerStateChangedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "backoff_ms": {
+            "description": "Open-state backoff chosen for this episode, in milliseconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "failures": {
+            "description": "Consecutive transport-failure count at the change.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "from": {
+            "description": "Breaker state before the transition.",
+            "type": "string"
+          },
+          "op_class": {
+            "description": "Operation class, e.g. bd.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "Store scope (canonical scope root path).",
+            "type": "string"
+          },
+          "to": {
+            "description": "Breaker state after the transition.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "op_class",
+          "from",
+          "to"
+        ],
+        "type": "object"
+      },
       "CityCreateRequest": {
         "additionalProperties": false,
         "properties": {
@@ -2363,6 +2401,9 @@
           },
           {
             "$ref": "#/components/schemas/BoundEventPayload"
+          },
+          {
+            "$ref": "#/components/schemas/BreakerStateChangedPayload"
           },
           {
             "$ref": "#/components/schemas/CityCreateSucceededPayload"
@@ -11877,6 +11918,7 @@
             "bead.worktree.reap_skipped": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReapSkipped",
             "bead.worktree.reaped": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReaped",
             "beads.conditional_writes.degraded": "#/components/schemas/TypedEventStreamEnvelopeBeadsConditionalWritesDegraded",
+            "breaker.state_changed": "#/components/schemas/TypedEventStreamEnvelopeBreakerStateChanged",
             "city.created": "#/components/schemas/TypedEventStreamEnvelopeCityCreated",
             "city.resumed": "#/components/schemas/TypedEventStreamEnvelopeCityResumed",
             "city.suspended": "#/components/schemas/TypedEventStreamEnvelopeCitySuspended",
@@ -11975,6 +12017,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadsConditionalWritesDegraded"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeBreakerStateChanged"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeCityCreated"
@@ -12645,6 +12690,57 @@
         "title": "TypedEventStreamEnvelope beads.conditional_writes.degraded",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeBreakerStateChanged": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BreakerStateChangedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "breaker.state_changed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope breaker.state_changed",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeCityCreated": {
         "additionalProperties": false,
         "properties": {
@@ -13163,7 +13259,8 @@
                 "pg.credential_resolved",
                 "emergency.signaled",
                 "emergency.acked",
-                "beads.conditional_writes.degraded"
+                "beads.conditional_writes.degraded",
+                "breaker.state_changed"
               ]
             },
             "type": "string"
@@ -16255,6 +16352,7 @@
             "bead.worktree.reap_skipped": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped",
             "bead.worktree.reaped": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReaped",
             "beads.conditional_writes.degraded": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded",
+            "breaker.state_changed": "#/components/schemas/TypedTaggedEventStreamEnvelopeBreakerStateChanged",
             "city.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityCreated",
             "city.resumed": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityResumed",
             "city.suspended": "#/components/schemas/TypedTaggedEventStreamEnvelopeCitySuspended",
@@ -16353,6 +16451,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBreakerStateChanged"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityCreated"
@@ -17059,6 +17160,61 @@
         "title": "TypedTaggedEventStreamEnvelope beads.conditional_writes.degraded",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeBreakerStateChanged": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BreakerStateChangedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "breaker.state_changed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope breaker.state_changed",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeCityCreated": {
         "additionalProperties": false,
         "properties": {
@@ -17612,7 +17768,8 @@
                 "pg.credential_resolved",
                 "emergency.signaled",
                 "emergency.acked",
-                "beads.conditional_writes.degraded"
+                "beads.conditional_writes.degraded",
+                "breaker.state_changed"
               ]
             },
             "type": "string"

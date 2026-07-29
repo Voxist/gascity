@@ -1289,6 +1289,27 @@ type BoundEventPayload struct {
 	SessionId      string  `json:"session_id"`
 }
 
+// BreakerStateChangedPayload defines model for BreakerStateChangedPayload.
+type BreakerStateChangedPayload struct {
+	// BackoffMs Open-state backoff chosen for this episode, in milliseconds.
+	BackoffMs *int64 `json:"backoff_ms,omitempty"`
+
+	// Failures Consecutive transport-failure count at the change.
+	Failures *int64 `json:"failures,omitempty"`
+
+	// From Breaker state before the transition.
+	From string `json:"from"`
+
+	// OpClass Operation class, e.g. bd.
+	OpClass string `json:"op_class"`
+
+	// Scope Store scope (canonical scope root path).
+	Scope string `json:"scope"`
+
+	// To Breaker state after the transition.
+	To string `json:"to"`
+}
+
 // CityCreateRequest defines model for CityCreateRequest.
 type CityCreateRequest struct {
 	// BootstrapProfile Optional bootstrap profile.
@@ -5322,6 +5343,21 @@ type TypedEventStreamEnvelopeBeadsConditionalWritesDegraded struct {
 	Workflow  *WorkflowEventProjection         `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeBreakerStateChanged defines model for TypedEventStreamEnvelopeBreakerStateChanged.
+type TypedEventStreamEnvelopeBreakerStateChanged struct {
+	Actor     string                     `json:"actor"`
+	Message   *string                    `json:"message,omitempty"`
+	Payload   BreakerStateChangedPayload `json:"payload"`
+	RunId     *string                    `json:"run_id,omitempty"`
+	Seq       int64                      `json:"seq"`
+	SessionId *string                    `json:"session_id,omitempty"`
+	StepId    *string                    `json:"step_id,omitempty"`
+	Subject   *string                    `json:"subject,omitempty"`
+	Ts        time.Time                  `json:"ts"`
+	Type      string                     `json:"type"`
+	Workflow  *WorkflowEventProjection   `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeCityCreated defines model for TypedEventStreamEnvelopeCityCreated.
 type TypedEventStreamEnvelopeCityCreated struct {
 	Actor     string                   `json:"actor"`
@@ -6504,6 +6540,22 @@ type TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded struct {
 	Ts        time.Time                        `json:"ts"`
 	Type      string                           `json:"type"`
 	Workflow  *WorkflowEventProjection         `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeBreakerStateChanged defines model for TypedTaggedEventStreamEnvelopeBreakerStateChanged.
+type TypedTaggedEventStreamEnvelopeBreakerStateChanged struct {
+	Actor     string                     `json:"actor"`
+	City      string                     `json:"city"`
+	Message   *string                    `json:"message,omitempty"`
+	Payload   BreakerStateChangedPayload `json:"payload"`
+	RunId     *string                    `json:"run_id,omitempty"`
+	Seq       int64                      `json:"seq"`
+	SessionId *string                    `json:"session_id,omitempty"`
+	StepId    *string                    `json:"step_id,omitempty"`
+	Subject   *string                    `json:"subject,omitempty"`
+	Ts        time.Time                  `json:"ts"`
+	Type      string                     `json:"type"`
+	Workflow  *WorkflowEventProjection   `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeCityCreated defines model for TypedTaggedEventStreamEnvelopeCityCreated.
@@ -9360,6 +9412,32 @@ func (t *EventPayload) FromBoundEventPayload(v BoundEventPayload) error {
 
 // MergeBoundEventPayload performs a merge with any union data inside the EventPayload, using the provided BoundEventPayload
 func (t *EventPayload) MergeBoundEventPayload(v BoundEventPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsBreakerStateChangedPayload returns the union data inside the EventPayload as a BreakerStateChangedPayload
+func (t EventPayload) AsBreakerStateChangedPayload() (BreakerStateChangedPayload, error) {
+	var body BreakerStateChangedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromBreakerStateChangedPayload overwrites any union data inside the EventPayload as the provided BreakerStateChangedPayload
+func (t *EventPayload) FromBreakerStateChangedPayload(v BreakerStateChangedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeBreakerStateChangedPayload performs a merge with any union data inside the EventPayload, using the provided BreakerStateChangedPayload
+func (t *EventPayload) MergeBreakerStateChangedPayload(v BreakerStateChangedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -12285,6 +12363,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBeadsConditional
 	return err
 }
 
+// AsTypedEventStreamEnvelopeBreakerStateChanged returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeBreakerStateChanged
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeBreakerStateChanged() (TypedEventStreamEnvelopeBreakerStateChanged, error) {
+	var body TypedEventStreamEnvelopeBreakerStateChanged
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeBreakerStateChanged overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeBreakerStateChanged
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeBreakerStateChanged(v TypedEventStreamEnvelopeBreakerStateChanged) error {
+	v.Type = "breaker.state_changed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeBreakerStateChanged performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeBreakerStateChanged
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeBreakerStateChanged(v TypedEventStreamEnvelopeBreakerStateChanged) error {
+	v.Type = "breaker.state_changed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeCityCreated returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeCityCreated
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeCityCreated() (TypedEventStreamEnvelopeCityCreated, error) {
 	var body TypedEventStreamEnvelopeCityCreated
@@ -14251,6 +14357,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeBeadWorktreeReaped()
 	case "beads.conditional_writes.degraded":
 		return t.AsTypedEventStreamEnvelopeBeadsConditionalWritesDegraded()
+	case "breaker.state_changed":
+		return t.AsTypedEventStreamEnvelopeBreakerStateChanged()
 	case "city.created":
 		return t.AsTypedEventStreamEnvelopeCityCreated()
 	case "city.resumed":
@@ -14644,6 +14752,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBeads
 // MergeTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded(v TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded) error {
 	v.Type = "beads.conditional_writes.degraded"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeBreakerStateChanged returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeBreakerStateChanged
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeBreakerStateChanged() (TypedTaggedEventStreamEnvelopeBreakerStateChanged, error) {
+	var body TypedTaggedEventStreamEnvelopeBreakerStateChanged
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeBreakerStateChanged overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeBreakerStateChanged
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeBreakerStateChanged(v TypedTaggedEventStreamEnvelopeBreakerStateChanged) error {
+	v.Type = "breaker.state_changed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeBreakerStateChanged performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeBreakerStateChanged
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeBreakerStateChanged(v TypedTaggedEventStreamEnvelopeBreakerStateChanged) error {
+	v.Type = "breaker.state_changed"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -16620,6 +16756,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeBeadWorktreeReaped()
 	case "beads.conditional_writes.degraded":
 		return t.AsTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded()
+	case "breaker.state_changed":
+		return t.AsTypedTaggedEventStreamEnvelopeBreakerStateChanged()
 	case "city.created":
 		return t.AsTypedTaggedEventStreamEnvelopeCityCreated()
 	case "city.resumed":

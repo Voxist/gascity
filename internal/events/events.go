@@ -288,6 +288,7 @@ var KnownEventTypes = []string{
 	// yet registered in internal/api (the payload registration lives in a
 	// follow-up that adds the full SSE projection). Until then, subscribers
 	// receive it via the custom-event envelope.
+	BreakerStateChanged,
 }
 
 // Event is a single recorded occurrence in the system.

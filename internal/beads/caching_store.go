@@ -79,6 +79,16 @@ type CachingStore struct {
 	latencyDriverActive bool
 
 	applyEventBeforeCommitForTest func()
+	// availabilityGate, when set, reports backing-store transport
+	// availability (the per-scope circuit breaker). See
+	// SetAvailabilityGate. Guarded by mu.
+	availabilityGate AvailabilityGate
+	// unavailableSkipLogged dedupes the reconcile-skip problem log to one
+	// entry per unavailable episode. Guarded by mu.
+	unavailableSkipLogged bool
+	// degradedReads counts reads served from last-good cache while the
+	// availability gate reported the store unavailable.
+	degradedReads atomic.Int64
 }
 
 var (
@@ -139,6 +149,9 @@ type CacheStats struct {
 	// "latency" (P95 above the high-water mark), or "both" (bead count
 	// and latency both push to MEDIUM).
 	CadenceDriver string
+	// DegradedReads counts reads served from last-good cache while the
+	// availability gate reported the backing store unavailable.
+	DegradedReads int64
 }
 
 const (
@@ -1144,6 +1157,7 @@ func (c *CachingStore) Stats() CacheStats {
 	default:
 		s.State = "uninitialized"
 	}
+	s.DegradedReads = c.degradedReads.Load()
 	return s
 }
 
