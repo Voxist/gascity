@@ -10,6 +10,8 @@ import (
 )
 
 // ErrNotFound is returned when a bead ID does not exist in the store.
+var ErrNotFound = errors.New("bead not found")
+
 // ErrStoreUnavailable is returned when the backing bead store cannot be
 // reached: the transport circuit breaker is open, or a fresh attempt failed
 // with a transport-class error. Consumers must treat it as "unknown", never
@@ -17,8 +19,6 @@ import (
 // freezes the affected scope's prior desired state, and CachingStore serves
 // last-good data tagged degraded. Check with errors.Is.
 var ErrStoreUnavailable = errors.New("bead store unavailable")
-
-var ErrNotFound = errors.New("bead not found")
 
 // ErrIDCollision is returned when bd's fuzzy/substring resolver returns a bead
 // whose ID differs from the requested ID (e.g. "gcy-dv7" resolves to
