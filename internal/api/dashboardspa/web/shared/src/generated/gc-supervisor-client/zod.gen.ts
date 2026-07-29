@@ -162,6 +162,15 @@ export const zBoundEventPayload = z.object({
     session_id: z.string()
 });
 
+export const zBreakerStateChangedPayload = z.object({
+    backoff_ms: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    failures: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    from: z.string(),
+    op_class: z.string(),
+    scope: z.string(),
+    to: z.string()
+});
+
 export const zCityCreateRequest = z.object({
     bootstrap_profile: z.enum([
         'k8s-cell',
@@ -3210,6 +3219,7 @@ export const zEventPayload = z.union([
     zBeadWorktreeReapSkippedPayload,
     zBeadWorktreeReapedPayload,
     zBoundEventPayload,
+    zBreakerStateChangedPayload,
     zCityCreateSucceededPayload,
     zCityLifecyclePayload,
     zCityUnregisterSucceededPayload,
@@ -3487,6 +3497,23 @@ export const zTypedEventStreamEnvelopeBeadsConditionalWritesDegraded = z.object(
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.literal('beads.conditional_writes.degraded'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedEventStreamEnvelope breaker.state_changed
+ */
+export const zTypedEventStreamEnvelopeBreakerStateChanged = z.object({
+    actor: z.string(),
+    message: z.string().optional(),
+    payload: zBreakerStateChangedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('breaker.state_changed'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -4678,6 +4705,7 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeBeadWorktreeReapSkipped.extend({ type: z.literal('bead.worktree.reap_skipped') }),
     zTypedEventStreamEnvelopeBeadWorktreeReaped.extend({ type: z.literal('bead.worktree.reaped') }),
     zTypedEventStreamEnvelopeBeadsConditionalWritesDegraded.extend({ type: z.literal('beads.conditional_writes.degraded') }),
+    zTypedEventStreamEnvelopeBreakerStateChanged.extend({ type: z.literal('breaker.state_changed') }),
     zTypedEventStreamEnvelopeCityCreated.extend({ type: z.literal('city.created') }),
     zTypedEventStreamEnvelopeCityResumed.extend({ type: z.literal('city.resumed') }),
     zTypedEventStreamEnvelopeCitySuspended.extend({ type: z.literal('city.suspended') }),
@@ -4916,6 +4944,24 @@ export const zTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded = z.o
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.literal('beads.conditional_writes.degraded'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedTaggedEventStreamEnvelope breaker.state_changed
+ */
+export const zTypedTaggedEventStreamEnvelopeBreakerStateChanged = z.object({
+    actor: z.string(),
+    city: z.string(),
+    message: z.string().optional(),
+    payload: zBreakerStateChangedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('breaker.state_changed'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -6176,6 +6222,7 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped.extend({ type: z.literal('bead.worktree.reap_skipped') }),
     zTypedTaggedEventStreamEnvelopeBeadWorktreeReaped.extend({ type: z.literal('bead.worktree.reaped') }),
     zTypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded.extend({ type: z.literal('beads.conditional_writes.degraded') }),
+    zTypedTaggedEventStreamEnvelopeBreakerStateChanged.extend({ type: z.literal('breaker.state_changed') }),
     zTypedTaggedEventStreamEnvelopeCityCreated.extend({ type: z.literal('city.created') }),
     zTypedTaggedEventStreamEnvelopeCityResumed.extend({ type: z.literal('city.resumed') }),
     zTypedTaggedEventStreamEnvelopeCitySuspended.extend({ type: z.literal('city.suspended') }),

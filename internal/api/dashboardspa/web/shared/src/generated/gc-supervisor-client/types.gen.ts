@@ -452,6 +452,33 @@ export type BoundEventPayload = {
     session_id: string;
 };
 
+export type BreakerStateChangedPayload = {
+    /**
+     * Open-state backoff chosen for this episode, in milliseconds.
+     */
+    backoff_ms?: number;
+    /**
+     * Consecutive transport-failure count at the change.
+     */
+    failures?: number;
+    /**
+     * Breaker state before the transition.
+     */
+    from: string;
+    /**
+     * Operation class, e.g. bd.
+     */
+    op_class: string;
+    /**
+     * Store scope (canonical scope root path).
+     */
+    scope: string;
+    /**
+     * Breaker state after the transition.
+     */
+    to: string;
+};
+
 export type CityCreateRequest = {
     /**
      * Optional bootstrap profile.
@@ -845,7 +872,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | BreakerStateChangedPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -5127,6 +5154,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeBeadWorktreeReaped) | ({
     type: 'beads.conditional_writes.degraded';
 } & TypedEventStreamEnvelopeBeadsConditionalWritesDegraded) | ({
+    type: 'breaker.state_changed';
+} & TypedEventStreamEnvelopeBreakerStateChanged) | ({
     type: 'city.created';
 } & TypedEventStreamEnvelopeCityCreated) | ({
     type: 'city.resumed';
@@ -5416,6 +5445,23 @@ export type TypedEventStreamEnvelopeBeadsConditionalWritesDegraded = {
     subject?: string;
     ts: string;
     type: 'beads.conditional_writes.degraded';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope breaker.state_changed
+ */
+export type TypedEventStreamEnvelopeBreakerStateChanged = {
+    actor: string;
+    message?: string;
+    payload: BreakerStateChangedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'breaker.state_changed';
     workflow?: WorkflowEventProjection;
 };
 
@@ -6616,6 +6662,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeBeadWorktreeReaped) | ({
     type: 'beads.conditional_writes.degraded';
 } & TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded) | ({
+    type: 'breaker.state_changed';
+} & TypedTaggedEventStreamEnvelopeBreakerStateChanged) | ({
     type: 'city.created';
 } & TypedTaggedEventStreamEnvelopeCityCreated) | ({
     type: 'city.resumed';
@@ -6914,6 +6962,24 @@ export type TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded = {
     subject?: string;
     ts: string;
     type: 'beads.conditional_writes.degraded';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope breaker.state_changed
+ */
+export type TypedTaggedEventStreamEnvelopeBreakerStateChanged = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: BreakerStateChangedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'breaker.state_changed';
     workflow?: WorkflowEventProjection;
 };
 
