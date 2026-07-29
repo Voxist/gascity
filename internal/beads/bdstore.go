@@ -945,7 +945,35 @@ func IsPartialResult(err error) bool {
 // tell a query that merely ran out of time under store contention — safe to
 // relax for idempotent work — apart from an error that must be treated as a
 // hard failure. Message matching is required because bd exec timeouts are
-// formatted strings that do not wrap the context.DeadlineExceeded sentinel.
+// formatted strings that do not wrap the context.DeadlineExceeded sentinel
+// (bdExecTimeoutError, and the second formatter in execPurge).
+//
+// SCOPE WARNING — substring-based, and safe only where a false positive is
+// harmless. The current caller (isGateContentionTimeout) relaxes a gate for
+// orders whose re-run is a no-op by contract, so a wrong "yes" costs a
+// duplicate dispatch and nothing more. On any path where timeout-versus-hard-
+// failure carries real weight, do not use this: a genuine outage whose message
+// happens to embed "deadline exceeded" would be misread as contention, and a
+// parse failure carries up to 200 bytes of raw bd output (bead titles) that the
+// caller does not control.
+//
+// It also matches on the flattened text of an errors.Join, so a chain mixing a
+// timeout with a hard failure reports true. That is deliberate for this caller:
+// the only join that reaches the gate carrying a timeout leaf is
+// mergeListTierResults, which fires only when BOTH list tiers fail — maximal
+// contention, where relaxing an idempotent gate is exactly the intended
+// behaviour. Do not generalize that reasoning to another call site.
+//
+// This is the fourth transient-error classifier in the tree, each with an
+// overlapping but deliberately different needle set. Keep them in sync only
+// where the semantics genuinely match:
+//   - isBdAmbiguousWriteError (this file) — write-path ambiguity; a broader
+//     connection-error set, because a half-applied write must be retried on
+//     transport faults this function ignores.
+//   - isTransientWorkQueryFailure (internal/dispatch/control.go) and
+//     isTransientGraphApplyError (internal/molecule/graph_apply.go) — both gate
+//     on an operation marker before matching needles, which bounds the text
+//     they can misread. This function has no such gate.
 func IsTimeoutError(err error) bool {
 	if err == nil {
 		return false

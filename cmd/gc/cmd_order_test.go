@@ -191,6 +191,7 @@ func TestOrderShowJSON(t *testing.T) {
 		Trigger:      "cron",
 		Schedule:     "0 3 * * *",
 		Pool:         "dog",
+		Idempotent:   true,
 		Source:       "/city/orders/digest.toml",
 		FormulaLayer: "/city/formulas",
 	}}
@@ -210,11 +211,20 @@ func TestOrderShowJSON(t *testing.T) {
 			Trigger      string `json:"trigger"`
 			Schedule     string `json:"schedule"`
 			Target       string `json:"target"`
+			Idempotent   bool   `json:"idempotent"`
 			FormulaLayer string `json:"formula_layer"`
 		} `json:"order"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 		t.Fatalf("order show JSON invalid: %v\n%s", err, stdout.String())
+	}
+	// The list projection asserts idempotent directly
+	// (TestOrderListJSONExposesIdempotent); without the same assertion here half
+	// the diagnostic contract could regress silently. idempotent is what decides
+	// whether an order fails open on a gate timeout, so operators reading
+	// `gc order show --json` need it to be accurate.
+	if !got.Order.Idempotent {
+		t.Error("order show JSON: idempotent = false, want true (the show projection must expose the flag the list projection does)")
 	}
 	if got.SchemaVersion != "1" || got.Order.Name != "digest" || got.Order.Target != "dog" || got.Order.FormulaLayer != "/city/formulas" {
 		t.Fatalf("payload = %+v", got)
