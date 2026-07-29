@@ -84,6 +84,15 @@ func doltProcRigOwner(p DoltProcInfo, rigs []resolverRig) (string, bool) {
 
 // pathUnderRoot reports whether path equals root or sits underneath it,
 // using the same normalization as samePath.
+//
+// PRECONDITION: root must already be normalized by the caller via
+// normalizePathForCompare; only path is normalized here. This is deliberate,
+// not an oversight — pathUnderRoot is called in the inner loop of a
+// process x rig cross product (doltProcRigOwner), where each rig root is
+// otherwise re-normalized once per candidate path of every discovered
+// process. Callers normalize the root once per rig instead. Passing a raw,
+// unnormalized root silently under-matches (protecting nothing), so any new
+// caller must normalize first.
 func pathUnderRoot(path, root string) bool {
 	normalized := normalizePathForCompare(path)
 	if normalized == "" {
