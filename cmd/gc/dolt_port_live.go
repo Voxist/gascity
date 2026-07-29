@@ -91,6 +91,23 @@ func newLiveDoltPortResolverForExplicitCity() liveDoltPortResolver {
 // returned resolution carries the port and the winning source; on failure
 // the error explains why and the attempt trail records every source
 // consulted. A nil error implies a valid Port.
+//
+// Attempts is load-bearing, not just diagnostics. ResolveDoltPort treats any
+// attempt with Status "error" as a hard stop: it returns Port 0 instead of
+// falling through to LegacyDefaultDoltPort (3307). So a garbled managed
+// handle — a runtime handle carrying an unparseable or out-of-range port —
+// is recorded here as "error" and, if no later step resolves a port,
+// suppresses the legacy default for the whole chain. That is deliberate and
+// conservative: it mirrors the historical bad-port-file hard stop. A handle
+// we cannot parse means the managed runtime state is corrupt, and guessing
+// 3307 would point a destructive caller (gc dolt cleanup) at whatever
+// happens to be listening there. A merely absent handle records "not-found"
+// instead and does leave the legacy default reachable.
+//
+// An invalid handle does not by itself fail the chain: if step 2 resolves an
+// unambiguous live listener, that wins (see
+// TestLiveDoltPortResolver_InvalidHandleValueFallsThrough). The suppression
+// only bites when the chain would otherwise reach the legacy default.
 func (r liveDoltPortResolver) resolve(cityPath string) (liveDoltPortResolution, error) {
 	res := liveDoltPortResolution{}
 	if strings.TrimSpace(cityPath) == "" {
@@ -98,7 +115,7 @@ func (r liveDoltPortResolver) resolve(cityPath string) (liveDoltPortResolution, 
 			PortResolutionAttempt{Source: liveDoltHandleSource, Status: "not-provided"},
 			PortResolutionAttempt{Source: liveDoltProcessSource, Status: "not-provided"},
 		)
-		return res, fmt.Errorf("%w: no city path provided", errNoLiveDoltEndpoint)
+		return res, fmt.Errorf("no city path provided: %w", errNoLiveDoltEndpoint)
 	}
 
 	// Step 1: managed-server live handle.
