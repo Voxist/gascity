@@ -15,8 +15,10 @@ import (
 )
 
 // RigDataPresenceCheck flags likely data loss in a rig's live bead store,
-// using the local issues.jsonl export as the evidence that the rig previously
-// held data. Because the rig identity file is stamped at scope creation (before the
+// using an export of the rig's rows as the evidence that it previously held
+// data: the local .beads/issues.jsonl, or — because gc deletes that file on
+// managed scopes — the durable archived export supplied via
+// WithArchiveExportRows. Because the rig identity file is stamped at scope creation (before the
 // first bead), identity-present alone does not imply the store should be
 // non-empty; the export history is what separates data loss from a fresh rig.
 //
@@ -35,6 +37,20 @@ type RigDataPresenceCheck struct {
 	rig      config.Rig
 	newStore func(rigPath string) (beads.Store, error)
 	fs       fsys.FS
+	// archiveExportRows reports the row count of the rig's durable archived
+	// export, and whether one was found. Injected rather than resolved here: the
+	// archive lives under a pack-owned layout with its own precedence rules, and
+	// this package should not learn where a pack keeps its state. Nil disables
+	// the fallback, leaving the local-export behaviour unchanged.
+	archiveExportRows func(rigPath string) (int, bool)
+}
+
+// WithArchiveExportRows injects the durable archived-export oracle used when a
+// rig's local .beads/issues.jsonl is absent. See the call site in Run for why
+// the local file cannot be relied on for gc-managed scopes.
+func (c *RigDataPresenceCheck) WithArchiveExportRows(fn func(rigPath string) (int, bool)) *RigDataPresenceCheck {
+	c.archiveExportRows = fn
+	return c
 }
 
 // NewRigDataPresenceCheck creates a per-rig data-presence check.
@@ -105,8 +121,26 @@ func (c *RigDataPresenceCheck) Run(_ *CheckContext) *CheckResult {
 	// an empty store cannot by itself distinguish data loss from a freshly
 	// created rig. Read the export count first and gate the blocking signals on
 	// it.
-	jsonlLines, jsonlErr := countJSONLLines(filepath.Join(rigPath, ".beads", "issues.jsonl"))
+	jsonlLines, jsonlErr := CountJSONLLines(filepath.Join(rigPath, ".beads", "issues.jsonl"))
 	haveExportHistory := jsonlErr == nil && jsonlLines > 0
+	evidence := "issues.jsonl"
+
+	// The local export is not durable on a gc-managed rig. Managed scopes get
+	// export.auto=false baked in, and gc then deletes .beads/issues.jsonl
+	// (reapStaleBdExportJSONL, and again after EnsureCanonicalConfig) because the
+	// re-import cycle stalls bd writes on large datasets. So on exactly the
+	// configuration this check targets, the local file is absent and the blocking
+	// branch below could never fire — the check would report "fresh rig, skip"
+	// for a rig that had just lost its rows.
+	//
+	// Fall back to the durable archive export, which lives outside the scope and
+	// is not reaped. Only consulted when the local file yields nothing, so a
+	// present local export still wins as the more current signal.
+	if !haveExportHistory && c.archiveExportRows != nil {
+		if archived, ok := c.archiveExportRows(rigPath); ok && archived > 0 {
+			jsonlLines, haveExportHistory, evidence = archived, true, "archived export"
+		}
+	}
 
 	if len(rows) == 0 {
 		if !haveExportHistory {
@@ -122,8 +156,8 @@ func (c *RigDataPresenceCheck) Run(_ *CheckContext) *CheckResult {
 		// (the va incident 2026-06-20: 803 rows in issues.jsonl, 0 live).
 		r.Status = StatusError
 		r.Severity = SeverityBlocking
-		r.Message = fmt.Sprintf("rig %s: live store is empty but issues.jsonl has %d rows — data loss",
-			c.rig.Name, jsonlLines)
+		r.Message = fmt.Sprintf("rig %s: live store is empty but %s has %d rows — data loss",
+			c.rig.Name, evidence, jsonlLines)
 		r.FixHint = dataPresenceFixHint()
 		return r
 	}
@@ -137,8 +171,8 @@ func (c *RigDataPresenceCheck) Run(_ *CheckContext) *CheckResult {
 	if haveExportHistory && len(rows) < jsonlLines {
 		r.Status = StatusWarning
 		r.Severity = SeverityAdvisory
-		r.Message = fmt.Sprintf("rig %s: live store has %d rows but issues.jsonl has %d — possible row deficit (advisory; retention/archival can cause this)",
-			c.rig.Name, len(rows), jsonlLines)
+		r.Message = fmt.Sprintf("rig %s: live store has %d rows but %s has %d — possible row deficit (advisory; retention/archival can cause this)",
+			c.rig.Name, len(rows), evidence, jsonlLines)
 		r.FixHint = dataPresenceFixHint()
 		return r
 	}
@@ -148,9 +182,12 @@ func (c *RigDataPresenceCheck) Run(_ *CheckContext) *CheckResult {
 	return r
 }
 
-// countJSONLLines counts non-empty lines in a JSONL file.
+// CountJSONLLines counts non-empty lines in a JSONL file. Exported so a caller
+// supplying an alternative export source (see WithArchiveExportRows) counts
+// rows exactly as this check does — two counters with different notions of a
+// row would make the live-vs-export comparison meaningless.
 // Returns (0, os.ErrNotExist) when the file is absent — callers treat that as "no signal".
-func countJSONLLines(path string) (int, error) {
+func CountJSONLLines(path string) (int, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
