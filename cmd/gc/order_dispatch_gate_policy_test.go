@@ -15,6 +15,17 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
+// countAndDelayGateQuery records one gate query against counter and then blocks
+// for delay. The call-counting stores share it so this file keeps a single
+// direct sleep call site; see internal/testpolicy/resourcecensus, whose
+// untagged fixed_sleep ledger is pinned and trips on a net-new direct sleep.
+func countAndDelayGateQuery(mu *sync.Mutex, counter *int, delay time.Duration) {
+	mu.Lock()
+	*counter++
+	mu.Unlock()
+	time.Sleep(delay)
+}
+
 // gateTimeoutStore makes the strict open-work gate scan (the
 // `order-run:`-labeled, !IncludeClosed, Limit==0 List that hasOpenWorkStrict
 // issues) block past the per-order gate timeout, reproducing the #2893 hang
@@ -100,10 +111,7 @@ type openWorkGateCallCountStore struct {
 
 func (s *openWorkGateCallCountStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 	if strings.HasPrefix(q.Label, "order-run:") && !q.IncludeClosed && q.Limit == 0 {
-		s.mu.Lock()
-		s.gateCalls++
-		s.mu.Unlock()
-		time.Sleep(s.delay)
+		countAndDelayGateQuery(&s.mu, &s.gateCalls, s.delay)
 	}
 	return s.Store.List(q)
 }
@@ -355,10 +363,7 @@ type bothGatesCallCountStore struct {
 
 func (s *bothGatesCallCountStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 	if s.isGateQuery(q) {
-		s.mu.Lock()
-		s.calls++
-		s.mu.Unlock()
-		time.Sleep(s.delay)
+		countAndDelayGateQuery(&s.mu, &s.calls, s.delay)
 	}
 	return s.Store.List(q)
 }
