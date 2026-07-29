@@ -9,7 +9,43 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+// recordedScopeDoltPorts reads each scope's .beads/dolt-server.port. It exists
+// solely as the degraded-mode fallback in protectedDoltPortsForReap, for the
+// window where live resolution returns nothing at all.
+//
+// Deliberately NOT a second source of truth. Live state wins whenever it has an
+// answer; this never selects a reap target, never overrides a live attribution,
+// and is not consulted when liveResolve succeeds. The file is a managed-local
+// compatibility mirror of the canonical managed port (writeDoltPortFile), so on
+// a healthy city it merely restates what live resolution already reported.
+//
+// Unparseable or malformed files are skipped: they contribute nothing, which
+// leaves the reaper exactly where it would be without this fallback. If two
+// scopes claim the same port (operator misconfiguration), the later-listed one
+// wins the label — harmless, since any match protects regardless of which name
+// is attributed.
+func recordedScopeDoltPorts(rigs []resolverRig, fs fsys.FS) map[int]string {
+	out := map[int]string{}
+	if fs == nil {
+		return out
+	}
+	for _, rig := range rigs {
+		data, err := fs.ReadFile(filepath.Join(rig.Path, ".beads", "dolt-server.port"))
+		if err != nil {
+			continue
+		}
+		port, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil || !validDoltPort(port) {
+			continue
+		}
+		out[port] = rig.Name
+	}
+	return out
+}
 
 // doltProcRigOwner reports which registered rig owns a discovered dolt
 // sql-server process, matched by the process's --data-dir or --config argv

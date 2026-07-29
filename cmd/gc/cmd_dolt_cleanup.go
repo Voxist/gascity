@@ -502,6 +502,23 @@ func protectedDoltPortsForReap(opts cleanupOptions, procs []DoltProcInfo) map[in
 	}
 	if live, err := liveResolve(opts.CityPath); err == nil && validDoltPort(live.Port) {
 		ports[live.Port] = "managed city dolt"
+	} else {
+		// Live resolution is unavailable (no runtime handle, unreadable process
+		// table, permissions). The rationale above — a lying status file fails to
+		// protect the REAL listener — compares a stale file against WORKING live
+		// state. It does not cover ABSENT live state, where the file is the only
+		// signal left, and where the managed city port would otherwise be in the
+		// reap set with a live server still on it.
+		//
+		// Read the recorded ports as a PROTECT-ONLY fallback: they can add a port
+		// to the protected set, never select a reap target and never override a
+		// live answer. A stale entry costs a skipped reap; the miss it covers
+		// costs a DataDir. These are exactly the conditions under which an
+		// operator reaches for `gc dolt cleanup`, so the degraded path is the one
+		// that most needs the guard.
+		for port, rig := range recordedScopeDoltPorts(opts.Rigs, opts.FS) {
+			ports[port] = rig + " (recorded port; live resolution unavailable)"
+		}
 	}
 	for _, proc := range procs {
 		owner, ok := doltProcRigOwner(proc, opts.Rigs)
