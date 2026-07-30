@@ -81,7 +81,10 @@ type CachingStore struct {
 	// availabilityGate, when set, reports backing-store transport
 	// availability (the per-scope circuit breaker). See
 	// SetAvailabilityGate. Guarded by mu.
-	availabilityGate AvailabilityGate
+	// Stored atomically rather than under mu: consulted by every cached read,
+	// including while another goroutine holds mu for writing, so a lock-taking
+	// read deadlocks those reads against an in-flight reconcile.
+	availabilityGate atomic.Value // AvailabilityGate
 	// unavailableSkipLogged dedupes the reconcile-skip problem log to one
 	// entry per unavailable episode. Guarded by mu.
 	unavailableSkipLogged bool

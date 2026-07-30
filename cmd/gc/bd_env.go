@@ -1183,21 +1183,32 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 				return out, fmt.Errorf("classifying scope backend (bd error: %w): %w", err, classifyErr)
 			}
 			if ok {
+				// gc does not manage RECOVERY for external PG, but the failure is
+				// still diagnosable: "connection refused" against a dead PG
+				// endpoint is the canonical wedged transport. Classifying it
+				// inconclusive here would mean the breaker could never trip on a
+				// PG city, so subprocesses would pile up exactly as before.
+				pgFailure, pgConclusive := bdBreakerOutcomeFor(cityPath, dir, env, err)
+				recordBdBreakerOutcome(breaker, pgFailure, pgConclusive)
 				return out, fmt.Errorf("postgres at %s:%s: gc does not manage external PG endpoints (no managed recovery attempted): %w", meta.PostgresHost, meta.PostgresPort, err)
 			}
 		}
 		if err == nil && scopeBackendIsPostgres(cityPath, dir) {
+			// bd answered successfully; that resolves the probe whatever the
+			// backend served it.
+			recordBdBreakerOutcome(breaker, false, true)
 			return out, err
 		}
 		if !bdTransportRetryableError(cityPath, dir, env, err) {
 			// Success or application-class failure: bd reached the store
 			// and answered, so the transport is healthy.
-			recordBdBreakerOutcome(breaker, false)
+			failure, conclusive := bdBreakerOutcomeFor(cityPath, dir, env, err)
+			recordBdBreakerOutcome(breaker, failure, conclusive)
 			return out, err
 		}
 		if bdTransportRecoverableError(cityPath, dir, env, err) {
 			if recErr := recoverManagedBDCommand(cityPath); recErr != nil {
-				recordBdBreakerOutcome(breaker, true)
+				recordBdBreakerOutcome(breaker, true, true)
 				return out, err
 			}
 		}
@@ -1213,7 +1224,8 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		// The retry's outcome is this invocation's final word: a second
 		// transport failure counts one consecutive failure toward the
 		// trip threshold; recovery resets the count.
-		recordBdBreakerOutcome(breaker, bdTransportRetryableError(cityPath, dir, retryEnv, retryErr))
+		retryFailure, retryConclusive := bdBreakerOutcomeFor(cityPath, dir, retryEnv, retryErr)
+		recordBdBreakerOutcome(breaker, retryFailure, retryConclusive)
 		return retryOut, retryErr
 	}
 }

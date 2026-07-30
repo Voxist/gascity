@@ -21,14 +21,20 @@ import (
 var bdResilience = struct {
 	mu         sync.Mutex
 	registries map[string]*resilience.Registry
-}{registries: make(map[string]*resilience.Registry)}
+	// provisional marks registries built from an unreadable config, so the
+	// first clean read can replace them with the operator's real settings.
+	provisional map[string]bool
+}{
+	registries:  make(map[string]*resilience.Registry),
+	provisional: make(map[string]bool),
+}
 
 // bdResilienceSettingsForCity resolves [beads.resilience] for a city,
 // falling back to defaults when the config cannot be loaded.
-func bdResilienceSettingsForCity(cityPath string) resilience.Settings {
+func bdResilienceSettingsForCity(cityPath string) (resilience.Settings, bool) {
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil || cfg == nil {
-		return resilience.DefaultSettings()
+		return resilience.DefaultSettings(), false
 	}
 	r := cfg.Beads.Resilience
 	return resilience.Settings{
@@ -37,7 +43,7 @@ func bdResilienceSettingsForCity(cityPath string) resilience.Settings {
 		OpenBase:            r.OpenBaseOrDefault(),
 		OpenMax:             r.OpenMaxOrDefault(),
 		HalfOpenInterval:    r.HalfOpenIntervalOrDefault(),
-	}
+	}, true
 }
 
 // bdResilienceRegistryForCity returns the breaker registry for a city,
@@ -52,15 +58,28 @@ func bdResilienceRegistryForCity(cityPath string) *resilience.Registry {
 	bdResilience.mu.Unlock()
 
 	// Config load happens outside the lock (file I/O); recheck after.
-	settings := bdResilienceSettingsForCity(key)
+	settings, configured := bdResilienceSettingsForCity(key)
 	bdResilience.mu.Lock()
 	defer bdResilience.mu.Unlock()
 	if reg, ok := bdResilience.registries[key]; ok {
-		return reg
+		if !bdResilience.provisional[key] || !configured {
+			return reg
+		}
+		// The cached registry was built from an unreadable config; the config
+		// now reads cleanly, so replace it with the operator's real settings.
+		// This happens at most once per city and costs only the breaker state
+		// accumulated during the unreadable window.
 	}
 	reg := resilience.NewRegistry(settings)
 	reg.SetOnStateChange(breakerStateChangeEmitter(key))
+	// Always memoize, even when provisional. A registry rebuilt on every call
+	// hands out a fresh breaker with failures=0, so the consecutive-failure
+	// count never accumulates and the breaker can never trip; worse, a store
+	// that captured a gate from a discarded registry keeps it for the process
+	// lifetime. Tracking the provisional flag fixes the stale-settings problem
+	// without giving up accumulation.
 	bdResilience.registries[key] = reg
+	bdResilience.provisional[key] = !configured
 	return reg
 }
 
@@ -129,8 +148,20 @@ func wireStoreAvailabilityGate(store beads.Store, cityPath, scopeRoot string) {
 // bdTransportRetryableMarkers classification: only transport-class
 // failures count toward tripping; success or application-class errors
 // (bd reached the store and answered) reset the consecutive count.
-func recordBdBreakerOutcome(breaker *resilience.Breaker, transportFailure bool) {
+func recordBdBreakerOutcome(breaker *resilience.Breaker, transportFailure, conclusive bool) {
 	if breaker == nil {
+		return
+	}
+	if !conclusive {
+		// An unclassifiable error is not evidence the transport is healthy, so
+		// it must not reset the consecutive-failure count. But it must still
+		// RESOLVE a probe that Allow() already consumed: leaving a half-open
+		// breaker unresolved pins the scope in degraded mode forever, because
+		// it neither closes (no success) nor re-arms its backoff (no failure),
+		// and once open the reconcile probe is the only bd traffic left.
+		if breaker.State() == resilience.StateHalfOpen {
+			breaker.RecordFailure()
+		}
 		return
 	}
 	if transportFailure {
@@ -138,4 +169,43 @@ func recordBdBreakerOutcome(breaker *resilience.Breaker, transportFailure bool) 
 		return
 	}
 	breaker.RecordSuccess()
+}
+
+// bdBreakerOutcomeFor classifies one bd invocation for breaker accounting.
+//
+// Deliberately NOT bdTransportRetryableError. That answers "is another attempt
+// worth making?", and a command timeout is not — it already burned the full
+// budget. But a timeout IS evidence the transport never answered, which is what
+// the breaker must count. Conflating the two made a hung backend record as a
+// SUCCESS, resetting the failure count, so the breaker could never trip for the
+// subprocess pile-up it exists to prevent.
+//
+// The third state is not a way to opt scopes out of the breaker: an error that
+// is neither a known transport marker nor a no-answer signal is genuinely
+// ambiguous, so it neither counts as a failure nor certifies health.
+func bdBreakerOutcomeFor(cityPath, dir string, env map[string]string, err error) (transportFailure, conclusive bool) {
+	if err == nil {
+		return false, true
+	}
+	if bdTransportRetryableError(cityPath, dir, env, err) {
+		return true, true
+	}
+	if bdErrorIndicatesNoAnswer(err) {
+		return true, true
+	}
+	return false, false
+}
+
+// bdErrorIndicatesNoAnswer reports whether err means bd never got a reply, as
+// opposed to getting one it did not like. A wedged backend produces these
+// shapes once marker matching has declined the error: bd blocked until the
+// command budget expired, so there is no stderr marker to match.
+func bdErrorIndicatesNoAnswer(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "timed out after") ||
+		strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "signal: killed")
 }

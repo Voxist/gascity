@@ -39,10 +39,17 @@ var ErrStoreClosed = errors.New("bead store closed")
 
 // ErrStoreUnavailable is returned when the backing bead store cannot be
 // reached: the transport circuit breaker is open, or a fresh attempt failed
-// with a transport-class error. Consumers must treat it as "unknown", never
-// as "empty": gc hook exits 2 (distinct from exit-1 no-work), the controller
-// freezes the affected scope's prior desired state, and CachingStore serves
-// last-good data tagged degraded. Check with errors.Is.
+// with a transport-class error.
+//
+// It means UNKNOWN, never EMPTY. A caller that treats it as "no results" will
+// act on an absence it has not established — a convoy tally would read "zero
+// completed work" and drive the graph forward on it.
+//
+// Callers must branch on it with errors.Is. Today the only consumer that does
+// is CachingStore, which short-circuits reads rather than making a backing call
+// that would fail with this same error. Propagating it into gc hook's exit code
+// and the controller's desired-state handling is not yet implemented; do not
+// infer those behaviors from this comment.
 var ErrStoreUnavailable = errors.New("bead store unavailable")
 
 // ErrParentProjectionSuperseded reports that a parent update was overtaken by a

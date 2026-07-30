@@ -341,6 +341,10 @@ func controlReadyCacheFor(dir, cityPath string, cfg *config.City) *beads.Caching
 		return nil
 	}
 	cs := beads.NewCachingStore(store, nil)
+	// Share the scope's transport breaker. Without this the readiness cache is
+	// the one caching store that inherits the chokepoint's fail-fast with no
+	// gate to short-circuit its doomed backing calls.
+	cs.SetAvailabilityGate(bdScopeBreaker(cityPath, dir))
 	if err := cs.PrimeActive(); err != nil {
 		log.Printf("control-ready cache: pre-prime failed for %s: %v (falling back to a live bd query)", dir, err)
 		return nil

@@ -34,11 +34,17 @@ func (c *CachingStore) ListCtx(ctx context.Context, query ListQuery) ([]Bead, er
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
-	// Breaker open: serve last-good cached data (tagged degraded via
-	// Degraded()/DegradedReads) instead of dialing an unreachable store.
-	// An unprimed cache returns ErrStoreUnavailable — never empty.
-	if c.servingDegraded() {
-		return c.listLastGood(query)
+	// Breaker open: the backing call below would fail with ErrStoreUnavailable
+	// anyway, so return it now rather than paying for a doomed subprocess.
+	//
+	// This deliberately does NOT serve cached data. The read path underneath
+	// already serves everything the cache can safely answer, through
+	// readCacheWithOverlay (dirty-row refresh, suppression, the closed-only and
+	// parent-history routing). Short-circuiting above it to answer MORE means
+	// answering queries the cache has already decided it cannot — which is what
+	// cacheDegraded exists to prevent.
+	if c.storeUnavailable() {
+		return nil, fmt.Errorf("listing beads: %w", ErrStoreUnavailable)
 	}
 	if query.Live || query.ParentID != "" {
 		c.mu.RLock()
@@ -430,10 +436,10 @@ func (c *CachingStore) ListOpen(status ...string) ([]Bead, error) {
 
 // Get returns a single bead by ID from the cache or backing store.
 func (c *CachingStore) Get(id string) (Bead, error) {
-	// Breaker open: serve the last-good cached bead; an uncached ID is
-	// ErrStoreUnavailable because the cache cannot prove absence.
-	if c.servingDegraded() {
-		return c.getLastGood(id)
+	// Breaker open: short-circuit the doomed backing call. Same reasoning as
+	// List — the cached path below already answers what it safely can.
+	if c.storeUnavailable() {
+		return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrStoreUnavailable)
 	}
 	c.mu.RLock()
 	if _, deleted := c.deletedSeq[id]; deleted {

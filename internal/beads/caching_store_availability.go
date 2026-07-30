@@ -1,9 +1,6 @@
 package beads
 
-import (
-	"errors"
-	"fmt"
-)
+import "errors"
 
 // AvailabilityGate reports whether the backing store transport is
 // currently believed reachable. The production implementation is the
@@ -19,83 +16,63 @@ type AvailabilityGate interface {
 	ProbeDue() bool
 }
 
-// SetAvailabilityGate wires the transport availability gate. While the
-// gate reports unavailable, List and Get serve last-good cached data
-// tagged degraded (or ErrStoreUnavailable when the cache cannot answer)
-// and the reconciler skips cycles except when a recovery probe is due.
+// SetAvailabilityGate wires the transport availability gate.
+//
+// The gate is an OPTIMISATION, not a second opinion about what the cache may
+// serve. While it reports unavailable, reads return ErrStoreUnavailable rather
+// than making a backing call that would fail with the same error after spawning
+// a doomed bd subprocess, and the reconciler skips cycles except when a
+// recovery probe is due. It never changes WHICH queries are answered from
+// memory: that belongs to cacheServableLocked and readCacheWithOverlay, which
+// already refuse stale, dirty and history-shaped reads.
+//
+// That boundary is deliberate. An earlier version short-circuited above the
+// cached read path to serve "last-good" data during an outage, which bypassed
+// the overlay's dirty-row refresh and suppression set, answered closed-only and
+// parent-history queries from an active-only map (a convoy tally read "zero
+// completed work"), and answered Live queries — which exist precisely to demand
+// a backing read — from stale memory. It also fought cacheDegraded: a sustained
+// outage flips the cache to that state, disabling serving, so last-good serving
+// switched itself off partway through the outage it existed for.
+//
 // A nil gate (the default) disables gating.
 func (c *CachingStore) SetAvailabilityGate(g AvailabilityGate) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.availabilityGate = g
+	if g == nil {
+		// atomic.Value rejects a nil value; an unset gate is the zero Value,
+		// which availabilityGateRef already reads as "no gate".
+		return
+	}
+	c.availabilityGate.Store(g)
 }
 
 // availabilityGateRef returns the configured gate (nil when unset).
+//
+// Read without holding mu: every cached read consults it, including while
+// another goroutine holds mu for writing, and a lock-taking read here
+// deadlocks those reads against an in-flight reconcile and defeats their
+// context cancellation.
 func (c *CachingStore) availabilityGateRef() AvailabilityGate {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.availabilityGate
+	g, _ := c.availabilityGate.Load().(AvailabilityGate)
+	return g
 }
 
-// servingDegraded reports whether reads must avoid the backing store
-// because the availability gate says the transport is unavailable.
-func (c *CachingStore) servingDegraded() bool {
+// storeUnavailable reports whether the backing transport is believed down, so
+// a call into it would fail rather than do useful work.
+func (c *CachingStore) storeUnavailable() bool {
 	g := c.availabilityGateRef()
 	return g != nil && !g.Available()
 }
 
-// Degraded reports whether the cache is currently serving degraded data:
-// the availability gate says the store is unreachable, or repeated
-// reconcile failures pushed the cache into the degraded state.
+// Degraded reports whether reads may be answered from a cache that repeated
+// reconcile failures marked stale, or whose backing transport is believed
+// unavailable.
 func (c *CachingStore) Degraded() bool {
-	if c.servingDegraded() {
+	if c.storeUnavailable() {
 		return true
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.state == cacheDegraded
-}
-
-// listLastGood answers a List query purely from the in-memory cache while
-// the backing store is unavailable. An unprimed cache returns
-// ErrStoreUnavailable — unavailable must never read as empty.
-func (c *CachingStore) listLastGood(query ListQuery) ([]Bead, error) {
-	c.mu.RLock()
-	if c.state == cacheUninitialized {
-		c.mu.RUnlock()
-		return nil, fmt.Errorf("listing beads: %w", ErrStoreUnavailable)
-	}
-	cached := make([]Bead, 0, len(c.beads))
-	for _, b := range c.beads {
-		if !query.Matches(b) {
-			continue
-		}
-		cached = append(cached, cloneBead(b))
-	}
-	c.mu.RUnlock()
-	c.degradedReads.Add(1)
-	sortBeadsForQuery(cached, query.Sort)
-	if query.Limit > 0 && len(cached) > query.Limit {
-		cached = cached[:query.Limit]
-	}
-	return cached, nil
-}
-
-// getLastGood answers a Get purely from the in-memory cache while the
-// backing store is unavailable. A bead absent from the cache returns
-// ErrStoreUnavailable: the cache cannot distinguish "missing" from
-// "unreachable" (closed beads are not fully cached).
-func (c *CachingStore) getLastGood(id string) (Bead, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if _, deleted := c.deletedSeq[id]; deleted {
-		return Bead{}, ErrNotFound
-	}
-	if b, ok := c.beads[id]; ok {
-		c.degradedReads.Add(1)
-		return cloneBead(b), nil
-	}
-	return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrStoreUnavailable)
 }
 
 // reconcileUnavailableSkip reports whether the current reconciliation
