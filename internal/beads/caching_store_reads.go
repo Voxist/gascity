@@ -137,6 +137,13 @@ func liveListQuery(query ListQuery) ListQuery {
 // queries are unsupported because Count must match List cardinality, including
 // List's post-sort limit cap.
 func (c *CachingStore) Count(ctx context.Context, query ListQuery, excludeTypes ...string) (int, error) {
+	// Breaker open: never fall through to the backing store. Otherwise a count
+	// hard-fails with ErrStoreUnavailable while List on the same data serves
+	// degraded, so a status page renders its bead list and errors on the count
+	// beside it.
+	if c.servingDegraded() {
+		return c.countLastGood(ctx, query, excludeTypes)
+	}
 	if !query.HasFilter() && !query.AllowScan {
 		return 0, fmt.Errorf("counting beads: %w", ErrQueryRequiresScan)
 	}
@@ -500,6 +507,11 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 
 // Ready returns open beads whose blocking deps are all closed.
 func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
+	// Ready needs dependency completeness the degraded cache cannot guarantee,
+	// so it declines rather than answering from an active-only snapshot.
+	if c.servingDegraded() {
+		return nil, fmt.Errorf("ready beads: %w", ErrStoreUnavailable)
+	}
 	if readyQueryFromArgs(query) != (ReadyQuery{}) {
 		return c.backing.Ready(query...)
 	}

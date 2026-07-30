@@ -25,10 +25,10 @@ var bdResilience = struct {
 
 // bdResilienceSettingsForCity resolves [beads.resilience] for a city,
 // falling back to defaults when the config cannot be loaded.
-func bdResilienceSettingsForCity(cityPath string) resilience.Settings {
+func bdResilienceSettingsForCity(cityPath string) (resilience.Settings, bool) {
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil || cfg == nil {
-		return resilience.DefaultSettings()
+		return resilience.DefaultSettings(), false
 	}
 	r := cfg.Beads.Resilience
 	return resilience.Settings{
@@ -37,7 +37,7 @@ func bdResilienceSettingsForCity(cityPath string) resilience.Settings {
 		OpenBase:            r.OpenBaseOrDefault(),
 		OpenMax:             r.OpenMaxOrDefault(),
 		HalfOpenInterval:    r.HalfOpenIntervalOrDefault(),
-	}
+	}, true
 }
 
 // bdResilienceRegistryForCity returns the breaker registry for a city,
@@ -52,7 +52,7 @@ func bdResilienceRegistryForCity(cityPath string) *resilience.Registry {
 	bdResilience.mu.Unlock()
 
 	// Config load happens outside the lock (file I/O); recheck after.
-	settings := bdResilienceSettingsForCity(key)
+	settings, configured := bdResilienceSettingsForCity(key)
 	bdResilience.mu.Lock()
 	defer bdResilience.mu.Unlock()
 	if reg, ok := bdResilience.registries[key]; ok {
@@ -60,6 +60,13 @@ func bdResilienceRegistryForCity(cityPath string) *resilience.Registry {
 	}
 	reg := resilience.NewRegistry(settings)
 	reg.SetOnStateChange(breakerStateChangeEmitter(key))
+	if !configured {
+		// Settings are a guess from an unreadable config. Serve this call from
+		// them but do not memoize: defaults are Enabled, and caching them would
+		// permanently re-enable a breaker the operator disabled after one
+		// transient read failure.
+		return reg
+	}
 	bdResilience.registries[key] = reg
 	return reg
 }
@@ -129,8 +136,8 @@ func wireStoreAvailabilityGate(store beads.Store, cityPath, scopeRoot string) {
 // bdTransportRetryableMarkers classification: only transport-class
 // failures count toward tripping; success or application-class errors
 // (bd reached the store and answered) reset the consecutive count.
-func recordBdBreakerOutcome(breaker *resilience.Breaker, transportFailure bool) {
-	if breaker == nil {
+func recordBdBreakerOutcome(breaker *resilience.Breaker, transportFailure, conclusive bool) {
+	if breaker == nil || !conclusive {
 		return
 	}
 	if transportFailure {
@@ -138,4 +145,43 @@ func recordBdBreakerOutcome(breaker *resilience.Breaker, transportFailure bool) 
 		return
 	}
 	breaker.RecordSuccess()
+}
+
+// bdBreakerOutcomeFor classifies one bd invocation for breaker accounting.
+//
+// Deliberately NOT bdTransportRetryableError. That answers "is another attempt
+// worth making?", and a command timeout is not — it already burned the full
+// budget. But a timeout IS evidence the transport never answered, which is what
+// the breaker must count. Conflating the two made a hung backend record as a
+// SUCCESS, resetting the failure count, so the breaker could never trip for the
+// subprocess pile-up it exists to prevent.
+//
+// The third state matters as much as the other two: an error that is neither a
+// known transport marker nor a no-answer signal is reported inconclusive rather
+// than healthy, so an unclassifiable error stream cannot hide a wedged backend.
+func bdBreakerOutcomeFor(cityPath, dir string, env map[string]string, err error) (transportFailure, conclusive bool) {
+	if err == nil {
+		return false, true
+	}
+	if bdTransportRetryableError(cityPath, dir, env, err) {
+		return true, true
+	}
+	if bdErrorIndicatesNoAnswer(err) {
+		return true, true
+	}
+	return false, false
+}
+
+// bdErrorIndicatesNoAnswer reports whether err means bd never got a reply, as
+// opposed to getting one it did not like. A wedged backend produces these
+// shapes once marker matching has declined the error: bd blocked until the
+// command budget expired, so there is no stderr marker to match.
+func bdErrorIndicatesNoAnswer(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "timed out after") ||
+		strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "signal: killed")
 }

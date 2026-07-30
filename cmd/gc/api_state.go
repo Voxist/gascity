@@ -348,6 +348,11 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 			// the cache handle must be shared too for immediate cross-rig reads.
 			if sharedLegacyCachedStore == nil {
 				sharedLegacyCachedStore = wrapWithCachingStore(cs.cacheCtx, sharedLegacyFileStore, cs.eventProv, true)
+				// Legacy file mode aliases every rig to one backing store, so
+				// the shared cache needs the city-scope gate too. Without it
+				// this was the one caching store that inherited the breaker's
+				// fail-fast with no degraded serving to compensate.
+				wireStoreAvailabilityGate(sharedLegacyCachedStore, cs.cityPath, cs.cityPath)
 			}
 			stores[rig.Name] = sharedLegacyCachedStore
 			continue
