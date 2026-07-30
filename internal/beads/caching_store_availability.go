@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"context"
 	"errors"
 	"fmt"
 )
@@ -25,16 +26,18 @@ type AvailabilityGate interface {
 // and the reconciler skips cycles except when a recovery probe is due.
 // A nil gate (the default) disables gating.
 func (c *CachingStore) SetAvailabilityGate(g AvailabilityGate) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.availabilityGate = g
+	if g == nil {
+		// atomic.Value rejects a nil value; an unset gate is the zero Value,
+		// which availabilityGateRef already reads as "no gate".
+		return
+	}
+	c.availabilityGate.Store(g)
 }
 
 // availabilityGateRef returns the configured gate (nil when unset).
 func (c *CachingStore) availabilityGateRef() AvailabilityGate {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.availabilityGate
+	g, _ := c.availabilityGate.Load().(AvailabilityGate)
+	return g
 }
 
 // servingDegraded reports whether reads must avoid the backing store
@@ -56,17 +59,42 @@ func (c *CachingStore) Degraded() bool {
 	return c.state == cacheDegraded
 }
 
-// listLastGood answers a List query purely from the in-memory cache while
-// the backing store is unavailable. An unprimed cache returns
-// ErrStoreUnavailable — unavailable must never read as empty.
+// listLastGood answers a List query purely from the in-memory cache while the
+// backing store is unavailable. It DECLINES with ErrStoreUnavailable rather
+// than answering approximately: unavailable must never read as empty, and a
+// silently truncated list is worse than an error because callers act on it.
+//
+// Three ways the cache cannot answer, all of which must decline:
+//
+//   - Not servable. cacheServableLocked is the same gate every other cached
+//     read uses; it additionally requires primePartialErr == nil. A half-loaded
+//     cache from a failed prime would otherwise be served as an authoritative
+//     complete answer.
+//   - History-shaped query. The cache holds active beads (PrimeActive loads
+//     open + in_progress), so it has no complete closed-only or parent-history
+//     view. The normal read path routes these to the backing store for exactly
+//     that reason; degraded serving must not silently answer them from an
+//     active-only map. A convoy tally counting closed children would otherwise
+//     read "zero completed work" during an outage and mis-drive the graph.
+//   - Suppressed deletions. The overlay read path drops rows the backing store
+//     reported ErrNotFound (invariant I6); without that filter, beads deleted
+//     out-of-band reappear in degraded listings.
 func (c *CachingStore) listLastGood(query ListQuery) ([]Bead, error) {
+	// Closed-only, closed-inclusive and parent-history shapes need the backing
+	// store's view, which is precisely what is unavailable.
+	if query.Status == "closed" || query.IncludeClosed || query.ParentID != "" {
+		return nil, fmt.Errorf("listing beads (cache holds active beads only, cannot answer this query shape): %w", ErrStoreUnavailable)
+	}
 	c.mu.RLock()
-	if c.state == cacheUninitialized {
+	if !c.cacheServableLocked() {
 		c.mu.RUnlock()
 		return nil, fmt.Errorf("listing beads: %w", ErrStoreUnavailable)
 	}
 	cached := make([]Bead, 0, len(c.beads))
 	for _, b := range c.beads {
+		if _, suppressed := c.deletedSeq[b.ID]; suppressed {
+			continue
+		}
 		if !query.Matches(b) {
 			continue
 		}
@@ -88,6 +116,11 @@ func (c *CachingStore) listLastGood(query ListQuery) ([]Bead, error) {
 func (c *CachingStore) getLastGood(id string) (Bead, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	// Same servability contract as every other cached read: a half-loaded cache
+	// from a failed prime cannot prove a bead's absence either.
+	if !c.cacheServableLocked() {
+		return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrStoreUnavailable)
+	}
 	if _, deleted := c.deletedSeq[id]; deleted {
 		return Bead{}, ErrNotFound
 	}
@@ -121,4 +154,30 @@ func (c *CachingStore) reconcileUnavailableSkip() bool {
 		c.recordProblem("reconcile skipped", errors.New("store unavailable (circuit breaker open); skipping reconcile cycles until a recovery probe is due"))
 	}
 	return true
+}
+
+// countLastGood answers a Count from the in-memory cache while the backing
+// store is unavailable. It reuses listLastGood's declining behavior so a
+// count and a list of the same query can never disagree about whether the
+// cache can answer: both serve, or both return ErrStoreUnavailable.
+func (c *CachingStore) countLastGood(_ context.Context, query ListQuery, excludeTypes []string) (int, error) {
+	beadsOut, err := c.listLastGood(query)
+	if err != nil {
+		return 0, err
+	}
+	if len(excludeTypes) == 0 {
+		return len(beadsOut), nil
+	}
+	excluded := make(map[string]struct{}, len(excludeTypes))
+	for _, t := range excludeTypes {
+		excluded[t] = struct{}{}
+	}
+	n := 0
+	for _, b := range beadsOut {
+		if _, skip := excluded[b.Type]; skip {
+			continue
+		}
+		n++
+	}
+	return n, nil
 }

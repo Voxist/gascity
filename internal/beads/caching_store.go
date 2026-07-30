@@ -81,13 +81,19 @@ type CachingStore struct {
 	applyEventBeforeCommitForTest func()
 	// availabilityGate, when set, reports backing-store transport
 	// availability (the per-scope circuit breaker). See
-	// SetAvailabilityGate. Guarded by mu.
-	availabilityGate AvailabilityGate
+	// SetAvailabilityGate. Stored atomically rather than under mu: it is
+	// consulted by every cached read, including while another goroutine
+	// holds mu for writing, and a lock-taking read here deadlocks those
+	// reads against an in-flight reconcile and defeats their context
+	// cancellation.
+	availabilityGate atomic.Value // AvailabilityGate
 	// unavailableSkipLogged dedupes the reconcile-skip problem log to one
 	// entry per unavailable episode. Guarded by mu.
 	unavailableSkipLogged bool
 	// degradedReads counts reads served from last-good cache while the
-	// availability gate reported the store unavailable.
+	// availability gate reported the store unavailable. Exposed through
+	// CacheStats for operator-facing staleness reporting; no production
+	// caller reads it yet.
 	degradedReads atomic.Int64
 }
 

@@ -17,9 +17,12 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
-	// Breaker open: serve last-good cached data (tagged degraded via
-	// Degraded()/DegradedReads) instead of dialing an unreachable store.
-	// An unprimed cache returns ErrStoreUnavailable — never empty.
+	// Breaker open: serve last-good cached data instead of dialing an
+	// unreachable store. Degraded()/Stats().DegradedReads record that this
+	// happened; no caller surfaces them yet, so treat them as the hook for
+	// operator-facing staleness reporting rather than as a live signal.
+	// A cache that cannot answer completely returns ErrStoreUnavailable —
+	// unavailable must never read as empty.
 	if c.servingDegraded() {
 		return c.listLastGood(query)
 	}
@@ -112,6 +115,13 @@ func liveListQuery(query ListQuery) ListQuery {
 func (c *CachingStore) Count(ctx context.Context, query ListQuery, excludeTypes ...string) (int, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return 0, fmt.Errorf("counting beads: %w", ErrQueryRequiresScan)
+	}
+	// Breaker open: never fall through to the backing store. Without this, a
+	// count delegates to an unavailable backing store and hard-fails while
+	// List on the same data serves degraded, so a status page renders its bead
+	// list and errors on the count beside it.
+	if c.servingDegraded() {
+		return c.countLastGood(ctx, query, excludeTypes)
 	}
 	if query.Limit > 0 {
 		return 0, fmt.Errorf("counting beads: %w", ErrCountUnsupported)
@@ -473,6 +483,11 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 
 // Ready returns open beads whose blocking deps are all closed.
 func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
+	// Ready needs dependency completeness the degraded cache cannot guarantee,
+	// so it declines rather than answering from an active-only snapshot.
+	if c.servingDegraded() {
+		return nil, fmt.Errorf("ready beads: %w", ErrStoreUnavailable)
+	}
 	if readyQueryFromArgs(query) != (ReadyQuery{}) {
 		return c.backing.Ready(query...)
 	}

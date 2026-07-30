@@ -24,10 +24,16 @@ var bdResilience = struct {
 
 // bdResilienceSettingsForCity resolves [beads.resilience] for a city,
 // falling back to defaults when the config cannot be loaded.
-func bdResilienceSettingsForCity(cityPath string) resilience.Settings {
+func bdResilienceSettingsForCity(cityPath string) (resilience.Settings, bool) {
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil || cfg == nil {
-		return resilience.DefaultSettings()
+		// Defaults are enabled, and bdResilienceRegistryForCity memoizes for the
+		// life of the process, so silently defaulting here would permanently
+		// re-enable a breaker an operator explicitly disabled after one
+		// unreadable read (a mid-edit city.toml, or an unrelated parse error
+		// elsewhere in the file). Report the failure so the caller can decline
+		// to cache a guess.
+		return resilience.DefaultSettings(), false
 	}
 	r := cfg.Beads.Resilience
 	return resilience.Settings{
@@ -36,7 +42,7 @@ func bdResilienceSettingsForCity(cityPath string) resilience.Settings {
 		OpenBase:            r.OpenBaseOrDefault(),
 		OpenMax:             r.OpenMaxOrDefault(),
 		HalfOpenInterval:    r.HalfOpenIntervalOrDefault(),
-	}
+	}, true
 }
 
 // bdResilienceRegistryForCity returns the breaker registry for a city,
@@ -51,7 +57,7 @@ func bdResilienceRegistryForCity(cityPath string) *resilience.Registry {
 	bdResilience.mu.Unlock()
 
 	// Config load happens outside the lock (file I/O); recheck after.
-	settings := bdResilienceSettingsForCity(key)
+	settings, configured := bdResilienceSettingsForCity(key)
 	bdResilience.mu.Lock()
 	defer bdResilience.mu.Unlock()
 	if reg, ok := bdResilience.registries[key]; ok {
@@ -59,6 +65,14 @@ func bdResilienceRegistryForCity(cityPath string) *resilience.Registry {
 	}
 	reg := resilience.NewRegistry(settings)
 	reg.SetOnStateChange(breakerStateChangeEmitter(key))
+	if !configured {
+		// The config was unreadable, so these settings are a guess. Serve this
+		// call from it, but do not memoize: the next call retries the read and
+		// picks up the operator's real configuration once the file is readable
+		// again. Caching a guess here would outlive the transient failure for
+		// the whole process lifetime.
+		return reg
+	}
 	bdResilience.registries[key] = reg
 	return reg
 }
@@ -66,34 +80,51 @@ func bdResilienceRegistryForCity(cityPath string) *resilience.Registry {
 // breakerStateChangeEmitter returns a resilience state-change callback that
 // records a typed breaker.state_changed event into the city's event log.
 // Emission is best-effort: a recorder open/marshal failure must never block
-// or panic the bd transport path that triggered the transition. The callback
-// is invoked synchronously from the state-changing call, so it stays cheap —
-// one append per transition (transitions are rare: trip, probe, recover).
+// or panic the bd transport path that triggered the transition.
+//
+// KNOWN COST, and where it is fixed: recording is not cheap — MkdirAll, an
+// orphan-file sweep, a full ReadLatestSeq over the active log plus every
+// archive index, and a bounded flock wait when another process holds the log.
+// The breaker currently invokes this callback while holding b.mu, so that I/O
+// stalls Allow/Available/ProbeDue/RecordSuccess/RecordFailure for the whole
+// scope, exactly when the store is degraded and callers retry hardest.
+//
+// Emission stays SYNCHRONOUS anyway. Moving it to a goroutine trades a bounded
+// stall for an unbounded one: the write then outlives the call that triggered
+// it, racing city shutdown and (observably) test temp-dir cleanup. The lock is
+// the actual defect, and it is fixed at its source in the breaker itself —
+// transitions dispatch after b.mu is released — rather than worked around here.
 func breakerStateChangeEmitter(cityPath string) func(resilience.Transition) {
 	return func(t resilience.Transition) {
-		payload, err := json.Marshal(events.BreakerStateChangedPayload{
-			Scope:     t.Scope,
-			OpClass:   t.OpClass,
-			From:      t.From.String(),
-			To:        t.To.String(),
-			Failures:  t.Failures,
-			BackoffMs: t.Backoff.Milliseconds(),
-		})
-		if err != nil {
-			return
-		}
-		rec, err := events.NewFileRecorder(filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl"), io.Discard)
-		if err != nil {
-			return
-		}
-		defer rec.Close() //nolint:errcheck // best-effort: emission must not surface I/O errors
-		rec.Record(events.Event{
-			Type:    events.BreakerStateChanged,
-			Actor:   eventActor(),
-			Subject: t.Scope,
-			Payload: payload,
-		})
+		emitBreakerStateChange(cityPath, t)
 	}
+}
+
+// emitBreakerStateChange writes one breaker.state_changed event. Runs off the
+// breaker's lock; see breakerStateChangeEmitter.
+func emitBreakerStateChange(cityPath string, t resilience.Transition) {
+	payload, err := json.Marshal(events.BreakerStateChangedPayload{
+		Scope:     t.Scope,
+		OpClass:   t.OpClass,
+		From:      t.From.String(),
+		To:        t.To.String(),
+		Failures:  t.Failures,
+		BackoffMs: t.Backoff.Milliseconds(),
+	})
+	if err != nil {
+		return
+	}
+	rec, err := events.NewFileRecorder(filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl"), io.Discard)
+	if err != nil {
+		return
+	}
+	defer rec.Close() //nolint:errcheck // best-effort: emission must not surface I/O errors
+	rec.Record(events.Event{
+		Type:    events.BreakerStateChanged,
+		Actor:   eventActor(),
+		Subject: t.Scope,
+		Payload: payload,
+	})
 }
 
 // bdScopeBreaker returns the shared transport breaker for a scope root.

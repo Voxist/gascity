@@ -71,6 +71,9 @@ func ValidateDurations(cfg *City, source string) []string {
 	}
 
 	// Session config durations.
+	check("[beads.resilience]", "open_base", cfg.Beads.Resilience.OpenBase)
+	check("[beads.resilience]", "open_max", cfg.Beads.Resilience.OpenMax)
+	check("[beads.resilience]", "half_open_interval", cfg.Beads.Resilience.HalfOpenInterval)
 	check("[session]", "setup_timeout", cfg.Session.SetupTimeout)
 	check("[session]", "setup_max_timeout", cfg.Session.SetupMaxTimeout)
 	check("[session]", "nudge_ready_timeout", cfg.Session.NudgeReadyTimeout)
