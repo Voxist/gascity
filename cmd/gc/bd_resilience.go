@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/resilience"
@@ -110,27 +109,13 @@ func bdScopeBreaker(cityPath, dir string) *resilience.Breaker {
 	return bdResilienceRegistryForCity(cityPath).Breaker(filepath.Clean(scope), resilience.OpClassBd)
 }
 
-// wireStoreAvailabilityGate attaches the scope's transport breaker to a
-// (possibly policy-wrapped) CachingStore so breaker-open reads serve
-// last-good cached data and the reconciler skips cycles cheaply. No-op
-// for stores without a caching layer.
-func wireStoreAvailabilityGate(store beads.Store, cityPath, scopeRoot string) {
-	if store == nil {
-		return
-	}
-	base, _, _ := unwrapBeadPolicyStore(store)
-	if cache, ok := base.(*beads.CachingStore); ok {
-		cache.SetAvailabilityGate(bdScopeBreaker(cityPath, scopeRoot))
-	}
-}
-
 // recordBdBreakerOutcome reports one bd invocation's final outcome to the
-// scope breaker. transportFailure must come from the pinned
-// bdTransportRetryableMarkers classification: only transport-class
-// failures count toward tripping; success or application-class errors
-// (bd reached the store and answered) reset the consecutive count.
-func recordBdBreakerOutcome(breaker *resilience.Breaker, transportFailure bool) {
-	if breaker == nil {
+// scope breaker. An INCONCLUSIVE outcome leaves the breaker untouched: an error
+// we cannot classify is not evidence the transport is healthy, and recording it
+// as success would reset the consecutive-failure count and let a wedged backend
+// hide behind unclassifiable errors.
+func recordBdBreakerOutcome(breaker *resilience.Breaker, transportFailure, conclusive bool) {
+	if breaker == nil || !conclusive {
 		return
 	}
 	if transportFailure {
@@ -138,4 +123,47 @@ func recordBdBreakerOutcome(breaker *resilience.Breaker, transportFailure bool) 
 		return
 	}
 	breaker.RecordSuccess()
+}
+
+// bdBreakerOutcomeFor classifies one bd invocation for breaker accounting.
+//
+// Deliberately NOT bdTransportRetryableError. That function answers "is another
+// attempt worth making?", and a command timeout is not — it already burned the
+// full budget, so retrying doubles the stall. But a timeout IS evidence the
+// transport never answered, which is precisely what the breaker must count.
+// Conflating the two made the breaker record a hung backend as a SUCCESS,
+// resetting the failure count, so it could never trip for the pile-up it exists
+// to prevent.
+//
+// The third state matters as much as the other two: an error that is neither a
+// known transport marker nor a no-answer signal (an application-class failure,
+// or anything on a scope whose backend gc does not manage) is reported
+// inconclusive rather than healthy.
+func bdBreakerOutcomeFor(cityPath, dir string, env map[string]string, err error) (transportFailure, conclusive bool) {
+	if err == nil {
+		return false, true // bd reached the store and answered
+	}
+	if bdTransportRetryableError(cityPath, dir, env, err) {
+		return true, true
+	}
+	if bdErrorIndicatesNoAnswer(err) {
+		return true, true
+	}
+	return false, false
+}
+
+// bdErrorIndicatesNoAnswer reports whether err means bd never got a reply, as
+// opposed to getting one it did not like. Timeouts and kill signals are the
+// shapes a wedged backend produces once the marker-based classification has
+// already declined it: bd blocked until the command budget expired, so there is
+// no stderr marker to match. isBdAmbiguousWriteError treats "timed out after"
+// as transport-family for the same reason.
+func bdErrorIndicatesNoAnswer(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "timed out after") ||
+		strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "signal: killed")
 }

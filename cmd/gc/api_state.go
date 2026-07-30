@@ -208,7 +208,7 @@ func newControllerState(
 		fmt.Fprintf(os.Stderr, "api: city bead store: %v (session/mail endpoints disabled)\n", err)
 	} else {
 		store := opened.Store
-		cs.cityBeadStore = wrapWithCachingStore(ctx, store, ep, true)
+		cs.cityBeadStore = wrapWithCachingStore(ctx, store, ep, true, cityPath, cityPath)
 		cs.cityBeadsDiagnostic = diagnosticPtr(opened.Diagnostic)
 		cs.cityMailProv = newCityMailProvider(cs.cityBeadStore, cfg, cityPath, ep)
 		svc := extmsg.NewServices(cs.cityBeadStore)
@@ -227,7 +227,14 @@ func newControllerState(
 // Suspended rigs pass false: they spawn no agents, so nothing writes locally and
 // a continuously refreshed cache buys nothing; reconciling every suspended rig
 // every cycle is what pegs the supervisor (gastownhall/gascity #1978 follow-up).
-func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Provider, backgroundRefresh bool) beads.Store {
+// The scope's transport breaker is attached here rather than by each caller:
+// the fail-fast half of the feature lives at the bd chokepoint and applies to
+// every store, so a caching store without its gate degrades strictly worse than
+// before the breaker existed — it inherits ErrStoreUnavailable with no last-good
+// serving to compensate. Wiring it at the single construction point makes that
+// state unrepresentable. cityPath roots the breaker registry; scopeRoot selects
+// the per-scope breaker (pass cityPath for the city store itself).
+func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Provider, backgroundRefresh bool, cityPath, scopeRoot string) beads.Store {
 	baseStore, policyStore, policyWrapped := unwrapBeadPolicyStore(store)
 	if baseStore == nil {
 		return nil
@@ -253,6 +260,7 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 		}
 	}
 	cs := beads.NewCachingStore(baseStore, onChange)
+	cs.SetAvailabilityGate(bdScopeBreaker(cityPath, scopeRoot))
 	// Pre-prime active beads synchronously (~1-2s, indexed queries).
 	// Loads open + in_progress beads — enough for the startup path
 	// (adoption, session snapshot, desired state) so the city can
@@ -346,13 +354,13 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 			// Legacy file mode aliases every rig to the same backing store, so
 			// the cache handle must be shared too for immediate cross-rig reads.
 			if sharedLegacyCachedStore == nil {
-				sharedLegacyCachedStore = wrapWithCachingStore(cs.cacheCtx, sharedLegacyFileStore, cs.eventProv, true)
+				sharedLegacyCachedStore = wrapWithCachingStore(cs.cacheCtx, sharedLegacyFileStore, cs.eventProv, true, cs.cityPath, cs.cityPath)
 			}
 			stores[rig.Name] = sharedLegacyCachedStore
 			continue
 		}
 		store = cs.openRigStore(scopeProvider, rig.Name, scopeRoot, rig.EffectivePrefix(), cfg)
-		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv, rigStoreBackgroundRefresh(suspState, rig))
+		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv, rigStoreBackgroundRefresh(suspState, rig), cs.cityPath, scopeRoot)
 	}
 	return stores
 }
@@ -726,8 +734,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	var cityMailProv mail.Provider
 	var extSvc *extmsg.Services
 	if cityStore != nil {
-		cityStore = wrapWithCachingStore(cs.cacheCtx, cityStore, cs.eventProv, true)
-		wireStoreAvailabilityGate(cityStore, cs.cityPath, cs.cityPath)
+		cityStore = wrapWithCachingStore(cs.cacheCtx, cityStore, cs.eventProv, true, cs.cityPath, cs.cityPath)
 		cityMailProv = newCityMailProvider(cityStore, cfg, cs.cityPath, cs.eventProv)
 		svc := extmsg.NewServices(cityStore)
 		extSvc = &svc
