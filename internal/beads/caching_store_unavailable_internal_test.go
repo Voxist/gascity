@@ -80,139 +80,64 @@ func newPrimedGatedCache(t *testing.T, beadsIn ...Bead) (*CachingStore, *callCou
 	return cache, backing, gate
 }
 
-// TestCachingStoreListUnavailableDeclinesRatherThanServingStale pins the
-// contract that replaced last-good serving.
+// TestCachingStoreWarmCacheReadsSurviveAnOpenGate is the regression for the
+// third and worst version of this feature.
 //
-// The gate is an optimisation: it avoids a backing call that would fail anyway.
-// It must NOT widen what the cache answers from memory. Serving "last-good"
-// data here bypassed readCacheWithOverlay (dirty-row refresh and the
-// suppression set) and answered closed-only and parent-history queries from an
-// active-only map, so a convoy tally read "zero completed work" during an
-// outage. Declining is the only answer that keeps ErrStoreUnavailable meaning
-// UNKNOWN rather than EMPTY.
-func TestCachingStoreListUnavailableDeclinesRatherThanServingStale(t *testing.T) {
+// The availability gate is an input to the RECONCILER, not to reads. Two
+// earlier revisions short-circuited above the cached read path — first to serve
+// last-good data, then to return ErrStoreUnavailable — and both broke reads
+// that needed no backing store at all. A cache primed by PrimeActive answers
+// active-bead queries entirely from memory, so gating them converted working
+// reads into failures: worse than the previous version AND worse than the
+// pre-breaker baseline.
+//
+// The gate must therefore be invisible here. Reads that the cache can answer
+// keep working no matter what the breaker thinks of the transport.
+func TestCachingStoreWarmCacheReadsSurviveAnOpenGate(t *testing.T) {
 	t.Parallel()
 	cache, backing, gate := newPrimedGatedCache(t, Bead{Title: "task-1"}, Bead{Title: "task-2"})
 
-	gate.set(false, false)
-	listsBefore, _ := backing.counts()
+	gate.set(false, false) // breaker open: transport believed down
+	listsBefore, getsBefore := backing.counts()
 
 	got, err := cache.List(ListQuery{AllowScan: true})
-	if !errors.Is(err, ErrStoreUnavailable) {
-		t.Fatalf("List under open breaker = (%d beads, %v), want ErrStoreUnavailable: a cache that answers here is asserting an absence it has not established", len(got), err)
+	if err != nil {
+		t.Fatalf("List under an open gate: %v — the active-bead path answers from memory, so the gate must not touch it", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("List returned %d beads, want 2 from the warm cache", len(got))
 	}
 	if listsAfter, _ := backing.counts(); listsAfter != listsBefore {
-		t.Fatalf("backing List called %d times under open breaker, want 0 — the point of the gate is to skip the doomed call", listsAfter-listsBefore)
+		t.Fatalf("warm-cache List made %d backing call(s); it should need none", listsAfter-listsBefore)
 	}
-	if !cache.Degraded() {
-		t.Fatal("Degraded() = false under an open breaker, want true")
+
+	if _, err := cache.Get(got[0].ID); err != nil {
+		t.Fatalf("Get of a cached bead under an open gate: %v — this is a map lookup, not a backing call", err)
+	}
+	if _, getsAfter := backing.counts(); getsAfter != getsBefore {
+		t.Fatalf("cached Get made %d backing call(s); it should need none", getsAfter-getsBefore)
 	}
 }
 
-// TestCachingStoreListUnavailableLiveQueryDeclines is the regression for a
-// specific production hazard. releaseOrphanedPoolAssignments issues
-// List(Live: true) and treats an error as "session is live, keep the
-// assignment". Agents create session beads out-of-band by running bd
-// themselves, which is exactly why that call sets Live.
-//
-// Answering it from cache during an outage means a session bead created
-// out-of-band is absent, the helper concludes the session is gone, and the pool
-// assignment for a RUNNING session is released — handing its in-flight work to
-// a second agent. A Live query exists to demand a backing read; when the
-// backing store is unreachable the honest answer is that we do not know.
-func TestCachingStoreListUnavailableLiveQueryDeclines(t *testing.T) {
+// TestCachingStoreGateDoesNotMaskLocallyKnownDeletion pins the other half: a
+// bead the cache has already established is gone must still report ErrNotFound,
+// not an unknown-state error. Callers branch on ErrNotFound to finish cleanup;
+// reporting "unavailable" for a fact we hold locally makes them retry forever.
+func TestCachingStoreGateDoesNotMaskLocallyKnownDeletion(t *testing.T) {
 	t.Parallel()
-	cache, backing, gate := newPrimedGatedCache(t, Bead{Title: "task-1"})
-
-	gate.set(false, false)
-	listsBefore, _ := backing.counts()
-	got, err := cache.List(ListQuery{AllowScan: true, Live: true})
-	if !errors.Is(err, ErrStoreUnavailable) {
-		t.Fatalf("List(Live) under open breaker = (%d beads, %v), want ErrStoreUnavailable", len(got), err)
-	}
-	if listsAfter, _ := backing.counts(); listsAfter != listsBefore {
-		t.Fatal("Live query reached the backing store under an open breaker")
-	}
-}
-
-func TestCachingStoreListUnavailableUnprimedReturnsTypedError(t *testing.T) {
-	t.Parallel()
-	backing := &callCountingStore{Store: NewMemStore()}
-	cache := NewCachingStoreForTest(backing, nil)
-	gate := &fakeAvailabilityGate{}
-	cache.SetAvailabilityGate(gate)
-
-	_, err := cache.List(ListQuery{AllowScan: true})
-	if !errors.Is(err, ErrStoreUnavailable) {
-		t.Fatalf("List on unprimed cache under open breaker: err = %v, want ErrStoreUnavailable (unavailable must never read as empty)", err)
-	}
-	if lists, _ := backing.counts(); lists != 0 {
-		t.Fatalf("backing List called %d times, want 0", lists)
-	}
-}
-
-// TestCachingStoreGetUnavailableDeclines mirrors the List contract: a cached
-// bead may be stale, and the cache cannot distinguish "this is current" from
-// "this is what we last saw", so under an open breaker Get declines rather than
-// presenting a possibly-stale bead as authoritative.
-func TestCachingStoreGetUnavailableDeclines(t *testing.T) {
-	t.Parallel()
-	cache, backing, gate := newPrimedGatedCache(t, Bead{Title: "task-1"})
+	cache, _, gate := newPrimedGatedCache(t, Bead{Title: "task-1"})
 	all, err := cache.List(ListQuery{AllowScan: true})
 	if err != nil || len(all) == 0 {
 		t.Fatalf("prime: List = (%d, %v), want beads", len(all), err)
 	}
 	id := all[0].ID
+	if err := cache.Delete(id); err != nil {
+		t.Skipf("backing delete unsupported in this harness: %v", err)
+	}
 
 	gate.set(false, false)
-	_, getsBefore := backing.counts()
-	if _, err := cache.Get(id); !errors.Is(err, ErrStoreUnavailable) {
-		t.Fatalf("Get under open breaker = %v, want ErrStoreUnavailable", err)
-	}
-	if _, getsAfter := backing.counts(); getsAfter != getsBefore {
-		t.Fatal("Get reached the backing store under an open breaker")
-	}
-}
-
-func TestCachingStoreGetUnavailableUncachedReturnsTypedError(t *testing.T) {
-	t.Parallel()
-	cache, _, gate := newPrimedGatedCache(t, Bead{Title: "task-1"})
-	gate.set(false, false)
-	_, err := cache.Get("missing-id")
-	if !errors.Is(err, ErrStoreUnavailable) {
-		t.Fatalf("Get(missing) under open breaker: err = %v, want ErrStoreUnavailable (cannot distinguish missing from unreachable)", err)
-	}
-}
-
-func TestCachingStoreAvailableGateLeavesReadsUntouched(t *testing.T) {
-	t.Parallel()
-	cache, _, gate := newPrimedGatedCache(t, Bead{Title: "task-1"})
-	gate.set(true, false)
-	got, err := cache.List(ListQuery{AllowScan: true})
-	if err != nil || len(got) != 1 {
-		t.Fatalf("List with available gate: %v (len %d)", err, len(got))
-	}
-	if cache.Degraded() {
-		t.Fatal("Degraded() = true with an available gate and healthy cache, want false")
-	}
-}
-
-func TestCachingStoreNilGateLeavesReadsUntouched(t *testing.T) {
-	t.Parallel()
-	backing := NewMemStore()
-	if _, err := backing.Create(Bead{Title: "task-1"}); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	cache := NewCachingStoreForTest(backing, nil)
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
-	got, err := cache.List(ListQuery{AllowScan: true})
-	if err != nil || len(got) != 1 {
-		t.Fatalf("List without gate: %v (len %d)", err, len(got))
-	}
-	if cache.Degraded() {
-		t.Fatal("Degraded() = true without a gate and with a healthy cache")
+	if _, err := cache.Get(id); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get of a locally-deleted bead under an open gate = %v, want ErrNotFound: the cache already knows this answer", err)
 	}
 }
 

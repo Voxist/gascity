@@ -21,20 +21,14 @@ import (
 var bdResilience = struct {
 	mu         sync.Mutex
 	registries map[string]*resilience.Registry
-	// provisional marks registries built from an unreadable config, so the
-	// first clean read can replace them with the operator's real settings.
-	provisional map[string]bool
-}{
-	registries:  make(map[string]*resilience.Registry),
-	provisional: make(map[string]bool),
-}
+}{registries: make(map[string]*resilience.Registry)}
 
 // bdResilienceSettingsForCity resolves [beads.resilience] for a city,
 // falling back to defaults when the config cannot be loaded.
-func bdResilienceSettingsForCity(cityPath string) (resilience.Settings, bool) {
+func bdResilienceSettingsForCity(cityPath string) resilience.Settings {
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil || cfg == nil {
-		return resilience.DefaultSettings(), false
+		return resilience.DefaultSettings()
 	}
 	r := cfg.Beads.Resilience
 	return resilience.Settings{
@@ -43,7 +37,7 @@ func bdResilienceSettingsForCity(cityPath string) (resilience.Settings, bool) {
 		OpenBase:            r.OpenBaseOrDefault(),
 		OpenMax:             r.OpenMaxOrDefault(),
 		HalfOpenInterval:    r.HalfOpenIntervalOrDefault(),
-	}, true
+	}
 }
 
 // bdResilienceRegistryForCity returns the breaker registry for a city,
@@ -58,28 +52,28 @@ func bdResilienceRegistryForCity(cityPath string) *resilience.Registry {
 	bdResilience.mu.Unlock()
 
 	// Config load happens outside the lock (file I/O); recheck after.
-	settings, configured := bdResilienceSettingsForCity(key)
+	settings := bdResilienceSettingsForCity(key)
 	bdResilience.mu.Lock()
 	defer bdResilience.mu.Unlock()
 	if reg, ok := bdResilience.registries[key]; ok {
-		if !bdResilience.provisional[key] || !configured {
-			return reg
-		}
-		// The cached registry was built from an unreadable config; the config
-		// now reads cleanly, so replace it with the operator's real settings.
-		// This happens at most once per city and costs only the breaker state
-		// accumulated during the unreadable window.
+		return reg
 	}
 	reg := resilience.NewRegistry(settings)
 	reg.SetOnStateChange(breakerStateChangeEmitter(key))
-	// Always memoize, even when provisional. A registry rebuilt on every call
-	// hands out a fresh breaker with failures=0, so the consecutive-failure
-	// count never accumulates and the breaker can never trip; worse, a store
-	// that captured a gate from a discarded registry keeps it for the process
-	// lifetime. Tracking the provisional flag fixes the stale-settings problem
-	// without giving up accumulation.
+	// Memoize unconditionally, including when the config was unreadable.
+	//
+	// Two rejected alternatives, both worse. Rebuilding per call hands out a
+	// fresh breaker with failures=0, so the consecutive count never accumulates
+	// and the breaker can never trip. Replacing a provisional registry later
+	// orphans every gate already handed out from it: stores keep the discarded
+	// registry's Breaker, which no bd invocation records against again, so
+	// their gate freezes for the process lifetime.
+	//
+	// The residual cost is accepted and narrow: if city.toml is unreadable at
+	// first touch, this process uses default settings, so a breaker an operator
+	// disabled runs enabled until restart. That errs toward protection rather
+	// than away from it, and it requires a read failure in exactly that window.
 	bdResilience.registries[key] = reg
-	bdResilience.provisional[key] = !configured
 	return reg
 }
 
@@ -143,25 +137,12 @@ func wireStoreAvailabilityGate(store beads.Store, cityPath, scopeRoot string) {
 	}
 }
 
-// recordBdBreakerOutcome reports one bd invocation's final outcome to the
-// scope breaker. transportFailure must come from the pinned
-// bdTransportRetryableMarkers classification: only transport-class
-// failures count toward tripping; success or application-class errors
-// (bd reached the store and answered) reset the consecutive count.
-func recordBdBreakerOutcome(breaker *resilience.Breaker, transportFailure, conclusive bool) {
+// recordBdBreakerOutcome reports one bd invocation's final outcome to the scope
+// breaker. Only transport-class failures count toward tripping; anything bd
+// answered — including an application-class error — resets the count, because
+// an answer is proof the transport worked.
+func recordBdBreakerOutcome(breaker *resilience.Breaker, transportFailure bool) {
 	if breaker == nil {
-		return
-	}
-	if !conclusive {
-		// An unclassifiable error is not evidence the transport is healthy, so
-		// it must not reset the consecutive-failure count. But it must still
-		// RESOLVE a probe that Allow() already consumed: leaving a half-open
-		// breaker unresolved pins the scope in degraded mode forever, because
-		// it neither closes (no success) nor re-arms its backoff (no failure),
-		// and once open the reconcile probe is the only bd traffic left.
-		if breaker.State() == resilience.StateHalfOpen {
-			breaker.RecordFailure()
-		}
 		return
 	}
 	if transportFailure {
@@ -171,35 +152,36 @@ func recordBdBreakerOutcome(breaker *resilience.Breaker, transportFailure, concl
 	breaker.RecordSuccess()
 }
 
-// bdBreakerOutcomeFor classifies one bd invocation for breaker accounting.
+// bdTransportFailure reports whether err means the bd transport failed, as
+// opposed to bd answering with something the caller did not like.
 //
-// Deliberately NOT bdTransportRetryableError. That answers "is another attempt
-// worth making?", and a command timeout is not — it already burned the full
-// budget. But a timeout IS evidence the transport never answered, which is what
-// the breaker must count. Conflating the two made a hung backend record as a
-// SUCCESS, resetting the failure count, so the breaker could never trip for the
-// subprocess pile-up it exists to prevent.
+// Two sources, deliberately kept apart from bdTransportRetryableError, which
+// answers a different question ("is another attempt worth making?"):
 //
-// The third state is not a way to opt scopes out of the breaker: an error that
-// is neither a known transport marker nor a no-answer signal is genuinely
-// ambiguous, so it neither counts as a failure nor certifies health.
-func bdBreakerOutcomeFor(cityPath, dir string, env map[string]string, err error) (transportFailure, conclusive bool) {
+//   - the pinned marker table, and
+//   - no-answer shapes. A backend that hangs until the command budget kills it
+//     produces no stderr marker, because bd never got a reply to print. Deriving
+//     the outcome from the marker table alone made that count as a SUCCESS,
+//     resetting the failure count, so the breaker could never trip for the
+//     subprocess pile-up it exists to prevent.
+//
+// Everything else is a success for breaker purposes. "bead not found" or a bad
+// query means bd reached the store and got an answer, which is exactly what the
+// breaker wants to know; Breaker.RecordFailure's own doc forbids recording it.
+// An earlier revision added a third "inconclusive" state for these, which
+// re-tripped recovering breakers on ordinary application errors and stranded
+// half-open probes that nothing then resolved.
+func bdTransportFailure(cityPath, dir string, env map[string]string, err error) bool {
 	if err == nil {
-		return false, true
+		return false
 	}
-	if bdTransportRetryableError(cityPath, dir, env, err) {
-		return true, true
-	}
-	if bdErrorIndicatesNoAnswer(err) {
-		return true, true
-	}
-	return false, false
+	return bdTransportRetryableError(cityPath, dir, env, err) || bdErrorIndicatesNoAnswer(err)
 }
 
-// bdErrorIndicatesNoAnswer reports whether err means bd never got a reply, as
-// opposed to getting one it did not like. A wedged backend produces these
-// shapes once marker matching has declined the error: bd blocked until the
-// command budget expired, so there is no stderr marker to match.
+// bdErrorIndicatesNoAnswer reports whether err means bd never got a reply. A
+// wedged backend produces these shapes once marker matching has declined the
+// error: bd blocked until the command budget expired, so there is no stderr
+// marker to match.
 func bdErrorIndicatesNoAnswer(err error) bool {
 	if err == nil {
 		return false

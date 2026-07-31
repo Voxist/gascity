@@ -1180,6 +1180,10 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		if err != nil {
 			meta, ok, classifyErr := postgresMetadataForScope(cityPath, dir)
 			if classifyErr != nil {
+				// gc-side classification failed, but Allow() already consumed the
+				// probe, so resolve it from the bd error itself rather than
+				// stranding the breaker half-open.
+				recordBdBreakerOutcome(breaker, bdTransportFailure(cityPath, dir, env, err))
 				return out, fmt.Errorf("classifying scope backend (bd error: %w): %w", err, classifyErr)
 			}
 			if ok {
@@ -1188,27 +1192,25 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 				// endpoint is the canonical wedged transport. Classifying it
 				// inconclusive here would mean the breaker could never trip on a
 				// PG city, so subprocesses would pile up exactly as before.
-				pgFailure, pgConclusive := bdBreakerOutcomeFor(cityPath, dir, env, err)
-				recordBdBreakerOutcome(breaker, pgFailure, pgConclusive)
+				recordBdBreakerOutcome(breaker, bdTransportFailure(cityPath, dir, env, err))
 				return out, fmt.Errorf("postgres at %s:%s: gc does not manage external PG endpoints (no managed recovery attempted): %w", meta.PostgresHost, meta.PostgresPort, err)
 			}
 		}
 		if err == nil && scopeBackendIsPostgres(cityPath, dir) {
 			// bd answered successfully; that resolves the probe whatever the
 			// backend served it.
-			recordBdBreakerOutcome(breaker, false, true)
+			recordBdBreakerOutcome(breaker, false)
 			return out, err
 		}
 		if !bdTransportRetryableError(cityPath, dir, env, err) {
 			// Success or application-class failure: bd reached the store
 			// and answered, so the transport is healthy.
-			failure, conclusive := bdBreakerOutcomeFor(cityPath, dir, env, err)
-			recordBdBreakerOutcome(breaker, failure, conclusive)
+			recordBdBreakerOutcome(breaker, bdTransportFailure(cityPath, dir, env, err))
 			return out, err
 		}
 		if bdTransportRecoverableError(cityPath, dir, env, err) {
 			if recErr := recoverManagedBDCommand(cityPath); recErr != nil {
-				recordBdBreakerOutcome(breaker, true, true)
+				recordBdBreakerOutcome(breaker, true)
 				return out, err
 			}
 		}
@@ -1224,8 +1226,7 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		// The retry's outcome is this invocation's final word: a second
 		// transport failure counts one consecutive failure toward the
 		// trip threshold; recovery resets the count.
-		retryFailure, retryConclusive := bdBreakerOutcomeFor(cityPath, dir, retryEnv, retryErr)
-		recordBdBreakerOutcome(breaker, retryFailure, retryConclusive)
+		recordBdBreakerOutcome(breaker, bdTransportFailure(cityPath, dir, retryEnv, retryErr))
 		return retryOut, retryErr
 	}
 }
