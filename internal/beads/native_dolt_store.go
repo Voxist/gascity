@@ -821,6 +821,23 @@ func (s *NativeDoltStore) SupportsEphemeralGraphApply() bool {
 	return true
 }
 
+// CreateWithStorage persists a new bead using a policy-selected storage tier.
+// The tier is carried on the issue's own Ephemeral/NoHistory fields, which is
+// what the upstream beads storage layer routes on: a no-history or ephemeral
+// issue is created in the dolt_ignore'd wisps table and skips DOLT_COMMIT
+// entirely (beads internal/storage/dolt/issues.go CreateIssue). Without this
+// method the native store is not a StorageCreateStore, and the caching layer
+// above it had no way to express the class — so every session bead was created
+// in the committed issues table at a cost of one Dolt commit per create and one
+// per subsequent update (vp-ia76).
+func (s *NativeDoltStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, error) {
+	staged, err := beadWithStorageClass(b, storage)
+	if err != nil {
+		return Bead{}, fmt.Errorf("native create: %w", err)
+	}
+	return s.Create(staged)
+}
+
 // Create persists a new bead through the upstream beads storage layer.
 func (s *NativeDoltStore) Create(b Bead) (Bead, error) {
 	issue, err := nativeIssueFromBead(b)
