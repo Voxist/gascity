@@ -1046,6 +1046,25 @@ func effectiveStorageFlags(b Bead, storage StorageClass) (ephemeral bool, noHist
 	}
 }
 
+// beadWithStorageClass returns b with its Ephemeral/NoHistory fields set to the
+// storage class. It is the field-carrying form of a storage class, for the
+// create paths that cannot pass the class out of band as a flag: every backend
+// routes a bead to the wisps table on these fields, so stamping them is what
+// makes a policy-selected class survive a store that does not implement the
+// optional StorageCreateStore capability. StorageDefault leaves b untouched.
+func beadWithStorageClass(b Bead, storage StorageClass) (Bead, error) {
+	ephemeral, noHistory, err := effectiveStorageFlags(b, storage)
+	if err != nil {
+		return Bead{}, err
+	}
+	if ephemeral && noHistory {
+		return Bead{}, fmt.Errorf("ephemeral and no-history storage are mutually exclusive")
+	}
+	b.Ephemeral = ephemeral
+	b.NoHistory = noHistory
+	return b, nil
+}
+
 // Get retrieves a bead by ID via bd show.
 func (s *BdStore) Get(id string) (Bead, error) {
 	// Read via the transient-retry wrapper so a Get that races a managed-Dolt
