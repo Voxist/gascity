@@ -213,10 +213,35 @@ func bdExecTimeoutError(parent context.Context, timeout time.Duration, start tim
 		if budget < 0 {
 			budget = 0
 		}
-		return fmt.Errorf("timed out after %s (caller deadline)", budget.Round(time.Millisecond))
+		return newBDTimeoutError("timed out after %s (caller deadline)", budget.Round(time.Millisecond))
 	}
-	return fmt.Errorf("timed out after %s", timeout)
+	return newBDTimeoutError("timed out after %s", timeout)
 }
+
+// bdTimeoutError is the typed form of a bd deadline failure.
+//
+// Its Error() text is deliberately byte-identical to the historical message, so
+// operator output and the existing substring matchers keep working unchanged.
+// The point of the type is to let callers STOP matching on text: the string
+// "timed out after" is also produced by at least five unrelated sites (waiting
+// for a bead, for the supervisor to exit, for managed Dolt to become
+// TCP-ready), so a substring match cannot tell a bd transport timeout from any
+// of those. errors.Is(err, ErrBDTimeout) can.
+type bdTimeoutError struct{ msg string }
+
+func (e *bdTimeoutError) Error() string { return e.msg }
+
+// Is reports the sentinel identity, so the type survives %w wrapping by callers.
+func (e *bdTimeoutError) Is(target error) bool { return target == ErrBDTimeout }
+
+func newBDTimeoutError(format string, args ...any) error {
+	return &bdTimeoutError{msg: fmt.Sprintf(format, args...)}
+}
+
+// IsBDTimeout reports whether err is, or wraps, a bd invocation that exceeded
+// its deadline — the shape a wedged backend produces, where bd never got a
+// reply and therefore printed no stderr marker to classify.
+func IsBDTimeout(err error) bool { return errors.Is(err, ErrBDTimeout) }
 
 func bdTelemetryAgentID(env map[string]string) string {
 	for _, key := range []string{"GC_ALIAS", "GC_AGENT"} {
@@ -502,7 +527,7 @@ func execPurge(dir string, env, args []string) ([]byte, error) {
 	}
 	TraceBDCall("go:bdstore.execPurge", dir, args, start, traceExit, err)
 	if ctx.Err() == context.DeadlineExceeded {
-		return nil, fmt.Errorf("timed out after 60s")
+		return nil, newBDTimeoutError("timed out after 60s")
 	}
 	if err != nil {
 		errMsg := strings.TrimSpace(stderr.String())

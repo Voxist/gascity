@@ -37,6 +37,16 @@ var ErrReadyContextUnsupported = errors.New("context-aware ready unsupported")
 // handle has been closed.
 var ErrStoreClosed = errors.New("bead store closed")
 
+// ErrBDTimeout marks a bd invocation that exceeded its deadline: the command
+// was killed before the store answered. It is the shape a wedged backend
+// produces, and the one a stderr-marker table cannot see, because bd never got
+// a reply to print. Check with errors.Is or beads.IsBDTimeout.
+//
+// Deliberately NOT context.DeadlineExceeded: dispatch.IsTransientControllerError
+// short-circuits on that sentinel, so reusing it would silently reclassify every
+// bd timeout as a transient controller error across the control dispatcher.
+var ErrBDTimeout = errors.New("bd command timed out")
+
 // ErrStoreUnavailable is returned when the backing bead store cannot be
 // reached: the transport circuit breaker is open, or a fresh attempt failed
 // with a transport-class error. Consumers must treat it as "unknown", never
