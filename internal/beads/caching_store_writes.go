@@ -15,14 +15,28 @@ func (c *CachingStore) Create(b Bead) (Bead, error) {
 
 // CreateWithStorage passes through a policy-selected storage class to backing
 // stores that support table-specific creates, then updates the cache.
+//
+// A backing store without the optional StorageCreateStore capability does NOT
+// cause the class to be discarded: the class is stamped onto the bead's own
+// Ephemeral/NoHistory fields and the plain Create carries it. Every storage
+// backend routes on those fields (the beads library sends Ephemeral or
+// NoHistory issues to the dolt_ignore'd wisps table and skips DOLT_COMMIT for
+// them), so the policy still lands. Dropping the class here instead — the
+// previous behavior — silently created every session bead in the committed
+// issues table on any deployment whose backend lacks the capability, costing
+// one Dolt commit per create and per subsequent update (vp-ia76: 727 of 730
+// session beads in 24h on the live hq city).
 func (c *CachingStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, error) {
-	storageBacking, ok := c.backing.(StorageCreateStore)
-	if !ok {
-		return c.Create(b)
+	if storageBacking, ok := c.backing.(StorageCreateStore); ok {
+		return c.createWith(func() (Bead, error) {
+			return storageBacking.CreateWithStorage(b, storage)
+		})
 	}
-	return c.createWith(func() (Bead, error) {
-		return storageBacking.CreateWithStorage(b, storage)
-	})
+	staged, err := beadWithStorageClass(b, storage)
+	if err != nil {
+		return Bead{}, fmt.Errorf("caching store create: %w", err)
+	}
+	return c.Create(staged)
 }
 
 func (c *CachingStore) createWith(create func() (Bead, error)) (Bead, error) {
