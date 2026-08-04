@@ -16,6 +16,7 @@ package doltpool
 import (
 	"database/sql"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
@@ -52,6 +53,27 @@ func key(host, port, user, password, database string) string {
 	return fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%s", user, host, port, database, password)
 }
 
+// formatDSN builds the go-sql-driver DSN for one endpoint.
+func formatDSN(host, port, user, password, database string) string {
+	cfg := mysql.NewConfig()
+	cfg.User = user
+	cfg.Passwd = password
+	cfg.Net = "tcp"
+	// JoinHostPort, not concatenation: a literal IPv6 host must be
+	// bracketed ("::1" -> "[::1]:3306"), or the driver is handed the
+	// unparseable "::1:3306".
+	cfg.Addr = net.JoinHostPort(host, port)
+	cfg.DBName = database
+	cfg.Timeout = connTimeout
+	cfg.ReadTimeout = readTimeout
+	cfg.WriteTimeout = writeTimeout
+	cfg.AllowNativePasswords = true
+	// DATETIME columns scan into time.Time (the convoy workflow snapshot
+	// reads created_at/updated_at this way); string scans still work.
+	cfg.ParseTime = true
+	return cfg.FormatDSN()
+}
+
 // Open returns the shared *sql.DB for the given Dolt endpoint, creating
 // it on first use. database may be empty for server-level connections
 // (SHOW DATABASES, health probes). The returned handle must never be
@@ -63,20 +85,7 @@ func Open(host, port, user, password, database string) (*sql.DB, error) {
 	if db, ok := registry.dbs[k]; ok {
 		return db, nil
 	}
-	cfg := mysql.NewConfig()
-	cfg.User = user
-	cfg.Passwd = password
-	cfg.Net = "tcp"
-	cfg.Addr = host + ":" + port
-	cfg.DBName = database
-	cfg.Timeout = connTimeout
-	cfg.ReadTimeout = readTimeout
-	cfg.WriteTimeout = writeTimeout
-	cfg.AllowNativePasswords = true
-	// DATETIME columns scan into time.Time (the convoy workflow snapshot
-	// reads created_at/updated_at this way); string scans still work.
-	cfg.ParseTime = true
-	db, err := sql.Open("mysql", cfg.FormatDSN())
+	db, err := sql.Open("mysql", formatDSN(host, port, user, password, database))
 	if err != nil {
 		return nil, fmt.Errorf("opening pooled dolt connection to %s:%s/%s: %w", host, port, database, err)
 	}

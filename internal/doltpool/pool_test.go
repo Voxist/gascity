@@ -3,7 +3,40 @@ package doltpool
 import (
 	"sync"
 	"testing"
+
+	mysql "github.com/go-sql-driver/mysql"
 )
+
+// TestFormatDSNBracketsIPv6Host pins the address form for every host
+// shape. A literal IPv6 host built by concatenation yields "::1:3306",
+// which the driver cannot parse, so external Dolt endpoints on IPv6
+// would fail to dial. Parsing the DSN back through the driver proves the
+// address is usable, not merely that it contains brackets.
+func TestFormatDSNBracketsIPv6Host(t *testing.T) {
+	cases := []struct {
+		name     string
+		host     string
+		port     string
+		wantAddr string
+	}{
+		{"IPv4 literal", "127.0.0.1", "3307", "127.0.0.1:3307"},
+		{"hostname", "dolt.internal", "3307", "dolt.internal:3307"},
+		{"IPv6 loopback literal", "::1", "3307", "[::1]:3307"},
+		{"IPv6 full literal", "2001:db8::1", "3307", "[2001:db8::1]:3307"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dsn := formatDSN(tc.host, tc.port, "root", "pw", "hq")
+			parsed, err := mysql.ParseDSN(dsn)
+			if err != nil {
+				t.Fatalf("ParseDSN(%q): %v", dsn, err)
+			}
+			if parsed.Addr != tc.wantAddr {
+				t.Errorf("Addr = %q, want %q (dsn %q)", parsed.Addr, tc.wantAddr, dsn)
+			}
+		})
+	}
+}
 
 // resetForTest empties the registry so tests are order-independent.
 func resetForTest(t *testing.T) {
