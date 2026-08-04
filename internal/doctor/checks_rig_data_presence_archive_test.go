@@ -10,10 +10,10 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
-// archiveTestRig builds a rig with identity stamped and NO local issues.jsonl —
-// the shape a gc-managed scope actually has on disk, since gc deletes that file
-// (reapStaleBdExportJSONL) once export.auto is off.
-func archiveTestRig(t *testing.T, rows []beads.Bead) (*RigDataPresenceCheck, string) {
+// archiveTestRig builds a rig with identity stamped, an empty live store, and
+// NO local issues.jsonl — the shape a gc-managed scope actually has on disk,
+// since gc deletes that file (reapStaleBdExportJSONL) once export.auto is off.
+func archiveTestRig(t *testing.T) (*RigDataPresenceCheck, string) {
 	t.Helper()
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig")
@@ -25,11 +25,6 @@ func archiveTestRig(t *testing.T, rows []beads.Bead) (*RigDataPresenceCheck, str
 		t.Fatal(err)
 	}
 	store := beads.NewMemStore()
-	for _, b := range rows {
-		if _, err := store.Create(b); err != nil {
-			t.Fatal(err)
-		}
-	}
 	c := NewRigDataPresenceCheck(cityDir, config.Rig{Name: "myrig", Path: rigDir},
 		func(string) (beads.Store, error) { return store, nil })
 	return c, rigDir
@@ -43,7 +38,7 @@ func archiveTestRig(t *testing.T, rows []beads.Bead) (*RigDataPresenceCheck, str
 // skip". A rig that had just lost every row passed silently — the va 2026-06-20
 // shape (803 exported rows, 0 live) would not have fired.
 func TestRigDataPresenceUsesArchivedExportWhenLocalIsReaped(t *testing.T) {
-	c, _ := archiveTestRig(t, nil) // empty live store, no local export
+	c, _ := archiveTestRig(t) // empty live store, no local export
 	c.WithArchiveExportRows(func(string) (int, bool) { return 803, true })
 
 	r := c.Run(nil)
@@ -63,7 +58,7 @@ func TestRigDataPresenceUsesArchivedExportWhenLocalIsReaped(t *testing.T) {
 // fix intact: a genuinely fresh rig has neither a local nor an archived export
 // and must not gate dispatch.
 func TestRigDataPresenceFreshRigStillSkipsWithoutAnyExport(t *testing.T) {
-	c, _ := archiveTestRig(t, nil)
+	c, _ := archiveTestRig(t)
 	c.WithArchiveExportRows(func(string) (int, bool) { return 0, false })
 
 	r := c.Run(nil)
@@ -77,7 +72,7 @@ func TestRigDataPresenceFreshRigStillSkipsWithoutAnyExport(t *testing.T) {
 // The local file is the more current signal, and consulting the archive first
 // would compare live rows against a staler snapshot.
 func TestRigDataPresenceLocalExportWinsOverArchive(t *testing.T) {
-	c, rigDir := archiveTestRig(t, nil)
+	c, rigDir := archiveTestRig(t)
 	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "issues.jsonl"),
 		[]byte("{\"id\":\"a\"}\n{\"id\":\"b\"}\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -97,7 +92,7 @@ func TestRigDataPresenceLocalExportWinsOverArchive(t *testing.T) {
 // point: with no oracle supplied the check behaves exactly as before, so the
 // fallback cannot change results for callers that do not opt in.
 func TestRigDataPresenceNilArchiveLookupKeepsOldBehaviour(t *testing.T) {
-	c, _ := archiveTestRig(t, nil) // archiveExportRows left nil
+	c, _ := archiveTestRig(t) // archiveExportRows left nil
 
 	r := c.Run(nil)
 	if r.Status != StatusOK {

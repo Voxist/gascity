@@ -31,7 +31,7 @@ func archiveExportRowsFor(cityPath string) func(rigPath string) (int, bool) {
 		if err != nil || !ok || strings.TrimSpace(db) == "" {
 			return 0, false
 		}
-		for _, repo := range jsonlArchiveRepoCandidates(cityPath) {
+		for _, repo := range jsonlArchiveRepoCandidates(os.Getenv, cityPath) {
 			// Per-database directory first, then the flattened mirror the export
 			// script also writes; either is a valid record that the rig held rows.
 			for _, candidate := range []string{
@@ -48,17 +48,23 @@ func archiveExportRowsFor(cityPath string) func(rigPath string) (int, bool) {
 }
 
 // jsonlArchiveRepoCandidates mirrors the archive-repo precedence in the core
-// pack's jsonl-export script, most current first. Kept in this package because
-// it encodes pack layout, which internal/doctor must not depend on.
-func jsonlArchiveRepoCandidates(cityPath string) []string {
-	if override := strings.TrimSpace(os.Getenv("GC_JSONL_ARCHIVE_REPO")); override != "" {
+// pack's jsonl-export script, most current first. An explicit
+// GC_JSONL_ARCHIVE_REPO override replaces the search entirely. Kept in this
+// package because it encodes pack layout, which internal/doctor must not
+// depend on, and shared with jsonlArchiveDoctorCheck.resolveArchiveRepo so the
+// two readers of the archive cannot drift from the script or each other.
+//
+// getenv is passed in rather than read directly so callers that already own an
+// env seam (the doctor check) keep using it.
+func jsonlArchiveRepoCandidates(getenv func(string) string, cityPath string) []string {
+	if override := strings.TrimSpace(getenv("GC_JSONL_ARCHIVE_REPO")); override != "" {
 		return []string{override}
 	}
-	runtime := strings.TrimSpace(os.Getenv("GC_CITY_RUNTIME_DIR"))
+	runtime := strings.TrimSpace(getenv("GC_CITY_RUNTIME_DIR"))
 	if runtime == "" {
 		runtime = filepath.Join(cityPath, ".gc", "runtime")
 	}
-	base := strings.TrimSpace(os.Getenv("GC_PACK_STATE_DIR"))
+	base := strings.TrimSpace(getenv("GC_PACK_STATE_DIR"))
 	if base == "" {
 		base = filepath.Join(runtime, "packs", "core")
 	}

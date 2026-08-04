@@ -41,7 +41,7 @@ type RigDataPresenceCheck struct {
 	// export, and whether one was found. Injected rather than resolved here: the
 	// archive lives under a pack-owned layout with its own precedence rules, and
 	// this package should not learn where a pack keeps its state. Nil disables
-	// the fallback, leaving the local-export behaviour unchanged.
+	// the fallback, leaving the local-export behavior unchanged.
 	archiveExportRows func(rigPath string) (int, bool)
 }
 
