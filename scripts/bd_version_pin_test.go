@@ -62,7 +62,7 @@ func TestBDVersionPins(t *testing.T) {
 	// deps.env carries BD_SOURCE_REF — the version/ref split that mirrors the
 	// BD_CURRENT_VERSION/BD_CURRENT_REF pair above, so BD_VERSION can stay a real
 	// version string instead of holding a commit SHA. A 40-hex BD_VERSION is the
-	// legacy spelling of the same thing and is still honoured.
+	// legacy spelling of the same thing and is still honored.
 	commitRE := regexp.MustCompile(`^[0-9a-f]{40}$`)
 	bridgeRef := bdSourceRef
 	if bridgeRef == "" && commitRE.MatchString(bdVersion) {
