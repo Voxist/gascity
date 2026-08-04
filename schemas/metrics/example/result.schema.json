@@ -206,10 +206,12 @@
               "logout",
               "whoami",
               "runtime-heartbeat",
-              "provider-rotate-key",
+              "pack-registry-requests",
+              "events-reemit-execution",
               "beads-state",
               "config-lint",
-              "provider-quota"
+              "provider-quota",
+              "provider-rotate-key"
             ]
           },
           "event_id": {

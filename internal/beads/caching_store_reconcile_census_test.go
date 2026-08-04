@@ -87,7 +87,8 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"beads": true, "deps": true, "depsComplete": true, "dirty": true,
 		"beadSeq": true, "localBeadAt": true, "deletedSeq": true, "state": true,
 		"lastFreshAt": true, "mutationSeq": true, "primePartialErr": true,
-		"syncFailures": true, "stats": true, // stats compared field-wise below
+		"syncFailures": true, "circuitTripped": true,
+		"stats": true, // stats compared field-wise below
 	}
 	excludedStore := map[string]bool{
 		"backing": true, "idPrefix": true, "mu": true, "reconciling": true,
@@ -98,11 +99,15 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"stopped": true, "latencyWindow": true, "latencyDriverActive": true,
 		"applyEventBeforeCommitForTest": true,
 		// Fork resilience/read-path state, orthogonal to the reconcile bead-state
-		// end-state the oracle compares: circuitTripped (breaker), availabilityGate
-		// (backing-transport gate), unavailableSkipLogged (reconcile-skip log
-		// dedupe), degradedReads (read-path counter of last-good-cache serves, not
-		// a reconcile delta).
-		"circuitTripped": true, "availabilityGate": true,
+		// end-state the oracle compares: availabilityGate (backing-transport
+		// gate), unavailableSkipLogged (reconcile-skip log dedupe), degradedReads
+		// (read-path counter of last-good-cache serves, not a reconcile delta).
+		//
+		// circuitTripped is deliberately NOT here: upstream #3379 made the
+		// one-shot breaker signal part of the compared reconcile end-state, and
+		// the merge left it in both sets. Upstream's classification wins — it is
+		// a reconcile delta, not read-path state.
+		"availabilityGate":      true,
 		"unavailableSkipLogged": true, "degradedReads": true,
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CachingStore{}), comparedStore, excludedStore)

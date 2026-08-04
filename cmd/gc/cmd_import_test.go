@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/testutil"
+
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
@@ -2689,9 +2691,11 @@ schema = 1
 	if err != nil {
 		t.Fatalf("EvalSymlinks(%q): %v", dir, err)
 	}
-	if got != want {
-		t.Fatalf("resolveImportRoot() = %q, want %q", got, want)
-	}
+	// testutil.AssertSamePath, not ==: want comes from bare EvalSymlinks while
+	// resolveImportRoot now normalizes through pathutil, which on darwin
+	// collapses /private/var and /private/tmp back to /var and /tmp — the
+	// reverse direction. Same directory, two spellings (macOS only).
+	testutil.AssertSamePath(t, got, want)
 }
 
 func TestFindNearestImportRootSkipsRuntimeOnlyDirs(t *testing.T) {
@@ -2764,9 +2768,8 @@ func TestResolveImportRootPrefersNearestPackUnderCity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EvalSymlinks(%q): %v", packDir, err)
 	}
-	if got != want {
-		t.Fatalf("resolveImportRoot() = %q, want nearest pack %q", got, want)
-	}
+	// Tolerant compare for the same darwin alias-collapse reason as above.
+	testutil.AssertSamePath(t, got, want)
 }
 
 func TestResolveImportRootRuntimeOnlyAncestorResolvesRegisteredRigCity(t *testing.T) {

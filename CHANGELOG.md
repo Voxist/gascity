@@ -7,94 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+### Fixed
 
-- **Provenance-correct release artifacts: `make artifact` + provenance in
-  `gc version` (vp-q1ho).** New `make artifact BASE_REF=<remote>/<branch>`
-  builds a gc binary whose filename is machine-derived from the ACTUAL build
-  commit (`gc-<token>-<UTC date>-<sha>[-dirty]`) and refuses the base
-  branch's name as the token when HEAD is not in the base's lineage — the
-  `gc-main-20260710-77916fc6c` trap (filename claimed main + 77916fc6c; the
-  binary carried neither). BASE_REF must be a remote-tracking ref because a
-  lineage claim that does not name its remote is unfalsifiable (`origin`
-  here is the upstream, not the fork). The build passes `-buildvcs=false`
-  and injects commit + base-lineage stamps via ldflags: Go's own VCS
-  stamping is untrustworthy from linked worktrees (verified live — nested
-  under the repo dir it embeds the MAIN checkout's HEAD/dirty state, outside
-  it embeds nothing). Post-build the target verifies the binary's
-  self-reported commit against HEAD and writes the `.buildinfo.json`
-  manifest beside the artifact (`cmd/writebuildmanifest`). `gc version
-  --long`/`--json` now also report the linked `github.com/steveyegge/beads`
-  library version and the build-base stamp (`base:
-  Voxist/main@eb743642c+0-0`, or `unstamped`), so "what exactly is
-  deployed?" is answerable from the binary itself — three installed gc
-  binaries once linked three different beads libraries while all
-  self-reporting the same version string. New `cmd/artifactname` +
-  `internal/provenance` artifact derivation.
-- **Storeless fallback for `gc session nudge`: bounded store attempt +
-  store-independent delivery, feature-flagged default-off (vl-3hb WS-B /
-  vp-4c86).** ADR-0024 designates `gc session nudge` as the fallback delivery
-  path when bd work-discovery is down, but its target resolution and shadow
-  enqueue route through the same bead store (and shared Dolt server) as
-  discovery, so a store-level degradation used to take out discovery and its
-  designated backup together. With `GC_NUDGE_STORELESS_FALLBACK=1` (or
-  `true`/`yes`/`on`), the store-touching resolution leg runs under a bounded
-  budget (3s); on budget exhaustion, a store-slow classification, or an
-  authoritative miss, the target is re-resolved from the live runtime provider
-  alone and delivery goes store-independent — queued nudges write the flock'd
-  `state.json` authority directly (observability shadow bead skipped, `BeadID`
-  empty), live nudges deliver provider-only. The CLI reports the degraded path
-  on stderr and as `"path": "storeless-fallback"` in `--json` output. With the
-  flag unset the behavior is unchanged. New file
-  `cmd/gc/cmd_nudge_storeless.go`.
-- **Host-load event stream + slow-tick doctor check (vp-qvqk / defects 3+1).**
-  The controller now emits a periodic `host.load_sample` event (load1/5/15,
-  logical cores, runnable-process count, summed per-process %CPU) at patrol
-  cadence from its own goroutine, so a wedged reconcile tick cannot stall the
-  series that attributes the wedge. Runnable + %CPU ride alongside the load
-  averages because Darwin's load average also counts uninterruptible waits —
-  load alone cannot discriminate CPU oversubscription from blocked-on-I/O.
-  The supervisor doctor gains a `slow_ticks` check that reads the tick
-  heartbeat's `threshold_breach` flag over the doctor window and emits a
-  `doctor.alert` when any tick breached — the consumer that makes the flag
-  load-bearing (it was previously emitted and never read). New event type
-  `host.load_sample` carries a typed payload struct but is deliberately left
-  out of `KnownEventTypes` and the payload registry until the SSE projection
-  follow-up (same deferral as `provider.health_gate_alert`); subscribers
-  receive it via the custom-event envelope.
-- **`gc config lint`: pre-commit/CI gate for config problems the runtime load
-  degrades to warnings (vc-quqf).** Loads the fully resolved city config
-  (includes, packs, patches, overrides), prints every composition warning, and
-  exits non-zero when any `[[patches.agent]]` entry targets an agent that does
-  not resolve in the merged config (or on any hard load error). Pairs with the
-  graceful-degrade change below: the runtime keeps loading, lint keeps the typo
-  from merging.
+- **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
+  SIGKILL, matching its documented contract.** The fallback (used when
+  neither `timeout` nor `gtimeout` is on `PATH`, the default on stock macOS)
+  previously called `subprocess.run(..., timeout=...)`, which kills the
+  child with SIGKILL immediately on expiry — giving it no chance to run its
+  own signal handler, unlike the `timeout --kill-after=2` path it's meant to
+  match. `mol-dog-backup.sh` wraps `dolt backup sync` in this helper, and
+  `dolt` publishes a backup archive under its final name before writing the
+  manifest that references it; a SIGKILL mid-sync left the archive
+  permanently unreferenced (`dolt backup` has no prune verb). The fallback
+  now uses `Popen` + `terminate()` + a 2s grace `wait()` + `kill()`,
+  streaming output instead of buffering it. (gascity#4823)
 
-- **L0 pre-heal in `ensure-project-id`: auto-restore canonical project_id from
-  `city.toml [identity_map]` when the DB confirms it but L1 was wiped (vp-cz7o.21).**
-  `gc dolt-state ensure-project-id` now reads a new L0 layer — the
-  `[identity_map]` block in city.toml — before running the 3-layer reconcile.
-  When L3 matches the canonical ID in L0 and L1 is absent or stale (the
-  2026-06-20 incident scenario), L1 and L2 are repaired from the canonical source,
-  so a recovery re-init always reconstructs the correct identity without human
-  intervention. The 3-layer `decideReconcile` contract is unchanged; L0 is a
-  pre-heal step only. New file `cmd/gc/city_identity_map.go`; ~20 lines added to
-  `ensureManagedDoltProjectIDWithRecorder`.
+- **ACP activity is now available across process boundaries.** ACP
+  `session/update` timestamps are published through an atomic, coalesced
+  sidecar, allowing a process other than the session owner to report
+  `last_active`. Sidecar I/O runs off the JSON-RPC dispatch loop, and transient
+  publication failures are reported and retried. ACP now declares the matching
+  activity capability, enabling timed idle policies and the existing opt-in
+  `[session] progress_stall_timeout` policy. The declaration also engages two
+  paths that are on by default for ACP: a configured named ACP session whose
+  config has drifted is no longer deferred as `activity_unknown`, so a
+  config-drift tick can now reset it once its last observed activity is older
+  than the two-minute named-session activity threshold; and nudge delivery now
+  applies the configured quiescence window to ACP instead of taking the
+  deliver-without-an-activity-signal fast path. Activity age records only the last
+  observed protocol update; it does not by itself diagnose why updates stopped
+  or prove that a session is dead. `progress_stall_timeout` remains disabled by
+  default.
 
-### Changed
-
-- **Controller tick heartbeat: emit every tick, breach threshold relative to
-  the patrol interval (vp-qvqk / defects 2+1).** `controller.tick_completed`
-  now fires once per completed tick instead of on breach-or-every-10th: the
-  sampled stream was a biased sample (fast ticks silently omitted), so any
-  period/median arithmetic over it was valid only while every tick breached —
-  a coincidence that would have flipped into a phantom regression the moment
-  the controller got healthy. The `threshold_breach` flag is now computed
-  against 2× the configured `[daemon] patrol_interval` (falling back to the
-  legacy absolute 5s only when the interval is unknown or non-positive)
-  instead of a constant 5s that had been ON for 100% of ticks in a 30-55s
-  regime. Consumers of `threshold_breach` should expect it to mean "lost
-  cadence for a full interval", not "took more than 5 seconds".
 ## [1.4.0] - 2026-07-24
 
 ### Upgrading Notes

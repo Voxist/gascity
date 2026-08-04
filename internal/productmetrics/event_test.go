@@ -350,12 +350,17 @@ func TestInjectedImmutableCommandCatalogRoundTripsWithoutExpandingProduction(t *
 
 	generatedCount := 0
 	generatedCommandIDCatalog(func(commandIDEntry) { generatedCount++ })
-	// 191 upstream + 4 fork-only runnable commands (gc beads state, gc config
+	// 193 upstream + 4 fork-only runnable commands (gc beads state, gc config
 	// lint, gc provider quota, gc provider rotate-key). The fifth fork-only
 	// census path, "gc provider", is a command group and carries the shared
 	// group id rather than a catalog entry, so it does not count here.
-	if generatedCount != 195 {
-		t.Fatalf("generated production catalog has %d entries, want 195", generatedCount)
+	//
+	// Re-derived at the v1.4.0 resync: upstream grew 191 -> 193, and upstream
+	// also took ids 196/197, which the fork-only commands had held. Those four
+	// were reallocated to 198-201 (next_id 202) — a fork-local id remap only,
+	// since none of the four exists upstream.
+	if generatedCount != 197 {
+		t.Fatalf("generated production catalog has %d entries, want 197", generatedCount)
 	}
 
 	injected := func(yield func(commandIDEntry)) {
