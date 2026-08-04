@@ -237,6 +237,22 @@ func (c *sqlCleanupDoltClient) DropDatabase(ctx context.Context, name string) er
 	return err
 }
 
+// PurgeDroppedDatabases runs Dolt's purge on rigDB.
+//
+// Connection-context hazard: c.db is the shared pooled handle from
+// internal/doltpool, opened server-level (empty database). The USE below
+// therefore mutates a connection that conn.Close() returns to the pool
+// still bound to rigDB, where any other caller may draw it next. There
+// is no restore: the connection started with no database selected, and
+// MySQL has no "USE nothing" to put it back.
+//
+// Safe today only because every other query on this pooled server-level
+// handle is database-context-independent — SHOW DATABASES, fully
+// qualified names, or its own USE. That is an invariant, not an
+// accident: any unqualified query added to a server-level pooled client
+// would silently run against whichever database a previous borrower left
+// selected. New callers must qualify their identifiers or issue their
+// own USE.
 func (c *sqlCleanupDoltClient) PurgeDroppedDatabases(ctx context.Context, rigDB string) error {
 	if !validDoltDatabaseIdentifier(rigDB) {
 		return fmt.Errorf("invalid database identifier %q", rigDB)
