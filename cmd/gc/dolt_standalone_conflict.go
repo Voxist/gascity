@@ -107,6 +107,14 @@ func argvDataDirMatches(argv []string, dataDir string) (bool, bool) {
 	return samePath(value, dataDir), true
 }
 
+// argvFlagValue reads a flag's value out of a raw argv, accepting both the
+// "--flag value" and "--flag=value" spellings. The bool reports presence, so a
+// flag supplied with an empty value is distinguishable from one not supplied.
+//
+// --data-dir today, but narrowing the signature to that one flag would turn a
+// reusable argv helper into a single-purpose one for no benefit.
+//
+//nolint:unparam // deliberately general: every caller happens to want
 func argvFlagValue(argv []string, flag string) (string, bool) {
 	for i, arg := range argv {
 		if arg == flag {

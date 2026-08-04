@@ -27,7 +27,7 @@ const (
 	// re-derive from the merged workflow rather than adopt either side's stale pin.
 	// Re-derived again for ga-kgluj: splitting BD_VERSION into BD_VERSION +
 	// BD_SOURCE_REF adds a job-level env key, and env is part of the execution
-	// shape this pin guards — so the tripwire firing here is correct behaviour,
+	// shape this pin guards — so the tripwire firing here is correct behavior,
 	// not noise.
 	expectedCIExecutionHash     = "41d38414857d74ccb3d7faffe10deb0c27e92aaf87bfeafb94351bacf7ffe1b7"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
