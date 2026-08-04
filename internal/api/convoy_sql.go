@@ -43,10 +43,13 @@ var (
 // workflowSQLQueryTimeout bounds each workflow SQL query so a stuck Dolt
 // server fails the fast path in ~5s and the caller drops to the bd-subprocess
 // slow path, rather than inheriting the doltpool DSN's longer ReadTimeout
-// (~30s). This restores the deliberate 5s boundary from 9799dce95 (review
-// #20). The workflow snapshot call path (buildWorkflowSnapshot →
-// tryFullWorkflowSQL) does not thread a request context, so each query
-// derives its own bounded context from context.Background().
+// (~30s). The bound matters more now that these reads share a pooled *sql.DB
+// capped at 5 open connections: an unbounded query no longer stalls only its
+// own caller, it holds one of the few shared connections and starves every
+// other Dolt reader in the process. The workflow snapshot call path
+// (buildWorkflowSnapshot → tryFullWorkflowSQL) does not thread a request
+// context, so each query derives its own bounded context from
+// context.Background().
 const workflowSQLQueryTimeout = 5 * time.Second
 
 func workflowSQLCandidatesForWorkflowID(
