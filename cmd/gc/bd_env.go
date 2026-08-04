@@ -1190,9 +1190,20 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 			return out, err
 		}
 		if !bdTransportRetryableError(cityPath, dir, env, err) {
-			// Success or application-class failure: bd reached the store
-			// and answered, so the transport is healthy.
-			recordBdBreakerOutcome(breaker, false)
+			// bd reached the store and answered (success or an
+			// application-class failure), so the transport is healthy —
+			// unless it never answered at all because we killed it at its
+			// deadline. A wedged backend produces no stderr marker, so it
+			// lands here and used to be recorded as a healthy transport,
+			// which is why the breaker never tripped on the one outage
+			// shape the cache most needs it for (ga-2bo4m).
+			//
+			// This counts the timeout toward the breaker but deliberately
+			// does NOT join the retry path below: bdTransportRetryableError
+			// gates both, and retrying a command that just burned its full
+			// per-command budget would double every call's latency against
+			// a store already known to be unresponsive.
+			recordBdBreakerOutcome(breaker, bdInvocationTimedOut(name, err))
 			return out, err
 		}
 		if bdTransportRecoverableError(cityPath, dir, env, err) {

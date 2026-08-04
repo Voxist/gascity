@@ -124,6 +124,44 @@ func wireStoreAvailabilityGate(store beads.Store, cityPath, scopeRoot string) {
 	}
 }
 
+// bdTimeoutMarker is the text the beads exec layer produces when a bd command
+// is killed at its per-command deadline. bd never answered, so there is no
+// stderr marker to classify — a wedged backend is exactly the failure the
+// stderr-marker tables cannot see.
+const bdTimeoutMarker = "timed out after"
+
+// bdCallerDeadlineMarker distinguishes the caller's own budget expiring from
+// the per-command timer firing. A short caller budget (the claim-time
+// current_run_id write, for example) says nothing about the backend's health,
+// so it must not count against the transport breaker.
+const bdCallerDeadlineMarker = "(caller deadline)"
+
+// bdInvocationTimedOut reports whether err is a bd command killed at its own
+// per-command deadline — the wedged-backend shape.
+//
+// Scoped deliberately on both axes the classification can get wrong:
+//
+//   - name must be "bd". The beads exec runner is shared, and BdStore also
+//     drives `dolt sql` through it, so a name-agnostic check would attribute a
+//     slow embedded-Dolt fallback to the bd transport and trip the breaker for
+//     the whole scope while bd itself is healthy.
+//   - the caller-deadline branch is excluded. That branch fires when the
+//     caller's budget was the binding one, which is a statement about the
+//     caller, not the store.
+//
+// Unlike the marker tables this sits beside, it deliberately does NOT gate the
+// retry or managed-recovery paths — see the call site for why.
+func bdInvocationTimedOut(name string, err error) bool {
+	if err == nil || name != "bd" {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, bdCallerDeadlineMarker) {
+		return false
+	}
+	return strings.Contains(msg, bdTimeoutMarker)
+}
+
 // recordBdBreakerOutcome reports one bd invocation's final outcome to the
 // scope breaker. transportFailure must come from the pinned
 // bdTransportRetryableMarkers classification: only transport-class
