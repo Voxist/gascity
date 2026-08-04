@@ -600,7 +600,7 @@ func TestReconcileTraceResultsObservePostTickValues(t *testing.T) {
 	reconcileSessionBeadsTracedWithNamedDemand(
 		context.Background(), cityDir, snap.OpenForReconcile(), snap, nil, map[string]bool{},
 		cfg, runtime.NewFake(), beads.SessionStore{Store: store}, nil, nil, nil, nil,
-		newDrainTracker(), nil, nil, nil, nil, nil, false, nil, cityName, nil, clock.Real{},
+		newDrainTracker(), nil, nil, nil, nil, nil, nil, false, nil, cityName, nil, clock.Real{},
 		events.Discard, 0, 0, io.Discard, io.Discard, cycle,
 	)
 
@@ -663,6 +663,7 @@ func TestSessionReconcilePhaseTraceUsesDistinctSites(t *testing.T) {
 		nil, // failoverChain (*[]string) — T-014
 		nil,
 		nil,
+		nil, // namedRoutedDemand
 		false,
 		nil,
 		"trace-town",

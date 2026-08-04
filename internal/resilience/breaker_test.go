@@ -30,7 +30,7 @@ func (c *testClock) Advance(d time.Duration) {
 
 // maxJitter pins full jitter to its upper bound so open deadlines are
 // deterministic in tests.
-func maxJitter(capacity time.Duration) time.Duration { return capacity }
+func maxJitter(capDur time.Duration) time.Duration { return capDur }
 
 func newTestBreaker(t *testing.T, settings Settings, clock *testClock, onChange func(Transition)) *Breaker {
 	t.Helper()

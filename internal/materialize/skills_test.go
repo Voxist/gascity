@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/testutil"
+
 	"github.com/gastownhall/gascity/internal/bootstrap"
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -99,7 +101,7 @@ func TestVendorSink(t *testing.T) {
 		wantOK   bool
 	}{
 		{"claude", ".claude/skills", true},
-		{"codex", ".codex/skills", true},
+		{"codex", ".agents/skills", true},
 		{"gemini", ".gemini/skills", true},
 		{"opencode", ".opencode/skills", true},
 		{"mimocode", ".mimocode/skills", true},
@@ -771,6 +773,162 @@ func TestMaterializeAgentSinkDirRequired(t *testing.T) {
 	}
 }
 
+// legacyRootTarget builds a symlink at sink/<name> pointing into a
+// retired root (e.g. the pre-#3344 .gc/system/packs projection) that no
+// longer exists on disk — the orphaned shape hq-38je root-caused.
+func mustDanglingLegacyLink(t *testing.T, sink, name, legacyRoot string) string {
+	t.Helper()
+	target := filepath.Join(legacyRoot, "core", "skills", name)
+	mustSymlink(t, target, filepath.Join(sink, name))
+	return target
+}
+
+func TestRunDeletesDanglingLegacyRootLink(t *testing.T) {
+	t.Parallel()
+	src := t.TempDir()
+	mkSkill(t, src, "gc-work")
+	sink := t.TempDir()
+	legacyRoot := filepath.Join(t.TempDir(), ".gc", "system", "packs") // never created — retired
+	mustDanglingLegacyLink(t, sink, "qlandia-crew.prep-convoy", legacyRoot)
+
+	_, err := Run(Request{
+		SinkDir:          sink,
+		Desired:          []SkillEntry{{Name: "gc-work", Source: filepath.Join(src, "gc-work"), Origin: "core"}},
+		OwnedRoots:       []string{src},
+		LegacyOwnedRoots: []string{legacyRoot},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(sink, "qlandia-crew.prep-convoy")); !os.IsNotExist(err) {
+		t.Errorf("dangling legacy link survived: lstat err=%v", err)
+	}
+	checkSymlink(t, filepath.Join(sink, "gc-work"), filepath.Join(src, "gc-work"))
+}
+
+func TestRunRepointsDesiredLegacyRootLink(t *testing.T) {
+	t.Parallel()
+	src := t.TempDir()
+	mkSkill(t, src, "gc-mail")
+	sink := t.TempDir()
+	legacyRoot := filepath.Join(t.TempDir(), ".gc", "system", "packs")
+	mustDanglingLegacyLink(t, sink, "gc-mail", legacyRoot)
+
+	res, err := Run(Request{
+		SinkDir:          sink,
+		Desired:          []SkillEntry{{Name: "gc-mail", Source: filepath.Join(src, "gc-mail"), Origin: "core"}},
+		OwnedRoots:       []string{src},
+		LegacyOwnedRoots: []string{legacyRoot},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(res.Materialized, []string{"gc-mail"}) {
+		t.Fatalf("Materialized = %v", res.Materialized)
+	}
+	checkSymlink(t, filepath.Join(sink, "gc-mail"), filepath.Join(src, "gc-mail"))
+	if len(res.Skipped) != 0 {
+		t.Errorf("legacy-target link misreported as user-owned: %+v", res.Skipped)
+	}
+}
+
+func TestRunRepointsLiveDesiredLegacyRootLink(t *testing.T) {
+	t.Parallel()
+	src := t.TempDir()
+	mkSkill(t, src, "gc-mail")
+	sink := t.TempDir()
+	// Legacy target still exists on disk (e.g. an old cache checkout not
+	// yet pruned): a desired name must still re-point at the current
+	// source — the pre-manifest #4130 case.
+	legacyRoot := t.TempDir()
+	legacyTarget := filepath.Join(legacyRoot, "oldsha", "skills", "gc-mail")
+	if err := os.MkdirAll(legacyTarget, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustSymlink(t, legacyTarget, filepath.Join(sink, "gc-mail"))
+
+	res, err := Run(Request{
+		SinkDir:          sink,
+		Desired:          []SkillEntry{{Name: "gc-mail", Source: filepath.Join(src, "gc-mail"), Origin: "core"}},
+		OwnedRoots:       []string{src},
+		LegacyOwnedRoots: []string{legacyRoot},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(res.Materialized, []string{"gc-mail"}) {
+		t.Fatalf("Materialized = %v", res.Materialized)
+	}
+	checkSymlink(t, filepath.Join(sink, "gc-mail"), filepath.Join(src, "gc-mail"))
+}
+
+func TestRunKeepsLiveUndesiredLegacyRootLink(t *testing.T) {
+	t.Parallel()
+	src := t.TempDir()
+	sink := t.TempDir()
+	// Live legacy target + name not desired: leave alone. Deleting a
+	// still-resolving link could strand content the user relies on; the
+	// doctor check surfaces it instead.
+	legacyRoot := t.TempDir()
+	legacyTarget := filepath.Join(legacyRoot, "core", "skills", "old-skill")
+	if err := os.MkdirAll(legacyTarget, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustSymlink(t, legacyTarget, filepath.Join(sink, "old-skill"))
+
+	_, err := Run(Request{
+		SinkDir:          sink,
+		Desired:          nil,
+		OwnedRoots:       []string{src},
+		LegacyOwnedRoots: []string{legacyRoot},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkSymlink(t, filepath.Join(sink, "old-skill"), legacyTarget)
+}
+
+func TestRunKeepsDanglingLegacyRootLinkWithoutOptIn(t *testing.T) {
+	t.Parallel()
+	src := t.TempDir()
+	sink := t.TempDir()
+	legacyRoot := filepath.Join(t.TempDir(), ".gc", "system", "packs")
+	target := mustDanglingLegacyLink(t, sink, "core.gc-mail", legacyRoot)
+
+	// No LegacyOwnedRoots: the historical behavior — orphaned pre-manifest
+	// links classify as user-owned and survive forever.
+	_, err := Run(Request{
+		SinkDir:    sink,
+		OwnedRoots: []string{src},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkSymlink(t, filepath.Join(sink, "core.gc-mail"), target)
+}
+
+func TestRunDeletesDanglingCacheRepoLink(t *testing.T) {
+	t.Parallel()
+	src := t.TempDir()
+	sink := t.TempDir()
+	// Cache checkout pruned out from under a pre-manifest link.
+	cacheRoot := filepath.Join(t.TempDir(), ".gc", "cache", "repos")
+	target := filepath.Join(cacheRoot, "be555e483c79", "internal", "bootstrap", "packs", "core", "skills", "gc-mail")
+	mustSymlink(t, target, filepath.Join(sink, "core.gc-mail"))
+
+	_, err := Run(Request{
+		SinkDir:          sink,
+		OwnedRoots:       []string{src},
+		LegacyOwnedRoots: []string{cacheRoot},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(sink, "core.gc-mail")); !os.IsNotExist(err) {
+		t.Errorf("dangling cache-target link survived: lstat err=%v", err)
+	}
+}
+
 func TestMaterializeAgentRemovesAllOwnedWhenDesiredEmpty(t *testing.T) {
 	t.Parallel()
 	src := t.TempDir()
@@ -1035,9 +1193,11 @@ func TestCanonicalizePath(t *testing.T) {
 		t.Fatal(err)
 	}
 	expected, _ := filepath.EvalSymlinks(alias)
-	if got != expected {
-		t.Errorf("alias dir: got %q, want %q", got, expected)
-	}
+	// testutil.AssertSamePath, not ==: expectations come from bare
+	// filepath.EvalSymlinks while canonicalizePath normalizes through pathutil,
+	// which on darwin collapses /private/var and /private/tmp back to /var and
+	// /tmp — the reverse direction. Same file, two spellings (macOS only).
+	testutil.AssertCanonicalPathEquals(t, got, expected)
 
 	// Missing tail under an aliased ancestor: walk-up + suffix re-append.
 	missing := filepath.Join(alias, "not-yet-created", "leaf")
@@ -1047,9 +1207,7 @@ func TestCanonicalizePath(t *testing.T) {
 	}
 	wantPrefix, _ := filepath.EvalSymlinks(alias)
 	wantMissing := filepath.Join(wantPrefix, "not-yet-created", "leaf")
-	if got != wantMissing {
-		t.Errorf("missing tail: got %q, want %q", got, wantMissing)
-	}
+	testutil.AssertCanonicalPathEquals(t, got, wantMissing)
 
 	// Empty input.
 	if got, err := canonicalizePath(""); err != nil || got != "" {

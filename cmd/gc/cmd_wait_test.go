@@ -13,6 +13,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -631,23 +633,181 @@ func waitTestRealBDPath(t *testing.T) string {
 	t.Helper()
 	skipSlowCmdGCTest(t, "requires a managed bd lifecycle city; run make test-cmd-gc-process for full coverage")
 	waitTestRealBDPathOnce.Do(func() {
-		candidate, err := findPreferredBinary("bd")
-		if err != nil {
-			waitTestRealBDErr = errors.New("bd with init not installed")
-			return
-		}
-		cmd := exec.Command(candidate, "init", "--help")
-		out, err := cmd.CombinedOutput()
-		if err == nil || !strings.Contains(string(out), `unknown subcommand "init"`) {
-			waitTestRealBDCached = candidate
-			return
-		}
-		waitTestRealBDErr = errors.New("bd with init not installed")
+		waitTestRealBDCached, waitTestRealBDErr = buildPinnedBDBinaryForTests()
 	})
 	if waitTestRealBDErr != nil {
-		t.Skip(waitTestRealBDErr.Error())
+		t.Fatalf("build pinned bd test binary: %v", waitTestRealBDErr)
 	}
 	return waitTestRealBDCached
+}
+
+// buildPinnedBDBinaryForTests builds the bd CLI from the exact
+// github.com/steveyegge/beads module version this repo's go.mod requires, so
+// the binary's compiled-in schema/migration knowledge always matches
+// gascity's own in-process beads code (internal/beads imports that same
+// module directly). A bd resolved by searching PATH/home-dir locations
+// instead (as findPreferredBinary does for callers that only need some bd
+// present) carries no such guarantee: it can drift to a different schema
+// version and fail deep inside a test with a cryptic mismatch error instead
+// of cleanly at the point the drift actually originates (ga-r9cvmi).
+//
+// go install's "@version" form deliberately ignores any enclosing module's
+// go.mod/go.sum and resolves the target module's own dependency closure in
+// isolation, which is required here: cmd/bd's full dependency graph (CLI
+// extras like AI-assisted duplicate detection, ADO rich-text rendering,
+// telemetry exporters) is broader than what gascity's own go.sum carries,
+// since gascity only imports internal/beads's storage packages.
+func buildPinnedBDBinaryForTests() (string, error) {
+	version, err := pinnedBeadsModuleVersion()
+	if err != nil {
+		return "", fmt.Errorf("resolve pinned beads module version: %w", err)
+	}
+
+	sweepOrphanPIDPrefixedDirs(os.TempDir(), testBDBinaryDirPrefix)
+	buildDir, err := os.MkdirTemp("", pidPrefixedTempPattern(testBDBinaryDirPrefix))
+	if err != nil {
+		return "", fmt.Errorf("mktemp bd binary dir: %w", err)
+	}
+
+	cmd := exec.Command("go", "install", "-tags", "gms_pure_go",
+		"github.com/steveyegge/beads/cmd/bd@"+version)
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOBIN="+buildDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("go install github.com/steveyegge/beads/cmd/bd@%s: %w\n%s", version, err, out)
+	}
+	return filepath.Join(buildDir, "bd"), nil
+}
+
+// pinnedBeadsModuleVersion reports the github.com/steveyegge/beads version
+// this test binary was actually built against, read from this process's own
+// embedded build info rather than a `go list -m` subprocess or a go.mod text
+// scan: debug.ReadBuildInfo reflects the exact resolved dependency graph
+// (including any replace/exclude directives) with zero process spawn, and it
+// can never itself drift from go.mod the way a second hardcoded version
+// string could, since the compiler stamps it in at build time.
+func pinnedBeadsModuleVersion() (string, error) {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "", fmt.Errorf("read build info: not available (binary not built with module support)")
+	}
+	for _, dep := range bi.Deps {
+		if dep.Path != "github.com/steveyegge/beads" {
+			continue
+		}
+		if dep.Replace != nil {
+			return dep.Replace.Version, nil
+		}
+		return dep.Version, nil
+	}
+	return "", fmt.Errorf("github.com/steveyegge/beads not found in build info deps")
+}
+
+// TestBuildPinnedBDBinaryForTestsMatchesGoModVersion locks in the fix for
+// ga-r9cvmi: a bd binary resolved by searching PATH/home-dir locations (the
+// old waitTestRealBDPath behavior, still used elsewhere via
+// findPreferredBinary) carries no guarantee of matching the schema/migration
+// knowledge baked into gascity's own in-process beads code, which is compiled
+// from the exact github.com/steveyegge/beads version go.mod pins. Confirmed
+// live: the same ~/.local/bin/bd path reported two different version stamps
+// across two consecutive invocations in this same fleet sandbox, and
+// ga-r9cvmi's own notes captured a deterministic v49-vs-v53 schema mismatch
+// from that ambient drift. buildPinnedBDBinaryForTests must instead build bd
+// fresh from the pinned dependency, so its correctness never depends on
+// whatever happens to be installed on the host.
+// pseudoVersionCommit returns the 12-hex commit prefix embedded in a go
+// pseudo-version, and whether pinned was one at all.
+func pseudoVersionCommit(pinned string) (string, bool) {
+	m := regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?[.-][0-9]{14}-([0-9a-f]{12})$`).FindStringSubmatch(pinned)
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
+}
+
+// depsEnvBDPins reads BD_VERSION and BD_SOURCE_REF out of the repo's deps.env.
+func depsEnvBDPins(t *testing.T) (bdVersion, sourceRef string) {
+	t.Helper()
+	// Walk up to the module root rather than shelling out to `git rev-parse`:
+	// a subprocess here would be a new call site against the resource-census
+	// debt ratchet, and this needs no process at all.
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	var raw []byte
+	for {
+		if b, readErr := os.ReadFile(filepath.Join(dir, "deps.env")); readErr == nil {
+			raw = b
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("deps.env not found walking up from working directory")
+		}
+		dir = parent
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "BD_VERSION="):
+			bdVersion = strings.TrimPrefix(line, "BD_VERSION=")
+		case strings.HasPrefix(line, "BD_SOURCE_REF="):
+			sourceRef = strings.TrimPrefix(line, "BD_SOURCE_REF=")
+		}
+	}
+	if bdVersion == "" || sourceRef == "" {
+		t.Fatalf("deps.env missing BD_VERSION (%q) or BD_SOURCE_REF (%q)", bdVersion, sourceRef)
+	}
+	return bdVersion, sourceRef
+}
+
+func TestBuildPinnedBDBinaryForTestsMatchesGoModVersion(t *testing.T) {
+	// Load-bearing for the census even though waitTestRealBDPath calls it
+	// again: this is the cmd/gc+untagged slow_process_gate call site the
+	// 57 -> 58 bump accounts for across census.go, test-resources.toml, and
+	// TESTING.md. Deleting it as redundant fails the ledger gate.
+	skipSlowCmdGCTest(t, "builds a real bd binary from source; run make test-cmd-gc-process for full coverage")
+
+	// Route through waitTestRealBDPath so this shares waitTestRealBDPathOnce
+	// with the other bd-consuming tests. Calling buildPinnedBDBinaryForTests
+	// directly builds a second ~91 MB binary, and leaks a second temp dir, in
+	// any shard that also holds a waitTestRealBDPath caller.
+	bdPath := waitTestRealBDPath(t)
+
+	pinned, err := pinnedBeadsModuleVersion()
+	if err != nil {
+		t.Fatalf("pinnedBeadsModuleVersion: %v", err)
+	}
+
+	// A go pseudo-version (vX.Y.Z-0.<timestamp>-<commit>) names a COMMIT, not a
+	// release, and a binary built from that commit reports whatever version the
+	// commit itself declares — never the pseudo-version string. gascity pins one
+	// deliberately: no published bd release carries schema migration 0054 (v1.1.2
+	// tops out at 0053), so go.mod must pin the commit directly. deps.env records
+	// what that commit declares, in BD_VERSION, and which commit it is, in
+	// BD_SOURCE_REF.
+	//
+	// So for a pseudo-version the meaningful assertions are: (a) the binary
+	// reports the version deps.env says the pinned commit declares, and (b)
+	// go.mod and deps.env name the SAME commit — the lockstep the deps.env
+	// comments promise and which nothing else checks.
+	wantVersion := strings.TrimPrefix(pinned, "v")
+	if commit, ok := pseudoVersionCommit(pinned); ok {
+		declared, sourceRef := depsEnvBDPins(t)
+		if !strings.HasPrefix(sourceRef, commit) {
+			t.Fatalf("go.mod pins beads commit %s but deps.env BD_SOURCE_REF is %s; "+
+				"the pseudo-version and the source ref must name the same commit", commit, sourceRef)
+		}
+		wantVersion = strings.TrimPrefix(declared, "v")
+	}
+
+	out, err := exec.Command(bdPath, "version").CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s version: %v\n%s", bdPath, err, out)
+	}
+	if !strings.Contains(string(out), wantVersion) {
+		t.Fatalf("%s version output %q does not reflect pinned beads module version %q", bdPath, out, pinned)
+	}
 }
 
 func TestLoadWaitBeadsByLabelUsesBoundedLookup(t *testing.T) {

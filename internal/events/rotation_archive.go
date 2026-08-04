@@ -135,13 +135,22 @@ func archiveOverlapsFilter(info archiveInfo, filter Filter) bool {
 	if filter.BeforeSeq > 0 && info.FirstSeq >= filter.BeforeSeq {
 		return false
 	}
-	// Timestamp is the rotation instant — an upper bound on the archive's
-	// newest event — so the archive is safe to skip only when that bound
-	// predates Since. Never prune on Until: the archive's FIRST event time
-	// is not recorded (only FirstSeq), so an archive stamped after Until
-	// may still hold in-window events; pruning there would silently drop
-	// them (vc-89s).
-	if !filter.Since.IsZero() && info.Timestamp.Before(filter.Since) {
+	// Every event in an archive was appended to the live log before that
+	// log was rotated at true instant T, so event.Time <= T. But
+	// info.Timestamp is T truncated to whole seconds (archiveTimestampLayout
+	// has no sub-second component), so info.Timestamp <= T < info.Timestamp+1s
+	// — the true rotation instant, and therefore every event.Time, can land
+	// anywhere up to (but not including) the NEXT whole second. A Since
+	// inside that truncation window cannot be ruled out and must still be
+	// read; only a Since at or beyond info.Timestamp+1s is guaranteed to
+	// postdate every possible event.Time (#4628). A zero Timestamp carries
+	// no such guarantee (legacy basenames predate the stamped convention),
+	// so it is read. This also assumes event.Ts is never clamped forward of
+	// the true rotation instant by the recorder (see ga-da13nh follow-up).
+	// Until is deliberately not handled here: the filename records only the
+	// rotation instant, not the archive's first event, so there is no sound
+	// upper-bound skip.
+	if !filter.Since.IsZero() && !info.Timestamp.IsZero() && info.Timestamp.Add(time.Second).Before(filter.Since) {
 		return false
 	}
 	return true

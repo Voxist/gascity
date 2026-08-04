@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 200,
+  "next_id": 202,
   "permanent_ids": [
     {
       "name": "help",
@@ -196,11 +196,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": true,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -331,7 +331,7 @@
       "notice_policy": "eligible",
       "classification": "beads-state",
       "owner": "immediate",
-      "id": 197
+      "id": 198
     },
     {
       "path": "gc build-image",
@@ -424,9 +424,9 @@
       "mode": "completion",
       "notice_policy": "ineligible",
       "classification": "completion",
+      "canonical_target": "gc completion bash",
       "owner": "immediate",
-      "id": 20,
-      "canonical_target": "gc completion bash"
+      "id": 20
     },
     {
       "path": "gc completion powershell",
@@ -440,9 +440,9 @@
       "mode": "completion",
       "notice_policy": "ineligible",
       "classification": "completion",
+      "canonical_target": "gc completion bash",
       "owner": "immediate",
-      "id": 20,
-      "canonical_target": "gc completion bash"
+      "id": 20
     },
     {
       "path": "gc completion zsh",
@@ -456,9 +456,9 @@
       "mode": "completion",
       "notice_policy": "ineligible",
       "classification": "completion",
+      "canonical_target": "gc completion bash",
       "owner": "immediate",
-      "id": 20,
-      "canonical_target": "gc completion bash"
+      "id": 20
     },
     {
       "path": "gc config",
@@ -504,7 +504,7 @@
       "notice_policy": "eligible",
       "classification": "config-lint",
       "owner": "immediate",
-      "id": 198
+      "id": 199
     },
     {
       "path": "gc config show",
@@ -823,11 +823,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -961,11 +961,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -1112,11 +1112,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable-group",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -1127,11 +1127,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -1142,11 +1142,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -1157,11 +1157,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -1172,11 +1172,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable-group",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -1187,11 +1187,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -1202,11 +1202,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -1217,11 +1217,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -1232,11 +1232,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -1247,11 +1247,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -1262,11 +1262,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -1277,11 +1277,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -1292,11 +1292,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -1307,11 +1307,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -1322,11 +1322,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -1337,11 +1337,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -1352,11 +1352,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -1367,11 +1367,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -1382,11 +1382,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -1397,11 +1397,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -1412,11 +1412,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -1427,11 +1427,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -1442,11 +1442,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -1475,11 +1475,11 @@
       "effective_hidden": false,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "event-emit",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "event-emit"
     },
     {
@@ -1496,6 +1496,21 @@
       "classification": "events",
       "owner": "immediate",
       "id": 50
+    },
+    {
+      "path": "gc events reemit-execution",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "events-stream",
+      "notice_policy": "ineligible",
+      "classification": "events-reemit-execution",
+      "owner": "immediate",
+      "id": 197
     },
     {
       "path": "gc events rotate",
@@ -1597,11 +1612,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -1672,11 +1687,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -1687,11 +1702,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "credential-helper",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "credential-helper"
     },
     {
@@ -1797,11 +1812,11 @@
       "effective_hidden": false,
       "disable_flag_parsing": false,
       "shape": "runnable-group",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hook-protocol",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hook-protocol"
     },
     {
@@ -1812,11 +1827,11 @@
       "effective_hidden": false,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hook-protocol",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hook-protocol"
     },
     {
@@ -1964,11 +1979,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -2069,11 +2084,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "structural",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -2084,11 +2099,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -2099,11 +2114,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -2438,11 +2453,11 @@
       "effective_hidden": false,
       "disable_flag_parsing": false,
       "shape": "runnable-group",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "metrics-control",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "metrics-control"
     },
     {
@@ -2453,11 +2468,11 @@
       "effective_hidden": false,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "metrics-control",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "metrics-control"
     },
     {
@@ -2468,11 +2483,11 @@
       "effective_hidden": false,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "metrics-control",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "metrics-control"
     },
     {
@@ -2483,11 +2498,11 @@
       "effective_hidden": false,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "metrics-control",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "metrics-control"
     },
     {
@@ -2498,11 +2513,11 @@
       "effective_hidden": false,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "metrics-control",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "metrics-control"
     },
     {
@@ -2513,11 +2528,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "structural",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -2528,11 +2543,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -2559,11 +2574,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -2574,11 +2589,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -2872,6 +2887,21 @@
       "id": 106
     },
     {
+      "path": "gc pack registry requests",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "pack-registry-requests",
+      "owner": "immediate",
+      "id": 196
+    },
+    {
       "path": "gc pack registry search",
       "aliases": [],
       "conditional_modes": [],
@@ -3003,11 +3033,11 @@
       "recording_policy": "recordable",
       "mode": "perf-wrapper",
       "notice_policy": "ineligible",
-      "hidden_exception": "perf-wrapper",
       "classification": "help",
       "canonical_target": "@help",
       "owner": "structural",
-      "id": 1
+      "id": 1,
+      "hidden_exception": "perf-wrapper"
     },
     {
       "path": "gc perf run",
@@ -3020,10 +3050,10 @@
       "recording_policy": "recordable",
       "mode": "perf-wrapper",
       "notice_policy": "ineligible",
-      "hidden_exception": "perf-wrapper",
       "classification": "perf-run",
       "owner": "immediate",
-      "id": 114
+      "id": 114,
+      "hidden_exception": "perf-wrapper"
     },
     {
       "path": "gc perf session-new",
@@ -3036,10 +3066,10 @@
       "recording_policy": "recordable",
       "mode": "perf-wrapper",
       "notice_policy": "ineligible",
-      "hidden_exception": "perf-wrapper",
       "classification": "perf-session-new",
       "owner": "immediate",
-      "id": 115
+      "id": 115,
+      "hidden_exception": "perf-wrapper"
     },
     {
       "path": "gc prime",
@@ -3120,7 +3150,7 @@
       "notice_policy": "eligible",
       "classification": "provider-quota",
       "owner": "immediate",
-      "id": 199
+      "id": 200
     },
     {
       "path": "gc provider rotate-key",
@@ -3135,7 +3165,7 @@
       "notice_policy": "eligible",
       "classification": "provider-rotate-key",
       "owner": "immediate",
-      "id": 196
+      "id": 201
     },
     {
       "path": "gc register",
@@ -4367,11 +4397,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "structural",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -4382,11 +4412,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -4397,11 +4427,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "structural",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -4415,11 +4445,11 @@
       "recording_policy": "recordable",
       "mode": "workflow-compat",
       "notice_policy": "ineligible",
-      "hidden_exception": "workflow-compat",
       "classification": "convoy-control",
+      "canonical_target": "gc convoy control",
       "owner": "immediate",
       "id": 35,
-      "canonical_target": "gc convoy control"
+      "hidden_exception": "workflow-compat"
     },
     {
       "path": "gc workflow delete",
@@ -4432,11 +4462,11 @@
       "recording_policy": "recordable",
       "mode": "workflow-compat",
       "notice_policy": "ineligible",
-      "hidden_exception": "workflow-compat",
       "classification": "convoy-delete",
+      "canonical_target": "gc convoy delete",
       "owner": "immediate",
       "id": 37,
-      "canonical_target": "gc convoy delete"
+      "hidden_exception": "workflow-compat"
     },
     {
       "path": "gc workflow delete-source",
@@ -4449,11 +4479,11 @@
       "recording_policy": "recordable",
       "mode": "workflow-compat",
       "notice_policy": "ineligible",
-      "hidden_exception": "workflow-compat",
       "classification": "convoy-delete-source",
+      "canonical_target": "gc convoy delete-source",
       "owner": "immediate",
       "id": 38,
-      "canonical_target": "gc convoy delete-source"
+      "hidden_exception": "workflow-compat"
     },
     {
       "path": "gc workflow poke",
@@ -4463,11 +4493,11 @@
       "effective_hidden": true,
       "disable_flag_parsing": false,
       "shape": "runnable",
-      "classification": "excluded",
-      "notice_policy": "ineligible",
       "recording_policy": "excluded",
-      "owner": "excluded",
       "mode": "hidden-private",
+      "notice_policy": "ineligible",
+      "classification": "excluded",
+      "owner": "excluded",
       "exclusion": "hidden-private"
     },
     {
@@ -4481,11 +4511,11 @@
       "recording_policy": "recordable",
       "mode": "workflow-compat",
       "notice_policy": "ineligible",
-      "hidden_exception": "workflow-compat",
       "classification": "convoy-reopen-source",
+      "canonical_target": "gc convoy reopen-source",
       "owner": "immediate",
       "id": 41,
-      "canonical_target": "gc convoy reopen-source"
+      "hidden_exception": "workflow-compat"
     }
   ],
   "synthetic": [

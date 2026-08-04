@@ -25,11 +25,14 @@ const (
 	// auto-merged both sides' changes, so the resulting shape hashes to neither
 	// the fork's nor upstream's previous value — the correct action is to
 	// re-derive from the merged workflow rather than adopt either side's stale pin.
+	// Re-derived again at the v1.4.0 resync (ga-y708o follow-up): ci.yml
+	// auto-merged both sides, so the merged execution shape hashes to neither
+	// the fork's nor upstream's previous pin — re-derive, never adopt a side.
 	// Re-derived again for ga-kgluj: splitting BD_VERSION into BD_VERSION +
 	// BD_SOURCE_REF adds a job-level env key, and env is part of the execution
 	// shape this pin guards — so the tripwire firing here is correct behavior,
 	// not noise.
-	expectedCIExecutionHash     = "41d38414857d74ccb3d7faffe10deb0c27e92aaf87bfeafb94351bacf7ffe1b7"
+	expectedCIExecutionHash     = "5c1e5f2198dbcdab3017f5543a5bee2041b1146fe2baacff17c38a2e31c08b21"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
@@ -74,6 +77,7 @@ var requiredFilterPaths = map[string][]string{
 		"Makefile",
 		"internal/worker/**",
 		"internal/sessionlog/**",
+		"internal/modelwindow/**",
 		"internal/runtime/**",
 		"internal/config/**",
 		"cmd/gc/template_resolve*.go",
@@ -87,6 +91,7 @@ var requiredFilterPaths = map[string][]string{
 		"Makefile",
 		"internal/worker/**",
 		"internal/sessionlog/**",
+		"internal/modelwindow/**",
 		"internal/runtime/**",
 		"internal/config/**",
 		"cmd/gc/**",
