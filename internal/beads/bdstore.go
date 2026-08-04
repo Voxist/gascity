@@ -962,7 +962,7 @@ func IsPartialResult(err error) bool {
 // the only join that reaches the gate carrying a timeout leaf is
 // mergeListTierResults, which fires only when BOTH list tiers fail — maximal
 // contention, where relaxing an idempotent gate is exactly the intended
-// behaviour. Do not generalize that reasoning to another call site.
+// behavior. Do not generalize that reasoning to another call site.
 //
 // This is the fourth transient-error classifier in the tree, each with an
 // overlapping but deliberately different needle set. Keep them in sync only
