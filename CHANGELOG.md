@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc dolt sync` now retries its pre-push fetch, which is what actually
+  fails on large stores.** The fast-forward classification fetches the remote
+  before pushing, and treated any fetch failure as `skipped (NOT pushed)` on
+  the first try. Measured on a 9-store fleet against a listener with
+  `read_timeout_millis=15000` (dolt 2.2.3, `git+ssh` remotes): the fetch — not
+  the push — is what loses to that deadline. `vp` failed at 15.34s then
+  converged at 1.57s on the next attempt; `hq` failed at 15.34s and 16.00s
+  then converged at 1.83s; the small stores fetched in ~2s throughout. Because
+  a fetch is read-only, idempotent, and warms its remote cache across
+  attempts, a torn fetch loses nothing and retrying converges — so those
+  stores were skipping a push that costs 1-2s for a routine delta (measured:
+  `hq` 150 commits / 3.9 MB in 1.7s). The fetch is now retried
+  `GC_DOLT_SYNC_FETCH_ATTEMPTS` times (default 3) with
+  `GC_DOLT_SYNC_FETCH_RETRY_DELAY_SECS` (default 2) between tries.
+
+  A corrupt remote archive (`Blob not found`) is excluded from the retry and
+  reported as `corrupt remote archive`: measured on one store, 5/5 attempts
+  failed with the *missing blob hash varying between attempts*, so no retry
+  budget converges, and spending one steals cycle time from every database
+  queued behind it while hiding a data-integrity fault behind a transport
+  status. A first-push signal and a client-bound timeout (exit 124) are also
+  not retried — neither converges by trying again.
+
+  `dolt-remotes-patrol` moves from the 300s exec default to an explicit 600s
+  timeout: the run is sequential across databases, so a cold-cache cycle that
+  spends its retry budget on slow stores would otherwise hit the order
+  deadline and leave the databases later in the scan order SIGTERMed before
+  they were ever attempted — starvation that the emitted event cannot
+  distinguish from a clean run. (vp-q3kp)
+
 - **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
   SIGKILL, matching its documented contract.** The fallback (used when
   neither `timeout` nor `gtimeout` is on `PATH`, the default on stock macOS)

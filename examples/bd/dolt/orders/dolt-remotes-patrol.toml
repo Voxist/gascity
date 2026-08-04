@@ -3,3 +3,15 @@ description = "Push dolt databases to configured remotes"
 trigger = "cooldown"
 interval = "15m"
 exec = "gc dolt sync"
+# 600s, not the 300s exec default (vp-q3kp). The pre-push fetch now retries
+# (GC_DOLT_SYNC_FETCH_ATTEMPTS, default 3) because on large stores it — not the
+# push — is what loses to a short server read timeout. A cold-cache cycle can
+# therefore spend up to 3 x GC_DOLT_SYNC_FETCH_TIMEOUT_SECS on a slow store,
+# and the run is SEQUENTIAL across databases: at the 300s default a few slow
+# stores would exhaust the order deadline and the databases later in the scan
+# order would be SIGTERMed before they were ever attempted — silent starvation,
+# indistinguishable in the emitted event from a clean run.
+# Measured on the voxist-city fleet 2026-08-04: a 9-store cycle took 96-201s
+# with no retries; warm-cache fetches are ~2s, so the steady-state cost of the
+# retry budget is near zero and 600s is headroom for the cold case.
+timeout = "600s"

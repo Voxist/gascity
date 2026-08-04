@@ -30,6 +30,13 @@
 #                     a fresh remote can exceed the prior fixed 120s ceiling).
 #                     Metadata queries (remote lookup, active branch) keep their
 #                     own 120s bound.
+#   GC_DOLT_SYNC_FETCH_ATTEMPTS
+#     (default: 3)    — tries for the read-only pre-push fetch. The fetch, not
+#                     the push, is what loses to a short server read timeout on
+#                     large stores; it is idempotent and its remote cache warms
+#                     across attempts, so retrying converges (vp-q3kp).
+#   GC_DOLT_SYNC_FETCH_RETRY_DELAY_SECS
+#     (default: 2)    — backoff between fetch attempts. 0 means retry at once.
 set -e
 
 dry_run=false
@@ -64,8 +71,10 @@ while [ $# -gt 0 ]; do
       echo "  exclude it from sync (reported as 'skipped (.no-sync)')."
       echo ""
       echo "Environment:"
-      echo "  GC_DOLT_SYNC_FETCH_TIMEOUT_SECS  pre-push fetch bound (default 60)"
-      echo "  GC_DOLT_SYNC_PUSH_TIMEOUT_SECS   push bound (default 1800)"
+      echo "  GC_DOLT_SYNC_FETCH_TIMEOUT_SECS      pre-push fetch bound (default 60)"
+      echo "  GC_DOLT_SYNC_FETCH_ATTEMPTS          pre-push fetch tries (default 3)"
+      echo "  GC_DOLT_SYNC_FETCH_RETRY_DELAY_SECS  backoff between tries (default 2)"
+      echo "  GC_DOLT_SYNC_PUSH_TIMEOUT_SECS       push bound (default 1800)"
       exit 0
       ;;
     *) echo "gc dolt sync: unknown flag: $1" >&2; exit 1 ;;
@@ -129,6 +138,50 @@ if [ "$fetch_timeout_valid" != true ]; then
     "$fetch_timeout" >&2
   exit 2
 fi
+
+# Attempt budget for the pre-push fetch (vp-q3kp). Defaults to 3.
+#
+# WHY A RETRY IS CORRECT HERE AND WOULD NOT BE FOR A PUSH: the fetch is
+# read-only and idempotent, and its git remote cache warms across attempts, so
+# a torn fetch loses nothing and a later attempt starts from more cached state.
+# Measured on the voxist-city fleet 2026-08-04 against read_timeout_millis=15000
+# (dolt 2.2.3, git+ssh remotes): vp failed at 15.34s then converged at 1.57s on
+# the next attempt; hq failed at 15.34s and 16.00s then converged at 1.83s. The
+# healthy stores fetch in ~2s throughout.
+#
+# This is the whole reason the large stores were chronically unsynced: the fetch
+# — not the push — is what loses to the server deadline, and a single-attempt
+# fetch turns that into "skipped (NOT pushed)" forever. The push those stores
+# never reached costs 1-2s for a routine delta (measured: hq 150 commits/3.9MB
+# in 1.7s, 389 commits/7.4MB in 2.3s).
+#
+# Validated with the same all-digit, at-least-one-non-zero rule as the timeouts:
+# a zero or non-numeric budget must fail loud, not silently mean "once" or
+# "never" — a misconfigured budget that quietly becomes something else is the
+# unreviewable-config failure this command set already guards against.
+fetch_attempts="${GC_DOLT_SYNC_FETCH_ATTEMPTS-3}"
+case "$fetch_attempts" in
+  ''|*[!0-9]*) fetch_attempts_valid=false ;;
+  *[1-9]*)     fetch_attempts_valid=true ;;
+  *)           fetch_attempts_valid=false ;;
+esac
+if [ "$fetch_attempts_valid" != true ]; then
+  printf 'gc dolt sync: invalid GC_DOLT_SYNC_FETCH_ATTEMPTS=%s (must be a positive integer)\n' \
+    "$fetch_attempts" >&2
+  exit 2
+fi
+
+# Backoff between fetch attempts (seconds). Defaults to 2. Unlike the bounds
+# above, 0 IS valid and means "retry immediately" — it is a delay, not a
+# ceiling, so zero has an unambiguous meaning and no unbounded-run hazard.
+fetch_retry_delay="${GC_DOLT_SYNC_FETCH_RETRY_DELAY_SECS-2}"
+case "$fetch_retry_delay" in
+  ''|*[!0-9]*)
+    printf 'gc dolt sync: invalid GC_DOLT_SYNC_FETCH_RETRY_DELAY_SECS=%s (must be a non-negative integer)\n' \
+      "$fetch_retry_delay" >&2
+    exit 2
+    ;;
+esac
 
 # Check if server is running.
 is_running() {
@@ -388,9 +441,54 @@ sync_database_sql() {
       echo "  $name: ERROR: cannot create temp file for fetch diagnostics" >&2
       return 1
     }
+    # Retry the fetch while the failure is transport-shaped (vp-q3kp). Four
+    # outcomes end the loop immediately, because retrying each is either wrong
+    # or wasteful:
+    #   * success
+    #   * a first-push signal — not a failure at all, just a branch the remote
+    #     does not have yet; a retry would spend two round trips to learn the
+    #     same thing
+    #   * exit 124 — the client wall-clock bound already burned fetch_timeout
+    #     seconds; another attempt costs the same again and would starve the
+    #     stores queued behind this one inside the order's own deadline
+    #   * a corrupt remote archive ("Blob not found") — terminal. Measured on
+    #     vct 2026-08-04: 5/5 attempts failed and the MISSING BLOB HASH VARIED
+    #     between attempts, so no number of retries converges. It also needs the
+    #     opposite operator response from a slow link, so it must not be
+    #     reported as a generic transport failure.
     fetch_rc=0
-    dolt_sql "USE \`$name\`; CALL DOLT_FETCH('$remote_name', '$remote_branch')" "$fetch_timeout" \
-      >/dev/null 2>"$fetch_err_tmp" || fetch_rc=$?
+    fetch_try=0
+    fetch_corrupt=false
+    while :; do
+      fetch_try=$((fetch_try + 1))
+      fetch_rc=0
+      : > "$fetch_err_tmp"
+      dolt_sql "USE \`$name\`; CALL DOLT_FETCH('$remote_name', '$remote_branch')" "$fetch_timeout" \
+        >/dev/null 2>"$fetch_err_tmp" || fetch_rc=$?
+      [ "$fetch_rc" -eq 0 ] && break
+      grep -q "no branches found in remote" "$fetch_err_tmp" 2>/dev/null && break
+      grep -q "invalid ref spec" "$fetch_err_tmp" 2>/dev/null && break
+      [ "$fetch_rc" -eq 124 ] && break
+      if grep -q "Blob not found" "$fetch_err_tmp" 2>/dev/null; then
+        fetch_corrupt=true
+        break
+      fi
+      [ "$fetch_try" -ge "$fetch_attempts" ] && break
+      echo "  $name: fetch attempt $fetch_try/$fetch_attempts failed — retrying" >&2
+      [ "$fetch_retry_delay" -gt 0 ] && sleep "$fetch_retry_delay"
+    done
+
+    if [ "$fetch_corrupt" = true ]; then
+      echo "  $name: corrupt remote archive — skipped (NOT pushed); retry cannot fix this, the remote needs repair" >&2
+      if [ -s "$fetch_err_tmp" ]; then
+        while IFS= read -r line || [ -n "$line" ]; do
+          printf '  %s: %s\n' "$name" "$line" >&2
+        done < "$fetch_err_tmp"
+      fi
+      rm -f "$fetch_err_tmp"
+      return 1
+    fi
+
     if [ "$fetch_rc" -ne 0 ] && { grep -q "no branches found in remote" "$fetch_err_tmp" 2>/dev/null || grep -q "invalid ref spec" "$fetch_err_tmp" 2>/dev/null; }; then
       # The remote has no such branch: an empty remote ("no branches found in
       # remote") or a brand-new branch on a populated remote ("invalid ref
@@ -403,7 +501,10 @@ sync_database_sql() {
       echo "  $name: fetch timed out after ${fetch_timeout}s — skipped (NOT pushed)" >&2
       return 1
     elif [ "$fetch_rc" -ne 0 ]; then
-      echo "  $name: fetch failed (exit $fetch_rc) — skipped (NOT pushed)" >&2
+      # Report the attempts spent: "failed once" and "failed every time the
+      # budget allowed" are different operator signals, and the second is the
+      # one that means a store is genuinely stuck rather than merely unlucky.
+      echo "  $name: fetch failed (exit $fetch_rc) after $fetch_try attempts — skipped (NOT pushed)" >&2
       if [ -s "$fetch_err_tmp" ]; then
         while IFS= read -r line || [ -n "$line" ]; do
           printf '  %s: %s\n' "$name" "$line" >&2

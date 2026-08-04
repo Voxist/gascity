@@ -1,0 +1,297 @@
+package dolt_test
+
+// Pre-push fetch retry (vp-q3kp).
+//
+// MEASURED on the live voxist-city fleet 2026-08-04 against the managed
+// listener (read_timeout_millis=15000, dolt 2.2.3, git+ssh remotes):
+//
+//	vw 1.96s ok · vg 2.11s ok · vl 2.02s ok · vm 2.11s ok · vr 1.90s ok
+//	vp 15.34s FAIL "unexpected EOF" -> retry 1.57s OK
+//	hq 15.34s FAIL, 16.00s FAIL      -> retry 1.83s OK
+//	va 13.73s ok (13.7s against a 15s deadline: this is the store that
+//	              oscillates pass/fail cycle to cycle)
+//	vct 3.58s FAIL "Blob not found: <hash>.darc", 5/5 attempts, the missing
+//	              hash VARYING between attempts -> remote archive corruption,
+//	              which retrying can never fix.
+//
+// The pre-push fetch is what exceeds the 15s server deadline on the large
+// stores, not the push. Because run.sh treats any fetch failure as
+// "skipped (NOT pushed)", those stores never reach a push at all — the sync
+// that was believed to be a push-throughput problem is actually a fetch that
+// gives up after one try.
+//
+// A fetch is read-only and idempotent and its remote cache warms across
+// attempts, so a torn fetch loses nothing and a retry converges. That makes
+// retry correct here in a way it would NOT be for a push.
+//
+// Corruption is the exception: "Blob not found" is terminal, and retrying it
+// burns the cycle budget of every store queued behind it while hiding a
+// data-integrity fault behind a generic transport status. It must fail on the
+// first attempt with its own greppable status.
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// runFFSyncRC is runFFSync plus the exit code, which the retry contract turns
+// load-bearing: a converged retry must exit 0, and an exhausted or terminal
+// failure must exit non-zero so the order's own failure signal still fires.
+func runFFSyncRC(t *testing.T, binDir string) (string, int) {
+	t.Helper()
+	root := repoRoot(t)
+	script := filepath.Join(root, syncScript)
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "app", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+	writeSyncFakeBeadsBD(t, cityPath)
+
+	cmd := exec.Command("sh", script)
+	cmd.Env = append(syncFilteredEnv(),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_DATA_DIR="+dataDir,
+		fmt.Sprintf("GC_DOLT_PORT=%d", port),
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		// Keep the tests fast: the production default backoff is seconds.
+		"GC_DOLT_SYNC_FETCH_RETRY_DELAY_SECS=0",
+	)
+	out, err := cmd.CombinedOutput()
+	code := 0
+	ee := &exec.ExitError{}
+	if errors.As(err, &ee) {
+		code = ee.ExitCode()
+	} else if err != nil {
+		t.Fatalf("run sync: %v", err)
+	}
+	return string(out), code
+}
+
+// writeSyncFakeDoltFetchFlaky makes DOLT_FETCH fail with failMsg for the first
+// failCount attempts and succeed afterwards, counting attempts in a file so a
+// test can assert the exact number of tries. Classification then reports
+// ahead=2/behind=0 so a converged fetch proceeds to a real push.
+//
+// The counter is incremented with a read-modify-write on a plain file rather
+// than `wc -l` on the shared argv log, so the count reflects DOLT_FETCH calls
+// only and cannot drift when unrelated queries are added to the sync path.
+func writeSyncFakeDoltFetchFlaky(t *testing.T, dir, failMsg string, failCount int) (logPath, countPath string) {
+	t.Helper()
+	branch := "main"
+	logPath = filepath.Join(dir, "dolt.log")
+	countPath = filepath.Join(dir, "fetch.count")
+	aheadPat := "dolt_log('remotes/origin/" + branch + ".." + branch + "')"
+	behindPat := "dolt_log('" + branch + "..remotes/origin/" + branch + "')"
+	body := fakeDoltHeader(logPath, branch) +
+		"  *\"CALL DOLT_FETCH(\"*)\n" +
+		"    n=$(cat \"" + countPath + "\" 2>/dev/null || echo 0)\n" +
+		"    n=$((n+1)) ; printf '%s' \"$n\" > \"" + countPath + "\"\n" +
+		"    if [ \"$n\" -le " + fmt.Sprintf("%d", failCount) + " ]; then\n" +
+		"      printf '" + failMsg + "\\n' >&2 ; exit 1\n" +
+		"    fi\n" +
+		"    exit 0 ;;\n" +
+		"  *\"" + aheadPat + "\"*) printf 'n\\n2\\n' ; exit 0 ;;\n" +
+		"  *\"" + behindPat + "\"*) printf 'n\\n0\\n' ; exit 0 ;;\n" +
+		"esac\nexit 0\n"
+	installFFFakeDolt(t, dir, body)
+	return logPath, countPath
+}
+
+func fetchAttempts(t *testing.T, countPath string) int {
+	t.Helper()
+	data, err := os.ReadFile(countPath)
+	if err != nil {
+		return 0
+	}
+	var n int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &n); err != nil {
+		t.Fatalf("parse fetch count %q: %v", string(data), err)
+	}
+	return n
+}
+
+// TestSyncRetriesTransientFetchFailureThenPushes is the hq/vp case measured
+// above: the fetch loses to the 15s server deadline once, converges on the
+// retry, and the push — the actual work — then happens. Asserting the push
+// (positive work), not merely the absence of an error.
+func TestSyncRetriesTransientFetchFailureThenPushes(t *testing.T) {
+	binDir := t.TempDir()
+	logPath, countPath := writeSyncFakeDoltFetchFlaky(t, binDir, "unexpected EOF", 1)
+
+	out, code := runFFSyncRC(t, binDir)
+
+	if got := fetchAttempts(t, countPath); got != 2 {
+		t.Fatalf("expected 2 fetch attempts (1 failure + 1 converged), got %d\nout:\n%s", got, out)
+	}
+	if !pushed(readLog(t, logPath)) {
+		t.Fatalf("expected a DOLT_PUSH after the fetch converged.\nout:\n%s\nlog:\n%s", out, readLog(t, logPath))
+	}
+	if code != 0 {
+		t.Fatalf("expected exit 0 after a converged retry, got %d\nout:\n%s", code, out)
+	}
+}
+
+// TestSyncRetriesFetchTwiceThenPushes is the hq case exactly: two consecutive
+// deadline losses before the remote cache is warm enough to converge. The
+// default attempt budget must be large enough to cover it — a budget of 2
+// would leave the fleet's largest store permanently unsynced.
+func TestSyncRetriesFetchTwiceThenPushes(t *testing.T) {
+	binDir := t.TempDir()
+	logPath, countPath := writeSyncFakeDoltFetchFlaky(t, binDir, "unexpected EOF", 2)
+
+	out, code := runFFSyncRC(t, binDir)
+
+	if got := fetchAttempts(t, countPath); got != 3 {
+		t.Fatalf("expected 3 fetch attempts, got %d\nout:\n%s", got, out)
+	}
+	if !pushed(readLog(t, logPath)) {
+		t.Fatalf("expected a DOLT_PUSH after two retries.\nout:\n%s", out)
+	}
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d\nout:\n%s", code, out)
+	}
+}
+
+// TestSyncFetchRetryExhaustionDoesNotPush: when the fetch never converges the
+// classification is unknown, so the push must NOT happen (RULE 1 — an unknown
+// propagates as unknown; a blind push is exactly the fast-forward-only
+// guarantee gc-6ommo exists to protect) and the run must exit non-zero.
+func TestSyncFetchRetryExhaustionDoesNotPush(t *testing.T) {
+	binDir := t.TempDir()
+	logPath, countPath := writeSyncFakeDoltFetchFlaky(t, binDir, "unexpected EOF", 99)
+
+	out, code := runFFSyncRC(t, binDir)
+
+	if got := fetchAttempts(t, countPath); got != 3 {
+		t.Fatalf("expected the default 3-attempt budget, got %d\nout:\n%s", got, out)
+	}
+	if pushed(readLog(t, logPath)) {
+		t.Fatalf("must NOT push when classification never succeeded.\nout:\n%s", out)
+	}
+	if code == 0 {
+		t.Fatalf("expected non-zero exit when the fetch never converged\nout:\n%s", out)
+	}
+	if !strings.Contains(out, "3 attempts") {
+		t.Fatalf("expected the status to report how many attempts were spent.\nout:\n%s", out)
+	}
+}
+
+// TestSyncDoesNotRetryCorruptRemoteArchive is the vct case. "Blob not found"
+// is a corrupt remote archive: retrying cannot fix it, and spending the budget
+// on it steals cycle time from every store queued behind. It must stop on the
+// first attempt and say so in its own words, because a corrupt archive and a
+// slow link need opposite operator responses.
+func TestSyncDoesNotRetryCorruptRemoteArchive(t *testing.T) {
+	binDir := t.TempDir()
+	logPath, countPath := writeSyncFakeDoltFetchFlaky(t,
+		binDir, "Blob not found: bckv59m50r5l43o5koeiap6ecjihm36a.darc", 99)
+
+	out, code := runFFSyncRC(t, binDir)
+
+	if got := fetchAttempts(t, countPath); got != 1 {
+		t.Fatalf("corruption must not be retried: expected 1 attempt, got %d\nout:\n%s", got, out)
+	}
+	if pushed(readLog(t, logPath)) {
+		t.Fatalf("must NOT push against a corrupt remote archive.\nout:\n%s", out)
+	}
+	if code == 0 {
+		t.Fatalf("expected non-zero exit for a corrupt remote archive\nout:\n%s", out)
+	}
+	if !strings.Contains(out, "corrupt remote archive") {
+		t.Fatalf("expected a distinct 'corrupt remote archive' status, not a generic fetch failure.\nout:\n%s", out)
+	}
+}
+
+// TestSyncFirstPushSignalIsNotRetried: "invalid ref spec" / "no branches found
+// in remote" are not failures at all, they are how Dolt reports a branch the
+// remote does not have yet. Retrying them would trade a first push for two
+// wasted round trips per cycle.
+func TestSyncFirstPushSignalIsNotRetried(t *testing.T) {
+	binDir := t.TempDir()
+	logPath, countPath := writeSyncFakeDoltFetchFlaky(t, binDir, "fetch failed: invalid ref spec", 99)
+
+	out, code := runFFSyncRC(t, binDir)
+
+	if got := fetchAttempts(t, countPath); got != 1 {
+		t.Fatalf("a first-push signal must not be retried: expected 1 attempt, got %d\nout:\n%s", got, out)
+	}
+	if !pushed(readLog(t, logPath)) {
+		t.Fatalf("expected the first push to proceed.\nout:\n%s", out)
+	}
+	if code != 0 {
+		t.Fatalf("expected exit 0 for a first push, got %d\nout:\n%s", code, out)
+	}
+}
+
+// TestSyncFetchAttemptsEnvOverride: the budget is tunable, and an invalid
+// value must fail loud rather than silently defaulting — the same contract the
+// push/fetch timeouts already hold, for the same reason (a misconfigured bound
+// that quietly becomes something else is unreviewable).
+func TestSyncFetchAttemptsEnvOverride(t *testing.T) {
+	binDir := t.TempDir()
+	_, countPath := writeSyncFakeDoltFetchFlaky(t, binDir, "unexpected EOF", 99)
+
+	root := repoRoot(t)
+	script := filepath.Join(root, syncScript)
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "app", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+	writeSyncFakeBeadsBD(t, cityPath)
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+
+	run := func(attempts string) (string, int) {
+		cmd := exec.Command("sh", script)
+		cmd.Env = append(syncFilteredEnv(),
+			"PATH="+binDir+":"+os.Getenv("PATH"),
+			"GC_CITY_PATH="+cityPath,
+			"GC_PACK_DIR="+root,
+			"GC_DOLT_DATA_DIR="+dataDir,
+			fmt.Sprintf("GC_DOLT_PORT=%d", port),
+			"GC_DOLT_USER=root",
+			"GC_DOLT_PASSWORD=",
+			"GC_DOLT_SYNC_FETCH_RETRY_DELAY_SECS=0",
+			"GC_DOLT_SYNC_FETCH_ATTEMPTS="+attempts,
+		)
+		out, err := cmd.CombinedOutput()
+		code := 0
+		ee := &exec.ExitError{}
+		if errors.As(err, &ee) {
+			code = ee.ExitCode()
+		}
+		return string(out), code
+	}
+
+	_ = os.Remove(countPath)
+	out, _ := run("5")
+	if got := fetchAttempts(t, countPath); got != 5 {
+		t.Fatalf("expected 5 attempts from the env override, got %d\nout:\n%s", got, out)
+	}
+
+	// An all-zero / non-numeric value must abort before any database is
+	// touched, exactly as the timeout bounds do.
+	for _, bad := range []string{"0", "00", "abc", ""} {
+		_ = os.Remove(countPath)
+		out, code := run(bad)
+		if code != 2 {
+			t.Fatalf("GC_DOLT_SYNC_FETCH_ATTEMPTS=%q must exit 2, got %d\nout:\n%s", bad, code, out)
+		}
+		if got := fetchAttempts(t, countPath); got != 0 {
+			t.Fatalf("GC_DOLT_SYNC_FETCH_ATTEMPTS=%q must abort before touching a db, got %d attempts\nout:\n%s", bad, got, out)
+		}
+	}
+}
