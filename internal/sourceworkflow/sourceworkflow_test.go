@@ -986,7 +986,7 @@ func TestCanonicalScopeRefResolvesSymlinkedParentWithMissingLeaf(t *testing.T) {
 	// pathutil, which on darwin collapses the /private/var and /private/tmp
 	// host aliases back to /var and /tmp — the reverse direction. Same file,
 	// two spellings; a raw compare fails on a correct result (macOS only).
-	testutil.AssertSamePath(t, got, want)
+	testutil.AssertCanonicalPathEquals(t, got, want)
 }
 
 // TestCanonicalScopeRefReturnsAbsolutePathForUnresolvableRelativeInput pins
@@ -1034,7 +1034,7 @@ func TestCanonicalCityPathResolvesSymlinkedParentWithMissingLeaf(t *testing.T) {
 	// pathutil, which on darwin collapses the /private/var and /private/tmp
 	// host aliases back to /var and /tmp — the reverse direction. Same file,
 	// two spellings; a raw compare fails on a correct result (macOS only).
-	testutil.AssertSamePath(t, got, want)
+	testutil.AssertCanonicalPathEquals(t, got, want)
 }
 
 // TestCanonicalScopeRefKeepsStoreSentinelStableAcrossWorkingDirs pins that a

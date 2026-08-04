@@ -727,13 +727,24 @@ func pseudoVersionCommit(pinned string) (string, bool) {
 // depsEnvBDPins reads BD_VERSION and BD_SOURCE_REF out of the repo's deps.env.
 func depsEnvBDPins(t *testing.T) (bdVersion, sourceRef string) {
 	t.Helper()
-	root, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	// Walk up to the module root rather than shelling out to `git rev-parse`:
+	// a subprocess here would be a new call site against the resource-census
+	// debt ratchet, and this needs no process at all.
+	dir, err := os.Getwd()
 	if err != nil {
-		t.Fatalf("locate repo root: %v", err)
+		t.Fatalf("getwd: %v", err)
 	}
-	raw, err := os.ReadFile(filepath.Join(strings.TrimSpace(string(root)), "deps.env"))
-	if err != nil {
-		t.Fatalf("read deps.env: %v", err)
+	var raw []byte
+	for {
+		if b, readErr := os.ReadFile(filepath.Join(dir, "deps.env")); readErr == nil {
+			raw = b
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("deps.env not found walking up from working directory")
+		}
+		dir = parent
 	}
 	for _, line := range strings.Split(string(raw), "\n") {
 		line = strings.TrimSpace(line)

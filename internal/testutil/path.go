@@ -26,6 +26,22 @@ func AssertSamePath(t *testing.T, got, want string) {
 	}
 }
 
+// AssertCanonicalPathEquals compares a path a function under test RETURNED
+// against an expectation, normalizing ONLY the expectation.
+//
+// Use this, not AssertSamePath, whenever the function under test is itself
+// responsible for canonicalizing. AssertSamePath normalizes both sides, and
+// CanonicalPath resolves symlinks — so it re-does the very work being asserted
+// and the assertion becomes a tautology that an identity implementation passes.
+// Normalizing only want keeps the darwin /private-alias spelling difference
+// tolerated while still failing on a got that was never resolved.
+func AssertCanonicalPathEquals(t *testing.T, got, want string) {
+	t.Helper()
+	if got != CanonicalPath(want) {
+		t.Fatalf("path = %q, want %q (canonicalized from %q)", got, CanonicalPath(want), want)
+	}
+}
+
 // ShortTempDir returns a test-owned temporary directory rooted at a short path
 // on macOS so Unix socket paths stay under the platform limit.
 func ShortTempDir(t *testing.T, prefix string) string {

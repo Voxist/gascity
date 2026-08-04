@@ -2695,7 +2695,7 @@ schema = 1
 	// resolveImportRoot now normalizes through pathutil, which on darwin
 	// collapses /private/var and /private/tmp back to /var and /tmp — the
 	// reverse direction. Same directory, two spellings (macOS only).
-	testutil.AssertSamePath(t, got, want)
+	testutil.AssertCanonicalPathEquals(t, got, want)
 }
 
 func TestFindNearestImportRootSkipsRuntimeOnlyDirs(t *testing.T) {
@@ -2769,7 +2769,7 @@ func TestResolveImportRootPrefersNearestPackUnderCity(t *testing.T) {
 		t.Fatalf("EvalSymlinks(%q): %v", packDir, err)
 	}
 	// Tolerant compare for the same darwin alias-collapse reason as above.
-	testutil.AssertSamePath(t, got, want)
+	testutil.AssertCanonicalPathEquals(t, got, want)
 }
 
 func TestResolveImportRootRuntimeOnlyAncestorResolvesRegisteredRigCity(t *testing.T) {

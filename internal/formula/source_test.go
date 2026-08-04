@@ -620,5 +620,5 @@ func TestCanonicalExistingPathResolvesSymlinkedGrandparentWithTwoMissingLevels(t
 	// and /private/tmp host aliases back to /var and /tmp — the reverse
 	// direction from EvalSymlinks. The two spellings denote the same file, so
 	// a raw compare fails on a correct result (macOS only; CI is Linux).
-	testutil.AssertSamePath(t, got, want)
+	testutil.AssertCanonicalPathEquals(t, got, want)
 }

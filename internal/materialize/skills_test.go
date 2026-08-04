@@ -1197,7 +1197,7 @@ func TestCanonicalizePath(t *testing.T) {
 	// filepath.EvalSymlinks while canonicalizePath normalizes through pathutil,
 	// which on darwin collapses /private/var and /private/tmp back to /var and
 	// /tmp — the reverse direction. Same file, two spellings (macOS only).
-	testutil.AssertSamePath(t, got, expected)
+	testutil.AssertCanonicalPathEquals(t, got, expected)
 
 	// Missing tail under an aliased ancestor: walk-up + suffix re-append.
 	missing := filepath.Join(alias, "not-yet-created", "leaf")
@@ -1207,7 +1207,7 @@ func TestCanonicalizePath(t *testing.T) {
 	}
 	wantPrefix, _ := filepath.EvalSymlinks(alias)
 	wantMissing := filepath.Join(wantPrefix, "not-yet-created", "leaf")
-	testutil.AssertSamePath(t, got, wantMissing)
+	testutil.AssertCanonicalPathEquals(t, got, wantMissing)
 
 	// Empty input.
 	if got, err := canonicalizePath(""); err != nil || got != "" {

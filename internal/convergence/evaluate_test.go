@@ -26,7 +26,7 @@ func TestResolveEvaluateStep_DefaultPath(t *testing.T) {
 	// (macOS firmlink -> /System/Volumes/Data/home) a raw string compare fails
 	// on a correct result. Upstream's newer tests in this file already use the
 	// tolerant helper; these two predate it.
-	testutil.AssertSamePath(t, step.PromptPath, filepath.Join("/home/user/city", DefaultEvaluatePromptPath))
+	testutil.AssertCanonicalPathEquals(t, step.PromptPath, filepath.Join("/home/user/city", DefaultEvaluatePromptPath))
 }
 
 func TestResolveEvaluateStep_CustomPath(t *testing.T) {
@@ -42,7 +42,7 @@ func TestResolveEvaluateStep_CustomPath(t *testing.T) {
 	if step.Name != EvaluateStepName {
 		t.Errorf("Name = %q, want %q", step.Name, EvaluateStepName)
 	}
-	testutil.AssertSamePath(t, step.PromptPath, filepath.Join("/home/user/city", "custom/my-evaluate.md"))
+	testutil.AssertCanonicalPathEquals(t, step.PromptPath, filepath.Join("/home/user/city", "custom/my-evaluate.md"))
 }
 
 func TestResolveEvaluateStep_PathTraversal(t *testing.T) {
@@ -211,5 +211,5 @@ func TestResolveEvaluateStep_DarwinPrivateTempAliasWithExistingPrompt(t *testing
 	if err != nil {
 		t.Fatalf("unexpected error: %v — the symlink-presence check must normalize realResolved before comparing it against a path built on the alias-collapsed canonCity", err)
 	}
-	testutil.AssertSamePath(t, step.PromptPath, prompt)
+	testutil.AssertCanonicalPathEquals(t, step.PromptPath, prompt)
 }
