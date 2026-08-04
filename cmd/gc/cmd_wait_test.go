@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -713,6 +714,42 @@ func pinnedBeadsModuleVersion() (string, error) {
 // from that ambient drift. buildPinnedBDBinaryForTests must instead build bd
 // fresh from the pinned dependency, so its correctness never depends on
 // whatever happens to be installed on the host.
+// pseudoVersionCommit returns the 12-hex commit prefix embedded in a go
+// pseudo-version, and whether pinned was one at all.
+func pseudoVersionCommit(pinned string) (string, bool) {
+	m := regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?[.-][0-9]{14}-([0-9a-f]{12})$`).FindStringSubmatch(pinned)
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
+}
+
+// depsEnvBDPins reads BD_VERSION and BD_SOURCE_REF out of the repo's deps.env.
+func depsEnvBDPins(t *testing.T) (bdVersion, sourceRef string) {
+	t.Helper()
+	root, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		t.Fatalf("locate repo root: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(strings.TrimSpace(string(root)), "deps.env"))
+	if err != nil {
+		t.Fatalf("read deps.env: %v", err)
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "BD_VERSION="):
+			bdVersion = strings.TrimPrefix(line, "BD_VERSION=")
+		case strings.HasPrefix(line, "BD_SOURCE_REF="):
+			sourceRef = strings.TrimPrefix(line, "BD_SOURCE_REF=")
+		}
+	}
+	if bdVersion == "" || sourceRef == "" {
+		t.Fatalf("deps.env missing BD_VERSION (%q) or BD_SOURCE_REF (%q)", bdVersion, sourceRef)
+	}
+	return bdVersion, sourceRef
+}
+
 func TestBuildPinnedBDBinaryForTestsMatchesGoModVersion(t *testing.T) {
 	// Load-bearing for the census even though waitTestRealBDPath calls it
 	// again: this is the cmd/gc+untagged slow_process_gate call site the
@@ -730,7 +767,28 @@ func TestBuildPinnedBDBinaryForTestsMatchesGoModVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pinnedBeadsModuleVersion: %v", err)
 	}
+
+	// A go pseudo-version (vX.Y.Z-0.<timestamp>-<commit>) names a COMMIT, not a
+	// release, and a binary built from that commit reports whatever version the
+	// commit itself declares — never the pseudo-version string. gascity pins one
+	// deliberately: no published bd release carries schema migration 0054 (v1.1.2
+	// tops out at 0053), so go.mod must pin the commit directly. deps.env records
+	// what that commit declares, in BD_VERSION, and which commit it is, in
+	// BD_SOURCE_REF.
+	//
+	// So for a pseudo-version the meaningful assertions are: (a) the binary
+	// reports the version deps.env says the pinned commit declares, and (b)
+	// go.mod and deps.env name the SAME commit — the lockstep the deps.env
+	// comments promise and which nothing else checks.
 	wantVersion := strings.TrimPrefix(pinned, "v")
+	if commit, ok := pseudoVersionCommit(pinned); ok {
+		declared, sourceRef := depsEnvBDPins(t)
+		if !strings.HasPrefix(sourceRef, commit) {
+			t.Fatalf("go.mod pins beads commit %s but deps.env BD_SOURCE_REF is %s; "+
+				"the pseudo-version and the source ref must name the same commit", commit, sourceRef)
+		}
+		wantVersion = strings.TrimPrefix(declared, "v")
+	}
 
 	out, err := exec.Command(bdPath, "version").CombinedOutput()
 	if err != nil {
