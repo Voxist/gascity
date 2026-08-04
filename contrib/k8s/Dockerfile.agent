@@ -31,10 +31,15 @@ ARG BD_SOURCE_SHA256=e40acdcbca7bdc08b986113692e11be7a533b9fced326c20e786f141c29
 ARG BD_BUILD=e97839a2e
 ARG BD_BRANCH=HEAD
 ARG GRPC_VERSION=1.82.1
+ARG XTEXT_VERSION=0.39.0
 
-# The published bd 1.1.0 binary embeds vulnerable grpc-go 1.80.0. Rebuild the
-# exact released source with its production CGO/pure-Go-regex configuration and
-# release identity, changing only the patched dependency version.
+# The published bd 1.1.0 binary embeds vulnerable grpc-go 1.80.0 and
+# golang.org/x/text 0.36.0 (CVE-2026-56852; the require line reads 0.35.0, MVS
+# resolves 0.36.0). bd resolves x/text through the beads module graph, not this
+# repo's, so the gc go.mod bump does not reach it and the override below is
+# required. Rebuild the exact released source with its production
+# CGO/pure-Go-regex configuration and release identity, changing only the
+# patched dependency versions.
 RUN mkdir -p /src/bd /out \
     && curl -fsSL --retry 3 \
        "https://github.com/gastownhall/beads/archive/${BD_SOURCE_REF}.tar.gz" \
@@ -47,6 +52,7 @@ WORKDIR /src/bd
 RUN bd_version="${BD_VERSION#v}" \
     && grep -Fq "Version = \"${bd_version}\"" cmd/bd/version.go \
     && go get "google.golang.org/grpc@v${GRPC_VERSION}" \
+    && go get "golang.org/x/text@v${XTEXT_VERSION}" \
     && CGO_ENABLED=1 go build \
        -tags="gms_pure_go" \
        -trimpath \
@@ -54,7 +60,8 @@ RUN bd_version="${BD_VERSION#v}" \
        -o /out/bd \
        ./cmd/bd \
     && /out/bd --version | grep -Fq "bd version ${bd_version} (${BD_BUILD})" \
-    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep google.golang.org/grpc v${GRPC_VERSION} "
+    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep google.golang.org/grpc v${GRPC_VERSION} " \
+    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/text v${XTEXT_VERSION} "
 
 FROM ${BASE_IMAGE}
 

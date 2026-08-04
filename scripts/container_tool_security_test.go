@@ -14,6 +14,7 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 		ghSourceRef               = "b300f2ec7ec9dc9addc39b2ad88c54097ded7ca0"
 		doltSourceRef             = "781cbb730221ea7df4fc7995255bb336df9c3864"
 		grpcVersion               = "1.82.1"
+		xtextVersion              = "0.39.0"
 		ghSourceSHA256            = "a0c18c98c73f7333f73e19b3a0bf5bd18673f3dc226193ab6478b3ea1ea18f03"
 		doltSourceSHA256          = "0b0c9bce8baef26baa7e0e5825cd2d7d6101daf6fc9673f38dac9670afb66847"
 		doltToolchainRelease      = "20260611_0.0.5_trixie"
@@ -30,6 +31,7 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 		"ARG DOLT_SOURCE_REF=" + doltSourceRef,
 		"ARG DOLT_SOURCE_SHA256=" + doltSourceSHA256,
 		"ARG GRPC_VERSION=" + grpcVersion,
+		"ARG XTEXT_VERSION=" + xtextVersion,
 		"ARG DOLT_TOOLCHAIN_RELEASE=" + doltToolchainRelease,
 		"ARG DOLT_OPTCROSS_X86_64_SHA256=" + doltOptcrossX8664SHA256,
 		"ARG DOLT_OPTCROSS_AARCH64_SHA256=" + doltOptcrossAarch64SHA256,
@@ -49,6 +51,9 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 	}
 	if got := strings.Count(dockerfile, `go get "google.golang.org/grpc@v${GRPC_VERSION}"`); got != 2 {
 		t.Errorf("contrib/k8s/Dockerfile.base applies the grpc override %d times, want exactly 2 (gh and Dolt)", got)
+	}
+	if got := strings.Count(dockerfile, `go get "golang.org/x/text@v${XTEXT_VERSION}"`); got != 2 {
+		t.Errorf("contrib/k8s/Dockerfile.base applies the x/text override %d times, want exactly 2 (gh and Dolt)", got)
 	}
 
 	for _, forbidden := range []string{
@@ -79,6 +84,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		bdBuild        = "e97839a2e"
 		bdBranch       = "HEAD"
 		grpcVersion    = "1.82.1"
+		xtextVersion   = "0.39.0"
 	)
 
 	root := repoRoot(t)
@@ -95,10 +101,12 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		"ARG BD_BUILD=" + bdBuild,
 		"ARG BD_BRANCH=" + bdBranch,
 		"ARG GRPC_VERSION=" + grpcVersion,
+		"ARG XTEXT_VERSION=" + xtextVersion,
 		`https://github.com/gastownhall/beads/archive/${BD_SOURCE_REF}.tar.gz`,
 		`echo "${BD_SOURCE_SHA256}  /tmp/bd-source.tar.gz" | sha256sum --check --strict`,
 		`grep -Fq "Version = \"${bd_version}\"" cmd/bd/version.go`,
 		`go get "google.golang.org/grpc@v${GRPC_VERSION}"`,
+		`go get "golang.org/x/text@v${XTEXT_VERSION}"`,
 		`CGO_ENABLED=1 go build`,
 		`-tags="gms_pure_go"`,
 		`-X main.Version=${bd_version}`,
@@ -116,6 +124,9 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	if got := strings.Count(dockerfile, `go get "google.golang.org/grpc@v${GRPC_VERSION}"`); got != 1 {
 		t.Errorf("contrib/k8s/Dockerfile.agent applies the bd grpc override %d times, want exactly 1", got)
 	}
+	if got := strings.Count(dockerfile, `go get "golang.org/x/text@v${XTEXT_VERSION}"`); got != 1 {
+		t.Errorf("contrib/k8s/Dockerfile.agent applies the bd x/text override %d times, want exactly 1", got)
+	}
 	if strings.Contains(dockerfile, "COPY bd /usr/local/bin/bd") {
 		t.Error("contrib/k8s/Dockerfile.agent still copies the vulnerable prebuilt bd binary")
 	}
@@ -129,6 +140,11 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	wantGRPCModule := "google.golang.org/grpc v" + grpcVersion
 	if got := strings.Count(goMod, wantGRPCModule); got != 1 {
 		t.Errorf("go.mod contains %q %d times, want exactly 1 so the gc binary embeds the patched grpc", wantGRPCModule, got)
+	}
+	// bd resolves x/text through its own module graph, not gc's, so the gc binary
+	// and the bd binary each need their own floor. This is the gc side.
+	if got := goModVersion(t, goMod, "golang.org/x/text"); !semverAtLeast(got, parseModuleSemver(t, "v"+xtextVersion)) {
+		t.Errorf("go.mod pins golang.org/x/text %v, want >= v%s so the gc binary clears CVE-2026-56852", got, xtextVersion)
 	}
 
 	workflow := readFile(t, root, ".github/workflows/container-scan.yml")
@@ -180,6 +196,31 @@ func TestRebuiltToolsAssertPatchedGRPCArtifact(t *testing.T) {
 	want := `go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep google.golang.org/grpc v${GRPC_VERSION} "`
 	if !strings.Contains(agent, want) {
 		t.Errorf("contrib/k8s/Dockerfile.agent must assert /out/bd embeds patched grpc; missing %q", want)
+	}
+}
+
+// TestRebuiltToolsAssertPatchedXTextArtifact mirrors the grpc artifact guard for
+// golang.org/x/text (CVE-2026-56852, norm.Iter infinite loop, fixed in 0.39.0).
+// Each rebuilt CLI pulled x/text through its own module graph — at the pinned refs
+// MVS selects 0.38.0 for gh and 0.36.0 for both dolt and bd — so bumping this repo's
+// go.mod fixes only the gc binary. These `go version -m` assertions are the only evidence the three
+// rebuilt artifacts actually link the patched module, so they must not be silently
+// removable.
+func TestRebuiltToolsAssertPatchedXTextArtifact(t *testing.T) {
+	root := repoRoot(t)
+
+	base := readFile(t, root, "contrib/k8s/Dockerfile.base")
+	for _, bin := range []string{"/out/gh", "/out/dolt"} {
+		want := `go version -m ` + bin + ` | tr '\t' ' ' | grep -Fq "dep golang.org/x/text v${XTEXT_VERSION} "`
+		if !strings.Contains(base, want) {
+			t.Errorf("contrib/k8s/Dockerfile.base must assert %s embeds patched x/text; missing %q", bin, want)
+		}
+	}
+
+	agent := readFile(t, root, "contrib/k8s/Dockerfile.agent")
+	want := `go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/text v${XTEXT_VERSION} "`
+	if !strings.Contains(agent, want) {
+		t.Errorf("contrib/k8s/Dockerfile.agent must assert /out/bd embeds patched x/text; missing %q", want)
 	}
 }
 
