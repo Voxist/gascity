@@ -102,8 +102,16 @@ func workflowSQLSnapshot(user, password, host string, port int, database, rootID
 		return nil, nil, nil, err
 	}
 
+	// Propagate: tryFullWorkflowSQL returns a nil error only on full
+	// success, and beads stripped of their labels are not that. A missing
+	// labels table is already tolerated inside the hydrate (it skips a
+	// table set that does not exist), so everything reaching here is a
+	// genuine Dolt failure — and the 5s query bound over a 5-connection
+	// shared pool makes a timeout newly reachable. Surfacing it lets
+	// buildWorkflowSnapshot log the cause and rebuild on the bd-subprocess
+	// slow path instead of serving a silently unlabeled graph.
 	if err := workflowSQLHydrateWorkflowLabels(db, tableSets, rootID, workflowBeads, beadIndex); err != nil {
-		return workflowBeads, beadIndex, depMap, nil
+		return nil, nil, nil, fmt.Errorf("hydrate workflow labels: %w", err)
 	}
 
 	return workflowBeads, beadIndex, depMap, nil
