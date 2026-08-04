@@ -2,32 +2,42 @@ package dolt_test
 
 // Pre-push fetch retry (vp-q3kp).
 //
-// MEASURED on the live voxist-city fleet 2026-08-04 against the managed
-// listener (read_timeout_millis=15000, dolt 2.2.3, git+ssh remotes):
+// The cost that matters is COLD vs WARM, not delta size and not store size. A
+// store's first remote operation in a given sql-server lifetime must spool the
+// remote's blobs; every later operation on that store in the same lifetime is
+// sub-second. Against a short server read timeout the cold operation is what
+// dies — and since the FETCH runs first, the push is never even attempted.
 //
-//	vw 1.96s ok · vg 2.11s ok · vl 2.02s ok · vm 2.11s ok · vr 1.90s ok
-//	vp 15.34s FAIL "unexpected EOF" -> retry 1.57s OK
-//	hq 15.34s FAIL, 16.00s FAIL      -> retry 1.83s OK
-//	va 13.73s ok (13.7s against a 15s deadline: this is the store that
-//	              oscillates pass/fail cycle to cycle)
-//	vct 3.58s FAIL "Blob not found: <hash>.darc", 5/5 attempts, the missing
-//	              hash VARYING between attempts -> remote archive corruption,
-//	              which retrying can never fix.
+// MEASURED on the live voxist-city fleet 2026-08-04, read_timeout_millis=15000,
+// dolt 2.2.3, git+ssh remotes. Same stores, two server lifetimes:
 //
-// The pre-push fetch is what exceeds the 15s server deadline on the large
-// stores, not the push. Because run.sh treats any fetch failure as
-// "skipped (NOT pushed)", those stores never reach a push at all — the sync
-// that was believed to be a push-throughput problem is actually a fetch that
-// gives up after one try.
+//	WARM (later in a lifetime):  hq 1.83s · vp 1.57s · vr 1.90s · vm 2.11s
+//	COLD (after a restart):      hq 15.2s FAIL · vp 15.2s FAIL · vr 15.7s FAIL
+//	                             vm 15.2s FAIL
 //
-// A fetch is read-only and idempotent and its remote cache warms across
-// attempts, so a torn fetch loses nothing and a retry converges. That makes
-// retry correct here in a way it would NOT be for a push.
+// vr and vm went from ~2s to failing with no change in delta — cold/warm is the
+// dominant variable, and a restart resets every store at once.
 //
-// Corruption is the exception: "Blob not found" is terminal, and retrying it
-// burns the cycle budget of every store queued behind it while hiding a
-// data-integrity fault behind a generic transport status. It must fail on the
-// first attempt with its own greppable status.
+// Attempts needed to converge FROM COLD, against git-remote-cache size:
+//
+//	vg 1 (5.7M) · vl 1 (12M) · vw 1 (57M) · vm 2 (342M) · vr 2 (465M)
+//	va 3 (871M) · vp 4 (799M) · hq NEVER (2.1G)
+//
+// A fetch is read-only and idempotent, so a torn fetch loses nothing, and
+// partial spool progress is retained across attempts — which is what makes
+// retrying a way to pay the cold cost in installments that each fit inside the
+// deadline. That is why retry is correct here and would not be for a push.
+//
+// It does NOT rescue every store: hq advanced 4 KB per attempt against a
+// 2.24 GB cache over 12 attempts, so no budget converges it. The default of 5
+// covers everything that converges at all, with one attempt of margin over the
+// worst (vp at 4), and deliberately stops short of burning cycle time on hq.
+//
+// Corruption is a separate exception: "Blob not found" is terminal — measured
+// on vct, 5/5 attempts failed with the missing hash VARYING between attempts.
+// Retrying it burns the cycle budget of every store queued behind it while
+// hiding a data-integrity fault behind a generic transport status, so it must
+// fail on the first attempt with its own greppable status.
 
 import (
 	"errors"
@@ -143,10 +153,10 @@ func TestSyncRetriesTransientFetchFailureThenPushes(t *testing.T) {
 	}
 }
 
-// TestSyncRetriesFetchTwiceThenPushes is the hq case exactly: two consecutive
-// deadline losses before the remote cache is warm enough to converge. The
-// default attempt budget must be large enough to cover it — a budget of 2
-// would leave the fleet's largest store permanently unsynced.
+// TestSyncRetriesFetchTwiceThenPushes: two consecutive deadline losses before
+// the spool is far enough along to converge. Measured from cold on the live
+// fleet, va needed 3 attempts and vp needed 4, so the default budget must
+// comfortably exceed 2 or those stores stay unsynced for the server lifetime.
 func TestSyncRetriesFetchTwiceThenPushes(t *testing.T) {
 	binDir := t.TempDir()
 	logPath, countPath := writeSyncFakeDoltFetchFlaky(t, binDir, "unexpected EOF", 2)
@@ -174,8 +184,8 @@ func TestSyncFetchRetryExhaustionDoesNotPush(t *testing.T) {
 
 	out, code := runFFSyncRC(t, binDir)
 
-	if got := fetchAttempts(t, countPath); got != 3 {
-		t.Fatalf("expected the default 3-attempt budget, got %d\nout:\n%s", got, out)
+	if got := fetchAttempts(t, countPath); got != 5 {
+		t.Fatalf("expected the default 5-attempt budget, got %d\nout:\n%s", got, out)
 	}
 	if pushed(readLog(t, logPath)) {
 		t.Fatalf("must NOT push when classification never succeeded.\nout:\n%s", out)
@@ -183,7 +193,7 @@ func TestSyncFetchRetryExhaustionDoesNotPush(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("expected non-zero exit when the fetch never converged\nout:\n%s", out)
 	}
-	if !strings.Contains(out, "3 attempts") {
+	if !strings.Contains(out, "5 attempts") {
 		t.Fatalf("expected the status to report how many attempts were spent.\nout:\n%s", out)
 	}
 }

@@ -139,27 +139,40 @@ if [ "$fetch_timeout_valid" != true ]; then
   exit 2
 fi
 
-# Attempt budget for the pre-push fetch (vp-q3kp). Defaults to 3.
+# Attempt budget for the pre-push fetch (vp-q3kp). Defaults to 5.
+#
+# THE COST IS COLD-VS-WARM, NOT DELTA SIZE. A store's first remote operation in
+# a given sql-server lifetime must spool the remote's blobs (GitBlobstore has no
+# server-side range read, so a ranged read streams whole blobs); every later
+# operation on that store in the same lifetime is sub-second. On a short server
+# read timeout the cold operation is what dies, and because it is the FETCH that
+# runs first, the push is never even attempted. A single-attempt fetch therefore
+# turns "this store is cold" into "skipped (NOT pushed)" for the whole server
+# lifetime.
 #
 # WHY A RETRY IS CORRECT HERE AND WOULD NOT BE FOR A PUSH: the fetch is
-# read-only and idempotent, and its git remote cache warms across attempts, so
-# a torn fetch loses nothing and a later attempt starts from more cached state.
-# Measured on the voxist-city fleet 2026-08-04 against read_timeout_millis=15000
-# (dolt 2.2.3, git+ssh remotes): vp failed at 15.34s then converged at 1.57s on
-# the next attempt; hq failed at 15.34s and 16.00s then converged at 1.83s. The
-# healthy stores fetch in ~2s throughout.
+# read-only and idempotent, so a torn fetch loses nothing, and partial spool
+# progress is retained across attempts — which makes retrying a way to pay the
+# cold cost in installments that each fit inside the deadline.
 #
-# This is the whole reason the large stores were chronically unsynced: the fetch
-# — not the push — is what loses to the server deadline, and a single-attempt
-# fetch turns that into "skipped (NOT pushed)" forever. The push those stores
-# never reached costs 1-2s for a routine delta (measured: hq 150 commits/3.9MB
-# in 1.7s, 389 commits/7.4MB in 2.3s).
+# Measured from cold on the voxist-city fleet 2026-08-04, against
+# read_timeout_millis=15000 (dolt 2.2.3, git+ssh remotes), attempts to converge
+# vs the store's git-remote-cache size:
+#
+#   vg 1 (5.7M) · vl 1 (12M) · vw 1 (57M) · vm 2 (342M) · vr 2 (465M)
+#   va 3 (871M) · vp 4 (799M) · hq NEVER (2.1G)
+#
+# 5 covers every store that converges at all, with one attempt of margin over
+# the worst (vp at 4). It deliberately does NOT rescue hq: hq made 4 KB of
+# progress per attempt against a 2.24 GB cache over 12 attempts, so no budget
+# converges it and a larger default would only burn cycle time. That is a
+# separate, escalated problem — see the bead.
 #
 # Validated with the same all-digit, at-least-one-non-zero rule as the timeouts:
 # a zero or non-numeric budget must fail loud, not silently mean "once" or
 # "never" — a misconfigured budget that quietly becomes something else is the
 # unreviewable-config failure this command set already guards against.
-fetch_attempts="${GC_DOLT_SYNC_FETCH_ATTEMPTS-3}"
+fetch_attempts="${GC_DOLT_SYNC_FETCH_ATTEMPTS-5}"
 case "$fetch_attempts" in
   ''|*[!0-9]*) fetch_attempts_valid=false ;;
   *[1-9]*)     fetch_attempts_valid=true ;;

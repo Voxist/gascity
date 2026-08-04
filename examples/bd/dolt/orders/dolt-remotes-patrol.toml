@@ -4,9 +4,11 @@ trigger = "cooldown"
 interval = "15m"
 exec = "gc dolt sync"
 # 600s, not the 300s exec default (vp-q3kp). The pre-push fetch now retries
-# (GC_DOLT_SYNC_FETCH_ATTEMPTS, default 3) because on large stores it — not the
-# push — is what loses to a short server read timeout. A cold-cache cycle can
-# therefore spend up to 3 x GC_DOLT_SYNC_FETCH_TIMEOUT_SECS on a slow store,
+# (GC_DOLT_SYNC_FETCH_ATTEMPTS, default 5) because on a store that is COLD for
+# this sql-server lifetime it — not the push — is what loses to a short server
+# read timeout. Every store is cold after a server restart, so a cycle that
+# lands just after one pays that cost for all of them at once. Such a cycle can
+# spend up to 5 x GC_DOLT_SYNC_FETCH_TIMEOUT_SECS on a slow store,
 # and the run is SEQUENTIAL across databases: at the 300s default a few slow
 # stores would exhaust the order deadline and the databases later in the scan
 # order would be SIGTERMed before they were ever attempted — silent starvation,
