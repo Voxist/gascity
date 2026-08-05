@@ -33,11 +33,10 @@ package dolt_test
 // covers everything that converges at all, with one attempt of margin over the
 // worst (vp at 4), and deliberately stops short of burning cycle time on hq.
 //
-// Corruption is a separate exception: "Blob not found" is terminal — measured
-// on vct, 5/5 attempts failed with the missing hash VARYING between attempts.
-// Retrying it burns the cycle budget of every store queued behind it while
-// hiding a data-integrity fault behind a generic transport status, so it must
-// fail on the first attempt with its own greppable status.
+// Only two failures skip the retry: a first-push signal (not a failure) and
+// exit 124 (the client bound already spent its whole budget). Everything else
+// retries — see TestSyncRetriesBlobNotFound for the one that looks like it
+// should be an exception and is not.
 
 import (
 	"errors"
@@ -198,29 +197,39 @@ func TestSyncFetchRetryExhaustionDoesNotPush(t *testing.T) {
 	}
 }
 
-// TestSyncDoesNotRetryCorruptRemoteArchive is the vct case. "Blob not found"
-// is a corrupt remote archive: retrying cannot fix it, and spending the budget
-// on it steals cycle time from every store queued behind. It must stop on the
-// first attempt and say so in its own words, because a corrupt archive and a
-// slow link need opposite operator responses.
-func TestSyncDoesNotRetryCorruptRemoteArchive(t *testing.T) {
+// TestSyncRetriesBlobNotFound: "Blob not found" is a recurring fleet-wide
+// TRANSIENT, not a corruption signature, so it goes through the normal retry
+// path like any other transport failure.
+//
+// This test exists because the first cut of this change got it wrong. One
+// store was observed failing 5/5 attempts with a VARYING missing-blob hash,
+// and that was read as a corrupt remote archive and given a terminal,
+// no-retry branch. It did not reproduce: the same store later fetched 5/5
+// clean, and the string appears 456 times across 10+ days and 17 distinct
+// hashes in the fleet's dolt.log, on days when nothing was damaged. A single
+// non-converging window does not license a permanent classification.
+//
+// Retrying is also cheap here — these attempts fail in ~3.4s, not at the ~15s
+// deadline — so the cost of being wrong in this direction is far lower than
+// the cost of turning a transient into a guaranteed per-cycle skip.
+func TestSyncRetriesBlobNotFound(t *testing.T) {
 	binDir := t.TempDir()
 	logPath, countPath := writeSyncFakeDoltFetchFlaky(t,
-		binDir, "Blob not found: bckv59m50r5l43o5koeiap6ecjihm36a.darc", 99)
+		binDir, "Blob not found: bckv59m50r5l43o5koeiap6ecjihm36a.darc", 2)
 
 	out, code := runFFSyncRC(t, binDir)
 
-	if got := fetchAttempts(t, countPath); got != 1 {
-		t.Fatalf("corruption must not be retried: expected 1 attempt, got %d\nout:\n%s", got, out)
+	if got := fetchAttempts(t, countPath); got != 3 {
+		t.Fatalf("Blob not found must be retried like any transport failure: expected 3 attempts, got %d\nout:\n%s", got, out)
 	}
-	if pushed(readLog(t, logPath)) {
-		t.Fatalf("must NOT push against a corrupt remote archive.\nout:\n%s", out)
+	if !pushed(readLog(t, logPath)) {
+		t.Fatalf("expected a DOLT_PUSH once the transient cleared.\nout:\n%s", out)
 	}
-	if code == 0 {
-		t.Fatalf("expected non-zero exit for a corrupt remote archive\nout:\n%s", out)
+	if code != 0 {
+		t.Fatalf("expected exit 0 after the transient cleared, got %d\nout:\n%s", code, out)
 	}
-	if !strings.Contains(out, "corrupt remote archive") {
-		t.Fatalf("expected a distinct 'corrupt remote archive' status, not a generic fetch failure.\nout:\n%s", out)
+	if strings.Contains(out, "corrupt") {
+		t.Fatalf("must not diagnose a recurring transient as corruption.\nout:\n%s", out)
 	}
 }
 

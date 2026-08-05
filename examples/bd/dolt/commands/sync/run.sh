@@ -454,24 +454,26 @@ sync_database_sql() {
       echo "  $name: ERROR: cannot create temp file for fetch diagnostics" >&2
       return 1
     }
-    # Retry the fetch while the failure is transport-shaped (vp-q3kp). Four
-    # outcomes end the loop immediately, because retrying each is either wrong
-    # or wasteful:
-    #   * success
+    # Retry the fetch while the failure is transport-shaped (vp-q3kp). Only two
+    # outcomes end the loop early, because retrying either is wrong or wasteful:
     #   * a first-push signal — not a failure at all, just a branch the remote
     #     does not have yet; a retry would spend two round trips to learn the
     #     same thing
     #   * exit 124 — the client wall-clock bound already burned fetch_timeout
     #     seconds; another attempt costs the same again and would starve the
     #     stores queued behind this one inside the order's own deadline
-    #   * a corrupt remote archive ("Blob not found") — terminal. Measured on
-    #     vct 2026-08-04: 5/5 attempts failed and the MISSING BLOB HASH VARIED
-    #     between attempts, so no number of retries converges. It also needs the
-    #     opposite operator response from a slow link, so it must not be
-    #     reported as a generic transport failure.
+    #
+    # Everything else retries, INCLUDING "Blob not found". That string looks
+    # like archive corruption and an earlier cut of this code treated it as
+    # terminal on the strength of one store failing 5/5 attempts with a varying
+    # missing-blob hash. It did not reproduce — the same store later fetched 5/5
+    # clean — and the string appears 456 times across 10+ days and 17 distinct
+    # hashes in this fleet's dolt.log, on days when nothing was damaged. It is a
+    # recurring transient. A terminal branch would have converted it into a
+    # guaranteed per-cycle skip, and these attempts fail in ~3.4s rather than at
+    # the deadline, so retrying them is cheap.
     fetch_rc=0
     fetch_try=0
-    fetch_corrupt=false
     while :; do
       fetch_try=$((fetch_try + 1))
       fetch_rc=0
@@ -482,25 +484,10 @@ sync_database_sql() {
       grep -q "no branches found in remote" "$fetch_err_tmp" 2>/dev/null && break
       grep -q "invalid ref spec" "$fetch_err_tmp" 2>/dev/null && break
       [ "$fetch_rc" -eq 124 ] && break
-      if grep -q "Blob not found" "$fetch_err_tmp" 2>/dev/null; then
-        fetch_corrupt=true
-        break
-      fi
       [ "$fetch_try" -ge "$fetch_attempts" ] && break
       echo "  $name: fetch attempt $fetch_try/$fetch_attempts failed — retrying" >&2
       [ "$fetch_retry_delay" -gt 0 ] && sleep "$fetch_retry_delay"
     done
-
-    if [ "$fetch_corrupt" = true ]; then
-      echo "  $name: corrupt remote archive — skipped (NOT pushed); retry cannot fix this, the remote needs repair" >&2
-      if [ -s "$fetch_err_tmp" ]; then
-        while IFS= read -r line || [ -n "$line" ]; do
-          printf '  %s: %s\n' "$name" "$line" >&2
-        done < "$fetch_err_tmp"
-      fi
-      rm -f "$fetch_err_tmp"
-      return 1
-    fi
 
     if [ "$fetch_rc" -ne 0 ] && { grep -q "no branches found in remote" "$fetch_err_tmp" 2>/dev/null || grep -q "invalid ref spec" "$fetch_err_tmp" 2>/dev/null; }; then
       # The remote has no such branch: an empty remote ("no branches found in

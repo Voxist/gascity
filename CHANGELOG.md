@@ -39,13 +39,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cache over 12 attempts, so no budget converges it and a larger default would
   only burn cycle time.
 
-  A corrupt remote archive (`Blob not found`) is excluded from the retry and
-  reported as `corrupt remote archive`: measured on one store, 5/5 attempts
-  failed with the *missing blob hash varying between attempts*, so no retry
-  budget converges, and spending one steals cycle time from every database
-  queued behind it while hiding a data-integrity fault behind a transport
-  status. A first-push signal and a client-bound timeout (exit 124) are also
-  not retried — neither converges by trying again.
+  Only two failures skip the retry, because retrying either is wasteful: a
+  first-push signal (not a failure — just a branch the remote does not have
+  yet) and a client-bound timeout (exit 124, which already spent its whole
+  budget). Everything else retries, including `Blob not found` — that string
+  looks like archive corruption but is a recurring transient on this class of
+  remote (456 occurrences across 10+ days and 17 distinct hashes in one
+  fleet's log, on days when nothing was damaged), and treating it as terminal
+  would convert a transient into a guaranteed per-cycle skip.
 
   `dolt-remotes-patrol` moves from the 300s exec default to an explicit 600s
   timeout: the run is sequential across databases, so a cold-cache cycle that
