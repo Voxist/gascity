@@ -325,7 +325,7 @@ func ReconcileCompletedStores(recorder events.Provider, graphStores []beads.Grap
 		return 0
 	}
 
-	existing, err := recorder.List(events.Filter{Type: events.ExecutionStepCompleted})
+	existing, err := completedFacts(recorder)
 	if err != nil {
 		// If the journal cannot be read, avoid generating duplicate recovery
 		// facts. A later reconciliation pass can safely retry.
@@ -381,6 +381,18 @@ func ReconcileCompletedStores(recorder events.Provider, graphStores []beads.Grap
 		}
 	}
 	return emitted
+}
+
+// completedFacts returns the retained completion journal, including a
+// FileRecorder segment that is temporarily awaiting archive compression. A
+// reconciliation pass must see that segment before deciding a close needs a
+// recovery fact; otherwise an event rotation can create a duplicate fact.
+func completedFacts(recorder events.Provider) ([]events.Event, error) {
+	filter := events.Filter{Type: events.ExecutionStepCompleted}
+	if inFlight, ok := recorder.(events.InFlightProvider); ok {
+		return inFlight.ListInFlight(filter)
+	}
+	return recorder.List(filter)
 }
 
 type completedFactKey struct {

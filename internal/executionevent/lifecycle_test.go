@@ -1,8 +1,12 @@
 package executionevent
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"errors"
+	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -104,6 +108,89 @@ func TestReconcileCompletedRepairsMissingFactAndRetainsConflictingHistory(t *tes
 	}
 	if len(completed) != 2 || completed[1].SessionID != "gcs-session" || completed[1].RunID != root.ID || completed[1].StepID != "build" {
 		t.Fatalf("completed facts = %#v, want stale history plus authoritative correction", completed)
+	}
+}
+
+func TestReconcileCompletedDoesNotDuplicateFactDuringFileRecorderRotation(t *testing.T) {
+	graph := beads.NewMemStore()
+	root := mustCreateProjectionRoot(t, graph, "")
+	step := mustCreateProjectionStep(t, graph, "gcg-rotation-attempt", root.ID, "build", "[]")
+	closed := "closed"
+	if err := graph.Update(step.ID, beads.UpdateOpts{Status: &closed, Metadata: map[string]string{beadmeta.SessionIDMetadataKey: "gcs-session"}}); err != nil {
+		t.Fatal(err)
+	}
+	step, err := graph.Get(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, ok := LifecycleEvent(events.ExecutionStepCompleted, root, step, "close-hook")
+	if !ok {
+		t.Fatal("LifecycleEvent(completed) = false")
+	}
+
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	recorder, err := events.NewFileRecorder(path, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = recorder.Close() })
+	recorder.Record(completed)
+	rotation, err := recorder.ForceRotate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rotation.Rotated {
+		t.Fatalf("ForceRotate = %#v, want archive", rotation)
+	}
+	recorder.WaitForRotations()
+	if got := ReconcileCompleted(recorder, beads.GraphStore{Store: graph}, "execution-reconcile"); got != 0 {
+		t.Fatalf("ReconcileCompleted after archived rotation = %d, want 0 duplicate facts", got)
+	}
+
+	// Re-create the state after the active file is renamed but before its
+	// asynchronous gzip promotion. FileRecorder.List deliberately cannot see
+	// this segment; ListInFlight must supply it to a durable reconciler.
+	rotating := filepath.Join(filepath.Dir(path), "events.jsonl.rotating-20260805T000000Z-seq-1-1")
+	expandArchiveToRotating(t, rotation.ArchivePath, rotating)
+
+	if got := ReconcileCompleted(recorder, beads.GraphStore{Store: graph}, "execution-reconcile"); got != 0 {
+		t.Fatalf("ReconcileCompleted during rotation = %d, want 0 duplicate facts", got)
+	}
+	all, err := recorder.ListInFlight(events.Filter{Type: events.ExecutionStepCompleted, Subject: step.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("completion facts during rotation = %#v, want exactly archived fact", all)
+	}
+}
+
+func expandArchiveToRotating(t *testing.T, archivePath, rotatingPath string) {
+	t.Helper()
+	archive, err := os.Open(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := gzip.NewReader(archive)
+	if err != nil {
+		_ = archive.Close()
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(reader)
+	if closeErr := reader.Close(); err == nil {
+		err = closeErr
+	}
+	if closeErr := archive.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rotatingPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(archivePath); err != nil {
+		t.Fatal(err)
 	}
 }
 
