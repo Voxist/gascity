@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -90,6 +92,48 @@ func TestWedgedBackendTripsTheBreakerThroughTheRealRunner(t *testing.T) {
 	if _, err := runner(scope, "bd", "list", "--json"); !errors.Is(err, beads.ErrStoreUnavailable) {
 		t.Fatalf("after 3 consecutive wedged-backend timeouts err = %v, want ErrStoreUnavailable; "+
 			"the breaker never trips, so the cache's last-good read path never activates", err)
+	}
+}
+
+// TestCompleteBindingScopesStayBehindTheBreaker pins that a scope with a
+// complete external storage binding — which bdCommandRunnerForCity routes to
+// the context runner instead of the managed-retry path — still gets the scope
+// transport breaker. The external-endpoint direction is exactly what the
+// breaker was built for; an early return that skipped it would let a wedged
+// endpoint pile up bd subprocesses unbounded.
+func TestCompleteBindingScopesStayBehindTheBreaker(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	cityPath := writeBreakerTestCity(t, "")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := `{"backend":"dolt","storage_endpoint":"db.example.com:3306","storage_database":"beads_prod"}`
+	if err := os.WriteFile(scopeMetadataJSONPath(cityPath), []byte(metadata), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bdResilienceRegistryForCity(cityPath).SetJitterForTest(func(c time.Duration) time.Duration { return c })
+	calls := installFakeBdExec(t, func(_, _ string, _ ...string) ([]byte, error) {
+		return nil, fmt.Errorf("timed out after %s", 2*time.Minute)
+	})
+
+	runner := bdCommandRunnerForCity(cityPath)
+	scope := t.TempDir()
+	for i := 0; i < 3; i++ {
+		if _, err := runner(scope, "bd", "list", "--json"); err == nil {
+			t.Fatalf("call %d: err = nil, want the timeout", i)
+		} else if errors.Is(err, beads.ErrStoreUnavailable) {
+			t.Fatalf("call %d: tripped before the threshold", i)
+		}
+	}
+	if *calls != 3 {
+		t.Fatalf("exec calls = %d after 3 invocations, want 3", *calls)
+	}
+	if _, err := runner(scope, "bd", "list", "--json"); !errors.Is(err, beads.ErrStoreUnavailable) {
+		t.Fatalf("after 3 consecutive wedged-endpoint timeouts err = %v, want ErrStoreUnavailable; "+
+			"the context runner bypasses the breaker", err)
+	}
+	if *calls != 3 {
+		t.Fatalf("exec calls = %d after the breaker opened, want still 3 — an open breaker must spawn zero subprocesses", *calls)
 	}
 }
 

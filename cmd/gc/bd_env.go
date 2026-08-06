@@ -63,7 +63,12 @@ func bdCommandRunnerForCity(cityPath string) beads.CommandRunner {
 }
 
 // bdContextCommandRunnerForCity delegates complete external bindings to the
-// workspace-pinned bd without projecting or recovering a managed backend.
+// workspace-pinned bd without projecting or recovering a managed backend. It
+// skips managed recovery, not resilience: the scope transport breaker,
+// admission semaphore, and outcome recording apply exactly as on the managed
+// path — a wedged external endpoint is precisely the outage shape the breaker
+// exists to fail fast on (ga-2bo4m), and without admission each controller
+// tick would pile another bd subprocess onto a store already known wedged.
 func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
 	return func(dir, name string, args ...string) ([]byte, error) {
 		env := cityRuntimeEnvMapForCity(cityPath)
@@ -85,10 +90,34 @@ func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
 		if credentialsFile != "" {
 			env["BEADS_CREDENTIALS_FILE"] = credentialsFile
 		}
-		if name == "bd" && bdBin != "" {
-			name = bdBin
+		var breaker *resilience.Breaker
+		if name == "bd" {
+			breaker = bdScopeBreaker(cityPath, dir)
+			if !breaker.Allow() {
+				return nil, fmt.Errorf("bd %s: scope %s: circuit breaker open after consecutive transport failures: %w",
+					strings.Join(args, " "), dir, beads.ErrStoreUnavailable)
+			}
+			release, admitted := bdAdmissionForCity(cityPath).acquire(bdAdmissionScope(cityPath, dir))
+			if !admitted {
+				return nil, fmt.Errorf("bd %s: scope %s: admission saturated, failing fast to protect the controller tick: %w",
+					strings.Join(args, " "), dir, beads.ErrStoreUnavailable)
+			}
+			defer release()
 		}
-		return beadsExecCommandRunnerWithEnv(env)(dir, name, args...)
+		execName := name
+		if execName == "bd" && bdBin != "" {
+			execName = bdBin
+		}
+		out, err := beadsExecCommandRunnerWithEnv(env)(dir, execName, args...)
+		if breaker != nil {
+			// No managed retry on this path, so this invocation's outcome is
+			// the final word: a per-command deadline kill or a transport-class
+			// error counts one consecutive failure; anything the store
+			// answered records a healthy transport.
+			recordBdBreakerOutcome(breaker,
+				bdInvocationTimedOut(name, err) || bdTransportRetryableError(cityPath, dir, env, err))
+		}
+		return out, err
 	}
 }
 
