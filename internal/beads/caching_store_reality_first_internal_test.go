@@ -442,9 +442,18 @@ func TestCachingStoreGatedClosedOnlyQueryRefuses(t *testing.T) {
 	}
 }
 
-// TestCachingStoreGatedIncludeClosedServesPartial: gated IncludeClosed reads
-// get the active snapshot tagged partial, matching the ungated fallback.
-func TestCachingStoreGatedIncludeClosedServesPartial(t *testing.T) {
+// TestCachingStoreGatedIncludeClosedServesSnapshotCompat pins the gated
+// path's long-standing IncludeClosed contract: rows with a NIL error.
+// Error-intolerant gated consumers (beadmail's sessionBeadCache and
+// historical-alias routing discard rows on ANY non-nil error) previously
+// kept working from the snapshot during breaker-open episodes; tagging the
+// answer partial here would silently break mail routing for the outage's
+// duration. The dial-first fallback path DOES tag
+// (TestCachingStoreDownIncludeClosedServesPartial): its callers previously
+// received a hard error, so a tagged answer cannot regress anyone. A
+// partially-primed snapshot is tagged on both paths — that data is
+// known-incomplete at the active level, which is a different claim.
+func TestCachingStoreGatedIncludeClosedServesSnapshotCompat(t *testing.T) {
 	t.Parallel()
 
 	r := newTierRunner()
@@ -452,10 +461,208 @@ func TestCachingStoreGatedIncludeClosedServesPartial(t *testing.T) {
 	cache.SetAvailabilityGate(&stubGate{available: false})
 
 	got, err := cache.List(ListQuery{AllowScan: true, IncludeClosed: true})
-	if !IsPartialResult(err) {
-		t.Fatalf("gated IncludeClosed List err = %v, want PartialResultError", err)
+	if err != nil {
+		t.Fatalf("gated IncludeClosed List err = %v, want nil (compat with error-intolerant gated consumers)", err)
 	}
 	if !hasBead(got, "ga-1") {
 		t.Fatalf("gated IncludeClosed List = %d beads without ga-1", len(got))
+	}
+}
+
+// TestCachingStoreFallbackTagsPartialPrimedSnapshot: a snapshot built from a
+// partial prime is known-incomplete at the active level (it can hold wisps
+// only), so the fallback must never present it as a complete nil-error
+// answer — "no work" must not be fabricated from half a prime.
+func TestCachingStoreFallbackTagsPartialPrimedSnapshot(t *testing.T) {
+	t.Parallel()
+
+	r := newTierRunner()
+	r.setMode("overloaded") // prime's TierBoth scan -> PartialResultError
+	cache := NewCachingStore(NewBdStore("/city", r.run), nil)
+	if err := cache.Prime(t.Context()); err != nil {
+		t.Fatalf("Prime under overload: %v", err)
+	}
+	cache.mu.RLock()
+	partial := cache.primePartialErr
+	cache.mu.RUnlock()
+	if partial == nil {
+		t.Fatal("fixture: primePartialErr not set after overloaded prime; test would prove nothing")
+	}
+
+	got, err := cache.List(ListQuery{Status: "open"})
+	if !IsPartialResult(err) {
+		t.Fatalf("List on partial-primed snapshot = (%d beads, %v), want a PartialResultError tag", len(got), err)
+	}
+}
+
+// TestCachingStoreGatedParentIDServesActiveChildren pins the gated path's
+// pre-existing child-listing behavior: active children live in the snapshot,
+// and convergence/molecule progress evaluation must keep advancing during a
+// breaker-open episode.
+func TestCachingStoreGatedParentIDServesActiveChildren(t *testing.T) {
+	t.Parallel()
+
+	mem := NewMemStore()
+	parent, err := mem.Create(Bead{Title: "root", Status: "open"})
+	if err != nil {
+		t.Fatalf("seed parent: %v", err)
+	}
+	if _, err := mem.Create(Bead{Title: "step", Status: "open", ParentID: parent.ID}); err != nil {
+		t.Fatalf("seed child: %v", err)
+	}
+	cache := NewCachingStore(mem, nil)
+	if err := cache.Prime(t.Context()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	cache.SetAvailabilityGate(&stubGate{available: false})
+
+	got, err := cache.List(ListQuery{ParentID: parent.ID})
+	if err != nil {
+		t.Fatalf("gated ParentID List = %v, want the cached active children", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("gated ParentID List = %d beads, want 1", len(got))
+	}
+}
+
+// TestCachingStoreGatedCountWithoutCounterKeepsContract: the capability
+// contract outranks the gate. Backing stores without a Counter must report
+// ErrCountUnsupported in every state so callers keep their documented List
+// fallback (store-health depends on it during outages).
+func TestCachingStoreGatedCountWithoutCounterKeepsContract(t *testing.T) {
+	t.Parallel()
+
+	mem := NewMemStore()
+	if _, err := mem.Create(Bead{Title: "a", Status: "open"}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	cache := NewCachingStore(mem, nil)
+	if err := cache.Prime(t.Context()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	cache.mu.Lock()
+	cache.state = cacheDegraded
+	cache.mu.Unlock()
+	cache.SetAvailabilityGate(&stubGate{available: false})
+
+	if _, err := cache.Count(t.Context(), ListQuery{Status: "open", AllowScan: true}); !errors.Is(err, ErrCountUnsupported) {
+		t.Fatalf("gated Count without Counter = %v, want ErrCountUnsupported (callers fall back to List)", err)
+	}
+}
+
+// cancelingListerStore expires the caller's ctx mid-dial and returns the ctx
+// error, modeling a CtxLister backing whose query outlives the caller's
+// deadline.
+type cancelingListerStore struct {
+	Store
+	cancel context.CancelFunc
+}
+
+func (s *cancelingListerStore) ListCtx(ctx context.Context, _ ListQuery) ([]Bead, error) {
+	s.cancel()
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestCachingStoreFallbackPropagatesCallerDeadline: once the CALLER's budget
+// is spent, serving a stale snapshot with a nil error would mask the very
+// slowness the deadline exists to surface — the dial's error stands.
+func TestCachingStoreFallbackPropagatesCallerDeadline(t *testing.T) {
+	t.Parallel()
+
+	mem := NewMemStore()
+	if _, err := mem.Create(Bead{Title: "a", Status: "open"}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	backing := &cancelingListerStore{Store: mem}
+	cache := NewCachingStore(backing, nil)
+	if err := cache.Prime(t.Context()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	cache.mu.Lock()
+	cache.state = cacheDegraded
+	cache.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	backing.cancel = cancel
+	got, err := cache.ListCtx(ctx, ListQuery{Status: "open", AllowScan: true})
+	if err == nil {
+		t.Fatalf("ListCtx past the caller's deadline = (%d beads, nil); stale data after budget exhaustion masks the slowness", len(got))
+	}
+}
+
+// TestCachingStoreDegradedDialSuccessRefreshesSnapshot: a successful
+// degraded-path dial folds its rows into the snapshot, so a fallback moments
+// later serves the freshest observed truth, not the pre-outage state —
+// consecutive reads must not travel backwards in time by hours.
+func TestCachingStoreDegradedDialSuccessRefreshesSnapshot(t *testing.T) {
+	t.Parallel()
+
+	r := newTierRunner()
+	cache := primeTierCache(t, r)
+	r.setMode("overloaded")
+	degradeCache(t, cache)
+
+	r.setListTitle("fresh")
+	r.setMode("healthy")
+	if _, err := cache.List(ListQuery{Status: "open"}); err != nil {
+		t.Fatalf("List during recovery window: %v", err)
+	}
+
+	r.setMode("down")
+	got, err := cache.List(ListQuery{Status: "open"})
+	if err != nil {
+		t.Fatalf("List after store went down = %v, want last-good snapshot", err)
+	}
+	for _, b := range got {
+		if b.ID == "ga-1" {
+			if b.Title != "fresh" {
+				t.Fatalf("ga-1 title = %q, want %q — the successful dial's rows must be absorbed into the snapshot", b.Title, "fresh")
+			}
+			return
+		}
+	}
+	t.Fatal("ga-1 missing from last-good snapshot")
+}
+
+// wispGetRunner: `bd show` reports not-found (wisps are invisible to it)
+// while the supplemental wisp `bd query` fails with a transport error.
+type wispGetRunner struct{ queryErr error }
+
+func (r *wispGetRunner) run(_, name string, args ...string) ([]byte, error) {
+	if name != "bd" || len(args) == 0 {
+		return nil, fmt.Errorf("unexpected command %q %v", name, args)
+	}
+	switch args[0] {
+	case "show":
+		return nil, fmt.Errorf("exit status 1: Error fetching %s: no issue found matching %q", args[len(args)-1], args[len(args)-1])
+	case "query":
+		if r.queryErr != nil {
+			return nil, r.queryErr
+		}
+		return []byte(`[]`), nil
+	}
+	return []byte(`[]`), nil
+}
+
+// TestBdStoreGetWispLookupFailureIsNotNotFound: when bd show says not-found
+// (wisps are always invisible to it) and the supplemental wisp query FAILS,
+// the bead may still exist and be unobservable — fabricating ErrNotFound
+// teaches NotFound-is-authoritative callers to drop live beads (auto-handoff
+// mail) during exactly the overload ga-2p81g exists to fix. A wisp query
+// that ANSWERS not-found (or empty) is confirmed absence and stays
+// ErrNotFound.
+func TestBdStoreGetWispLookupFailureIsNotNotFound(t *testing.T) {
+	t.Parallel()
+
+	r := &wispGetRunner{queryErr: fmt.Errorf("timed out after 2m0s")}
+	store := NewBdStore("/city", r.run)
+	if _, err := store.Get("wisp-1"); errors.Is(err, ErrNotFound) || err == nil {
+		t.Fatalf("Get with failed wisp lookup = %v; a transport failure must not be reported as absence", err)
+	}
+
+	r.queryErr = nil // wisp query answers: empty result = confirmed absence
+	if _, err := store.Get("wisp-1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get with empty wisp answer = %v, want ErrNotFound", err)
 	}
 }
