@@ -3,6 +3,7 @@ package beads
 import (
 	"errors"
 	"fmt"
+	"slices"
 )
 
 // AvailabilityGate reports whether the backing store transport is
@@ -46,20 +47,51 @@ func (c *CachingStore) servingDegraded() bool {
 
 // Degraded reports whether the cache is currently serving degraded data:
 // the availability gate says the store is unreachable, or repeated
-// reconcile failures pushed the cache into the degraded state.
+// reconcile failures pushed the cache into the degraded state. Both facts
+// are read under one lock acquisition so a state transition between two
+// reads cannot make the indicator blink false mid-outage; the gate's own
+// Available() runs outside c.mu so foreign breaker code never executes
+// under this lock.
 func (c *CachingStore) Degraded() bool {
-	if c.servingDegraded() {
+	c.mu.RLock()
+	gate := c.availabilityGate
+	degraded := c.state == cacheDegraded
+	c.mu.RUnlock()
+	if degraded {
 		return true
 	}
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.state == cacheDegraded
+	return gate != nil && !gate.Available()
 }
 
-// listLastGood answers a List query purely from the in-memory cache while
-// the backing store is unavailable. An unprimed cache returns
-// ErrStoreUnavailable — unavailable must never read as empty.
+// listLastGood answers a List query purely from the in-memory snapshot while
+// the backing store is unavailable. It refuses every shape the snapshot
+// cannot answer honestly, so a caller never receives a plausible-looking
+// wrong answer:
+//
+//   - An unprimed cache returns ErrStoreUnavailable — unavailable must
+//     never read as empty.
+//   - Live queries return ErrStoreUnavailable. Live declares staleness
+//     unacceptable (see ListQuery.Live): lifecycle gates that treat absence
+//     as authoritative would release live pool assignments on a stale short
+//     list.
+//   - Closed-only and parent-history shapes return ErrStoreUnavailable: the
+//     snapshot holds active beads only, so an empty answer would read as
+//     "none exist".
+//   - IncludeClosed queries get the active snapshot tagged with the
+//     package's PartialResultError convention — half an answer, labeled as
+//     half.
+//
+// The snapshot is not frozen during an outage: local writes still absorb
+// into c.beads (createWith/closeWith/update run with no state check), so
+// last-good includes this process's own activity even while the reconcile
+// scan is failing.
 func (c *CachingStore) listLastGood(query ListQuery) ([]Bead, error) {
+	if query.Live {
+		return nil, fmt.Errorf("listing beads (live): %w", ErrStoreUnavailable)
+	}
+	if query.Status == "closed" || query.ParentID != "" {
+		return nil, fmt.Errorf("listing beads (closed history): %w", ErrStoreUnavailable)
+	}
 	c.mu.RLock()
 	if c.state == cacheUninitialized {
 		c.mu.RUnlock()
@@ -78,7 +110,37 @@ func (c *CachingStore) listLastGood(query ListQuery) ([]Bead, error) {
 	if query.Limit > 0 && len(cached) > query.Limit {
 		cached = cached[:query.Limit]
 	}
+	if query.IncludesClosed() {
+		return cached, &PartialResultError{
+			Op:  "cache list last-good",
+			Err: fmt.Errorf("closed history unavailable: %w", ErrStoreUnavailable),
+		}
+	}
 	return cached, nil
+}
+
+// lastGoodCount answers a Count from the in-memory snapshot while the
+// backing store is unavailable, under the same honesty boundary as
+// listLastGood: only active-shape queries (non-Live, no parent, no closed
+// history) against a primed cache are answerable; everything else reports
+// ok=false so the caller surfaces the backing failure instead.
+func (c *CachingStore) lastGoodCount(query ListQuery, excludeTypes []string) (int, bool) {
+	if query.Live || query.ParentID != "" || query.Status == "closed" || query.IncludesClosed() {
+		return 0, false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.state == cacheUninitialized {
+		return 0, false
+	}
+	n := 0
+	for _, b := range c.beads {
+		if query.Matches(b) && !slices.Contains(excludeTypes, b.Type) {
+			n++
+		}
+	}
+	c.degradedReads.Add(1)
+	return n, true
 }
 
 // getLastGood answers a Get purely from the in-memory cache while the

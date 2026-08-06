@@ -110,7 +110,33 @@ func (c *CachingStore) ListCtx(ctx context.Context, query ListQuery) ([]Bead, er
 		}
 		return finish(cached, err)
 	}
-	return c.backingListCtx(ctx, liveListQuery(query))
+	// Cache not servable (degraded, partial prime, mid-transition): reality
+	// first — dial the backing store, and when it answers, its answer wins.
+	// Reachability under load is a per-query property, not a store-level one
+	// (a store timing out on unbounded scans routinely still serves filtered
+	// reads), so no state may pre-route this read away from the store.
+	items, err := c.backingListCtx(ctx, liveListQuery(query))
+	if err == nil || IsPartialResult(err) || errors.Is(err, context.Canceled) {
+		// A PartialResultError is an ANSWER: rows plus a typed caveat. It
+		// passes through untouched so a partially-primed cache never presents
+		// an active list as complete (see
+		// TestCachingStorePrimePartialDoesNotServeActiveListAsComplete) — the
+		// fallback below is reserved for the store giving no usable answer.
+		return items, err
+	}
+	// The store did not answer. Serve the last-good snapshot for every shape
+	// it can answer honestly (listLastGood owns that boundary; a refusal —
+	// Live, closed-only, parent history, unprimed — surfaces the backing
+	// failure unchanged). This is what makes a backend outage degrade reads
+	// to stale-but-correct instead of amplifying into a read outage
+	// (ga-2p81g). Note query is non-Live here by construction: Live queries
+	// took the bypass branch above and never reach this fallback.
+	fallback, ferr := c.listLastGood(query)
+	if ferr != nil && !IsPartialResult(ferr) {
+		return items, err
+	}
+	c.recordProblem("list served last-good after backing failure", err)
+	return fallback, ferr
 }
 
 // backingListCtx routes a backing-store list read through the backing's
@@ -157,11 +183,31 @@ func (c *CachingStore) Count(ctx context.Context, query ListQuery, excludeTypes 
 			return 0, err
 		}
 	}
+	// Breaker open: the store is proven down by real command outcomes, so
+	// dialing it for a count defeats the gate's fail-fast purpose. Serve the
+	// snapshot count for shapes it can answer honestly; refuse the rest.
+	if c.servingDegraded() {
+		if n, ok := c.lastGoodCount(query, excludeTypes); ok {
+			return n, nil
+		}
+		return 0, fmt.Errorf("counting beads: %w", ErrStoreUnavailable)
+	}
 	counter, ok := c.backing.(Counter)
 	if !ok {
 		return 0, fmt.Errorf("counting beads: backing store: %w", ErrCountUnsupported)
 	}
-	return counter.Count(ctx, liveListQuery(query), excludeTypes...)
+	n, err := counter.Count(ctx, liveListQuery(query), excludeTypes...)
+	if err == nil || errors.Is(err, ErrCountUnsupported) || IsPartialResult(err) || errors.Is(err, context.Canceled) {
+		return n, err
+	}
+	// Reality first, snapshot as backstop — the same contract as ListCtx:
+	// the store was dialed and did not answer, so an active-shape count is
+	// served from last-good rather than surfacing the outage to the caller.
+	if fn, ok := c.lastGoodCount(query, excludeTypes); ok {
+		c.recordProblem("count served last-good after backing failure", err)
+		return fn, nil
+	}
+	return n, err
 }
 
 // cachedCountContext serves only a clean active snapshot. Dirty overlays use
@@ -495,7 +541,31 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 		return c.backing.Get(id)
 	}
 	c.mu.RUnlock()
-	return c.backing.Get(id)
+	return c.getBackingWithLastGoodFallback(id)
+}
+
+// getBackingWithLastGoodFallback is the degraded-state Get: reality first
+// (dial the backing store; its answer wins, including ErrNotFound — that is
+// an answer, and falling back on it would resurrect deleted beads), then the
+// last-good cached clone when the store did not answer. A locally-deleted id
+// stays ErrNotFound: the tombstone is this process's own write and carries
+// the same trust as the cached rows being served. An uncached id propagates
+// the backing failure — the cache cannot distinguish "missing" from
+// "unreachable".
+func (c *CachingStore) getBackingWithLastGoodFallback(id string) (Bead, error) {
+	fresh, err := c.backing.Get(id)
+	if err == nil || errors.Is(err, ErrNotFound) || IsPartialResult(err) || errors.Is(err, context.Canceled) {
+		return fresh, err
+	}
+	lg, lgErr := c.getLastGood(id)
+	switch {
+	case lgErr == nil:
+		c.recordProblem("get served last-good after backing failure", err)
+		return lg, nil
+	case errors.Is(lgErr, ErrNotFound):
+		return Bead{}, ErrNotFound
+	}
+	return fresh, err
 }
 
 // Ready returns open beads whose blocking deps are all closed.

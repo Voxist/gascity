@@ -106,21 +106,36 @@ func TestCachingStoreListUnavailableServesLastGoodCache(t *testing.T) {
 	}
 }
 
-func TestCachingStoreListUnavailableLiveQueryStaysOnCache(t *testing.T) {
+// TestCachingStoreListUnavailableLiveQueryRefusesStaleAnswer replaces the
+// former ...LiveQueryStaysOnCache, which asserted the opposite: that a Live
+// query under an open breaker returns cached rows with a nil error. That
+// pinned the pool-release hazard — ListQuery.Live's documented contract is
+// "must observe external mutations immediately", and a lifecycle gate that
+// treats absence as authoritative would release a running session's pool
+// assignment on a stale short list. The half the old test got right is kept:
+// the backing store must not be dialed while the breaker is open. A non-Live
+// query in the same state proves the refusal is scoped, not a retreat from
+// serving last-good.
+func TestCachingStoreListUnavailableLiveQueryRefusesStaleAnswer(t *testing.T) {
 	t.Parallel()
 	cache, backing, gate := newPrimedGatedCache(t, Bead{Title: "task-1"})
 
 	gate.set(false, false)
 	listsBefore, _ := backing.counts()
 	got, err := cache.List(ListQuery{AllowScan: true, Live: true})
-	if err != nil {
-		t.Fatalf("List(Live) under open breaker: %v", err)
+	if !errors.Is(err, ErrStoreUnavailable) {
+		t.Fatalf("List(Live) under open breaker = (%d beads, %v), want ErrStoreUnavailable", len(got), err)
 	}
-	if len(got) != 1 {
-		t.Fatalf("List(Live) returned %d beads, want 1", len(got))
+	if len(got) != 0 {
+		t.Fatalf("List(Live) under open breaker returned %d beads alongside the refusal, want 0", len(got))
 	}
 	if listsAfter, _ := backing.counts(); listsAfter != listsBefore {
 		t.Fatal("Live query reached the backing store under an open breaker")
+	}
+
+	nonLive, err := cache.List(ListQuery{AllowScan: true})
+	if err != nil || len(nonLive) != 1 {
+		t.Fatalf("non-Live List under open breaker = (%d beads, %v), want the last-good bead — the refusal must be scoped to Live", len(nonLive), err)
 	}
 }
 
