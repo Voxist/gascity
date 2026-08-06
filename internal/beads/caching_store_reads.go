@@ -34,11 +34,14 @@ func (c *CachingStore) ListCtx(ctx context.Context, query ListQuery) ([]Bead, er
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
-	// Breaker open: serve last-good cached data (tagged degraded via
-	// Degraded()/DegradedReads) instead of dialing an unreachable store.
-	// An unprimed cache returns ErrStoreUnavailable — never empty.
+	// Breaker open: do not dial a store proven down by real command
+	// outcomes. listLastGood answers what the snapshot can answer honestly —
+	// active and ParentID shapes serve rows (nil error, preserving this
+	// path's long-standing contract for error-intolerant consumers), a
+	// partially-primed snapshot is tagged partial, and Live, closed-only,
+	// and unprimed shapes refuse with ErrStoreUnavailable.
 	if c.servingDegraded() {
-		return c.listLastGood(query)
+		return c.listLastGood(query, false)
 	}
 	if query.Live || query.ParentID != "" {
 		c.mu.RLock()
@@ -110,7 +113,81 @@ func (c *CachingStore) ListCtx(ctx context.Context, query ListQuery) ([]Bead, er
 		}
 		return finish(cached, err)
 	}
-	return c.backingListCtx(ctx, liveListQuery(query))
+	// Cache not servable (degraded, partial prime, mid-transition): reality
+	// first — dial the backing store, and when it answers, its answer wins.
+	// Reachability under load is a per-query property, not a store-level one
+	// (a store timing out on unbounded scans routinely still serves filtered
+	// reads), so no state may pre-route this read away from the store.
+	c.mu.RLock()
+	startSeq := c.mutationSeq
+	c.mu.RUnlock()
+	items, err := c.backingListCtx(ctx, liveListQuery(query))
+	if err == nil {
+		// Fold the fresh rows into the snapshot so consecutive degraded
+		// reads cannot travel backwards in time: a read that succeeds and a
+		// read that falls back moments later must not disagree by hours.
+		c.absorbBackingListLocked(items, startSeq)
+		return items, nil
+	}
+	if IsPartialResult(err) || ctx.Err() != nil {
+		// A PartialResultError is an ANSWER: rows plus a typed caveat. It
+		// passes through untouched so a partially-primed cache never presents
+		// an active list as complete (see
+		// TestCachingStorePrimePartialDoesNotServeActiveListAsComplete). And
+		// once the CALLER's ctx is canceled or past its deadline, the caller's
+		// budget is spent — serving a stale snapshot with a nil error after
+		// the deadline would mask the slowness the deadline exists to
+		// surface, so the dial's error stands. The fallback below is reserved
+		// for the store giving no usable answer within the caller's budget.
+		return items, err
+	}
+	// The store did not answer. Serve the last-good snapshot for every shape
+	// it can answer honestly (listLastGood owns that boundary; a refusal
+	// surfaces the backing failure unchanged; known-incomplete snapshots
+	// arrive tagged partial). This is what makes a backend outage degrade
+	// reads to stale-but-correct instead of amplifying into a read outage
+	// (ga-2p81g). Note query is non-Live here by construction: Live queries
+	// took the bypass branch above and never reach this fallback.
+	fallback, ferr := c.listLastGood(query, true)
+	if ferr != nil && !IsPartialResult(ferr) {
+		return items, err
+	}
+	c.recordProblem("list served last-good after backing failure", err)
+	return fallback, ferr
+}
+
+// absorbBackingListLocked folds rows returned by a successful degraded-path
+// dial into the snapshot, so last-good converges toward reality during an
+// outage instead of staying pinned at the pre-outage state. Guards mirror
+// the Get dirty-refresh path: a row whose local delete or write is newer
+// than the dial (its seq moved past startSeq) keeps the local truth, and an
+// unprimed cache absorbs nothing — a fallback snapshot must never be
+// fabricated from one filtered read. Rows are updated or added, never
+// evicted: absence from a filtered result is not evidence of deletion.
+func (c *CachingStore) absorbBackingListLocked(items []Bead, startSeq uint64) {
+	if len(items) == 0 {
+		return
+	}
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state == cacheUninitialized {
+		return
+	}
+	for _, b := range items {
+		if c.deletedSeq[b.ID] > startSeq || c.beadSeq[b.ID] > startSeq {
+			continue
+		}
+		c.absorbFreshLocked(b.ID, b, now, absorbOpts{
+			// List rows are shape-reduced: unlike backing.Get results they
+			// often omit dep fields, and depsFromFields would wipe cached
+			// deps (Ready would then treat every bead as unblocked). Only
+			// recompute deps when the row actually carries them.
+			depsMode:   depsFromFieldsIfCarried,
+			seqMode:    seqClearBeadSeqOnly,
+			clearDirty: true,
+		})
+	}
 }
 
 // backingListCtx routes a backing-store list read through the backing's
@@ -157,11 +234,35 @@ func (c *CachingStore) Count(ctx context.Context, query ListQuery, excludeTypes 
 			return 0, err
 		}
 	}
+	// The capability contract stands in every state: backing stores without
+	// a Counter report ErrCountUnsupported so callers keep their documented
+	// List fallback (store-health relies on it during outages).
 	counter, ok := c.backing.(Counter)
 	if !ok {
 		return 0, fmt.Errorf("counting beads: backing store: %w", ErrCountUnsupported)
 	}
-	return counter.Count(ctx, liveListQuery(query), excludeTypes...)
+	// Breaker open: the store is proven down by real command outcomes, so
+	// dialing it for a count defeats the gate's fail-fast purpose. Serve the
+	// snapshot count for shapes it can answer honestly; refuse the rest.
+	if c.servingDegraded() {
+		if n, ok := c.lastGoodCount(ctx, query, excludeTypes); ok {
+			return n, nil
+		}
+		return 0, fmt.Errorf("counting beads: %w", ErrStoreUnavailable)
+	}
+	n, err := counter.Count(ctx, liveListQuery(query), excludeTypes...)
+	if err == nil || errors.Is(err, ErrCountUnsupported) || IsPartialResult(err) || (ctx != nil && ctx.Err() != nil) {
+		return n, err
+	}
+	// Reality first, snapshot as backstop — the same contract as ListCtx:
+	// the store was dialed and did not answer within the caller's budget, so
+	// an active-shape count is served from last-good rather than surfacing
+	// the outage to the caller.
+	if fn, ok := c.lastGoodCount(ctx, query, excludeTypes); ok {
+		c.recordProblem("count served last-good after backing failure", err)
+		return fn, nil
+	}
+	return n, err
 }
 
 // cachedCountContext serves only a clean active snapshot. Dirty overlays use
@@ -495,7 +596,31 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 		return c.backing.Get(id)
 	}
 	c.mu.RUnlock()
-	return c.backing.Get(id)
+	return c.getBackingWithLastGoodFallback(id)
+}
+
+// getBackingWithLastGoodFallback is the degraded-state Get: reality first
+// (dial the backing store; its answer wins, including ErrNotFound — that is
+// an answer, and falling back on it would resurrect deleted beads), then the
+// last-good cached clone when the store did not answer. A locally-deleted id
+// stays ErrNotFound: the tombstone is this process's own write and carries
+// the same trust as the cached rows being served. An uncached id propagates
+// the backing failure — the cache cannot distinguish "missing" from
+// "unreachable".
+func (c *CachingStore) getBackingWithLastGoodFallback(id string) (Bead, error) {
+	fresh, err := c.backing.Get(id)
+	if err == nil || errors.Is(err, ErrNotFound) || IsPartialResult(err) || errors.Is(err, context.Canceled) {
+		return fresh, err
+	}
+	lg, lgErr := c.getLastGood(id)
+	switch {
+	case lgErr == nil:
+		c.recordProblem("get served last-good after backing failure", err)
+		return lg, nil
+	case errors.Is(lgErr, ErrNotFound):
+		return Bead{}, ErrNotFound
+	}
+	return fresh, err
 }
 
 // Ready returns open beads whose blocking deps are all closed.

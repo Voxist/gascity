@@ -1068,11 +1068,19 @@ func (s *BdStore) Get(id string) (Bead, error) {
 		// must not leak into a supplemental wisp query.
 		if isWispQueryableID(id) {
 			wisps, queryErr := s.getEphemeralByID(id)
-			if queryErr == nil {
-				for _, b := range wisps {
-					if b.ID == id {
-						return b, nil
-					}
+			if queryErr != nil && !isBdNotFound(queryErr) {
+				// A failed wisp lookup is not evidence of absence unless the
+				// failure itself says not-found (confirmed absence): the bead
+				// may exist in the wisps table and be unobservable right now.
+				// Fabricating ErrNotFound here teaches callers that treat
+				// NotFound as an authoritative answer (the CachingStore's
+				// degraded-read fallback, mail handoff consumers) to drop
+				// beads that still exist. Surface the failure instead.
+				return Bead{}, fmt.Errorf("getting bead %q (wisp tier): %w", id, queryErr)
+			}
+			for _, b := range wisps {
+				if b.ID == id {
+					return b, nil
 				}
 			}
 		}
