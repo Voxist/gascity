@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -16,9 +17,13 @@ import (
 )
 
 const (
-	orderFiringCurrentName    = "order-firing-current"
-	orderFiringInspectHintFmt = "Inspect with: gc order check && gc order history %s"
-	orderFiringHistoryTimeout = 15 * time.Second
+	// orderFiringLastRunConcurrency caps the parallel order-run lookups. Each
+	// lookup is one bounded bd read; eight keeps the prefetch comfortably under
+	// the doctor's own timeout on large cities without stampeding the store.
+	orderFiringLastRunConcurrency = 8
+	orderFiringCurrentName        = "order-firing-current"
+	orderFiringInspectHintFmt     = "Inspect with: gc order check && gc order history %s"
+	orderFiringHistoryTimeout     = 15 * time.Second
 )
 
 // OrderFiringCurrentLastRunFunc reports the newest persisted run time for an order.
@@ -181,6 +186,11 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 		return result
 	}
 	degraded := appendUniqueStrings(firedWarnings, startWarnings)
+	// Resolve every order-run lookup the loop below will need up front and in
+	// parallel (grafted from upstream). The pre-pass mirrors the loop's filters
+	// and shares its cron-interval cache, so the two agree on which orders need
+	// an authoritative lookup.
+	lastRunFor := c.prefetchedLastRunFunc(c.pendingLastRunOrders(allOrders, firedEvents, suspendedRigs, cronIntervals, now))
 
 	worst := StatusOK
 	var firstNonOK string
@@ -199,7 +209,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 			blockingErrors++
 			continue
 		}
-		lastFired, err := c.latestOrderFiredAt(firedEvents, order, mo.expected, now)
+		lastFired, err := c.latestOrderFiredAtUsing(lastRunFor, firedEvents, order, mo.expected, now)
 		if err != nil {
 			worst = worseStatus(worst, StatusError)
 			result.Details = append(result.Details, fmt.Sprintf("%s: cannot read order history: %v", orderDisplayName(order), err))
@@ -649,22 +659,150 @@ func appendUniqueStrings(base, extra []string) []string {
 }
 
 func (c *OrderFiringCurrentCheck) latestOrderFiredAt(evts []events.Event, order orders.Order, expected time.Duration, now time.Time) (time.Time, error) {
+	return c.latestOrderFiredAtUsing(c.lastRun, evts, order, expected, now)
+}
+
+// latestOrderFiredAtUsing is latestOrderFiredAt against a caller-supplied
+// order-run resolver, so the classification loop can read prefetched results
+// instead of issuing each store round-trip inline.
+func (c *OrderFiringCurrentCheck) latestOrderFiredAtUsing(lastRun OrderFiringCurrentLastRunFunc, evts []events.Event, order orders.Order, expected time.Duration, now time.Time) (time.Time, error) {
 	latest := latestOrderFiredAt(evts, order.ScopedName())
-	if c.lastRun == nil {
+	if lastRun == nil {
 		return latest, nil
 	}
-	if !latest.IsZero() && now.Sub(latest) < expected+expected/2 {
-		return latest, nil
-	}
-	runAt, err := c.lastRun(order)
-	if err != nil {
-		return time.Time{}, err
-	}
-	if runAt.After(latest) {
-		return runAt, nil
+	if !eventEvidenceSuffices(latest, expected, now) {
+		runAt, err := lastRun(order)
+		if err != nil {
+			return time.Time{}, err
+		}
+		if runAt.After(latest) {
+			return runAt, nil
+		}
 	}
 	return latest, nil
 }
+
+// eventEvidenceSuffices reports whether the event log alone answers "is this
+// order current". Anything else needs the authoritative order-run lookup: the
+// event log can lag, and a stale event must not be reported as a real outage
+// without confirmation.
+
+// prefetchLastRuns resolves, in parallel, the order-run lookups the
+// classification loop is about to need. Each lookup is a store round-trip
+// costing ~1s on a busy city; issued serially across the monitored orders they
+// alone exceed the check budget, while the check's own timeout means a slow
+// fan-out reports a blocking failure that says nothing about order firing
+// (ga-klv). Results (values AND errors) are handed back verbatim so the
+// classification loop behaves exactly as it did when it called inline.
+func (c *OrderFiringCurrentCheck) prefetchLastRuns(pending []orders.Order) map[string]orderFiringLastRunResult {
+	out := make(map[string]orderFiringLastRunResult, len(pending))
+	if c.lastRun == nil || len(pending) == 0 {
+		return out
+	}
+
+	limit := orderFiringLastRunConcurrency
+	if len(pending) < limit {
+		limit = len(pending)
+	}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, limit)
+	for _, order := range pending {
+		wg.Add(1)
+		go func(order orders.Order) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			at, err := c.lastRun(order)
+			mu.Lock()
+			out[order.ScopedName()] = orderFiringLastRunResult{at: at, err: err}
+			mu.Unlock()
+		}(order)
+	}
+	wg.Wait()
+	return out
+}
+
+// orderFiringLastRunResult is one prefetched order-run lookup outcome.
+type orderFiringLastRunResult struct {
+	at  time.Time
+	err error
+}
+
+// eventEvidenceSuffices reports whether the event log alone answers "is this
+// order current". Anything else needs the authoritative order-run lookup: the
+// event log can lag, and a stale event must not be reported as a real outage
+// without confirmation.
+func eventEvidenceSuffices(latest time.Time, expected time.Duration, now time.Time) bool {
+	return !latest.IsZero() && now.Sub(latest) < expected+expected/2
+}
+
+// pendingLastRunOrders returns the monitored orders the event log cannot
+// answer on its own, in discovery order. It mirrors the classification loop's
+// filters exactly and shares its cron-interval cache, so the two agree on which
+// orders need an authoritative lookup. Orders whose expected interval cannot be
+// computed are skipped: the loop reports that as its own error without ever
+// reaching the lookup.
+
+// pendingLastRunOrders returns the monitored orders the event log cannot
+// answer on its own, in discovery order. It mirrors the classification loop's
+// filters exactly and shares its cron-interval cache, so the two agree on which
+// orders need an authoritative lookup. Orders whose expected interval cannot be
+// computed are skipped: the loop reports that as its own error without ever
+// reaching the lookup.
+func (c *OrderFiringCurrentCheck) pendingLastRunOrders(allOrders []orders.Order, firedEvents []events.Event, suspendedRigs map[string]bool, cronIntervals map[string]time.Duration, now time.Time) []orders.Order {
+	if c.lastRun == nil {
+		return nil
+	}
+	var pending []orders.Order
+	for _, order := range allOrders {
+		if order.Trigger != "cron" && order.Trigger != "cooldown" {
+			continue
+		}
+		if orderFiringCurrentOrderSuspended(suspendedRigs, order) {
+			continue
+		}
+		expected, err := expectedIntervalForOrder(order, cronIntervals)
+		if err != nil {
+			continue
+		}
+		if eventEvidenceSuffices(latestOrderFiredAt(firedEvents, order.ScopedName()), expected, now) {
+			continue
+		}
+		pending = append(pending, order)
+	}
+	return pending
+}
+
+// prefetchedLastRunFunc resolves pending in parallel and returns a resolver
+// serving those results. A lookup the pre-pass did not anticipate still falls
+// through to the live resolver, so the classification loop can never silently
+// lose an answer.
+
+// prefetchedLastRunFunc resolves pending in parallel and returns a resolver
+// serving those results. A lookup the pre-pass did not anticipate still falls
+// through to the live resolver, so the classification loop can never silently
+// lose an answer.
+func (c *OrderFiringCurrentCheck) prefetchedLastRunFunc(pending []orders.Order) OrderFiringCurrentLastRunFunc {
+	if c.lastRun == nil {
+		return nil
+	}
+	prefetched := c.prefetchLastRuns(pending)
+	return func(order orders.Order) (time.Time, error) {
+		if result, ok := prefetched[order.ScopedName()]; ok {
+			return result.at, result.err
+		}
+		return c.lastRun(order)
+	}
+}
+
+// prefetchLastRuns resolves, in parallel, the order-run lookups the
+// classification loop is about to need. Each lookup is a store round-trip
+// costing ~1s on a busy city; issued serially across the monitored orders they
+// alone exceed the check budget, while the check's own timeout means a slow
+// fan-out reports a blocking failure that says nothing about order firing
+// (ga-klv). Results (values AND errors) are handed back verbatim so the
+// classification loop behaves exactly as it did when it called inline.
 
 func latestOrderFiredAt(evts []events.Event, subject string) time.Time {
 	var latest time.Time

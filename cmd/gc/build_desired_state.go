@@ -4223,7 +4223,8 @@ func stampRunSessionIdentity(workBeads []beads.Bead, workStores []beads.Store, s
 		if sessionName != "" && strings.TrimSpace(wb.Metadata[beadmeta.SessionNameMetadataKey]) != sessionName {
 			patch[beadmeta.SessionNameMetadataKey] = sessionName
 		}
-		if workDir != "" && strings.TrimSpace(wb.Metadata[beadmeta.WorkDirMetadataKey]) != workDir {
+		if workDir != "" && strings.TrimSpace(wb.Metadata[beadmeta.WorkDirMetadataKey]) != workDir &&
+			(!sbInfo.PoolManaged || workDirStampHasOwnershipEvidence(wb.Metadata, workDir)) {
 			patch[beadmeta.WorkDirMetadataKey] = workDir
 		}
 		if len(patch) > 0 {
@@ -4236,8 +4237,21 @@ func stampRunSessionIdentity(workBeads []beads.Bead, workStores []beads.Store, s
 		// workBeads and route-time stamping skips it for pool agents. The
 		// dashboard's root-only snapshot reads the root's own metadata, so a
 		// worked step back-fills its root via gc.root_bead_id. (#2843)
-		stampRunRootFromStep(store, wb, sessionName, workDir, stampedRoots, stderr)
+		stampRunRootFromStep(store, wb, sessionName, workDir, !sbInfo.PoolManaged, stampedRoots, stderr)
 	}
+}
+
+// workDirStampHasOwnershipEvidence reports whether existing bead metadata
+// already identifies workDir as the work artifact directory. Session
+// reconciliation of a pool session observes a slot cwd; it does not create or
+// own a managed worktree, so it must not manufacture gc.work_dir on an
+// arbitrary routed bead. Doing so turns a pool slot label into incomplete
+// worktree ownership evidence and makes demand fail closed. The worktree
+// creator writes the legacy artifact path first; reconciliation may only mirror
+// that value. Non-pool sessions retain the historical observability stamp.
+func workDirStampHasOwnershipEvidence(metadata map[string]string, workDir string) bool {
+	legacy := strings.TrimSpace(metadata[beadmeta.LegacyWorkDirMetadataKey])
+	return legacy != "" && legacy == workDir
 }
 
 // stampRunRootFromStep copies a step's resolved session_name/work_dir onto its
@@ -4245,7 +4259,7 @@ func stampRunSessionIdentity(workBeads []beads.Bead, workStores []beads.Store, s
 // the root and writes only the keys that differ. Best-effort — a root that is
 // in another store, already gone, or already stamped is silently skipped (a
 // cross-store root gets stamped on its own store's reconcile pass).
-func stampRunRootFromStep(store beads.Store, step beads.Bead, sessionName, workDir string, stampedRoots map[string]struct{}, stderr io.Writer) {
+func stampRunRootFromStep(store beads.Store, step beads.Bead, sessionName, workDir string, allowUnownedWorkDir bool, stampedRoots map[string]struct{}, stderr io.Writer) {
 	rootID := strings.TrimSpace(step.Metadata[beadmeta.RootBeadIDMetadataKey])
 	if rootID == "" || rootID == step.ID {
 		return
@@ -4264,7 +4278,8 @@ func stampRunRootFromStep(store beads.Store, step beads.Bead, sessionName, workD
 	if sessionName != "" && strings.TrimSpace(root.Metadata[beadmeta.SessionNameMetadataKey]) != sessionName {
 		patch[beadmeta.SessionNameMetadataKey] = sessionName
 	}
-	if workDir != "" && strings.TrimSpace(root.Metadata[beadmeta.WorkDirMetadataKey]) != workDir {
+	if workDir != "" && strings.TrimSpace(root.Metadata[beadmeta.WorkDirMetadataKey]) != workDir &&
+		(allowUnownedWorkDir || workDirStampHasOwnershipEvidence(root.Metadata, workDir)) {
 		patch[beadmeta.WorkDirMetadataKey] = workDir
 	}
 	if len(patch) == 0 {
@@ -5146,13 +5161,30 @@ func materializeProviderOverlaysBeforeFingerprint(
 		PackOverlayDirs:     packDirs,
 		OverlayDir:          overlayDir,
 	})
+	// Skip reconciler-owned mergeable hook/settings files here: hooks.Install
+	// runs immediately after this staging on the SAME workDir (see
+	// prepareTemplateResolution), so it must be the sole writer of those files
+	// ON THE RECONCILE TICK. Staging them too leaves two writers with
+	// disagreeing hook-entry matchers and a permanent codex-hooks-drift hybrid.
+	// The runtime task-worktree staging path keeps staging them — it is their
+	// sole writer.
+	//
+	// "Sole writer" is scoped to the tick on purpose. For a persistent
+	// (non-task) agent the home dir is also the session workDir, and
+	// session-start staging writes these same files through the NON-skipping
+	// path — internal/runtime/tmux.stageStartFiles and
+	// runtime.StageSessionWorkDir (subprocess/acp) both call
+	// StageProviderOverlayDir with a nil skip. So a hybrid document can
+	// reappear at session start; the next tick converges it. That turns the
+	// permanent drift this fix targets into a transient one, which is the
+	// actual invariant — not that nothing else ever writes these paths.
 	for _, od := range packDirs {
-		if err := runtime.StageProviderOverlayDir(od, workDir, overlayProviders, stderr); err != nil {
+		if err := runtime.StageProviderOverlayDirSkippingMergeable(od, workDir, overlayProviders, stderr); err != nil {
 			fmt.Fprintf(stderr, "agent %q: pack overlay %q: %v\n", qualifiedName, od, err) //nolint:errcheck
 		}
 	}
 	if overlayDir != "" {
-		if err := runtime.StageProviderOverlayDir(overlayDir, workDir, overlayProviders, stderr); err != nil {
+		if err := runtime.StageProviderOverlayDirSkippingMergeable(overlayDir, workDir, overlayProviders, stderr); err != nil {
 			fmt.Fprintf(stderr, "agent %q: overlay %q: %v\n", qualifiedName, overlayDir, err) //nolint:errcheck
 		}
 	}

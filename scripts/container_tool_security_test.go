@@ -71,13 +71,14 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	const (
 		// FORK DIVERGENCE — TIME-BOXED BRIDGE (ADR-0026 C5, vp-kpoi, ga-kgluj).
-		// Upstream pins bd source at 8e4e59d39 / sha 63597b6b… / build 8e4e59d39.
-		// That commit tops out at schema migration 0053, but gc's linked beads
-		// library (go.mod v1.1.1-0.20260704062855-e97839a2e1c0) carries 0054, so
-		// an image built from upstream's ref ships a bd that skews from the linked
-		// lib. These three move together and revert together: when a bd release
-		// carries 0054, restore upstream's values here, set deps.env BD_VERSION to
-		// that tag, drop BD_SOURCE_REF/BD_SOURCE_SHA256, and repin go.mod.
+		// Upstream now pins bd source at bf97b73749 (2026-08-05, schema 0062);
+		// this fork deliberately stays on e97839a2 (schema 0054) because moving
+		// past 0054 migrates the fleet's live stores through irreversible
+		// migrations (0059/0061/0062 ship no down.sql) and is planned as a
+		// coordinated rehearsed cutover, not a resync side effect. These three
+		// values move together with go.mod and deps.env; the cutover replaces
+		// them with the fleet's Voxist/beads fork commit (ga-zzcjs) or, once a
+		// bd release >= 0054 exists, with that tag.
 		// BD_VERSION itself is NOT diverged — the pinned commit declares 1.1.0.
 		bdSourceRef    = "e97839a2e1c0de305bf64a01b997f2f314591aa4"
 		bdSourceSHA256 = "e40acdcbca7bdc08b986113692e11be7a533b9fced326c20e786f141c29996f1"
@@ -153,7 +154,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	}
 }
 
-func TestMCPMailImagePinsPatchedGitPythonAndPillow(t *testing.T) {
+func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	root := repoRoot(t)
 	input := readFile(t, root, ".github/requirements/mcp-agent-mail.in")
 	for _, want := range []string{
@@ -165,7 +166,6 @@ func TestMCPMailImagePinsPatchedGitPythonAndPillow(t *testing.T) {
 			t.Errorf("mcp-agent-mail input requirements missing security floor %q", want)
 		}
 	}
-
 	// cryptography is capped by a transitive constraint, so its floor lives in
 	// the overrides file rather than the input requirements.
 	overrides := readFile(t, root, ".github/requirements/mcp-agent-mail.overrides.txt")
@@ -242,10 +242,12 @@ func TestRebuiltToolsAssertPatchedXTextArtifact(t *testing.T) {
 // source tools (bd, dolt, gh) carry no Go-stdlib CVE waiver. The image build rebuilds
 // them with the Go 1.26.5 toolchain, which fixes every stdlib CVE listed, so a waiver
 // on those paths would let the scan gate keep masking a regressed rebuild instead of
-// proving the fix holds. The residual x/net / x/crypto module waivers that bd and dolt
-// legitimately keep (external binaries the grpc-only rebuild does not touch) are out of
-// scope here; gc's x/net / x/crypto module waivers are enforced separately by
-// TestTrivyIgnoreDropsGCModuleWaiversPastThreshold.
+// proving the fix holds. CVE-2026-56852 is the one explicit non-stdlib exception:
+// the pinned gh and Dolt sources, plus external kubectl, still select vulnerable x/text
+// versions. The residual
+// x/net / x/crypto module waivers that bd and dolt legitimately keep (external binaries
+// the grpc-only rebuild does not touch) are out of scope here; gc's x/net / x/crypto
+// module waivers are enforced separately by TestTrivyIgnoreDropsGCModuleWaiversPastThreshold.
 func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	root := repoRoot(t)
 
@@ -270,20 +272,38 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 		"CVE-2026-39826": true, "CVE-2026-39836": true, "CVE-2026-42499": true,
 		"CVE-2026-42504": true, "CVE-2026-27145": true,
 	}
+	allowedXTextWaivers := map[string]map[string]bool{
+		"CVE-2026-56852": {
+			"usr/bin/gh":            true,
+			"usr/local/bin/dolt":    true,
+			"usr/local/bin/kubectl": true,
+		},
+	}
+	foundAllowed := map[string]map[string]bool{}
 
-	ghWaived := false
 	for _, v := range doc.Vulnerabilities {
 		for _, p := range v.Paths {
-			if p == "usr/bin/gh" {
-				ghWaived = true
-			}
 			if stdlibCVEs[v.ID] && rebuiltPaths[p] {
 				t.Errorf("%s still waives rebuilt tool %q for a Go-stdlib CVE the 1.26.5 rebuild clears; drop the path so the scan proves the fix stays effective", v.ID, p)
 			}
+			if allowedPaths, ok := allowedXTextWaivers[v.ID]; ok && allowedPaths[p] {
+				if foundAllowed[v.ID] == nil {
+					foundAllowed[v.ID] = map[string]bool{}
+				}
+				foundAllowed[v.ID][p] = true
+				continue
+			}
+			if p == "usr/bin/gh" {
+				t.Errorf("%s waives rebuilt gh without a reviewed module-specific exception", v.ID)
+			}
 		}
 	}
-	if ghWaived {
-		t.Error(".trivyignore.yaml still waives usr/bin/gh; gh is rebuilt with Go 1.26.5 + patched grpc and must carry no residual waiver")
+	for cve, paths := range allowedXTextWaivers {
+		for path := range paths {
+			if !foundAllowed[cve][path] {
+				t.Errorf(".trivyignore.yaml must retain the reviewed %s waiver for %s until that source updates golang.org/x/text", cve, path)
+			}
+		}
 	}
 }
 

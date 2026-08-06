@@ -61,8 +61,11 @@ const (
 	ControllerErrorClassMetadataKey      = "gc.controller_error_class"
 	ControllerErrorMetadataKey           = "gc.controller_error"
 	ControllerRetryableMetadataKey       = "gc.controller_retryable"
-	CurrentRunIDMetadataKey              = "gc.current_run_id"
-	CwdMetadataKey                       = "gc.cwd"
+	// CoordinatorOutcomeProducerDispositionMetadataKey holds the typed-close JSON
+	// envelope written by gc-outcome-close.
+	CoordinatorOutcomeProducerDispositionMetadataKey = "gc.coordinator_outcome.producer_disposition"
+	CurrentRunIDMetadataKey                          = "gc.current_run_id"
+	CwdMetadataKey                                   = "gc.cwd"
 	// AttachFencePendingMetadataKey marks a fenced attach's sub-DAG root
 	// between speculative (deferred, non-runnable) creation and the CAS-last
 	// epoch fence committing. Cleared on activation; a root still carrying it
@@ -150,6 +153,7 @@ const (
 	ReasoningMetadataKey                 = "gc.reasoning"
 	RequiredArtifactMetadataKey          = "gc.required_artifact"
 	RequiredArtifactsMetadataKey         = "gc.required_artifacts"
+	ReviewGateMetadataKey                = "gc.review_gate"
 	RetryCountMetadataKey                = "gc.retry_count"
 	RetryFromMetadataKey                 = "gc.retry_from"
 	RetrySessionRecycledMetadataKey      = "gc.retry_session_recycled"
@@ -314,6 +318,7 @@ var KnownMetadataKeys = []string{
 	ControllerErrorClassMetadataKey,
 	ControllerErrorMetadataKey,
 	ControllerRetryableMetadataKey,
+	CoordinatorOutcomeProducerDispositionMetadataKey,
 	CurrentRunIDMetadataKey,
 	CwdMetadataKey,
 	AttachFencePendingMetadataKey,
@@ -398,6 +403,7 @@ var KnownMetadataKeys = []string{
 	ReasoningMetadataKey,
 	RequiredArtifactMetadataKey,
 	RequiredArtifactsMetadataKey,
+	ReviewGateMetadataKey,
 	RetryCountMetadataKey,
 	RetryFromMetadataKey,
 	RetrySessionRecycledMetadataKey,
