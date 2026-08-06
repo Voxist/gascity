@@ -50,6 +50,13 @@ var (
 // *beadPolicyStore.
 func (s *beadPolicyStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
 
+// AppliesBeadStoragePolicy marks this wrapper as applying the bead storage
+// policy inside its own Create (policyForCreate -> createWithStoragePolicy), so
+// callers that cannot reach CreateWithStorage through it — it is deliberately
+// not forwarded — know the policy is still applied and need not warn. Consumed
+// by internal/session's createSessionBead via a structural interface.
+func (s *beadPolicyStore) AppliesBeadStoragePolicy() {}
+
 var (
 	_ beads.BatchDeleter = (*beadPolicyStore)(nil)
 	_ beads.BatchDeleter = (*beadPolicyGraphStore)(nil)

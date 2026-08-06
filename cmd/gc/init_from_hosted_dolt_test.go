@@ -26,37 +26,12 @@ func gastownExamplePath(t *testing.T) string {
 // GC_DOLT_* and let the copied template's managed-local assumption win). The
 // pinned endpoint must land in city.toml [dolt] and the canonical
 // .beads/config.yaml.
-// cleanupManagedDoltForTest stops the managed dolt sql-server a successful init
-// bootstraps for cityPath, and WAITS for it to exit (SIGTERM, grace, SIGKILL —
-// the production stop path). Registered via t.Cleanup by every test in this
-// file whose init completes far enough to spawn one.
-//
-// WHY: doInitFromDirWithOptionsInternal runs the real bootstrap, which starts a
-// real dolt sql-server for the new city. Without this cleanup the server
-// outlives the test and the package-level leak guard fails the ENTIRE test
-// job — deterministically, not flakily: this was the failure that blocked
-// three consecutive pre-push runs on 2026-08-06 while looking like an
-// unrelated infrastructure problem. A test that starts a server owns its
-// shutdown.
-func cleanupManagedDoltForTest(t *testing.T, cityPath string) {
-	t.Helper()
-	t.Cleanup(func() {
-		// Port "" resolves the managed PID from the city's own runtime layout.
-		// A city whose init never reached the dolt bootstrap reports HadPID
-		// false and this is a no-op — so it is safe to register uncond-
-		// itionally before the init runs.
-		if _, err := stopManagedDoltProcess(cityPath, ""); err != nil {
-			t.Logf("cleanup: stopManagedDoltProcess(%s): %v", cityPath, err)
-		}
-	})
-}
-
 func TestInitFromPinsHostedDoltEndpoint(t *testing.T) {
 	clearGCEnv(t)
 
 	src := gastownExamplePath(t)
 	cityPath := filepath.Join(t.TempDir(), "city")
-	cleanupManagedDoltForTest(t, cityPath)
+	cleanupManagedDoltTestCity(t, cityPath)
 
 	hosted := hostedDoltInitOptions{
 		Host:      "dolt.example.com",
@@ -97,7 +72,7 @@ func TestInitFromWithoutHostedPreservesTemplate(t *testing.T) {
 
 	src := gastownExamplePath(t)
 	cityPath := filepath.Join(t.TempDir(), "city")
-	cleanupManagedDoltForTest(t, cityPath)
+	cleanupManagedDoltTestCity(t, cityPath)
 
 	var stdout, stderr bytes.Buffer
 	// disabled hosted options => template preserved
@@ -137,7 +112,7 @@ func TestInitFromRejectsIncompleteHostedEndpoint(t *testing.T) {
 
 	src := gastownExamplePath(t)
 	cityPath := filepath.Join(t.TempDir(), "city")
-	cleanupManagedDoltForTest(t, cityPath)
+	cleanupManagedDoltTestCity(t, cityPath)
 
 	// host set but port/database/project-id missing -> validate() must fail
 	hosted := hostedDoltInitOptions{Host: "dolt.example.com"}
@@ -168,7 +143,7 @@ func TestInitFromRejectsDoltFlagsWithoutHost(t *testing.T) {
 
 	src := gastownExamplePath(t)
 	cityPath := filepath.Join(t.TempDir(), "city")
-	cleanupManagedDoltForTest(t, cityPath)
+	cleanupManagedDoltTestCity(t, cityPath)
 
 	var stdout, stderr bytes.Buffer
 	code := doInitFromDirWithOptionsInternal(src, cityPath, "", &stdout, &stderr, true, true, hostedDoltInitOptions{Port: "3307"})
@@ -210,7 +185,7 @@ schema = 2
 `)
 
 	cityPath := filepath.Join(t.TempDir(), "city")
-	cleanupManagedDoltForTest(t, cityPath)
+	cleanupManagedDoltTestCity(t, cityPath)
 	hosted := hostedDoltInitOptions{
 		Host:      "dolt.example.com",
 		Port:      "3307",

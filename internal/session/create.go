@@ -97,7 +97,7 @@ func (s *Store) CreateSessionInfo(spec CreateSpec) (Info, error) {
 //     declares incompatible for sessions (bead_policy_store.go) and which
 //     matchesTier (internal/beads/query.go) silently DROPS from results.
 //
-// THE FALLBACK IS LOUD ON PURPOSE. CachingStore.CreateWithStorage silently degrades to
+// THE FALLBACK IS LOUD ON PURPOSE. Before this PR, CachingStore.CreateWithStorage degraded to
 // a plain Create when its backing store does not implement StorageCreateStore — and
 // NativeDoltStore does not implement it. So a chain assembled the wrong way would take
 // this fix, report success, and keep writing to issues exactly as before: the fix would
@@ -105,29 +105,58 @@ func (s *Store) CreateSessionInfo(spec CreateSpec) (Info, error) {
 // (ADR-0043: an unknown must propagate, not be coerced into the quiet answer). When the
 // class cannot be honored we say so rather than pretend, once per process so a hot path
 // cannot spam the ops tail.
-func (s *Store) createSessionBead(b beads.Bead) (beads.Bead, error) {
-	storageStore, ok := s.store.Store.(beads.StorageCreateStore)
-	if !ok {
-		warnSessionStorageUnsupported(s.store.Store)
-		return s.store.Create(b)
-	}
-	return storageStore.CreateWithStorage(b, beads.StorageNoHistory)
+// storagePolicySelfApplying marks a store wrapper that resolves and applies the
+// bead storage policy inside its own Create — so a caller that cannot reach
+// CreateWithStorage through it has NOT lost the policy. The policy layer in
+// cmd/gc declares this; see beadPolicyStore.AppliesBeadStoragePolicy. Review
+// finding (PR #124): without this, the front door warned on every boot for the
+// policy wrapper — a false alarm that then BURNED the once-guard, so a later,
+// genuinely incapable chain in the same process failed silently.
+type storagePolicySelfApplying interface {
+	AppliesBeadStoragePolicy()
 }
 
-var sessionStorageWarnOnce sync.Once
+func (s *Store) createSessionBead(b beads.Bead) (beads.Bead, error) {
+	if storageStore, ok := s.store.Store.(beads.StorageCreateStore); ok {
+		return storageStore.CreateWithStorage(b, beads.StorageNoHistory)
+	}
+	if _, ok := s.store.Store.(storagePolicySelfApplying); ok {
+		// The wrapper applies the session storage policy itself; a plain Create
+		// through it still lands the bead in wisps. Verified on the live fleet
+		// 2026-08-06: 27 sessions -> wisps, 0 -> issues, all through this path.
+		return s.store.Create(b)
+	}
+	warnSessionStorageUnsupported(s.store.Store)
+	return s.store.Create(b)
+}
 
-// warnSessionStorageUnsupported reports, once per process, that the session storage
-// policy could not be applied. Silence here would mean the caller believes sessions are
-// staying out of the committed table while they are not.
+var (
+	sessionStorageWarnMu    sync.Mutex
+	sessionStorageWarnTypes = map[string]bool{}
+)
+
+// warnSessionStorageUnsupported reports, once per process PER STORE TYPE, that
+// the session storage policy could not be applied. Once-per-process was wrong:
+// a single benign false alarm burned the guard, and a later genuinely
+// incapable chain of a DIFFERENT type then wrote sessions to the committed
+// table with no warning at all — a silent failure inside the warning that
+// exists to prevent silent failure. Per-type keeps the noise bounded (one line
+// per offending type per process) without ever muting a new offender.
 func warnSessionStorageUnsupported(store any) {
-	sessionStorageWarnOnce.Do(func() {
-		fmt.Fprintf(os.Stderr,
-			"gc: session storage policy NOT applied: %T does not implement "+
-				"beads.StorageCreateStore, so session beads are being written to the "+
-				"committed issues table (one DOLT_COMMIT each) instead of wisps. "+
-				"This is vp-ia76 / vp-9u1 and it silently inflates the store.\n",
-			store)
-	})
+	typeName := fmt.Sprintf("%T", store)
+	sessionStorageWarnMu.Lock()
+	seen := sessionStorageWarnTypes[typeName]
+	sessionStorageWarnTypes[typeName] = true
+	sessionStorageWarnMu.Unlock()
+	if seen {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"gc: session storage policy NOT applied: %s does not implement "+
+			"beads.StorageCreateStore, so session beads are being written to the "+
+			"committed issues table (one DOLT_COMMIT each) instead of wisps. "+
+			"This is vp-ia76 / vp-9u1 and it silently inflates the store.\n",
+		typeName)
 }
 
 // CreateSession creates a session bead from spec and returns its id. It is the
