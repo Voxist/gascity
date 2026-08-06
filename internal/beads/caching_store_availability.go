@@ -1,8 +1,11 @@
 package beads
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"time"
 )
 
 // AvailabilityGate reports whether the backing store transport is
@@ -46,25 +49,75 @@ func (c *CachingStore) servingDegraded() bool {
 
 // Degraded reports whether the cache is currently serving degraded data:
 // the availability gate says the store is unreachable, or repeated
-// reconcile failures pushed the cache into the degraded state.
+// reconcile failures pushed the cache into the degraded state. The state
+// and the gate reference are snapshotted under one lock acquisition, but
+// the gate's Available() deliberately runs outside c.mu (foreign breaker
+// code must never execute under this lock), so the two facts are NOT
+// evaluated atomically: a transition that lands between the snapshot and
+// the gate call can make one reading disagree with an adjacent one. This
+// is an observability indicator, not a synchronization primitive — do not
+// build invariants on consecutive Degraded() readings agreeing.
 func (c *CachingStore) Degraded() bool {
-	if c.servingDegraded() {
+	c.mu.RLock()
+	gate := c.availabilityGate
+	degraded := c.state == cacheDegraded
+	c.mu.RUnlock()
+	if degraded {
 		return true
 	}
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.state == cacheDegraded
+	return gate != nil && !gate.Available()
 }
 
-// listLastGood answers a List query purely from the in-memory cache while
-// the backing store is unavailable. An unprimed cache returns
-// ErrStoreUnavailable — unavailable must never read as empty.
-func (c *CachingStore) listLastGood(query ListQuery) ([]Bead, error) {
+// listLastGood answers a List query purely from the in-memory snapshot while
+// the backing store is unavailable, refusing the shapes the snapshot cannot
+// answer honestly:
+//
+//   - An unprimed cache returns ErrStoreUnavailable — unavailable must
+//     never read as empty.
+//   - Live queries return ErrStoreUnavailable. Live declares staleness
+//     unacceptable (see ListQuery.Live): lifecycle gates that treat absence
+//     as authoritative would release live pool assignments on a stale short
+//     list.
+//   - Closed-only shapes return ErrStoreUnavailable: the snapshot holds
+//     active beads only, so an empty answer would read as "none exist".
+//   - A partially-primed snapshot (primePartialErr set) is tagged with the
+//     package's PartialResultError convention on every answer: the active
+//     set itself is known-incomplete (a partial prime can hold wisps only),
+//     and serving it as complete would present "no work" as fact.
+//   - IncludeClosed answers are tagged the same way when tagIncompleteHistory
+//     is set. The new dial-first fallback sets it (its callers previously got
+//     a hard error, so a tagged answer is a strict improvement); the gated
+//     breaker-open path does not, preserving its long-standing rows+nil
+//     contract for error-intolerant consumers (beadmail's session caches
+//     discard rows on any non-nil error).
+//
+// ParentID queries are served: active children live in the snapshot, and
+// this process's own closes are absorbed into it, so molecule/convergence
+// child listings keep advancing during an outage.
+//
+// Known limitation: rows marked dirty are served as-is. The overlay's
+// per-read suppression (backing Get returning ErrNotFound) cannot run while
+// the store is unavailable, so an externally-deleted bead whose delete event
+// was missed can reappear until the store recovers. Staleness, including
+// this form, is the price of answering at all.
+//
+// The snapshot is not frozen during an outage: local writes still absorb
+// into c.beads (createWith/closeWith/update run with no state check), so
+// last-good includes this process's own activity even while the reconcile
+// scan is failing.
+func (c *CachingStore) listLastGood(query ListQuery, tagIncompleteHistory bool) ([]Bead, error) {
+	if query.Live {
+		return nil, fmt.Errorf("listing beads (live): %w", ErrStoreUnavailable)
+	}
+	if query.Status == "closed" {
+		return nil, fmt.Errorf("listing beads (closed history): %w", ErrStoreUnavailable)
+	}
 	c.mu.RLock()
 	if c.state == cacheUninitialized {
 		c.mu.RUnlock()
 		return nil, fmt.Errorf("listing beads: %w", ErrStoreUnavailable)
 	}
+	partialPrime := c.primePartialErr
 	cached := make([]Bead, 0, len(c.beads))
 	for _, b := range c.beads {
 		if !query.Matches(b) {
@@ -78,7 +131,61 @@ func (c *CachingStore) listLastGood(query ListQuery) ([]Bead, error) {
 	if query.Limit > 0 && len(cached) > query.Limit {
 		cached = cached[:query.Limit]
 	}
+	if partialPrime != nil {
+		return cached, &PartialResultError{
+			Op:  "cache list last-good",
+			Err: fmt.Errorf("snapshot from partial prime: %w", partialPrime),
+		}
+	}
+	if tagIncompleteHistory && query.IncludesClosed() {
+		return cached, &PartialResultError{
+			Op:  "cache list last-good",
+			Err: fmt.Errorf("closed history unavailable: %w", ErrStoreUnavailable),
+		}
+	}
 	return cached, nil
+}
+
+// lastGoodCount answers a Count from the in-memory snapshot while the
+// backing store is unavailable, under listLastGood's honesty boundary. A
+// count cannot carry a partial tag, so shapes that would need one (closed
+// history, partial prime) report ok=false and the caller surfaces the
+// backing failure instead. Lock acquisition observes ctx with the same
+// TryRLock guard cachedCountContext documents as mandatory for this verb,
+// so a cache writer cannot strand a deadline-bounded caller.
+func (c *CachingStore) lastGoodCount(ctx context.Context, query ListQuery, excludeTypes []string) (int, bool) {
+	if query.Live || query.Status == "closed" || query.IncludesClosed() {
+		return 0, false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return 0, false
+	}
+	if !c.mu.TryRLock() {
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for !c.mu.TryRLock() {
+			select {
+			case <-ctx.Done():
+				return 0, false
+			case <-ticker.C:
+			}
+		}
+	}
+	defer c.mu.RUnlock()
+	if c.state == cacheUninitialized || c.primePartialErr != nil {
+		return 0, false
+	}
+	n := 0
+	for _, b := range c.beads {
+		if query.Matches(b) && !slices.Contains(excludeTypes, b.Type) {
+			n++
+		}
+	}
+	c.degradedReads.Add(1)
+	return n, true
 }
 
 // getLastGood answers a Get purely from the in-memory cache while the
