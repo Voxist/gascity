@@ -149,17 +149,24 @@ func parseEventBeforeSeq(cursor string) (uint64, error) {
 // has-more signal. It returns the fetched events and scanned — the best-effort
 // count of matching rows the read could see, used as the filtered Total.
 //
-// ListTail is the fast path: a backward scan of the ACTIVE events.jsonl only,
-// never the .gz archives, so its result is trusted ONLY when it yields a full
-// limit+1 rows. The active file holds the newest events, so a full tail page
-// there IS the newest page below the boundary. Anything short cannot
-// distinguish "log exhausted" from "active file exhausted, older matches in
-// archives/rotation" and MUST fall through to the full scan — otherwise a
-// rotation (or a selective filter) strands the older history behind an unminted
-// cursor. The scan uses the in-flight-aware read when the provider offers one
-// (listWithInFlight) so a just-rotated segment living only in a .rotating-* file
-// is not skipped; the BeforeSeq predicate keeps rotation/archive handling inside
-// the one battle-tested sequential reader instead of a bespoke reverse reader.
+// ListTail is the primary path. For the production FileRecorder it is
+// AUTHORITATIVE across rotation: ReadFilteredTail tails the active log, then
+// walks the .gz archives newest-first, stopping as soon as `limit+1` matches
+// are collected (vp-x7x8w). So a first-page or filtered read — the cases whose
+// zero/BeforeSeq cursor once forced the oldest-first full archive scan — now
+// returns a full page from the bounded walk alone. The result is trusted when
+// it yields a full limit+1 rows, which the archive-spanning tail does whenever
+// that many matches exist anywhere in the log.
+//
+// The fall-through to listWithInFlight is the genuine fallback, not the hot
+// path: it covers a short tail that genuinely exhausted the log (fewer than
+// limit+1 total matches — the last page, which mints no cursor) and providers
+// that are not TailProviders. It uses the in-flight-aware read when available
+// so a just-rotated segment living only in a .rotating-* file is not skipped;
+// the BeforeSeq predicate keeps rotation/archive handling inside the one
+// battle-tested sequential reader instead of a bespoke reverse reader.
+// TestFetchEventPageFirstPageBoundedAfterRotation pins that a first-page read
+// after rotation is served by ListTail and never reaches this fallback.
 func fetchEventPageAscending(ep events.Provider, filter events.Filter, limit int) ([]events.Event, int, error) {
 	fetch := limit + 1
 	if tp, ok := ep.(events.TailProvider); ok {
