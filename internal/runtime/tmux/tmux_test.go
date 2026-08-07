@@ -2050,10 +2050,18 @@ func TestNewSessionWithCommandAndEnv(t *testing.T) {
 		"GT_ROLE": "testrig/crew/testname",
 		"GT_RIG":  "testrig",
 		"GT_CREW": "testname",
+		// ADR-0051 C1 acceptance: a special-character sentinel must survive the
+		// set-environment transport intact (space, =, quotes, $ all exercise the
+		// value-delivery path that -e serialized as KEY=VALUE).
+		"GT_SENTINEL": `a b=c;"$x`,
 	}
 
-	// Create session with env vars and a command that prints GT_ROLE
-	cmd := `bash -c "echo GT_ROLE=$GT_ROLE; sleep 5"`
+	// Create session with env vars and a command that prints GT_ROLE and the
+	// sentinel to a file, so the assertion reads what the COMMAND PROCESS saw —
+	// not just the session option (GetEnvironment). This is the load-bearing C1
+	// check: the respawn-pane transport must deliver env to the running command.
+	outFile := filepath.Join(t.TempDir(), "env-probe.txt")
+	cmd := `bash -c 'echo "GT_ROLE=$GT_ROLE"; echo "SENT=$GT_SENTINEL"; printf "%s\n" "$GT_ROLE|$GT_SENTINEL" > ` + outFile + `; sleep 5'`
 	if err := tm.NewSessionWithCommandAndEnv(sessionName, "", cmd, env); err != nil {
 		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
 	}
@@ -2083,6 +2091,29 @@ func TestNewSessionWithCommandAndEnv(t *testing.T) {
 	}
 	if gotRig != "testrig" {
 		t.Errorf("GT_RIG = %q, want %q", gotRig, "testrig")
+	}
+
+	// C1 (ADR-0051): the command PROCESS must receive every env var with the
+	// correct value, including the special-character sentinel. Wait for the
+	// probe file the command writes, then read it back. This is the assertion
+	// that proves the set-environment + respawn-pane transport actually delivers
+	// env to the pane (not just that the session option is set).
+	deadline := time.Now().Add(5 * time.Second)
+	var probeData string
+	for time.Now().Before(deadline) {
+		if b, rerr := os.ReadFile(outFile); rerr == nil {
+			probeData = string(b)
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	wantProbe := "testrig/crew/testname|a b=c;\"$x\n"
+	if probeData == "" {
+		t.Fatal("command process never wrote the env probe file — env did not reach the pane (C1 transport failure)")
+	}
+	if probeData != wantProbe {
+		t.Errorf("command-process env probe = %q, want %q (special-char sentinel must survive transport)",
+			probeData, wantProbe)
 	}
 }
 

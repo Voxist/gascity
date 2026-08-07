@@ -60,13 +60,181 @@ func TestNewSessionWithCommandAndEnvClearsEmptyVars(t *testing.T) {
 		t.Fatal("no tmux calls recorded")
 	}
 
-	args := exec.calls[0]
-	joined := strings.Join(args, "\x00")
-	if !strings.Contains(joined, "\x00-e\x00LANG=en_US.UTF-8\x00") {
-		t.Fatalf("new-session args missing LANG -e flag: %v", args)
+	// C2 (ADR-0051): no -e flag anywhere in the launch sequence — that is the
+	// argv-exposure defect this change removes. (runCtx prepends -u/-L to every
+	// call, so scan every arg of every call.)
+	for i, args := range exec.calls {
+		for _, a := range args {
+			if a == "-e" {
+				t.Fatalf("call %d still uses -e flag (ADR-0051 transport): %v", i, args)
+			}
+		}
 	}
-	if got := args[len(args)-1]; got != "env -u LC_ALL -u LC_CTYPE claude" {
-		t.Fatalf("command = %q, want env -u LC_ALL -u LC_CTYPE claude", got)
+
+	// The session is created bare (no command, no -e). cmd() finds the tmux
+	// subcommand token past the -u/-L prefix injected by runCtx.
+	newSession := exec.calls[0]
+	if cmd(newSession) != "new-session" {
+		t.Fatalf("first call = %q, want new-session: %v", cmd(newSession), newSession)
+	}
+	for _, a := range newSession {
+		if a == "claude" || strings.HasPrefix(a, "env ") {
+			t.Fatalf("new-session should not carry the command: %v", newSession)
+		}
+	}
+
+	// LANG is set over the socket via set-environment; empty values via -u.
+	foundSet := false
+	foundUnsetAll := false
+	foundUnsetCtype := false
+	for _, args := range exec.calls {
+		if cmd(args) != "set-environment" {
+			continue
+		}
+		// set-environment -t <session> KEY VALUE  (or -u KEY)
+		if contains(args, "LANG") && contains(args, "en_US.UTF-8") {
+			foundSet = true
+		}
+		if contains(args, "-u") && contains(args, "LC_ALL") {
+			foundUnsetAll = true
+		}
+		if contains(args, "-u") && contains(args, "LC_CTYPE") {
+			foundUnsetCtype = true
+		}
+	}
+	if !foundSet {
+		t.Errorf("missing set-environment LANG en_US.UTF-8")
+	}
+	if !foundUnsetAll {
+		t.Errorf("missing set-environment -u LC_ALL (empty-value unset)")
+	}
+	if !foundUnsetCtype {
+		t.Errorf("missing set-environment -u LC_CTYPE (empty-value unset)")
+	}
+
+	// The command is started via respawn-pane -k -t <session> <wrapped command>.
+	var respawn []string
+	for _, args := range exec.calls {
+		if cmd(args) == "respawn-pane" {
+			respawn = args
+			break
+		}
+	}
+	if respawn == nil {
+		t.Fatal("missing respawn-pane call to start the command")
+	}
+	if got := respawn[len(respawn)-1]; !strings.Contains(got, "claude") {
+		t.Fatalf("respawn-pane command = %q, want it to contain claude", got)
+	}
+	// The env -u prefix the old transport bolted onto the command is gone —
+	// unsetting is now a session-level set-environment -u, not a command prefix.
+	if got := respawn[len(respawn)-1]; strings.HasPrefix(got, "env ") {
+		t.Fatalf("respawn-pane command should not carry an env -u prefix: %q", got)
+	}
+}
+
+// contains reports whether args contains s.
+func contains(args []string, s string) bool {
+	for _, a := range args {
+		if a == s {
+			return true
+		}
+	}
+	return false
+}
+
+// cmd returns the tmux subcommand token from a recorded call, skipping the -u
+// and -L <socket> flags that runCtx prepends to every invocation.
+func cmd(args []string) string {
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-u":
+			continue
+		case "-L":
+			i++ // skip socket name
+			continue
+		default:
+			return args[i]
+		}
+	}
+	return ""
+}
+
+// TestNewSessionWithCommandAndEnvNoSecretInArgv is the load-bearing ADR-0051
+// regression (Acceptance criterion C2): no secret value may be pinned to a
+// long-lived process's argv. The -e transport placed every secret on the
+// new-session command, which becomes the persistent tmux *server* argv; the
+// set-environment transport must not reintroduce that.
+//
+// C2 scope note (ADR-0051 "C2 scope correction"): set-environment takes the value
+// as a positional argv argument of a short-lived tmux *client* that exits in
+// milliseconds. That transient client argv is the acknowledged bounded residual —
+// NOT what this test guards. This test guards the persistent surface: the
+// new-session call (server argv) and the respawn-pane call (the long-lived pane
+// process). It also asserts no -e flag exists anywhere in the launch sequence.
+func TestNewSessionWithCommandAndEnvNoSecretInArgv(t *testing.T) {
+	exec := &fakeExecutor{}
+	tm := NewTmux()
+	tm.exec = exec
+
+	const secretValue = "sk-SECRET-v1-0123456789-do-not-leak"
+	env := map[string]string{
+		"ANTHROPIC_AUTH_TOKEN": secretValue,
+		"OPENROUTER_API_KEY":   secretValue,
+		"GC_INSTANCE_TOKEN":    secretValue,
+		"BEADS_HOLDER_TOKEN":   secretValue, // alias of GC_INSTANCE_TOKEN (same value, different name)
+		"GT_ROLE":              "testrig/crew/x",
+	}
+	if err := tm.NewSessionWithCommandAndEnv("gc-test-no-leak", "", "claude", env); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	if len(exec.calls) == 0 {
+		t.Fatal("no tmux calls recorded")
+	}
+
+	// 1. No -e flag anywhere in the launch sequence (transport is clean).
+	for i, args := range exec.calls {
+		for _, a := range args {
+			if a == "-e" {
+				t.Fatalf("ADR-0051 C2 violation: call %d (%s) still uses -e flag: %v", i, args[0], args)
+			}
+		}
+	}
+
+	// 2. No secret value in the PERSISTENT surfaces: new-session (server argv)
+	//    and respawn-pane (the long-lived pane process). set-environment calls are
+	//    the transient client and are intentionally excluded.
+	persistent := []string{"new-session", "respawn-pane"}
+	for i, args := range exec.calls {
+		if !contains(persistent, cmd(args)) {
+			continue
+		}
+		joined := strings.Join(args, "\x00")
+		if strings.Contains(joined, secretValue) {
+			t.Fatalf("ADR-0051 C2 violation: secret value leaked into persistent %s "+
+				"argv (call %d): %v", cmd(args), i, args)
+		}
+		// Even a "KEY=VALUE" pair (the -e serialization shape) must not appear.
+		if strings.Contains(joined, "ANTHROPIC_AUTH_TOKEN=") ||
+			strings.Contains(joined, "OPENROUTER_API_KEY=") ||
+			strings.Contains(joined, "GC_INSTANCE_TOKEN=") ||
+			strings.Contains(joined, "BEADS_HOLDER_TOKEN=") {
+			t.Fatalf("ADR-0051 C2 violation: KEY=VALUE pair in persistent %s argv "+
+				"(call %d): %v", cmd(args), i, args)
+		}
+	}
+
+	// 3. Sanity: env WAS delivered — via set-environment (not -e). At least one
+	//    set-environment call carries the GT_ROLE value (non-secret).
+	delivered := false
+	for _, args := range exec.calls {
+		if cmd(args) == "set-environment" && contains(args, "testrig/crew/x") {
+			delivered = true
+			break
+		}
+	}
+	if !delivered {
+		t.Errorf("expected a set-environment call delivering GT_ROLE; calls: %v", exec.calls)
 	}
 }
 

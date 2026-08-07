@@ -526,15 +526,35 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 	return nil
 }
 
-// NewSessionWithCommandAndEnv creates a new detached tmux session with environment
-// variables set via -e flags. This ensures the initial shell process inherits the
-// correct environment from the session, rather than inheriting from the tmux server
-// or parent process. The -e flags set session-level environment before the shell
-// starts, preventing stale env vars (e.g., GT_ROLE from a parent mayor session)
-// from leaking into crew/polecat shells.
+// NewSessionWithCommandAndEnv creates a new detached tmux session and delivers
+// its environment variables to the pane via tmux set-environment over the socket
+// — never via -e argv literals.
 //
-// The command should still use 'exec env' for WaitForCommand detection compatibility,
-// but -e provides defense-in-depth for the initial shell environment.
+// SECURITY (ADR-0051): a tmux -e KEY=VALUE flag places the value literally in the
+// tmux *server* process's argv, where it is world-readable via ps for the entire
+// server lifetime (which, because orphaned servers reparent to pid 1, can outlast
+// the launching session — ADR-0029). Every secret gc injects (provider tokens,
+// instance/holder tokens) was therefore exposed in ps. set-environment sends the
+// value over the tmux socket inside a short-lived *client* process that exits in
+// milliseconds, so no secret value is pinned to a long-lived process's argv.
+//
+// ORDERING (correctness, empirically verified against tmux 3.7b): session-level
+// environment set via set-environment is applied to a pane's process when that
+// process *starts*. The pane's initial shell starts at new-session time, so env
+// set after a bare new-session is NOT retroactively exported into an already-
+// running shell, and typing the command into that shell (send-keys) would inherit
+// the stale env — breaking the transport. Instead the session is created without
+// a command, the env is set on the session, and the pane is then respawned with
+// the command (respawn-pane -k), which re-reads the session environment. A direct
+// new-session-with-command + set-environment split has the same problem (the
+// command process starts before set-environment runs), so respawn-pane is the
+// load-bearing step that makes the env actually reach the command.
+//
+// Empty env values mean "unset this var": they are applied as set-environment -u
+// so the pane's process does not inherit a stale value from the tmux server's
+// global environment (the defense-in-depth rationale the original -e comment
+// wanted). The command should still use 'exec env' for WaitForCommand detection
+// compatibility.
 // Requires tmux >= 3.2.
 func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env map[string]string) error {
 	if err := validateSessionName(name); err != nil {
@@ -543,43 +563,46 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	if err := t.probeServerAlive(); err != nil {
 		return err
 	}
+	// 1. Create the session WITHOUT a command and WITHOUT any -e flags. The
+	//    session's initial pane starts a default shell that we discard below; no
+	//    secret value appears in this — or any — long-lived process's argv.
 	args := []string{"new-session", "-d", "-s", name}
 	if workDir != "" {
 		args = append(args, "-c", workDir)
 	}
-	// Add -e flags to set environment variables in the session before the shell starts.
-	// Keys are sorted for deterministic behavior.
+	if _, err := t.run(args...); err != nil {
+		return err
+	}
+
+	// 2. Set every env var on the session over the socket via set-environment.
+	//    Keys are sorted for deterministic behavior. Empty values unset the var
+	//    (set-environment -u) so a stale server-global value does not leak in.
 	keys := make([]string, 0, len(env))
 	for k := range env {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	var unsetKeys []string
 	for _, k := range keys {
 		if env[k] == "" {
-			// Empty values mean "unset this var". Collect for env -u prefix.
-			unsetKeys = append(unsetKeys, k)
+			if err := t.RemoveEnvironment(name, k); err != nil {
+				return fmt.Errorf("unset env %q: %w", k, err)
+			}
 		} else {
-			args = append(args, "-e", fmt.Sprintf("%s=%s", k, env[k]))
+			if err := t.SetEnvironment(name, k, env[k]); err != nil {
+				return fmt.Errorf("set env %q: %w", k, err)
+			}
 		}
 	}
-	// For vars that need unsetting, prefix the command with env -u flags.
-	// tmux -e sets session-level env but the shell process still inherits
-	// from the tmux server's global environment. env -u ensures the var
-	// is actually absent from the child process.
-	if len(unsetKeys) > 0 && command != "" {
-		var prefix string
-		for _, k := range unsetKeys {
-			prefix += " -u " + k
+
+	// 3. Start the actual command by respawning the pane, which re-reads the
+	//    session environment set in step 2. send-keys into the default shell would
+	//    NOT see it (the shell captured its env at start, before step 2).
+	if command != "" {
+		if err := t.RespawnPane(name, command); err != nil {
+			return fmt.Errorf("respawn pane with command: %w", err)
 		}
-		command = "env" + prefix + " " + command
 	}
-	// Add the command as the last argument
-	args = append(args, t.wrapPaneCommand(command))
-	_, err := t.run(args...)
-	if err != nil {
-		return err
-	}
+
 	_ = t.ConfigureServer()
 	// tmux 3.3+: reset window-size from manual to latest (see NewSession).
 	t.run("set-option", "-wt", name, "window-size", "latest") //nolint:errcheck // best-effort

@@ -53,18 +53,55 @@ func TestAgentSliceWrapsNewSessionWithCommandAndEnv(t *testing.T) {
 	if len(exec.calls) == 0 {
 		t.Fatal("no tmux calls recorded")
 	}
-	args := exec.calls[0]
-	got := args[len(args)-1]
-	// The env -u prefix must end up INSIDE the scope wrapper so the unset
-	// still applies to the agent process.
-	want := "systemd-run --user --scope --slice=gascity-agents.slice --collect --quiet -- sh -c 'env -u LC_ALL claude'"
-	if got != want {
-		t.Fatalf("pane command = %q, want %q", got, want)
+
+	// ADR-0051 transport: no -e flags anywhere (secrets would pin to argv), and
+	// the agent command is started via respawn-pane, which wrapPaneCommand still
+	// wraps in the systemd scope. Empty-value vars are unset via set-environment
+	// -u, NOT via an env -u prefix on the command — so the wrapped command is
+	// the plain agent command.
+	for i, call := range exec.calls {
+		for _, a := range call {
+			if a == "-e" {
+				t.Fatalf("ADR-0051: call %d still uses -e flag: %v", i, call)
+			}
+		}
 	}
-	// The -e session env flags must survive wrapping.
-	joined := strings.Join(args, "\x00")
-	if !strings.Contains(joined, "\x00-e\x00LANG=en_US.UTF-8\x00") {
-		t.Fatalf("new-session args missing LANG -e flag: %v", args)
+
+	// LANG is delivered via set-environment over the socket.
+	foundLANG := false
+	foundUnsetLCALL := false
+	for _, call := range exec.calls {
+		if cmd(call) == "set-environment" {
+			if slices.Contains(call, "LANG") && slices.Contains(call, "en_US.UTF-8") {
+				foundLANG = true
+			}
+			if slices.Contains(call, "-u") && slices.Contains(call, "LC_ALL") {
+				foundUnsetLCALL = true
+			}
+		}
+	}
+	if !foundLANG {
+		t.Errorf("missing set-environment LANG en_US.UTF-8; calls: %v", exec.calls)
+	}
+	if !foundUnsetLCALL {
+		t.Errorf("missing set-environment -u LC_ALL (empty-value unset); calls: %v", exec.calls)
+	}
+
+	// The command is started via respawn-pane and STILL wrapped in the systemd
+	// scope (wrapPaneCommand applies inside RespawnPane).
+	var respawnCmd string
+	for _, call := range exec.calls {
+		if cmd(call) == "respawn-pane" {
+			respawnCmd = call[len(call)-1]
+			break
+		}
+	}
+	want := "systemd-run --user --scope --slice=gascity-agents.slice --collect --quiet -- sh -c claude"
+	if respawnCmd == "" {
+		t.Fatalf("missing respawn-pane call; calls: %v", exec.calls)
+	}
+	if respawnCmd != want {
+		t.Fatalf("respawn pane command = %q, want %q", respawnCmd, want)
 	}
 }
 
@@ -154,14 +191,31 @@ func TestAgentSliceEmptyCommandNotWrapped(t *testing.T) {
 	t.Setenv(AgentSliceEnv, "gascity-agents.slice")
 	tm, exec := newSliceTestTmux(t)
 
-	// Empty command + env-only session must keep the empty trailing arg so
-	// tmux still starts the default shell.
+	// Empty command + env-only session: under the ADR-0051 transport, a bare
+	// new-session (no command) starts tmux's default shell, env is set via
+	// set-environment, and NO respawn-pane is issued (there is no command to
+	// respawn). The systemd wrapper must not be invoked either.
 	if err := tm.NewSessionWithCommandAndEnv("gc-test-empty", "/work", "", map[string]string{"LANG": "C"}); err != nil {
 		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
 	}
-	args := exec.calls[0]
-	if got := args[len(args)-1]; got != "" {
-		t.Fatalf("pane command = %q, want empty", got)
+	for i, call := range exec.calls {
+		if cmd(call) == "respawn-pane" {
+			t.Fatalf("empty command should not issue respawn-pane; call %d: %v", i, call)
+		}
+		if c := call[len(call)-1]; strings.Contains(c, "systemd-run") {
+			t.Fatalf("empty command should not be systemd-wrapped; call %d: %v", i, call)
+		}
+	}
+	// LANG still delivered via set-environment.
+	delivered := false
+	for _, call := range exec.calls {
+		if cmd(call) == "set-environment" && slices.Contains(call, "LANG") && slices.Contains(call, "C") {
+			delivered = true
+			break
+		}
+	}
+	if !delivered {
+		t.Fatalf("missing set-environment LANG C; calls: %v", exec.calls)
 	}
 }
 
