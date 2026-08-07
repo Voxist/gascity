@@ -36,6 +36,24 @@ func TestCustomTypesPreflightCheck_AllRegistered(t *testing.T) {
 	if r.Status != StatusOK {
 		t.Fatalf("status = %d, want OK; message=%q", r.Status, r.Message)
 	}
+	// The passing message must report what was checked...
+	if !strings.Contains(r.Message, "type-registration precondition only") {
+		t.Errorf("message %q does not scope the claim to type registration", r.Message)
+	}
+	// ...and must not promote a necessary condition into a sufficient one.
+	// Type registration is observable here; dispatch safety is not, so a
+	// passing preflight may never read as clearance for the flip.
+	//
+	// "eligible" is banned as a bare substring deliberately: a correct OK
+	// message has no use for the word in ANY polarity, so this needs no
+	// negation-awareness. Phrases that a correct message may legitimately use
+	// negated (e.g. "not a ... go-ahead") are NOT banned here — a substring
+	// test cannot distinguish assertion from negation, and banning them would
+	// pass or fail on incidental punctuation rather than on meaning.
+	if strings.Contains(strings.ToLower(r.Message), "eligible") {
+		t.Errorf("message %q claims flip eligibility; the preflight checks a necessary "+
+			"condition only and cannot clear the flip", r.Message)
+	}
 }
 
 func TestCustomTypesPreflightCheck_MissingRequiredIsError(t *testing.T) {
