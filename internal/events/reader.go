@@ -445,6 +445,16 @@ func tailActive(path string, filter Filter, limit int) ([]Event, error) {
 // active holds the already-tailed newest matches (seq-ascending, possibly
 // empty); the merged result is the limit newest matching events in
 // seq-ascending order.
+//
+// An unreadable archive (truncated gzip, torn write) is SKIPPED, not failed —
+// the same degraded contract ReadFilteredWithWarnings and ReadLatestMatch follow
+// (vc-89s). The walk continues into older archives, so a corrupt archive can
+// only make the result OLDER, never silently short. This matters for callers
+// that route a tail read over the archive set: the doctor order-firing check's
+// order.fired read must survive a single corrupt sibling (its degraded warning
+// for that archive surfaces via the separate controller-start ReadLatestMatch
+// path), and the events-list API degrades to a slightly shorter page instead of
+// erroring. A failed directory listing is handled the same lenient way.
 func tailArchives(path string, filter Filter, limit int, active []Event) ([]Event, error) {
 	dir := filepath.Dir(path)
 	archives, err := archiveFilesIn(dir)
@@ -468,7 +478,9 @@ func tailArchives(path string, filter Filter, limit int, active []Event) ([]Even
 		remaining := limit - len(result)
 		tail, err := readFilteredTailFromArchive(filepath.Join(dir, info.Basename), filter, remaining)
 		if err != nil {
-			return result, fmt.Errorf("reading archive %q: %w", info.Basename, err)
+			// Degrade: skip the corrupt archive and keep walking older ones so
+			// the result can only get older, never silently short.
+			continue
 		}
 		if len(tail) == 0 {
 			continue

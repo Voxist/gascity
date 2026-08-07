@@ -52,6 +52,60 @@ func TestReadFilteredTailSpansArchivesNewestFirst(t *testing.T) {
 	}
 }
 
+// TestReadFilteredTailDegradesCorruptArchive is the degraded-contract regression
+// for vp-x7x8w: now that ReadFilteredTail spans archives, a corrupt (truncated
+// gzip) archive in the newest-first walk must be SKIPPED, not fail the whole
+// read. The walk continues into older archives so the result can only get older,
+// never silently short. This mirrors the contract ReadFilteredWithWarnings and
+// ReadLatestMatch already follow (vc-89s), and it is load-bearing for the doctor
+// order-firing check: its order.fired read calls ReadFilteredTail and must not
+// hard-fail when a single sibling archive is unreadable (the degraded warning
+// surfaces separately via the controller-start ReadLatestMatch path).
+func TestReadFilteredTailDegradesCorruptArchive(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	base := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+
+	// Oldest archive: valid, seqs 1-2.
+	oldestSrc := filepath.Join(dir, "oldest-src.jsonl")
+	writeJSONLEvents(t, oldestSrc, 1, 2)
+	oldest := filepath.Join(dir, formatArchiveBasename(base, 1, 2))
+	var stderr bytes.Buffer
+	if err := gzipAndArchive(oldestSrc, oldest, &stderr); err != nil {
+		t.Fatalf("gzipAndArchive oldest: %v (stderr %q)", err, stderr.String())
+	}
+
+	// Newer archive: corrupt (truncated gzip). The newest-first walk hits this
+	// one first and must skip it, not fail.
+	_ = writeCorruptArchive(dir, base.Add(time.Hour), 3, 5)
+
+	// Active file: seqs 6-7 (newest). Fewer than limit=5 matches, so the read
+	// must reach into the archives to fill the page.
+	writeJSONLEvents(t, path, 6, 7)
+
+	got, err := ReadFilteredTail(path, Filter{}, 5)
+	if err != nil {
+		t.Fatalf("ReadFilteredTail: %v (a non-nil error means the corrupt newer "+
+			"archive failed the whole read instead of being skipped)", err)
+	}
+	// Only 4 matches exist in readable segments (active 6-7 + oldest valid
+	// archive 1-2); the corrupt seq-3-5 archive contributes nothing and is
+	// skipped. The read returns all of them, ordered seq-ascending.
+	if want := []uint64{1, 2, 6, 7}; !reflect.DeepEqual(seqsOf(got), want) {
+		t.Fatalf("ReadFilteredTail(limit=5) seqs = %v, want %v (active 6-7 + "+
+			"oldest valid archive 1-2; corrupt 3-5 skipped)", seqsOf(got), want)
+	}
+}
+
+// writeCorruptArchive writes a canonically named archive whose body is not valid
+// gzip — the truncated-archive class. Any attempt to open it errors, which lets
+// tests prove an archive was skipped (no error) rather than decoded.
+func writeCorruptArchive(dir string, rotatedAt time.Time, firstSeq, lastSeq uint64) string {
+	name := formatArchiveBasename(rotatedAt, firstSeq, lastSeq)
+	_ = os.WriteFile(filepath.Join(dir, name), []byte{0x1f, 0x8b, 0x00, 0xde, 0xad, 0xbe, 0xef}, 0o644)
+	return name
+}
+
 // TestReadFilteredTailBoundedArchiveOpens is the T-006 latency guard: a first-page
 // (no cursor) descending read must open only O(1) archives — the ones whose seq
 // window actually overlaps the needed tail — never O(archives). This keeps the
