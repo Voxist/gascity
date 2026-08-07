@@ -1011,7 +1011,7 @@ func TestClaimHookWorkRetriesLaterStoreWhenSelectedStoreLosesClaimRace(t *testin
 // own (primary) store loses its claim race and is dropped from the working set,
 // a later federated store that errors must stay a best-effort skip. The claim
 // must drain as "no work" rather than surface that federated store's error as a
-// fatal claim failure (the bug: firstStoreWithWork keyed "own store" on slice
+// fatal claim failure (the bug: bestStoreWithWork keyed "own store" on slice
 // position, so the federated store became index 0 after the primary was removed
 // and wedged the hook).
 func TestClaimHookWorkDrainsWhenPrimaryLosesRaceThenFederatedStoreErrors(t *testing.T) {
@@ -1548,7 +1548,7 @@ work_query = "printf '[{\"id\":\"hw-1\",\"title\":\"Fix the bug\"}]'"
 	}
 }
 
-func TestHookCommandClaimUsesSessionActorAndPreassignsContinuation(t *testing.T) {
+func TestHookCommandClaimUsesCanonicalActorAndPreassignsContinuation(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
 	cityDir := t.TempDir()
@@ -1602,7 +1602,7 @@ esac
 	t.Setenv("GC_TEMPLATE", "worker")
 	t.Setenv("GC_ALIAS", "worker-1")
 	t.Setenv("GC_SESSION_ID", "session-id-1")
-	t.Setenv("GC_SESSION_NAME", "worker-1")
+	t.Setenv("GC_SESSION_NAME", "test-city--worker-1")
 	t.Setenv("GC_SESSION_ORIGIN", "ephemeral")
 
 	var stdout, stderr bytes.Buffer
@@ -1630,16 +1630,43 @@ esac
 	}
 	logText := string(logData)
 	if !strings.Contains(logText, "actor=worker-1 args=update hw-claim --claim --json") {
-		t.Fatalf("bd claim did not use session BEADS_ACTOR=worker-1; log:\n%s", logText)
+		t.Fatalf("bd claim did not use canonical BEADS_ACTOR=worker-1; log:\n%s", logText)
 	}
 	if !strings.Contains(logText, "actor=worker-1 args=show --json hw-claim") {
-		t.Fatalf("bd canonical read did not use session BEADS_ACTOR=worker-1; log:\n%s", logText)
+		t.Fatalf("bd canonical read did not use BEADS_ACTOR=worker-1; log:\n%s", logText)
 	}
 	if !strings.Contains(logText, "args=update --json hw-next --assignee worker-1") {
 		t.Fatalf("continuation sibling was not preassigned through bd; log:\n%s", logText)
 	}
 	if strings.Contains(logText, "args=update hw-other --assignee") {
 		t.Fatalf("continuation preassignment crossed route target; log:\n%s", logText)
+	}
+}
+
+func TestHookSessionAgentForQueryPrefersOwnershipIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		alias       string
+		actor       string
+		agent       string
+		sessionName string
+		want        string
+	}{
+		{name: "alias", alias: "rig/worker", actor: "session-id", agent: "stale", sessionName: "rig--worker", want: "rig/worker"},
+		{name: "durable actor fallback", actor: "session-id", agent: "stale", sessionName: "s-session-id", want: "session-id"},
+		{name: "compatibility fallback", agent: "session-id", sessionName: "s-session-id", want: "session-id"},
+		{name: "runtime fallback", sessionName: "rig--worker", want: "rig--worker"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			t.Setenv("GC_ALIAS", tc.alias)
+			t.Setenv("BEADS_ACTOR", tc.actor)
+			t.Setenv("GC_AGENT", tc.agent)
+			t.Setenv("GC_SESSION_NAME", tc.sessionName)
+			if got := hookSessionAgentForQuery(); got != tc.want {
+				t.Fatalf("hookSessionAgentForQuery() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

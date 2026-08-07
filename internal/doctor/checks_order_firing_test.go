@@ -528,11 +528,15 @@ func TestOrderFiringCurrent_CorruptArchive_DegradesToWarning(t *testing.T) {
 	// check (StatusError), hiding the real verdict for days. It must degrade
 	// instead: Warning naming the skipped file — never StatusError, and
 	// never a silent OK over data the check did not see.
+	//
+	// The order.fired read is a live-file tail and never touches archives;
+	// the archive-spanning read is the controller-start lookup. Keep
+	// controller.started out of the live log so that lookup must walk into
+	// the corrupt archive.
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	cityPath, cfg := orderFiringTestCity(t)
 	writeOrderFiringTestOrder(t, cityPath, "mol-dog-stale-db", "cron", "0 */4 * * *")
 	writeOrderFiringTestEvents(t, cityPath,
-		events.Event{Type: events.ControllerStarted, Ts: now.Add(-8 * time.Hour)},
 		events.Event{Type: events.OrderFired, Subject: "mol-dog-stale-db", Ts: now.Add(-1 * time.Hour)},
 	)
 	corrupt := writeOrderFiringCorruptArchive(t, cityPath, now.Add(-2*time.Hour), 1, 2)

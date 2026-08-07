@@ -57,7 +57,6 @@ func TestBDVersionPins(t *testing.T) {
 	if !regexp.MustCompile(`^v?\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`).MatchString(bdCurrent) {
 		t.Fatalf("deps.env BD_CURRENT_VERSION = %q, want a semver token", bdCurrent)
 	}
-
 	// Bridge-mode detection. The installable default is built from source when
 	// deps.env carries BD_SOURCE_REF — the version/ref split that mirrors the
 	// BD_CURRENT_VERSION/BD_CURRENT_REF pair above, so BD_VERSION can stay a real
@@ -72,6 +71,34 @@ func TestBDVersionPins(t *testing.T) {
 		t.Fatalf("deps.env BD_SOURCE_REF = %q, want a full 40-char gastownhall/beads commit SHA", bdSourceRef)
 	}
 	bdVersionIsCommit := bridgeRef != ""
+
+	// The unified-pin invariant (go.mod, the bleeding-edge contract-matrix
+	// cell, and the agent image all on ONE commit) is upstream's shape and
+	// only holds when no bridge is active. In bridge mode this fork
+	// deliberately splits them: go.mod and the image follow BD_SOURCE_REF
+	// (the lockstep checks below), while BD_CURRENT_REF may point at a newer
+	// beads commit so the contract matrix exercises gc against the schema the
+	// planned migration will move to (ga-zzcjs, ga-y1xxg).
+	if bridgeRef == "" {
+		// The native Go store, the bleeding-edge contract-matrix cell, and the
+		// source-built agent image must all use the same upstream commit. A drift
+		// here can pair one schema catalog with another version's write behavior.
+		goMod := readFile(t, root, "go.mod")
+		goModMatch := regexp.MustCompile(`(?m)^\s*github\.com/steveyegge/beads\s+v\S+-([0-9a-f]{12})\s*$`).FindStringSubmatch(goMod)
+		if goModMatch == nil {
+			t.Fatal("go.mod missing a pseudo-version pin for github.com/steveyegge/beads")
+		}
+		if got, want := goModMatch[1], bdCurrentRef[:12]; got != want {
+			t.Fatalf("go.mod beads pseudo-version commit = %q, want BD_CURRENT_REF prefix %q", got, want)
+		}
+		dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")
+		if !strings.Contains(dockerfile, "ARG BD_SOURCE_REF="+bdCurrentRef) {
+			t.Fatalf("contrib/k8s/Dockerfile.agent BD_SOURCE_REF must equal deps.env BD_CURRENT_REF (%s)", bdCurrentRef)
+		}
+		if !strings.Contains(dockerfile, "ARG BD_BUILD="+bdCurrentRef[:10]) {
+			t.Fatalf("contrib/k8s/Dockerfile.agent BD_BUILD must equal the first 10 characters of BD_CURRENT_REF (%s)", bdCurrentRef[:10])
+		}
+	}
 
 	// Lockstep with the linked library. The bd binary CI installs and the beads
 	// library gc links must carry the same schema-migration level: a go.mod
