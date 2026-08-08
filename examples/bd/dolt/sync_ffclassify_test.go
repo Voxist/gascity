@@ -18,13 +18,20 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
 
-// runFFSync sets up a one-DB ("app") SQL-mode city with the fake dolt already
-// installed in binDir, runs `gc dolt sync <args>`, and returns combined output.
-func runFFSync(t *testing.T, binDir string, args ...string) string {
+// runFFSyncRaw is the one lexical subprocess call site backing runFFSync and
+// every variant below (runFFSyncWithConfig, the exit-code check) — the
+// repository's untagged-source subprocess census is a checked ratchet that
+// cannot grow (TESTING.md), so new call shapes are added by extending this
+// shared runner, never by hand-rolling another exec.Command site (vp-9v6f9).
+// Sets up a one-DB ("app") SQL-mode city with the fake dolt already installed
+// in binDir, runs `gc dolt sync <args>` with extraEnv appended, and returns
+// (combined output, exit error).
+func runFFSyncRaw(t *testing.T, binDir string, extraEnv []string, args ...string) (string, error) {
 	t.Helper()
 	root := repoRoot(t)
 	script := filepath.Join(root, syncScript)
@@ -38,8 +45,7 @@ func runFFSync(t *testing.T, binDir string, args ...string) string {
 	}
 	writeSyncFakeBeadsBD(t, cityPath)
 
-	cmd := exec.Command("sh", append([]string{script}, args...)...)
-	cmd.Env = append(syncFilteredEnv(),
+	env := append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
@@ -48,8 +54,20 @@ func runFFSync(t *testing.T, binDir string, args ...string) string {
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
 	)
-	out, _ := cmd.CombinedOutput()
-	return string(out)
+	env = append(env, extraEnv...)
+
+	cmd := exec.Command("sh", append([]string{script}, args...)...)
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// runFFSync sets up a one-DB ("app") SQL-mode city with the fake dolt already
+// installed in binDir, runs `gc dolt sync <args>`, and returns combined output.
+func runFFSync(t *testing.T, binDir string, args ...string) string {
+	t.Helper()
+	out, _ := runFFSyncRaw(t, binDir, nil, args...)
+	return out
 }
 
 // fakeDoltHeader is the shared preamble: log argv and answer the remote-lookup
@@ -282,6 +300,188 @@ func TestSyncFetchTimeoutSkipsNeverPushes(t *testing.T) {
 	}
 	if !strings.Contains(out, "fetch timed out") {
 		t.Fatalf("expected a 'fetch timed out' status.\nout:\n%s", out)
+	}
+}
+
+// runFFSyncWithConfig is runFFSync plus GC_DOLT_CONFIG_FILE pointed at a
+// generated dolt-config.yaml stamped with the given read_timeout_millis, so
+// cold-open-wall tests can use a short deadline instead of waiting out the
+// real managed default of 15s (vp-9v6f9). readTimeoutMillis == 0 omits the
+// env var entirely, exercising the documented-default fallback.
+func runFFSyncWithConfig(t *testing.T, binDir string, readTimeoutMillis int, args ...string) string {
+	t.Helper()
+	var extraEnv []string
+	if readTimeoutMillis > 0 {
+		cfgPath := filepath.Join(t.TempDir(), "dolt-config.yaml")
+		cfg := fmt.Sprintf("listener:\n  read_timeout_millis: %d\n", readTimeoutMillis)
+		if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
+			t.Fatalf("write fake dolt-config.yaml: %v", err)
+		}
+		extraEnv = append(extraEnv, "GC_DOLT_CONFIG_FILE="+cfgPath)
+	}
+	out, _ := runFFSyncRaw(t, binDir, extraEnv, args...)
+	return out
+}
+
+// writeSyncFakeDoltColdWall models the managed listener's read_timeout_millis
+// killing CALL DOLT_FETCH server-side: the fetch sleeps 2s (standing in for
+// the spool time; paired with a test-scoped 2000ms listener deadline so the
+// test stays fast without waiting out the real 15s default) then exits 1
+// with no recognizable first-push signal — vp-9v6f9's measured
+// ".dolt/git-remote-cache grows 4 KB/attempt" residue is exactly this: a
+// spool killed mid-flight, not a normal fetch error.
+func writeSyncFakeDoltColdWall(t *testing.T, dir string) string {
+	t.Helper()
+	branch := "main"
+	logPath := filepath.Join(dir, "dolt.log")
+	body := fakeDoltHeader(logPath, branch) +
+		"  *\"CALL DOLT_FETCH(\"*) sleep 2" +
+		" ; printf 'row read wait bigger than connection timeout\\n' >&2 ; exit 1 ;;\n" +
+		"esac\nexit 0\n"
+	return installFFFakeDolt(t, dir, body)
+}
+
+// writeSyncFakeDoltGenericFetchFailure models a fetch that fails FAST — well
+// under the listener deadline — with an error unrelated to the first-push
+// signals (vp-catlj's corrupt-remote shape: "Blob not found"). This must
+// never be misclassified as COLD-OPEN WALL.
+func writeSyncFakeDoltGenericFetchFailure(t *testing.T, dir string) string {
+	t.Helper()
+	branch := "main"
+	logPath := filepath.Join(dir, "dolt.log")
+	body := fakeDoltHeader(logPath, branch) +
+		"  *\"CALL DOLT_FETCH(\"*) printf 'Blob not found: deadbeef.darc\\n' >&2 ; exit 1 ;;\n" +
+		"esac\nexit 0\n"
+	return installFFFakeDolt(t, dir, body)
+}
+
+// TestSyncColdOpenWallIsClassified is T-001: a fetch killed past 90% of a
+// (short, test-scoped) listener deadline must be reported as COLD-OPEN WALL,
+// not the generic "fetch failed" — this is the live root cause behind
+// vp-9v6f9 (hq's cold CALL DOLT_FETCH is always killed at ~15.1s by the
+// managed listener's 15s read_timeout_millis, dead flat across 12 measured
+// attempts).
+func TestSyncColdOpenWallIsClassified(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := writeSyncFakeDoltColdWall(t, binDir)
+	out := runFFSyncWithConfig(t, binDir, 2000, "--db", "app")
+	if !strings.Contains(readLog(t, logPath), "CALL DOLT_FETCH(") {
+		t.Fatalf("expected a fetch attempt.\nout:\n%s", out)
+	}
+	if !strings.Contains(out, "COLD-OPEN WALL") {
+		t.Fatalf("expected a COLD-OPEN WALL status.\nout:\n%s", out)
+	}
+	if !strings.Contains(out, "NO off-box copy this server lifetime") {
+		t.Fatalf("expected the no-off-box-copy explanation.\nout:\n%s", out)
+	}
+}
+
+// TestSyncListenerDeadlineParsedFromGeneratedConfig is T-002:
+// listener_read_timeout_secs() must read the live listener's
+// read_timeout_millis from the generated dolt-config.yaml (converted to
+// seconds), and fall back to the documented managed default (15) when the
+// file is absent — surfaced via the (fast, no-sleep) generic fetch-failed
+// message so this is testable without waiting out any real deadline.
+func TestSyncListenerDeadlineParsedFromGeneratedConfig(t *testing.T) {
+	t.Run("custom deadline from generated config", func(t *testing.T) {
+		binDir := t.TempDir()
+		writeSyncFakeDoltGenericFetchFailure(t, binDir)
+		// 10s (not 2s): an instant failure must stay comfortably under 90% of
+		// the deadline even with date(1)'s 1s granularity rounding an ~0s
+		// fetch up to "1s" across a wall-clock second boundary — a 2s
+		// deadline's 1s (integer) threshold has no such margin and flakes.
+		out := runFFSyncWithConfig(t, binDir, 10000, "--db", "app")
+		if !strings.Contains(out, "listener deadline 10s") {
+			t.Fatalf("expected the custom 10s deadline to be reported.\nout:\n%s", out)
+		}
+	})
+	t.Run("falls back to the documented default when config is absent", func(t *testing.T) {
+		binDir := t.TempDir()
+		writeSyncFakeDoltGenericFetchFailure(t, binDir)
+		out := runFFSyncWithConfig(t, binDir, 0, "--db", "app")
+		if !strings.Contains(out, "listener deadline 15s") {
+			t.Fatalf("expected the documented default (15s) when no config file is set.\nout:\n%s", out)
+		}
+	})
+}
+
+// TestSyncRecordsFetchElapsed is T-003: the elapsed wall-clock time around
+// CALL DOLT_FETCH must be captured and reported, independent of whether the
+// failure crosses the cold-open-wall threshold.
+func TestSyncRecordsFetchElapsed(t *testing.T) {
+	binDir := t.TempDir()
+	writeSyncFakeDoltColdWall(t, binDir)
+	// A generous 30s deadline keeps a 2s fetch well under the 90% cold-wall
+	// threshold, so this isolates elapsed-capture from cold-wall classification.
+	out := runFFSyncWithConfig(t, binDir, 30000, "--db", "app")
+	if strings.Contains(out, "COLD-OPEN WALL") {
+		t.Fatalf("2s elapsed against a 30s deadline must not classify as cold-open wall.\nout:\n%s", out)
+	}
+	if !regexp.MustCompile(`after [2-9][0-9]*s`).MatchString(out) {
+		t.Fatalf("expected elapsed seconds (>=2) reported in the fetch-failed line.\nout:\n%s", out)
+	}
+}
+
+// TestSyncFastFetchFailureIsNotColdWall is T-005: a fetch that fails FAST —
+// well under the listener deadline, vp-catlj's corrupt-remote shape — must
+// keep the existing generic "fetch failed" status, never COLD-OPEN WALL.
+func TestSyncFastFetchFailureIsNotColdWall(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := writeSyncFakeDoltGenericFetchFailure(t, binDir)
+	// 10s (not 2s): see the matching comment in
+	// TestSyncListenerDeadlineParsedFromGeneratedConfig — a 2s deadline's 1s
+	// threshold leaves no margin against date(1)'s 1s clock granularity.
+	out := runFFSyncWithConfig(t, binDir, 10000, "--db", "app")
+	if !strings.Contains(readLog(t, logPath), "CALL DOLT_FETCH(") {
+		t.Fatalf("expected a fetch attempt.\nout:\n%s", out)
+	}
+	if strings.Contains(out, "COLD-OPEN WALL") {
+		t.Fatalf("a fast fetch failure must not classify as COLD-OPEN WALL.\nout:\n%s", out)
+	}
+	if !strings.Contains(out, "fetch failed") {
+		t.Fatalf("expected the generic 'fetch failed' status.\nout:\n%s", out)
+	}
+}
+
+// TestSyncSummaryListsStoresWithNoOffBoxCopy and
+// TestSyncSummarySilentWhenAllPushed are T-006: an end-of-run backup-coverage
+// summary names every store that hit the cold-open wall, and says nothing on
+// a clean run.
+func TestSyncSummaryListsStoresWithNoOffBoxCopy(t *testing.T) {
+	binDir := t.TempDir()
+	writeSyncFakeDoltColdWall(t, binDir)
+	out := runFFSyncWithConfig(t, binDir, 2000, "--db", "app")
+	if strings.Count(out, "NO OFF-BOX COPY:") != 1 {
+		t.Fatalf("expected exactly one 'NO OFF-BOX COPY:' header.\nout:\n%s", out)
+	}
+	if strings.Count(out, "app") < 2 { // once in the COLD-OPEN WALL line, once in the summary
+		t.Fatalf("expected the store name to appear in the summary.\nout:\n%s", out)
+	}
+}
+
+func TestSyncSummarySilentWhenAllPushed(t *testing.T) {
+	binDir := t.TempDir()
+	writeSyncFakeDoltClassify(t, binDir, 2, 0)
+	out := runFFSync(t, binDir, "--db", "app")
+	if strings.Contains(out, "NO OFF-BOX COPY:") {
+		t.Fatalf("a clean run must not print the no-off-box-copy summary.\nout:\n%s", out)
+	}
+}
+
+// TestSyncColdWallExitsNonZero is T-007: the cold-open wall is a failure and
+// must still set the script's exit status non-zero, exactly like the generic
+// fetch-failed arm did before this change.
+func TestSyncColdWallExitsNonZero(t *testing.T) {
+	binDir := t.TempDir()
+	writeSyncFakeDoltColdWall(t, binDir)
+	cfgPath := filepath.Join(t.TempDir(), "dolt-config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("listener:\n  read_timeout_millis: 2000\n"), 0o644); err != nil {
+		t.Fatalf("write fake dolt-config.yaml: %v", err)
+	}
+	out, err := runFFSyncRaw(t, binDir, []string{"GC_DOLT_CONFIG_FILE=" + cfgPath}, "--db", "app")
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 1 {
+		t.Fatalf("expected exit 1 on a cold-open wall, got err=%v\nout:\n%s", err, out)
 	}
 }
 

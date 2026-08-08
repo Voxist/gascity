@@ -347,6 +347,25 @@ resolve_refspec_cli() {
   printf 'main\nmain\n'
 }
 
+# listener_read_timeout_secs — the live managed Dolt listener's
+# read_timeout_millis (the hard per-query kill deadline), in whole seconds.
+# Read from the generated dolt-config.yaml (GC_DOLT_CONFIG_FILE, else the
+# packs/dolt default under GC_CITY_PATH) rather than city.toml: the two
+# diverge during a warming window, and cold-open classification (vp-9v6f9)
+# must describe the server that is actually running, not operator intent.
+# Falls back to the documented managed default (15) when the file is absent
+# or unparseable — the generated config is optional in this script's
+# environment.
+listener_read_timeout_secs() {
+  cfg="${GC_DOLT_CONFIG_FILE:-$GC_CITY_PATH/.gc/runtime/packs/dolt/dolt-config.yaml}"
+  millis=$(sed -n 's/^[[:space:]]*read_timeout_millis:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+    "$cfg" 2>/dev/null | head -1)
+  case "$millis" in
+    ''|*[!0-9]*) echo 15 ;;
+    *) echo $(( millis / 1000 )) ;;
+  esac
+}
+
 sync_database_sql() {
   name="$1"
   if ! valid_database_name "$name"; then
@@ -389,8 +408,10 @@ sync_database_sql() {
       return 1
     }
     fetch_rc=0
+    fetch_start=$(date +%s)
     dolt_sql "USE \`$name\`; CALL DOLT_FETCH('$remote_name', '$remote_branch')" "$fetch_timeout" \
       >/dev/null 2>"$fetch_err_tmp" || fetch_rc=$?
+    fetch_elapsed=$(( $(date +%s) - fetch_start ))
     if [ "$fetch_rc" -ne 0 ] && { grep -q "no branches found in remote" "$fetch_err_tmp" 2>/dev/null || grep -q "invalid ref spec" "$fetch_err_tmp" 2>/dev/null; }; then
       # The remote has no such branch: an empty remote ("no branches found in
       # remote") or a brand-new branch on a populated remote ("invalid ref
@@ -403,7 +424,26 @@ sync_database_sql() {
       echo "  $name: fetch timed out after ${fetch_timeout}s — skipped (NOT pushed)" >&2
       return 1
     elif [ "$fetch_rc" -ne 0 ]; then
-      echo "  $name: fetch failed (exit $fetch_rc) — skipped (NOT pushed)" >&2
+      # vp-9v6f9: classify by ELAPSED TIME against the live listener deadline,
+      # not by matching an error string — the exact text at the wall is not
+      # recorded in the evidence this classification is based on, and the
+      # elapsed-time signature is the measured physics regardless of which
+      # layer reports the kill. A store whose first-in-lifetime fetch must
+      # spool its whole remote blobset (no server-side range read) is killed
+      # by the listener's hard per-query read_timeout_millis before the spool
+      # can persist — not a transient blip, and no retry budget converges it
+      # (every attempt dies at the same wall). Threshold is 90% of the live
+      # deadline: comfortably above fast-failure noise (e.g. a corrupt remote,
+      # vp-catlj) and below the deadline itself.
+      deadline=$(listener_read_timeout_secs)
+      threshold=$(( deadline * 9 / 10 ))
+      if [ "$fetch_elapsed" -ge "$threshold" ]; then
+        rm -f "$fetch_err_tmp"
+        echo "  $name: COLD-OPEN WALL — fetch killed at ${fetch_elapsed}s (listener deadline ${deadline}s); NO off-box copy this server lifetime — skipped (NOT pushed)" >&2
+        cold_wall_stores="$cold_wall_stores $name"
+        return 1
+      fi
+      echo "  $name: fetch failed (exit $fetch_rc) after ${fetch_elapsed}s (listener deadline ${deadline}s) — skipped (NOT pushed)" >&2
       if [ -s "$fetch_err_tmp" ]; then
         while IFS= read -r line || [ -n "$line" ]; do
           printf '  %s: %s\n' "$name" "$line" >&2
@@ -617,6 +657,10 @@ fi
 exit_code=0
 server_running=false
 is_running && server_running=true
+# vp-9v6f9: every store name that hit a COLD-OPEN WALL this run, for the
+# end-of-run backup-coverage summary below. Appended to directly by
+# sync_database_sql (same shell, not a subshell — plain assignment persists).
+cold_wall_stores=""
 
 # Does this run have at least one database it will actually sync? Mirrors the
 # selection filters of the sync loop below (.dolt present, not a system schema,
@@ -664,6 +708,17 @@ if [ -d "$data_dir" ]; then
     else
       sync_database_cli "$d" "$name" || exit_code=1
     fi
+  done
+fi
+
+# vp-9v6f9: an operator scanning per-database lines can miss a P0 fleet-backup
+# gap buried among routine "up-to-date" output. Silent when the list is empty
+# so a clean run stays quiet.
+if [ -n "$cold_wall_stores" ]; then
+  echo ""
+  echo "NO OFF-BOX COPY:"
+  for cw_store in $cold_wall_stores; do
+    echo "  $cw_store"
   done
 fi
 
