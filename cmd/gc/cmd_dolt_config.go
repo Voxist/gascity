@@ -182,7 +182,22 @@ func writeManagedDoltConfigFile(path, host, port, dataDir, logLevel string, dolt
 	waitTimeout := managedDoltWaitTimeout()
 	waitTimeoutLine := ""
 	if waitTimeout > 0 {
-		waitTimeoutLine = fmt.Sprintf("  wait_timeout: %q\n", strconv.Itoa(waitTimeout))
+		// ADR-0064 AC1. wait_timeout is INERT in go-mysql-server: it is
+		// DECLARED ONLY (sql/variables/system_variables.go) so SET/SELECT
+		// @@wait_timeout work for MySQL compatibility, and a grep for
+		// consumers outside that declaration returns zero rows — identically
+		// across all six go-mysql-server versions in the module cache.
+		// Nothing reaps a connection on its basis. read_timeout_millis is the
+		// sole reaper (ConnReadTimeout -> server.go readTimeout ->
+		// handler.go, whose expiry path calls CloseConnection). The comment
+		// is emitted with the key, and only with it, so a reader of a
+		// generated config cannot re-derive the refuted "wait_timeout already
+		// reaps the dead sockets, so a read_timeout_millis raise is safe"
+		// argument that ADR-0064 retired on source evidence.
+		waitTimeoutLine = "  # INERT — declared-only in go-mysql-server; NOT a connection reaper.\n" +
+			"  # read_timeout_millis is the sole reaper. Do not cite this key as\n" +
+			"  # defence-in-depth for raising it on a swarm-facing server (ADR-0064).\n" +
+			fmt.Sprintf("  wait_timeout: %q\n", strconv.Itoa(waitTimeout))
 	}
 	content := fmt.Sprintf(`# Dolt SQL server configuration — managed by gc-beads-bd
 # Do not edit manually; changes are overwritten on each server start.

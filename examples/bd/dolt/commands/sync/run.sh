@@ -30,21 +30,34 @@
 #                     a fresh remote can exceed the prior fixed 120s ceiling).
 #                     Metadata queries (remote lookup, active branch) keep their
 #                     own 120s bound.
+#   GC_DOLT_SYNC_DRAIN_ATTEMPTS
+#     (default: 3)    — --drain only. How many push+verify rounds a single store
+#                     gets before it is declared undrainable and reported under
+#                     'BACKLOG NOT DRAINED:'. See ADR-0064 D1.
 set -e
 
 dry_run=false
 force=false
 do_gc=false
 db_filter=""
+# ADR-0064 D1/D3. --drain is the delivery-window mode: every store must be
+# driven to a VERIFIED zero backlog, and a store that cannot get there is a
+# terminal, named, non-zero failure. Off by default so the routine sync patrol
+# keeps its current semantics — on a live (non-quiesced) city new commits can
+# legitimately land between push and verification, and failing the patrol for
+# that would be a false alarm. The residual is still measured and reported in
+# both modes; only the enforcement is gated.
+drain=false
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry_run=true; shift ;;
     --force)   force=true; shift ;;
     --gc)      do_gc=true; shift ;;
+    --drain)   drain=true; shift ;;
     --db)      db_filter="$2"; shift 2 ;;
     -h|--help)
-      echo "Usage: gc dolt sync [--dry-run] [--force] [--gc] [--db NAME]"
+      echo "Usage: gc dolt sync [--dry-run] [--force] [--gc] [--drain] [--db NAME]"
       echo ""
       echo "Fast-forward-push Dolt databases to their configured remotes."
       echo "Each database is fetched and classified against its remote; only"
@@ -57,6 +70,12 @@ while [ $# -gt 0 ]; do
       echo "              (fetches read-only to classify; makes no other change)"
       echo "  --force     Force-push to remotes (bypasses the fast-forward check)"
       echo "  --gc        Purge closed ephemeral beads before sync"
+      echo "  --drain     Delivery-window mode (ADR-0064): re-verify each store's"
+      echo "              backlog after pushing and re-push until it reaches zero."
+      echo "              A store still carrying undelivered commits is reported"
+      echo "              terminally under 'BACKLOG NOT DRAINED:' and the run exits"
+      echo "              non-zero. Intended for a quiesced city; on a live city"
+      echo "              new commits can arrive mid-run and read as a residual."
       echo "  --db NAME   Sync only the named database"
       echo ""
       echo "Policy:"
@@ -66,6 +85,7 @@ while [ $# -gt 0 ]; do
       echo "Environment:"
       echo "  GC_DOLT_SYNC_FETCH_TIMEOUT_SECS  pre-push fetch bound (default 60)"
       echo "  GC_DOLT_SYNC_PUSH_TIMEOUT_SECS   push bound (default 1800)"
+      echo "  GC_DOLT_SYNC_DRAIN_ATTEMPTS      --drain push+verify rounds (default 3)"
       exit 0
       ;;
     *) echo "gc dolt sync: unknown flag: $1" >&2; exit 1 ;;
@@ -127,6 +147,27 @@ esac
 if [ "$fetch_timeout_valid" != true ]; then
   printf 'gc dolt sync: invalid GC_DOLT_SYNC_FETCH_TIMEOUT_SECS=%s (must be a positive integer)\n' \
     "$fetch_timeout" >&2
+  exit 2
+fi
+
+# ADR-0064 D1 step 2: how many push+verify rounds a single store gets before it
+# is declared undrainable. The 2026-08-04 window pushed ONCE per store and hq
+# came out at ~2 unpushed, with vp/va/vr falling out again within hours on the
+# same server — push cost is driven by backlog as well as by cold/warm, so a
+# missed window makes the next push bigger and the two compound into a ratchet.
+# Bounded rather than unbounded: on a quiesced city the residual converges in a
+# round or two, and a store that will not converge must be *reported*, not
+# retried forever while the city waits to be admitted. Same validation rules as
+# the timeouts above (reject empty / non-numeric / all-zero).
+drain_attempts="${GC_DOLT_SYNC_DRAIN_ATTEMPTS-3}"
+case "$drain_attempts" in
+  ''|*[!0-9]*) drain_attempts_valid=false ;;
+  *[1-9]*)     drain_attempts_valid=true ;;
+  *)           drain_attempts_valid=false ;;
+esac
+if [ "$drain_attempts_valid" != true ]; then
+  printf 'gc dolt sync: invalid GC_DOLT_SYNC_DRAIN_ATTEMPTS=%s (must be a positive integer)\n' \
+    "$drain_attempts" >&2
   exit 2
 fi
 
@@ -256,6 +297,38 @@ classify_count() {
   printf '%s\n' "$cc_out" | awk -F, 'NR == 2 { gsub(/^"|"$/, "", $1); print $1; exit }'
 }
 
+# ADR-0064 AC2. residual_backlog <db> <remote> <local-branch> <remote-branch> —
+# re-fetch the remote tracking ref and emit how many local commits are STILL not
+# on it. Prints the count (possibly 0) on stdout; returns 2 when the residual
+# cannot be measured at all.
+#
+# Why this exists: `CALL DOLT_PUSH` returning 0 reports that *this push*
+# succeeded, not that the store has nothing left to deliver. The 2026-08-04
+# window trusted the push result, pushed once per store, and hq came out at ~2
+# unpushed — so the window read as complete while the store still had no
+# complete off-box copy. Measuring the post-push `ahead` count is the only
+# statement of delivery that survives that. This is the same classify_count
+# range the pre-push fast-forward check uses, re-run after the fact.
+#
+# An indeterminate result (rc 2) is deliberately NOT collapsed into "zero": a
+# store whose residual cannot be read is exactly a store whose off-box copy
+# cannot be asserted, and D3 requires that to be loud rather than absent.
+# The re-fetch is cheap here by construction — the pre-push fetch already
+# succeeded this run, so the remote blobset is spooled and the store is warm.
+residual_backlog() {
+  rb_db="$1"
+  rb_remote="$2"
+  rb_local="$3"
+  rb_remote_branch="$4"
+  dolt_sql "USE \`$rb_db\`; CALL DOLT_FETCH('$rb_remote', '$rb_remote_branch')" "$fetch_timeout" \
+    >/dev/null 2>&1 || return 2
+  rb_ahead=$(classify_count "$rb_db" "remotes/$rb_remote/$rb_remote_branch..$rb_local") || return 2
+  case "$rb_ahead" in
+    ''|*[!0-9]*) return 2 ;;
+  esac
+  printf '%s\n' "$rb_ahead"
+}
+
 find_remote_sql() {
   db="$1"
   remote_csv=$(dolt_sql "USE \`$db\`; SELECT name, url FROM dolt_remotes LIMIT 1") || return 1
@@ -378,6 +451,18 @@ sync_database_sql() {
     return 1
   }
   if [ -z "$remote_pair" ]; then
+    # ADR-0064 D3/AC4. Outside the delivery window this is a benign "nothing to
+    # do". Inside it, a store with no remote configured is the P0 condition
+    # itself — it has no off-box copy and never will — so the window must not
+    # exit 0 having quietly stepped over it. `.no-sync` remains the sanctioned
+    # opt-out for genuinely local-only stores (scratch/test databases); this
+    # branch is for a store that simply has no remote, which is indistinguishable
+    # from a misconfigured real store.
+    if [ "$drain" = true ]; then
+      echo "  $name: NO REMOTE — no off-box copy is possible for this store; configure a remote or mark it .no-sync" >&2
+      undrained_stores="$undrained_stores $name"
+      return 1
+    fi
     echo "  $name: skipped (no remote)"
     return 0
   fi
@@ -513,60 +598,110 @@ sync_database_sql() {
   else
     push_query="USE \`$name\`; CALL DOLT_PUSH('$remote_name', '$refspec_arg') /* $push_tag */"
   fi
-  push_rc=0
-  # Guard mktemp: under `set -e` a bare `$(mktemp)` failure (unwritable or
-  # exhausted TMPDIR) would abort the whole multi-db sync run with an opaque
-  # error — itself the swallowed/opaque-failure class this command set out to
-  # eliminate. Degrade to a per-db error so the loop reports this db and moves
-  # on rather than killing the run.
-  push_err_tmp=$(mktemp) || {
-    echo "  $name: ERROR: cannot create temp file for push diagnostics" >&2
-    return 1
-  }
-  # Route push under push_timeout (not dolt_sql's 120s metadata ceiling) and
-  # capture stderr so the underlying dolt diagnostic survives, preserving the
-  # real exit code via `|| push_rc=$?`.
-  dolt_sql "$push_query" "$push_timeout" >/dev/null 2>"$push_err_tmp" || push_rc=$?
+  # ADR-0064 D1 step 2. Push, then in --drain mode VERIFY the store actually
+  # reached a zero backlog and re-push while it has not. Bounded by
+  # drain_attempts: on a quiesced city the residual converges in a round or two,
+  # and a store that will not converge must be reported rather than retried
+  # forever while the city waits to be admitted.
+  #
+  # Only the SUCCESSFUL-push branch loops. A hard push failure keeps its
+  # existing single-shot semantics and returns immediately: retrying a push that
+  # errored is a different decision with its own failure modes (it is what
+  # PR #515's retry loop covers), and the cold-open wall in particular converges
+  # for no retry budget — every attempt dies at the same listener deadline.
+  push_round=0
+  while : ; do
+    push_round=$((push_round + 1))
+    push_rc=0
+    # Guard mktemp: under `set -e` a bare `$(mktemp)` failure (unwritable or
+    # exhausted TMPDIR) would abort the whole multi-db sync run with an opaque
+    # error — itself the swallowed/opaque-failure class this command set out to
+    # eliminate. Degrade to a per-db error so the loop reports this db and moves
+    # on rather than killing the run.
+    push_err_tmp=$(mktemp) || {
+      echo "  $name: ERROR: cannot create temp file for push diagnostics" >&2
+      return 1
+    }
+    # Route push under push_timeout (not dolt_sql's 120s metadata ceiling) and
+    # capture stderr so the underlying dolt diagnostic survives, preserving the
+    # real exit code via `|| push_rc=$?`.
+    dolt_sql "$push_query" "$push_timeout" >/dev/null 2>"$push_err_tmp" || push_rc=$?
 
-  if [ "$push_rc" -eq 0 ]; then
-    echo "  $name: pushed $local_branch -> $remote_name:$remote_branch ($remote_url)"
+    if [ "$push_rc" -eq 0 ]; then
+      rm -f "$push_err_tmp"
+      # Outside the delivery window keep the pre-existing semantics exactly: no
+      # extra fetch, no extra output. The verification costs a round trip per
+      # store and, on a store that is cold for this server lifetime, that fetch
+      # is itself liable to hit the listener wall — so making the routine patrol
+      # pay for it would add both latency and false "unverified" noise to a path
+      # that is not trying to make a durability claim.
+      if [ "$drain" != true ]; then
+        echo "  $name: pushed $local_branch -> $remote_name:$remote_branch ($remote_url)"
+        return 0
+      fi
+
+      residual_rc=0
+      residual=$(residual_backlog "$name" "$remote_name" "$local_branch" "$remote_branch") || residual_rc=$?
+      if [ "$residual_rc" -ne 0 ]; then
+        echo "  $name: pushed $local_branch -> $remote_name:$remote_branch ($remote_url)"
+        echo "  $name: DELIVERY UNVERIFIED — push reported success but the residual backlog could not be measured; this store's off-box copy cannot be asserted" >&2
+        undrained_stores="$undrained_stores $name"
+        return 1
+      fi
+      if [ "$residual" -eq 0 ]; then
+        echo "  $name: pushed $local_branch -> $remote_name:$remote_branch ($remote_url) [backlog 0, verified]"
+        return 0
+      fi
+      if [ "$push_round" -lt "$drain_attempts" ]; then
+        echo "  $name: pushed, $residual commit(s) still undelivered — re-pushing (round $push_round/$drain_attempts)"
+        continue
+      fi
+      echo "  $name: BACKLOG NOT DRAINED — $residual commit(s) still undelivered after $drain_attempts push round(s); this store has NO complete off-box copy" >&2
+      undrained_stores="$undrained_stores $name"
+      return 1
+    fi
+
+    if [ "$push_rc" -eq 124 ]; then
+      # Exit 124 is overloaded: a real wall-clock timeout (run_bounded via
+      # timeout/gtimeout, runtime.sh) AND the no-mechanism fall-through where
+      # neither timeout/gtimeout nor python3 exists and dolt never ran. A
+      # SIGKILLed client leaves no stderr; the no-mechanism path leaves the
+      # "cannot run bounded command" marker, so the stderr replay below
+      # disambiguates the two at zero extra mechanism.
+      echo "  $name: TIMEOUT after ${push_timeout}s — push manually or increase timeout (GC_DOLT_SYNC_PUSH_TIMEOUT_SECS)" >&2
+      # The client bound killed our dolt client, but the server-side push keeps
+      # running orphaned — reap this run's tagged push so it stops contending on
+      # the shared server (vc-ewyro). Short-bounded; never blocks the patrol.
+      reap_dolt_push_by_tag "$push_tag"
+    else
+      echo "  $name: ERROR: push failed (exit $push_rc)" >&2
+    fi
+
+    # Replay the captured dolt stderr, prefixed with the db name for scannable
+    # multi-db output. Safe to emit unfiltered (RB6): the password reaches dolt via
+    # the DOLT_CLI_PASSWORD env var (see dolt_sql), never as an argv flag, so
+    # dolt's own stderr cannot echo it back. The -s guard skips an empty capture so
+    # no spurious blank line is emitted.
+    if [ -s "$push_err_tmp" ]; then
+      # `|| [ -n "$line" ]` flushes a final line that lacks a trailing newline:
+      # POSIX `read` returns non-zero at an unterminated EOF, so a terse
+      # newline-less dolt diagnostic (e.g. a SIGKILL-truncated `fatal: ...`) would
+      # otherwise be captured but never replayed — re-introducing the swallowed
+      # failure this command set out to surface.
+      while IFS= read -r line || [ -n "$line" ]; do
+        printf '  %s: %s\n' "$name" "$line" >&2
+      done < "$push_err_tmp"
+    fi
     rm -f "$push_err_tmp"
-    return 0
-  fi
-
-  if [ "$push_rc" -eq 124 ]; then
-    # Exit 124 is overloaded: a real wall-clock timeout (run_bounded via
-    # timeout/gtimeout, runtime.sh) AND the no-mechanism fall-through where
-    # neither timeout/gtimeout nor python3 exists and dolt never ran. A
-    # SIGKILLed client leaves no stderr; the no-mechanism path leaves the
-    # "cannot run bounded command" marker, so the stderr replay below
-    # disambiguates the two at zero extra mechanism.
-    echo "  $name: TIMEOUT after ${push_timeout}s — push manually or increase timeout (GC_DOLT_SYNC_PUSH_TIMEOUT_SECS)" >&2
-    # The client bound killed our dolt client, but the server-side push keeps
-    # running orphaned — reap this run's tagged push so it stops contending on
-    # the shared server (vc-ewyro). Short-bounded; never blocks the patrol.
-    reap_dolt_push_by_tag "$push_tag"
-  else
-    echo "  $name: ERROR: push failed (exit $push_rc)" >&2
-  fi
-
-  # Replay the captured dolt stderr, prefixed with the db name for scannable
-  # multi-db output. Safe to emit unfiltered (RB6): the password reaches dolt via
-  # the DOLT_CLI_PASSWORD env var (see dolt_sql), never as an argv flag, so
-  # dolt's own stderr cannot echo it back. The -s guard skips an empty capture so
-  # no spurious blank line is emitted.
-  if [ -s "$push_err_tmp" ]; then
-    # `|| [ -n "$line" ]` flushes a final line that lacks a trailing newline:
-    # POSIX `read` returns non-zero at an unterminated EOF, so a terse
-    # newline-less dolt diagnostic (e.g. a SIGKILL-truncated `fatal: ...`) would
-    # otherwise be captured but never replayed — re-introducing the swallowed
-    # failure this command set out to surface.
-    while IFS= read -r line || [ -n "$line" ]; do
-      printf '  %s: %s\n' "$name" "$line" >&2
-    done < "$push_err_tmp"
-  fi
-  rm -f "$push_err_tmp"
-  return 1
+    # A push that failed outright is also a store with no complete off-box copy
+    # for this window, so name it in the drain summary rather than letting the
+    # per-store line scroll past. The generic exit_code=1 already fails the run;
+    # this makes WHICH store failed survive into the end-of-run block (D3).
+    if [ "$drain" = true ]; then
+      undrained_stores="$undrained_stores $name"
+    fi
+    return 1
+  done
 }
 
 sync_database_cli() {
@@ -657,10 +792,25 @@ fi
 exit_code=0
 server_running=false
 is_running && server_running=true
+
+# ADR-0064 D3. --drain asserts a durability property, and only the SQL path can
+# verify it: the residual re-classification runs through the live server. In CLI
+# mode (server down) each store would be pushed unverified and the run would
+# still exit 0 — a window that claims delivery it never checked, which is worse
+# than no window at all because order.completed would then read as evidence of
+# freshness. Refuse instead of degrading silently.
+if [ "$drain" = true ] && [ "$server_running" != true ]; then
+  echo "gc dolt sync --drain: no managed Dolt server reachable on port ${GC_DOLT_PORT:-?}; the delivery window cannot verify a zero backlog without it" >&2
+  exit 2
+fi
 # vp-9v6f9: every store name that hit a COLD-OPEN WALL this run, for the
 # end-of-run backup-coverage summary below. Appended to directly by
 # sync_database_sql (same shell, not a subshell — plain assignment persists).
 cold_wall_stores=""
+# ADR-0064 D3: every store this --drain run could not prove it drove to a zero
+# backlog — undrainable residual, unmeasurable residual, outright push failure,
+# or no remote at all. Same same-shell append discipline as cold_wall_stores.
+undrained_stores=""
 
 # Does this run have at least one database it will actually sync? Mirrors the
 # selection filters of the sync loop below (.dolt present, not a system schema,
@@ -720,6 +870,21 @@ if [ -n "$cold_wall_stores" ]; then
   for cw_store in $cold_wall_stores; do
     echo "  $cw_store"
   done
+fi
+
+# ADR-0064 D3 / AC4. The delivery window's whole claim is "every store reached a
+# verified zero backlog". Anything short of that must be terminal, named, and
+# non-zero — never a silent exit 0 that an order summary then records as a fresh
+# backup. This is the failure shape vp-cblo produced for darc-backup ("skipping
+# sweep exits 0 -> order.completed counts as fresh") and it must not recur here.
+if [ "$drain" = true ] && [ -n "$undrained_stores" ]; then
+  echo ""
+  echo "BACKLOG NOT DRAINED:"
+  for ud_store in $undrained_stores; do
+    echo "  $ud_store"
+  done
+  echo "These stores have NO complete off-box copy for this server lifetime."
+  exit_code=1
 fi
 
 exit $exit_code
