@@ -15,8 +15,8 @@ ASSIGNEE="${GC_SESSION_NAME:-$GC_AGENT}"
 while true; do
     ready=$(bd ready --assignee="$ASSIGNEE" --include-ephemeral 2>/dev/null || true)
 
-    if echo "$ready" | grep -q "^gc-"; then
-        id=$(echo "$ready" | grep "^gc-" | head -1 | awk '{print $1}')
+    if echo "$ready" | grep -qE '^[^[:alnum:]]*gc-'; then
+        id=$(echo "$ready" | grep -E '^[^[:alnum:]]*gc-' | head -1 | grep -oE 'gc-[[:alnum:]]+' | head -1)
         bd close "$id"
         exit 0
     fi

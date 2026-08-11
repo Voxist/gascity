@@ -15,10 +15,10 @@ while true; do
     # Check inbox for dispatch requests
     inbox=$(gc mail inbox "$GC_AGENT" 2>/dev/null || true)
 
-    if echo "$inbox" | grep -q "^gc-"; then
+    if echo "$inbox" | grep -qE '^[^[:alnum:]]*gc-'; then
         # Process each message
-        echo "$inbox" | grep "^gc-" | while read -r line; do
-            msg_id=$(echo "$line" | awk '{print $1}')
+        echo "$inbox" | grep -E '^[^[:alnum:]]*gc-' | while read -r line; do
+            msg_id=$(echo "$line" | grep -oE 'gc-[[:alnum:]]+' | head -1)
 
             # Read the dispatch request
             msg=$(gc mail read "$msg_id" 2>/dev/null || true)

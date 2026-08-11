@@ -45,15 +45,17 @@ func TestSplitGlobalFlagsSkipsGlobalFlagValues(t *testing.T) {
 // bypass below: SplitGlobalFlags would read that flag's value as the verb, and
 // every guard keyed off the verb stops firing — with no test failing.
 //
-// Sourced from `bd --help` (bd 1.1.0). bd declares exactly four persistent
-// flags that consume the next argument; -C and --directory are the two spellings
-// of one of them. Every other persistent flag (--global, --ignore-schema-skew,
-// --json, --profile, -q/--quiet, --readonly, --sandbox, -v/--verbose, -h/--help,
+// Sourced from `bd --help` (bd 1.1.0, fork-first repin a75c226c9). bd declares
+// exactly five persistent flags that consume the next argument; -C and
+// --directory are the two spellings of one of them, and --database is the
+// 0062-era proxied database override. Every other persistent flag (--global,
+// --ignore-schema-skew, --json, --no-color, --profile, --cpu-profile,
+// --mem-profile, -q/--quiet, --readonly, --sandbox, -v/--verbose, -h/--help,
 // -V/--version) is boolean and consumes nothing.
 func TestGlobalValueFlagsIsComplete(t *testing.T) {
 	want := map[string]bool{
 		"--actor": true, "--db": true, "-C": true, "--directory": true,
-		"--dolt-auto-commit": true,
+		"--dolt-auto-commit": true, "--database": true,
 	}
 	if got := GlobalValueFlags(); !reflect.DeepEqual(got, want) {
 		t.Errorf("GlobalValueFlags() = %v, want %v; re-check `bd --help` persistent flags", got, want)

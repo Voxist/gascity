@@ -15,8 +15,8 @@ ASSIGNEE="${GC_SESSION_NAME:-$GC_AGENT}"
 
 while true; do
     hooked=$(bd ready --assignee="$ASSIGNEE" --include-ephemeral 2>/dev/null || true)
-    if echo "$hooked" | grep -q "^gc-"; then
-        work_id=$(echo "$hooked" | grep "^gc-" | head -1 | awk '{print $1}')
+    if echo "$hooked" | grep -qE '^[^[:alnum:]]*gc-'; then
+        work_id=$(echo "$hooked" | grep -E '^[^[:alnum:]]*gc-' | head -1 | grep -oE 'gc-[[:alnum:]]+' | head -1)
 
         if [ -n "${GC_DIR:-}" ] && [ -d "$GC_DIR" ]; then
             cd "$GC_DIR"
@@ -37,8 +37,8 @@ while true; do
     fi
 
     ready=$(bd ready 2>/dev/null || true)
-    if echo "$ready" | grep -q "^gc-"; then
-        id=$(echo "$ready" | grep "^gc-" | head -1 | awk '{print $1}')
+    if echo "$ready" | grep -qE '^[^[:alnum:]]*gc-'; then
+        id=$(echo "$ready" | grep -E '^[^[:alnum:]]*gc-' | head -1 | grep -oE 'gc-[[:alnum:]]+' | head -1)
         bd update "$id" --assignee="$ASSIGNEE" 2>/dev/null || true
         continue
     fi
