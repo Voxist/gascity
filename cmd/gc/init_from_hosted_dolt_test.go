@@ -68,6 +68,16 @@ func TestInitFromPinsHostedDoltEndpoint(t *testing.T) {
 // canonical external config.yaml is forced).
 func TestInitFromWithoutHostedPreservesTemplate(t *testing.T) {
 	clearGCEnv(t)
+	// Hermetic-init idiom (see e.g. TestDoInitFromDirSuccess): every artifact this
+	// test asserts is fully determined before the managed-Dolt bootstrap runs, so
+	// skip the bootstrap. Without this the test spawned a REAL dolt sql-server it
+	// never stopped — the package leak guard then failed the whole job,
+	// deterministically, while looking like unrelated infrastructure (three
+	// consecutive pre-push runs, 2026-08-06). The hosted-endpoint siblings keep
+	// the bd-backed provider because --dolt-host validation requires it; they pin
+	// an EXTERNAL endpoint and spawn no local server.
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
 
 	src := gastownExamplePath(t)
 	cityPath := filepath.Join(t.TempDir(), "city")
