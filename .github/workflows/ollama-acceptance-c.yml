@@ -9,7 +9,8 @@ permissions:
 env:
   DOLT_VERSION: "2.1.7"
   BD_VERSION: "v1.1.0" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
-  BD_SOURCE_REF: "e97839a2e1c0de305bf64a01b997f2f314591aa4" # bd commit with schema 0054 — built from source by install-bd-archive.sh
+  BD_REPO: "Voxist/beads"
+  BD_SOURCE_REF: "a75c226c97d8ab7c0ae0359fb258e6cfd80bf72b" # fork-tip bd commit (schema 0062) — built from BD_REPO source by install-bd-archive.sh
   ANTHROPIC_BASE_URL: https://ollama.com
   ANTHROPIC_API_KEY: ""
   ANTHROPIC_AUTH_TOKEN: ${{ secrets.OLLAMA_API_KEY }}

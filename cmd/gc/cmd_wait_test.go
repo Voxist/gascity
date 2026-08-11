@@ -725,7 +725,11 @@ func pseudoVersionCommit(pinned string) (string, bool) {
 	return m[1], true
 }
 
-// depsEnvBDPins reads BD_VERSION and BD_SOURCE_REF out of the repo's deps.env.
+// depsEnvBDPins reads BD_VERSION and the go.mod-facing ref out of the repo's
+// deps.env. Under the fork-first bridge the LIBRARY pin (BD_LIB_REF, the
+// newest upstream ancestor of the fork build commit) is what go.mod must
+// match — fork commits do not resolve on the module path. When BD_LIB_REF is
+// absent (upstream's one-commit shape), BD_SOURCE_REF plays both roles.
 func depsEnvBDPins(t *testing.T) (bdVersion, sourceRef string) {
 	t.Helper()
 	// Walk up to the module root rather than shelling out to `git rev-parse`:
@@ -753,7 +757,11 @@ func depsEnvBDPins(t *testing.T) (bdVersion, sourceRef string) {
 		case strings.HasPrefix(line, "BD_VERSION="):
 			bdVersion = strings.TrimPrefix(line, "BD_VERSION=")
 		case strings.HasPrefix(line, "BD_SOURCE_REF="):
-			sourceRef = strings.TrimPrefix(line, "BD_SOURCE_REF=")
+			if sourceRef == "" {
+				sourceRef = strings.TrimPrefix(line, "BD_SOURCE_REF=")
+			}
+		case strings.HasPrefix(line, "BD_LIB_REF="):
+			sourceRef = strings.TrimPrefix(line, "BD_LIB_REF=")
 		}
 	}
 	if bdVersion == "" || sourceRef == "" {

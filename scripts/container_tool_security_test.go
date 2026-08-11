@@ -70,19 +70,19 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 
 func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	const (
-		// FORK DIVERGENCE — TIME-BOXED BRIDGE (ADR-0026 C5, vp-kpoi, ga-kgluj).
-		// Upstream now pins bd source at bf97b73749 (2026-08-05, schema 0062);
-		// this fork deliberately stays on e97839a2 (schema 0054) because moving
-		// past 0054 migrates the fleet's live stores through irreversible
-		// migrations (0059/0061/0062 ship no down.sql) and is planned as a
-		// coordinated rehearsed cutover, not a resync side effect. These three
-		// values move together with go.mod and deps.env; the cutover replaces
-		// them with the fleet's Voxist/beads fork commit (ga-zzcjs) or, once a
-		// bd release >= 0054 exists, with that tag.
+		// FORK DIVERGENCE — FORK-FIRST BRIDGE (ga-zzcjs; supersedes the
+		// ADR-0026 C5 upstream bridge). The image builds bd from the
+		// Voxist/beads fork tip (schema 0062 plus fork-only fixes; the
+		// 0054->0062 store migration was rehearsed and cut over
+		// deliberately). go.mod links BD_LIB_REF — the fork tip's newest
+		// upstream ancestor — because fork commits do not resolve on the
+		// module path. These values move together with deps.env and go.mod;
+		// a published release >= 0062 on a module-resolvable repo retires
+		// the bridge (one change: BD_VERSION=tag, drop the refs).
 		// BD_VERSION itself is NOT diverged — the pinned commit declares 1.1.0.
-		bdSourceRef    = "e97839a2e1c0de305bf64a01b997f2f314591aa4"
-		bdSourceSHA256 = "e40acdcbca7bdc08b986113692e11be7a533b9fced326c20e786f141c29996f1"
-		bdBuild        = "e97839a2e"
+		bdSourceRef    = "a75c226c97d8ab7c0ae0359fb258e6cfd80bf72b"
+		bdSourceSHA256 = "10f9356ebd047266997d417082b51eb7dc913eff63b4facef918c63ce0e1b4b7"
+		bdBuild        = "a75c226c9"
 		bdBranch       = "HEAD"
 		grpcVersion    = "1.82.1"
 		xtextVersion   = "0.39.0"
@@ -103,7 +103,8 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		"ARG BD_BRANCH=" + bdBranch,
 		"ARG GRPC_VERSION=" + grpcVersion,
 		"ARG XTEXT_VERSION=" + xtextVersion,
-		`https://github.com/gastownhall/beads/archive/${BD_SOURCE_REF}.tar.gz`,
+		"ARG BD_REPO=Voxist/beads",
+		`https://github.com/${BD_REPO}/archive/${BD_SOURCE_REF}.tar.gz`,
 		`echo "${BD_SOURCE_SHA256}  /tmp/bd-source.tar.gz" | sha256sum --check --strict`,
 		`grep -Fq "Version = \"${bd_version}\"" cmd/bd/version.go`,
 		`go get "google.golang.org/grpc@v${GRPC_VERSION}"`,

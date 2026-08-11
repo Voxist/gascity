@@ -26,9 +26,10 @@ FROM golang:1.26.5-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93
 # would skew from the linked lib. Repointed at the same commit go.mod pins.
 # Revert all three to upstream's values once a release carries 0054.
 ARG BD_VERSION=v1.1.0
-ARG BD_SOURCE_REF=e97839a2e1c0de305bf64a01b997f2f314591aa4
-ARG BD_SOURCE_SHA256=e40acdcbca7bdc08b986113692e11be7a533b9fced326c20e786f141c29996f1
-ARG BD_BUILD=e97839a2e
+ARG BD_REPO=Voxist/beads
+ARG BD_SOURCE_REF=a75c226c97d8ab7c0ae0359fb258e6cfd80bf72b
+ARG BD_SOURCE_SHA256=10f9356ebd047266997d417082b51eb7dc913eff63b4facef918c63ce0e1b4b7
+ARG BD_BUILD=a75c226c9
 ARG BD_BRANCH=HEAD
 ARG GRPC_VERSION=1.82.1
 ARG XTEXT_VERSION=0.39.0
@@ -42,7 +43,7 @@ ARG XTEXT_VERSION=0.39.0
 # patched dependency versions.
 RUN mkdir -p /src/bd /out \
     && curl -fsSL --retry 3 \
-       "https://github.com/gastownhall/beads/archive/${BD_SOURCE_REF}.tar.gz" \
+       "https://github.com/${BD_REPO}/archive/${BD_SOURCE_REF}.tar.gz" \
        -o /tmp/bd-source.tar.gz \
     && echo "${BD_SOURCE_SHA256}  /tmp/bd-source.tar.gz" | sha256sum --check --strict \
     && tar -xzf /tmp/bd-source.tar.gz --strip-components=1 -C /src/bd \

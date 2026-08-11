@@ -183,7 +183,10 @@ elif $build_from_source; then
   fi
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
-  git clone --filter=blob:none https://github.com/gastownhall/beads "${tmp}/beads-src"
+  # BD_REPO selects which repo the pinned commit lives in. The fork-first
+  # bridge builds bd from Voxist/beads (fork commits are not on the upstream
+  # repo); releases and upstream commits keep working via the default.
+  git clone --filter=blob:none "https://github.com/${BD_REPO:-gastownhall/beads}" "${tmp}/beads-src"
   git -C "${tmp}/beads-src" checkout "$source_ref"
   # Same build shape as ci.yml's cross-version contract cells.
   go -C "${tmp}/beads-src" build -tags gms_pure_go -o "${tmp}/bd" ./cmd/bd

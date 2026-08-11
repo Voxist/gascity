@@ -37,6 +37,7 @@ func TestBDVersionPins(t *testing.T) {
 	bdCurrent := env["BD_CURRENT_VERSION"] // bleeding-edge matrix cell (built from source)
 	bdCurrentRef := env["BD_CURRENT_REF"]  // beads commit the current cell builds from
 	bdSourceRef := env["BD_SOURCE_REF"]    // beads commit the installable default builds from (bridge mode)
+	bdLibRef := env["BD_LIB_REF"]          // upstream ancestor go.mod links (fork-first bridge); empty = BD_SOURCE_REF plays both roles
 
 	if bdVersion == "" {
 		t.Fatal("deps.env missing BD_VERSION")
@@ -68,17 +69,32 @@ func TestBDVersionPins(t *testing.T) {
 		bridgeRef = bdVersion
 	}
 	if bdSourceRef != "" && !commitRE.MatchString(bdSourceRef) {
-		t.Fatalf("deps.env BD_SOURCE_REF = %q, want a full 40-char gastownhall/beads commit SHA", bdSourceRef)
+		t.Fatalf("deps.env BD_SOURCE_REF = %q, want a full 40-char beads commit SHA", bdSourceRef)
+	}
+	if bdLibRef != "" && !commitRE.MatchString(bdLibRef) {
+		t.Fatalf("deps.env BD_LIB_REF = %q, want a full 40-char upstream beads commit SHA", bdLibRef)
+	}
+	if bdLibRef != "" && bridgeRef == "" {
+		t.Fatal("deps.env BD_LIB_REF without BD_SOURCE_REF: the lib ref only exists to pair with a fork build commit")
+	}
+	// go.mod must match the LIBRARY ref: under the fork-first bridge the
+	// binary builds from a Voxist/beads fork commit that the module path
+	// (which resolves to the upstream repo) cannot serve, so go.mod links the
+	// newest upstream ancestor recorded in BD_LIB_REF instead.
+	libRef := bdLibRef
+	if libRef == "" {
+		libRef = bridgeRef
 	}
 	bdVersionIsCommit := bridgeRef != ""
 
 	// The unified-pin invariant (go.mod, the bleeding-edge contract-matrix
 	// cell, and the agent image all on ONE commit) is upstream's shape and
 	// only holds when no bridge is active. In bridge mode this fork
-	// deliberately splits them: go.mod and the image follow BD_SOURCE_REF
-	// (the lockstep checks below), while BD_CURRENT_REF may point at a newer
-	// beads commit so the contract matrix exercises gc against the schema the
-	// planned migration will move to (ga-zzcjs, ga-y1xxg).
+	// deliberately splits them: the image follows BD_SOURCE_REF (the fork
+	// build commit), go.mod follows BD_LIB_REF (its newest upstream ancestor
+	// — the lockstep checks below), while BD_CURRENT_REF may point at a
+	// different beads commit so the contract matrix exercises another cell
+	// (ga-zzcjs, ga-y1xxg).
 	if bridgeRef == "" {
 		// The native Go store, the bleeding-edge contract-matrix cell, and the
 		// source-built agent image must all use the same upstream commit. A drift
@@ -117,9 +133,9 @@ func TestBDVersionPins(t *testing.T) {
 	pseudo := regexp.MustCompile(`[-.]\d{14}-([0-9a-f]{12})$`).FindStringSubmatch(linkedBeads)
 	switch {
 	case bdVersionIsCommit && pseudo == nil:
-		t.Fatalf("deps.env pins beads commit %s but go.mod links released beads %s; the bd binary and the linked library must move together", bridgeRef, linkedBeads)
-	case bdVersionIsCommit && !strings.HasPrefix(bridgeRef, pseudo[1]):
-		t.Fatalf("deps.env pins beads commit %s but go.mod's beads pseudo-version %s pins commit %s; the bd binary and the linked library must pin the SAME beads commit", bridgeRef, linkedBeads, pseudo[1])
+		t.Fatalf("deps.env pins beads commit %s but go.mod links released beads %s; the bd binary and the linked library must move together", libRef, linkedBeads)
+	case bdVersionIsCommit && !strings.HasPrefix(libRef, pseudo[1]):
+		t.Fatalf("deps.env expects go.mod to link beads commit %s (BD_LIB_REF, or BD_SOURCE_REF when unset) but go.mod's pseudo-version %s pins commit %s", libRef, linkedBeads, pseudo[1])
 	case !bdVersionIsCommit && pseudo != nil:
 		t.Fatalf("go.mod links untagged beads commit %s (%s) but deps.env installs release %s; set BD_SOURCE_REF to the same commit, or move go.mod to a release tag", pseudo[1], linkedBeads, bdVersion)
 	}
