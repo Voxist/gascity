@@ -196,7 +196,7 @@ func writeManagedDoltConfigFile(path, host, port, dataDir, logLevel string, dolt
 		// argument that ADR-0064 retired on source evidence.
 		waitTimeoutLine = "  # INERT — declared-only in go-mysql-server; NOT a connection reaper.\n" +
 			"  # read_timeout_millis is the sole reaper. Do not cite this key as\n" +
-			"  # defence-in-depth for raising it on a swarm-facing server (ADR-0064).\n" +
+			"  # defense-in-depth for raising it on a swarm-facing server (ADR-0064).\n" +
 			fmt.Sprintf("  wait_timeout: %q\n", strconv.Itoa(waitTimeout))
 	}
 	content := fmt.Sprintf(`# Dolt SQL server configuration — managed by gc-beads-bd

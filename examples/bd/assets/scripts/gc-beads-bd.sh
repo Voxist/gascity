@@ -1320,7 +1320,7 @@ write_config_yaml() {
     if [ -n "$wait_timeout_value" ]; then
         wait_timeout_line="  # INERT — declared-only in go-mysql-server; NOT a connection reaper.
   # read_timeout_millis is the sole reaper. Do not cite this key as
-  # defence-in-depth for raising it on a swarm-facing server (ADR-0064).
+  # defense-in-depth for raising it on a swarm-facing server (ADR-0064).
   wait_timeout: \"$wait_timeout_value\""
     else
         wait_timeout_line=""

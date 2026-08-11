@@ -98,12 +98,14 @@ func TestSyncDrainRePushesAndFailsTerminallyWhenBacklogRemains(t *testing.T) {
 	if got := strings.Count(log, "CALL DOLT_PUSH("); got != 2 {
 		t.Fatalf("drain must re-push up to the attempt budget and then stop: want 2 pushes, got %d.\nlog:\n%s", got, log)
 	}
-	if !strings.Contains(out, "BACKLOG NOT DRAINED") {
+	// D3: the failure must name the store in the end-of-run summary, not only in
+	// a per-store line that scrolls past in a multi-store run. Index (not
+	// Contains) is the guard here so the slice below can never be taken from -1.
+	summaryStart := strings.Index(out, "BACKLOG NOT DRAINED")
+	if summaryStart < 0 {
 		t.Fatalf("an undrainable store must produce a terminal record.\nout:\n%s", out)
 	}
-	// D3: the failure must name the store in the end-of-run summary, not only in
-	// a per-store line that scrolls past in a multi-store run.
-	summary := out[strings.Index(out, "BACKLOG NOT DRAINED"):]
+	summary := out[summaryStart:]
 	if !strings.Contains(summary, "app") {
 		t.Fatalf("the summary must name the undrained store.\nout:\n%s", out)
 	}
