@@ -186,6 +186,15 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 		return report, fmt.Errorf("refusing to start dolt sql-server for %s: %w", layout.DataDir, err)
 	}
 
+	// Drain the off-box backlog BEFORE the server starts (vp-6hb8). This is
+	// the only moment a CLI push is safe (the lock-free wait above proved no
+	// server owns the store) and the only path with no listener deadline in
+	// front of it. See dolt_boot_drain.go for the trap this closes. Failures
+	// never block the boot.
+	if bootDrainEnabled() {
+		runManagedDoltBootDrain(layout.DataDir, bootDrainBudget(), os.Stderr)
+	}
+
 	currentPort := portNum
 	// retryWindow is resolved once before the loop so an in-progress
 	// city.toml edit cannot change the wait policy mid-flight.
