@@ -15,14 +15,52 @@ func (c *CachingStore) Create(b Bead) (Bead, error) {
 
 // CreateWithStorage passes through a policy-selected storage class to backing
 // stores that support table-specific creates, then updates the cache.
+//
+// A backing store without the optional StorageCreateStore capability does NOT
+// cause the class to be discarded: the class is stamped onto the bead's own
+// Ephemeral/NoHistory fields and the plain Create carries it. Every storage
+// backend routes on those fields (the beads library sends Ephemeral or
+// NoHistory issues to the dolt_ignore'd wisps table and skips DOLT_COMMIT for
+// them), so the policy still lands. Dropping the class here instead — the
+// previous behavior — silently created every session bead in the committed
+// issues table on any deployment whose backend lacks the capability, costing
+// one Dolt commit per create and per subsequent update (vp-ia76: 727 of 730
+// session beads in 24h on the live hq city).
+//
+// BLAST RADIUS. This is not a session-only change. cmd/gc's policy layer routes
+// six policy names through CreateWithStorage (bead_policy_store.go:
+// policyNameForBead -> effectiveBeadStorage), so on a backing that lacks the
+// capability EVERY one of them starts carrying its class where it previously
+// carried none:
+//
+//   - session, wait, nudge, order_tracking: no_history under both semantics.
+//     NoHistory does not change query visibility (ListQuery.matchesTier only
+//     filters on Ephemeral), so these gain wisps-table routing and lose nothing.
+//   - workflow: no_history under bd-105 ready semantics, history otherwise.
+//   - wisp: EPHEMERAL under bd-105 ready semantics. This is the one to look at
+//     twice — an ephemeral bead is GC/TTL-eligible AND is dropped by the default
+//     TierIssues read. Reads through the policy layer are safe (it expands
+//     TierIssues to TierBoth), but a raw un-wrapped read of the same store now
+//     misses newly created wisps on such a deployment.
+//
+// A capable backing (BdStore) already behaved this way — the class was forwarded
+// and honored — so this converges incapable backings onto the behavior capable
+// ones already had, rather than inventing a new one.
+//
+// An explicit class also OVERRIDES fields the caller stamped by hand:
+// StorageHistory clears Ephemeral/NoHistory. Only StorageDefault leaves the
+// incoming bead alone.
 func (c *CachingStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, error) {
-	storageBacking, ok := c.backing.(StorageCreateStore)
-	if !ok {
-		return c.Create(b)
+	if storageBacking, ok := c.backing.(StorageCreateStore); ok {
+		return c.createWith(func() (Bead, error) {
+			return storageBacking.CreateWithStorage(b, storage)
+		})
 	}
-	return c.createWith(func() (Bead, error) {
-		return storageBacking.CreateWithStorage(b, storage)
-	})
+	staged, err := beadWithStorageClass(b, storage)
+	if err != nil {
+		return Bead{}, fmt.Errorf("caching store create: %w", err)
+	}
+	return c.Create(staged)
 }
 
 func (c *CachingStore) createWith(create func() (Bead, error)) (Bead, error) {

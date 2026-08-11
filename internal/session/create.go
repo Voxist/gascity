@@ -1,6 +1,12 @@
 package session
 
-import "github.com/gastownhall/gascity/internal/beads"
+import (
+	"fmt"
+	"os"
+	"sync"
+
+	"github.com/gastownhall/gascity/internal/beads"
+)
 
 // CreateSpec captures the typed vocabulary for creating a session bead through
 // the front door. It is the byte-identical replacement for the inline
@@ -57,17 +63,143 @@ type CreateSpec struct {
 // pinned across every backend by the beadstest conformance case
 // CreateEchoMatchesGetOnMetadata, not just by the memstore-backed oracle here.
 func (s *Store) CreateSessionInfo(spec CreateSpec) (Info, error) {
-	created, err := s.store.Create(beads.Bead{
+	bead := beads.Bead{
 		ID:       spec.ID,
 		Title:    spec.Title,
 		Type:     BeadType,
 		Labels:   []string{LabelSession, "agent:" + spec.AgentName},
 		Metadata: spec.Metadata,
-	})
+	}
+	created, err := s.createSessionBead(bead)
 	if err != nil {
 		return Info{}, err
 	}
 	return infoFromPersistedBead(created), nil
+}
+
+// StoragePolicySelfApplying marks a store that resolves and applies the bead
+// storage policy inside its own Create. A caller that cannot reach
+// CreateWithStorage through such a store has NOT lost the policy, and must not
+// warn: the plain Create is already policy-correct.
+//
+// It is also the only party that can see a CONFIGURED policy — the storage class
+// for a policy name is read from the city config
+// ([beads.policies.session] storage = ...), which internal/session has no access
+// to. So a store that declares this marker is authoritative about the session
+// bead's storage class, and createSessionBead defers to it.
+//
+// cmd/gc's policy layer is the implementation; the coupling is pinned there by
+// `var _ session.StoragePolicySelfApplying = (*beadPolicyStore)(nil)`, so
+// renaming either side is a compile error rather than a silent downgrade to the
+// warn path.
+type StoragePolicySelfApplying interface {
+	AppliesBeadStoragePolicy()
+}
+
+// createSessionBead persists a session bead under the SESSION STORAGE POLICY:
+// no_history, never ephemeral.
+//
+// no_history and ephemeral are NOT interchangeable, and picking the wrong one
+// is worse than picking neither:
+//   - no_history sets no_history=1, ephemeral=0. Retention is dropped, nothing
+//     else is: the bead is NOT GC/TTL-eligible and reads keep finding it. (On
+//     the Dolt backend this is the dolt_ignore'd wisps table, at zero
+//     DOLT_COMMITs; other backends express the same tier their own way.)
+//   - ephemeral sets ephemeral=1, which is ALSO GC/TTL-eligible, which
+//     gascity's own policy declares incompatible for sessions
+//     (cmd/gc/bead_policy_store.go), and which ListQuery.matchesTier
+//     (internal/beads/query.go) silently DROPS from default-tier results. A
+//     session that vanishes from reads would look like a successful fix.
+//
+// Three routes to that class, in precedence order:
+//
+//  1. The store applies the policy itself (StoragePolicySelfApplying). A plain
+//     Create through it is already policy-correct. It wins over route 2 on
+//     purpose: the class named in route 2 is a hardcoded default, while a
+//     self-applying store resolves the CONFIGURED class and can honor a
+//     [beads.policies.session] storage override that this package cannot see.
+//  2. The store accepts a class out of band (beads.StorageCreateStore). Here the
+//     class is hardcoded to StorageNoHistory, the policy DEFAULT for sessions;
+//     a configured override is not visible on this route. That divergence is
+//     bounded by route 1 taking precedence: gascity's own wiring always hands
+//     this front door a policy-wrapped store (cmd/gc/class_store.go
+//     resolveSessionStore over the policy-wrapped city store), so route 2 is
+//     reached only by a caller that passes a bare store directly — a fixture or
+//     an embedder — where there is no city config to diverge from.
+//  3. Neither. The class is stamped directly onto the bead's own NoHistory
+//     field — the same field routing the caching store's own fallback relies on
+//     (internal/beads/caching_store_writes.go) — so backends that route on the
+//     field still place the bead correctly, and the loss is reported.
+//
+// Route 3 warns rather than fails. Observability must never break the caller: a
+// session that cannot be created is worse than one created in the wrong tier.
+// But it must be REPORTED, not silent — an unhonored capability coerced into
+// the quiet default is exactly ADR-0043 Cause 1, and it would let this whole
+// mechanism ship inert and invisible.
+func (s *Store) createSessionBead(b beads.Bead) (beads.Bead, error) {
+	if _, ok := s.store.Store.(StoragePolicySelfApplying); ok {
+		return s.store.Create(b)
+	}
+	if storageStore, ok := s.store.Store.(beads.StorageCreateStore); ok {
+		return storageStore.CreateWithStorage(b, beads.StorageNoHistory)
+	}
+	warnSessionStorageUnsupported(s.store.Store)
+	b.NoHistory = true
+	b.Ephemeral = false
+	return s.store.Create(b)
+}
+
+var (
+	sessionStorageWarnMu    sync.Mutex
+	sessionStorageWarnTypes = map[string]bool{}
+)
+
+// ResetStorageWarningsForTest clears the per-store-type warning ledger.
+//
+// The ledger is process-wide by design, which makes "this composition does not
+// warn" depend on whether an earlier test in the same binary already warned for
+// the same store type — a silence assertion that passes for the wrong reason is
+// a guard that cannot fail. Cross-package tests (cmd/gc's policy-composition
+// guard) reset it first so they observe the FIRST-warning behavior.
+func ResetStorageWarningsForTest() {
+	sessionStorageWarnMu.Lock()
+	sessionStorageWarnTypes = map[string]bool{}
+	sessionStorageWarnMu.Unlock()
+}
+
+// warnSessionStorageUnsupported reports that the session storage policy could
+// not be requested through a store, ONCE PER STORE TYPE per process.
+//
+// The key is the store type, not the process, because a single benign warning
+// would otherwise mute a later, genuinely incapable chain of a DIFFERENT type —
+// a silent failure inside the warning that exists to prevent silent failure.
+// Keying on the type bounds the noise (one line per offending type) without
+// ever muting a new offender.
+//
+// The message names the store TYPE and the POLICY that was lost, not a table or
+// a commit count: the same code path serves FileStore and MemStore chains where
+// there is no Dolt, no issues table, and no commit to count. What is universally
+// true is that the policy could not be expressed through this store, so the
+// tier now depends on the backend honoring a field rather than on gascity
+// having asked for it.
+func warnSessionStorageUnsupported(store any) {
+	typeName := fmt.Sprintf("%T", store)
+	sessionStorageWarnMu.Lock()
+	seen := sessionStorageWarnTypes[typeName]
+	sessionStorageWarnTypes[typeName] = true
+	sessionStorageWarnMu.Unlock()
+	if seen {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"gc: session storage policy NOT applied through %s: it implements neither "+
+			"beads.StorageCreateStore nor session.StoragePolicySelfApplying, so the "+
+			"no_history class could not be requested. The bead is stamped no_history "+
+			"on its own field and created anyway — backends that route on that field "+
+			"still place it in the no-history tier, but a backend that ignores the "+
+			"field keeps session beads in its default, fully-retained tier and the "+
+			"session storage policy is lost there (vp-ia76 / vp-9u1).\n",
+		typeName)
 }
 
 // CreateSession creates a session bead from spec and returns its id. It is the
