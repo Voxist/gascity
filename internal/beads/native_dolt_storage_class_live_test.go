@@ -1,3 +1,5 @@
+//go:build integration
+
 package beads
 
 import (
@@ -5,22 +7,67 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"regexp"
 	"testing"
 
 	_ "github.com/go-sql-driver/mysql"
 )
 
+// probeDBNamePattern constrains the probe database name to characters that are
+// safe to interpolate into an SQL identifier. The name reaches the query as an
+// identifier, where a placeholder cannot be used, so it is validated instead of
+// escaped — a whitelist is the sound fix, quoting is not.
+var probeDBNamePattern = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+
+// The identifier whitelist must actually reject the shapes that would let an
+// operator-supplied database name change the meaning of the probe's queries.
+// It needs no server, so it runs whenever the integration tag is on.
+func TestProbeDBNamePatternRejectsSQLIdentifierInjection(t *testing.T) {
+	for _, ok := range []string{"gc", "hq_scratch", "probe1", "A_1"} {
+		if !probeDBNamePattern.MatchString(ok) {
+			t.Errorf("probeDBNamePattern rejected the plain identifier %q", ok)
+		}
+	}
+	for _, bad := range []string{
+		"",
+		"hq`.issues; drop database hq; -- ",
+		"hq`",
+		"hq.issues",
+		"hq issues",
+		"hq-issues",
+		"hq\nissues",
+		"hq'",
+	} {
+		if probeDBNamePattern.MatchString(bad) {
+			t.Errorf("probeDBNamePattern accepted %q, which is not a bare SQL identifier "+
+				"and would be interpolated into the probe queries verbatim", bad)
+		}
+	}
+}
+
 // TestNativeDoltStoreCreateWithStorageRoutesToWispsLive is the end-to-end proof
 // for vp-ia76 against a REAL Dolt sql-server and a REAL beads schema — not a
 // fake storage. It measures the thing the epic is about: the Dolt commit count.
 //
-// It is opt-in because it needs a scratch server. Run it with:
+// It is opt-in twice over: the `integration` build tag keeps it out of the
+// default suite (AGENTS.md, "Integration tests use //go:build integration"),
+// and it still skips unless a scratch server is configured. Run it with:
 //
 //	GC_NATIVE_WISP_PROBE_SCOPE=<dir containing .beads>  \
 //	GC_NATIVE_WISP_PROBE_DSN='root@tcp(127.0.0.1:49991)/<db>'  \
 //	GC_NATIVE_WISP_PROBE_DB=<db>  \
 //	GC_NATIVE_WISP_PROBE_PORT=49991  \
-//	go test ./internal/beads/ -run TestNativeDoltStoreCreateWithStorageRoutesToWispsLive -count=1 -v
+//	go test -tags integration ./internal/beads/ \
+//	  -run TestNativeDoltStoreCreateWithStorageRoutesToWispsLive -count=1 -v
+//
+// GC_NATIVE_WISP_PROBE_DB is interpolated into the probe queries as an SQL
+// identifier (placeholders bind values, not identifiers), so it is validated
+// against probeDBNamePattern first.
+//
+// The always-on sibling is TestNativeDoltStoreCreateWithStorageStampsClass,
+// which pins the field routing against the in-memory storage fixture. This one
+// exists for the part a fixture cannot show: the real table the row lands in
+// and the Dolt commit it does or does not cost.
 //
 // NEVER point it at the live fleet server. It writes beads.
 func TestNativeDoltStoreCreateWithStorageRoutesToWispsLive(t *testing.T) {
@@ -30,6 +77,10 @@ func TestNativeDoltStoreCreateWithStorageRoutesToWispsLive(t *testing.T) {
 	port := os.Getenv("GC_NATIVE_WISP_PROBE_PORT")
 	if scope == "" || dsn == "" || dbName == "" || port == "" {
 		t.Skip("scratch Dolt server not configured; see the doc comment")
+	}
+	if !probeDBNamePattern.MatchString(dbName) {
+		t.Fatalf("GC_NATIVE_WISP_PROBE_DB = %q is not a plain [A-Za-z0-9_] identifier; "+
+			"it is interpolated into the probe queries as an SQL identifier", dbName)
 	}
 
 	db, err := sql.Open("mysql", dsn)

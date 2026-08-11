@@ -245,6 +245,7 @@ var (
 	_ AtomicTxStore                 = (*NativeDoltStore)(nil)
 	_ GraphApplyStore               = (*NativeDoltStore)(nil)
 	_ StorageGraphApplyStore        = (*NativeDoltStore)(nil)
+	_ StorageCreateStore            = (*NativeDoltStore)(nil)
 	_ EphemeralGraphApplyStore      = (*NativeDoltStore)(nil)
 	_ conditionalWritesModeCarrier  = (*NativeDoltStore)(nil)
 )

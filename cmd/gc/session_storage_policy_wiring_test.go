@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -30,11 +34,9 @@ func (s *capableBackingStore) CreateWithStorage(b beads.Bead, storage beads.Stor
 }
 
 // incapableBackingStore is a backend that does NOT implement
-// StorageCreateStore. This is the shape *beads.NativeDoltStore has today: it
-// implements Create (and ApplyGraphPlanWithStorage) but no single-bead
-// CreateWithStorage. It is the store the live hq city runs on — proven by the
-// "gc: update bead <id>" commit messages in hq.dolt_log, which are emitted only
-// by NativeDoltStore.Update (internal/beads/native_dolt_store.go:1004).
+// StorageCreateStore — the shape *beads.NativeDoltStore had before this change,
+// and the shape any future or third-party backend may have, since the
+// capability is optional by design.
 //
 // It records the bead exactly as it arrives, so the test can see whether the
 // no-history storage class survived the trip. Routing to the wisps table is
@@ -99,11 +101,10 @@ func TestSessionCreateRoutesToNoHistoryOnCapableBackend(t *testing.T) {
 // TestSessionCreateRoutesToNoHistoryOnIncapableBackend is the vp-ia76 guard.
 //
 // A backend that cannot honor a storage class must not cause the class to be
-// discarded. CachingStore.CreateWithStorage currently falls back to plain
-// Create when the backing store is not a StorageCreateStore
-// (internal/beads/caching_store_writes.go:20-22), dropping the policy silently
-// — no error, no warning, no signal of any kind. That is ADR-0043 Cause 1:
-// an unsupported capability coerced into the quiet default.
+// discarded: CachingStore.CreateWithStorage stamps it onto the bead's own
+// fields instead (internal/beads/caching_store_writes.go). Discarding it would
+// be ADR-0043 Cause 1 — an unsupported capability coerced into the quiet
+// default, with no error, no warning, and no signal of any kind.
 //
 // The consequence is measurable on the live fleet, not theoretical. Measured on
 // hq 2026-07-31: 727 of 730 session beads created in 24h landed in the
@@ -113,9 +114,8 @@ func TestSessionCreateRoutesToNoHistoryOnCapableBackend(t *testing.T) {
 // the fleet's configuration): a session bead in issues costs one Dolt commit on
 // create and one on every update; the same bead in wisps costs zero for both.
 //
-// Reverting the fix must turn this red. It asserts the bead the backend
-// actually receives — the value the beads library routes on — not that some
-// wrapper was called.
+// It asserts the bead the backend actually receives — the value the beads
+// library routes on — not that some wrapper was called.
 func TestSessionCreateRoutesToNoHistoryOnIncapableBackend(t *testing.T) {
 	backing := &incapableBackingStore{Store: beads.NewMemStore()}
 
@@ -134,14 +134,72 @@ func TestSessionCreateRoutesToNoHistoryOnIncapableBackend(t *testing.T) {
 	}
 }
 
-// TestNativeDoltStoreDeclaresStorageCreateCapability pins the capability
-// itself. The live city store is a *beads.NativeDoltStore; without this
-// assertion the drop above is reachable again the moment the fallback is
-// touched.
-func TestNativeDoltStoreDeclaresStorageCreateCapability(t *testing.T) {
-	var store any = (*beads.NativeDoltStore)(nil)
-	if _, ok := store.(beads.StorageCreateStore); !ok {
-		t.Fatal("*beads.NativeDoltStore does not implement beads.StorageCreateStore: " +
-			"policy-selected storage classes are silently discarded on the store the live city runs on")
+// TestPolicyStoreCompositionCreatesSessionsSilently is the guard for the
+// storage-policy MARKER contract.
+//
+// internal/session recognizes cmd/gc's policy wrapper structurally: if the
+// marker method disappears from either side, the front door stops recognizing
+// the wrapper and falls through to the last-resort path, which warns on stderr
+// and imposes its own hardcoded class over the configured one. Nothing else
+// fails — the bead is still created, the storage class still ends up
+// no_history by coincidence of the default, and every other test in this
+// package stays green. The observable symptom is the warning, so that is what
+// this asserts: stderr SILENCE through the REAL composition
+// (wrapStoreWithBeadPolicies + wrapWithCachingStore + the session front door).
+//
+// Its compile-time half lives in bead_policy_store.go
+// (`var _ session.StoragePolicySelfApplying = (*beadPolicyStore)(nil)`), which
+// catches a rename on either side at build time. This catches the wiring: a
+// composition that never puts the marked wrapper where the front door looks.
+func TestPolicyStoreCompositionCreatesSessionsSilently(t *testing.T) {
+	// The warning ledger is process-wide and keyed by store TYPE, and the
+	// sibling tests above create sessions through this very type. Without the
+	// reset, a broken marker contract would warn once for them and then stay
+	// quiet here — this guard would pass for the wrong reason.
+	session.ResetStorageWarningsForTest()
+	t.Cleanup(session.ResetStorageWarningsForTest)
+
+	backing := &incapableBackingStore{Store: beads.NewMemStore()}
+	store := controllerCityStore(t, backing)
+
+	if _, ok := store.(session.StoragePolicySelfApplying); !ok {
+		t.Fatalf("the controller's session store composition is %T, which the session "+
+			"front door cannot recognize as policy-self-applying; it will warn and "+
+			"impose its own storage class instead of the configured one", store)
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer r.Close() //nolint:errcheck
+	old := os.Stderr
+	os.Stderr = w
+	restored := false
+	restore := func() {
+		if restored {
+			return
+		}
+		restored = true
+		os.Stderr = old
+		w.Close() //nolint:errcheck
+	}
+	// Deferred, so a t.Fatalf below cannot strand os.Stderr on a dead pipe.
+	defer restore()
+
+	if _, err := sessionFrontDoor(store).CreateSessionInfo(sessionCreateSpec()); err != nil {
+		t.Fatalf("CreateSessionInfo: %v", err)
+	}
+
+	restore()
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("read captured stderr: %v", err)
+	}
+	if strings.Contains(buf.String(), "session storage policy NOT applied") {
+		t.Fatalf("creating a session through the real policy composition warned that the "+
+			"storage policy was not applied; the marker contract between "+
+			"beadPolicyStore.AppliesBeadStoragePolicy and "+
+			"session.StoragePolicySelfApplying is broken. got: %q", buf.String())
 	}
 }

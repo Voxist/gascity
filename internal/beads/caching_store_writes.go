@@ -26,6 +26,30 @@ func (c *CachingStore) Create(b Bead) (Bead, error) {
 // issues table on any deployment whose backend lacks the capability, costing
 // one Dolt commit per create and per subsequent update (vp-ia76: 727 of 730
 // session beads in 24h on the live hq city).
+//
+// BLAST RADIUS. This is not a session-only change. cmd/gc's policy layer routes
+// six policy names through CreateWithStorage (bead_policy_store.go:
+// policyNameForBead -> effectiveBeadStorage), so on a backing that lacks the
+// capability EVERY one of them starts carrying its class where it previously
+// carried none:
+//
+//   - session, wait, nudge, order_tracking: no_history under both semantics.
+//     NoHistory does not change query visibility (ListQuery.matchesTier only
+//     filters on Ephemeral), so these gain wisps-table routing and lose nothing.
+//   - workflow: no_history under bd-105 ready semantics, history otherwise.
+//   - wisp: EPHEMERAL under bd-105 ready semantics. This is the one to look at
+//     twice — an ephemeral bead is GC/TTL-eligible AND is dropped by the default
+//     TierIssues read. Reads through the policy layer are safe (it expands
+//     TierIssues to TierBoth), but a raw un-wrapped read of the same store now
+//     misses newly created wisps on such a deployment.
+//
+// A capable backing (BdStore) already behaved this way — the class was forwarded
+// and honored — so this converges incapable backings onto the behavior capable
+// ones already had, rather than inventing a new one.
+//
+// An explicit class also OVERRIDES fields the caller stamped by hand:
+// StorageHistory clears Ephemeral/NoHistory. Only StorageDefault leaves the
+// incoming bead alone.
 func (c *CachingStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, error) {
 	if storageBacking, ok := c.backing.(StorageCreateStore); ok {
 		return c.createWith(func() (Bead, error) {
