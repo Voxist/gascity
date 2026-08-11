@@ -38,6 +38,15 @@ type beadPolicyGraphStore struct {
 var (
 	_ beads.ConditionalAssignmentReleaser    = (*beadPolicyStore)(nil)
 	_ beads.ConditionalWritesResolveTargeter = (*beadPolicyStore)(nil)
+
+	// The session front door recognizes this wrapper structurally: without the
+	// marker it cannot tell a policy-applying store from a store that dropped
+	// the policy, and it warns and stamps its own hardcoded class instead of
+	// deferring to the configured one. A structural interface has no compiler
+	// coupling of its own, so state it here — renaming either side is then a
+	// build failure, not a silent behavior change.
+	_ session.StoragePolicySelfApplying = (*beadPolicyStore)(nil)
+	_ session.StoragePolicySelfApplying = (*beadPolicyGraphStore)(nil)
 )
 
 // ConditionalWritesResolveTarget declares the wrapped store as the
@@ -49,6 +58,15 @@ var (
 // wrapper. beadPolicyGraphStore inherits this via its embedded
 // *beadPolicyStore.
 func (s *beadPolicyStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
+
+// AppliesBeadStoragePolicy marks this wrapper as applying the bead storage
+// policy inside its own Create (policyForCreate -> createWithStoragePolicy).
+// CreateWithStorage is deliberately not forwarded — an out-of-band class from a
+// caller would override the class this layer resolves from city config — so a
+// caller that finds no beads.StorageCreateStore here has NOT lost the policy.
+// It implements session.StoragePolicySelfApplying; see the compile-time
+// assertion above.
+func (s *beadPolicyStore) AppliesBeadStoragePolicy() {}
 
 var (
 	_ beads.BatchDeleter = (*beadPolicyStore)(nil)
