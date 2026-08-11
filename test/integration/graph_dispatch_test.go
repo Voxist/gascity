@@ -195,7 +195,7 @@ func setupGraphWorkflowCity(t *testing.T, mode string) string {
 
 	startCommand := "GC_GRAPH_MODE=" + mode + " bash " + agentScript("graph-dispatch.sh")
 	cityToml := fmt.Sprintf(
-		"[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\nformula_v2 = true\npatrol_interval = \"100ms\"\n\n[[agent]]\nname = \"worker\"\nmax_active_sessions = 1\nstart_command = %q\n\n[[named_session]]\ntemplate = \"worker\"\nmode = \"always\"\n",
+		"[workspace]\nname = %q\n\n[beads]\n# The pinned CI bd (deps.env BD_SOURCE_REF, schema 0062) enforces strict\n# wisp-plane exclusion in ready queries; without declaring 1.0.5 semantics\n# the controller's work query omits --include-ephemeral and control wisps\n# (workflow finalize) are invisible to the dispatcher.\nbd_compatibility = \"bd-1.0.5\"\n\n[session]\nprovider = \"subprocess\"\n\n[daemon]\nformula_v2 = true\npatrol_interval = \"100ms\"\n\n[[agent]]\nname = \"worker\"\nmax_active_sessions = 1\nstart_command = %q\n\n[[named_session]]\ntemplate = \"worker\"\nmode = \"always\"\n",
 		cityName, startCommand,
 	)
 	configPath := filepath.Join(t.TempDir(), "graph-workflow.toml")
@@ -298,7 +298,7 @@ func waitForGraphWorkflowRootForInputConvoy(t *testing.T, cityDir, inputConvoyID
 }
 
 func findGraphWorkflowRootForInputConvoy(cityDir, inputConvoyID string) (string, string, error) {
-	out, err := bdDolt(cityDir, "list", "--json", "--all", "--limit=0")
+	out, err := bdDolt(cityDir, "list", "--json", "--all", "--include-ephemeral", "--limit=0")
 	if err != nil {
 		return "", out, fmt.Errorf("bd list --json failed: %w", err)
 	}
@@ -336,7 +336,7 @@ func waitForBeadClosed(t *testing.T, cityDir, beadID string, timeout time.Durati
 		t.Logf("waitForBeadClosed(%s) ended with %v; collecting diagnostics", beadID, err)
 	}
 
-	out, err := bdDolt(cityDir, "list", "--json", "--all", "--limit=0")
+	out, err := bdDolt(cityDir, "list", "--json", "--all", "--include-ephemeral", "--limit=0")
 	if err != nil {
 		t.Fatalf("timed out waiting for bead %s to close; bd list failed: %v\noutput: %s", beadID, err, out)
 	}
@@ -416,7 +416,7 @@ func tryShowBead(cityDir, beadID string) (graphBead, error) {
 func mustFindWorkflowBeadByRefSuffix(t *testing.T, cityDir, workflowID, suffix string) graphBead {
 	t.Helper()
 
-	out, err := bdDolt(cityDir, "list", "--json", "--all", "--limit=0")
+	out, err := bdDolt(cityDir, "list", "--json", "--all", "--include-ephemeral", "--limit=0")
 	if err != nil {
 		t.Fatalf("bd list --json failed: %v\noutput: %s", err, out)
 	}

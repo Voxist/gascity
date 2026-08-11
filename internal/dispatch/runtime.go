@@ -1174,12 +1174,11 @@ func sourceChainRootIDs(roots []beads.Bead) string {
 }
 
 func closeSourceBeadPreservingOutcome(store beads.Store, bead beads.Bead) error {
-	status := "closed"
-	opts := beads.UpdateOpts{Status: &status}
+	var metadata map[string]string
 	if strings.TrimSpace(bead.Metadata[beadmeta.OutcomeMetadataKey]) == "" {
-		opts.Metadata = map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass}
+		metadata = map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass}
 	}
-	return store.Update(bead.ID, opts)
+	return closeBeadWithMetadata(store, bead.ID, metadata)
 }
 
 func propagateSourceBeadTerminalMetadata(store beads.Store, beadID string, metadata map[string]string) error {
@@ -1418,14 +1417,17 @@ func skipScopeMembers(store beads.Store, ids []string) (int, error) {
 	}
 	if batch, ok := store.(scopeSkipBatchUpdater); ok {
 		updated, err := batch.UpdateAll(ids, opts)
-		if err != nil {
-			return updated, fmt.Errorf("closing skipped scope beads %v: %w", ids, err)
+		if err == nil {
+			return updated, nil
 		}
-		return updated, nil
+		// The batch fast path refuses when any member is still blocked (bd
+		// 0055-era guards status-closes of blocked issues, and skipped scope
+		// members legitimately block one another). Fall through to per-id
+		// closes, which carry the blocked-close fallback.
 	}
 	closed := 0
 	for _, id := range ids {
-		if err := store.Update(id, opts); err != nil {
+		if err := closeBeadWithMetadata(store, id, opts.Metadata); err != nil {
 			return closed, fmt.Errorf("closing bead %q: %w", id, err)
 		}
 		closed++

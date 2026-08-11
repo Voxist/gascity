@@ -13,15 +13,15 @@ cd "$GC_CITY"
 ASSIGNEE="${GC_SESSION_NAME:-$GC_AGENT}"
 
 while true; do
-    hooked=$(bd ready --assignee="$ASSIGNEE" 2>/dev/null || true)
-    if echo "$hooked" | grep -q "^gc-"; then
-        root_id=$(echo "$hooked" | grep "^gc-" | head -1 | awk '{print $1}')
+    hooked=$(bd ready --assignee="$ASSIGNEE" --include-ephemeral 2>/dev/null || true)
+    if echo "$hooked" | grep -qE '^[^[:alnum:]]*gc-'; then
+        root_id=$(echo "$hooked" | grep -E '^[^[:alnum:]]*gc-' | head -1 | grep -oE 'gc-[[:alnum:]]+' | head -1)
 
         # Walk steps: close each open child bead
         children=$(bd list 2>/dev/null || true)
-        if echo "$children" | grep -q "^gc-"; then
-            echo "$children" | grep "^gc-" | while read -r line; do
-                child_id=$(echo "$line" | awk '{print $1}')
+        if echo "$children" | grep -qE '^[^[:alnum:]]*gc-'; then
+            echo "$children" | grep -E '^[^[:alnum:]]*gc-' | while read -r line; do
+                child_id=$(echo "$line" | grep -oE 'gc-[[:alnum:]]+' | head -1)
                 status=$(echo "$line" | awk '{print $2}')
                 # Skip if already closed or if it's the root bead
                 if [ "$child_id" = "$root_id" ]; then

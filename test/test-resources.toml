@@ -10,7 +10,11 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 555
+# 555 -> 558 (2026-08-11, fork-first repin ga-zzcjs): the integration
+# harness's bridge bd build adds three subprocess sites (curl the
+# BD_SOURCE_REF tarball, tar extract, go build) so tests exercise the
+# fleet's bd binary instead of the go.mod library commit.
+baseline_calls = 558
 baseline_files = 168
 reported_calls = 495
 reported_files = 135

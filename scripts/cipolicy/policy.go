@@ -32,13 +32,18 @@ const (
 	// BD_SOURCE_REF adds a job-level env key, and env is part of the execution
 	// shape this pin guards — so the tripwire firing here is correct behavior,
 	// not noise.
-	expectedCIExecutionHash     = "5c1e5f2198dbcdab3017f5543a5bee2041b1146fe2baacff17c38a2e31c08b21"
+	// Re-derived for the fork-first bd repin (ga-zzcjs): BD_REPO joins
+	// BD_SOURCE_REF as a job-level env key at every pin site, so the shape
+	// moves again — deliberately.
+	expectedCIExecutionHash     = "fb5eebf7e2995c5a5ea7527c15b7640d035d41e1957d454bf7f470766aac4226"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
 	// --theirs on this file would have adopted upstream's pin and failed. Each
 	// pin is an independent tripwire and must be re-derived on its own.
-	expectedNightlyExecutionHash = "383509972a3f0c73b6d5653040de042b4d183a650cc32a0a4c14439899a97d5d"
+	// Nightly re-derived with the same fork-first repin (BD_REPO env key at
+	// its two pin sites).
+	expectedNightlyExecutionHash = "efc14757064eb2e9201fc97e16601490faa2c35417864a1fbb867808fc701b53"
 	expectedSetupActionHash      = "b7864038195cd054aee7fccfa903cab335b375bcab1a35239c17c5da7d32c07e"
 )
 

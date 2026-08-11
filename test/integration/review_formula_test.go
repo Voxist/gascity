@@ -515,7 +515,7 @@ func startReviewWorkflow(t *testing.T, cityDir, formula string, vars map[string]
 
 func listWorkflowSteps(t *testing.T, cityDir, workflowID string) []string {
 	t.Helper()
-	out, err := bdDolt(cityDir, "list", "--json", "--all", "--limit=0")
+	out, err := bdDolt(cityDir, "list", "--json", "--all", "--include-ephemeral", "--limit=0")
 	if err != nil {
 		t.Fatalf("bd list: %v\noutput: %s", err, out)
 	}
@@ -572,7 +572,7 @@ func dumpWorkflowState(t *testing.T, cityDir, workflowID string) {
 
 func dumpReviewFormulaCityState(t *testing.T, cityDir string) {
 	t.Helper()
-	out, _ := bdDolt(cityDir, "list", "--json", "--all", "--limit=0")
+	out, _ := bdDolt(cityDir, "list", "--json", "--all", "--include-ephemeral", "--limit=0")
 	t.Logf("all beads:\n%s", out)
 	sessionList, _ := gcDolt(cityDir, "session", "list")
 	t.Logf("sessions:\n%s", sessionList)

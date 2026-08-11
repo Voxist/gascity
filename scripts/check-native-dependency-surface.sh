@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 728 = upstream's 727 + 1 for the beads-bridge era: the fork's beads pin
-# (deps.env BD_SOURCE_REF) keeps github.com/wk8/go-ordered-map/v2 in the graph
-# while upstream's otel v1.44 bump adds go.opentelemetry.io/otel/metric/x, and
-# each parent sat exactly at the cap with only one of the two. Drop back to
-# upstream's value when the planned beads repin (ga-zzcjs) retires the bridge.
-max_modules="${GC_NATIVE_DEP_MAX_MODULES:-728}"
+# 738 = 728 + 10 for the 0062-era beads library (the ga-zzcjs repin,
+# BD_LIB_REF): beads main grew an OpenAPI toolchain (kin-openapi,
+# oapi-codegen, oasdiff/yaml, speakeasy jsonpath/overlay, marshmallow,
+# go-yit, yaml-jsonpath, deepcopy, decimal128) that rides gc's module graph
+# as indirect requirements. Revisit when beads trims its api-gen deps or a
+# release supersedes the bridge.
+max_modules="${GC_NATIVE_DEP_MAX_MODULES:-738}"
 max_binary_bytes="${GC_NATIVE_DEP_MAX_BINARY_BYTES:-270000000}"
 max_aws_modules="${GC_NATIVE_DEP_MAX_AWS_MODULES:-25}"
 max_azure_modules="${GC_NATIVE_DEP_MAX_AZURE_MODULES:-9}"

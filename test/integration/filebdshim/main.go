@@ -308,6 +308,11 @@ func parseListArgs(args []string) (beads.ListQuery, bool, error) {
 				return q, jsonOut, err
 			}
 			q.Limit = n
+		case arg == "--include-ephemeral":
+			// The file-provider store has no wisp plane, so the real bd's
+			// ephemeral opt-in is a correct no-op here. Accepted so agent
+			// scripts can carry the flag unconditionally (the 0062-era bd
+			// hides wisps from ready/list without it).
 		case strings.HasPrefix(arg, "-"):
 			return q, jsonOut, fmt.Errorf("unsupported list flag %q", arg)
 		}
