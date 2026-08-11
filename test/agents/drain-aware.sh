@@ -19,7 +19,7 @@ while true; do
         exit 0
     fi
 
-    hooked=$(bd ready --assignee="$ASSIGNEE" 2>/dev/null || true)
+    hooked=$(bd ready --assignee="$ASSIGNEE" --include-ephemeral 2>/dev/null || true)
     if echo "$hooked" | grep -q "^gc-"; then
         id=$(echo "$hooked" | grep "^gc-" | head -1 | awk '{print $1}')
         bd close "$id"

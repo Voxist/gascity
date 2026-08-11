@@ -288,7 +288,7 @@ fetch_ready_queue() {
     # dispatcher. Read that assigned queue directly so empty polls do not spend
     # their budget in gc hook/native-store preflight. Keep the full hook path
     # available for tests that explicitly need generic routed work.
-    if ready=$(timeout 10 bd ready --assignee="$ASSIGNEE" --json --limit=0 2>/dev/null); then
+    if ready=$(timeout 10 bd ready --assignee="$ASSIGNEE" --include-ephemeral --json --limit=0 2>/dev/null); then
         if printf '%s\n' "$ready" | json_payload | jq -e 'if type == "array" then length > 0 else . != null end' >/dev/null 2>&1; then
             printf '%s\n' "$ready"
             return 0

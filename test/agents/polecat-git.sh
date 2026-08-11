@@ -19,7 +19,7 @@ REPO_DIR="${GIT_WORK_DIR:-$GC_DIR}"
 
 while true; do
     # Check for work assigned to this agent
-    work_id=$(bd ready --assignee="$GC_AGENT" --json 2>/dev/null \
+    work_id=$(bd ready --assignee="$GC_AGENT" --include-ephemeral --json 2>/dev/null \
         | jq -r '.[0].id // empty' 2>/dev/null || true)
 
     if [ -n "$work_id" ]; then

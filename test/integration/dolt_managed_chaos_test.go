@@ -155,8 +155,8 @@ func TestManagedDoltMailRebindRawBDReady(t *testing.T) {
 		t.Fatalf("gc mail send rig-worker after hard kill: %v\n%s", err, out)
 	}
 
-	cityRaw, cityErr := h.runCityRawBD("list", "--json", "--all", "--limit=0")
-	rigRaw, rigErr := h.runRigRawBD("list", "--json", "--all", "--limit=0")
+	cityRaw, cityErr := h.runCityRawBD("list", "--json", "--all", "--include-ephemeral", "--limit=0")
+	rigRaw, rigErr := h.runRigRawBD("list", "--json", "--all", "--include-ephemeral", "--limit=0")
 	after, afterErr := h.waitForManagedRuntimeState(managedDoltRecoveryTimeout, func(state managedDoltChaosRuntimeState) bool {
 		if !state.Running || state.PID <= 0 || state.Port <= 0 {
 			return false
@@ -242,8 +242,8 @@ func TestManagedDoltMailInboxCityRecoveryKeepsScopesRawReady(t *testing.T) {
 		t.Fatalf("city gc show %s after city inbox recovery: %v\n%s", cityEntry.ID, cityShowErr, cityShow)
 	}
 
-	cityRaw, cityErr := h.runCityRawBD("list", "--json", "--all", "--limit=0")
-	rigRaw, rigErr := h.runRigRawBD("list", "--json", "--all", "--limit=0")
+	cityRaw, cityErr := h.runCityRawBD("list", "--json", "--all", "--include-ephemeral", "--limit=0")
+	rigRaw, rigErr := h.runRigRawBD("list", "--json", "--all", "--include-ephemeral", "--limit=0")
 	if cityErr != nil || rigErr != nil {
 		t.Fatalf("raw bd not ready after city inbox recovery followup; cityErr=%v cityOut=%s rigErr=%v rigOut=%s after=%+v afterErr=%v state=%s", cityErr, cityRaw, rigErr, rigRaw, after, afterErr, h.debugStateSummary())
 	}
@@ -282,7 +282,7 @@ func TestManagedDoltConcurrentRecoveryLeavesRawBDReady(t *testing.T) {
 	}
 	results := make(chan opResult, 2)
 	go func() {
-		out, err := gcDolt(h.cityDir, "bd", "list", "--json", "--all", "--limit=0")
+		out, err := gcDolt(h.cityDir, "bd", "list", "--json", "--all", "--include-ephemeral", "--limit=0")
 		results <- opResult{name: "gc bd list", out: out, err: err}
 	}()
 	go func() {
@@ -313,8 +313,8 @@ func TestManagedDoltConcurrentRecoveryLeavesRawBDReady(t *testing.T) {
 		t.Fatalf("managed runtime did not update port mirrors to %d after concurrent recovery: %v", after.Port, err)
 	}
 
-	cityRaw, cityErr := h.runCityRawBD("list", "--json", "--all", "--limit=0")
-	rigRaw, rigErr := h.runRigRawBD("list", "--json", "--all", "--limit=0")
+	cityRaw, cityErr := h.runCityRawBD("list", "--json", "--all", "--include-ephemeral", "--limit=0")
+	rigRaw, rigErr := h.runRigRawBD("list", "--json", "--all", "--include-ephemeral", "--limit=0")
 	if cityErr != nil || rigErr != nil {
 		t.Fatalf("raw bd not ready after concurrent recovery; cityErr=%v cityOut=%s rigErr=%v rigOut=%s after=%+v", cityErr, cityRaw, rigErr, rigRaw, after)
 	}
@@ -577,7 +577,7 @@ func (h *managedDoltChaosHarness) randomShow() (string, error) {
 func (h *managedDoltChaosHarness) randomList() (string, error) {
 	switch h.rng.Intn(4) {
 	case 0:
-		out, err := h.runCityRawBD("list", "--json", "--all", "--limit=0")
+		out, err := h.runCityRawBD("list", "--json", "--all", "--include-ephemeral", "--limit=0")
 		if err != nil {
 			return "city raw list", fmt.Errorf("city raw list: %v\n%s", err, out)
 		}
@@ -586,7 +586,7 @@ func (h *managedDoltChaosHarness) randomList() (string, error) {
 		}
 		return "city raw list", nil
 	case 1:
-		out, err := h.runCityGCBD("list", "--json", "--all", "--limit=0")
+		out, err := h.runCityGCBD("list", "--json", "--all", "--include-ephemeral", "--limit=0")
 		if err != nil {
 			return "city gc list", fmt.Errorf("city gc list: %v\n%s", err, out)
 		}
@@ -595,7 +595,7 @@ func (h *managedDoltChaosHarness) randomList() (string, error) {
 		}
 		return "city gc list", nil
 	case 2:
-		out, err := h.runRigRawBD("list", "--json", "--all", "--limit=0")
+		out, err := h.runRigRawBD("list", "--json", "--all", "--include-ephemeral", "--limit=0")
 		if err != nil {
 			return "rig raw list", fmt.Errorf("rig raw list: %v\n%s", err, out)
 		}
@@ -604,7 +604,7 @@ func (h *managedDoltChaosHarness) randomList() (string, error) {
 		}
 		return "rig raw list", nil
 	default:
-		out, err := h.runRigGCBD("list", "--json", "--all", "--limit=0")
+		out, err := h.runRigGCBD("list", "--json", "--all", "--include-ephemeral", "--limit=0")
 		if err != nil {
 			return "rig gc list", fmt.Errorf("rig gc list: %v\n%s", err, out)
 		}
@@ -711,10 +711,10 @@ func (h *managedDoltChaosHarness) runRecoveryTrigger() (string, string, error) {
 	// Raw bd should work again after recovery, but it is not the lifecycle owner.
 	switch h.rng.Intn(4) {
 	case 0:
-		out, err := h.runCityGCBD("list", "--json", "--all", "--limit=0")
+		out, err := h.runCityGCBD("list", "--json", "--all", "--include-ephemeral", "--limit=0")
 		return "city gc bd list", out, err
 	case 1:
-		out, err := h.runRigGCBD("list", "--json", "--all", "--limit=0")
+		out, err := h.runRigGCBD("list", "--json", "--all", "--include-ephemeral", "--limit=0")
 		return "rig gc bd list", out, err
 	case 2:
 		out, err := gcDolt(h.cityDir, "mail", "inbox", "city-worker")
@@ -931,8 +931,8 @@ func (h *managedDoltChaosHarness) waitForRawBDReady(timeout time.Duration) error
 	var lastErr error
 	stableSuccesses := 0
 	for {
-		cityOut, cityErr := h.runCityRawBD("list", "--json", "--all", "--limit=0")
-		rigOut, rigErr := h.runRigRawBD("list", "--json", "--all", "--limit=0")
+		cityOut, cityErr := h.runCityRawBD("list", "--json", "--all", "--include-ephemeral", "--limit=0")
+		rigOut, rigErr := h.runRigRawBD("list", "--json", "--all", "--include-ephemeral", "--limit=0")
 		cityShowOut, cityShowErr := "", error(nil)
 		if cityErr == nil {
 			if entry, ok := latestManagedDoltChaosEntry(h.ledger, managedDoltChaosCityScope); ok {
@@ -966,7 +966,7 @@ func (h *managedDoltChaosHarness) waitForRawBDReady(timeout time.Duration) error
 }
 
 func (h *managedDoltChaosHarness) listEntries(name string, run func(...string) (string, error)) (map[string]string, error) {
-	out, err := run("list", "--json", "--all", "--limit=0")
+	out, err := run("list", "--json", "--all", "--include-ephemeral", "--limit=0")
 	if err != nil {
 		return nil, fmt.Errorf("%s list: %v\n%s", name, err, out)
 	}

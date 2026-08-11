@@ -16,6 +16,7 @@ package integration
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +26,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -391,6 +393,20 @@ func binaryOverride(envName string) (string, bool, error) {
 // older host bd open the database after gc has migrated it, producing a schema
 // skew that obscures the workflow under test.
 func buildPinnedIntegrationBDBinary(tmpDir string) (string, error) {
+	// Fork-first bridge (deps.env BD_SOURCE_REF, ga-zzcjs): the fleet's bd is
+	// built from a fork commit the Go module path cannot serve, and it carries
+	// CLI surface (e.g. list --include-ephemeral) the go.mod library commit
+	// does not. Integration tests exercise the CLI the fleet runs, so in
+	// bridge mode build bd from the BD_SOURCE_REF source tarball — the same
+	// artifact contrib/k8s/Dockerfile.agent and install-bd-archive.sh build —
+	// verified against BD_SOURCE_SHA256 and cached per ref. Outside bridge
+	// mode the go.mod module version remains the source, keeping the binary
+	// and gc's linked library schema-consistent by construction.
+	if path, ok, err := buildBridgeIntegrationBDBinary(); err != nil {
+		return "", err
+	} else if ok {
+		return path, nil
+	}
 	version, err := pinnedIntegrationBeadsModuleVersion()
 	if err != nil {
 		return "", err
@@ -405,6 +421,84 @@ func buildPinnedIntegrationBDBinary(tmpDir string) (string, error) {
 		return "", fmt.Errorf("go install github.com/steveyegge/beads/cmd/bd@%s: %w\n%s", version, err, out)
 	}
 	return filepath.Join(binDir, "bd"), nil
+}
+
+// bridgeIntegrationBDPins reads the fork-first bridge pins out of deps.env at
+// the module root. ok is false when no bridge is active (no BD_SOURCE_REF).
+func bridgeIntegrationBDPins() (repo, ref, sha string, ok bool, err error) {
+	raw, err := os.ReadFile(filepath.Join(findModuleRoot(), "deps.env"))
+	if err != nil {
+		return "", "", "", false, fmt.Errorf("read deps.env: %w", err)
+	}
+	vals := map[string]string{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if k, v, found := strings.Cut(line, "="); found {
+			vals[k] = v
+		}
+	}
+	if vals["BD_SOURCE_REF"] == "" {
+		return "", "", "", false, nil
+	}
+	repo = vals["BD_REPO"]
+	if repo == "" {
+		repo = "gastownhall/beads"
+	}
+	return repo, vals["BD_SOURCE_REF"], vals["BD_SOURCE_SHA256"], true, nil
+}
+
+// buildBridgeIntegrationBDBinary builds bd from the deps.env bridge source
+// tarball, caching the result per ref under the user cache dir so repeated
+// test runs skip the download and build. ok is false when no bridge is
+// configured.
+func buildBridgeIntegrationBDBinary() (string, bool, error) {
+	repo, ref, wantSHA, ok, err := bridgeIntegrationBDPins()
+	if err != nil || !ok {
+		return "", ok, err
+	}
+	cacheRoot, err := os.UserCacheDir()
+	if err != nil {
+		return "", true, fmt.Errorf("resolve user cache dir: %w", err)
+	}
+	binPath := filepath.Join(cacheRoot, "gc-integration-bd", ref, "bd")
+	if info, statErr := os.Stat(binPath); statErr == nil && info.Mode()&0o111 != 0 {
+		return binPath, true, nil
+	}
+	srcDir, err := os.MkdirTemp("", "bridge-bd-src")
+	if err != nil {
+		return "", true, fmt.Errorf("create bridge bd source dir: %w", err)
+	}
+	defer os.RemoveAll(srcDir) //nolint:errcheck // best-effort temp cleanup
+	tarPath := filepath.Join(srcDir, "src.tar.gz")
+	url := fmt.Sprintf("https://github.com/%s/archive/%s.tar.gz", repo, ref)
+	if out, curlErr := exec.Command("curl", "-fsSL", "--retry", "3", url, "-o", tarPath).CombinedOutput(); curlErr != nil {
+		return "", true, fmt.Errorf("download %s: %w\n%s", url, curlErr, out)
+	}
+	if wantSHA != "" {
+		data, readErr := os.ReadFile(tarPath)
+		if readErr != nil {
+			return "", true, fmt.Errorf("read bridge bd tarball: %w", readErr)
+		}
+		if got := fmt.Sprintf("%x", sha256.Sum256(data)); got != wantSHA {
+			return "", true, fmt.Errorf("bridge bd tarball sha256 = %s, deps.env BD_SOURCE_SHA256 = %s", got, wantSHA)
+		}
+	}
+	if out, tarErr := exec.Command("tar", "-xzf", tarPath, "--strip-components=1", "-C", srcDir).CombinedOutput(); tarErr != nil {
+		return "", true, fmt.Errorf("extract bridge bd tarball: %w\n%s", tarErr, out)
+	}
+	if err := os.MkdirAll(filepath.Dir(binPath), 0o755); err != nil {
+		return "", true, fmt.Errorf("create bridge bd cache dir: %w", err)
+	}
+	build := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", binPath, "./cmd/bd")
+	build.Dir = srcDir
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, buildErr := build.CombinedOutput(); buildErr != nil {
+		return "", true, fmt.Errorf("build bridge bd from %s@%s: %w\n%s", repo, ref, buildErr, out)
+	}
+	return binPath, true, nil
 }
 
 // pinnedBdStoreCommandRunner keeps direct BdStore integration tests on the
@@ -441,9 +535,35 @@ func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pinnedIntegrationBeadsModuleVersion() error = %v", err)
 	}
-	const want = "v1.1.1-0.20260805093327-bf97b73749ac"
-	if version != want {
-		t.Errorf("pinnedIntegrationBeadsModuleVersion() = %q, want %q", version, want)
+	// Derive the expectation from deps.env instead of a literal: under the
+	// fork-first bridge go.mod links BD_LIB_REF (the fork build commit's
+	// newest upstream ancestor); with no bridge, BD_SOURCE_REF plays both
+	// roles. A literal here rotted silently once already — it lives in a
+	// shard tier ordinary PRs skip, so a stale value surfaces only in
+	// nightly/rest-full runs.
+	raw, err := os.ReadFile(filepath.Join(findModuleRoot(), "deps.env"))
+	if err != nil {
+		t.Fatalf("read deps.env: %v", err)
+	}
+	wantRef := ""
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if v, ok := strings.CutPrefix(line, "BD_LIB_REF="); ok {
+			wantRef = v
+		}
+		if v, ok := strings.CutPrefix(line, "BD_SOURCE_REF="); ok && wantRef == "" {
+			wantRef = v
+		}
+	}
+	if wantRef == "" {
+		t.Skip("deps.env carries no bd commit pin; go.mod tracks a release")
+	}
+	m := regexp.MustCompile(`[-.]\d{14}-([0-9a-f]{12})$`).FindStringSubmatch(version)
+	if m == nil {
+		t.Fatalf("go.mod beads version %q is not a pseudo-version but deps.env pins commit %s", version, wantRef)
+	}
+	if !strings.HasPrefix(wantRef, m[1]) {
+		t.Errorf("go.mod links beads commit %s (%s), deps.env expects %s", m[1], version, wantRef)
 	}
 }
 

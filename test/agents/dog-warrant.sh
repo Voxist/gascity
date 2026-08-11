@@ -14,7 +14,7 @@ cd "$GC_CITY"
 ASSIGNEE="${GC_SESSION_NAME:-$GC_AGENT}"
 
 while true; do
-    hooked=$(bd ready --assignee="$ASSIGNEE" 2>/dev/null || true)
+    hooked=$(bd ready --assignee="$ASSIGNEE" --include-ephemeral 2>/dev/null || true)
     if echo "$hooked" | grep -q "^gc-"; then
         warrant_id=$(echo "$hooked" | grep "^gc-" | head -1 | awk '{print $1}')
 
