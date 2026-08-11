@@ -1231,7 +1231,7 @@ graceful_stop_owned_pid() {
 # Overwritten on each server start. Without read/write timeouts, CLOSE_WAIT connections
 # accumulate and the server enters unrecoverable read-only mode.
 write_config_yaml() {
-    local archive_level auto_gc_enabled auto_gc_sysvar gc_bin raw_wait_timeout wait_timeout_line max_connections read_timeout_millis write_timeout_millis
+    local archive_level auto_gc_enabled auto_gc_sysvar gc_bin raw_wait_timeout wait_timeout_value wait_timeout_line max_connections read_timeout_millis write_timeout_millis
     # Surface the resolved managed-server bind. Since the default flipped from
     # 0.0.0.0 to loopback, an operator who relied on the old wildcard bind would
     # otherwise see a bare connection-refused; this line names the bind host and
@@ -1287,25 +1287,44 @@ write_config_yaml() {
             --write-timeout-millis "$write_timeout_millis" || die "failed to write managed dolt config via gc helper $gc_bin"
         return 0
     fi
-    wait_timeout_line='  wait_timeout: "30"'
+    # ADR-0064 AC1. wait_timeout is INERT in go-mysql-server: declared-only,
+    # with zero consumers outside its own declaration across all six cached
+    # versions, so nothing reaps a connection on its basis. read_timeout_millis
+    # is the sole reaper. This mirrors the annotation the gc helper emits in
+    # writeManagedDoltConfigFile — BOTH generators must carry it, or a reader of
+    # a gc-less config still sees a bare `wait_timeout: "30"` and re-derives the
+    # refuted "the dead sockets are already reaped, so raising read_timeout_millis
+    # is safe" argument that ADR-0064 retired on source evidence.
+    wait_timeout_value="30"
     raw_wait_timeout=${GC_DOLT_WAIT_TIMEOUT:-}
     case "$raw_wait_timeout" in
         '' ) ;;
         -*)
             case "${raw_wait_timeout#-}" in
                 ''|*[!0-9]* ) ;;
-                * ) wait_timeout_line="" ;;
+                * ) wait_timeout_value="" ;;
             esac
             ;;
         *[!0-9]* ) ;;
         * )
             if [ "$raw_wait_timeout" -gt 0 ] 2>/dev/null; then
-                wait_timeout_line="  wait_timeout: \"$raw_wait_timeout\""
+                wait_timeout_value="$raw_wait_timeout"
             else
-                wait_timeout_line=""
+                wait_timeout_value=""
             fi
             ;;
     esac
+    # The annotation is emitted with the key and only with it: when the override
+    # disables wait_timeout the generated file must contain no occurrence of the
+    # string at all.
+    if [ -n "$wait_timeout_value" ]; then
+        wait_timeout_line="  # INERT — declared-only in go-mysql-server; NOT a connection reaper.
+  # read_timeout_millis is the sole reaper. Do not cite this key as
+  # defense-in-depth for raising it on a swarm-facing server (ADR-0064).
+  wait_timeout: \"$wait_timeout_value\""
+    else
+        wait_timeout_line=""
+    fi
     local tmp
     tmp=$(mktemp "$CONFIG_FILE.tmp.XXXXXX")
     cat > "$tmp" <<YAML
