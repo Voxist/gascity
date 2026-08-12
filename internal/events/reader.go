@@ -388,13 +388,42 @@ func streamArchive(path string, _ Filter, fn func(Event) bool) error {
 	return nil
 }
 
-// ReadFilteredTail reads the trailing matching events from path. A positive
-// limit returns at most that many events in chronological order; limit <= 0
-// falls back to ReadFiltered.
+// ReadFilteredTail reads the trailing matching events from path, spanning
+// the active log and the sibling .gz archives. A positive limit returns at
+// most that many events in chronological (seq-ascending) order; limit <= 0
+// falls back to ReadFiltered (unbounded).
+//
+// The active log is read first (it holds the newest events) via the
+// backwards chunk reader, then archives are walked NEWEST-FIRST (reverse of
+// the ascending seq order) until `limit` matching events are collected. This
+// makes the descending read authoritative across rotation: a first-page read
+// that needs older matches reaches into the newest archive only, instead of
+// gunzipping the whole history oldest-first — the vp-x7x8w residual of the
+// vp-8jig archive-decode pathology. `archiveOverlapsFilter` still gates each
+// archive so a BeforeSeq/AfterSeq/Since cursor page skips non-overlapping
+// archives without opening them.
 func ReadFilteredTail(path string, filter Filter, limit int) ([]Event, error) {
 	if limit <= 0 {
 		return ReadFiltered(path, filter)
 	}
+
+	// Newest first: the active log holds the tail of the seq stream.
+	result, err := tailActive(path, filter, limit)
+	if err != nil {
+		return nil, err
+	}
+	if len(result) >= limit {
+		return result, nil
+	}
+
+	// Not enough matches in the active file — reach into archives newest-first.
+	return tailArchives(path, filter, limit, result)
+}
+
+// tailActive tails the active log, returning up to limit matching events
+// in seq-ascending order. A missing active file is not an error: the entire
+// seq stream may already live in archives (e.g. just after a rotation).
+func tailActive(path string, filter Filter, limit int) ([]Event, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -409,6 +438,127 @@ func ReadFilteredTail(path string, filter Filter, limit int) ([]Event, error) {
 		return nil, fmt.Errorf("stat events tail: %w", err)
 	}
 	return readFilteredTailFromFile(f, info.Size(), filter, limit)
+}
+
+// tailArchives walks archives newest-first, merging their trailing matches
+// with the events already collected from the active log until limit is met.
+// active holds the already-tailed newest matches (seq-ascending, possibly
+// empty); the merged result is the limit newest matching events in
+// seq-ascending order.
+//
+// An unreadable archive (truncated gzip, torn write) is SKIPPED, not failed —
+// the same degraded contract ReadFilteredWithWarnings and ReadLatestMatch follow
+// (vc-89s). The walk continues into older archives, so a corrupt archive can
+// only make the result OLDER, never silently short. This matters for callers
+// that route a tail read over the archive set: the doctor order-firing check's
+// order.fired read must survive a single corrupt sibling (its degraded warning
+// for that archive surfaces via the separate controller-start ReadLatestMatch
+// path), and the events-list API degrades to a slightly shorter page instead of
+// erroring. A failed directory listing is handled the same lenient way.
+func tailArchives(path string, filter Filter, limit int, active []Event) ([]Event, error) {
+	dir := filepath.Dir(path)
+	archives, err := archiveFilesIn(dir)
+	if err != nil {
+		// Directory listing failed — return what the active tail found rather
+		// than poisoning the read (matches ReadFiltered's lenient dir handling).
+		return active, nil
+	}
+
+	// archiveFilesIn is ascending by FirstSeq; walk newest-first so we stop
+	// as soon as the cap is satisfied and never open older archives.
+	result := active
+	for i := len(archives) - 1; i >= 0; i-- {
+		if len(result) >= limit {
+			break
+		}
+		info := archives[i]
+		if !archiveOverlapsFilter(info, filter) {
+			continue
+		}
+		remaining := limit - len(result)
+		tail, err := readFilteredTailFromArchive(filepath.Join(dir, info.Basename), filter, remaining)
+		if err != nil {
+			// Degrade: skip the corrupt archive and keep walking older ones so
+			// the result can only get older, never silently short.
+			continue
+		}
+		if len(tail) == 0 {
+			continue
+		}
+		result = mergeTailInto(result, tail, limit)
+	}
+	return result, nil
+}
+
+// mergeTailInto merges an older archive's seq-ascending matches into the
+// already-collected seq-ascending matches, keeping the limit newest. The
+// archive tail is strictly older than every event already in `base` (the
+// active log precedes any archive, and we walk archives newest-first), so a
+// merge-by-seq followed by a trailing trim preserves both order and the cap.
+func mergeTailInto(base, older []Event, limit int) []Event {
+	if len(older) == 0 {
+		return base
+	}
+	merged := make([]Event, 0, len(base)+len(older))
+	i, j := 0, 0
+	for i < len(base) && j < len(older) {
+		if base[i].Seq <= older[j].Seq {
+			merged = append(merged, base[i])
+			i++
+		} else {
+			merged = append(merged, older[j])
+			j++
+		}
+	}
+	merged = append(merged, base[i:]...)
+	merged = append(merged, older[j:]...)
+	if len(merged) > limit {
+		merged = merged[len(merged)-limit:]
+	}
+	return merged
+}
+
+// readFilteredTailFromArchive streams a gzipped archive forward (gzip is not
+// seekable, so it cannot be read backwards) and returns the last `limit`
+// matching events in seq-ascending order. A ring of the most recent `limit`
+// matches avoids buffering the whole archive.
+func readFilteredTailFromArchive(path string, filter Filter, limit int) ([]Event, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close() //nolint:errcheck // read-only file
+
+	gr, err := gzip.NewReader(f)
+	if err != nil {
+		return nil, fmt.Errorf("gunzip: %w", err)
+	}
+	defer gr.Close() //nolint:errcheck // read-only stream
+
+	scanner := bufio.NewScanner(gr)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // handle lines up to 1MB
+	ring := make([]Event, 0, limit)
+	for scanner.Scan() {
+		var e Event
+		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
+			continue // skip malformed lines
+		}
+		if !matchesFilter(e, filter) {
+			continue
+		}
+		if len(ring) < limit {
+			ring = append(ring, e)
+			continue
+		}
+		// Slide the ring: drop the oldest, append the newest. Archives are
+		// streamed oldest-first, so ring[0] is always the oldest retained.
+		copy(ring, ring[1:])
+		ring[limit-1] = e
+	}
+	if err := scanner.Err(); err != nil {
+		return ring, fmt.Errorf("scanning archive: %w", err)
+	}
+	return ring, nil
 }
 
 func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) ([]Event, error) {
