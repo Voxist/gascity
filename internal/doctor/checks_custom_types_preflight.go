@@ -50,6 +50,14 @@ func (c *CustomTypesPreflightCheck) Name() string {
 // dolt_mode_safe on it would reproduce the zero-session class. An unreadable
 // store is a warning: eligibility cannot be confirmed, so the flip stays
 // refused by default.
+//
+// Type registration is a NECESSARY, not a sufficient, condition for the flip.
+// This asymmetry is load-bearing in both directions: the check may REFUSE the
+// flip on its own authority (a missing type is decisive), but it may never
+// CLEAR it, because it observes nothing about dispatch safety — notably the
+// status-erasure class, where the native path collapses blocked/deferred to
+// open and leaves the dependency edge as the only surviving guard. The OK
+// message must therefore report what was checked and nothing downstream of it.
 func (c *CustomTypesPreflightCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 
@@ -75,7 +83,7 @@ func (c *CustomTypesPreflightCheck) Run(_ *CheckContext) *CheckResult {
 	result := contract.EvaluateCustomTypesRegistered(RequiredCustomTypes, registered)
 	if result.Satisfied {
 		r.Status = StatusOK
-		r.Message = fmt.Sprintf("all %d required types registered; native-store flip is data-eligible", len(RequiredCustomTypes))
+		r.Message = fmt.Sprintf("all %d required types registered (type-registration precondition only — not a native-store flip go-ahead)", len(RequiredCustomTypes))
 		return r
 	}
 
