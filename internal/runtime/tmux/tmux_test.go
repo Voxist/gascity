@@ -2188,6 +2188,64 @@ func TestNewSessionWithCommandAndEnvEmpty(t *testing.T) {
 	}
 }
 
+// TestNewSessionWithCommandAndEnvRemovesStaleGlobalFromCommandProcess is the
+// BEHAVIOURAL counterpart to TestNewSessionWithCommandAndEnvClearsEmptyVars,
+// which can only assert the call shape.
+//
+// ADR-0051: an empty env value means "the command must not see this variable".
+// Asserting that a set-environment -u call was made does not prove that — -u
+// deletes the session-scope entry, and tmux then re-merges the SERVER-GLOBAL
+// environment when respawn-pane starts the command, so a stale global value
+// arrives in the pane anyway. Measured on tmux 3.7b: with -u the command
+// process reads the global value; with -r it reads nothing.
+//
+// This test seeds a server-global value and reads the result back FROM THE
+// COMMAND PROCESS (not show-environment), so it fails if the launch path ever
+// regresses to -u.
+func TestNewSessionWithCommandAndEnvRemovesStaleGlobalFromCommandProcess(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	const (
+		key         = "GC_TEST_STALE_GLOBAL"
+		staleValue  = "stale-server-global-value"
+		unsetMarker = "<UNSET>"
+	)
+
+	tm := testTmux()
+	sessionName := "gt-test-staleglobal-" + t.Name()
+	seedName := sessionName + "-seed"
+
+	_ = tm.KillSession(sessionName)
+	_ = tm.KillSession(seedName)
+
+	// The global environment only exists while a server is running on this
+	// socket, so seed a throwaway session first, then plant the stale value.
+	if err := tm.NewSession(seedName, ""); err != nil {
+		t.Fatalf("NewSession(seed): %v", err)
+	}
+	defer func() { _ = tm.KillSession(seedName) }()
+	if err := tm.SetGlobalEnvironment(key, staleValue); err != nil {
+		t.Fatalf("SetGlobalEnvironment: %v", err)
+	}
+
+	// ${VAR-<UNSET>} expands to the marker only when VAR is genuinely absent —
+	// it stays empty for a set-but-empty variable, so this distinguishes
+	// "removed" from "present but blank".
+	outFile := filepath.Join(t.TempDir(), "stale-global-probe.txt")
+	cmd := `bash -c 'printf "%s\n" "${` + key + `-` + unsetMarker + `}" > ` + outFile + `; sleep 5'`
+
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, "", cmd, map[string]string{key: ""}); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	// A timeout here reporting the stale value IS the -u regression: the
+	// server-global value reached the command process.
+	waitForMarker(t, outFile, unsetMarker)
+}
+
 func TestIsTransientSendKeysError(t *testing.T) {
 	tests := []struct {
 		name string

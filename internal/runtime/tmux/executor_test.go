@@ -3,6 +3,7 @@ package tmux
 import (
 	"context"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -83,7 +84,15 @@ func TestNewSessionWithCommandAndEnvClearsEmptyVars(t *testing.T) {
 		}
 	}
 
-	// LANG is set over the socket via set-environment; empty values via -u.
+	// LANG is set over the socket via set-environment; empty values via -r.
+	//
+	// The flag must be -r, not -u: -u drops only the session-scope entry, after
+	// which tmux re-merges the server-global environment when respawn-pane starts
+	// the command — so a stale global LC_ALL/LC_CTYPE would reach the pane anyway.
+	// -r is "removed from the environment before starting a new process".
+	// NOTE: this is a call-SHAPE assertion and cannot observe the actual child
+	// env; TestNewSessionWithCommandAndEnvRemovesStaleGlobalFromCommandProcess is
+	// the behavioral counterpart that fails if this flag regresses to -u.
 	foundSet := false
 	foundUnsetAll := false
 	foundUnsetCtype := false
@@ -91,25 +100,35 @@ func TestNewSessionWithCommandAndEnvClearsEmptyVars(t *testing.T) {
 		if cmd(args) != "set-environment" {
 			continue
 		}
-		// set-environment -t <session> KEY VALUE  (or -u KEY)
-		if contains(args, "LANG") && contains(args, "en_US.UTF-8") {
+		// Scan only the subcommand's OWN flags. runCtx prepends tmux's global
+		// -u (force UTF-8) to every call, so a bare contains(args, "-u") matches
+		// that wrapper flag and is true even when set-environment was never
+		// given -u — a vacuous assertion. Slice past the subcommand token first.
+		sub := args[slices.Index(args, "set-environment")+1:]
+		// set-environment -t <session> KEY VALUE  (or -r KEY)
+		if contains(sub, "LANG") && contains(sub, "en_US.UTF-8") {
 			foundSet = true
 		}
-		if contains(args, "-u") && contains(args, "LC_ALL") {
+		if contains(sub, "-r") && contains(sub, "LC_ALL") {
 			foundUnsetAll = true
 		}
-		if contains(args, "-u") && contains(args, "LC_CTYPE") {
+		if contains(sub, "-r") && contains(sub, "LC_CTYPE") {
 			foundUnsetCtype = true
+		}
+		// -u on the launch path is the regression this guards against.
+		if contains(sub, "-u") && (contains(sub, "LC_ALL") || contains(sub, "LC_CTYPE")) {
+			t.Errorf("launch path used set-environment -u (session-scope only, "+
+				"server-global value survives into the pane); want -r: %v", args)
 		}
 	}
 	if !foundSet {
 		t.Errorf("missing set-environment LANG en_US.UTF-8")
 	}
 	if !foundUnsetAll {
-		t.Errorf("missing set-environment -u LC_ALL (empty-value unset)")
+		t.Errorf("missing set-environment -r LC_ALL (empty-value removal)")
 	}
 	if !foundUnsetCtype {
-		t.Errorf("missing set-environment -u LC_CTYPE (empty-value unset)")
+		t.Errorf("missing set-environment -r LC_CTYPE (empty-value removal)")
 	}
 
 	// The command is started via respawn-pane -k -t <session> <wrapped command>.
@@ -127,7 +146,7 @@ func TestNewSessionWithCommandAndEnvClearsEmptyVars(t *testing.T) {
 		t.Fatalf("respawn-pane command = %q, want it to contain claude", got)
 	}
 	// The env -u prefix the old transport bolted onto the command is gone —
-	// unsetting is now a session-level set-environment -u, not a command prefix.
+	// unsetting is now a session-level set-environment -r, not a command prefix.
 	if got := respawn[len(respawn)-1]; strings.HasPrefix(got, "env ") {
 		t.Fatalf("respawn-pane command should not carry an env -u prefix: %q", got)
 	}

@@ -550,11 +550,15 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 // command process starts before set-environment runs), so respawn-pane is the
 // load-bearing step that makes the env actually reach the command.
 //
-// Empty env values mean "unset this var": they are applied as set-environment -u
+// Empty env values mean "unset this var": they are applied as set-environment -r
 // so the pane's process does not inherit a stale value from the tmux server's
 // global environment (the defense-in-depth rationale the original -e comment
-// wanted). The command should still use 'exec env' for WaitForCommand detection
-// compatibility.
+// wanted). The flag is load-bearing and -u is NOT a substitute: -u deletes the
+// session-scope entry only, after which tmux still merges the server-global
+// environment when building the new process's env, so the stale value returns.
+// -r is documented as "removed from the environment before starting a new
+// process" — which is exactly the respawn-pane in step 3. The command should
+// still use 'exec env' for WaitForCommand detection compatibility.
 // Requires tmux >= 3.2.
 func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env map[string]string) error {
 	if err := validateSessionName(name); err != nil {
@@ -575,8 +579,10 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	}
 
 	// 2. Set every env var on the session over the socket via set-environment.
-	//    Keys are sorted for deterministic behavior. Empty values unset the var
-	//    (set-environment -u) so a stale server-global value does not leak in.
+	//    Keys are sorted for deterministic behavior. Empty values remove the var
+	//    for the new process (set-environment -r) so a stale server-global value
+	//    does not leak in. -u would NOT do this: it drops only the session-scope
+	//    entry, and the server-global value is re-merged at respawn time.
 	keys := make([]string, 0, len(env))
 	for k := range env {
 		keys = append(keys, k)
@@ -584,7 +590,7 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	sort.Strings(keys)
 	for _, k := range keys {
 		if env[k] == "" {
-			if err := t.RemoveEnvironment(name, k); err != nil {
+			if err := t.RemoveEnvironmentForNewProcess(name, k); err != nil {
 				return fmt.Errorf("unset env %q: %w", k, err)
 			}
 		} else {
@@ -2856,9 +2862,30 @@ func (t *Tmux) SetEnvironment(session, key, value string) error {
 	return err
 }
 
-// RemoveEnvironment removes an environment variable from the session.
+// RemoveEnvironment removes an environment variable from the session environment.
+//
+// This drops the SESSION-SCOPE entry only (set-environment -u). Processes the
+// session starts afterwards still inherit the variable from the tmux server's
+// GLOBAL environment if it is set there. When the intent is "the command must
+// not see this variable at all", use RemoveEnvironmentForNewProcess instead.
 func (t *Tmux) RemoveEnvironment(session, key string) error {
 	_, err := t.run("set-environment", "-t", session, "-u", key)
+	return err
+}
+
+// RemoveEnvironmentForNewProcess marks an environment variable to be removed
+// from the environment before the session starts a new process (set-environment
+// -r).
+//
+// SECURITY / CORRECTNESS (ADR-0051): -u is not a substitute here. -u deletes the
+// session-scope entry, and tmux then merges the server-global environment when
+// building the new process's env — so a stale server-global value (LANG,
+// LC_ALL, GT_ROLE bleeding from a parent mayor session) comes straight back and
+// reaches the agent pane. -r is documented as "the variable is to be removed
+// from the environment before starting a new process", which is precisely the
+// respawn-pane step of NewSessionWithCommandAndEnv.
+func (t *Tmux) RemoveEnvironmentForNewProcess(session, key string) error {
+	_, err := t.run("set-environment", "-t", session, "-r", key)
 	return err
 }
 
