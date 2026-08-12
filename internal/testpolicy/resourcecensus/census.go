@@ -123,8 +123,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   535,
-			BaselineFiles:   163,
+			BaselineCalls:   607,
+			BaselineFiles:   173,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",
@@ -136,8 +136,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   427,
-			BaselineFiles:   156,
+			BaselineCalls:   436,
+			BaselineFiles:   161,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
 			OwnerBead:       "ga-80po0c.2",
@@ -164,8 +164,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   396,
-			BaselineFiles:   112,
+			BaselineCalls:   411,
+			BaselineFiles:   117,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-80po0c.2",
@@ -177,8 +177,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   288,
-			BaselineFiles:   111,
+			BaselineCalls:   286,
+			BaselineFiles:   114,
 			ReportedCalls:   295,
 			ReportedFiles:   114,
 			OwnerBead:       "ga-80po0c.2",
@@ -190,7 +190,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   128,
+			BaselineCalls:   122,
 			BaselineFiles:   13,
 			ReportedCalls:   3960,
 			ReportedFiles:   184,
@@ -216,7 +216,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceSlowProcessGate,
-			BaselineCalls:   57,
+			BaselineCalls:   58,
 			BaselineFiles:   24,
 			ReportedCalls:   78,
 			ReportedFiles:   27,
@@ -255,8 +255,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceNetListen,
-			BaselineCalls:   94,
-			BaselineFiles:   35,
+			BaselineCalls:   95,
+			BaselineFiles:   36,
 			ReportedCalls:   92,
 			ReportedFiles:   34,
 			OwnerBead:       "ga-80po0c.2.2.2",
@@ -342,6 +342,17 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-10-01",
 		},
 		{
+			PackageDir:      "cmd/gc",
+			PackageName:     "main",
+			Owner:           "TestPassthroughEnvWithholdsControllerTokenFromChildProcess",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-80po0c.2.1",
+			Invariant:       "the controller-token withholding proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the one /bin/sh subprocess is confined to TestPassthroughEnvWithholdsControllerTokenFromChildProcess, which exists to read a credential back out of a real child process: the session env is an overlay, so only a real child can prove GC_CONTROLLER_TOKEN is absent rather than merely missing from a map",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-01",
+		},
+		{
 			PackageDir:      "internal/runtime/herdr",
 			PackageName:     "herdr",
 			Owner:           "TestServerAliveRejectsStaleSocket",
@@ -407,6 +418,17 @@ var bootstrapPolicy = Ledger{
 			MigrationTarget: "P0.4b",
 			Expires:         "2026-10-01",
 		},
+		{
+			PackageDir:      "internal/doctor",
+			PackageName:     "doctor",
+			Owner:           "TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-8pkpor",
+			Invariant:       "doctor custom-types test-owned-HOME dolt-isolation regression proof is a checked Medium owner",
+			ResourceOwner:   "the bd subprocess is confined to TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext, which proves bd routes to an embedded, test-owned dolt store rather than a machine-level shared server",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-01",
+		},
 	},
 	ReviewedHermeticBody: []ReviewedHermeticBody{
 		{
@@ -442,8 +464,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   391,
-			BaselineFiles:   109,
+			BaselineCalls:   404,
+			BaselineFiles:   113,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
 			OwnerBead:       "ga-80po0c.2.1",
@@ -455,8 +477,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   288,
-			BaselineFiles:   111,
+			BaselineCalls:   286,
+			BaselineFiles:   114,
 			ReportedCalls:   287,
 			ReportedFiles:   113,
 			OwnerBead:       "ga-80po0c.2.1",
@@ -468,7 +490,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   122,
+			BaselineCalls:   116,
 			BaselineFiles:   13,
 			ReportedCalls:   4348,
 			ReportedFiles:   200,
@@ -494,7 +516,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceSlowProcessGate,
-			BaselineCalls:   57,
+			BaselineCalls:   58,
 			BaselineFiles:   24,
 			ReportedCalls:   75,
 			ReportedFiles:   25,
@@ -533,8 +555,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceNetListen,
-			BaselineCalls:   92,
-			BaselineFiles:   34,
+			BaselineCalls:   93,
+			BaselineFiles:   35,
 			ReportedCalls:   92,
 			ReportedFiles:   34,
 			OwnerBead:       "ga-80po0c.2.2.2",
@@ -2052,14 +2074,34 @@ const (
 
 // CheckedMarkdownBlock returns the single generated inventory block.
 func CheckedMarkdownBlock(document string) (string, error) {
-	if strings.Count(document, markdownBegin) != 1 || strings.Count(document, markdownEnd) != 1 {
-		return "", errors.New("TESTING.md must contain exactly one checked test resource ledger marker pair")
+	start, end, err := markdownBlockSpan(document)
+	if err != nil {
+		return "", err
 	}
-	start := strings.Index(document, markdownBegin)
-	end := strings.Index(document, markdownEnd)
+	return document[start:end], nil
+}
+
+// ReplaceMarkdownBlock returns document with its single checked test resource
+// ledger block replaced by replacement. Content outside the marker pair is
+// preserved byte-for-byte. Pass RenderMarkdown's output as replacement to
+// regenerate the block from a Ledger.
+func ReplaceMarkdownBlock(document, replacement string) (string, error) {
+	start, end, err := markdownBlockSpan(document)
+	if err != nil {
+		return "", err
+	}
+	return document[:start] + replacement + document[end:], nil
+}
+
+func markdownBlockSpan(document string) (start, end int, err error) {
+	if strings.Count(document, markdownBegin) != 1 || strings.Count(document, markdownEnd) != 1 {
+		return 0, 0, errors.New("TESTING.md must contain exactly one checked test resource ledger marker pair")
+	}
+	start = strings.Index(document, markdownBegin)
+	end = strings.Index(document, markdownEnd)
 	if end < start {
-		return "", errors.New("TESTING.md resource ledger end marker precedes begin marker")
+		return 0, 0, errors.New("TESTING.md resource ledger end marker precedes begin marker")
 	}
 	end += len(markdownEnd)
-	return document[start:end], nil
+	return start, end, nil
 }
