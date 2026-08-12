@@ -603,9 +603,22 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	// 3. Start the actual command by respawning the pane, which re-reads the
 	//    session environment set in step 2. send-keys into the default shell would
 	//    NOT see it (the shell captured its env at start, before step 2).
-	if command != "" {
+	//
+	//    The respawn is deliberately NOT conditional on a command. The default
+	//    shell that new-session -d started in step 1 captured its environment
+	//    before step 2 ran too, so an env-only session that skipped the respawn
+	//    would deliver nothing to the pane's process while show-environment still
+	//    reported every variable as set — a false-positive that hides the miss.
+	//    Respawning with no shell-command re-runs the pane's original command
+	//    (the default shell), this time with the session environment applied.
+	switch {
+	case command != "":
 		if err := t.RespawnPane(name, command); err != nil {
 			return fmt.Errorf("respawn pane with command: %w", err)
+		}
+	case len(env) > 0:
+		if err := t.RespawnPaneDefaultCommand(name); err != nil {
+			return fmt.Errorf("respawn pane for env-only session: %w", err)
 		}
 	}
 
@@ -3721,6 +3734,19 @@ func (t *Tmux) SetMailClickBinding(_ string) error {
 // The pane parameter should be a pane ID (e.g., "%0") or session:window.pane format.
 func (t *Tmux) RespawnPane(pane, command string) error {
 	_, err := t.run("respawn-pane", "-k", "-t", pane, t.wrapPaneCommand(command))
+	return err
+}
+
+// RespawnPaneDefaultCommand restarts the pane's original command — for a session
+// created by NewSession or NewSessionWithCommandAndEnv that is tmux's default
+// shell — so the new process picks up session environment applied after the pane
+// first started.
+//
+// No shell-command argument is passed, so wrapPaneCommand does not apply: an
+// env-only session has no agent process to place in the systemd scope, only the
+// default shell.
+func (t *Tmux) RespawnPaneDefaultCommand(pane string) error {
+	_, err := t.run("respawn-pane", "-k", "-t", pane)
 	return err
 }
 

@@ -2202,6 +2202,47 @@ func TestNewSessionWithCommandAndEnvEmpty(t *testing.T) {
 // This test seeds a server-global value and reads the result back FROM THE
 // COMMAND PROCESS (not show-environment), so it fails if the launch path ever
 // regresses to -u.
+// TestNewSessionWithCommandAndEnvDeliversEnvToEnvOnlyShell is the behavioral
+// counterpart for the env-only (command == "") launch path.
+//
+// The shell that new-session -d starts captures its environment before
+// set-environment runs, so without the step-3 respawn the variable never reaches
+// the pane's process. show-environment cannot see that: it reports the
+// session-scope entry and returns success in the broken case, which is why this
+// test asks the SHELL what it actually has instead.
+func TestNewSessionWithCommandAndEnvDeliversEnvToEnvOnlyShell(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	const (
+		key         = "GC_TEST_ENV_ONLY"
+		value       = "delivered-to-env-only-shell"
+		unsetMarker = "<UNSET>"
+	)
+
+	tm := testTmux()
+	sessionName := "gt-test-envonly-" + t.Name()
+	_ = tm.KillSession(sessionName)
+
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, "", "", map[string]string{key: value}); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	// Ask the pane's own shell to report the variable. It can only echo what is
+	// in its process environment, so a miss here is a real delivery failure.
+	outFile := filepath.Join(t.TempDir(), "env-only-probe.txt")
+	if err := tm.SendKeys(sessionName,
+		`printf "%s\n" "${`+key+`-`+unsetMarker+`}" > `+outFile); err != nil {
+		t.Fatalf("SendKeys: %v", err)
+	}
+
+	// A timeout here reporting the marker IS the regression: the respawn was
+	// skipped and the shell never received the session environment.
+	waitForMarker(t, outFile, value)
+}
+
 func TestNewSessionWithCommandAndEnvRemovesStaleGlobalFromCommandProcess(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")

@@ -94,42 +94,17 @@ func TestNewSessionWithCommandAndEnvClearsEmptyVars(t *testing.T) {
 	// env; TestNewSessionWithCommandAndEnvRemovesStaleGlobalFromCommandProcess is
 	// the behavioral counterpart that fails if this flag regresses to -u.
 	foundSet := false
-	foundUnsetAll := false
-	foundUnsetCtype := false
 	for _, args := range exec.calls {
-		if cmd(args) != "set-environment" {
-			continue
-		}
-		// Scan only the subcommand's OWN flags. runCtx prepends tmux's global
-		// -u (force UTF-8) to every call, so a bare contains(args, "-u") matches
-		// that wrapper flag and is true even when set-environment was never
-		// given -u — a vacuous assertion. Slice past the subcommand token first.
-		sub := args[slices.Index(args, "set-environment")+1:]
-		// set-environment -t <session> KEY VALUE  (or -r KEY)
-		if contains(sub, "LANG") && contains(sub, "en_US.UTF-8") {
+		// set-environment -t <session> KEY VALUE
+		if sub := setEnvironmentArgs(args); contains(sub, "LANG") && contains(sub, "en_US.UTF-8") {
 			foundSet = true
-		}
-		if contains(sub, "-r") && contains(sub, "LC_ALL") {
-			foundUnsetAll = true
-		}
-		if contains(sub, "-r") && contains(sub, "LC_CTYPE") {
-			foundUnsetCtype = true
-		}
-		// -u on the launch path is the regression this guards against.
-		if contains(sub, "-u") && (contains(sub, "LC_ALL") || contains(sub, "LC_CTYPE")) {
-			t.Errorf("launch path used set-environment -u (session-scope only, "+
-				"server-global value survives into the pane); want -r: %v", args)
 		}
 	}
 	if !foundSet {
 		t.Errorf("missing set-environment LANG en_US.UTF-8")
 	}
-	if !foundUnsetAll {
-		t.Errorf("missing set-environment -r LC_ALL (empty-value removal)")
-	}
-	if !foundUnsetCtype {
-		t.Errorf("missing set-environment -r LC_CTYPE (empty-value removal)")
-	}
+	assertEnvRemovedForNewProcess(t, exec.calls, "LC_ALL")
+	assertEnvRemovedForNewProcess(t, exec.calls, "LC_CTYPE")
 
 	// The command is started via respawn-pane -k -t <session> <wrapped command>.
 	var respawn []string
@@ -177,6 +152,53 @@ func cmd(args []string) string {
 		}
 	}
 	return ""
+}
+
+// setEnvironmentArgs returns the arguments a recorded call passed to its own
+// set-environment subcommand, or nil when the call is not set-environment.
+//
+// Every set-environment flag assertion must go through this. runCtx prepends
+// tmux's global -u (force UTF-8) to EVERY invocation, so scanning the whole argv
+// for "-u" matches that wrapper flag and stays true even when set-environment
+// was never given it. That vacuity is what let the original -u/-r defect ship
+// green; repairing it in one test file while an identical copy survived in
+// another is how it stayed green afterwards. The scan lives in one place so a
+// fix cannot land in only half the call sites.
+func setEnvironmentArgs(args []string) []string {
+	if cmd(args) != "set-environment" {
+		return nil
+	}
+	return args[slices.Index(args, "set-environment")+1:]
+}
+
+// assertEnvRemovedForNewProcess fails unless the recorded calls remove key with
+// set-environment -r, and fails if any of them removes it with -u instead.
+//
+// -u drops only the session-scope entry; tmux re-merges the server-global
+// environment when respawn-pane starts the process, so a stale global value
+// comes back. -r is "removed from the environment before starting a new
+// process". This is a call-SHAPE assertion — the behavioral counterpart is
+// TestNewSessionWithCommandAndEnvRemovesStaleGlobalFromCommandProcess.
+func assertEnvRemovedForNewProcess(t *testing.T, calls [][]string, key string) {
+	t.Helper()
+	removed := false
+	for _, args := range calls {
+		sub := setEnvironmentArgs(args)
+		if sub == nil || !contains(sub, key) {
+			continue
+		}
+		if contains(sub, "-u") {
+			t.Errorf("launch path used set-environment -u %s: -u drops only the "+
+				"session-scope entry, so tmux re-merges the server-global value when "+
+				"respawn-pane starts the process; want -r; call: %v", key, args)
+		}
+		if contains(sub, "-r") {
+			removed = true
+		}
+	}
+	if !removed {
+		t.Errorf("missing set-environment -r %s (empty-value removal); calls: %v", key, calls)
+	}
 }
 
 // TestNewSessionWithCommandAndEnvNoSecretInArgv is the load-bearing ADR-0051
