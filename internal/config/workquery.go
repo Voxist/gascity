@@ -336,19 +336,53 @@ func ephemeralAssignedReadyProbeScript(shellVar string, includeEphemeralReady bo
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
 }
 
+// poolDemandOriginGateScript emits the work_query pool tier's origin gate.
+//
+// The gate itself is unchanged in effect: only an ephemeral origin (or an
+// unset one) may probe pool demand. A named session is a reserved coordinator
+// identity, not a generic-demand worker, and letting it probe would make it
+// poach a pool's queue.
+//
+// What changes (vc-ozanp5) is that the refusal is no longer silent. The gate
+// used to be `*) exit 0`, so a named origin exited before probe_pool_demand
+// ran and the caller saw an empty result that was indistinguishable from a
+// drained queue — `gc hook` reporting "no work" when the real answer was "not
+// looked". `exit` cannot say anything on its way out, so the refusal is
+// recorded in pool_gate_skipped and reported by poolDemandGatedTailScript,
+// which is the only place the empty fallthrough is printed.
 func poolDemandOriginGateScript() string {
-	return `case "$GC_SESSION_ORIGIN" in ` +
+	return `pool_gate_skipped=0; ` +
+		`case "$GC_SESSION_ORIGIN" in ` +
 		`ephemeral|"") ;; ` +
-		`*) exit 0 ;; ` +
+		`*) pool_gate_skipped=1 ;; ` +
 		`esac; `
+}
+
+// poolDemandProbeCallScript emits ONE gated probe_pool_demand call. The bare
+// `probe_pool_demand "$N"` form must not come back: it is what would let a
+// named origin silently re-acquire pool-poaching behaviour.
+func poolDemandProbeCallScript(arg string) string {
+	return `[ "$pool_gate_skipped" = "0" ] && probe_pool_demand ` + arg + `; `
+}
+
+// poolDemandGatedTailScript closes the pool tier: it reports a skipped probe
+// on stderr, then prints the empty fallthrough. It fires whenever the gate
+// refused, not only when the tier turned out to be non-empty — establishing
+// non-emptiness would require running the probe the gate exists to prevent.
+// "gated" versus "no work" is the distinction callers need; whether the gated
+// queue happened to hold rows is not knowable without violating the gate.
+func poolDemandGatedTailScript() string {
+	return `[ "$pool_gate_skipped" = "1" ] && ` +
+		`printf "gc: work_query pool tier not probed: origin=%s is not ephemeral; routed pool work (if any) was NOT considered\n" "$GC_SESSION_ORIGIN" >&2; ` +
+		`printf "[]"`
 }
 
 func routedPoolWorkQueryProbeScript(includeEphemeralReady bool, targetCount int) string {
 	script := poolDemandOriginGateScript() + poolDemandFirstRowFunctionScript(includeEphemeralReady)
 	for i := 1; i <= targetCount; i++ {
-		script += fmt.Sprintf(`probe_pool_demand "$%d"; `, i)
+		script += poolDemandProbeCallScript(fmt.Sprintf(`"$%d"`, i))
 	}
-	return script + `printf "[]"`
+	return script + poolDemandGatedTailScript()
 }
 
 func routedPoolWorkQueryCommand(includeEphemeralReady bool, targets ...string) string {
@@ -464,16 +498,16 @@ func buildWorkQuery(a *Agent, includeEphemeralReady bool) string {
 		script := standardAssignedWorkQueryScript(includeEphemeralReady) +
 			poolDemandOriginGateScript() +
 			poolDemandFirstRowFunctionScript(includeEphemeralReady) +
-			`probe_pool_demand "$1"; ` +
-			`printf "[]"`
+			poolDemandProbeCallScript(`"$1"`) +
+			poolDemandGatedTailScript()
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
 	script := legacyControlAssignedWorkQueryScript(includeEphemeralReady) +
 		poolDemandOriginGateScript() +
 		poolDemandFirstRowFunctionScript(includeEphemeralReady) +
-		`probe_pool_demand "$1"; ` +
-		`probe_pool_demand "$2"; ` +
-		`printf "[]"`
+		poolDemandProbeCallScript(`"$1"`) +
+		poolDemandProbeCallScript(`"$2"`) +
+		poolDemandGatedTailScript()
 	return shellquote.Join([]string{"sh", "-c", script, "--", target, legacyTarget})
 }
 
