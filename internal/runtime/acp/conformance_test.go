@@ -36,6 +36,22 @@ func TestACPConformance(t *testing.T) {
 	})
 }
 
+// TestACPConformanceSharedDir runs the full Provider conformance suite
+// against NewSeamBacked's construction path: the shared os.TempDir()/gc-acp
+// directory used in production, distinct from the per-test isolated
+// directory TestACPConformance exercises above via NewSeamBackedWithDir.
+func TestACPConformanceSharedDir(t *testing.T) {
+	var fixture acpConformanceFixture
+	var counter int64
+
+	runtimetest.RunProviderTests(t, func(caseT *testing.T) (runtime.Provider, runtime.Config, string) {
+		return NewSeamBacked(Config{}), runtime.Config{
+			Command: acpConformanceCommand(caseT, t, &fixture),
+			WorkDir: caseT.TempDir(),
+		}, fmt.Sprintf("gc-acp-conform-shared-%d", atomic.AddInt64(&counter, 1))
+	})
+}
+
 func acpConformanceDir(caseT, ownerT *testing.T, fixture *acpConformanceFixture) string {
 	caseT.Helper()
 	if err := prepareACPConformanceFixture(ownerT, fixture); err != nil {
