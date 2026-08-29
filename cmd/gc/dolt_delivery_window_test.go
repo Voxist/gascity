@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -178,6 +180,77 @@ func TestDeliveryWindowGuardConditions(t *testing.T) {
 	// we only pin that the nested entrypoint keeps its raised-config
 	// parameter — the thing AC5 depends on.
 	_ = defaultDeliveryWindowStart
+}
+
+// AC3/AC5 durability: the outcome must survive the starting process
+// exiting — a JSON file, not just a stream nothing captures (architect
+// guidance, bead comment 2026-08-12).
+func TestDeliveryWindowOutcomeFilePersistsAndRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	s := &windowSeams{}
+	stubDeliveryWindow(t, s)
+
+	out := runManagedDoltDeliveryWindow("/city", "127.0.0.1", "3311", "root", "info", 30*time.Second, config.DoltConfig{})
+	if err := writeDeliveryWindowOutcomeFile(dir, out); err != nil {
+		t.Fatalf("writeDeliveryWindowOutcomeFile: %v", err)
+	}
+
+	data, err := os.ReadFile(deliveryWindowOutcomeStatePath(dir))
+	if err != nil {
+		t.Fatalf("read outcome file: %v", err)
+	}
+	var got deliveryWindowOutcome
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal outcome file: %v", err)
+	}
+	if !got.Ran || got.Err != "" || got.Skipped != "" {
+		t.Errorf("persisted outcome = %+v, want a clean ran record", got)
+	}
+	if got.At.IsZero() {
+		t.Error("persisted outcome At is zero, want the finalize timestamp")
+	}
+}
+
+// The three AC3 states ("armed and drained", "armed but push failed",
+// "never armed") must round-trip distinguishably, and the file holds the
+// LATEST outcome only — one record, not an append-only log.
+func TestDeliveryWindowOutcomeFileDistinguishesSkippedFromFailed(t *testing.T) {
+	dir := t.TempDir()
+
+	skipped := deliveryWindowOutcome{Skipped: "window server failed to start: port unavailable", At: time.Unix(1_700_000_000, 0)}
+	if err := writeDeliveryWindowOutcomeFile(dir, skipped); err != nil {
+		t.Fatalf("write skipped: %v", err)
+	}
+	data, err := os.ReadFile(deliveryWindowOutcomeStatePath(dir))
+	if err != nil {
+		t.Fatalf("read skipped: %v", err)
+	}
+	var gotSkipped deliveryWindowOutcome
+	if err := json.Unmarshal(data, &gotSkipped); err != nil {
+		t.Fatalf("unmarshal skipped: %v", err)
+	}
+	if gotSkipped.Ran || gotSkipped.Skipped == "" {
+		t.Errorf("persisted skipped outcome = %+v, want Ran=false with a reason", gotSkipped)
+	}
+
+	failed := deliveryWindowOutcome{Ran: true, Err: "gc dolt sync --drain failed: BACKLOG NOT DRAINED", At: time.Unix(1_700_000_100, 0)}
+	if err := writeDeliveryWindowOutcomeFile(dir, failed); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	data, err = os.ReadFile(deliveryWindowOutcomeStatePath(dir))
+	if err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+	var gotFailed deliveryWindowOutcome
+	if err := json.Unmarshal(data, &gotFailed); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if !gotFailed.Ran || gotFailed.Err == "" {
+		t.Errorf("persisted failed outcome = %+v, want Ran=true with an error", gotFailed)
+	}
+	if gotFailed.Skipped != "" {
+		t.Errorf("persisted failed outcome Skipped = %q, want empty (Ran/Err and Skipped are mutually exclusive)", gotFailed.Skipped)
+	}
 }
 
 // Budget and read-timeout env parsing: invalid values fall back to the

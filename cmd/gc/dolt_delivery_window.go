@@ -40,14 +40,17 @@ package main
 // so order.completed reads as fresh").
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // defaultDeliveryWindowReadTimeoutMillis is the raised listener deadline
@@ -174,16 +177,20 @@ type deliveryWindowOutcome struct {
 	Skipped  string // non-empty => window did not run, with the reason
 	Port     int
 	Duration time.Duration
-	stopped  bool // guards the at-most-once stop inside one outcome
+	At       time.Time // when the outcome was finalized — the durable record's timestamp (AC3/AC5)
+	stopped  bool      // guards the at-most-once stop inside one outcome
 }
 
 // runManagedDoltDeliveryWindow arms the window (ADR-0064 D1/D2). It ALWAYS
 // returns an outcome — never a bare error — because constraint 2 says a
 // failed window must not block the boot; the caller turns any non-clean
 // outcome into an alertable record and proceeds.
-func runManagedDoltDeliveryWindow(cityPath, host, port, user, logLevel string, timeout time.Duration, baseCfg config.DoltConfig) deliveryWindowOutcome {
+func runManagedDoltDeliveryWindow(cityPath, host, port, user, logLevel string, timeout time.Duration, baseCfg config.DoltConfig) (out deliveryWindowOutcome) {
 	start := deliveryWindowNowFn()
-	out := deliveryWindowOutcome{}
+	// At is stamped on every exit path (including the early skip returns
+	// below) via defer, so the durable record always carries a finalize
+	// timestamp without duplicating the stamp at each return site.
+	defer func() { out.At = deliveryWindowNowFn() }()
 	budget := deliveryWindowBudget()
 	deadline := start.Add(budget)
 
@@ -197,7 +204,7 @@ func runManagedDoltDeliveryWindow(cityPath, host, port, user, logLevel string, t
 	nested, err := deliveryWindowStartFn(cityPath, host, port, user, logLevel, timeout, windowCfg)
 	if err != nil {
 		out.Skipped = fmt.Sprintf("window server failed to start: %v", err)
-		return out
+		return
 	}
 	out.Ran = true
 	out.Port = nested.Port
@@ -208,7 +215,7 @@ func runManagedDoltDeliveryWindow(cityPath, host, port, user, logLevel string, t
 		out.Err = fmt.Sprintf("window budget (%s) exhausted before the drain could run", budget)
 		out.recordStopErr(out.stopWindow(cityPath, nested.Port))
 		out.Duration = deliveryWindowNowFn().Sub(start)
-		return out
+		return
 	}
 	if err := deliveryWindowDrainFn(cityPath, strconv.Itoa(nested.Port), user, remaining); err != nil {
 		out.Err = fmt.Sprintf("gc dolt sync --drain failed: %v", err)
@@ -220,7 +227,7 @@ func runManagedDoltDeliveryWindow(cityPath, host, port, user, logLevel string, t
 	// acceptable end state. A failed stop is itself a window failure.
 	out.recordStopErr(out.stopWindow(cityPath, nested.Port))
 	out.Duration = deliveryWindowNowFn().Sub(start)
-	return out
+	return
 }
 
 // stopWindow stops the nested server at most once per outcome; the first
@@ -245,9 +252,14 @@ func (o *deliveryWindowOutcome) recordStopErr(stopErr string) {
 	}
 }
 
-// reportDeliveryWindowOutcome emits the AC3 record. Loud, greppable, and
-// present on the skip paths too — a start that skips the window is the
-// defect D2 exists to prevent, so it may not be quiet.
+// reportDeliveryWindowOutcome emits the AC3 record to stderr. Loud,
+// greppable, and present on the skip paths too — a start that skips the
+// window is the defect D2 exists to prevent, so it may not be quiet. Stderr
+// alone is not the durable record, though: production captures that stream
+// nowhere (measured on the sibling boot-drain path, vp-5mc4p: grep -c
+// boot-drain supervisor.log = 0 on a live 7.1MB log). See
+// writeDeliveryWindowOutcomeFile for the sink that survives the starting
+// process exiting.
 func reportDeliveryWindowOutcome(out deliveryWindowOutcome, stderr io.Writer) {
 	switch {
 	case out.Ran && out.Err == "":
@@ -257,4 +269,39 @@ func reportDeliveryWindowOutcome(out deliveryWindowOutcome, stderr io.Writer) {
 	default:
 		fmt.Fprintf(stderr, "gc dolt: MANAGED DOLT DELIVERY WINDOW SKIPPED: %s\n", out.Skipped) //nolint:errcheck
 	}
+}
+
+// deliveryWindowOutcomeFileName is the durable AC3/AC5 record's basename,
+// written under the dolt pack's state dir (same directory the provider
+// already publishes runtime state into — see dolt_runtime_publication.go).
+const deliveryWindowOutcomeFileName = "dolt-delivery-window-outcome.json"
+
+// deliveryWindowOutcomeStatePath resolves the durable record's path from a
+// managedDoltRuntimeLayout.PackStateDir, so it honors the same
+// GC_PACK_STATE_DIR / GC_CITY_RUNTIME_DIR overrides as the rest of the
+// managed-dolt runtime files.
+func deliveryWindowOutcomeStatePath(packStateDir string) string {
+	return filepath.Join(packStateDir, deliveryWindowOutcomeFileName)
+}
+
+// writeDeliveryWindowOutcomeFile persists the outcome record so it survives
+// the starting process exiting — the architect's explicit AC3/AC5 ask
+// (bead comment 2026-08-12): "armed and drained N", "armed but push
+// failed", and "never armed" must be three distinguishable, machine-readable
+// states, not three ways of printing to a stream nothing captures. Mirrors
+// writeDoltRuntimeStateFile's convention exactly: atomic temp-file + rename
+// via internal/fsys, one JSON object overwritten per publishing start (the
+// record is "the last window's outcome," not an append-only log — At is
+// what disambiguates a stale record from a fresh one).
+func writeDeliveryWindowOutcomeFile(packStateDir string, outcome deliveryWindowOutcome) error {
+	path := deliveryWindowOutcomeStatePath(packStateDir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.Marshal(outcome)
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return fsys.WriteFileAtomic(fsys.OSFS{}, path, data, 0o644)
 }

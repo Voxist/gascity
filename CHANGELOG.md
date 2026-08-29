@@ -23,9 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   undone by the next restart. The window is bounded by an overall budget
   (`GC_DOLT_DELIVERY_WINDOW_BUDGET`, default 5m) so a slow drain cannot stall
   the first `bd` call after a restart indefinitely, and a failed or skipped
-  window never blocks the server from starting — it only reports a loud
+  window never blocks the server from starting — it reports a loud
   `MANAGED DOLT DELIVERY WINDOW …` stderr record, including from the
-  `gc`-less shell fallback start, which cannot run the window at all. Disable
+  `gc`-less shell fallback start, which cannot run the window at all, **and**
+  persists a `dolt-delivery-window-outcome.json` record in the dolt pack's
+  state dir that survives the starting process exiting — stderr alone proved
+  invisible in production for the sibling boot-drain path (vp-5mc4p). Disable
   with `GC_DOLT_DELIVERY_WINDOW=0`. (vp-o52ia, ADR-0064)
 
 ### Fixed

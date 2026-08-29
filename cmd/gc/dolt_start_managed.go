@@ -205,8 +205,16 @@ func startManagedDoltProcessWithConfig(cityPath, host, port, user, logLevel stri
 		outcome := runManagedDoltDeliveryWindow(cityPath, host, port, user, logLevel, timeout, doltConfig)
 		report.DeliveryWindow = outcome
 		reportDeliveryWindowOutcome(outcome, os.Stderr)
+		if werr := writeDeliveryWindowOutcomeFile(layout.PackStateDir, outcome); werr != nil {
+			// The durable record failing to write is itself only
+			// stderr-reportable, not boot-blocking (constraint 2 applies
+			// to this write too — it is best-effort observability, not a
+			// start precondition).
+			fmt.Fprintf(os.Stderr, "gc dolt: failed to persist delivery window outcome record: %v\n", werr) //nolint:errcheck
+		}
 		// Constraint 2: a failed or aborted window NEVER blocks the boot.
-		// The outcome record above is the alertable surface (AC3).
+		// The outcome record above (stderr) and on disk (AC3/AC5 durable
+		// sink) is the alertable surface.
 	}
 
 	// Lock-keyed singleton guard (gastownhall/gascity#3174). Dolt holds an
