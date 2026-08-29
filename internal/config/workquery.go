@@ -360,7 +360,7 @@ func poolDemandOriginGateScript() string {
 
 // poolDemandProbeCallScript emits ONE gated probe_pool_demand call. The bare
 // `probe_pool_demand "$N"` form must not come back: it is what would let a
-// named origin silently re-acquire pool-poaching behaviour.
+// named origin silently re-acquire pool-poaching behavior.
 func poolDemandProbeCallScript(arg string) string {
 	return `[ "$pool_gate_skipped" = "0" ] && probe_pool_demand ` + arg + `; `
 }
