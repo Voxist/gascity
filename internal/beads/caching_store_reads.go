@@ -629,9 +629,10 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		return c.backing.Ready(query...)
 	}
 	var (
-		statusByID map[string]string
-		depsByID   map[string][]Dep
-		openBeads  []Bead
+		statusByID   map[string]string
+		depsByID     map[string][]Dep
+		openBeads    []Bead
+		readyInvalid map[string]struct{}
 	)
 	// Ready requires a fully live cache with complete dependency coverage; the
 	// overlay refreshes any dirty rows first, then computes readiness from the
@@ -655,6 +656,7 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 			for _, b := range openBeads {
 				depsByID[b.ID] = cloneDeps(c.deps[b.ID])
 			}
+			readyInvalid = c.readyProjectionInvalidSnapshotLocked(openBeads)
 		},
 	); err != nil {
 		return c.backing.Ready(query...)
@@ -662,7 +664,8 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 
 	var result []Bead
 	for _, b := range openBeads {
-		if cachedBeadReady(b, statusByID, depsByID[b.ID]) {
+		_, invalid := readyInvalid[b.ID]
+		if cachedBeadReady(b, statusByID, depsByID[b.ID], invalid) {
 			result = append(result, cloneBead(b))
 		}
 	}
@@ -729,7 +732,7 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 		default:
 			return nil, false
 		}
-		if cachedBeadReady(b, statusByID, deps) {
+		if cachedBeadReady(b, statusByID, deps, c.readyProjectionInvalidLocked(b.ID)) {
 			result = append(result, cloneBead(b))
 		}
 	}
@@ -739,8 +742,13 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 	return result, true
 }
 
-func cachedBeadReady(b Bead, statusByID map[string]string, deps []Dep) bool {
-	if b.IsBlocked != nil {
+// cachedBeadReady answers readiness for one cached row. projectionInvalid says
+// the cache has invalidated this row's is_blocked verdict and not yet
+// re-observed it (ADR-0094); the row still carries the value the backing last
+// reported, so the caller passes the invalidation rather than the row carrying
+// a nil sentinel that the reconcile differ would misread as a real change.
+func cachedBeadReady(b Bead, statusByID map[string]string, deps []Dep, projectionInvalid bool) bool {
+	if b.IsBlocked != nil && !projectionInvalid {
 		return !*b.IsBlocked
 	}
 	for _, dep := range deps {

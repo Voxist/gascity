@@ -75,19 +75,23 @@ func (in snapshotInputs) quiescent(st storeState) bool {
 // It captures every field the seam writes; the field-coverage census
 // (TestMergeOracleFieldCoverage) proves this list stays exhaustive.
 type mergeEndState struct {
-	beads          map[string]Bead
-	deps           map[string][]Dep
-	depsComplete   bool
-	dirty          map[string]struct{}
-	beadSeq        map[string]uint64
-	localBeadAt    map[string]time.Time
-	deletedSeq     map[string]uint64
-	state          cacheState
-	lastFreshAt    time.Time
-	mutationSeq    uint64
-	primeErr       string
-	syncFailures   int
-	circuitTripped bool
+	beads        map[string]Bead
+	deps         map[string][]Dep
+	depsComplete bool
+	dirty        map[string]struct{}
+	beadSeq      map[string]uint64
+	localBeadAt  map[string]time.Time
+	deletedSeq   map[string]uint64
+	// readyProjectionInvalid is a per-row staleness mark cleared by
+	// absorbFreshLocked, structurally the same kind of seam-written state as
+	// dirty — so the oracle compares it rather than excluding it (ADR-0094).
+	readyProjectionInvalid map[string]struct{}
+	state                  cacheState
+	lastFreshAt            time.Time
+	mutationSeq            uint64
+	primeErr               string
+	syncFailures           int
+	circuitTripped         bool
 	// stats fields the seam writes.
 	statsAdds            int64
 	statsRemoves         int64
@@ -269,6 +273,9 @@ func ensureMaps(c *CachingStore) {
 	if c.deletedSeq == nil {
 		c.deletedSeq = make(map[string]uint64)
 	}
+	if c.readyProjectionInvalid == nil {
+		c.readyProjectionInvalid = make(map[string]struct{})
+	}
 }
 
 func captureEndState(c *CachingStore) mergeEndState {
@@ -277,24 +284,25 @@ func captureEndState(c *CachingStore) mergeEndState {
 		primeErr = c.primePartialErr.Error()
 	}
 	return mergeEndState{
-		beads:                cloneBeadMap(c.beads),
-		deps:                 cloneDepMap(c.deps),
-		depsComplete:         c.depsComplete,
-		dirty:                cloneDirty(c.dirty),
-		beadSeq:              cloneU64Map(c.beadSeq),
-		localBeadAt:          cloneTimeMap(c.localBeadAt),
-		deletedSeq:           cloneU64Map(c.deletedSeq),
-		state:                c.state,
-		lastFreshAt:          c.lastFreshAt,
-		mutationSeq:          c.mutationSeq,
-		primeErr:             primeErr,
-		syncFailures:         c.syncFailures,
-		circuitTripped:       c.circuitTripped,
-		statsAdds:            c.stats.Adds,
-		statsRemoves:         c.stats.Removes,
-		statsUpdates:         c.stats.Updates,
-		statsLastReconcileAt: c.stats.LastReconcileAt,
-		statsLastFreshAt:     c.stats.LastFreshAt,
+		beads:                  cloneBeadMap(c.beads),
+		deps:                   cloneDepMap(c.deps),
+		depsComplete:           c.depsComplete,
+		dirty:                  cloneDirty(c.dirty),
+		beadSeq:                cloneU64Map(c.beadSeq),
+		localBeadAt:            cloneTimeMap(c.localBeadAt),
+		deletedSeq:             cloneU64Map(c.deletedSeq),
+		readyProjectionInvalid: cloneDirty(c.readyProjectionInvalid),
+		state:                  c.state,
+		lastFreshAt:            c.lastFreshAt,
+		mutationSeq:            c.mutationSeq,
+		primeErr:               primeErr,
+		syncFailures:           c.syncFailures,
+		circuitTripped:         c.circuitTripped,
+		statsAdds:              c.stats.Adds,
+		statsRemoves:           c.stats.Removes,
+		statsUpdates:           c.stats.Updates,
+		statsLastReconcileAt:   c.stats.LastReconcileAt,
+		statsLastFreshAt:       c.stats.LastFreshAt,
 	}
 }
 
