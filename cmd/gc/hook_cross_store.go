@@ -293,7 +293,96 @@ func rigScopedHookRig(cfg *config.City, agentIdentity string) string {
 // federated claim loop reselects over a shrinking store set: once the primary
 // store has been dropped it is no longer in stores, so no later federated store
 // may inherit its emit-on-timeout semantics.
-func bestStoreWithWork(command string, stores []hookStore, primary hookStore, run hookStoreRunner) (string, hookStore, error) {
+//
+// ADR-0076 (vp-d1kjk) refines the ranking this function is built on, via the
+// variadic hookStoreRankOptions (zero value = pre-ADR behavior exactly):
+//
+//   - D1: with RankProbeCommand set, a store whose window-best candidate is in
+//     the ROUTED tier is ranked on a per-store priority probe (--limit=1,
+//     best-by-priority) instead of the 20-row oldest-first window, which on a
+//     backlogged store is not priority-representative — the busiest store
+//     advertised the worst rank while holding more ready P1s than a quiet rig
+//     held beads. The in_progress/assigned tiers are never probed: their reads
+//     are already single-row. A probe failure keeps the window rank
+//     (best-effort, like a flaky rig store — constraint C3).
+//   - D2: exact (tier, priority) ties resolve on candidate AGE — the older best
+//     candidate wins, the anti-starvation axis ADR-0035 already uses within a
+//     store — instead of slice position, which is how one early-registered rig
+//     owned the front door for 34 days. Equal KNOWN ages keep slice order;
+//     ties whose ages cannot be read keep the pre-D2 rotation (ga-kbbg9a), so
+//     an unreadable created_at cannot restore permanent starvation.
+//   - D3: with Stats set, the call reports stores-with-ready-work, total ready
+//     candidates, and the selected store.
+//
+// hookSelectionStats is ADR-0076 D3's visibility telemetry: what the front
+// door actually showed, so "5 of 140 routed beads" is a recorded fact instead
+// of something a session has to reverse-engineer from Go source. Collected
+// only when the caller passes a non-nil Stats in hookStoreRankOptions.
+type hookSelectionStats struct {
+	// StoresWithReadyWork counts stores whose work query returned at least one
+	// ready candidate.
+	StoresWithReadyWork int
+	// TotalReadyCandidates sums the ready candidate count across every store
+	// consulted. Per-store counts are bounded by that store's returned window,
+	// so this is a floor on the agent's pool, not its size — which is exactly
+	// the truncation signal D3 exists to expose.
+	TotalReadyCandidates int
+	// SelectedStore is the dir of the store the hook selected; "" when no
+	// store had ready work.
+	SelectedStore string
+}
+
+// hookStoreRankOptions carries the ADR-0076 D1/D3 add-ons to
+// bestStoreWithWork. The zero value reproduces the pre-D1 behavior exactly:
+// rank off the returned window, rotate unresolved ties. Variadic so existing
+// call sites and tests opt in rather than change shape.
+type hookStoreRankOptions struct {
+	// RankProbeCommand, when non-empty, is a per-store priority probe
+	// (config.EffectiveRoutedRankProbeQueryFor). For a store whose window-best
+	// candidate is in the routed tier, the probe's single best-by-priority row
+	// refines that rank — the window is ordered oldest-first and truncates at
+	// 20 rows, so a store's advertised priority must not be read off it
+	// (ADR-0076 D1). A probe that errors or cannot be parsed is best-effort:
+	// the store keeps its window rank, never errors the hook, and never
+	// blocks selection (constraint C3).
+	RankProbeCommand string
+	// Stats, when non-nil, collects the D3 telemetry for the call.
+	Stats *hookSelectionStats
+}
+
+// hookProbeStoreRank runs the D1 rank probe against one store and returns the
+// probe row's rank and id. ok is false whenever the probe does not yield a
+// rankable row — error, empty, or unparseable — and every caller treats that
+// as "keep the window's rank", never as an absence of work.
+func hookProbeStoreRank(probeCommand string, st hookStore, run hookStoreRunner) (hookCandidateRank, string, bool) {
+	out, err := run(probeCommand, st.dir, st.env)
+	if err != nil {
+		return hookCandidateRank{}, "", false
+	}
+	ready := filterUnreadyHookCandidates(normalizeWorkQueryOutput(strings.TrimSpace(out)), time.Now())
+	if !workQueryHasReadyWork(ready) {
+		return hookCandidateRank{}, "", false
+	}
+	return bestHookCandidateRank(ready)
+}
+
+// countHookReadyRows counts the ready rows in one store's filtered work-query
+// output, for the D3 TotalReadyCandidates sum. Unparseable output counts as 0:
+// the sum is telemetry, and a count that failed to decode must not fail the
+// selection that produced it.
+func countHookReadyRows(ready string) int {
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(ready)), &rows); err != nil {
+		return 0
+	}
+	return len(rows)
+}
+
+func bestStoreWithWork(command string, stores []hookStore, primary hookStore, run hookStoreRunner, opts ...hookStoreRankOptions) (string, hookStore, error) {
+	var opt hookStoreRankOptions
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
 	var lastOut string
 	var ownStoreOut string
 	var ownStoreErr error
@@ -342,6 +431,10 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 			lastOut = out
 			continue
 		}
+		if opt.Stats != nil {
+			opt.Stats.StoresWithReadyWork++
+			opt.Stats.TotalReadyCandidates += countHookReadyRows(ready)
+		}
 		if !firstHit {
 			firstHitOut, firstHitStore, firstHit = out, st, true
 		}
@@ -350,22 +443,44 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 			unrankable = true
 			continue
 		}
+		// ADR-0076 D1: a store whose window-best is a ROUTED candidate is
+		// ranked on the priority probe instead — the 20-row window is ordered
+		// oldest-first, so its minimum priority is a truncation artifact on a
+		// backlogged store. The in_progress/assigned tiers are never probed:
+		// their reads are already single-row (limit=1) and carry no window to
+		// be wrong about. A probe row only ever refines the routed priority
+		// and age; the tier itself stays what the shared output said.
+		if opt.RankProbeCommand != "" && rank.tier == hookTierRouted {
+			if probeRank, probeID, pok := hookProbeStoreRank(opt.RankProbeCommand, st, run); pok {
+				if probeRank.less(rank) || probeRank.tieWith(rank) {
+					// The probe's priority is authoritative when it is the
+					// better (or same) reading; a probe that somehow reports a
+					// WORSE priority than the window already proved loses to
+					// the row the hook can actually return.
+					rank = probeRank
+					rank.tier = hookTierRouted
+					if probeID != "" {
+						id = probeID
+					}
+				}
+			}
+		}
 		// Resuming this session's own in-progress work is unconditional.
 		if rank.tier == hookTierInProgress && sameHookStore(st, primary) {
 			return out, st, nil
 		}
 		switch {
-		case !haveBest || rank.less(bestRank):
+		case !haveBest || rank.betterThan(bestRank):
 			bestRank, haveBest = rank, true
 			bestTied = append(bestTied[:0], hookRankedStore{out: out, store: st, id: id})
-		case rank == bestRank && !hookTiedIDSeen(bestTied, id):
+		case rank.tieWith(bestRank) && !rank.betterThan(bestRank) && !hookTiedIDSeen(bestTied, id):
 			// A migrated bead (`gc storage migrate` copies, never deletes) can be
 			// ready from more than one store under the SAME id: the same row, not
 			// two tied pieces of work. Rotating across a duplicate would put a
 			// later store ahead of the primary for no reason — nothing about the
 			// work differs — and breaks the rig-first-city-last fan-out order the
 			// class-escalation claim loop depends on. An empty id (unidentifiable
-			// row) is never treated as a duplicate, so unranked-id fixtures keep
+			// row) is never treated as a duplicate, so unidentifiable-id fixtures keep
 			// rotating exactly as before.
 			bestTied = append(bestTied, hookRankedStore{out: out, store: st, id: id})
 		}
@@ -381,6 +496,9 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 		return ownStoreOut, hookStore{}, ownStoreErr
 	}
 	if unrankable && firstHit {
+		if opt.Stats != nil {
+			opt.Stats.SelectedStore = firstHitStore.dir
+		}
 		return firstHitOut, firstHitStore, nil
 	}
 	if haveBest {
@@ -388,9 +506,15 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 		if len(bestTied) > 1 {
 			winner = bestTied[hookTieBreakIndex(len(bestTied), hookTieBreakClock())]
 		}
+		if opt.Stats != nil {
+			opt.Stats.SelectedStore = winner.store.dir
+		}
 		return winner.out, winner.store, nil
 	}
 	if firstHit {
+		if opt.Stats != nil {
+			opt.Stats.SelectedStore = firstHitStore.dir
+		}
 		return firstHitOut, firstHitStore, nil
 	}
 	if ownStoreErr != nil {
@@ -504,26 +628,71 @@ const (
 // P0 would let a field that simply was not serialized outrank a real P0.
 const hookDefaultCandidatePriority = 2
 
-// hookCandidateRank orders one ready work-query candidate: lower is more urgent,
-// tier first and priority second. Comparing this across stores is the whole
-// point — within a single store bd already applies the same ordering.
+// hookCandidateRank orders one ready work-query candidate: lower is more
+// urgent, tier first, priority second, and — as a residual tiebreak under
+// ADR-0076 D2 — the candidate's age (older wins). Comparing this across stores
+// is the whole point — within a single store bd already applies the same
+// ordering.
 type hookCandidateRank struct {
 	tier     int
 	priority int
+	// age is the best candidate's created_at, when the row carries a parseable
+	// one (hasAge). It resolves exact (tier, priority) ties ACROSS stores by
+	// work age — the same anti-starvation axis ADR-0035 uses within a store —
+	// instead of slice position, which is how one early-registered rig owned
+	// the front door for 34 days (ADR-0076).
+	age    time.Time
+	hasAge bool
 }
 
-// less reports whether r should be picked ahead of other. Equal ranks report
-// false in both directions: less alone never breaks a tie, so each caller
-// decides how to. bestHookCandidateRank (below) only replaces its incumbent
-// on a strict improvement, so it keeps the first row seen. bestStoreWithWork
-// instead accumulates every candidate tied for the best rank and rotates
-// among them (see its doc comment) — the tie itself is the same regardless of
-// caller; only what happens with it differs.
+// less reports whether r should be picked ahead of other on (tier, priority)
+// alone. Equal ranks report false in both directions: less alone never breaks
+// a tie, so each caller decides how to. bestHookCandidateRank (below) only
+// replaces its incumbent on a strict improvement, so it keeps the first row
+// seen. bestStoreWithWork instead accumulates every candidate tied for the
+// best rank and rotates among them (see its doc comment) — the tie itself is
+// the same regardless of caller; only what happens with it differs.
 func (r hookCandidateRank) less(other hookCandidateRank) bool {
 	if r.tier != other.tier {
 		return r.tier < other.tier
 	}
 	return r.priority < other.priority
+}
+
+// betterThan is less plus the D2 age tiebreak: on equal (tier, priority), a
+// strictly older age wins. It deliberately does NOT prefer a known age over an
+// unknown one — an unreadable created_at must not outrank or be outranked by a
+// readable one on a comparison that was not actually made.
+func (r hookCandidateRank) betterThan(other hookCandidateRank) bool {
+	if r.tier != other.tier {
+		return r.tier < other.tier
+	}
+	if r.priority != other.priority {
+		return r.priority < other.priority
+	}
+	return r.olderThan(other)
+}
+
+// olderThan reports whether r is strictly older than other. False whenever
+// either side lacks a parseable age.
+func (r hookCandidateRank) olderThan(other hookCandidateRank) bool {
+	return r.hasAge && other.hasAge && r.age.Before(other.age)
+}
+
+// tieWith reports whether r and other are the same (tier, priority) AND that
+// sameness was not resolved by age — the case bestStoreWithWork's rotation
+// exists for. When both sides carry an age, an exact age match is a resolved
+// tie (slice order per ADR-0076 D2) and is NOT rotatable; when either age is
+// unknown the tie is unresolved and keeps the pre-D2 ga-kbbg9a rotation, which
+// is what stops an unreadable created_at from restoring permanent starvation.
+func (r hookCandidateRank) tieWith(other hookCandidateRank) bool {
+	if r.tier != other.tier || r.priority != other.priority {
+		return false
+	}
+	if r.hasAge && other.hasAge {
+		return !r.age.Equal(other.age)
+	}
+	return true
 }
 
 // bestHookCandidateRank returns the rank of the most urgent candidate in one
@@ -541,7 +710,10 @@ func bestHookCandidateRank(ready string) (hookCandidateRank, string, bool) {
 	found := false
 	for _, row := range rows {
 		rank := hookRankCandidate(row)
-		if !found || rank.less(best) {
+		// betterThan, not less: among same-(tier, priority) rows in ONE store
+		// the store's D2 representative is its oldest candidate, so the age
+		// carried upward is the age that would win the cross-store tiebreak.
+		if !found || rank.betterThan(best) {
 			best, found = rank, true
 			bestID, _ = row["id"].(string)
 		}
@@ -549,9 +721,11 @@ func bestHookCandidateRank(ready string) (hookCandidateRank, string, bool) {
 	return best, bestID, found
 }
 
-// hookRankCandidate reads one row's tier and priority. An unrecognized status or
-// a missing priority falls back to the least-urgent defensible reading, so a row
-// gc cannot classify never preempts one it can.
+// hookRankCandidate reads one row's tier, priority, and (best-effort)
+// created_at. An unrecognized status or a missing priority falls back to the
+// least-urgent defensible reading, so a row gc cannot classify never preempts
+// one it can. An unparseable created_at leaves hasAge false — the D2 age
+// tiebreak then simply does not apply to that row.
 func hookRankCandidate(row map[string]any) hookCandidateRank {
 	rank := hookCandidateRank{tier: hookTierRouted, priority: hookDefaultCandidatePriority}
 	if status, ok := row["status"].(string); ok && strings.EqualFold(strings.TrimSpace(status), "in_progress") {
@@ -561,6 +735,11 @@ func hookRankCandidate(row map[string]any) hookCandidateRank {
 	}
 	if p, ok := row["priority"].(float64); ok {
 		rank.priority = int(p)
+	}
+	if created, ok := row["created_at"].(string); ok {
+		if t, err := time.Parse(time.RFC3339, strings.TrimSpace(created)); err == nil {
+			rank.age, rank.hasAge = t, true
+		}
 	}
 	return rank
 }
@@ -593,7 +772,7 @@ func hookRankCandidate(row map[string]any) hookCandidateRank {
 // mc's topology that read is the more expensive half of the claim.
 //
 // discovered is the output selection already read from this store, moments ago.
-func claimStoreWithFallback(command string, stores []hookStore, selected, primary hookStore, discovered string, run hookStoreRunner) (string, hookStore, error) {
+func claimStoreWithFallback(command string, stores []hookStore, selected, primary hookStore, discovered string, run hookStoreRunner, opts ...hookStoreRankOptions) (string, hookStore, error) {
 	if len(stores) == 1 {
 		return discovered, selected, nil
 	}
@@ -602,13 +781,13 @@ func claimStoreWithFallback(command string, stores []hookStore, selected, primar
 		if sameHookStore(selected, primary) {
 			return "", hookStore{}, err
 		}
-		return bestStoreWithWork(command, stores, primary, run)
+		return bestStoreWithWork(command, stores, primary, run, opts...)
 	}
 	ready := filterUnreadyHookCandidates(normalizeWorkQueryOutput(strings.TrimSpace(selectedOut)), time.Now())
 	if workQueryHasReadyWork(ready) {
 		return selectedOut, selected, nil
 	}
-	return bestStoreWithWork(command, stores, primary, run)
+	return bestStoreWithWork(command, stores, primary, run, opts...)
 }
 
 // hookClaimReadsPerTick counts the work-query runs one claim attempt performs
