@@ -3488,10 +3488,18 @@ func (cr *CityRuntime) loadSessionBeadSnapshot() *sessionBeadSnapshot {
 
 func (cr *CityRuntime) loadSessionBeadSnapshotWithPartial() (*sessionBeadSnapshot, bool) {
 	// The session-bead snapshot is a sessions-class read, so route it through the
-	// sessions accessor (identity to the city store today).
+	// sessions accessor. Once [storage.classes] relocates sessions this is a
+	// different store than the work store, so the caller's work-store nil guard
+	// does not stand in front of this read.
 	store := cr.sessionsBeadStore()
 	if store.Store == nil {
-		return nil, false
+		// A read that never happened is NOT-OBSERVED, not "observed, and the
+		// answer is nothing". Reporting it complete unlocks
+		// releaseOrphanedPoolAssignmentsWhenSnapshotsComplete with an empty
+		// open-session set, which reopens every pool-routed claim in the city.
+		// Return partial=true so the existing safe branch holds the gate shut.
+		fmt.Fprintf(cr.stderr, "%s: sessions bead store unavailable; treating session snapshot as partial\n", cr.logPrefix) //nolint:errcheck
+		return nil, true
 	}
 	sessionBeads, err := loadSessionBeadSnapshot(store.Store)
 	if err != nil {
