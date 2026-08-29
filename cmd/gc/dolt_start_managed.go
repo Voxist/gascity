@@ -198,9 +198,15 @@ func startManagedDoltProcessWithConfig(cityPath, host, port, user, logLevel stri
 	// every store to a verified zero at a raised read_timeout, stops
 	// (releasing the NBS lock), and THIS start then binds the data dir at
 	// the managed 15s default. Only the swarm-facing start runs the window:
-	// runWindow=true is the nested call itself (recursion guard) and
-	// publish=false callers (recovery restarts) keep the pre-window
-	// behavior until they reach a publishing start.
+	// runWindow=true is the nested call itself (recursion guard).
+	// publish=false callers get no window here. Recovery restarts
+	// (dolt_recover_managed.go) are the one such caller in production: they
+	// call this with publish=false and then publish separately via
+	// publishManagedDoltRuntimeStateIfOwned, never re-entering this
+	// function with publish=true — so a recovery-triggered restart skips
+	// the window entirely today. Known gap (flagged in the vp-o52ia PR),
+	// not a design choice; closing it needs the window run between
+	// recovery's stop/preflight-cleanup and its own start.
 	if !runWindow && publish && deliveryWindowEnabled() {
 		outcome := runManagedDoltDeliveryWindow(cityPath, host, port, user, logLevel, timeout, doltConfig)
 		report.DeliveryWindow = outcome
