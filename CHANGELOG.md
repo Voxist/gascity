@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Runtime-provider waiver expiries are now independent per entry instead of
+  sharing one hardcoded date.** All nine `runtime.Provider` contract waivers
+  in `internal/testutil/providerledger` previously expired on the same
+  literal date, so when that date passed they all lapsed simultaneously and
+  took `CI / required` red repo-wide with no code change involved. Two of
+  the nine (`acp.NewSeamBacked`, `subprocess.NewSeamBacked`) now carry real
+  conformance proofs instead of waivers; the remaining seven each carry
+  their own staggered expiry and reference a resolvable owner bead
+  (`vp-8eqrh`) instead of an ID that doesn't resolve in this fork's `bd`
+  store, so a future lapse degrades one entry instead of the whole merge
+  queue.
+
 - **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
   SIGKILL, matching its documented contract.** The fallback (used when
   neither `timeout` nor `gtimeout` is on `PATH`, the default on stock macOS)
