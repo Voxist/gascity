@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Managed Dolt starts now arm a bounded delivery-drain window before the
+  swarm-facing server binds (ADR-0064 D1/D2/AC3).** Every publishing managed
+  start — both `gc dolt-state start-managed` and `gc-beads-bd.sh`'s on-demand
+  cold start funnel through the same Go choke point — now starts a nested
+  managed server on the same data dir with `read_timeout_millis` raised (10m
+  default) and `publish=false`, so the runtime state that admits the swarm is
+  never written for it and the city stays quiesced by construction. It runs
+  the verified-zero `gc dolt sync --drain` (vp-p8tze) against that nested
+  server, stops it to release the data-dir lock, then lets the normal start
+  proceed at the managed 15s default — closing the gap where four supervised
+  hand-run drain windows (2026-07-30 … 2026-08-06) each worked and each was
+  undone by the next restart. The window is bounded by an overall budget
+  (`GC_DOLT_DELIVERY_WINDOW_BUDGET`, default 5m) so a slow drain cannot stall
+  the first `bd` call after a restart indefinitely, and a failed or skipped
+  window never blocks the server from starting — it only reports a loud
+  `MANAGED DOLT DELIVERY WINDOW …` stderr record, including from the
+  `gc`-less shell fallback start, which cannot run the window at all. Disable
+  with `GC_DOLT_DELIVERY_WINDOW=0`. (vp-o52ia, ADR-0064)
+
 ### Fixed
 
 - **Runtime-provider waiver expiries are now independent per entry instead of

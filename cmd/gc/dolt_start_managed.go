@@ -27,6 +27,10 @@ type managedDoltStartReport struct {
 	Port         int
 	AddressInUse bool
 	Attempts     int
+	// DeliveryWindow (vp-o52ia) is set on every publishing start — the ran/
+	// skipped/failed record ADR-0064 AC3 requires. Not set on the nested
+	// window start itself.
+	DeliveryWindow deliveryWindowOutcome
 }
 
 type managedDoltStartedProcess struct {
@@ -148,6 +152,17 @@ func startManagedDoltProcess(cityPath, host, port, user, logLevel string, timeou
 
 //nolint:unparam // archiveLevel is an explicit override hook; current callers use config/env fallback.
 func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel string, archiveLevel int, timeout time.Duration, publish bool) (managedDoltStartReport, error) {
+	return startManagedDoltProcessWithConfig(cityPath, host, port, user, logLevel, archiveLevel, timeout, publish, nil, false)
+}
+
+// startManagedDoltProcessWithConfig is the full start path. configOverride
+// (vp-o52ia, ADR-0064 D1) lets the delivery window start its NESTED server
+// with only read_timeout_millis raised; runWindow=true marks that nested
+// call so it cannot recurse into another window (the window's own drain
+// supersedes the boot drain, so the nested start skips that too).
+//
+//nolint:unparam // archiveLevel is an explicit override hook; current callers use config/env fallback.
+func startManagedDoltProcessWithConfig(cityPath, host, port, user, logLevel string, archiveLevel int, timeout time.Duration, publish bool, configOverride *config.DoltConfig, runWindow bool) (managedDoltStartReport, error) {
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
 		return managedDoltStartReport{}, err
@@ -174,6 +189,25 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 	if err != nil {
 		return report, err
 	}
+	if configOverride != nil {
+		doltConfig = *configOverride
+	}
+
+	// ADR-0064 D1/D2 (vp-o52ia): arm the delivery window BEFORE the lock
+	// wait below — the nested window start does its own lock wait, drains
+	// every store to a verified zero at a raised read_timeout, stops
+	// (releasing the NBS lock), and THIS start then binds the data dir at
+	// the managed 15s default. Only the swarm-facing start runs the window:
+	// runWindow=true is the nested call itself (recursion guard) and
+	// publish=false callers (recovery restarts) keep the pre-window
+	// behavior until they reach a publishing start.
+	if !runWindow && publish && deliveryWindowEnabled() {
+		outcome := runManagedDoltDeliveryWindow(cityPath, host, port, user, logLevel, timeout, doltConfig)
+		report.DeliveryWindow = outcome
+		reportDeliveryWindowOutcome(outcome, os.Stderr)
+		// Constraint 2: a failed or aborted window NEVER blocks the boot.
+		// The outcome record above is the alertable surface (AC3).
+	}
 
 	// Lock-keyed singleton guard (gastownhall/gascity#3174). Dolt holds an
 	// exclusive flock on each database's `.dolt/noms/LOCK` until its chunk
@@ -191,7 +225,10 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 	// server owns the store) and the only path with no listener deadline in
 	// front of it. See dolt_boot_drain.go for the trap this closes. Failures
 	// never block the boot.
-	if bootDrainEnabled() {
+	if bootDrainEnabled() && !runWindow {
+		// runWindow skips the boot drain: the window's own verified-zero
+		// drain supersedes a plain CLI push, and the two racing pushes on
+		// the same quiesced store buy nothing but doubled cost.
 		runManagedDoltBootDrain(layout.DataDir, bootDrainBudget(), os.Stderr)
 	}
 
