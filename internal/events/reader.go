@@ -18,6 +18,12 @@ import (
 // the listing boundary instead of racing a gzip goroutine.
 var readRotationDir = os.ReadDir
 
+// openArchiveFile opens an archive for tailing. It is indirected so tests can
+// count archive opens directly (vp-ym41j) instead of relying on the
+// poisoned-archive error signal, which readFilteredTailFromArchive's caller
+// (tailArchives) degrades to a skip rather than propagating.
+var openArchiveFile = os.Open
+
 // Filter specifies predicates for ReadFiltered. Zero values are ignored.
 type Filter struct {
 	Type     string    // match events with this Type
@@ -742,7 +748,7 @@ func mergeTailInto(base, older []Event, limit int) []Event {
 // matching events in seq-ascending order. A ring of the most recent `limit`
 // matches avoids buffering the whole archive.
 func readFilteredTailFromArchive(path string, filter Filter, limit int) ([]Event, error) {
-	f, err := os.Open(path)
+	f, err := openArchiveFile(path)
 	if err != nil {
 		return nil, err
 	}

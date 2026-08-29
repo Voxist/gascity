@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -43,6 +44,20 @@ func TestReadFilteredTailSpansArchivesNewestFirst(t *testing.T) {
 	// Active file: seqs 7-9 (newest).
 	writeJSONLEvents(t, path, 7, 8, 9)
 
+	// Count archive opens directly (vp-ym41j): tailArchives degrades a
+	// corrupt-archive error to a skip rather than propagating it, so the
+	// "err != nil means the poisoned archive was opened" check below cannot
+	// by itself catch a regression that removed the newest-first early-break
+	// bound — it would silently skip the wrongly-opened poisoned archive and
+	// still return the right seqs.
+	var opens atomic.Int64
+	orig := openArchiveFile
+	openArchiveFile = func(name string) (*os.File, error) {
+		opens.Add(1)
+		return orig(name)
+	}
+	t.Cleanup(func() { openArchiveFile = orig })
+
 	got, err := ReadFilteredTail(path, Filter{SpanArchives: true}, 5)
 	if err != nil {
 		t.Fatalf("ReadFilteredTail: %v (a non-nil error means the poisoned "+
@@ -51,6 +66,13 @@ func TestReadFilteredTailSpansArchivesNewestFirst(t *testing.T) {
 	if want := []uint64{5, 6, 7, 8, 9}; !reflect.DeepEqual(seqsOf(got), want) {
 		t.Fatalf("ReadFilteredTail(limit=5) seqs = %v, want %v (newest 5, "+
 			"spanning the active file + one archive)", seqsOf(got), want)
+	}
+	// Load-bearing: only the newer archive may ever be opened. The poisoned
+	// oldest archive must never be opened, regardless of whether opening it
+	// would surface as an error.
+	if gotOpens, wantOpens := opens.Load(), int64(1); gotOpens != wantOpens {
+		t.Fatalf("archive opens = %d, want %d (only the newer archive; the "+
+			"poisoned oldest archive must never be opened)", gotOpens, wantOpens)
 	}
 }
 
@@ -137,6 +159,20 @@ func TestReadFilteredTailBoundedArchiveOpens(t *testing.T) {
 	// limit=5 without reaching into any archive.
 	writeJSONLEvents(t, path, 16, 17, 18, 19, 20)
 
+	// Count archive opens directly (vp-ym41j): tailArchives degrades a
+	// corrupt-archive error to a skip rather than propagating it, so the
+	// "err != nil means a poisoned archive was opened" check below cannot by
+	// itself catch a regression that removed the early-break bound — it would
+	// silently skip every wrongly-opened poisoned archive and still return
+	// the right seqs.
+	var opens atomic.Int64
+	orig := openArchiveFile
+	openArchiveFile = func(name string) (*os.File, error) {
+		opens.Add(1)
+		return orig(name)
+	}
+	t.Cleanup(func() { openArchiveFile = orig })
+
 	got, err := ReadFilteredTail(path, Filter{SpanArchives: true}, 5)
 	if err != nil {
 		t.Fatalf("ReadFilteredTail: %v (a non-nil error means a poisoned archive "+
@@ -144,5 +180,11 @@ func TestReadFilteredTailBoundedArchiveOpens(t *testing.T) {
 	}
 	if want := []uint64{16, 17, 18, 19, 20}; !reflect.DeepEqual(seqsOf(got), want) {
 		t.Fatalf("ReadFilteredTail(limit=5) seqs = %v, want %v", seqsOf(got), want)
+	}
+	// Load-bearing: the active file alone satisfies limit=5, so no archive —
+	// poisoned or not — should ever be opened.
+	if gotOpens, wantOpens := opens.Load(), int64(0); gotOpens != wantOpens {
+		t.Fatalf("archive opens = %d, want %d (active file alone satisfies the "+
+			"limit; no archive should ever be opened)", gotOpens, wantOpens)
 	}
 }
