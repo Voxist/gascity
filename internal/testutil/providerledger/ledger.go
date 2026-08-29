@@ -65,7 +65,10 @@ const (
 	// runtimeDoubleBoundaryPath is the designated runtime.Provider double source.
 	runtimeDoubleBoundaryPath = "internal/runtime/fake.go"
 	// runtimeContractWaiverOwner owns the remaining production-runtime gaps.
-	runtimeContractWaiverOwner = "ga-80po0c.3"
+	// It was re-pointed from ga-80po0c.3 (vp-d246m): that ID does not resolve
+	// via `bd show` in this repo's own store, so it could never actually be
+	// nagged as an expiry approached. vp-8eqrh is a bead in this store.
+	runtimeContractWaiverOwner = "vp-8eqrh"
 
 	// MarkdownStart begins the generated TESTING.md table.
 	MarkdownStart = "<!-- BEGIN CHECKED RUNTIME PROVIDER LEDGER -->"
@@ -161,9 +164,13 @@ func Catalog() []Entry {
 		),
 		builtin(
 			"subprocess", "exact:subprocess", nil,
-			waivedRuntime(
+			provedRuntime(
 				repoSymbol("internal/runtime/subprocess", "NewSeamBacked"),
-				"NewSeamBacked selects a distinct reachable empty-cityPath branch with shared /tmp state; the WithDir proof does not exercise that composition",
+				"internal/runtime/subprocess/seam_conformance_test.go",
+				"TestSubprocessDefaultDirSeamConformance",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				SymbolRef{ImportPath: "os", Name: "Getpid"},
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 			provedRuntime(
 				repoSymbol("internal/runtime/subprocess", "NewSeamBackedWithDir"),
@@ -176,9 +183,13 @@ func Catalog() []Entry {
 		),
 		builtin(
 			"acp", "exact:acp", nil,
-			waivedRuntime(
+			provedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBacked"),
-				"NewSeamBacked always uses shared os.TempDir()/gc-acp state; the WithDir proof does not exercise that composition",
+				"internal/runtime/acp/conformance_test.go",
+				"TestACPConformanceSharedDir",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				repoSymbol("internal/runtime/acp", "acpConformanceCommand"),
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 			provedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBackedWithDir"),
@@ -194,28 +205,32 @@ func Catalog() []Entry {
 			"t3bridge", "exact:t3bridge", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				"the production T3 bridge composition has focused tests but no full shared runtime contract",
+				time.Date(2026, time.November, 5, 0, 0, 0, 0, time.UTC),
+				"the production T3 bridge composition has focused tests but no full shared runtime contract; needs a fake-double T3 server reachable from RunProviderTests",
 			),
 		),
 		builtin(
 			"k8s", "exact:k8s", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/k8s", "NewSeamBacked"),
-				"the actual K8s production composition has no full shared runtime contract",
+				time.Date(2026, time.November, 14, 0, 0, 0, 0, time.UTC),
+				"the actual K8s production composition has no full shared runtime contract; needs a live or fake-double cluster reachable from RunProviderTests",
 			),
 		),
 		builtin(
 			"herdr", "exact:herdr", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/herdr", "New"),
-				"the existing full conformance run skips in short mode or when the herdr executable is absent",
+				time.Date(2026, time.September, 19, 0, 0, 0, 0, time.UTC),
+				"the existing full conformance run skips in short mode or when the herdr executable is absent; the proof shape bans skips, so this needs the binary made unconditionally present in the test environment first",
 			),
 		),
 		builtin(
 			"hybrid", "exact:hybrid", nil,
 			waivedRuntime(
 				repoSymbol("cmd/gc", "newHybridProvider"),
-				"cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract",
+				time.Date(2026, time.October, 10, 0, 0, 0, 0, time.UTC),
+				"cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract; blocked on the tmux and k8s entries it composes",
 			),
 		),
 		builtin(
@@ -230,21 +245,24 @@ func Catalog() []Entry {
 			),
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				"the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract",
+				time.Date(2026, time.November, 7, 0, 0, 0, 0, time.UTC),
+				"the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract; same underlying gap as runtime.builtin.t3bridge, staggered so the two claims don't lapse together",
 			),
 		),
 		builtin(
 			"ssh", "prefix:ssh:", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/ssh", "NewSeamBacked"),
-				"the production SSH composition has no full shared runtime contract",
+				time.Date(2026, time.November, 19, 0, 0, 0, 0, time.UTC),
+				"the production SSH composition has no full shared runtime contract; needs a live or fake-double SSH endpoint reachable from RunProviderTests",
 			),
 		),
 		builtin(
 			"tmux", "exact:tmux", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/tmux", "NewSeamBackedWithConfig"),
-				"the existing full conformance run skips when the tmux executable is absent",
+				time.Date(2026, time.September, 22, 0, 0, 0, 0, time.UTC),
+				"the existing full conformance run skips when the tmux executable is absent; the proof shape bans skips, so this needs the binary made unconditionally present in the test environment first",
 			),
 		),
 		{
@@ -320,14 +338,26 @@ func provedRuntimeScoped(constructor SymbolRef, file, test, scope string, allowe
 	return claim
 }
 
-func waivedRuntime(constructor SymbolRef, reason string) ContractClaim {
+// waivedRuntime builds a claim that defers proof of the runtime.Provider
+// contract to a dated waiver. Each call site supplies its own expires
+// literal rather than sharing one: every remaining waiver previously shared
+// a single hardcoded 2026-08-12 date, so all of them lapsed in lockstep and
+// took the whole repo-wide push gate red at once (vp-d246m) — the calendar
+// caused the outage, not a code change. An independent date per entry means
+// a lapse can only ever affect that one entry going forward.
+//
+// Prefer a short horizon (weeks) over the 90-day maxWaiverHorizon ceiling:
+// a long horizon hides a stalled contract behind a green run, while a short
+// one puts the question back in front of the owner while the context is
+// still fresh.
+func waivedRuntime(constructor SymbolRef, expires time.Time, reason string) ContractClaim {
 	return ContractClaim{
 		Constructor: constructor,
 		Contract:    ContractRuntimeProvider,
 		Disposition: DispositionWaived,
 		Waiver: &Waiver{
 			Owner:   runtimeContractWaiverOwner,
-			Expires: time.Date(2026, time.August, 12, 0, 0, 0, 0, time.UTC),
+			Expires: expires,
 			Reason:  reason,
 		},
 	}
