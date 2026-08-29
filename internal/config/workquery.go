@@ -344,14 +344,105 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 		`}; `
 }
 
+// routedReadyPriorityWindowLimit is ADR-0076 D4's small top-K read (vp-d1kjk):
+// how many best-by-priority rows are unioned into the routed tier's SERVED
+// set alongside the existing --limit=20 oldest-first lookahead. Kept small on
+// purpose — D4 reasons this as one additive, indexed read whose cost must stay
+// bounded (constraint C1); it is not a replacement for the lookahead and must
+// not grow to try to replace it (that is the rejected "raise --limit"
+// alternative, which scales the wrong quantity and still leaves a cliff).
+const routedReadyPriorityWindowLimit = 5
+
+// routedReadyTierCommand is the routed tier's work query. ADR-0076 D1 (below,
+// routedReadyRankTierCommand) fixed cross-store RANKING by probing each
+// store's best priority separately, but deliberately left this function's
+// SERVED rows as the bare --sort oldest --limit=20 lookahead — and on a store
+// whose >=48h backlog exceeds 20 rows, oldest-first is priority-blind past the
+// 48h seam, so the window fills entirely with the oldest aged rows and any
+// higher-priority row outside it is unreachable. A store could therefore
+// correctly ADVERTISE P0 (via the D1 probe) and then SERVE a window
+// containing zero P0s: claimFirstReadyHookAssignment (cmd/gc/cmd_hook_claim.go)
+// walks the served rows in order and would starve on the very P0 the probe
+// found. Escalated to P0 and amended as ADR-0076 D4 on 2026-08-28 after
+// measuring exactly that on this bead's own store: 8 ready P0s, all outside
+// the window, masked behind a P3 created 2026-07-23.
+//
+// D4's fix: the served set is the UNION of (a) a small best-by-priority read
+// (routedReadyPriorityWindowLimit rows, priority first in the output) and (b)
+// the unchanged oldest-first lookahead, deduped by id. (a) guarantees the
+// store's best available priority is always reachable; (b) is untouched, so
+// ADR-0035's anti-starvation drain of the aged tail survives exactly as
+// before (constraint C2) — it is no longer the only thing served, but nothing
+// is removed from it. The self-blocked-head reasoning that motivated
+// limit=20 in the first place — filterUnreadyHookCandidates strips a blocked
+// head and needs Ready routed work behind it to fall through to — applies
+// unchanged to the lookahead half of the union.
+//
+// Both reads share the federated reader / stderr-sink / failure-propagation
+// contract every tier in this file uses (see readyReaderCommand and
+// siblings): each is captured independently and each independently
+// propagates a federated-reader failure, so a dead leg on EITHER read still
+// aborts the tier loud rather than silently degrading to the other read's
+// rows (constraint C3). jq runs last and inherits the same stderr sink, so a
+// merge failure is exactly as quiet (single-store) or exactly as loud
+// (federated) as a bare read failure already was.
 func routedReadyTierCommand(topo QueryTopology) string {
-	// The shared predicate stays order-free so the count-form does no wasted
-	// sorting; the worker first-row path asks the reader for the oldest
-	// candidates. The tier is widened past a single row (limit=20, not limit=1)
-	// so a self-blocked head (is_blocked / status==blocked) has Ready routed work
-	// behind it to fall through to instead of idle-exiting; the hook layer
-	// (filterUnreadyHookCandidates) strips the blocked head from the result.
-	return bdReadyPoolDemandShell("--sort oldest --limit=20", topo) + readyReaderStderrSink(topo.FederatedReady)
+	fed := topo.FederatedReady
+	fail := readyReaderFailurePropagation(fed)
+	sink := readyReaderStderrSink(fed)
+	priority := bdReadyPoolDemandShell(fmt.Sprintf("--sort priority --limit=%d", routedReadyPriorityWindowLimit), topo) + sink
+	window := bdReadyPoolDemandShell("--sort oldest --limit=20", topo) + sink
+	return `p=$(` + priority + `)` + fail + `; h=$(` + window + `)` + fail +
+		`; jq -nc --argjson p "${p:-[]}" --argjson h "${h:-[]}" ` +
+		shellquote.Quote(routedReadyPriorityRepresentativeMergeJQ()) + sink
+}
+
+// routedReadyPriorityRepresentativeMergeJQ is ADR-0076 D4's union filter: every
+// row from the best-by-priority read first (so the store's true priority is
+// always reachable and, via claimFirstReadyHookAssignment's in-order walk, is
+// tried first), then any row from the oldest-first lookahead not already
+// present, deduped by id. A row with no id (defensively; every bd row carries
+// one) is never treated as a duplicate of another id-less row — the same rule
+// hookTiedIDSeen applies on the Go side, kept consistent here so the two
+// layers cannot disagree about what counts as "the same bead". -nc keeps the
+// merged output compact on one line, matching bd's own --json shape: the
+// tier's callers compare it against the literal string "[]" to decide
+// fallthrough, and that comparison must not see a pretty-printed empty array
+// as non-empty.
+func routedReadyPriorityRepresentativeMergeJQ() string {
+	return `($p + $h) | reduce .[] as $x ([]; if (($x.id // "") != "") and any(.[]; (.id // "") == ($x.id // "")) then . else . + [$x] end)`
+}
+
+// routedReadyRankTierCommand is the D1 priority probe of ADR-0076 (vp-d1kjk):
+// the SAME routed predicate as routedReadyTierCommand, but asking the reader
+// for the single best-by-priority row instead of the tier's full served set.
+//
+// The hook's cross-store selection ranks each federated store on the best
+// candidate inside its returned window. Before D4 that window was ordered
+// oldest-first alone (the work tier's --sort oldest; ADR-0035's hybrid
+// behaves the same past its 48h seam) — so a store with a deep aged backlog
+// filled all 20 slots with P2/P3 while its ready P1s sat outside the window,
+// and the busiest store advertised the WORST rank. Ranking on this probe
+// makes the advertised rank a property of the store's best available work
+// independent of what the window happened to contain.
+//
+// D4 has since made routedReadyTierCommand's OWN served set
+// priority-representative too (it unions in the same best-by-priority read
+// this probe performs), so this probe's rank and a rank read directly off the
+// D4 window now agree in the common case — this function is not strictly
+// load-bearing for ranking accuracy any more. It stays: it is the cheaper of
+// the two reads (limit=1 vs D4's limit=5+20), it is the belt-and-braces
+// ranking signal if the D4 window's own priority read ever fails and
+// silently degrades to the lookahead alone (non-federated mode swallows that
+// per-read failure by design), and removing it would be a second, unrelated
+// change with no correctness upside. The probe is one indexed --limit=1 read
+// per store (constraint C1).
+//
+// It deliberately carries none of the migration/ephemeral fallbacks of the
+// work tier: its only consumer treats a probe miss as "keep the window's
+// rank", never as an absence of work.
+func routedReadyRankTierCommand(topo QueryTopology) string {
+	return bdReadyPoolDemandShell("--sort priority --limit=1", topo) + readyReaderStderrSink(topo.FederatedReady)
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
@@ -692,6 +783,44 @@ func routedPoolWorkQueryCommand(topo QueryTopology, targets ...string) string {
 	args := []string{"sh", "-c", routedPoolWorkQueryProbeScript(topo, len(targets)), "--"}
 	args = append(args, targets...)
 	return shellquote.Join(args)
+}
+
+// routedPoolRankProbeCommand is the ADR-0076 D1 per-store ranking probe: for
+// each target in turn it prints the target's single best-by-priority routed
+// row and exits, mirroring routedPoolWorkQueryProbeScript's shape (same origin
+// gate, same failure propagation) so the probe sees exactly the population the
+// work tier's routed leg would serve — no more, no less. Used only for RANKING
+// a store; never for selecting or claiming a bead.
+func routedPoolRankProbeCommand(topo QueryTopology, targets ...string) string {
+	fed := topo.FederatedReady
+	script := poolDemandOriginGateScript() +
+		`probe_pool_rank() { ` +
+		`target="$1"; ` +
+		`[ -z "$target" ] && return 1; ` +
+		`r=$(` + routedReadyRankTierCommand(topo) + `)` + readyReaderFailurePropagation(fed) + `; ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`return 1; ` +
+		`}; `
+	for i := 1; i <= len(targets); i++ {
+		script += fmt.Sprintf(`probe_pool_rank "$%d"; `, i)
+	}
+	args := []string{"sh", "-c", script + `printf "[]"`, "--"}
+	args = append(args, targets...)
+	return shellquote.Join(args)
+}
+
+// EffectiveRoutedRankProbeQueryFor returns the ADR-0076 D1 rank probe for this
+// agent's routed tier, built for a city topology. Unlike the Effective*Query
+// accessors it NEVER honors a custom WorkQuery: a custom query is the
+// caller-owned discovery contract and has no probe equivalent, so the caller
+// (cmd/gc's hook) gates on WorkQuery itself and passes no probe at all rather
+// than ranking a custom query against the default predicate.
+func (a *Agent) EffectiveRoutedRankProbeQueryFor(topo QueryTopology) string {
+	target := a.poolDemandTarget()
+	if legacyTarget := legacyWorkflowControlQualifiedName(target); legacyTarget != "" {
+		return routedPoolRankProbeCommand(topo, target, legacyTarget)
+	}
+	return routedPoolRankProbeCommand(topo, target)
 }
 
 // queryKind names one of the built-in agent query shapes.

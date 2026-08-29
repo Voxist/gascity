@@ -1231,6 +1231,84 @@ func TestClaimHookWorkUsesFallbackStoreDirEnvAndOutput(t *testing.T) {
 	}
 }
 
+// TestClaimHookWorkEmitsSelectionStats is ADR-0076 D3's claim-path wiring
+// (vp-d1kjk): before this fix, emitHookSelectionStats was only reachable from
+// cmdHookWithOptions's read-only runner closure — a claim invocation, which is
+// the one that actually dispatches work, was a silent visibility blind spot
+// relative to a plain `gc hook` call. bestStoreWithWork always populates
+// hookSelectionStats correctly when a Stats pointer is supplied; what this
+// test pins is that claimHookWorkWithRunner now supplies one (from the SAME
+// hookStoreRankOptions D1 already threads through) and emits it exactly once
+// on the successful-claim exit path.
+func TestClaimHookWorkEmitsSelectionStats(t *testing.T) {
+	stores := []hookStore{
+		{dir: "city", env: []string{"GC_STORE=city"}},
+		{dir: "riga", env: []string{"GC_STORE=riga"}},
+	}
+	run := func(_, dir string, _ []string) (string, error) {
+		switch dir {
+		case "city":
+			return `[{"id":"hw-city","status":"open","priority":1,"metadata":{"gc.routed_to":"worker"}}]`, nil
+		case "riga":
+			return `[{"id":"hw-riga","status":"open","priority":1,"metadata":{"gc.routed_to":"worker"}}]`, nil
+		default:
+			t.Fatalf("unexpected store dir %q", dir)
+			return "", nil
+		}
+	}
+	ops := hookClaimOps{
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
+		},
+		ResolveWorkBranch: func(string) string { return "" },
+	}
+	claimOpts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	// A bare hookStoreRankOptions{} (no RankProbeCommand) is enough to trigger
+	// the Stats attachment — D3's emission does not depend on D1's probe.
+	code := claimHookWorkWithRunner("bd ready --json", "city", stores[0].env, stores, claimOpts, ops, run, func(string, error) {}, &stdout, &stderr, hookStoreRankOptions{})
+	if code != 0 {
+		t.Fatalf("claimHookWorkWithRunner = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	const prefix = "gc hook selection: "
+	idx := strings.Index(stderr.String(), prefix)
+	if idx < 0 {
+		t.Fatalf("stderr missing %q line: %s", prefix, stderr.String())
+	}
+	line := stderr.String()[idx+len(prefix):]
+	if nl := strings.IndexByte(line, '\n'); nl >= 0 {
+		line = line[:nl]
+	}
+	var stats struct {
+		StoresWithReadyWork  int    `json:"stores_with_ready_work"`
+		TotalReadyCandidates int    `json:"total_ready_candidates"`
+		SelectedStore        string `json:"selected_store"`
+	}
+	if err := json.Unmarshal([]byte(line), &stats); err != nil {
+		t.Fatalf("selection stats line is not JSON: %v\nline=%s", err, line)
+	}
+	if stats.StoresWithReadyWork != 2 {
+		t.Fatalf("stats.StoresWithReadyWork = %d, want 2 (both stores had ready work)", stats.StoresWithReadyWork)
+	}
+	if stats.TotalReadyCandidates != 2 {
+		t.Fatalf("stats.TotalReadyCandidates = %d, want 2 (one row per store)", stats.TotalReadyCandidates)
+	}
+	if stats.SelectedStore != "city" {
+		t.Fatalf("stats.SelectedStore = %q, want %q (own store, tied on priority)", stats.SelectedStore, "city")
+	}
+	// Emitted exactly once for this single-attempt claim — not once per
+	// internal bestStoreWithWork call in the loop.
+	if n := strings.Count(stderr.String(), prefix); n != 1 {
+		t.Fatalf("selection stats emitted %d times, want 1: %s", n, stderr.String())
+	}
+}
+
 func TestDoHookClaimPreassignsContinuationGroupSiblings(t *testing.T) {
 	var assigned []string
 	runner := func(string, string) (string, error) {

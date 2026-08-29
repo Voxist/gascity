@@ -380,6 +380,29 @@ func renormalizeFederatedCommand(federated string) string {
 			assignedInProgressTierCommand(shellVar, QueryTopology{FederatedReady: true}),
 			assignedInProgressTierCommand(shellVar, QueryTopology{}))
 	}
+	// ADR-0076 D4 (vp-d1kjk): the routed tier unions a priority probe and the
+	// oldest-first lookahead, so its federated/single-store difference is now
+	// two independently reader/failure/sink-gated reads instead of one. Same
+	// principle as the two fragments above: diff the production function's
+	// own two forms rather than pasting a hand-written pattern here. This
+	// function's only caller always compares under BD105 ready semantics, so
+	// that Beads config is fixed here to match — otherwise the fragment would
+	// miss the --include-ephemeral flag bd105 adds and silently no-op.
+	//
+	// The diffed fragment is the routed tier's FULL poolDemandFirstRowFunctionScript
+	// wrapping (`r=$(...)` + its OWN readyReaderFailurePropagation), not just
+	// routedReadyTierCommand's return value alone: routedReadyTierCommand no
+	// longer ends on the sink/fail-gated read it did pre-D4 (it now ends on
+	// the jq merge), so substituting only its own text would strand the
+	// caller's outer `|| exit $?` unswapped against the single-store form's
+	// sink-suffixed tail — the leftover this test caught on the first pass.
+	bd105 := BeadsConfig{BDCompatibility: BeadsBDCompatibility105}
+	routedTierWrapped := func(topo QueryTopology) string {
+		return `r=$(` + routedReadyTierCommand(topo) + `)` + readyReaderFailurePropagation(topo.FederatedReady)
+	}
+	federated = replaceFragment(federated,
+		routedTierWrapped(QueryTopology{Beads: bd105, FederatedReady: true}),
+		routedTierWrapped(QueryTopology{Beads: bd105}))
 	federated = strings.ReplaceAll(federated, gcReadyCommand, bdReadyCommand)
 	federated = strings.ReplaceAll(federated, `--json --limit=1) || exit $?`, `--json --limit=1 2>/dev/null)`)
 	federated = strings.ReplaceAll(federated, `--sort oldest --limit=20) || exit $?`, `--sort oldest --limit=20 2>/dev/null)`)
