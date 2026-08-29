@@ -103,3 +103,29 @@ func TestCmdHookEphemeralOriginFindsRoutedWorkAndStaysSilent(t *testing.T) {
 		t.Fatalf("permitted origin emitted the gated reason despite probing: stderr=%q", stderr.String())
 	}
 }
+
+// The signal is wired into BOTH hook paths, and they are mutually exclusive:
+// cmdHookWithOptions returns through claimHookWork when Claim is set and
+// through doHook otherwise, each with its own runner. The tests above cover the
+// read path; without this one the claim path — the form the startup wrapper
+// actually runs — would ship unproven.
+func TestCmdHookClaimNamedOriginReportsGatedReason(t *testing.T) {
+	hookOriginGateCity(t)
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_AGENT", "worker")
+	t.Setenv("GC_SESSION_ID", "worker-session-id")
+	t.Setenv("GC_SESSION_NAME", "worker-session")
+	t.Setenv("GC_TEMPLATE", "worker")
+	t.Setenv("GC_SESSION_ORIGIN", "named")
+
+	var stdout, stderr bytes.Buffer
+	cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
+
+	if strings.Contains(stdout.String(), "hw-1") {
+		t.Fatalf("named origin claimed routed pool work; the gate did not refuse: stdout=%q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "work_query pool tier not probed") {
+		t.Fatalf("gc hook --claim swallowed the origin-gate reason:\nstdout=%q\nstderr=%q",
+			stdout.String(), stderr.String())
+	}
+}
