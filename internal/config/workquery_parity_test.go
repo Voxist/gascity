@@ -34,16 +34,16 @@ func oldEffectiveWorkQuery(a *Agent, topo QueryTopology) string {
 		script := standardAssignedWorkQueryScript(topo) +
 			poolDemandOriginGateScript() +
 			poolDemandFirstRowFunctionScript(topo) +
-			`probe_pool_demand "$1"; ` +
-			`printf "[]"`
+			poolDemandProbeCallScript(`"$1"`) +
+			poolDemandGatedTailScript()
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
 	script := legacyControlAssignedWorkQueryScript(topo) +
 		poolDemandOriginGateScript() +
 		poolDemandFirstRowFunctionScript(topo) +
-		`probe_pool_demand "$1"; ` +
-		`probe_pool_demand "$2"; ` +
-		`printf "[]"`
+		poolDemandProbeCallScript(`"$1"`) +
+		poolDemandProbeCallScript(`"$2"`) +
+		poolDemandGatedTailScript()
 	return shellquote.Join([]string{"sh", "-c", script, "--", target, legacyTarget})
 }
 

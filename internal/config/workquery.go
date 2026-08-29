@@ -673,19 +673,72 @@ func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) stri
 		`fi; `
 }
 
+// poolDemandOriginGateScript emits the work_query Tier 3 origin gate. The
+// gate's job is not to hide routed work from named sessions but to stop them
+// poaching a POOL's demand: an ephemeral worker may claim anything routed to
+// its pool, while a named session may probe only a target that is
+// self-addressed — the target equals the session's own alias/agent identity
+// (singletons like gastown.mayor) or one of its numbered seats
+// (voxist.platform-architect-1 answering for voxist.platform-architect).
+// Anything else a named origin probes would be another pool's queue.
+//
+// Before vc-ozanp5 the gate was `*) exit 0`: every non-ephemeral origin
+// exited before probe_pool_demand ever ran, so beads stamped
+// gc.routed_to=<named agent> were invisible to `gc hook` for every named
+// session fleet-wide, and the empty output was indistinguishable from a
+// drained queue — named agents sat idle on routed work. Now the gate skips
+// only non-self targets and, when it skipped one and nothing was served,
+// says so on stderr so "gated" stops reading as "no work".
 func poolDemandOriginGateScript() string {
-	return `case "$GC_SESSION_ORIGIN" in ` +
+	return `pool_gate_self_only=0; pool_gate_skipped=0; ` +
+		`case "$GC_SESSION_ORIGIN" in ` +
 		`ephemeral|"") ;; ` +
-		`*) exit 0 ;; ` +
-		`esac; `
+		`*) pool_gate_self_only=1 ;; ` +
+		`esac; ` +
+		`pool_target_allowed() { ` +
+		`[ "$pool_gate_self_only" = "0" ] && return 0; ` +
+		`[ -n "$1" ] || return 1; ` +
+		// Qualified names separate scope with "/" while runtime aliases use
+		// "." (gastown/mayor the route target, gastown.mayor the alias), so
+		// both sides are normalized to "." before comparing. The numbered-seat
+		// form covers seats like voxist.platform-architect-1 answering for the
+		// voxist.platform-architect route; the trailing guard requires the
+		// suffix to start with a digit so an adhoc pool instance
+		// (rig/polecat-adhoc-<hash>) is NOT read as a seat of rig/polecat.
+		`t=$(printf "%s" "$1" | tr "/." ".."); ` +
+		`a=$(printf "%s" "$GC_ALIAS" | tr "/." ".."); ` +
+		`[ "$t" = "$a" ] && return 0; ` +
+		`g=$(printf "%s" "$GC_AGENT" | tr "/." ".."); ` +
+		`[ "$t" = "$g" ] && return 0; ` +
+		`case "$a" in "$t"-[0-9]*) return 0 ;; esac; ` +
+		`case "$g" in "$t"-[0-9]*) return 0 ;; esac; ` +
+		`pool_gate_skipped=1; return 1; ` +
+		`}; `
+}
+
+// poolDemandProbeCallScript gates ONE probe_pool_demand call on
+// pool_target_allowed. The bare `probe_pool_demand "$N"` form must not come
+// back: it is exactly how a named origin silently re-acquired the old
+// gate-free behavior for foreign targets.
+func poolDemandProbeCallScript(arg string) string {
+	return `pool_target_allowed ` + arg + ` && probe_pool_demand ` + arg + `; `
+}
+
+// poolDemandGatedTailScript closes the routed tier. It is the only place the
+// empty fallthrough is printed, so the "gated" stderr note can fire exactly
+// when a non-self target was skipped AND nothing above served a row.
+func poolDemandGatedTailScript() string {
+	return `[ "$pool_gate_skipped" = "1" ] && ` +
+		`printf "gc: work_query pool tier gated: origin=%s has no self-addressed target; routed work may exist\n" "$GC_SESSION_ORIGIN" >&2; ` +
+		`printf "[]"`
 }
 
 func routedPoolWorkQueryProbeScript(topo QueryTopology, targetCount int) string {
 	script := poolDemandOriginGateScript() + poolDemandFirstRowFunctionScript(topo)
 	for i := 1; i <= targetCount; i++ {
-		script += fmt.Sprintf(`probe_pool_demand "$%d"; `, i)
+		script += poolDemandProbeCallScript(fmt.Sprintf(`"$%d"`, i))
 	}
-	return script + `printf "[]"`
+	return script + poolDemandGatedTailScript()
 }
 
 func routedPoolWorkQueryCommand(topo QueryTopology, targets ...string) string {
@@ -800,16 +853,16 @@ func buildWorkQuery(a *Agent, topo QueryTopology) string {
 		script := standardAssignedWorkQueryScript(topo) +
 			poolDemandOriginGateScript() +
 			poolDemandFirstRowFunctionScript(topo) +
-			`probe_pool_demand "$1"; ` +
-			`printf "[]"`
+			poolDemandProbeCallScript(`"$1"`) +
+			poolDemandGatedTailScript()
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
 	script := legacyControlAssignedWorkQueryScript(topo) +
 		poolDemandOriginGateScript() +
 		poolDemandFirstRowFunctionScript(topo) +
-		`probe_pool_demand "$1"; ` +
-		`probe_pool_demand "$2"; ` +
-		`printf "[]"`
+		poolDemandProbeCallScript(`"$1"`) +
+		poolDemandProbeCallScript(`"$2"`) +
+		poolDemandGatedTailScript()
 	return shellquote.Join([]string{"sh", "-c", script, "--", target, legacyTarget})
 }
 
