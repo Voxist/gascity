@@ -23,6 +23,19 @@ var updateGolden = flag.Bool("update", false, "update workquery golden files")
 // oracle copies are eventually retired, TestWorkQueryGolden below remains as
 // the permanent byte-identity pin.
 
+// NOTE (vc-ozanp5): these oracles are frozen in COMPOSITION, not in bytes. They
+// call the same leaf helpers as production (standardAssignedWorkQueryScript,
+// poolDemandOriginGateScript, poolDemandFirstRowFunctionScript, ...), so an
+// intentional change inside a leaf shows up on both sides and parity stays
+// green. What parity still pins is that buildWorkQuery assembles the same
+// pieces in the same order as the pre-refactor code did. The byte-level record
+// of a behavior change lives in TestWorkQueryGolden, and the behavior of the
+// origin gate itself is asserted in workquery_origin_gate_test.go.
+//
+// The pool-tier tail below moved from a hardcoded `probe_pool_demand "$1";
+// printf "[]"` to poolDemandProbeCallScript + poolDemandGatedTailScript when
+// the gate's refusal was made audible. That is a deliberate behavior change,
+// so the oracle was updated in lockstep; the goldens carry the diff.
 func oldEffectiveWorkQuery(a *Agent, includeEphemeralReady bool) string {
 	if a.WorkQuery != "" {
 		return a.WorkQuery
@@ -33,16 +46,16 @@ func oldEffectiveWorkQuery(a *Agent, includeEphemeralReady bool) string {
 		script := standardAssignedWorkQueryScript(includeEphemeralReady) +
 			poolDemandOriginGateScript() +
 			poolDemandFirstRowFunctionScript(includeEphemeralReady) +
-			`probe_pool_demand "$1"; ` +
-			`printf "[]"`
+			poolDemandProbeCallScript(`"$1"`) +
+			poolDemandGatedTailScript()
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
 	script := legacyControlAssignedWorkQueryScript(includeEphemeralReady) +
 		poolDemandOriginGateScript() +
 		poolDemandFirstRowFunctionScript(includeEphemeralReady) +
-		`probe_pool_demand "$1"; ` +
-		`probe_pool_demand "$2"; ` +
-		`printf "[]"`
+		poolDemandProbeCallScript(`"$1"`) +
+		poolDemandProbeCallScript(`"$2"`) +
+		poolDemandGatedTailScript()
 	return shellquote.Join([]string{"sh", "-c", script, "--", target, legacyTarget})
 }
 

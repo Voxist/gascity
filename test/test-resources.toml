@@ -14,8 +14,13 @@ resource = "subprocess"
 # harness's bridge bd build adds three subprocess sites (curl the
 # BD_SOURCE_REF tarball, tar extract, go build) so tests exercise the
 # fleet's bd binary instead of the go.mod library commit.
-baseline_calls = 558
-baseline_files = 168
+# 558 -> 560 (2026-08-29, origin-gate signal vc-ozanp5):
+# internal/config/workquery_origin_gate_test.go adds two subprocess sites in
+# one file. The gate's audible refusal is only observable by executing the
+# generated work_query script in a real shell; asserting on the string would
+# pin the script's text rather than its behavior.
+baseline_calls = 560
+baseline_files = 169
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
@@ -55,8 +60,13 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 414
-baseline_files = 117
+# 414 -> 416 (2026-08-29, origin-gate signal vc-ozanp5):
+# internal/config/workquery_origin_gate_test.go adds two subprocess sites in
+# one file. The gate's audible refusal is only observable by executing the
+# generated work_query script in a real shell; asserting on the string would
+# pin the script's text rather than its behavior.
+baseline_calls = 416
+baseline_files = 118
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
@@ -348,8 +358,13 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 408
-baseline_files = 114
+# 408 -> 410 (2026-08-29, origin-gate signal vc-ozanp5):
+# internal/config/workquery_origin_gate_test.go adds two subprocess sites in
+# one file. The gate's audible refusal is only observable by executing the
+# generated work_query script in a real shell; asserting on the string would
+# pin the script's text rather than its behavior.
+baseline_calls = 410
+baseline_files = 115
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-80po0c.2.1"

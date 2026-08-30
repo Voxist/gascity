@@ -427,8 +427,9 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		emitCityWorkQueryFailure(cityPath, stderr,
 			os.Getenv("GC_SESSION_ID"), failureTemplate, command, err)
 	}
+	queryRunner := hookWorkQueryRunner(stderr)
 	runner := func(command, _ string) (string, error) {
-		out, _, err := bestStoreWithWork(command, stores, stores[0], shellWorkQueryWithEnv)
+		out, _, err := bestStoreWithWork(command, stores, stores[0], queryRunner)
 		emitQueryFailure(command, err)
 		return out, err
 	}
@@ -597,7 +598,7 @@ func hookClaimSessionEligibility(info session.Info, instanceToken string) (hookC
 // set, binding the production shell work-query runner and real claim ops. See
 // claimHookWorkWithRunner for the federation and lost-claim-race semantics.
 func claimHookWork(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
-	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, hookClaimOps{}, shellWorkQueryWithEnv, emitFailure, stdout, stderr)
+	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, hookClaimOps{}, hookWorkQueryRunner(stderr), emitFailure, stdout, stderr)
 }
 
 // claimHookWorkWithRunner is claimHookWork with the work-query runner and claim
@@ -756,6 +757,19 @@ var hookWorkQueryTimeout = 60 * time.Second
 // short bounded interval so startup hooks cannot strand sessions behind a
 // wedged data-plane command.
 func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
+	return shellWorkQueryWithEnvDiag(command, dir, env, io.Discard)
+}
+
+// shellWorkQueryWithEnvDiag is shellWorkQueryWithEnv with the query's own
+// stderr forwarded to diag on the SUCCESS path.
+//
+// The error path below already reports captured stderr, but a work query that
+// exits 0 can still have something to say. The work_query origin gate refuses
+// to probe the pool tier for a non-ephemeral session and says so on stderr
+// (vc-ozanp5); that refusal is a policy decision rather than a failure, so it
+// exits 0 and was captured and dropped here — which is what made an empty
+// `gc hook` indistinguishable from a drained queue.
+func shellWorkQueryWithEnvDiag(command, dir string, env []string, diag io.Writer) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), hookWorkQueryTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
@@ -789,7 +803,35 @@ func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 		}
 		return "", fmt.Errorf("running work query %q: %w", command, err)
 	}
+	if msg := strings.TrimSpace(stderr.String()); msg != "" {
+		fmt.Fprintln(diag, msg) //nolint:errcheck // best-effort diagnostic
+	}
 	return string(out), nil
+}
+
+// hookWorkQueryRunner returns the work-query runner `gc hook` uses: the
+// production shell runner, with each query's own stderr diagnostics forwarded
+// to diag so a successful-but-gated query is not silently empty.
+//
+// Lines are de-duplicated for the lifetime of one hook invocation because a
+// federated hook runs the same query against every store in the set, and an
+// origin-gate refusal is a property of the session rather than of any one
+// store — without this it would be repeated once per store.
+func hookWorkQueryRunner(diag io.Writer) hookStoreRunner {
+	seen := make(map[string]bool)
+	return func(command, dir string, env []string) (string, error) {
+		var captured bytes.Buffer
+		out, err := shellWorkQueryWithEnvDiag(command, dir, env, &captured)
+		for _, line := range strings.Split(captured.String(), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || seen[line] {
+				continue
+			}
+			seen[line] = true
+			fmt.Fprintln(diag, line) //nolint:errcheck // best-effort diagnostic
+		}
+		return out, err
+	}
 }
 
 // workQueryEnvForDir ensures the subprocess environment does not carry a
