@@ -421,19 +421,45 @@ func TestApplyEventAbsorbsBeforeDepsOverlay_OC3(t *testing.T) {
 	}
 	cache.ApplyEvent("bead.created", payload)
 
-	got, err := cache.Get("gc-blocked")
-	if err != nil {
-		t.Fatalf("Get after created event: %v", err)
-	}
-	if got.IsBlocked != nil {
-		t.Fatalf("OC-3 violated: projected IsBlocked = %v, want nil (overlay must clear the newly absorbed row)", *got.IsBlocked)
-	}
+	// OC-3: the overlay must reach the row the absorb just installed. Under
+	// ADR-0094 that is observable as the out-of-band invalidation mark, not as a
+	// nil in the row — an inverted order would leave the row unmarked because
+	// clearReadyProjectionLocked would have no-oped on a still-absent id.
+	assertReadyProjectionInvalidated(t, cache, "gc-blocked")
 
 	cache.mu.RLock()
 	_, hasDeps := cache.deps["gc-blocked"]
 	cache.mu.RUnlock()
 	if !hasDeps {
 		t.Fatal("expected the deps overlay to install authoritative deps for the absorbed row")
+	}
+}
+
+// assertReadyProjectionInvalidated states ADR-0094's contract at the sites that
+// used to assert an in-band nil sentinel. Two things must now hold: the cached
+// row still carries the verdict the backing last reported — that is what keeps
+// the reconcile differ from reading a cache-internal invalidation as a
+// store-side nil↔set transition, i.e. the whole-store bead.updated flood — and
+// the invalidation itself is recorded out of band, where the readiness readers
+// consult it. The behavioral half (readiness now falls back to the dependency
+// predicate) is asserted by the CachedReady checks at each call site.
+func assertReadyProjectionInvalidated(t *testing.T, c *CachingStore, id string) {
+	t.Helper()
+	// Every call site invalidates a row the backing last reported as BLOCKED,
+	// so the retained verdict is always true. Keeping it as a parameter would
+	// be an unexercised degree of freedom.
+	const wantRetainedVerdict = true
+	got, err := c.Get(id)
+	if err != nil {
+		t.Fatalf("Get %s: %v", id, err)
+	}
+	if got.IsBlocked == nil || *got.IsBlocked != wantRetainedVerdict {
+		t.Fatalf("%s IsBlocked = %v, want the last reported verdict %v retained in the row (ADR-0094: invalidation is not a value)", id, got.IsBlocked, wantRetainedVerdict)
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if !c.readyProjectionInvalidLocked(id) {
+		t.Fatalf("%s: verdict was not marked invalid out of band, so readiness would keep serving it", id)
 	}
 }
 

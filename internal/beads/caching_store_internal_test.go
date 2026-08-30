@@ -3166,13 +3166,7 @@ func TestCachingStoreApplyCloseEventClearsDependentProjectedIsBlocked(t *testing
 	if !readyByID[blocked.ID] {
 		t.Fatalf("CachedReady after close ids = %v, want dependent unblocked by closed blocker", readyByID)
 	}
-	got, err := cache.Get(blocked.ID)
-	if err != nil {
-		t.Fatalf("Get blocked after close event: %v", err)
-	}
-	if got.IsBlocked != nil {
-		t.Fatalf("dependent IsBlocked after close event = %v, want nil fallback to cached deps", got.IsBlocked)
-	}
+	assertReadyProjectionInvalidated(t, cache, blocked.ID)
 }
 
 func TestCachingStoreApplyCloseEventClearsProjectedIsBlockedWhenDepsIncomplete(t *testing.T) {
@@ -3238,13 +3232,7 @@ func TestCachingStoreApplyCloseEventClearsProjectedIsBlockedWhenDepsIncomplete(t
 	if !readyByID[blocked.ID] {
 		t.Fatalf("CachedReady after close ids = %v, want projected dependent to fall back to cached deps", readyByID)
 	}
-	got, err := cache.Get(blocked.ID)
-	if err != nil {
-		t.Fatalf("Get blocked after close event: %v", err)
-	}
-	if got.IsBlocked != nil {
-		t.Fatalf("dependent IsBlocked after close event = %v, want nil fallback when dependency coverage is incomplete", got.IsBlocked)
-	}
+	assertReadyProjectionInvalidated(t, cache, blocked.ID)
 }
 
 func TestCachingStoreApplyEventRejectsStaleProjectedIsBlockedConflict(t *testing.T) {

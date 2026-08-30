@@ -362,28 +362,49 @@ func (c *CachingStore) ApplyDepEvent(beadID string, deps []Dep) {
 	c.updateStatsLocked()
 }
 
+// clearReadyProjectionLocked marks a row's is_blocked verdict as awaiting
+// re-observation, because the row's own edges or a blocking target's status
+// just moved.
+//
+// It records that out of band and leaves c.beads[id] alone. Writing a nil
+// sentinel into the row was the defect ADR-0094 names: the reconcile differ
+// reads IsBlocked as "what the backing store reported", so a cache-internal
+// "I don't know" written into that slot is indistinguishable from bd flipping
+// the projection — and the next enrichment, restoring the very value the wipe
+// removed, registered as a change for every row it touched. Readiness reads
+// consult readyProjectionInvalid instead, exactly where the sentinel used to
+// send them to the dependency-derived fallback.
+//
+// Returns whether this call changed anything, so a second clear on an already
+// invalid row is not reported as a mutation. Caller must hold c.mu in write
+// mode.
 func (c *CachingStore) clearReadyProjectionLocked(id string) bool {
 	b, ok := c.beads[id]
 	if !ok || b.IsBlocked == nil {
 		return false
 	}
-	b.IsBlocked = nil
-	c.beads[id] = b
+	if c.readyProjectionInvalidLocked(id) {
+		return false
+	}
+	c.markReadyProjectionInvalidLocked(id)
 	return true
 }
 
+// clearAllReadyProjectionsLocked invalidates every resident row's verdict. It
+// deliberately does NOT noteMutationLocked the rows (ADR-0094 D3): a
+// cache-internal invalidation is not a local write, and stamping localBeadAt
+// for the whole store made every row look recently locally mutated, which
+// latched depsComplete false through mergeSkipRecentLocal → degradeDepsComplete
+// and kept clearDependentReadyProjectionsLocked selecting this whole-cache
+// branch. That latch is what turned a transient into a sustained flood.
 func (c *CachingStore) clearAllReadyProjectionsLocked() bool {
-	cleared := make([]string, 0)
+	cleared := false
 	for id := range c.beads {
 		if c.clearReadyProjectionLocked(id) {
-			cleared = append(cleared, id)
+			cleared = true
 		}
 	}
-	if len(cleared) == 0 {
-		return false
-	}
-	c.noteMutationLocked(cleared...)
-	return true
+	return cleared
 }
 
 func (c *CachingStore) clearDependentReadyProjectionsLocked(dependsOnID string) bool {
@@ -393,7 +414,7 @@ func (c *CachingStore) clearDependentReadyProjectionsLocked(dependsOnID string) 
 	if !c.depsComplete {
 		return c.clearAllReadyProjectionsLocked()
 	}
-	cleared := make([]string, 0)
+	cleared := false
 	for id, deps := range c.deps {
 		if _, ok := c.beads[id]; !ok {
 			continue
@@ -403,16 +424,12 @@ func (c *CachingStore) clearDependentReadyProjectionsLocked(dependsOnID string) 
 				continue
 			}
 			if c.clearReadyProjectionLocked(id) {
-				cleared = append(cleared, id)
+				cleared = true
 			}
 			break
 		}
 	}
-	if len(cleared) == 0 {
-		return false
-	}
-	c.noteMutationLocked(cleared...)
-	return true
+	return cleared
 }
 
 func mergeCacheEventPatch(base, patch Bead, fields map[string]json.RawMessage) Bead {
