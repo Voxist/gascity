@@ -2349,6 +2349,13 @@ op_start() {
             die "refusing to start dolt sql-server: a prior instance still holds the data dir exclusive lock (check $LOG_FILE)"
 
         # Write managed config.yaml with timeouts and GC settings.
+        # ADR-0064 AC3 (vp-o52ia): this gc-less shell fallback start cannot
+        # run the delivery window — the window is armed in the Go lifecycle
+        # (startManagedDoltProcessWithConfig). A start that skips the window
+        # is the defect D2 exists to prevent, so the skip must be loud, not
+        # silent (the vp-cblo shape).
+        echo "gc-beads-bd: MANAGED DOLT DELIVERY WINDOW SKIPPED: gc binary unavailable (shell fallback start) — no delivery window this start" >&2
+
         write_config_yaml
 
         local log_offset=0
