@@ -81,3 +81,10 @@ __pycache__/
 # .omc/skills/ is the sole committable exception per OMC conventions)
 .omc/*
 !.omc/skills/
+
+# Per-bead agent worktrees. gc creates linked worktrees under <rig>/worktrees/
+# (see gastownhall/gascity#5695); they are nested checkouts, never repo content.
+/worktrees/
+
+# bd gate lock — local runtime state, zero bytes, left behind on unclean exit
+.beads.gate.lock
