@@ -82,6 +82,51 @@ Useful search targets:
 If history contains working code, prefer porting the smallest proven slice
 instead of inventing a parallel mechanism.
 
+### Resync conventions
+
+Every resync so far has produced a second wave of commits that exist only to
+repair the first: `fix(resync)`, `merge-fix`, ratchet bumps, regenerated
+artifacts, `test: unbreak CI`. As of 2026-08-30 there are **32 such commits**
+in `origin/main..fork/main`, and 8 of them sit in the top 32 by conflict
+weight — they cost more in the *next* merge than the fix they delivered.
+
+Two rules keep that wave from forming.
+
+**1. Generated artifacts are regenerated, never merged.** On a conflict in any
+of these, take upstream wholesale and re-run the generator:
+
+- `internal/api/openapi.json`, `docs/reference/schema/openapi.*`
+- `docs/reference/schema/city-schema.*`, `docs/reference/cli.md`,
+  `docs/reference/config.md`
+- `cmd/gc/productmetrics_command_census.json`, `cmd/gc/metrics_census_gen.go`
+- `internal/api/dashboardspa/**` generated TS and `dist/`
+- test ratchets and baselines: `internal/testpolicy/resourcecensus/census.go`,
+  `internal/testenv/testdata/*.golden`, `scripts/*baseline*`,
+  `scripts/*manifest*`
+
+Hand-merging these is what produces `chore(regen)` and `test: unbreak CI`
+commits. The generator output is a *function of the merged source*; resolving
+it by hand asserts a value the source does not yet imply, and the next resync
+inherits both the wrong value and a conflicting commit.
+
+**2. Do not rewrite published fork history to clean this up.** `fork/main`
+carries ~490 remote branches and open PRs. Squashing debt commits out of it
+would break every one, and the pathspec/force-push family has already cost
+this fork a merged-but-empty PR (see the CHANGELOG rebase-clobber incident).
+
+The debt commits do not need to be *removed* to stop conflicting — during a
+merge they are resolved by rule 1, upstream-side. Retire them by
+**resolution**, not by rewriting.
+
+**3. `CHANGELOG.md` is union-merged**, both sides kept, ordered by date. Map
+every conflicting path *before* resolving any of them; a resolver that assumes
+CHANGELOG is the only conflict will silently mishandle a merge that also
+touches code.
+
+**4. Verify with the real suite.** `make test-local-full-parallel`, not
+`go build` + `go vet`. The 2026-07-15 resync passed build and vet cleanly and
+still shipped four runtime regressions.
+
 ## Development approach
 
 **TDD.** Write the test first, watch it fail, make it pass. Every package
