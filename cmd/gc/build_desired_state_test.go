@@ -2354,15 +2354,19 @@ func TestCollectAssignedWorkBeads_ReadyProbeStillRunsForOtherAssignees(t *testin
 			t.Fatalf("collected work IDs = %#v, want %s", gotIDs, want)
 		}
 	}
-	queried := make(map[string]bool)
-	for _, query := range store.readyQueries {
-		queried[query.Assignee] = true
+	// Re-expressed against the collapse invariant (#3218). Upstream asserted
+	// this as "a Ready(Assignee=worker-ready) probe was issued, and none for
+	// worker-active". This builder issues ONE unfiltered scope read and
+	// partitions client-side, so per-assignee probes do not exist to count.
+	// Both properties survive at the level they are actually observable:
+	// coverage of worker-ready is the gotIDs assertion above, and the
+	// redundant-probe-for-an-already-collected-assignee that the skip set
+	// existed to avoid is structurally impossible under a single read.
+	if len(store.readyQueries) != 1 {
+		t.Fatalf("Ready read count = %d (queries=%#v), want exactly 1 collapsed scope read", len(store.readyQueries), store.readyQueries)
 	}
-	if queried["worker-active"] || queried[activeSession.ID] {
-		t.Fatalf("Ready queries = %#v, want no probe for active assignee", store.readyQueries)
-	}
-	if !queried["worker-ready"] {
-		t.Fatalf("Ready queries = %#v, want probe for worker-ready", store.readyQueries)
+	if store.readyQueries[0].Assignee != "" {
+		t.Fatalf("collapsed Ready query carried an Assignee filter %q, want a single unfiltered scope read", store.readyQueries[0].Assignee)
 	}
 }
 
@@ -2412,12 +2416,16 @@ func TestCollectAssignedWorkBeads_ReadyProbeIncludesActiveSessionAssignees(t *te
 	if len(got) != 1 || got[0].ID != readyWork.ID {
 		t.Fatalf("got = %#v, want ready active-session work %s", got, readyWork.ID)
 	}
-	queried := make(map[string]bool)
-	for _, query := range store.readyQueries {
-		queried[query.Assignee] = true
+	// Re-expressed against the collapse invariant (#3218): an active session's
+	// assignee must still be COVERED by the scope read. Upstream proved that
+	// with a per-assignee probe; here the coverage is the got assertion above
+	// (worker-active's ready bead was collected), and the read shape is pinned
+	// so a future regression to per-assignee fan-out is caught.
+	if len(store.readyQueries) != 1 {
+		t.Fatalf("Ready read count = %d (queries=%#v), want exactly 1 collapsed scope read", len(store.readyQueries), store.readyQueries)
 	}
-	if !queried["worker-active"] {
-		t.Fatalf("Ready queries = %#v, want probe for active session assignee", store.readyQueries)
+	if store.readyQueries[0].Assignee != "" {
+		t.Fatalf("collapsed Ready query carried an Assignee filter %q, want a single unfiltered scope read", store.readyQueries[0].Assignee)
 	}
 }
 
@@ -2495,15 +2503,22 @@ func TestCollectAssignedWorkBeads_ReadyProbeExcludesFutureNamedSessionRuntimeAss
 	if len(storeRefs) != 0 {
 		t.Fatalf("storeRefs = %#v, want none", storeRefs)
 	}
-	queried := make(map[string]bool)
-	for _, query := range rigStore.readyQueries {
-		queried[query.Assignee] = true
+	// Re-expressed against the collapse invariant (#3218). Upstream asserted
+	// the rig's per-assignee probe set contained the canonical identity and
+	// not the future runtime name. Under a single unfiltered scope read that
+	// set is the partition set, so assert it where it now lives — the
+	// assignee set the scope read is partitioned over. The exclusion half is
+	// additionally proven end-to-end by len(got) == 0 above.
+	assignees := readyAssignedWorkAssignees(cfg, nil, nil)
+	inSet := make(map[string]bool, len(assignees))
+	for _, a := range assignees {
+		inSet[a] = true
 	}
-	if queried[runtimeName] {
-		t.Fatalf("rig Ready queries = %#v, must not include future runtime assignee %q", rigStore.readyQueries, runtimeName)
+	if inSet[runtimeName] {
+		t.Fatalf("ready assignee set = %#v, must not include future runtime assignee %q", assignees, runtimeName)
 	}
-	if !queried[identity] {
-		t.Fatalf("rig Ready queries = %#v, want canonical named-session assignee %q", rigStore.readyQueries, identity)
+	if !inSet[identity] {
+		t.Fatalf("ready assignee set = %#v, want canonical named-session assignee %q", assignees, identity)
 	}
 }
 
@@ -2786,14 +2801,17 @@ func TestCollectAssignedWorkBeadsWithStores_SkipSetIsStoreScopedAcrossSameID(t *
 		t.Fatalf("worker-rig ready bead %q was dropped: the same-ID city ready bead collapsed the skip set and suppressed worker-rig's store-scoped Ready probe; collected=%#v", rigReadyWork.ID, gotIDs)
 	}
 
-	rigProbedForRigAssignee := false
-	for _, query := range rigStore.readyQueries {
-		if query.Assignee == "worker-rig" {
-			rigProbedForRigAssignee = true
-		}
+	// Re-expressed against the collapse invariant (#3218). The property under
+	// test is that the skip set is STORE-SCOPED: a same-ID city bead must not
+	// suppress the rig store's own probe. The gotIDs assertion above proves
+	// that end-to-end and is strictly stronger than counting queries. What
+	// remains to pin here is that the rig store was read on its own scope at
+	// all, rather than being collapsed into the city's read.
+	if len(rigStore.readyQueries) != 1 {
+		t.Fatalf("rig Ready read count = %d (queries=%#v), want the rig store read once on its own scope despite the same-ID city ready bead", len(rigStore.readyQueries), rigStore.readyQueries)
 	}
-	if !rigProbedForRigAssignee {
-		t.Fatalf("rig Ready queries = %#v, want a probe for worker-rig despite the same-ID city ready bead", rigStore.readyQueries)
+	if rigStore.readyQueries[0].Assignee != "" {
+		t.Fatalf("rig collapsed Ready query carried an Assignee filter %q, want a single unfiltered scope read", rigStore.readyQueries[0].Assignee)
 	}
 }
 

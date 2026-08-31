@@ -83,6 +83,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/gastownhall/gascity/internal/beads/identity"
+
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -373,6 +375,30 @@ func (s *emittingClassStore) Close(id string) error {
 	}
 	s.emitClosed(id)
 	return nil
+}
+
+// OpenedIdentity and AssertOpenedIdentity forward the fork-only scope-identity
+// capability of *beads.NativeDoltStore. Upstream's NativeDoltStore has neither,
+// so upstream's wrapper never needed them — but a wrapper that silently drops a
+// capability of the store it wraps stops the identity assertion matching at all
+// (TestEmittingClassStoreKeepsEveryEngineCapability). Pure pass-through: these
+// are reads, so there is nothing to emit.
+func (s *emittingClassStore) OpenedIdentity() identity.ScopeIdentity {
+	if inner, ok := s.Store.(interface {
+		OpenedIdentity() identity.ScopeIdentity
+	}); ok {
+		return inner.OpenedIdentity()
+	}
+	return identity.ScopeIdentity{}
+}
+
+func (s *emittingClassStore) AssertOpenedIdentity(configured identity.ScopeIdentity) identity.Result {
+	if inner, ok := s.Store.(interface {
+		AssertOpenedIdentity(identity.ScopeIdentity) identity.Result
+	}); ok {
+		return inner.AssertOpenedIdentity(configured)
+	}
+	return identity.Result{}
 }
 
 func (s *emittingClassStore) Reopen(id string) error {

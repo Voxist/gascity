@@ -686,19 +686,40 @@ func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) stri
 		`fi; `
 }
 
+// poolDemandOriginGateScript sets pool_gate_skipped rather than `exit 0`
+// (vc-ozanp5). Exiting silently made a non-ephemeral session look like a
+// session with no work: the pool tier was never probed and nothing said so, and
+// an operator could not tell "no routed work" from "routed work was not even
+// considered". Silent failure is this fleet's dominant failure mode
+// (ADR-0043), so the refusal is made audible by the gated tail below.
 func poolDemandOriginGateScript() string {
-	return `case "$GC_SESSION_ORIGIN" in ` +
+	return `pool_gate_skipped=0; ` +
+		`case "$GC_SESSION_ORIGIN" in ` +
 		`ephemeral|"") ;; ` +
-		`*) exit 0 ;; ` +
+		`*) pool_gate_skipped=1 ;; ` +
 		`esac; `
+}
+
+// poolDemandProbeCallScript emits ONE gated probe_pool_demand call.
+func poolDemandProbeCallScript(arg string) string {
+	return `[ "$pool_gate_skipped" = "0" ] && probe_pool_demand ` + arg + `; `
+}
+
+// poolDemandGatedTailScript closes the pool tier: it reports a skipped probe on
+// stderr, then prints the empty fallthrough. It fires whenever the gate
+// refused, not only when the tier turned out empty.
+func poolDemandGatedTailScript() string {
+	return `[ "$pool_gate_skipped" = "1" ] && ` +
+		`printf "gc: work_query pool tier not probed: origin=%s is not ephemeral; routed pool work (if any) was NOT considered\n" "$GC_SESSION_ORIGIN" >&2; ` +
+		`printf "[]"`
 }
 
 func routedPoolWorkQueryProbeScript(topo QueryTopology, targetCount int) string {
 	script := poolDemandOriginGateScript() + poolDemandFirstRowFunctionScript(topo)
 	for i := 1; i <= targetCount; i++ {
-		script += fmt.Sprintf(`probe_pool_demand "$%d"; `, i)
+		script += poolDemandProbeCallScript(fmt.Sprintf(`"$%d"`, i))
 	}
-	return script + `printf "[]"`
+	return script + poolDemandGatedTailScript()
 }
 
 func routedPoolWorkQueryCommand(topo QueryTopology, targets ...string) string {
@@ -811,18 +832,11 @@ func buildWorkQuery(a *Agent, topo QueryTopology) string {
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
 		script := standardAssignedWorkQueryScript(topo) +
-			poolDemandOriginGateScript() +
-			poolDemandFirstRowFunctionScript(topo) +
-			`probe_pool_demand "$1"; ` +
-			`printf "[]"`
+			routedPoolWorkQueryProbeScript(topo, 1)
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
 	script := legacyControlAssignedWorkQueryScript(topo) +
-		poolDemandOriginGateScript() +
-		poolDemandFirstRowFunctionScript(topo) +
-		`probe_pool_demand "$1"; ` +
-		`probe_pool_demand "$2"; ` +
-		`printf "[]"`
+		routedPoolWorkQueryProbeScript(topo, 2)
 	return shellquote.Join([]string{"sh", "-c", script, "--", target, legacyTarget})
 }
 

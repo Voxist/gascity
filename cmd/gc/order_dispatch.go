@@ -336,6 +336,16 @@ type orderSetSnapshot struct {
 type memoryOrderDispatcher struct {
 	aa      []orders.Order
 	storeFn orderStoreFunc
+	// failOpenRecorded dedupes the order.gate_timeout_fail_open tripwire
+	// WITHIN one dispatch tick, keyed by scoped order name. An idempotent
+	// order crosses TWO bounded gates in a single iteration (the tracking-bead
+	// gate and the wisp-aware open-work gate); gateFailClosed returns false
+	// for both, so without this a single fail-open DISPATCH emitted two
+	// events. The event's own message says "idempotent order dispatched
+	// fail-open" — one dispatch — and the emission COUNT is the incident-12
+	// contention tripwire, so double-counting inflates exactly the signal the
+	// tripwire exists to measure. Reset at the top of every dispatch tick.
+	failOpenRecorded map[string]bool
 	// storageRoutes is the opened non-work storage binding this process
 	// resolved at boot, and it carries BOTH classes a dispatch writes: the
 	// molecule a formula order materializes is graph class (coordclass
@@ -644,6 +654,8 @@ func (m *memoryOrderDispatcher) prefetchConditionResults(candidates []*orderDisp
 }
 
 func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, now time.Time) {
+	// One tick, one fail-open tripwire event per order (see failOpenRecorded).
+	m.failOpenRecorded = nil
 	// Skip all order dispatch when the city is suspended. Use the
 	// dispatcher's in-scope city path so suspension state resolves
 	// against the controlled city rather than the process cwd.
@@ -2869,6 +2881,15 @@ func (m *memoryOrderDispatcher) recordGateTimeoutFailOpen(a orders.Order, scoped
 	if m.rec == nil {
 		return
 	}
+	// One event per order per tick — the order dispatched fail-open ONCE even
+	// though it crossed two bounded gates. See failOpenRecorded.
+	if m.failOpenRecorded[scoped] {
+		return
+	}
+	if m.failOpenRecorded == nil {
+		m.failOpenRecorded = make(map[string]bool)
+	}
+	m.failOpenRecorded[scoped] = true
 	var elapsed time.Duration
 	var te *gateTimeoutError
 	if errors.As(err, &te) {

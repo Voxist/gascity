@@ -133,7 +133,20 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 			// replace-not-mutate, and nothing appends to a stored body. If a
 			// future handler enriches the body in place before serialization,
 			// clone here (matching response_cache.go's clone-on-read invariant).
-			return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: entry.body}, nil
+			// CacheAgeS reports the GREATER of the two staleness signals, the
+			// same rule the SWR path below applies: how long ago this warm
+			// entry was built, and the age of the CachingStore snapshot it was
+			// built from. Reporting only the store age hides the warm delay —
+			// statusWarmServeMaxAge is 5m while the CLI's staleness banner
+			// fires at 30s (cacheAgeBannerThresholdSeconds), so a
+			// minutes-old warm body sitting on a freshly reconciled store
+			// would report ~0 and silently suppress the banner on exactly the
+			// stale view the operator needs told about.
+			return &IndexOutput[StatusBody]{
+				Index:     index,
+				CacheAgeS: max(age.Seconds(), cacheAgeSeconds(store)),
+				Body:      entry.body,
+			}, nil
 		}
 		// Stale-while-revalidate (ra-4u2eqc): the bucket and TTL-floor caches
 		// both missed, so any entry that exists is older than

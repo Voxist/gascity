@@ -180,7 +180,18 @@ func LastMaintenance(ep events.Provider) (time.Time, string) {
 			err  error
 		)
 		if hasTail {
-			evts, err = tp.ListTail(events.Filter{Type: spec.typ, MaxScanBytes: lastMaintenanceScanWindowBytes}, 1)
+			// ActiveOnly makes this caller's long-documented contract
+			// explicit rather than relying on ListTail's default. A rotated
+			// maintenance record must not be resurrected here: reporting a
+			// store as recently maintained when the only evidence sits in an
+			// archive is the permissive branch of an unknown (ADR-0043
+			// RULE 1). ListTail spans archives by default for history readers
+			// (vp-x7x8w / T-003); this caller opts out.
+			evts, err = tp.ListTail(events.Filter{
+				Type:         spec.typ,
+				MaxScanBytes: lastMaintenanceScanWindowBytes,
+				ActiveOnly:   true,
+			}, 1)
 		} else {
 			evts, err = ep.List(events.Filter{Type: spec.typ})
 		}

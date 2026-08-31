@@ -287,11 +287,16 @@ func expandSessionSetup(cmds []string, ctx SessionSetupContext) []string {
 // don't affect the original.
 func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 	dst := config.Agent{
-		Name:              name,
-		Description:       src.Description,
-		Dir:               dir,
-		WorkDir:           src.WorkDir,
-		TmuxAlias:         src.TmuxAlias,
+		Name:        name,
+		Description: src.Description,
+		Dir:         dir,
+		WorkDir:     src.WorkDir,
+		TmuxAlias:   src.TmuxAlias,
+		// Tier is fork-only (provider-governor tier classification) and is
+		// absent from upstream's config.Agent, so upstream's deepCopyAgent
+		// never copied it. Dropping it here silently declassifies every
+		// pool-expanded agent — TestDeepCopyAgentCoversAllFields is the guard.
+		Tier:              src.Tier,
 		Scope:             src.Scope,
 		Session:           src.Session,
 		Provider:          src.Provider,

@@ -124,6 +124,11 @@ type nudgeTarget struct {
 	sessionID         string
 	continuationEpoch string
 	sessionName       string
+	// storeless marks a target resolved via the runtime provider alone
+	// (vl-3hb WS-B fallback): delivery must not open the bead store — queue
+	// writes go straight to the flock'd state.json authority and the
+	// observability shadow bead is skipped.
+	storeless bool
 }
 
 type nudgeStatusJSON struct {
@@ -884,6 +889,7 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 			Delivery:      string(mode),
 			Queued:        false,
 			Outcome:       "delivered",
+			Path:          target.nudgePath(),
 		})
 	}
 	fmt.Fprintf(stdout, "Nudged %s\n", target.agentKey()) //nolint:errcheck
@@ -1131,7 +1137,17 @@ func deliverSessionNudgeWithProvider(target nudgeTarget, sp runtime.Provider, mo
 // line can say it; it is empty for a caller that queued by request rather than
 // by downgrade.
 func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, mode nudgeDeliveryMode, jsonOutput bool, undelivered worker.NudgeUndeliveredReason, stdout, stderr io.Writer) int {
-	if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))); err != nil {
+	item := newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))
+	enqueue := func() error { return enqueueQueuedNudge(target.cityPath, item) }
+	if target.storeless {
+		// Storeless fallback: write the flock'd state.json authority directly.
+		// The shadow bead is observability-only and its store open is exactly
+		// the failure domain this path exists to avoid (vl-3hb WS-B).
+		// enqueueQueuedNudgeWithStore is upstream's name for the fork's
+		// enqueueQueuedNudgeInto — the same clockless storeless transport.
+		enqueue = func() error { return enqueueQueuedNudgeStoreless(target.cityPath, item) }
+	}
+	if err := enqueue(); err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
@@ -1158,6 +1174,7 @@ func writeQueuedSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, j
 			Delivery:      string(mode),
 			Queued:        true,
 			Outcome:       "queued",
+			Path:          target.nudgePath(),
 		})
 	}
 	fmt.Fprintf(stdout, //nolint:errcheck // best-effort stdout
@@ -1266,6 +1283,14 @@ func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTar
 	if err != nil {
 		return nudgeTarget{}, err
 	}
+	return resolveNudgeTargetViaStore(cityPath, cfg, identifier)
+}
+
+// resolveNudgeTargetViaStore is the store-touching resolution leg: open the
+// nudge bead store, materialize named sessions, and read the session bead.
+// Split out of resolveNudgeTarget so the storeless fallback can bound it
+// (resolveNudgeTargetViaStoreBounded) without changing the default path.
+func resolveNudgeTargetViaStore(cityPath string, cfg *config.City, identifier string) (nudgeTarget, error) {
 	store := openNudgeBeadStore(cityPath)
 	if store.Store != nil {
 		// Named-session materialization is a session WRITE, and the follow-up Get
@@ -2101,14 +2126,31 @@ func enqueueQueuedNudgeWithStore(cityPath string, store beads.NudgesStore, item 
 }
 
 func enqueueQueuedNudgeWithStoreAndClock(cityPath string, store beads.NudgesStore, item queuedNudge, clk clock.Clock) error {
-	ownStore := false
 	if store.Store == nil {
 		store = openNudgeBeadStore(cityPath)
-		ownStore = true
-	}
-	if ownStore {
 		defer closeBeadStoreHandle(store.Store) //nolint:errcheck // best-effort
 	}
+	return enqueueQueuedNudgeBody(cityPath, store, item, clk)
+}
+
+// enqueueQueuedNudgeStoreless is the vl-3hb WS-B store-independent transport:
+// it writes the flock'd state.json authority with NO bead store at all and no
+// observability shadow bead.
+//
+// It is deliberately NOT enqueueQueuedNudgeWithStore(cityPath,
+// beads.NudgesStore{}, item). That form reads a nil store as "open one for
+// me", which is precisely the store open this path exists to avoid — under a
+// hung store it blocks forever rather than falling back. (The fork's
+// enqueueQueuedNudgeInto had the opposite nil-store semantics; the two are
+// name-alike, not behaviour-alike.)
+func enqueueQueuedNudgeStoreless(cityPath string, item queuedNudge) error {
+	return enqueueQueuedNudgeBody(cityPath, beads.NudgesStore{}, item, clock.Real{})
+}
+
+// enqueueQueuedNudgeBody is the shared enqueue body. It NEVER opens a store:
+// whether one was opened is the caller's decision, which is what keeps the
+// storeless path storeless.
+func enqueueQueuedNudgeBody(cityPath string, store beads.NudgesStore, item queuedNudge, clk clock.Clock) error {
 	var front *nudgequeue.Store
 	if store.Store != nil {
 		front = nudgeFrontDoor(store)

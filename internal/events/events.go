@@ -391,8 +391,7 @@ var KnownEventTypes = []string{
 	OrderFired, OrderCompleted, OrderFailed, OrderGateTimeoutFailOpen,
 	ProviderSwapped, ProviderQuotaObserved, ProviderQuotaPollFailed,
 	WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
-	OrderFired, OrderCompleted, OrderFailed, OrderSuppressed,
-	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
+	OrderSuppressed,
 	MoleculeResolved,
 	SupervisorStarted, SupervisorShutdownRequested, SupervisorRequest,
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
@@ -411,12 +410,12 @@ var KnownEventTypes = []string{
 	BeadsConditionalWritesDegraded,
 	StorageBindingConverged, StorageBindingGenesis,
 	StorageBindingUnconverged, StorageBindingUncheckable,
-	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
-	// The event is emitted by the reconciler but its typed SSE payload is not
-	// yet registered in internal/api (the payload registration lives in a
-	// follow-up that adds the full SSE projection). Until then, subscribers
-	// receive it via the custom-event envelope.
-	// HostLoadSample is omitted for the same reason (see hostload_payloads.go).
+	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.,
+	// The event is emitted by the reconciler but its typed SSE payload is not,
+	// yet registered in internal/api (the payload registration lives in a,
+	// follow-up that adds the full SSE projection). Until then, subscribers,
+	// receive it via the custom-event envelope.,
+	// HostLoadSample is omitted for the same reason (see hostload_payloads.go).,
 }
 
 // Event is a single recorded occurrence in the system.

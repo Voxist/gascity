@@ -42,6 +42,27 @@ type Filter struct {
 	// ReadFiltered's forward scan or on List/ListTail implementations
 	// that are not byte-scanning a file (e.g. Fake, Multiplexer).
 	MaxScanBytes int64
+	// ActiveOnly confines a tail scan to the ACTIVE events.jsonl, never
+	// opening the sibling .gz archives, so "no match in the active file" is
+	// returned as no match rather than escalating into an archive walk.
+	//
+	// It exists because two callers hold directly opposing, separately tested
+	// contracts for the same method. FileRecorder.ListTail must span archives
+	// by default (vp-x7x8w / T-003,
+	// TestFileRecorderListTailSpansArchivesAfterRotation): before that fix a
+	// rotation silently truncated event history. But storehealth's
+	// LastMaintenance must NOT see archived records
+	// (TestLastMaintenanceDoesNotReadRotatedArchives): resurrecting a rotated
+	// maintenance timestamp reports a store as recently maintained when it is
+	// not, which is the permissive branch of an unknown (ADR-0043 RULE 1) on
+	// the durability surface. Whether a record sits in the active file or an
+	// archive is an artifact of rotation timing, so neither behaviour can be
+	// the silent default for both — the caller declares which it needs.
+	//
+	// Like MaxScanBytes, this is for callers where "no match within the recent
+	// window" is an acceptable, already-representable result, and it likewise
+	// has no effect on non-byte-scanning implementations (Fake, Multiplexer).
+	ActiveOnly bool
 }
 
 // matchesFilter reports whether e satisfies all non-zero predicates in f.
@@ -579,7 +600,11 @@ func ReadFilteredTail(path string, filter Filter, limit int) ([]Event, error) {
 		return result, nil
 	}
 
-	// Not enough matches in the active file — reach into archives newest-first.
+	// Not enough matches in the active file — reach into archives newest-first,
+	// unless the caller confined the scan to the active log (Filter.ActiveOnly).
+	if filter.ActiveOnly {
+		return result, nil
+	}
 	return tailArchives(path, filter, limit, result)
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -2675,6 +2676,12 @@ func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, jsonOutput bool,
 	target := args[0]
 	message := strings.Join(args[1:], " ")
 
+	// vl-3hb WS-B: flagged, default-off store-independent delivery. The Path
+	// field above exists to report it; without this branch that field could
+	// never be set.
+	if parseNudgeStorelessFlag(os.Getenv(nudgeStorelessFallbackEnv)) {
+		return sessionNudgeStorelessEntry(target, message, delivery, jsonOutput, stdout, stderr)
+	}
 	targetInfo, err := resolveNudgeTarget(target)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck // best-effort stderr

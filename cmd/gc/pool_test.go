@@ -802,7 +802,10 @@ func TestCountRunningPoolInstancesNoneRunning(t *testing.T) {
 func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 	trueVal := true
 	intVal := 42
+	// Tier is the provider-governor tier. Every Agent field must be
+	// non-zero here or the deep-copy guard cannot prove Clone copies it.
 	src := config.Agent{
+		Tier:                         "claude-required",
 		Name:                         "original",
 		Description:                  "test agent description",
 		Dir:                          "original-dir",

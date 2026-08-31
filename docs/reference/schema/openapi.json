@@ -483,6 +483,12 @@
               "null"
             ]
           },
+          "Tier": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "TmuxAlias": {
             "type": [
               "string",
@@ -552,6 +558,7 @@
           "ResumeCommand",
           "WakeMode",
           "MouseMode",
+          "Tier",
           "PreStartAppend",
           "SessionSetupAppend",
           "SessionLiveAppend",
@@ -1307,6 +1314,13 @@
           "beads_store": {
             "type": "string"
           },
+          "degraded": {
+            "type": "boolean"
+          },
+          "gc_bd_inflight": {
+            "format": "int64",
+            "type": "integer"
+          },
           "native_store_eligible": {
             "type": "boolean"
           },
@@ -1351,6 +1365,44 @@
           "provider",
           "conversation_id",
           "session_id"
+        ],
+        "type": "object"
+      },
+      "BreakerStateChangedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "backoff_ms": {
+            "description": "Open-state backoff chosen for this episode, in milliseconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "failures": {
+            "description": "Consecutive transport-failure count at the change.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "from": {
+            "description": "Breaker state before the transition.",
+            "type": "string"
+          },
+          "op_class": {
+            "description": "Operation class, e.g. bd.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "Store scope (canonical scope root path).",
+            "type": "string"
+          },
+          "to": {
+            "description": "Breaker state after the transition.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "op_class",
+          "from",
+          "to"
         ],
         "type": "object"
       },
@@ -1838,6 +1890,29 @@
         ],
         "type": "object"
       },
+      "ControllerTickCompletedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "duration_ms": {
+            "description": "Wall-clock duration of the completed tick, in milliseconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "phase": {
+            "description": "Tick trigger phase: patrol, poke, control-dispatcher, etc.",
+            "type": "string"
+          },
+          "threshold_breach": {
+            "description": "True when the tick's duration reached the slow-tick threshold (a multiple of the configured patrol interval).",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "duration_ms",
+          "phase"
+        ],
+        "type": "object"
+      },
       "ConversationGroupParticipant": {
         "additionalProperties": false,
         "properties": {
@@ -2245,6 +2320,32 @@
         ],
         "type": "object"
       },
+      "DoctorAlertPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "check": {
+            "description": "Name of the doctor check that went red.",
+            "type": "string"
+          },
+          "city": {
+            "description": "City name the check evaluated, when scoped to a city.",
+            "type": "string"
+          },
+          "detail": {
+            "description": "Human-readable description of the red condition.",
+            "type": "string"
+          },
+          "subject": {
+            "description": "Optional subject identifier (scope, path) the alert concerns.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "check",
+          "detail"
+        ],
+        "type": "object"
+      },
       "ErrorDetail": {
         "additionalProperties": false,
         "properties": {
@@ -2485,6 +2586,9 @@
             "$ref": "#/components/schemas/BoundEventPayload"
           },
           {
+            "$ref": "#/components/schemas/BreakerStateChangedPayload"
+          },
+          {
             "$ref": "#/components/schemas/CityCreateSucceededPayload"
           },
           {
@@ -2498,6 +2602,12 @@
           },
           {
             "$ref": "#/components/schemas/ControlStalledPayload"
+          },
+          {
+            "$ref": "#/components/schemas/ControllerTickCompletedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/DoctorAlertPayload"
           },
           {
             "$ref": "#/components/schemas/ExecutionClaimWindowExpiredPayload"
@@ -2521,6 +2631,9 @@
             "$ref": "#/components/schemas/NoPayload"
           },
           {
+            "$ref": "#/components/schemas/OrderGateTimeoutFailOpenPayload"
+          },
+          {
             "$ref": "#/components/schemas/OrderSuppressedPayload"
           },
           {
@@ -2531,6 +2644,15 @@
           },
           {
             "$ref": "#/components/schemas/ProjectIdentityStampedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/ProxyReapedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/QuotaObservedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/QuotaPollFailedPayload"
           },
           {
             "$ref": "#/components/schemas/Record"
@@ -2578,6 +2700,9 @@
             "$ref": "#/components/schemas/StorageBindingOutcomePayload"
           },
           {
+            "$ref": "#/components/schemas/StoreDegradedPayload"
+          },
+          {
             "$ref": "#/components/schemas/StoreDiskCriticalPayload"
           },
           {
@@ -2588,6 +2713,12 @@
           },
           {
             "$ref": "#/components/schemas/StoreMaintenanceFailedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/StoreProbeFailedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/StoreRecoveredPayload"
           },
           {
             "$ref": "#/components/schemas/SupervisorFSPressureSkippedTickPayload"
@@ -5009,6 +5140,26 @@
         ],
         "type": "object"
       },
+      "OrderGateTimeoutFailOpenPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "elapsed_s": {
+            "format": "double",
+            "type": "number"
+          },
+          "order": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "order",
+          "elapsed_s"
+        ],
+        "type": "object"
+      },
       "OrderHistoryDetailResponse": {
         "additionalProperties": false,
         "properties": {
@@ -6331,6 +6482,34 @@
         },
         "type": "object"
       },
+      "ProxyReapedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "pids_signaled": {
+            "description": "Number of db-proxy-child PIDs signaled.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "quarantine_dir": {
+            "description": "Directory holding the pre-reap forensic artifacts.",
+            "type": "string"
+          },
+          "rate_limited": {
+            "description": "True when a second poison inside the window suppressed the reap (forensics kept, alert-only).",
+            "type": "boolean"
+          },
+          "scope": {
+            "description": "Canonical scope root path whose db-proxy child was reaped.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "quarantine_dir",
+          "pids_signaled"
+        ],
+        "type": "object"
+      },
       "PublishReceipt": {
         "additionalProperties": false,
         "properties": {
@@ -6364,6 +6543,58 @@
           "FailureKind",
           "RetryAfter",
           "Metadata"
+        ],
+        "type": "object"
+      },
+      "QuotaObservedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "five_hour_resets_at": {
+            "type": "string"
+          },
+          "five_hour_util": {
+            "format": "double",
+            "type": "number"
+          },
+          "opus_util": {
+            "format": "double",
+            "type": "number"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "seven_day_resets_at": {
+            "type": "string"
+          },
+          "seven_day_util": {
+            "format": "double",
+            "type": "number"
+          },
+          "sonnet_util": {
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "provider",
+          "five_hour_util",
+          "seven_day_util"
+        ],
+        "type": "object"
+      },
+      "QuotaPollFailedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "provider": {
+            "type": "string"
+          },
+          "reason_class": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "reason_class"
         ],
         "type": "object"
       },
@@ -11620,6 +11851,33 @@
         ],
         "type": "object"
       },
+      "StoreDegradedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "class": {
+            "description": "Degradation class: transport, backend, or write-rejection.",
+            "type": "string"
+          },
+          "consecutive_fails": {
+            "description": "Consecutive failed probe cycles at the trip.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "reason": {
+            "description": "Human-readable cause from the failing probe.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "Canonical scope root path whose store degraded.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "class"
+        ],
+        "type": "object"
+      },
       "StoreDiskCriticalPayload": {
         "additionalProperties": false,
         "properties": {
@@ -11717,6 +11975,45 @@
           "stage",
           "error_msg",
           "duration_s"
+        ],
+        "type": "object"
+      },
+      "StoreProbeFailedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "probe": {
+            "description": "Which probe failed: routed (probe A) or backend (probe B).",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Human-readable cause from the failing probe.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "Canonical scope root path of the failing probe.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "probe"
+        ],
+        "type": "object"
+      },
+      "StoreRecoveredPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "class": {
+            "description": "Degradation class that recovered, if known.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "Canonical scope root path whose store recovered.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope"
         ],
         "type": "object"
       },
@@ -12119,6 +12416,7 @@
             "bead.worktree.reap_skipped": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReapSkipped",
             "bead.worktree.reaped": "#/components/schemas/TypedEventStreamEnvelopeBeadWorktreeReaped",
             "beads.conditional_writes.degraded": "#/components/schemas/TypedEventStreamEnvelopeBeadsConditionalWritesDegraded",
+            "breaker.state_changed": "#/components/schemas/TypedEventStreamEnvelopeBreakerStateChanged",
             "city.created": "#/components/schemas/TypedEventStreamEnvelopeCityCreated",
             "city.resumed": "#/components/schemas/TypedEventStreamEnvelopeCityResumed",
             "city.suspended": "#/components/schemas/TypedEventStreamEnvelopeCitySuspended",
@@ -12126,8 +12424,10 @@
             "control.stalled": "#/components/schemas/TypedEventStreamEnvelopeControlStalled",
             "controller.started": "#/components/schemas/TypedEventStreamEnvelopeControllerStarted",
             "controller.stopped": "#/components/schemas/TypedEventStreamEnvelopeControllerStopped",
+            "controller.tick_completed": "#/components/schemas/TypedEventStreamEnvelopeControllerTickCompleted",
             "convoy.closed": "#/components/schemas/TypedEventStreamEnvelopeConvoyClosed",
             "convoy.created": "#/components/schemas/TypedEventStreamEnvelopeConvoyCreated",
+            "doctor.alert": "#/components/schemas/TypedEventStreamEnvelopeDoctorAlert",
             "emergency.acked": "#/components/schemas/TypedEventStreamEnvelopeEmergencyAcked",
             "emergency.signaled": "#/components/schemas/TypedEventStreamEnvelopeEmergencySignaled",
             "events.rotated": "#/components/schemas/TypedEventStreamEnvelopeEventsRotated",
@@ -12161,9 +12461,13 @@
             "order.completed": "#/components/schemas/TypedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedEventStreamEnvelopeOrderFired",
+            "order.gate_timeout_fail_open": "#/components/schemas/TypedEventStreamEnvelopeOrderGateTimeoutFailOpen",
             "order.suppressed": "#/components/schemas/TypedEventStreamEnvelopeOrderSuppressed",
             "project.identity.stamped": "#/components/schemas/TypedEventStreamEnvelopeProjectIdentityStamped",
+            "provider.quota_observed": "#/components/schemas/TypedEventStreamEnvelopeProviderQuotaObserved",
+            "provider.quota_poll_failed": "#/components/schemas/TypedEventStreamEnvelopeProviderQuotaPollFailed",
             "provider.swapped": "#/components/schemas/TypedEventStreamEnvelopeProviderSwapped",
+            "proxy.reaped": "#/components/schemas/TypedEventStreamEnvelopeProxyReaped",
             "request.failed": "#/components/schemas/TypedEventStreamEnvelopeRequestFailed",
             "request.result.city.create": "#/components/schemas/TypedEventStreamEnvelopeRequestResultCityCreate",
             "request.result.city.unregister": "#/components/schemas/TypedEventStreamEnvelopeRequestResultCityUnregister",
@@ -12193,6 +12497,9 @@
             "storage.binding.genesis": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingGenesis",
             "storage.binding.uncheckable": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingUncheckable",
             "storage.binding.unconverged": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingUnconverged",
+            "store.degraded": "#/components/schemas/TypedEventStreamEnvelopeStoreDegraded",
+            "store.probe_failed": "#/components/schemas/TypedEventStreamEnvelopeStoreProbeFailed",
+            "store.recovered": "#/components/schemas/TypedEventStreamEnvelopeStoreRecovered",
             "supervisor.fs_pressure.skipped_tick": "#/components/schemas/TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick",
             "supervisor.request": "#/components/schemas/TypedEventStreamEnvelopeSupervisorRequest",
             "supervisor.shutdown_requested": "#/components/schemas/TypedEventStreamEnvelopeSupervisorShutdownRequested",
@@ -12238,6 +12545,9 @@
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeBeadsConditionalWritesDegraded"
           },
           {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeBreakerStateChanged"
+          },
+          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeCityCreated"
           },
           {
@@ -12259,10 +12569,16 @@
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeControllerStopped"
           },
           {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeControllerTickCompleted"
+          },
+          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeConvoyClosed"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeConvoyCreated"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeDoctorAlert"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeEmergencyAcked"
@@ -12364,13 +12680,25 @@
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderFired"
           },
           {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderGateTimeoutFailOpen"
+          },
+          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderSuppressed"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeProjectIdentityStamped"
           },
           {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeProviderQuotaObserved"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeProviderQuotaPollFailed"
+          },
+          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeProviderSwapped"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeProxyReaped"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeRequestFailed"
@@ -12458,6 +12786,15 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeStorageBindingUnconverged"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeStoreDegraded"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeStoreProbeFailed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeStoreRecovered"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick"
@@ -13113,6 +13450,63 @@
         "title": "TypedEventStreamEnvelope beads.conditional_writes.degraded",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeBreakerStateChanged": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BreakerStateChangedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "breaker.state_changed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope breaker.state_changed",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeCityCreated": {
         "additionalProperties": false,
         "properties": {
@@ -13512,6 +13906,63 @@
         "title": "TypedEventStreamEnvelope controller.stopped",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeControllerTickCompleted": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ControllerTickCompletedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "controller.tick_completed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope controller.tick_completed",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeConvoyClosed": {
         "additionalProperties": false,
         "properties": {
@@ -13726,11 +14177,14 @@
                 "order.fired",
                 "order.completed",
                 "order.failed",
-                "order.suppressed",
+                "order.gate_timeout_fail_open",
                 "provider.swapped",
+                "provider.quota_observed",
+                "provider.quota_poll_failed",
                 "worker.operation",
                 "project.identity.stamped",
                 "supervisor.fs_pressure.skipped_tick",
+                "order.suppressed",
                 "molecule.resolved",
                 "supervisor.started",
                 "supervisor.shutdown_requested",
@@ -13750,6 +14204,13 @@
                 "gc.store.maintenance.failed",
                 "gc.store.disk_warn",
                 "gc.store.disk_critical",
+                "store.degraded",
+                "store.recovered",
+                "store.probe_failed",
+                "proxy.reaped",
+                "breaker.state_changed",
+                "controller.tick_completed",
+                "doctor.alert",
                 "backend.credential_resolved",
                 "emergency.signaled",
                 "emergency.acked",
@@ -13774,6 +14235,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope custom",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeDoctorAlert": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/DoctorAlertPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "doctor.alert",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope doctor.alert",
         "type": "object"
       },
       "TypedEventStreamEnvelopeEmergencyAcked": {
@@ -15657,6 +16175,63 @@
         "title": "TypedEventStreamEnvelope order.fired",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeOrderGateTimeoutFailOpen": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/OrderGateTimeoutFailOpenPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "order.gate_timeout_fail_open",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope order.gate_timeout_fail_open",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeOrderSuppressed": {
         "additionalProperties": false,
         "properties": {
@@ -15771,6 +16346,120 @@
         "title": "TypedEventStreamEnvelope project.identity.stamped",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeProviderQuotaObserved": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/QuotaObservedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "provider.quota_observed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope provider.quota_observed",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeProviderQuotaPollFailed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/QuotaPollFailedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "provider.quota_poll_failed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope provider.quota_poll_failed",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeProviderSwapped": {
         "additionalProperties": false,
         "properties": {
@@ -15826,6 +16515,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope provider.swapped",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeProxyReaped": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ProxyReapedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "proxy.reaped",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope proxy.reaped",
         "type": "object"
       },
       "TypedEventStreamEnvelopeRequestFailed": {
@@ -17481,6 +18227,177 @@
         "title": "TypedEventStreamEnvelope storage.binding.unconverged",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeStoreDegraded": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StoreDegradedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "store.degraded",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope store.degraded",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeStoreProbeFailed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StoreProbeFailedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "store.probe_failed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope store.probe_failed",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeStoreRecovered": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StoreRecoveredPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "store.recovered",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope store.recovered",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick": {
         "additionalProperties": false,
         "properties": {
@@ -17895,6 +18812,7 @@
             "bead.worktree.reap_skipped": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReapSkipped",
             "bead.worktree.reaped": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadWorktreeReaped",
             "beads.conditional_writes.degraded": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded",
+            "breaker.state_changed": "#/components/schemas/TypedTaggedEventStreamEnvelopeBreakerStateChanged",
             "city.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityCreated",
             "city.resumed": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityResumed",
             "city.suspended": "#/components/schemas/TypedTaggedEventStreamEnvelopeCitySuspended",
@@ -17902,8 +18820,10 @@
             "control.stalled": "#/components/schemas/TypedTaggedEventStreamEnvelopeControlStalled",
             "controller.started": "#/components/schemas/TypedTaggedEventStreamEnvelopeControllerStarted",
             "controller.stopped": "#/components/schemas/TypedTaggedEventStreamEnvelopeControllerStopped",
+            "controller.tick_completed": "#/components/schemas/TypedTaggedEventStreamEnvelopeControllerTickCompleted",
             "convoy.closed": "#/components/schemas/TypedTaggedEventStreamEnvelopeConvoyClosed",
             "convoy.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeConvoyCreated",
+            "doctor.alert": "#/components/schemas/TypedTaggedEventStreamEnvelopeDoctorAlert",
             "emergency.acked": "#/components/schemas/TypedTaggedEventStreamEnvelopeEmergencyAcked",
             "emergency.signaled": "#/components/schemas/TypedTaggedEventStreamEnvelopeEmergencySignaled",
             "events.rotated": "#/components/schemas/TypedTaggedEventStreamEnvelopeEventsRotated",
@@ -17937,9 +18857,13 @@
             "order.completed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFired",
+            "order.gate_timeout_fail_open": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen",
             "order.suppressed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderSuppressed",
             "project.identity.stamped": "#/components/schemas/TypedTaggedEventStreamEnvelopeProjectIdentityStamped",
+            "provider.quota_observed": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderQuotaObserved",
+            "provider.quota_poll_failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderQuotaPollFailed",
             "provider.swapped": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderSwapped",
+            "proxy.reaped": "#/components/schemas/TypedTaggedEventStreamEnvelopeProxyReaped",
             "request.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestFailed",
             "request.result.city.create": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultCityCreate",
             "request.result.city.unregister": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultCityUnregister",
@@ -17969,6 +18893,9 @@
             "storage.binding.genesis": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingGenesis",
             "storage.binding.uncheckable": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingUncheckable",
             "storage.binding.unconverged": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingUnconverged",
+            "store.degraded": "#/components/schemas/TypedTaggedEventStreamEnvelopeStoreDegraded",
+            "store.probe_failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeStoreProbeFailed",
+            "store.recovered": "#/components/schemas/TypedTaggedEventStreamEnvelopeStoreRecovered",
             "supervisor.fs_pressure.skipped_tick": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick",
             "supervisor.request": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorRequest",
             "supervisor.shutdown_requested": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested",
@@ -18014,6 +18941,9 @@
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded"
           },
           {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeBreakerStateChanged"
+          },
+          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeCityCreated"
           },
           {
@@ -18035,10 +18965,16 @@
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeControllerStopped"
           },
           {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeControllerTickCompleted"
+          },
+          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeConvoyClosed"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeConvoyCreated"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeDoctorAlert"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeEmergencyAcked"
@@ -18140,13 +19076,25 @@
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFired"
           },
           {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen"
+          },
+          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderSuppressed"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeProjectIdentityStamped"
           },
           {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderQuotaObserved"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderQuotaPollFailed"
+          },
+          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeProviderSwapped"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeProxyReaped"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestFailed"
@@ -18234,6 +19182,15 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeStorageBindingUnconverged"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeStoreDegraded"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeStoreProbeFailed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeStoreRecovered"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick"
@@ -18933,6 +19890,67 @@
         "title": "TypedTaggedEventStreamEnvelope beads.conditional_writes.degraded",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeBreakerStateChanged": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/BreakerStateChangedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "breaker.state_changed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope breaker.state_changed",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeCityCreated": {
         "additionalProperties": false,
         "properties": {
@@ -19360,6 +20378,67 @@
         "title": "TypedTaggedEventStreamEnvelope controller.stopped",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeControllerTickCompleted": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ControllerTickCompletedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "controller.tick_completed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope controller.tick_completed",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeConvoyClosed": {
         "additionalProperties": false,
         "properties": {
@@ -19585,11 +20664,14 @@
                 "order.fired",
                 "order.completed",
                 "order.failed",
-                "order.suppressed",
+                "order.gate_timeout_fail_open",
                 "provider.swapped",
+                "provider.quota_observed",
+                "provider.quota_poll_failed",
                 "worker.operation",
                 "project.identity.stamped",
                 "supervisor.fs_pressure.skipped_tick",
+                "order.suppressed",
                 "molecule.resolved",
                 "supervisor.started",
                 "supervisor.shutdown_requested",
@@ -19609,6 +20691,13 @@
                 "gc.store.maintenance.failed",
                 "gc.store.disk_warn",
                 "gc.store.disk_critical",
+                "store.degraded",
+                "store.recovered",
+                "store.probe_failed",
+                "proxy.reaped",
+                "breaker.state_changed",
+                "controller.tick_completed",
+                "doctor.alert",
                 "backend.credential_resolved",
                 "emergency.signaled",
                 "emergency.acked",
@@ -19634,6 +20723,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope custom",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeDoctorAlert": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/DoctorAlertPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "doctor.alert",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope doctor.alert",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeEmergencyAcked": {
@@ -21649,6 +22799,67 @@
         "title": "TypedTaggedEventStreamEnvelope order.fired",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/OrderGateTimeoutFailOpenPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "order.gate_timeout_fail_open",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope order.gate_timeout_fail_open",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeOrderSuppressed": {
         "additionalProperties": false,
         "properties": {
@@ -21771,6 +22982,128 @@
         "title": "TypedTaggedEventStreamEnvelope project.identity.stamped",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeProviderQuotaObserved": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/QuotaObservedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "provider.quota_observed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope provider.quota_observed",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeProviderQuotaPollFailed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/QuotaPollFailedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "provider.quota_poll_failed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope provider.quota_poll_failed",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeProviderSwapped": {
         "additionalProperties": false,
         "properties": {
@@ -21830,6 +23163,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope provider.swapped",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeProxyReaped": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ProxyReapedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "proxy.reaped",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope proxy.reaped",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeRequestFailed": {
@@ -23599,6 +24993,189 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope storage.binding.unconverged",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeStoreDegraded": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StoreDegradedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "store.degraded",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope store.degraded",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeStoreProbeFailed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StoreProbeFailedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "store.probe_failed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope store.probe_failed",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeStoreRecovered": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StoreRecoveredPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "store.recovered",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope store.recovered",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick": {
