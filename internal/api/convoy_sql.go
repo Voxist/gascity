@@ -43,10 +43,13 @@ var (
 // workflowSQLQueryTimeout bounds each workflow SQL query so a stuck Dolt
 // server fails the fast path in ~5s and the caller drops to the bd-subprocess
 // slow path, rather than inheriting the doltpool DSN's longer ReadTimeout
-// (~30s). This restores the deliberate 5s boundary from 9799dce95 (review
-// #20). The workflow snapshot call path (buildWorkflowSnapshot →
-// tryFullWorkflowSQL) does not thread a request context, so each query
-// derives its own bounded context from context.Background().
+// (~30s). The bound matters more now that these reads share a pooled *sql.DB
+// capped at 5 open connections: an unbounded query no longer stalls only its
+// own caller, it holds one of the few shared connections and starves every
+// other Dolt reader in the process. The workflow snapshot call path
+// (buildWorkflowSnapshot → tryFullWorkflowSQL) does not thread a request
+// context, so each query derives its own bounded context from
+// context.Background().
 const workflowSQLQueryTimeout = 5 * time.Second
 
 func workflowSQLCandidatesForWorkflowID(
@@ -99,13 +102,31 @@ func workflowSQLSnapshot(user, password, host string, port int, database, rootID
 		return nil, nil, nil, err
 	}
 
+	// Propagate: tryFullWorkflowSQL returns a nil error only on full
+	// success, and beads stripped of their labels are not that. A missing
+	// labels table is already tolerated inside the hydrate (it skips a
+	// table set that does not exist), so everything reaching here is a
+	// genuine Dolt failure — and the 5s query bound over a 5-connection
+	// shared pool makes a timeout newly reachable. Surfacing it lets
+	// buildWorkflowSnapshot log the cause and rebuild on the bd-subprocess
+	// slow path instead of serving a silently unlabeled graph.
 	if err := workflowSQLHydrateWorkflowLabels(db, tableSets, rootID, workflowBeads, beadIndex); err != nil {
-		return workflowBeads, beadIndex, depMap, nil
+		return nil, nil, nil, fmt.Errorf("hydrate workflow labels: %w", err)
 	}
 
 	return workflowBeads, beadIndex, depMap, nil
 }
 
+// workflowSQLQueryWorkflowBeads is beads.MembershipDirectRootID expressed as a
+// WHERE clause: the root row, plus every row whose gc.root_bead_id metadata
+// equals the root id. It runs over every available table set, issues and wisps
+// alike, which is what makes it tier-complete like beads.DirectMembers.
+//
+// It must stay equivalent to beads.DirectMembers — this is the fast path for
+// the same question snapshotFromStore's fallback answers, and a divergence
+// would make the dashboard's step list depend on whether the Dolt server
+// happened to be reachable. One such divergence exists today and is recorded
+// on snapshotFromStore: the fallback is tier-scoped and this path is not.
 func workflowSQLQueryWorkflowBeads(db *sql.DB, tableSets []workflowSQLTableSet, rootID string) ([]beads.Bead, map[string]beads.Bead, error) {
 	workflowBeads := make([]beads.Bead, 0, 100)
 	beadIndex := make(map[string]beads.Bead)
@@ -630,11 +651,13 @@ func workflowSQLRouteCandidate(state State, prefix string) (workflowSQLStoreCand
 }
 
 func workflowStorePath(state State, info workflowStoreInfo) (string, bool) {
-	// The dedicated graph store lives at its own legacy .gc/ location (or a gcg
-	// Postgres schema), not at a rig/city path derivable here, so it has no
-	// rig-path-derived SQL fast-path candidate. Skip it; the slow store-scan in
-	// buildWorkflowSnapshot consults the graph store directly.
-	if strings.HasPrefix(strings.TrimSpace(info.ref), workflowGraphStoreRefPrefix+":") {
+	// A class ref names a storage binding, not a scope root: the graph and orders
+	// bindings live at their own legacy .gc/ location (or a gcg Postgres schema),
+	// not at a rig/city path derivable here. They carry the city scope as their
+	// fallback, so answering the city path here would run the SQL fast path against
+	// the wrong database. Skip them; the slow store-scan reads the binding directly.
+	ref := strings.TrimSpace(info.ref)
+	if strings.HasPrefix(ref, workflowGraphStoreRefPrefix+":") || strings.HasPrefix(ref, ordersClassStoreRefPrefix+":") {
 		return "", false
 	}
 	switch strings.TrimSpace(info.scopeKind) {

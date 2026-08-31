@@ -11,10 +11,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gastownhall/gascity/internal/testutil"
-
 	"github.com/gastownhall/gascity/internal/bootstrap"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func overrideBootstrapPacks(t *testing.T, names ...string) {
@@ -1192,12 +1191,15 @@ func TestCanonicalizePath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected, _ := filepath.EvalSymlinks(alias)
-	// testutil.AssertSamePath, not ==: expectations come from bare
-	// filepath.EvalSymlinks while canonicalizePath normalizes through pathutil,
-	// which on darwin collapses /private/var and /private/tmp back to /var and
-	// /tmp — the reverse direction. Same file, two spellings (macOS only).
-	testutil.AssertCanonicalPathEquals(t, got, expected)
+	// Canonicalize the expectation the same way canonicalizePath does. Bare
+	// EvalSymlinks is a different canonical form on macOS, where it reports
+	// /private/var/... while the production normalizer collapses the
+	// equivalent /var alias. The comparison stays exact, so an unresolved
+	// alias still fails.
+	expected := testutil.CanonicalPath(alias)
+	if got != expected {
+		t.Errorf("alias dir: got %q, want %q", got, expected)
+	}
 
 	// Missing tail under an aliased ancestor: walk-up + suffix re-append.
 	missing := filepath.Join(alias, "not-yet-created", "leaf")
@@ -1205,9 +1207,11 @@ func TestCanonicalizePath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantPrefix, _ := filepath.EvalSymlinks(alias)
+	wantPrefix := testutil.CanonicalPath(alias)
 	wantMissing := filepath.Join(wantPrefix, "not-yet-created", "leaf")
-	testutil.AssertCanonicalPathEquals(t, got, wantMissing)
+	if got != wantMissing {
+		t.Errorf("missing tail: got %q, want %q", got, wantMissing)
+	}
 
 	// Empty input.
 	if got, err := canonicalizePath(""); err != nil || got != "" {

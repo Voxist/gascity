@@ -96,6 +96,7 @@ export type AgentPatch = {
     PromptTemplate: string | null;
     Provider: string | null;
     ResumeCommand: string | null;
+    Rig: string;
     ScaleCheck: string | null;
     Scope: string | null;
     Session: string | null;
@@ -109,7 +110,6 @@ export type AgentPatch = {
     SleepAfterIdle: string | null;
     StartCommand: string | null;
     Suspended: boolean | null;
-    Tier: string | null;
     TmuxAlias: string | null;
     Upstream: string | null;
     WakeMode: string | null;
@@ -118,7 +118,7 @@ export type AgentPatch = {
 
 export type AgentPatchSetInputBody = {
     /**
-     * Agent directory scope.
+     * Agent directory scope (legacy targeting key; prefer rig).
      */
     dir?: string;
     /**
@@ -135,6 +135,10 @@ export type AgentPatchSetInputBody = {
      * Override the agent's provider.
      */
     provider?: string;
+    /**
+     * Rig targeting key. "*" matches the agent name across all rigs and city. Mutually exclusive with dir.
+     */
+    rig?: string;
     /**
      * Override agent scope.
      */
@@ -263,6 +267,16 @@ export type AsyncAcceptedResponse = {
     request_id: string;
 };
 
+export type BackendCredentialResolvedPayload = {
+    backend: string;
+    host: string;
+    port: string;
+    scope_kind: string;
+    scope_name: string;
+    source: string;
+    user: string;
+};
+
 export type Bead = {
     assignee?: string;
     created_at: string;
@@ -299,6 +313,12 @@ export type BeadClaimRejectedPayload = {
     attempted_claimant: string;
     bead_id: string;
     existing_claimant: string;
+};
+
+export type BeadClaimReleasedPayload = {
+    assignee: string;
+    bead_id: string;
+    reason: string;
 };
 
 export type BeadCreateInputBody = {
@@ -372,6 +392,10 @@ export type BeadEventPayload = {
 export type BeadGraphResponse = {
     beads: Array<Bead> | null;
     deps: Array<WorkflowDepResponse> | null;
+    /**
+     * Rule that decided which beads are in Beads: the root, everything carrying gc.root_bead_id == root, plus the root's convoy members when the root is a convoy, and then the transitive parent-child closure taken over all of those — a convoy member brings its own subtree. Both storage tiers are in scope, so a wisp molecule (whose beads are all ephemeral) returns its members rather than reading as empty. Never dependency reachability, which drops dependency-isolated members such as gc.kind=spec sidecars.
+     */
+    membership: 'direct-root-id+parent-closure' | 'direct-root-id+parent-closure+convoy-members';
     root: Bead;
 };
 
@@ -436,8 +460,6 @@ export type BeadWorktreeReapedPayload = {
 
 export type BeadsDiagnostic = {
     beads_store: string;
-    degraded?: boolean;
-    gc_bd_inflight?: number;
     native_store_eligible: boolean;
     preflight_gate?: string;
     preflight_reason?: string;
@@ -453,33 +475,6 @@ export type BoundEventPayload = {
     conversation_id: string;
     provider: string;
     session_id: string;
-};
-
-export type BreakerStateChangedPayload = {
-    /**
-     * Open-state backoff chosen for this episode, in milliseconds.
-     */
-    backoff_ms?: number;
-    /**
-     * Consecutive transport-failure count at the change.
-     */
-    failures?: number;
-    /**
-     * Breaker state before the transition.
-     */
-    from: string;
-    /**
-     * Operation class, e.g. bd.
-     */
-    op_class: string;
-    /**
-     * Store scope (canonical scope root path).
-     */
-    scope: string;
-    /**
-     * Breaker state after the transition.
-     */
-    to: string;
 };
 
 export type CityCreateRequest = {
@@ -650,19 +645,16 @@ export type ConfigValidateOutputBody = {
     warnings: Array<string> | null;
 };
 
-export type ControllerTickCompletedPayload = {
-    /**
-     * Wall-clock duration of the completed tick, in milliseconds.
-     */
-    duration_ms: number;
-    /**
-     * Tick trigger phase: patrol, poke, control-dispatcher, etc.
-     */
-    phase: string;
-    /**
-     * True when the tick's duration reached the slow-tick threshold (a multiple of the configured patrol interval).
-     */
-    threshold_breach?: boolean;
+export type ControlStalledPayload = {
+    attempts: number;
+    bead_id: string;
+    error: string;
+    error_class: string;
+    first_seen: string;
+    kind?: string;
+    order_name?: string;
+    root_bead_id?: string;
+    store_path?: string;
 };
 
 export type ConversationGroupParticipant = {
@@ -818,25 +810,6 @@ export type Dep = {
     type: string;
 };
 
-export type DoctorAlertPayload = {
-    /**
-     * Name of the doctor check that went red.
-     */
-    check: string;
-    /**
-     * City name the check evaluated, when scoped to a city.
-     */
-    city?: string;
-    /**
-     * Human-readable description of the red condition.
-     */
-    detail: string;
-    /**
-     * Optional subject identifier (scope, path) the alert concerns.
-     */
-    subject?: string;
-};
-
 export type ErrorDetail = {
     /**
      * Where the error occurred, e.g. 'body.items[3].tags' or 'path.thing-id'
@@ -909,7 +882,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadClaimRejectedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | BreakerStateChangedPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControllerTickCompletedPayload | DoctorAlertPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderGateTimeoutFailOpenPayload | OutboundChannelMismatchPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | ProxyReapedPayload | QuotaObservedPayload | QuotaPollFailedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StoreDegradedPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | StoreProbeFailedPayload | StoreRecoveredPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -977,6 +950,19 @@ export type EventStreamEnvelope = {
     ts: string;
     type: string;
     workflow?: WorkflowEventProjection;
+};
+
+export type ExecutionClaimWindowExpiredPayload = {
+    bead_id: string;
+    invocation_age_ms: number;
+    parent_alive: boolean;
+};
+
+export type ExecutionStepStalledPayload = {
+    attempts: number;
+    bead_id: string;
+    root_bead_id?: string;
+    session_id: string;
 };
 
 export type ExtMsgAdapterRegisterInputBody = {
@@ -2050,12 +2036,6 @@ export type OrderCheckResponse = {
     scoped_name: string;
 };
 
-export type OrderGateTimeoutFailOpenPayload = {
-    elapsed_s: number;
-    order: string;
-    scope?: string;
-};
-
 export type OrderHistoryDetailResponse = {
     bead_id: string;
     created_at: string;
@@ -2146,6 +2126,13 @@ export type OrderRunOutputBody = {
      * Tracking bead id for the dispatch.
      */
     tracking_id?: string;
+};
+
+export type OrderSuppressedPayload = {
+    consecutive: number;
+    first_suppressed: string;
+    order_name: string;
+    suppressed_for_ms: number;
 };
 
 export type OrdersFeedBody = {
@@ -2298,15 +2285,6 @@ export type PoolOverride = {
     Min: number | null;
     OnBoot: string | null;
     OnDeath: string | null;
-};
-
-export type PostgresCredentialResolvedPayload = {
-    host: string;
-    port: string;
-    scope_kind: string;
-    scope_name: string;
-    source: string;
-    user: string;
 };
 
 export type ProjectIdentityStampedPayload = {
@@ -2592,25 +2570,6 @@ export type ProviderUpdateInputBody = {
     ready_delay_ms?: number;
 };
 
-export type ProxyReapedPayload = {
-    /**
-     * Number of db-proxy-child PIDs signaled.
-     */
-    pids_signaled: number;
-    /**
-     * Directory holding the pre-reap forensic artifacts.
-     */
-    quarantine_dir: string;
-    /**
-     * True when a second poison inside the window suppressed the reap (forensics kept, alert-only).
-     */
-    rate_limited?: boolean;
-    /**
-     * Canonical scope root path whose db-proxy child was reaped.
-     */
-    scope: string;
-};
-
 export type PublishReceipt = {
     Conversation: ConversationRef;
     Delivered: boolean;
@@ -2620,21 +2579,6 @@ export type PublishReceipt = {
         [key: string]: string;
     };
     RetryAfter: number;
-};
-
-export type QuotaObservedPayload = {
-    five_hour_resets_at?: string;
-    five_hour_util: number;
-    opus_util?: number;
-    provider: string;
-    seven_day_resets_at?: string;
-    seven_day_util: number;
-    sonnet_util?: number;
-};
-
-export type QuotaPollFailedPayload = {
-    provider: string;
-    reason_class: string;
 };
 
 export type ReadinessItem = {
@@ -3181,6 +3125,15 @@ export type SessionCreateSucceededPayload = {
      * Full session state as returned by GET /session/{id}. For session.create, this result is emitted only after the session has left creating and can accept normal metadata and lifecycle commands.
      */
     session: SessionResponse;
+};
+
+export type SessionDemandClaimDivergencePayload = {
+    classification: string;
+    drain_reason: string;
+    session_id: string;
+    template: string;
+    trigger_bead_id?: string;
+    trigger_status_at_drain?: string;
 };
 
 export type SessionDrainAckedWithAssignedWorkPayload = {
@@ -4984,23 +4937,11 @@ export type StatusWorkCounts = {
     ready: number;
 };
 
-export type StoreDegradedPayload = {
-    /**
-     * Degradation class: transport, backend, or write-rejection.
-     */
-    class: string;
-    /**
-     * Consecutive failed probe cycles at the trip.
-     */
-    consecutive_fails?: number;
-    /**
-     * Human-readable cause from the failing probe.
-     */
-    reason?: string;
-    /**
-     * Canonical scope root path whose store degraded.
-     */
-    scope: string;
+export type StorageBindingOutcomePayload = {
+    binding: string;
+    database: string;
+    invariant: string;
+    outcome: string;
 };
 
 export type StoreDiskCriticalPayload = {
@@ -5028,32 +4969,6 @@ export type StoreMaintenanceFailedPayload = {
     error_msg: string;
     snapshot_path?: string;
     stage: string;
-};
-
-export type StoreProbeFailedPayload = {
-    /**
-     * Which probe failed: routed (probe A) or backend (probe B).
-     */
-    probe: string;
-    /**
-     * Human-readable cause from the failing probe.
-     */
-    reason?: string;
-    /**
-     * Canonical scope root path of the failing probe.
-     */
-    scope: string;
-};
-
-export type StoreRecoveredPayload = {
-    /**
-     * Degradation class that recovered, if known.
-     */
-    class?: string;
-    /**
-     * Canonical scope root path whose store recovered.
-     */
-    scope: string;
 };
 
 export type SubmissionCapabilities = {
@@ -5260,8 +5175,12 @@ export type TranscriptProvenance = 'live' | 'hydrated';
  * Discriminated union of city event stream envelopes. Each variant constrains the envelope type and payload schema together.
  */
 export type TypedEventStreamEnvelope = ({
+    type: 'backend.credential_resolved';
+} & TypedEventStreamEnvelopeBackendCredentialResolved) | ({
     type: 'bead.claim_rejected';
 } & TypedEventStreamEnvelopeBeadClaimRejected) | ({
+    type: 'bead.claim_released';
+} & TypedEventStreamEnvelopeBeadClaimReleased) | ({
     type: 'bead.closed';
 } & TypedEventStreamEnvelopeBeadClosed) | ({
     type: 'bead.created';
@@ -5278,8 +5197,6 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeBeadWorktreeReaped) | ({
     type: 'beads.conditional_writes.degraded';
 } & TypedEventStreamEnvelopeBeadsConditionalWritesDegraded) | ({
-    type: 'breaker.state_changed';
-} & TypedEventStreamEnvelopeBreakerStateChanged) | ({
     type: 'city.created';
 } & TypedEventStreamEnvelopeCityCreated) | ({
     type: 'city.resumed';
@@ -5288,28 +5205,32 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeCitySuspended) | ({
     type: 'city.unregister_requested';
 } & TypedEventStreamEnvelopeCityUnregisterRequested) | ({
+    type: 'control.stalled';
+} & TypedEventStreamEnvelopeControlStalled) | ({
     type: 'controller.started';
 } & TypedEventStreamEnvelopeControllerStarted) | ({
     type: 'controller.stopped';
 } & TypedEventStreamEnvelopeControllerStopped) | ({
-    type: 'controller.tick_completed';
-} & TypedEventStreamEnvelopeControllerTickCompleted) | ({
     type: 'convoy.closed';
 } & TypedEventStreamEnvelopeConvoyClosed) | ({
     type: 'convoy.created';
 } & TypedEventStreamEnvelopeConvoyCreated) | ({
-    type: 'doctor.alert';
-} & TypedEventStreamEnvelopeDoctorAlert) | ({
     type: 'emergency.acked';
 } & TypedEventStreamEnvelopeEmergencyAcked) | ({
     type: 'emergency.signaled';
 } & TypedEventStreamEnvelopeEmergencySignaled) | ({
     type: 'events.rotated';
 } & TypedEventStreamEnvelopeEventsRotated) | ({
+    type: 'execution.claim_window_expired';
+} & TypedEventStreamEnvelopeExecutionClaimWindowExpired) | ({
+    type: 'execution.run_anchored';
+} & TypedEventStreamEnvelopeExecutionRunAnchored) | ({
     type: 'execution.step_completed';
 } & TypedEventStreamEnvelopeExecutionStepCompleted) | ({
     type: 'execution.step_defined';
 } & TypedEventStreamEnvelopeExecutionStepDefined) | ({
+    type: 'execution.step_stalled';
+} & TypedEventStreamEnvelopeExecutionStepStalled) | ({
     type: 'execution.step_started';
 } & TypedEventStreamEnvelopeExecutionStepStarted) | ({
     type: 'execution.work_associated';
@@ -5360,20 +5281,12 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeOrderFailed) | ({
     type: 'order.fired';
 } & TypedEventStreamEnvelopeOrderFired) | ({
-    type: 'order.gate_timeout_fail_open';
-} & TypedEventStreamEnvelopeOrderGateTimeoutFailOpen) | ({
-    type: 'pg.credential_resolved';
-} & TypedEventStreamEnvelopePgCredentialResolved) | ({
+    type: 'order.suppressed';
+} & TypedEventStreamEnvelopeOrderSuppressed) | ({
     type: 'project.identity.stamped';
 } & TypedEventStreamEnvelopeProjectIdentityStamped) | ({
-    type: 'provider.quota_observed';
-} & TypedEventStreamEnvelopeProviderQuotaObserved) | ({
-    type: 'provider.quota_poll_failed';
-} & TypedEventStreamEnvelopeProviderQuotaPollFailed) | ({
     type: 'provider.swapped';
 } & TypedEventStreamEnvelopeProviderSwapped) | ({
-    type: 'proxy.reaped';
-} & TypedEventStreamEnvelopeProxyReaped) | ({
     type: 'request.failed';
 } & TypedEventStreamEnvelopeRequestFailed) | ({
     type: 'request.result.city.create';
@@ -5394,6 +5307,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionColdStartTimeout) | ({
     type: 'session.crashed';
 } & TypedEventStreamEnvelopeSessionCrashed) | ({
+    type: 'session.demand_claim_divergence';
+} & TypedEventStreamEnvelopeSessionDemandClaimDivergence) | ({
     type: 'session.drain_acked_with_assigned_work';
 } & TypedEventStreamEnvelopeSessionDrainAckedWithAssignedWork) | ({
     type: 'session.draining';
@@ -5422,12 +5337,14 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionWoke) | ({
     type: 'session.work_query_failed';
 } & TypedEventStreamEnvelopeSessionWorkQueryFailed) | ({
-    type: 'store.degraded';
-} & TypedEventStreamEnvelopeStoreDegraded) | ({
-    type: 'store.probe_failed';
-} & TypedEventStreamEnvelopeStoreProbeFailed) | ({
-    type: 'store.recovered';
-} & TypedEventStreamEnvelopeStoreRecovered) | ({
+    type: 'storage.binding.converged';
+} & TypedEventStreamEnvelopeStorageBindingConverged) | ({
+    type: 'storage.binding.genesis';
+} & TypedEventStreamEnvelopeStorageBindingGenesis) | ({
+    type: 'storage.binding.uncheckable';
+} & TypedEventStreamEnvelopeStorageBindingUncheckable) | ({
+    type: 'storage.binding.unconverged';
+} & TypedEventStreamEnvelopeStorageBindingUnconverged) | ({
     type: 'supervisor.fs_pressure.skipped_tick';
 } & TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick) | ({
     type: 'supervisor.request';
@@ -5446,6 +5363,24 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeCustom);
 
 /**
+ * TypedEventStreamEnvelope backend.credential_resolved
+ */
+export type TypedEventStreamEnvelopeBackendCredentialResolved = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: BackendCredentialResolvedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'backend.credential_resolved';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope bead.claim_rejected
  */
 export type TypedEventStreamEnvelopeBeadClaimRejected = {
@@ -5460,6 +5395,24 @@ export type TypedEventStreamEnvelopeBeadClaimRejected = {
     subject?: string;
     ts: string;
     type: 'bead.claim_rejected';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope bead.claim_released
+ */
+export type TypedEventStreamEnvelopeBeadClaimReleased = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: BeadClaimReleasedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'bead.claim_released';
     workflow?: WorkflowEventProjection;
 };
 
@@ -5608,24 +5561,6 @@ export type TypedEventStreamEnvelopeBeadsConditionalWritesDegraded = {
 };
 
 /**
- * TypedEventStreamEnvelope breaker.state_changed
- */
-export type TypedEventStreamEnvelopeBreakerStateChanged = {
-    actor: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: BreakerStateChangedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'breaker.state_changed';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
  * TypedEventStreamEnvelope city.created
  */
 export type TypedEventStreamEnvelopeCityCreated = {
@@ -5698,6 +5633,24 @@ export type TypedEventStreamEnvelopeCityUnregisterRequested = {
 };
 
 /**
+ * TypedEventStreamEnvelope control.stalled
+ */
+export type TypedEventStreamEnvelopeControlStalled = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: ControlStalledPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'control.stalled';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope controller.started
  */
 export type TypedEventStreamEnvelopeControllerStarted = {
@@ -5730,24 +5683,6 @@ export type TypedEventStreamEnvelopeControllerStopped = {
     subject?: string;
     ts: string;
     type: 'controller.stopped';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope controller.tick_completed
- */
-export type TypedEventStreamEnvelopeControllerTickCompleted = {
-    actor: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: ControllerTickCompletedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'controller.tick_completed';
     workflow?: WorkflowEventProjection;
 };
 
@@ -5806,24 +5741,6 @@ export type TypedEventStreamEnvelopeCustom = {
 };
 
 /**
- * TypedEventStreamEnvelope doctor.alert
- */
-export type TypedEventStreamEnvelopeDoctorAlert = {
-    actor: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: DoctorAlertPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'doctor.alert';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
  * TypedEventStreamEnvelope emergency.acked
  */
 export type TypedEventStreamEnvelopeEmergencyAcked = {
@@ -5878,6 +5795,42 @@ export type TypedEventStreamEnvelopeEventsRotated = {
 };
 
 /**
+ * TypedEventStreamEnvelope execution.claim_window_expired
+ */
+export type TypedEventStreamEnvelopeExecutionClaimWindowExpired = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: ExecutionClaimWindowExpiredPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'execution.claim_window_expired';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope execution.run_anchored
+ */
+export type TypedEventStreamEnvelopeExecutionRunAnchored = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: NoPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'execution.run_anchored';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope execution.step_completed
  */
 export type TypedEventStreamEnvelopeExecutionStepCompleted = {
@@ -5910,6 +5863,24 @@ export type TypedEventStreamEnvelopeExecutionStepDefined = {
     subject?: string;
     ts: string;
     type: 'execution.step_defined';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope execution.step_stalled
+ */
+export type TypedEventStreamEnvelopeExecutionStepStalled = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: ExecutionStepStalledPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'execution.step_stalled';
     workflow?: WorkflowEventProjection;
 };
 
@@ -6364,38 +6335,20 @@ export type TypedEventStreamEnvelopeOrderFired = {
 };
 
 /**
- * TypedEventStreamEnvelope order.gate_timeout_fail_open
+ * TypedEventStreamEnvelope order.suppressed
  */
-export type TypedEventStreamEnvelopeOrderGateTimeoutFailOpen = {
+export type TypedEventStreamEnvelopeOrderSuppressed = {
     actor: string;
     depends_on_step_ids?: Array<string>;
     message?: string;
-    payload: OrderGateTimeoutFailOpenPayload;
+    payload: OrderSuppressedPayload;
     run_id?: string;
     seq: number;
     session_id?: string;
     step_id?: string;
     subject?: string;
     ts: string;
-    type: 'order.gate_timeout_fail_open';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope pg.credential_resolved
- */
-export type TypedEventStreamEnvelopePgCredentialResolved = {
-    actor: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: PostgresCredentialResolvedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'pg.credential_resolved';
+    type: 'order.suppressed';
     workflow?: WorkflowEventProjection;
 };
 
@@ -6418,42 +6371,6 @@ export type TypedEventStreamEnvelopeProjectIdentityStamped = {
 };
 
 /**
- * TypedEventStreamEnvelope provider.quota_observed
- */
-export type TypedEventStreamEnvelopeProviderQuotaObserved = {
-    actor: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: QuotaObservedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'provider.quota_observed';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope provider.quota_poll_failed
- */
-export type TypedEventStreamEnvelopeProviderQuotaPollFailed = {
-    actor: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: QuotaPollFailedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'provider.quota_poll_failed';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
  * TypedEventStreamEnvelope provider.swapped
  */
 export type TypedEventStreamEnvelopeProviderSwapped = {
@@ -6468,24 +6385,6 @@ export type TypedEventStreamEnvelopeProviderSwapped = {
     subject?: string;
     ts: string;
     type: 'provider.swapped';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedEventStreamEnvelope proxy.reaped
- */
-export type TypedEventStreamEnvelopeProxyReaped = {
-    actor: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: ProxyReapedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'proxy.reaped';
     workflow?: WorkflowEventProjection;
 };
 
@@ -6666,6 +6565,24 @@ export type TypedEventStreamEnvelopeSessionCrashed = {
     subject?: string;
     ts: string;
     type: 'session.crashed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope session.demand_claim_divergence
+ */
+export type TypedEventStreamEnvelopeSessionDemandClaimDivergence = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionDemandClaimDivergencePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.demand_claim_divergence';
     workflow?: WorkflowEventProjection;
 };
 
@@ -6922,56 +6839,74 @@ export type TypedEventStreamEnvelopeSessionWorkQueryFailed = {
 };
 
 /**
- * TypedEventStreamEnvelope store.degraded
+ * TypedEventStreamEnvelope storage.binding.converged
  */
-export type TypedEventStreamEnvelopeStoreDegraded = {
+export type TypedEventStreamEnvelopeStorageBindingConverged = {
     actor: string;
     depends_on_step_ids?: Array<string>;
     message?: string;
-    payload: StoreDegradedPayload;
+    payload: StorageBindingOutcomePayload;
     run_id?: string;
     seq: number;
     session_id?: string;
     step_id?: string;
     subject?: string;
     ts: string;
-    type: 'store.degraded';
+    type: 'storage.binding.converged';
     workflow?: WorkflowEventProjection;
 };
 
 /**
- * TypedEventStreamEnvelope store.probe_failed
+ * TypedEventStreamEnvelope storage.binding.genesis
  */
-export type TypedEventStreamEnvelopeStoreProbeFailed = {
+export type TypedEventStreamEnvelopeStorageBindingGenesis = {
     actor: string;
     depends_on_step_ids?: Array<string>;
     message?: string;
-    payload: StoreProbeFailedPayload;
+    payload: StorageBindingOutcomePayload;
     run_id?: string;
     seq: number;
     session_id?: string;
     step_id?: string;
     subject?: string;
     ts: string;
-    type: 'store.probe_failed';
+    type: 'storage.binding.genesis';
     workflow?: WorkflowEventProjection;
 };
 
 /**
- * TypedEventStreamEnvelope store.recovered
+ * TypedEventStreamEnvelope storage.binding.uncheckable
  */
-export type TypedEventStreamEnvelopeStoreRecovered = {
+export type TypedEventStreamEnvelopeStorageBindingUncheckable = {
     actor: string;
     depends_on_step_ids?: Array<string>;
     message?: string;
-    payload: StoreRecoveredPayload;
+    payload: StorageBindingOutcomePayload;
     run_id?: string;
     seq: number;
     session_id?: string;
     step_id?: string;
     subject?: string;
     ts: string;
-    type: 'store.recovered';
+    type: 'storage.binding.uncheckable';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope storage.binding.unconverged
+ */
+export type TypedEventStreamEnvelopeStorageBindingUnconverged = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: StorageBindingOutcomePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'storage.binding.unconverged';
     workflow?: WorkflowEventProjection;
 };
 
@@ -7107,8 +7042,12 @@ export type TypedEventStreamEnvelopeWorkerOperation = {
  * Discriminated union of supervisor event stream envelopes. Each variant constrains the envelope type and payload schema together and includes the source city.
  */
 export type TypedTaggedEventStreamEnvelope = ({
+    type: 'backend.credential_resolved';
+} & TypedTaggedEventStreamEnvelopeBackendCredentialResolved) | ({
     type: 'bead.claim_rejected';
 } & TypedTaggedEventStreamEnvelopeBeadClaimRejected) | ({
+    type: 'bead.claim_released';
+} & TypedTaggedEventStreamEnvelopeBeadClaimReleased) | ({
     type: 'bead.closed';
 } & TypedTaggedEventStreamEnvelopeBeadClosed) | ({
     type: 'bead.created';
@@ -7125,8 +7064,6 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeBeadWorktreeReaped) | ({
     type: 'beads.conditional_writes.degraded';
 } & TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded) | ({
-    type: 'breaker.state_changed';
-} & TypedTaggedEventStreamEnvelopeBreakerStateChanged) | ({
     type: 'city.created';
 } & TypedTaggedEventStreamEnvelopeCityCreated) | ({
     type: 'city.resumed';
@@ -7135,28 +7072,32 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeCitySuspended) | ({
     type: 'city.unregister_requested';
 } & TypedTaggedEventStreamEnvelopeCityUnregisterRequested) | ({
+    type: 'control.stalled';
+} & TypedTaggedEventStreamEnvelopeControlStalled) | ({
     type: 'controller.started';
 } & TypedTaggedEventStreamEnvelopeControllerStarted) | ({
     type: 'controller.stopped';
 } & TypedTaggedEventStreamEnvelopeControllerStopped) | ({
-    type: 'controller.tick_completed';
-} & TypedTaggedEventStreamEnvelopeControllerTickCompleted) | ({
     type: 'convoy.closed';
 } & TypedTaggedEventStreamEnvelopeConvoyClosed) | ({
     type: 'convoy.created';
 } & TypedTaggedEventStreamEnvelopeConvoyCreated) | ({
-    type: 'doctor.alert';
-} & TypedTaggedEventStreamEnvelopeDoctorAlert) | ({
     type: 'emergency.acked';
 } & TypedTaggedEventStreamEnvelopeEmergencyAcked) | ({
     type: 'emergency.signaled';
 } & TypedTaggedEventStreamEnvelopeEmergencySignaled) | ({
     type: 'events.rotated';
 } & TypedTaggedEventStreamEnvelopeEventsRotated) | ({
+    type: 'execution.claim_window_expired';
+} & TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired) | ({
+    type: 'execution.run_anchored';
+} & TypedTaggedEventStreamEnvelopeExecutionRunAnchored) | ({
     type: 'execution.step_completed';
 } & TypedTaggedEventStreamEnvelopeExecutionStepCompleted) | ({
     type: 'execution.step_defined';
 } & TypedTaggedEventStreamEnvelopeExecutionStepDefined) | ({
+    type: 'execution.step_stalled';
+} & TypedTaggedEventStreamEnvelopeExecutionStepStalled) | ({
     type: 'execution.step_started';
 } & TypedTaggedEventStreamEnvelopeExecutionStepStarted) | ({
     type: 'execution.work_associated';
@@ -7207,20 +7148,12 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeOrderFailed) | ({
     type: 'order.fired';
 } & TypedTaggedEventStreamEnvelopeOrderFired) | ({
-    type: 'order.gate_timeout_fail_open';
-} & TypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen) | ({
-    type: 'pg.credential_resolved';
-} & TypedTaggedEventStreamEnvelopePgCredentialResolved) | ({
+    type: 'order.suppressed';
+} & TypedTaggedEventStreamEnvelopeOrderSuppressed) | ({
     type: 'project.identity.stamped';
 } & TypedTaggedEventStreamEnvelopeProjectIdentityStamped) | ({
-    type: 'provider.quota_observed';
-} & TypedTaggedEventStreamEnvelopeProviderQuotaObserved) | ({
-    type: 'provider.quota_poll_failed';
-} & TypedTaggedEventStreamEnvelopeProviderQuotaPollFailed) | ({
     type: 'provider.swapped';
 } & TypedTaggedEventStreamEnvelopeProviderSwapped) | ({
-    type: 'proxy.reaped';
-} & TypedTaggedEventStreamEnvelopeProxyReaped) | ({
     type: 'request.failed';
 } & TypedTaggedEventStreamEnvelopeRequestFailed) | ({
     type: 'request.result.city.create';
@@ -7241,6 +7174,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionColdStartTimeout) | ({
     type: 'session.crashed';
 } & TypedTaggedEventStreamEnvelopeSessionCrashed) | ({
+    type: 'session.demand_claim_divergence';
+} & TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence) | ({
     type: 'session.drain_acked_with_assigned_work';
 } & TypedTaggedEventStreamEnvelopeSessionDrainAckedWithAssignedWork) | ({
     type: 'session.draining';
@@ -7269,12 +7204,14 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionWoke) | ({
     type: 'session.work_query_failed';
 } & TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed) | ({
-    type: 'store.degraded';
-} & TypedTaggedEventStreamEnvelopeStoreDegraded) | ({
-    type: 'store.probe_failed';
-} & TypedTaggedEventStreamEnvelopeStoreProbeFailed) | ({
-    type: 'store.recovered';
-} & TypedTaggedEventStreamEnvelopeStoreRecovered) | ({
+    type: 'storage.binding.converged';
+} & TypedTaggedEventStreamEnvelopeStorageBindingConverged) | ({
+    type: 'storage.binding.genesis';
+} & TypedTaggedEventStreamEnvelopeStorageBindingGenesis) | ({
+    type: 'storage.binding.uncheckable';
+} & TypedTaggedEventStreamEnvelopeStorageBindingUncheckable) | ({
+    type: 'storage.binding.unconverged';
+} & TypedTaggedEventStreamEnvelopeStorageBindingUnconverged) | ({
     type: 'supervisor.fs_pressure.skipped_tick';
 } & TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick) | ({
     type: 'supervisor.request';
@@ -7293,6 +7230,25 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeCustom);
 
 /**
+ * TypedTaggedEventStreamEnvelope backend.credential_resolved
+ */
+export type TypedTaggedEventStreamEnvelopeBackendCredentialResolved = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: BackendCredentialResolvedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'backend.credential_resolved';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope bead.claim_rejected
  */
 export type TypedTaggedEventStreamEnvelopeBeadClaimRejected = {
@@ -7308,6 +7264,25 @@ export type TypedTaggedEventStreamEnvelopeBeadClaimRejected = {
     subject?: string;
     ts: string;
     type: 'bead.claim_rejected';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope bead.claim_released
+ */
+export type TypedTaggedEventStreamEnvelopeBeadClaimReleased = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: BeadClaimReleasedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'bead.claim_released';
     workflow?: WorkflowEventProjection;
 };
 
@@ -7464,25 +7439,6 @@ export type TypedTaggedEventStreamEnvelopeBeadsConditionalWritesDegraded = {
 };
 
 /**
- * TypedTaggedEventStreamEnvelope breaker.state_changed
- */
-export type TypedTaggedEventStreamEnvelopeBreakerStateChanged = {
-    actor: string;
-    city: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: BreakerStateChangedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'breaker.state_changed';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
  * TypedTaggedEventStreamEnvelope city.created
  */
 export type TypedTaggedEventStreamEnvelopeCityCreated = {
@@ -7559,6 +7515,25 @@ export type TypedTaggedEventStreamEnvelopeCityUnregisterRequested = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope control.stalled
+ */
+export type TypedTaggedEventStreamEnvelopeControlStalled = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: ControlStalledPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'control.stalled';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope controller.started
  */
 export type TypedTaggedEventStreamEnvelopeControllerStarted = {
@@ -7593,25 +7568,6 @@ export type TypedTaggedEventStreamEnvelopeControllerStopped = {
     subject?: string;
     ts: string;
     type: 'controller.stopped';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope controller.tick_completed
- */
-export type TypedTaggedEventStreamEnvelopeControllerTickCompleted = {
-    actor: string;
-    city: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: ControllerTickCompletedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'controller.tick_completed';
     workflow?: WorkflowEventProjection;
 };
 
@@ -7673,25 +7629,6 @@ export type TypedTaggedEventStreamEnvelopeCustom = {
 };
 
 /**
- * TypedTaggedEventStreamEnvelope doctor.alert
- */
-export type TypedTaggedEventStreamEnvelopeDoctorAlert = {
-    actor: string;
-    city: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: DoctorAlertPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'doctor.alert';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
  * TypedTaggedEventStreamEnvelope emergency.acked
  */
 export type TypedTaggedEventStreamEnvelopeEmergencyAcked = {
@@ -7749,6 +7686,44 @@ export type TypedTaggedEventStreamEnvelopeEventsRotated = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope execution.claim_window_expired
+ */
+export type TypedTaggedEventStreamEnvelopeExecutionClaimWindowExpired = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: ExecutionClaimWindowExpiredPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'execution.claim_window_expired';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope execution.run_anchored
+ */
+export type TypedTaggedEventStreamEnvelopeExecutionRunAnchored = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: NoPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'execution.run_anchored';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope execution.step_completed
  */
 export type TypedTaggedEventStreamEnvelopeExecutionStepCompleted = {
@@ -7783,6 +7758,25 @@ export type TypedTaggedEventStreamEnvelopeExecutionStepDefined = {
     subject?: string;
     ts: string;
     type: 'execution.step_defined';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope execution.step_stalled
+ */
+export type TypedTaggedEventStreamEnvelopeExecutionStepStalled = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: ExecutionStepStalledPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'execution.step_stalled';
     workflow?: WorkflowEventProjection;
 };
 
@@ -8262,40 +8256,21 @@ export type TypedTaggedEventStreamEnvelopeOrderFired = {
 };
 
 /**
- * TypedTaggedEventStreamEnvelope order.gate_timeout_fail_open
+ * TypedTaggedEventStreamEnvelope order.suppressed
  */
-export type TypedTaggedEventStreamEnvelopeOrderGateTimeoutFailOpen = {
+export type TypedTaggedEventStreamEnvelopeOrderSuppressed = {
     actor: string;
     city: string;
     depends_on_step_ids?: Array<string>;
     message?: string;
-    payload: OrderGateTimeoutFailOpenPayload;
+    payload: OrderSuppressedPayload;
     run_id?: string;
     seq: number;
     session_id?: string;
     step_id?: string;
     subject?: string;
     ts: string;
-    type: 'order.gate_timeout_fail_open';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope pg.credential_resolved
- */
-export type TypedTaggedEventStreamEnvelopePgCredentialResolved = {
-    actor: string;
-    city: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: PostgresCredentialResolvedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'pg.credential_resolved';
+    type: 'order.suppressed';
     workflow?: WorkflowEventProjection;
 };
 
@@ -8319,44 +8294,6 @@ export type TypedTaggedEventStreamEnvelopeProjectIdentityStamped = {
 };
 
 /**
- * TypedTaggedEventStreamEnvelope provider.quota_observed
- */
-export type TypedTaggedEventStreamEnvelopeProviderQuotaObserved = {
-    actor: string;
-    city: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: QuotaObservedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'provider.quota_observed';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope provider.quota_poll_failed
- */
-export type TypedTaggedEventStreamEnvelopeProviderQuotaPollFailed = {
-    actor: string;
-    city: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: QuotaPollFailedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'provider.quota_poll_failed';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
  * TypedTaggedEventStreamEnvelope provider.swapped
  */
 export type TypedTaggedEventStreamEnvelopeProviderSwapped = {
@@ -8372,25 +8309,6 @@ export type TypedTaggedEventStreamEnvelopeProviderSwapped = {
     subject?: string;
     ts: string;
     type: 'provider.swapped';
-    workflow?: WorkflowEventProjection;
-};
-
-/**
- * TypedTaggedEventStreamEnvelope proxy.reaped
- */
-export type TypedTaggedEventStreamEnvelopeProxyReaped = {
-    actor: string;
-    city: string;
-    depends_on_step_ids?: Array<string>;
-    message?: string;
-    payload: ProxyReapedPayload;
-    run_id?: string;
-    seq: number;
-    session_id?: string;
-    step_id?: string;
-    subject?: string;
-    ts: string;
-    type: 'proxy.reaped';
     workflow?: WorkflowEventProjection;
 };
 
@@ -8581,6 +8499,25 @@ export type TypedTaggedEventStreamEnvelopeSessionCrashed = {
     subject?: string;
     ts: string;
     type: 'session.crashed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope session.demand_claim_divergence
+ */
+export type TypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionDemandClaimDivergencePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'session.demand_claim_divergence';
     workflow?: WorkflowEventProjection;
 };
 
@@ -8851,59 +8788,78 @@ export type TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed = {
 };
 
 /**
- * TypedTaggedEventStreamEnvelope store.degraded
+ * TypedTaggedEventStreamEnvelope storage.binding.converged
  */
-export type TypedTaggedEventStreamEnvelopeStoreDegraded = {
+export type TypedTaggedEventStreamEnvelopeStorageBindingConverged = {
     actor: string;
     city: string;
     depends_on_step_ids?: Array<string>;
     message?: string;
-    payload: StoreDegradedPayload;
+    payload: StorageBindingOutcomePayload;
     run_id?: string;
     seq: number;
     session_id?: string;
     step_id?: string;
     subject?: string;
     ts: string;
-    type: 'store.degraded';
+    type: 'storage.binding.converged';
     workflow?: WorkflowEventProjection;
 };
 
 /**
- * TypedTaggedEventStreamEnvelope store.probe_failed
+ * TypedTaggedEventStreamEnvelope storage.binding.genesis
  */
-export type TypedTaggedEventStreamEnvelopeStoreProbeFailed = {
+export type TypedTaggedEventStreamEnvelopeStorageBindingGenesis = {
     actor: string;
     city: string;
     depends_on_step_ids?: Array<string>;
     message?: string;
-    payload: StoreProbeFailedPayload;
+    payload: StorageBindingOutcomePayload;
     run_id?: string;
     seq: number;
     session_id?: string;
     step_id?: string;
     subject?: string;
     ts: string;
-    type: 'store.probe_failed';
+    type: 'storage.binding.genesis';
     workflow?: WorkflowEventProjection;
 };
 
 /**
- * TypedTaggedEventStreamEnvelope store.recovered
+ * TypedTaggedEventStreamEnvelope storage.binding.uncheckable
  */
-export type TypedTaggedEventStreamEnvelopeStoreRecovered = {
+export type TypedTaggedEventStreamEnvelopeStorageBindingUncheckable = {
     actor: string;
     city: string;
     depends_on_step_ids?: Array<string>;
     message?: string;
-    payload: StoreRecoveredPayload;
+    payload: StorageBindingOutcomePayload;
     run_id?: string;
     seq: number;
     session_id?: string;
     step_id?: string;
     subject?: string;
     ts: string;
-    type: 'store.recovered';
+    type: 'storage.binding.uncheckable';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope storage.binding.unconverged
+ */
+export type TypedTaggedEventStreamEnvelopeStorageBindingUnconverged = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: StorageBindingOutcomePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'storage.binding.unconverged';
     workflow?: WorkflowEventProjection;
 };
 

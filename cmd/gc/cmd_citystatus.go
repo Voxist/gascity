@@ -86,8 +86,16 @@ type StatusRigJSON struct {
 
 // StatusSummaryJSON is the agent count summary in JSON output.
 type StatusSummaryJSON struct {
-	TotalAgents       int          `json:"total_agents"`
-	RunningAgents     int          `json:"running_agents"`
+	TotalAgents   int `json:"total_agents"`
+	RunningAgents int `json:"running_agents"`
+	// UnknownAgents is how many of TotalAgents the runtime probe never
+	// answered for. It is zero unless the status is partial. RunningAgents
+	// stays a count of agents observed running, so during partial status
+	// TotalAgents-RunningAgents is not a count of stopped agents and
+	// UnknownAgents is the part of that difference nothing was learned
+	// about. Without it a consumer reads running_agents=0 out of a probe
+	// that reached nobody and cannot tell it from a genuinely idle city.
+	UnknownAgents     int          `json:"unknown_agents,omitempty"`
 	ActiveSessions    int          `json:"active_sessions,omitempty"`
 	SuspendedSessions int          `json:"suspended_sessions,omitempty"`
 	StoreHealth       *StoreHealth `json:"store_health,omitempty"`
@@ -208,23 +216,17 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 // or (nil, reason) when the caller should fall back. Indirected through a
 // var so tests inject a client pointed at httptest.Server or force a
 // specific fallback reason without spinning up a real controller.
-var cityStatusAPIClient = func(cityPath string) (*api.Client, string) {
-	if c := apiClient(cityPath); c != nil {
-		return c, ""
-	}
-	// Supervisor-managed cities expose no standalone [api] port, so apiClient
-	// returns nil and status reads would fall back to a slow local tmux probe
-	// (route=fallback reason=controller-down) even though the supervisor hosts a
-	// warm StatusView on its own port. Route status reads to the supervisor
-	// client when it is alive — same precedent as gc service (cmd_service.go) and
-	// the maintenance commands (ga-tp7). routeCityStatus still falls back to the
-	// local probe on any API read error via api.ShouldFallbackForRead, so this
-	// only ever ADDS the warm-state path; it never removes the probe safety net.
-	if c := supervisorCityAPIClient(cityPath); c != nil {
-		return c, ""
-	}
-	return nil, apiClientFallbackReason(cityPath)
-}
+//
+// Uses the shared supervisorFallthroughAPIClient helper (gascity ga-tp7,
+// ra-r9hm6v) rather than plain apiClient: a supervisor-managed city with no
+// standalone [api] port in city.toml — the common case — otherwise falls
+// straight to nil here even though the supervisor is reachable, and
+// `gc status`'s local fallback re-opens the full local bead/dolt store and
+// rescans event archives to rebuild store health, which measured ~9.5s of
+// CPU on a 26-agent/1.2GB city versus ~0.35s for the supervisor's cached
+// response. Status has a local fallback (unlike maintenance), so this
+// change only affects the ROUTE picked, not the correctness of either path.
+var cityStatusAPIClient = supervisorFallthroughAPIClient
 
 // routeCityStatus dispatches `gc status` to the supervisor API when a
 // controller is up; otherwise falls back to the local snapshot builder.
@@ -389,14 +391,8 @@ func observeSessionTargetWithWarning(
 		err         error
 	}
 	done := make(chan observeResult, 1)
-	// Snapshot the package var into a local before spawning the worker so the
-	// goroutine reads a stable value. observeSessionTargetForStatus can be
-	// swapped by tests (and t.Cleanup restores it) concurrently with the
-	// observation goroutine, which the race detector flags as a read/write
-	// race on the package-level var.
-	observe := observeSessionTargetForStatus
 	go func() {
-		obs, err := observe(cityPath, nil, sp, cfg, target.runtimeSessionName)
+		obs, err := observeSessionTargetForStatus(cityPath, nil, sp, cfg, target.runtimeSessionName)
 		done <- observeResult{observation: obs, err: err}
 	}()
 
@@ -424,29 +420,9 @@ type statusObservationTarget struct {
 	suspended          bool
 }
 
-// statusSnapshotTimeout resolves the session-snapshot load bound from city
-// config ([daemon] status_snapshot_timeout), falling back to the package
-// default when no config is available.
-func statusSnapshotTimeout(cfg *config.City) time.Duration {
-	// Fall back to the package default when no explicit [daemon]
-	// status_snapshot_timeout is configured, so tests (which override the
-	// package var) and unset configs both resolve here rather than to
-	// StatusSnapshotTimeoutDuration's hardcoded default.
-	if cfg == nil || strings.TrimSpace(cfg.Daemon.StatusSnapshotTimeout) == "" {
-		return statusSessionSnapshotTimeout
-	}
-	return cfg.Daemon.StatusSnapshotTimeoutDuration()
-}
-
 func loadStatusSessionSnapshot(cityPath string, cfg *config.City, store beads.Store, stderr io.Writer) *sessionBeadSnapshot {
 	if store == nil {
 		return newSessionBeadSnapshotFromInfos(nil)
-	}
-	// A non-positive timeout (e.g. an unset/zeroed caller) falls back to the
-	// historical default so status never blocks the snapshot load indefinitely.
-	timeout := statusSnapshotTimeout(cfg)
-	if timeout <= 0 {
-		timeout = statusSessionSnapshotTimeout
 	}
 	// Callers pass the session coordination-class store (cliSessionStore) so a
 	// [beads.classes.sessions] relocation reaches this snapshot; the guard in
@@ -471,7 +447,7 @@ func loadStatusSessionSnapshot(cityPath string, cfg *config.City, store beads.St
 	// made class-preserving (clone what it unwrapped, or refuse to unwrap a
 	// relocated store so this keeps reading through the routed store) as part of
 	// the split, where a real infra store makes the fix testable.
-	reqCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	reqCtx, cancel := context.WithTimeout(context.Background(), statusSessionSnapshotTimeout)
 	defer cancel()
 	readStore := store
 	if scoped, err := scopedStoreLike(reqCtx, cityPath, cfg, store); err != nil {
@@ -505,11 +481,11 @@ func loadStatusSessionSnapshot(cityPath string, cfg *config.City, store beads.St
 			return newSessionBeadSnapshotFromInfos(nil)
 		}
 		return result.snapshot
-	case <-time.After(timeout):
+	case <-time.After(statusSessionSnapshotTimeout):
 		if stderr != nil {
-			fmt.Fprintf(stderr, "gc status: loading session snapshot timed out after %s; continuing with runtime-only status (raise [daemon] status_snapshot_timeout on large stores)\n", timeout) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc status: loading session snapshot timed out after %s; continuing with runtime-only status\n", statusSessionSnapshotTimeout) //nolint:errcheck // best-effort stderr
 		}
-		return newSessionBeadSnapshotWithError(fmt.Errorf("loading session snapshot timed out after %s", timeout))
+		return newSessionBeadSnapshotWithError(fmt.Errorf("loading session snapshot timed out after %s", statusSessionSnapshotTimeout))
 	}
 }
 

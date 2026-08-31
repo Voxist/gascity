@@ -86,30 +86,38 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 	comparedStore := map[string]bool{
 		"beads": true, "deps": true, "depsComplete": true, "dirty": true,
 		"beadSeq": true, "localBeadAt": true, "deletedSeq": true, "state": true,
-		"readyProjectionInvalid": true,
-		"lastFreshAt":            true, "mutationSeq": true, "primePartialErr": true,
+		"readyProjectionLost": true, // compared as mergeEndState.readyLost
+		"lastFreshAt":         true, "mutationSeq": true, "primePartialErr": true,
 		"syncFailures": true, "circuitTripped": true,
 		"stats": true, // stats compared field-wise below
 	}
 	excludedStore := map[string]bool{
-		"backing": true, "idPrefix": true, "mu": true, "reconciling": true,
+		// observationRevision is a process-local publication fence, orthogonal to
+		// the merge oracle's durable cache-state comparison.
+		"observationRevision": true,
+		"backing":             true, "idPrefix": true, "mu": true, "reconciling": true,
 		"onChange": true, "problemf": true, "problemLog": true,
 		"lastReconcileLogAt": true, "primeMu": true, "primeRunning": true,
 		"primeCycle": true, "lastFullPrimeStartedAt": true, "primeRetryDelay": true,
 		"lifecycleMu": true, "lifecycleWG": true, "cancelFn": true, "stopCh": true,
 		"stopped": true, "latencyWindow": true, "latencyDriverActive": true,
 		"applyEventBeforeCommitForTest": true,
-		// Fork resilience/read-path state, orthogonal to the reconcile bead-state
-		// end-state the oracle compares: availabilityGate (backing-transport
-		// gate), unavailableSkipLogged (reconcile-skip log dedupe), degradedReads
-		// (read-path counter of last-good-cache serves, not a reconcile delta).
-		//
-		// circuitTripped is deliberately NOT here: upstream #3379 made the
-		// one-shot breaker signal part of the compared reconcile end-state, and
-		// the merge left it in both sets. Upstream's classification wins — it is
-		// a reconcile delta, not read-path state.
-		"availabilityGate":      true,
-		"unavailableSkipLogged": true, "degradedReads": true,
+		// readyProjectionDegraded is a one-way capability latch about the
+		// BACKING STORE, set by applyReadyProjection before the seam runs and
+		// never touched by mergeSnapshotLocked. It routes readiness reads to the
+		// live backing (readyReadsMustGoLive); the merge end state does not
+		// depend on it. Its own behavior is pinned by
+		// TestDegradedProjectionSendsReadyToTheLiveBdVerdict.
+		"readyProjectionDegraded": true,
+		// The store-availability gate (fork). All three are about BACKING-STORE
+		// REACHABILITY, not durable cache content: availabilityGate is an
+		// injected collaborator, unavailableSkipLogged dedupes one problem entry
+		// per outage episode, and degradedReads is a monotonic counter of reads
+		// served from last-good. None is written by mergeSnapshotLocked and the
+		// merge end state does not depend on any of them; their behaviour is
+		// pinned by the caching_store_unavailable / reality_first suites.
+		"availabilityGate": true, "unavailableSkipLogged": true,
+		"degradedReads": true,
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CachingStore{}), comparedStore, excludedStore)
 
@@ -123,9 +131,8 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"SyncFailures": true, "ProblemCount": true, "LastProblemAt": true,
 		"LastProblem": true, "State": true, "StaggerOffsetMs": true,
 		"CurrentReconcileInterval": true, "LatencyP95Ms": true, "CadenceDriver": true,
-		// Fork read-path observability counter (last-good-cache serves during
-		// backing unavailability), not a reconcile delta — mirrors excluded
-		// SyncFailures/ReconcileRecoveries, not compared Adds/Removes/Updates.
+		// DegradedReads mirrors the gate counter above — an outage observable,
+		// not durable cache content the merge oracle compares.
 		"DegradedReads": true,
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CacheStats{}), comparedStats, excludedStats)

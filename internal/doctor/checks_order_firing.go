@@ -12,8 +12,10 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 const (
@@ -157,7 +159,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 		now = time.Now()
 	}
 	cronIntervals := map[string]time.Duration{}
-	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg)
+	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg, cityPath)
 
 	// Resolve expected intervals before touching the event log so the read
 	// below can be bounded by the check's own staleness horizon:
@@ -317,7 +319,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 }
 
 func scanOrderFiringCurrentOrders(cityPath string, cfg *config.City) ([]orders.Order, error) {
-	scanCfg := orderFiringCurrentScanConfig(cfg)
+	scanCfg := orderFiringCurrentScanConfig(cfg, cityPath)
 	scanCfg = orderFiringCurrentPruneSuspendedOnlyWildcardOverrides(cityPath, cfg, scanCfg)
 	allOrders, err := orderdiscovery.ScanAll(cityPath, scanCfg, orderFiringCurrentScanOptions(cityPath))
 	if err != nil {
@@ -340,11 +342,11 @@ func orderFiringCurrentScanOptions(cityPath string) orderdiscovery.ScanOptions {
 	}
 }
 
-func orderFiringCurrentScanConfig(cfg *config.City) *config.City {
+func orderFiringCurrentScanConfig(cfg *config.City, cityPath string) *config.City {
 	if cfg == nil {
 		return nil
 	}
-	suspended := orderFiringCurrentSuspendedRigs(cfg)
+	suspended := orderFiringCurrentSuspendedRigs(cfg, cityPath)
 	if len(suspended) == 0 {
 		return cfg
 	}
@@ -383,7 +385,7 @@ func orderFiringCurrentPruneSuspendedOnlyWildcardOverrides(cityPath string, orig
 	if originalCfg == nil || scanCfg == nil || len(scanCfg.Orders.Overrides) == 0 {
 		return scanCfg
 	}
-	suspended := orderFiringCurrentSuspendedRigs(originalCfg)
+	suspended := orderFiringCurrentSuspendedRigs(originalCfg, cityPath)
 	if len(suspended) == 0 {
 		return scanCfg
 	}
@@ -429,14 +431,22 @@ func orderFiringCurrentScanWithoutOverrides(cityPath string, cfg *config.City) (
 	return orderdiscovery.ScanAll(cityPath, &clone, orderFiringCurrentScanOptions(cityPath))
 }
 
-func orderFiringCurrentSuspendedRigs(cfg *config.City) map[string]bool {
+func orderFiringCurrentSuspendedRigs(cfg *config.City, cityPath string) map[string]bool {
 	out := make(map[string]bool)
 	if cfg == nil {
 		return out
 	}
+	var st suspensionstate.State
+	if cityPath != "" {
+		st, _ = suspensionstate.Load(fsys.OSFS{}, cityPath)
+	}
 	for _, rig := range cfg.Rigs {
-		if rig.Suspended && strings.TrimSpace(rig.Name) != "" {
-			out[rig.Name] = true
+		name := strings.TrimSpace(rig.Name)
+		if name == "" {
+			continue
+		}
+		if suspensionstate.EffectiveRigSuspended(st, name, rig.EffectiveSuspendedOnStart()) {
+			out[name] = true
 		}
 	}
 	return out

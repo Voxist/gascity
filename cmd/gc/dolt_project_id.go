@@ -16,6 +16,7 @@ import (
 
 	gcapi "github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/doltpool"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/spf13/cobra"
@@ -161,33 +162,6 @@ func ensureManagedDoltProjectIDWithRecorder(metadataPath, host, port, user, data
 	databaseProjectID, ok, err := readDatabaseProjectID(ctx, db)
 	if err != nil {
 		return managedDoltProjectIDReport{}, err
-	}
-
-	// L0 pre-heal: if city.toml [identity_map] has a canonical ID for this rig
-	// and the DB (L3) confirms it, but L1 is absent or was regenerated to the
-	// wrong value, repair L1+L2 from the canonical source before reconcile runs.
-	// This closes the recovery gap from the 2026-06-20 incident (vp-cz7o.21).
-	if cityPath != "" {
-		l0, l0ok, l0err := readCityIdentityMapEntry(cityPath, scopeRoot)
-		switch {
-		case l0err != nil:
-			// Non-fatal: emit an event so it's observable, then fall through.
-			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "l0_read_error", "L0", "", "")
-		case l0ok && ok && databaseProjectID == l0 && (!identityOK || identityProjectID != l0):
-			// DB confirms the canonical ID; L1 is absent or stale. Auto-repair.
-			if writeErr := contract.WriteProjectIdentity(fs, scopeRoot, l0); writeErr != nil {
-				return managedDoltProjectIDReport{}, fmt.Errorf("L0 pre-heal write identity: %w", writeErr)
-			}
-			if _, writeErr := writeManagedMetadataProjectID(metadataPath, l0); writeErr != nil {
-				return managedDoltProjectIDReport{}, fmt.Errorf("L0 pre-heal write metadata: %w", writeErr)
-			}
-			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "restored_from_canonical", "L0", identityProjectID, l0)
-			identityProjectID, identityOK = l0, true
-			metadataProjectID, metadataOK = l0, true
-		case l0ok && ok && databaseProjectID != l0:
-			// L3 disagrees with the canonical map — do not auto-repair; needs human triage.
-			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "canonical_l3_mismatch", "L0", l0, databaseProjectID)
-		}
 	}
 
 	decision := decideReconcile(identityProjectID, identityOK, metadataProjectID, metadataOK, databaseProjectID, ok)
@@ -521,11 +495,20 @@ func formatLegacyL2L3MismatchError(l2, l3 string) error {
 // NOT Close it. The previous per-call sql.Open+Close pattern here was the
 // 2,618-TIME_WAIT hotspot (city-scale plan item 1.2).
 func managedDoltOpenDatabase(host, port, user, database string) (*sql.DB, error) {
+	host = managedDoltConnectHost(host)
+	port = strings.TrimSpace(port)
+	if port == "" {
+		return nil, fmt.Errorf("missing port")
+	}
+	user = strings.TrimSpace(user)
+	if user == "" {
+		user = "root"
+	}
 	database = strings.TrimSpace(database)
 	if database == "" {
 		return nil, fmt.Errorf("missing database")
 	}
-	return openManagedDoltPooled(host, port, user, database)
+	return doltpool.Open(host, port, user, managedDoltPassword(), database)
 }
 
 func readManagedMetadataProjectID(metadataPath string) (string, error) {
