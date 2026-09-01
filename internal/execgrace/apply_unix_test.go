@@ -4,11 +4,14 @@ package execgrace
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // TestApplyTrapRunsBeforeKill is the regression test for the staged-content
@@ -46,19 +49,7 @@ sleep 30
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
-	deadline := time.After(5 * time.Second)
-	for {
-		if _, err := os.Stat(ready); err == nil {
-			break
-		}
-		select {
-		case err := <-done:
-			t.Fatalf("command exited before readiness: %v", err)
-		case <-deadline:
-			t.Fatal("timed out waiting for readiness marker")
-		case <-time.After(5 * time.Millisecond):
-		}
-	}
+	waitForReadiness(t, ready, done)
 	cancel()
 	select {
 	case err := <-done:
@@ -168,19 +159,7 @@ sleep 30
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 
-	deadline := time.After(5 * time.Second)
-	for {
-		if _, err := os.Stat(ready); err == nil {
-			break
-		}
-		select {
-		case err := <-done:
-			t.Fatalf("command exited before readiness: %v", err)
-		case <-deadline:
-			t.Fatal("timed out waiting for readiness marker")
-		case <-time.After(5 * time.Millisecond):
-		}
-	}
+	waitForReadiness(t, ready, done)
 
 	cancel()
 	select {
@@ -190,5 +169,34 @@ sleep 30
 	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("rollback trap's child was killed by a re-signal — the rollback was aborted mid-flight: %v", err)
+	}
+}
+
+// waitForReadiness is the one polling site in this package, at a true
+// black-box boundary: the fixture is a shell adapter whose only completion
+// signal for "the foreground child is now observable" is the readiness file
+// its background subshell writes (adding a pipe would change the fixture
+// contract). Boundary owner: the adapter script's readiness marker. It polls
+// on a bounded ticker up to testutil.ExecRaceTimeout (the documented floor
+// for timers racing a subprocess start) and fails with the last observed
+// state: a command exit before readiness, a stat error, or the timeout.
+func waitForReadiness(t *testing.T, ready string, done <-chan error) {
+	t.Helper()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.After(testutil.ExecRaceTimeout)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			return
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("stat readiness marker %s: %v", ready, err)
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("command exited before readiness marker %s appeared: %v", ready, err)
+		case <-deadline:
+			t.Fatalf("readiness marker %s did not appear within %s", ready, testutil.ExecRaceTimeout)
+		case <-ticker.C:
+		}
 	}
 }
