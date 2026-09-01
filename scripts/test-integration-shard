@@ -238,14 +238,15 @@ run_packages_core_shard() {
   local line i
 
   validate_modulo_shard "$shard_index" "$shard_total"
+  # Package list from scripts/test-tier-packages — the single source of truth
+  # for tier membership (ga-4h8bu). This set carries the fast tier's re-tiered
+  # heavy packages (examples/bd/dolt, examples/gastown, scripts), and
+  # scripts/test-tier-coverage.sh asserts on every fast run that it does; the
+  # excludes here (test/integration, cmd/gc, internal/runtime/tmux) each have
+  # a dedicated shard family of their own.
   while IFS= read -r line; do
     packages+=("$line")
-  done < <(
-    go list ./... |
-      grep -v '^github.com/gastownhall/gascity/test/integration$' |
-      grep -v '^github.com/gastownhall/gascity/cmd/gc$' |
-      grep -v '^github.com/gastownhall/gascity/internal/runtime/tmux$'
-  )
+  done < <("$repo_root/scripts/test-tier-packages" integration-core)
   if [[ ${#packages[@]} -eq 0 ]]; then
     echo "no core packages found" >&2
     exit 1

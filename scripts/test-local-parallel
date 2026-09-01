@@ -12,6 +12,9 @@ Environment:
   GC_TEST_INNER_P        override the per-job GOFLAGS=-p= value (default:
                          outer job budget divided across concurrent jobs)
   GO_TEST_TIMEOUT       per-package go test budget, <n>s|m|h (default: 20m)
+  GC_TEST_UNIT_CORE_P    override the unit-core job's larger -p share
+                         (default: LOCAL_TEST_JOBS/2, min 2 — see
+                         add_unit_core_job)
 USAGE
 }
 
@@ -162,8 +165,49 @@ add_fsys_compile_job() {
 # still carries the cmd/gc-only exclusion). Neither runs on pull_request, so
 # diff the #5653 removal against rc-gate.yml:47, not against this line.
 add_unit_core_job() {
+  # Package list comes from scripts/test-tier-packages — the single source of
+  # truth for tier membership (ga-4h8bu): everything except cmd/gc (which has
+  # its own six fast shards) and the three integration-weight packages
+  # (examples/bd/dolt, examples/gastown, scripts — measured 562.9s/445.3s/
+  # 390.5s) that made the tier named "fast" take ~20 minutes. Those three run
+  # with strictly MORE coverage (GC_FAST_UNIT=0 plus -tags integration) in the
+  # integration tier's packages-core shards, and the tier-coverage selftest
+  # proves the tiers' union on every fast run.
+  #
+  # unit-core also gets a LARGER -p than the shared inner_p: it is the one
+  # multi-package job (~190 packages), so under the flat jobs/shards split it
+  # walked them at -p=1 while the drained single-package shards' slots idled.
+  # The job-level GOFLAGS assignment appends after the shared export below,
+  # and go's flag parsing takes the LAST -p (verified by execution). Budget
+  # note: the other concurrent jobs are single-package, where -p bounds only
+  # their dependency-build phase (see inner-parallelism.sh), so the brief
+  # overlap oversubscribes builds, not test execution.
+  local unit_core_p="${GC_TEST_UNIT_CORE_P:-$(( local_jobs / 2 ))}"
+  if ! [[ "$unit_core_p" =~ ^[0-9]+$ && "$unit_core_p" -gt 0 ]]; then
+    echo "GC_TEST_UNIT_CORE_P must be a positive integer" >&2
+    exit 1
+  fi
+  if (( unit_core_p < 2 )); then
+    unit_core_p=2
+  fi
   add_job "unit-core" \
-    "GC_FAST_UNIT=1 go test -count=1 -timeout ${go_test_timeout} \$(go list ./... | grep -vE '^github.com/gastownhall/gascity/(cmd/gc|internal/runtime/herdr)\$')"
+    'GC_FAST_UNIT=1 GOFLAGS="${GOFLAGS:-} -p='"${unit_core_p}"'" go test -count=1 -timeout '"${go_test_timeout}"' $(./scripts/test-tier-packages unit-core)'
+}
+
+# Direct shell job for the same resourcecensus reason as the selftests below:
+# no Go wrapper, so no os/exec entry in the never-shrinks subprocess audit.
+# Costs one `go list` (~2s) and makes tier-membership rot loud instead of
+# silent (ga-4h8bu): a package excluded from the fast tier without a home in
+# another tier fails every fast run, rather than quietly running nowhere.
+#
+# MERGE NOTE (resync x ga-4h8bu): the unit-core command above is #139's
+# structure — the tier printer as single source of truth plus the -p share —
+# carrying UPSTREAM's resync-era additions verbatim: -count=1 and the
+# GO_TEST_TIMEOUT budget (both added upstream after #139 branched). Upstream's
+# inline herdr exclusion (#5702/#5809) moved into the printer's documented
+# fast excludes, where the tier-coverage guard accounts for it.
+add_tier_coverage_selftest_job() {
+  add_job "tier-coverage-selftest" "bash scripts/test-tier-coverage.sh"
 }
 
 # Runs as a direct shell job rather than through a `go test` wrapper because a
@@ -236,6 +280,7 @@ case "$mode" in
     add_unit_core_job
     add_push_gate_lock_selftest_job
     add_local_concurrency_selftest_job
+    add_tier_coverage_selftest_job
     add_cmd_gc_shards "unit-cmd-gc" "1" ""
     ;;
   cmd-gc-process)
@@ -250,6 +295,7 @@ case "$mode" in
     add_unit_core_job
     add_push_gate_lock_selftest_job
     add_local_concurrency_selftest_job
+    add_tier_coverage_selftest_job
     add_cmd_gc_shards "cmd-gc-process" "0" ""
     add_productmetrics_testhook_job
     add_integration_jobs
