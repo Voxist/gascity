@@ -188,8 +188,23 @@ elif $build_from_source; then
   # repo); releases and upstream commits keep working via the default.
   git clone --filter=blob:none "https://github.com/${BD_REPO:-gastownhall/beads}" "${tmp}/beads-src"
   git -C "${tmp}/beads-src" checkout "$source_ref"
-  # Same build shape as ci.yml's cross-version contract cells.
-  go -C "${tmp}/beads-src" build -tags gms_pure_go -o "${tmp}/bd" ./cmd/bd
+  # This bd must match what the release archive would provide: a CGO build
+  # with the embedded Dolt store, which the integration suites drive
+  # (`bd init` standalone, `gc rig add`). The cross-version contract cells in
+  # ci.yml deliberately build pure-Go (`-tags gms_pure_go`) because they only
+  # exercise the CLI surface; copying their build shape here produced a
+  # `//go:build !cgo` bd whose embedded init fails with "embedded Dolt requires
+  # a CGO build" — red on every main run that reached the REST shards. CGO is
+  # forced explicitly (Go silently disables it in several configurations) and
+  # the result is asserted below, so a wrong binary fails the install loudly
+  # instead of failing tests obscurely.
+  echo "bd source build env: $(go env CGO_ENABLED CC GOOS GOARCH | tr '\n' ' ')"
+  CGO_ENABLED=1 go -C "${tmp}/beads-src" build -o "${tmp}/bd" ./cmd/bd
+  if ! go version -m "${tmp}/bd" | grep -qE '^\s*build\s+CGO_ENABLED=1$'; then
+    echo "bd built from ${source_ref} is not a CGO build; embedded Dolt would be unavailable:" >&2
+    go version -m "${tmp}/bd" | grep -E 'CGO_ENABLED|-tags' >&2 || true
+    exit 1
+  fi
   if $use_cache; then
     install_binary "${tmp}/bd" "$target"
   else
