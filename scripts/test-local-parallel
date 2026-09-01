@@ -61,9 +61,17 @@ unset GC_DOLT_PORT BEADS_DOLT_SERVER_PORT
 
 local_jobs="${LOCAL_TEST_JOBS:-$("$repo_root/scripts/test-local-job-count")}"
 cmd_gc_total="${CMD_GC_PROCESS_TOTAL:-6}"
+# unit-core covers ~190 packages. Left as one job it was the gate's entire
+# critical path: the six cmd/gc shards finished in ~4 minutes and then fifteen
+# of sixteen cores idled for another four waiting on it.
+unit_core_total="${UNIT_CORE_TOTAL:-4}"
 
 if ! [[ "$local_jobs" =~ ^[0-9]+$ && "$local_jobs" -gt 0 ]]; then
   echo "LOCAL_TEST_JOBS must be a positive integer" >&2
+  exit 1
+fi
+if ! [[ "$unit_core_total" =~ ^[0-9]+$ && "$unit_core_total" -gt 0 ]]; then
+  echo "UNIT_CORE_TOTAL must be a positive integer" >&2
   exit 1
 fi
 if ! [[ "$cmd_gc_total" =~ ^[0-9]+$ && "$cmd_gc_total" -gt 0 ]]; then
@@ -91,8 +99,11 @@ add_fsys_compile_job() {
 }
 
 add_unit_core_job() {
-  add_job "unit-core" \
-    'GC_FAST_UNIT=1 go test -timeout 15m $(go list ./... | grep -v '"'"'^github.com/gastownhall/gascity/cmd/gc$'"'"')'
+  local i
+  for i in $(seq 1 "$unit_core_total"); do
+    add_job "unit-core-${i}-of-${unit_core_total}" \
+      "GC_FAST_UNIT=1 GO_TEST_TIMEOUT=15m ./scripts/test-go-package-shard ${i} ${unit_core_total}"
+  done
 }
 
 # Runs as a direct shell job rather than through a `go test` wrapper because a

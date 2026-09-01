@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Runs one shard of the "everything except ./cmd/gc" unit lane.
+#
+# Why this exists: unit-core was a SINGLE job running `go test` over ~190
+# packages while ./cmd/gc — one package — was already split six ways. On a
+# 16-core box the six cmd/gc shards finished in ~4 minutes and then fifteen
+# cores idled for another four while unit-core ran alone, so the gate's wall
+# time was unit-core and nothing else. Splitting the package list evens the
+# fan-out out.
+#
+# This is a PACKAGE-list shard, which is why it cannot reuse
+# scripts/test-go-test-shard: that helper slices the tests *within* a single
+# package (GC_TEST_SHARD_INDEX), whereas this one distributes whole packages.
+# Packages are the right grain here — go test already parallelizes within a
+# package, and per-package binaries are what dominate wall time.
+#
+# Assignment is round-robin over the sorted package list, so it is
+# deterministic and stable: the same package lands on the same shard for a
+# given shard count, which keeps Go's build cache warm across runs.
+
+if [[ $# -ne 2 ]]; then
+  echo "usage: $0 <shard-index> <shard-total>" >&2
+  exit 1
+fi
+
+shard_index="$1"
+shard_total="$2"
+
+if ! [[ "$shard_index" =~ ^[0-9]+$ && "$shard_total" =~ ^[0-9]+$ ]]; then
+  echo "shard index and total must be positive integers" >&2
+  exit 1
+fi
+if (( shard_index < 1 || shard_total < 1 || shard_index > shard_total )); then
+  echo "invalid shard ${shard_index} of ${shard_total}" >&2
+  exit 1
+fi
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+# ./cmd/gc is excluded because it has its own dedicated shard lane.
+#
+# The three packages below are excluded because they are integration-weight and
+# were the real reason the "fast" tier was not fast (ga-4h8bu, measured
+# 2026-09-01):
+#
+#     examples/bd/dolt   562.9s   spawns real dolt servers
+#     examples/gastown   445.3s   full pipeline shell tests
+#     scripts            390.5s
+#
+# That is ~23 minutes of CPU inside the tier named fast, and sharding alone
+# cannot fix it: round-robin still lands examples/bd/dolt whole on one shard,
+# so the critical path stays ~9 minutes no matter how many shards there are.
+#
+# This is a RE-TIERING, not a coverage cut. All three still run in the
+# integration tier: scripts/test-integration-shard's packages-core-N-of-4
+# shards enumerate `go list ./...` (minus test/integration, cmd/gc and
+# internal/runtime/tmux) and run them with `-tags integration`. Build tags only
+# ADD files, so that run is a superset of the untagged fast-tier run. Verify
+# with: ./scripts/test-integration-shard packages-core-1-of-4
+# NOT mapfile/readarray: those are bash 4+ builtins and the runner executes
+# jobs under macOS's bash 3.2, where the script aborts with "mapfile: command
+# not found" before running a single package. The runner does catch the 127,
+# so the gate goes red rather than silently green -- but the failure reads as
+# a shell error with no test output, which is easy to misread as infra noise.
+all_pkgs=()
+while IFS= read -r pkg; do
+  [[ -n "$pkg" ]] && all_pkgs+=("$pkg")
+done < <(
+  go list ./... |
+    grep -v '^github.com/gastownhall/gascity/cmd/gc$' |
+    grep -v '^github.com/gastownhall/gascity/examples/bd/dolt$' |
+    grep -v '^github.com/gastownhall/gascity/examples/gastown$' |
+    grep -v '^github.com/gastownhall/gascity/scripts$' |
+    sort
+)
+
+if (( ${#all_pkgs[@]} == 0 )); then
+  echo "test-go-package-shard: go list produced no packages" >&2
+  exit 1
+fi
+
+shard_pkgs=()
+for (( i = 0; i < ${#all_pkgs[@]}; i++ )); do
+  if (( i % shard_total == shard_index - 1 )); then
+    shard_pkgs+=("${all_pkgs[$i]}")
+  fi
+done
+
+# A shard with no packages is a success, not a failure: it just means there
+# are fewer packages than shards.
+if (( ${#shard_pkgs[@]} == 0 )); then
+  echo "test-go-package-shard: shard ${shard_index}/${shard_total} has no packages; nothing to do"
+  exit 0
+fi
+
+exec go test -timeout "${GO_TEST_TIMEOUT:-15m}" "${shard_pkgs[@]}"
