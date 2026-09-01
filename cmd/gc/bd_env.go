@@ -76,6 +76,19 @@ func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
 		if credentialsFile != "" {
 			env["BEADS_CREDENTIALS_FILE"] = credentialsFile
 		}
+		if err := applyHostedBeadsCredentialEnv(env, cityPath); err != nil {
+			return nil, err
+		}
+		// Route through the hosted-city chooser (upstream's contract): the
+		// exact hosted beads-workspace binding gets the hermetic runner that
+		// withholds the inherited BEADS_* namespace; everything else keeps
+		// the plain runner. The 2026-08-31 merge kept the chooser but
+		// dropped this call site, leaking ambient BEADS_* into hosted bd
+		// subprocesses (pinned by TestHostedCityRunnersWithholdAmbientBeadsEnv).
+		hostedRunner, err := beadsCommandRunnerForHostedCity(cityPath, env)
+		if err != nil {
+			return nil, err
+		}
 		var breaker *resilience.Breaker
 		if name == "bd" {
 			breaker = bdScopeBreaker(cityPath, dir)
@@ -94,7 +107,7 @@ func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
 		if execName == "bd" && bdBin != "" {
 			execName = bdBin
 		}
-		out, err := beadsExecCommandRunnerWithEnv(env)(dir, execName, args...)
+		out, err := hostedRunner(dir, execName, args...)
 		if breaker != nil {
 			// No managed retry on this path, so this invocation's outcome is
 			// the final word: a per-command deadline kill or a transport-class
@@ -1362,7 +1375,11 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 			env = map[string]string{}
 		}
 		ensureProjectedDoltEnvExplicit(env)
-		runner := beadsExecCommandRunnerWithEnv(env)
+		// Hosted-city routing restored (see TestHostedCityRunnersWithholdAmbientBeadsEnv).
+		runner, runnerErr := beadsCommandRunnerForHostedCity(cityPath, env)
+		if runnerErr != nil {
+			return nil, runnerErr
+		}
 		// Scope transport breaker (chokepoint a, plan item 1.2): an open
 		// breaker fails fast with the typed ErrStoreUnavailable and spawns
 		// ZERO subprocesses, so a wedged backend cannot pile up bd
@@ -1426,7 +1443,10 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 			return nil, retryEnvErr
 		}
 		ensureProjectedDoltEnvExplicit(retryEnv)
-		retryRunner := beadsExecCommandRunnerWithEnv(retryEnv)
+		retryRunner, runnerErr := beadsCommandRunnerForHostedCity(cityPath, retryEnv)
+		if runnerErr != nil {
+			return nil, runnerErr
+		}
 		retryOut, retryErr := retryRunner(dir, name, args...)
 		// The retry's outcome is this invocation's final word: a second
 		// transport failure counts one consecutive failure toward the

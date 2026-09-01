@@ -621,13 +621,23 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 				// documented city-before-rig precedence (a rig patch applied
 				// below still wins); ALSO defer a second, tail-scoped pass for
 				// any implicit agent injected later. A wildcard that matches
-				// neither still routes through the normal pass so ApplyPatches
-				// hard-errors on the typo (a wildcard matching nothing is an
-				// error, not a silent no-op).
+				// NEITHER degrades to the same vc-9wa / vc-quqf composition
+				// warning as an unresolvable (dir, name) target below: one bad
+				// patch target must not abort the city-wide config load. It is
+				// not a silent no-op — gc config lint treats the warning as a
+				// failure (IsUnresolvedAgentPatchWarning), so the typo is
+				// caught at pre-commit rather than by taking the city down at
+				// start. (The pre-resync fork warn-skipped this exact input;
+				// routing it into ApplyPatches' hard error resurrected the
+				// vc-9wa outage class for the new wildcard surface only.)
 				matchesExisting := wildcardPatchMatchesExisting(root, p.Name)
 				deferForImplicit := implicitNames[p.Name]
-				if matchesExisting || !deferForImplicit {
+				switch {
+				case matchesExisting:
 					nowPatches = append(nowPatches, p)
+				case !deferForImplicit:
+					prov.Warnings = appendUnique(prov.Warnings,
+						UnresolvedAgentPatchWarning(i, p.Rig, p.Name))
 				}
 				if deferForImplicit {
 					deferredAgentPatches = append(deferredAgentPatches, p)

@@ -296,10 +296,10 @@ func TestBuildDoctorChecks_RigStoreNameSetPreflight(t *testing.T) {
 	// Constant-drift lock: omit N store checks and add one preflight entry.
 	// A silent 12th city store check would make this delta diverge without
 	// updating doctorCityStoreCheckCount / beadStorePreflightSkipCount.
-	wantDelta := beadStorePreflightSkipCount(2) - 1 // -1 for bead-store-preflight
+	wantDelta := beadStorePreflightSkipCount(cityDir, cfg.Rigs) - 1 // -1 for bead-store-preflight
 	if got := len(healthy) - len(outage); got != wantDelta {
 		t.Fatalf("healthy-outage name delta = %d, want %d (skipCount-1=%d); healthy=%d outage=%d",
-			got, wantDelta, beadStorePreflightSkipCount(2)-1, len(healthy), len(outage))
+			got, wantDelta, beadStorePreflightSkipCount(cityDir, cfg.Rigs)-1, len(healthy), len(outage))
 	}
 }
 
@@ -324,11 +324,16 @@ func TestBeadStorePreflightSkipMessage(t *testing.T) {
 }
 
 func TestBeadStorePreflightSkipCount(t *testing.T) {
-	t.Parallel()
-	if got := beadStorePreflightSkipCount(0); got != doctorCityStoreCheckCount {
+	// Not parallel: the count is env-shaped (gcDoltSkip), so this pins the
+	// base constants under GC_DOLT=skip; shape-exactness against the real
+	// builder in BOTH env shapes is pinned by
+	// TestBeadStorePreflightSkipCountMatchesBothEnvShapes.
+	t.Setenv("GC_DOLT", "skip")
+	rigs := []config.Rig{{Name: "alpha", Path: "alpha"}, {Name: "beta", Path: "beta"}}
+	if got := beadStorePreflightSkipCount(t.TempDir(), nil); got != doctorCityStoreCheckCount {
 		t.Fatalf("skip count 0 rigs = %d, want %d", got, doctorCityStoreCheckCount)
 	}
-	if got := beadStorePreflightSkipCount(2); got != doctorCityStoreCheckCount+2*doctorPerRigStoreCheckCount {
+	if got := beadStorePreflightSkipCount(t.TempDir(), rigs); got != doctorCityStoreCheckCount+2*doctorPerRigStoreCheckCount {
 		t.Fatalf("skip count 2 rigs = %d, want %d", got, doctorCityStoreCheckCount+6)
 	}
 	if len(doctorCityStoreDependentNames) != doctorCityStoreCheckCount {

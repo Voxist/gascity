@@ -528,10 +528,20 @@ func (c *CachingStore) mergeSnapshotLocked(
 	for id, freshBead := range freshByID {
 		freshDeps := c.depsForReconcileLocked(id, freshBead, depMap, useFreshDeps)
 		cached, cachedExists := c.beads[id]
-		// OPTION 2 differ substitution: a nil'd (invalidated) verdict compares
-		// as the value the cache disowned, so the invalidation itself never
-		// reads as a store-side nil<->set transition (the ADR-0094 flood).
-		if cachedExists && cached.IsBlocked == nil {
+		// Differ substitution: a nil'd (invalidated) verdict compares as the
+		// value the cache disowned, so the invalidation itself never reads as
+		// a store-side nil<->set transition (the ADR-0094 flood).
+		//
+		// Only when the FRESH row carries a verdict. When the projection is
+		// DEGRADED the fresh row is nil too; substituting then manufactures a
+		// value-vs-nil difference out of two nils, and because a verdict-less
+		// absorb keeps the mark, the same spurious bead.updated re-fires on
+		// every reconcile tick until the projection recovers — a sustained
+		// per-tick flood in exactly the degraded shape (round-4 review;
+		// reproduced at 1 event/tick before this guard). Fresh-nil vs
+		// cached-nil compares silently, which is what upstream's sentinel did
+		// in this shape all along.
+		if cachedExists && cached.IsBlocked == nil && freshBead.IsBlocked != nil {
 			if v, ok := c.readyProjectionInvalid[id]; ok {
 				vv := v
 				cached.IsBlocked = &vv

@@ -690,7 +690,12 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 			// the token here a transport-class failure is still indistinguishable
 			// from "no work" to every consumer that matches on it — the dead-drop
 			// the token exists to close.
-			if classified := classifyWorkQueryStoreUnavailable(err); errors.Is(classified, beads.ErrStoreUnavailable) {
+			// Classified ONCE and reused for both the stderr token and the exit
+			// code below, so the published contract (token <=> exit 2) cannot be
+			// split by an edit reaching one call site and not the other.
+			classified := classifyWorkQueryStoreUnavailable(err)
+			storeUnavailable := errors.Is(classified, beads.ErrStoreUnavailable)
+			if storeUnavailable {
 				fmt.Fprintf(stderr, "gc hook --claim: %s: %v\n", hookStoreUnavailableToken, classified) //nolint:errcheck // best-effort stderr
 			} else {
 				fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -705,7 +710,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 			// contract: hookStoreUnavailableToken documents exit 2, and a
 			// consumer gating on the code must be able to tell a dead store from
 			// no-work on this path too — it is the form agents run.
-			if errors.Is(classifyWorkQueryStoreUnavailable(err), beads.ErrStoreUnavailable) {
+			if storeUnavailable {
 				return 2
 			}
 			return 1
@@ -977,11 +982,10 @@ func classifyWorkQueryStoreUnavailable(err error) error {
 	if err == nil || errors.Is(err, beads.ErrStoreUnavailable) {
 		return err
 	}
-	msg := strings.ToLower(err.Error())
-	for _, marker := range bdTransportRetryableMarkers {
-		if strings.Contains(msg, marker) {
-			return fmt.Errorf("%w: %w", beads.ErrStoreUnavailable, err)
-		}
+	// isTransportClassMessage is the single pinned marker table shared with
+	// the storehealth patrol; a marker added there must classify here too.
+	if isTransportClassMessage(strings.ToLower(err.Error())) {
+		return fmt.Errorf("%w: %w", beads.ErrStoreUnavailable, err)
 	}
 	return err
 }

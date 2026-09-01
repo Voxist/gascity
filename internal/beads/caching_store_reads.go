@@ -133,7 +133,14 @@ func (c *CachingStore) ListCtx(ctx context.Context, query ListQuery) ([]Bead, er
 	// is incomplete. Falling back would replace a truthful partial with a
 	// snapshot and DROP the PartialResultError, hiding the degradation the
 	// caller must see (TestCachingStoreRunReconciliationDegradesImmediatelyOnPartialResult).
-	if IsPartialResult(err) {
+	if IsPartialResult(err) || ctx.Err() != nil {
+		// ctx.Err(): the caller's deadline expired during the backing read.
+		// Serving stale last-good rows with a NIL error here would mask the
+		// slowness the deadline exists to surface — a wedged backend would
+		// present as a healthy store (statusListStoreWithTimeout budgets its
+		// reads on exactly this contract). Count keeps the same guard; the
+		// 2026-08-31 resync dropped it from this path only, restoring the
+		// fork's original pass-through.
 		return items, err
 	}
 	// The store did not answer. Serve the last-good snapshot for every shape it
@@ -549,15 +556,31 @@ func (c *CachingStore) ListOpen(status ...string) ([]Bead, error) {
 // cannot prove absence, so a miss must never be manufactured from a snapshot
 // (TestCachingStoreDownGetServesLastGoodAndPropagatesMisses).
 func (c *CachingStore) getBackingOrLastGood(id string) (Bead, error) {
-	b, err := c.backing.Get(id)
-	if err == nil || errors.Is(err, ErrNotFound) {
-		return b, err
+	fresh, err := c.backing.Get(id)
+	// PartialResult and context.Canceled are ANSWERS, not outages: a partial
+	// carries rows plus a typed caveat the caller must see, and a cancelled
+	// read is the caller's own budget firing — swallowing either into a
+	// stale-with-nil last-good hides exactly the degradation/cancellation
+	// signal it exists to carry. (This helper was authored in the 2026-08-31
+	// resync as a rename of the fork's getBackingWithLastGoodFallback and
+	// silently dropped both pass-throughs plus the tombstone mapping below;
+	// restored to the fork's semantics.)
+	if err == nil || errors.Is(err, ErrNotFound) || IsPartialResult(err) || errors.Is(err, context.Canceled) {
+		return fresh, err
 	}
-	if lg, lerr := c.getLastGood(id); lerr == nil {
+	lg, lgErr := c.getLastGood(id)
+	switch {
+	case lgErr == nil:
 		c.recordProblem("get served last-good after backing failure", err)
 		return lg, nil
+	case errors.Is(lgErr, ErrNotFound):
+		// The last-good snapshot authoritatively knows this id is gone
+		// (locally tombstoned during the outage). ErrNotFound is the answer;
+		// returning the raw transport error instead spins callers that treat
+		// ErrNotFound as terminal.
+		return Bead{}, ErrNotFound
 	}
-	return b, err
+	return fresh, err
 }
 
 // Get returns a single bead by ID from the cache or backing store.

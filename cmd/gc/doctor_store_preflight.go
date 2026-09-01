@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // Bounds the single store probe that gates store-dependent doctor checks (#5064).
@@ -77,15 +78,43 @@ func isBeadStoreUnreachable(err error) bool {
 	return false
 }
 
-func beadStorePreflightSkipCount(activeRigCount int) int {
-	return doctorCityStoreCheckCount + doctorPerRigStoreCheckCount*activeRigCount
+// doctorCityStoreCheckCountForEnv is the city store-gated check count for the
+// CURRENT env shape: the base constant, plus the city
+// CustomTypesPreflightCheck that buildDoctorChecks registers only outside
+// GC_DOLT=skip. Every earlier drift-lock test ran under GC_DOLT=skip, so the
+// env-gated registration was invisible to the sync guard and a production
+// outage under-reported how many checks it withheld.
+func doctorCityStoreCheckCountForEnv() int {
+	if gcDoltSkip() {
+		return doctorCityStoreCheckCount
+	}
+	return doctorCityStoreCheckCount + 1
+}
+
+// beadStorePreflightSkipCount counts the store-gated checks buildDoctorChecks
+// would have registered for this city and rig set, using the SAME predicates
+// the registrations themselves use (gcDoltSkip for the env shape,
+// rigUsesManagedBdStoreContract for the per-rig custom-types preflight), so
+// the outage banner cannot drift from production by construction. Pinned in
+// both env shapes by TestBeadStorePreflightSkipCountMatchesBothEnvShapes.
+func beadStorePreflightSkipCount(cityPath string, activeRigs []config.Rig) int {
+	count := doctorCityStoreCheckCountForEnv() + doctorPerRigStoreCheckCount*len(activeRigs)
+	if gcDoltSkip() {
+		return count
+	}
+	for _, rig := range activeRigs {
+		if rigUsesManagedBdStoreContract(cityPath, rig) {
+			count++ // rig custom-types-preflight, managed-bdstore rigs only
+		}
+	}
+	return count
 }
 
 func beadStorePreflightSkipMessage(skipCount, rigCount int, probeErr error) string {
 	// City-scoped probe: skip is a city-outage gate (per-rig endpoints may differ).
 	base := fmt.Sprintf(
 		"bead store unreachable — skipped %d store checks (%d city, %d rigs); city store was probed (per-rig endpoints, including doltlite, may differ)",
-		skipCount, doctorCityStoreCheckCount, rigCount,
+		skipCount, doctorCityStoreCheckCountForEnv(), rigCount,
 	)
 	if probeErr == nil {
 		return base

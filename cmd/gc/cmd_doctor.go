@@ -322,7 +322,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			storeOK = false
 			storePreflightErr = probeErr
 			// Register early so the preflight error precedes omitted store checks.
-			skipCount := beadStorePreflightSkipCount(len(activeRigs))
+			skipCount := beadStorePreflightSkipCount(cityPath, activeRigs)
 			register(doctor.ErrorCheck("bead-store-preflight", beadStorePreflightSkipMessage(skipCount, len(activeRigs), storePreflightErr)))
 		}
 	}

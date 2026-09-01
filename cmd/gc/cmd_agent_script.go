@@ -799,6 +799,15 @@ func agentScriptHookBeadWithRunner(stderr io.Writer, runHook agentScriptHookRunn
 	return beads[0], true, nil
 }
 
+// originGateRefusalPrefix is the stable prefix of the vc-ozanp5 origin-gate
+// disclosure poolDemandGatedTailScript (internal/config/workquery.go) prints
+// on stderr whenever a non-ephemeral session's work query declines to probe
+// the routed pool tier. It is a POLICY DISCLOSURE on every named session's
+// empty poll, not a failure — deliberately audible (ga-bea6p) so an empty
+// hook is distinguishable from a drained queue. Kept in lockstep with the
+// emitter by TestOriginGateRefusalPrefixMatchesEmitter.
+const originGateRefusalPrefix = "gc: work_query pool tier not probed:"
+
 func agentScriptHookExitIsNoWork(output, stderr string) bool {
 	if workQueryHasReadyWork(output) {
 		return false
@@ -806,6 +815,12 @@ func agentScriptHookExitIsNoWork(output, stderr string) bool {
 	for _, line := range strings.Split(stderr, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, originGateRefusalPrefix) {
+			// Benign-empty: the origin gate disclosing that it did not probe
+			// the routed pool tier for this non-ephemeral session. The line
+			// stays audible on stderr; only its CLASSIFICATION is no-work.
 			continue
 		}
 		if !strings.Contains(strings.ToLower(line), "warning") {
