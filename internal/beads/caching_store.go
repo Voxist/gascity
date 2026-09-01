@@ -553,6 +553,16 @@ type absorbOpts struct {
 	seqMode    absorbSeqMode
 	readyMode  absorbReadyMode
 	clearDirty bool
+	// readyProjectionUnobserved marks an absorb whose incoming row carries an
+	// is_blocked value that was NOT observed this cycle — it was copied from
+	// the cache. mergeCacheEventPatch seeds the merged row from the cached row
+	// and overwrites IsBlocked only when the event actually carried the field,
+	// so on any other field's bead.updated the value looks authoritative while
+	// observing nothing. Without this flag such an absorb would discharge an
+	// ADR-0094 invalidation, letting unrelated traffic silently cancel a
+	// pending re-ask. Default false: every caller that really did observe
+	// (backing reads, graph applies, creates) keeps discharging.
+	readyProjectionUnobserved bool
 }
 
 // absorbFreshLocked installs a fresh row for id per opts. It is the only code
@@ -561,13 +571,25 @@ type absorbOpts struct {
 // only by seqClearGuarded. Caller must hold c.mu in write mode.
 func (c *CachingStore) absorbFreshLocked(id string, bead Bead, now time.Time, opts absorbOpts) {
 	c.advanceObservationLocked()
+	// Whether the INCOMING row carried its own verdict, read before
+	// absorbReadyProjectionLocked runs — that helper may copy the cache's own
+	// cached verdict forward under readyPreserveWhenDepsUnchanged, after which
+	// bead.IsBlocked is no longer evidence of an observation.
+	observedVerdict := bead.IsBlocked != nil
 	bead = c.absorbReadyProjectionLocked(id, bead, opts)
 	c.beads[id] = cloneBead(bead)
-	// An absorb is an observation: whatever the backing (or an event payload
-	// carrying the field) just reported supersedes this cache's own request to
-	// re-ask, so the invalidation is discharged here rather than at each of the
-	// ~20 call sites that raise it.
-	delete(c.readyProjectionInvalid, id)
+	// An absorb discharges the ADR-0094 invalidation only when it actually
+	// OBSERVED a verdict: what the backing (or an event payload carrying the
+	// field) just reported supersedes this cache's own request to re-ask. A
+	// preserve-branch absorb copies the cache's own — possibly disowned —
+	// verdict forward and observes nothing, so it must NOT discharge the mark.
+	// That is the same distinction preserveCachedReadyProjectionLocked makes
+	// (D1: preservation is not observation); under the old in-band sentinel it
+	// was unreachable, because an invalidation had already nil-ed the cached
+	// verdict and the preserve branch could not fire.
+	if observedVerdict && !opts.readyProjectionUnobserved {
+		delete(c.readyProjectionInvalid, id)
+	}
 	switch opts.depsMode {
 	case depsExplicit:
 		c.deps[id] = cloneDeps(opts.deps)

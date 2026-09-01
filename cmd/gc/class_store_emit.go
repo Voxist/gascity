@@ -398,7 +398,14 @@ func (s *emittingClassStore) AssertOpenedIdentity(configured identity.ScopeIdent
 	}); ok {
 		return inner.AssertOpenedIdentity(configured)
 	}
-	return identity.Result{}
+	// A wrapper method cannot be conditionally absent, so a capability probe on
+	// this type always succeeds. Returning a zero Result would hand that probe
+	// a Class matching none of the four documented values while Degraded()
+	// reports true — an alert with an empty class. Assert against an empty
+	// opened identity instead, which yields the documented ClassOpenedEmpty:
+	// the same silent-empty signature assertNativeStoreIdentity produces for a
+	// nil store, and the honest answer when the wrapped store cannot report one.
+	return identity.Assert(configured, identity.ScopeIdentity{})
 }
 
 func (s *emittingClassStore) Reopen(id string) error {

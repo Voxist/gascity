@@ -122,9 +122,16 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	// past statusWarmRefreshAfter; never block the request on the rebuild.
 	//
 	// This is the FIRST fast path after the bucket cache, above the TTL floor,
-	// deliberately: if the TTL floor answered first it would serve a body of
-	// almost the same age while skipping this branch, and statusWarmRefreshAfter
-	// would never fire.
+	// deliberately. With the current constants the floor (3s) is TIGHTER than
+	// statusWarmRefreshAfter (5s), so ordering it first would not by itself
+	// suppress every refresh — but it would answer for the whole 0-3s window
+	// without ever entering this branch, so the refresh could only ever be
+	// kicked by requests landing in the 3-5s gap, and any future widening of
+	// the floor past statusWarmRefreshAfter would silence it entirely. The
+	// warm entry is also the fresher of the two (a background rebuild seeds it
+	// and the response cache together, and only this branch reports the warm
+	// body's own age). Pinned by TestHandleStatusRefreshesAgedWarmBody, which
+	// fails if these two are swapped.
 	if entry, ok := s.warmStatusBody(input.Lite); ok {
 		age := time.Since(entry.builtAt)
 		if age <= statusWarmServeMaxAge {

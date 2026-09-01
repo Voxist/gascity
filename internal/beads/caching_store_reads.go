@@ -575,8 +575,9 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 	if _, mutated := c.beadSeq[id]; mutated {
 		if _, dirty := c.dirty[id]; !dirty {
 			if b, ok := c.beads[id]; ok {
+				invalid := c.readyProjectionInvalidLocked(id)
 				c.mu.RUnlock()
-				return cloneBead(b), nil
+				return projectCachedBead(b, invalid), nil
 			}
 		}
 	}
@@ -603,8 +604,9 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 					return c.getBackingOrLastGood(id)
 				}
 				if current, ok := c.beads[id]; ok {
+					invalid := c.readyProjectionInvalidLocked(id)
 					c.mu.Unlock()
-					return cloneBead(current), nil
+					return projectCachedBead(current, invalid), nil
 				}
 				c.mu.Unlock()
 				return Bead{}, ErrNotFound
@@ -620,8 +622,9 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 			return fresh, nil
 		}
 		if b, ok := c.beads[id]; ok {
+			invalid := c.readyProjectionInvalidLocked(id)
 			c.mu.RUnlock()
-			return cloneBead(b), nil
+			return projectCachedBead(b, invalid), nil
 		}
 		c.mu.RUnlock()
 		return c.getBackingOrLastGood(id)
@@ -927,4 +930,28 @@ func (c *CachingStore) backingListCtx(ctx context.Context, query ListQuery) ([]B
 		return cl.ListCtx(ctx, query)
 	}
 	return c.backing.List(query)
+}
+
+// projectCachedBead clones a cached row for an EXTERNAL reader, withholding an
+// is_blocked verdict this cache has invalidated and not yet re-observed.
+//
+// ADR-0094 keeps the invalidated verdict in c.beads on purpose: the reconcile
+// differ must compare what the backing last reported, or a cache-internal
+// "re-ask" reads as a store-side transition and floods bead.updated. But every
+// reader OUTSIDE this package reads Bead.IsBlocked as the backing's answer, and
+// several treat nil as their fail-open case (bindNamedSessionTriggerBead's
+// staleness test, computeAwakeBridge's blocked test, gc bead state). Handing
+// them a verdict this cache has already disowned makes them act on a value the
+// cache itself does not trust.
+//
+// So the value is STORED but not SERVED: the differ keeps its like-for-like
+// comparison, and callers see the same nil the in-band sentinel used to give
+// them. The readiness readers do not go through here — they take the
+// projectionInvalid flag directly (see cachedBeadReady).
+func projectCachedBead(b Bead, projectionInvalid bool) Bead {
+	out := cloneBead(b)
+	if projectionInvalid {
+		out.IsBlocked = nil
+	}
+	return out
 }

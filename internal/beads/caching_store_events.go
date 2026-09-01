@@ -49,6 +49,11 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 		return
 	}
 
+	// Set when the row handed to absorbFreshLocked carries an is_blocked value
+	// copied from the CACHE rather than observed from this event, so the absorb
+	// must not discharge an ADR-0094 invalidation. See absorbOpts.
+	readyProjectionUnobserved := false
+
 	patch, fields, err := decodeCacheEvent(payload)
 	if err != nil {
 		c.recordProblem(fmt.Sprintf("apply %s event", eventType), err)
@@ -238,6 +243,9 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 		}
 		if eventType != "bead.closed" || !verifiedClosedFromBacking {
 			b = mergeCacheEventPatch(current, patch, fields)
+			// The merge seeds from the CACHED row, so b.IsBlocked is only an
+			// observation when the event actually carried is_blocked.
+			readyProjectionUnobserved = !hasCacheEventField(fields, "is_blocked")
 		}
 	}
 
@@ -249,9 +257,10 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 			// OC-3: absorb installs the row before updateEventDepsLocked, whose
 			// clearReadyProjectionLocked must observe the newly absorbed row.
 			c.absorbFreshLocked(b.ID, b, time.Now(), absorbOpts{
-				depsMode:   depsKeepCached,
-				seqMode:    seqKeep,
-				clearDirty: true,
+				depsMode:                  depsKeepCached,
+				seqMode:                   seqKeep,
+				clearDirty:                true,
+				readyProjectionUnobserved: readyProjectionUnobserved,
 			})
 			c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking || depsAuthoritative)
 		}
@@ -268,9 +277,10 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 		if !cached || beadChanged(existing, b, false) {
 			c.noteMutationLocked(b.ID)
 			c.absorbFreshLocked(b.ID, b, time.Now(), absorbOpts{
-				depsMode:   depsKeepCached,
-				seqMode:    seqKeep,
-				clearDirty: true,
+				depsMode:                  depsKeepCached,
+				seqMode:                   seqKeep,
+				clearDirty:                true,
+				readyProjectionUnobserved: readyProjectionUnobserved,
 			})
 			mutated = true
 		}
@@ -291,9 +301,10 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 		}
 		// OC-3: absorb before updateEventDepsLocked (see bead.created).
 		c.absorbFreshLocked(b.ID, b, time.Now(), absorbOpts{
-			depsMode:   depsKeepCached,
-			seqMode:    seqKeep,
-			clearDirty: true,
+			depsMode:                  depsKeepCached,
+			seqMode:                   seqKeep,
+			clearDirty:                true,
+			readyProjectionUnobserved: readyProjectionUnobserved,
 		})
 		c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking || depsAuthoritative)
 		mutated = true

@@ -588,6 +588,14 @@ func LatestArchivedMatch(path string, filter Filter) (Event, bool, error) {
 // falls back to ReadFiltered.
 func ReadFilteredTail(path string, filter Filter, limit int) ([]Event, error) {
 	if limit <= 0 {
+		// ActiveOnly must hold on this branch too. ReadFiltered walks the
+		// archives, so returning it here would silently ignore the caller's
+		// bound and hand back archived records — the inert-knob class this
+		// field exists to avoid. tailActive with an unbounded limit is the
+		// active-file-only answer to the same question.
+		if filter.ActiveOnly {
+			return tailActive(path, filter, 0)
+		}
 		return ReadFiltered(path, filter)
 	}
 

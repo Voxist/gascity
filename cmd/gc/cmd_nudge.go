@@ -892,7 +892,7 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 			Path:          target.nudgePath(),
 		})
 	}
-	fmt.Fprintf(stdout, "Nudged %s\n", target.agentKey()) //nolint:errcheck
+	fmt.Fprintf(stdout, "Nudged %s%s\n", target.agentKey(), target.nudgePathSuffix()) //nolint:errcheck
 	return 0
 }
 
@@ -1178,8 +1178,9 @@ func writeQueuedSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, j
 		})
 	}
 	fmt.Fprintf(stdout, //nolint:errcheck // best-effort stdout
-		"Queued nudge for %s in %s%s\n",
-		target.agentKey(), nudgequeue.StatePath(target.cityPath), queuedNudgeDowngradeNote(target, undelivered))
+		"Queued nudge for %s in %s%s%s\n",
+		target.agentKey(), nudgequeue.StatePath(target.cityPath), queuedNudgeDowngradeNote(target, undelivered),
+		target.nudgePathSuffix())
 	return 0
 }
 

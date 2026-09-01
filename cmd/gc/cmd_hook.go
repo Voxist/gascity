@@ -685,7 +685,16 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		discovered, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, run)
 		if err != nil {
 			emitFailure(workQuery, err)
-			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
+			// Same store-unavailable classification the read path applies. This
+			// is the form agents actually run in the dispatch loop, so without
+			// the token here a transport-class failure is still indistinguishable
+			// from "no work" to every consumer that matches on it — the dead-drop
+			// the token exists to close.
+			if classified := classifyWorkQueryStoreUnavailable(err); errors.Is(classified, beads.ErrStoreUnavailable) {
+				fmt.Fprintf(stderr, "gc hook --claim: %s: %v\n", hookStoreUnavailableToken, classified) //nolint:errcheck // best-effort stderr
+			} else {
+				fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
+			}
 			// Deliberately NO drain result and NO drain-ack. A failed read is not
 			// an idle store: the controller counted demand for this seat, so
 			// draining here would convert a transport failure into a false idle,
@@ -907,40 +916,12 @@ var hookWorkQueryTimeout = 150 * time.Second
 // short bounded interval so startup hooks cannot strand sessions behind a
 // wedged data-plane command.
 func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), hookWorkQueryTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
-	cmd.WaitDelay = 2 * time.Second
-	prepareProviderOpCommand(cmd)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	cmd.Env = workQueryEnvForDir(env, dir)
-	disableProductMetricsForChild(cmd)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if ctx.Err() == context.DeadlineExceeded {
-		// Wrap context.DeadlineExceeded so callers can classify the timeout as
-		// transient (dispatch.IsTransientControllerError / errors.Is). Without
-		// this, a work-query timeout reads as an opaque fatal error and kills
-		// long-running consumers like the control-dispatcher --follow loop even
-		// though the timeout is just transient bead-store load. The human-facing
-		// "timed out after" text is preserved.
-		msg := strings.TrimSpace(string(out))
-		if msg != "" {
-			return string(out), fmt.Errorf("running work query %q: timed out after %s with partial stdout %q: %w", command, hookWorkQueryTimeout, msg, context.DeadlineExceeded)
-		}
-		return "", fmt.Errorf("running work query %q: timed out after %s: %w", command, hookWorkQueryTimeout, context.DeadlineExceeded)
-	}
-	if err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg != "" {
-			return "", fmt.Errorf("running work query %q: %w: %s", command, err, msg)
-		}
-		return "", fmt.Errorf("running work query %q: %w", command, err)
-	}
-	return string(out), nil
+	// Delegates so there is exactly ONE work-query body. The two used to be
+	// verbatim copies differing only in the trailing stderr forward, including
+	// the load-bearing context.DeadlineExceeded wrapping that lets callers
+	// classify a timeout as transient — a fix to one would silently not reach
+	// the other. io.Discard drops the diagnostics this caller does not want.
+	return shellWorkQueryWithEnvDiag(command, dir, env, io.Discard)
 }
 
 // workQueryEnvForDir ensures the subprocess environment does not carry a

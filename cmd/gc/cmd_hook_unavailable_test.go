@@ -93,3 +93,37 @@ func TestClassifyWorkQueryStoreUnavailable(t *testing.T) {
 		}
 	}
 }
+
+// TestClaimHookStoreUnavailableEmitsToken pins the token on the --claim path.
+//
+// --claim is the form agents run in the dispatch loop, so this is where a
+// transport-class failure most needs to be distinguishable from "no work". The
+// token lived only on the read path (doHook) until this was added, which left
+// the dead-drop open on exactly the path that matters.
+func TestClaimHookStoreUnavailableEmitsToken(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+
+	failing := func(string, string, []string) (string, error) {
+		return "", fmt.Errorf("running work query %q: %w", "bd ready --json",
+			errors.New("exit status 1: Error: dial tcp 127.0.0.1:3307: connection refused"))
+	}
+
+	code := claimHookWorkWithRunner(
+		"bd ready --json", "", nil,
+		[]hookStore{{dir: ""}},
+		hookClaimOptions{Assignee: "worker"},
+		hookClaimOps{},
+		failing,
+		func(string, error) {},
+		&stdout, &stderr,
+	)
+
+	if code == 0 {
+		t.Fatalf("claim hook returned 0 on a transport failure; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), hookStoreUnavailableToken) {
+		t.Fatalf("claim path did not emit %s on a transport-class failure; a dead store is still "+
+			"indistinguishable from a drained queue on the path agents actually run:\nstderr=%q",
+			hookStoreUnavailableToken, stderr.String())
+	}
+}
