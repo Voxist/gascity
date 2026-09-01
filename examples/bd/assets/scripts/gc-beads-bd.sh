@@ -2522,13 +2522,28 @@ ensure_current_era_version_witness() {
         return 0
     fi
 
+    # [0-9v]: bd's own writeLocalVersion and classifyVersionWitness accept a
+    # v-prefixed value (release tooling can stamp `v1.2.2`), so a digit-only
+    # pattern would yield empty and silently skip the stamp -- leaving the
+    # opaque "legacy Dolt server workspace" failure with nothing explaining it.
     local version
-    version=$(bd version 2>/dev/null | sed -n 's/^bd version \([0-9][^ ]*\).*/\1/p')
+    version=$(bd version 2>/dev/null | sed -n 's/^bd version \([0-9v][^ ]*\).*/\1/p')
     case "$version" in
-        "" | 0.*) return 0 ;;
+        "")
+            echo "warning: could not parse a version from 'bd version'; not stamping ${witness}. If bd init now fails with 'legacy Dolt server workspace detected', that is why." >&2
+            return 0
+            ;;
+        0.* | v0.*)
+            # Pre-1.0 bd: the guard's own era test would call this legacy, so
+            # leave the decision to bd rather than stamping past it.
+            echo "warning: bd reports pre-1.0 version '${version}'; not stamping ${witness} (leaving the legacy-workspace guard to decide)." >&2
+            return 0
+            ;;
     esac
 
-    ( umask 077 && printf '%s\n' "$version" > "$witness" ) 2>/dev/null || return 0
+    if ! ( umask 077 && printf '%s\n' "$version" > "$witness" ) 2>/dev/null; then
+        echo "warning: could not write ${witness}; if bd init fails with 'legacy Dolt server workspace detected', an unwritable .beads is why." >&2
+    fi
     return 0
 }
 

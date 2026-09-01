@@ -198,17 +198,11 @@ jobs:
       - name: Build local images
         run: |
           set -euo pipefail
-          # set -a: deps.env assignments must reach the ENVIRONMENT of the
-          # scripts below, not just this shell. install-bd-archive.sh reads
-          # BD_SOURCE_REF/BD_REPO from the environment to take the
-          # build-from-source bridge path; without them it treats BD_VERSION
-          # as a release tag. BD_VERSION is currently v1.2.2, which is ALSO a
-          # real published beads release on a different lineage carrying
-          # schema 0053 -- so a plain `. ./deps.env` here silently installs the
-          # wrong binary through the unpinned API fallback.
-          set -a
+          # No `set -a` here: this step runs no installer, and its only use of
+          # deps.env is the shell expansion below, which needs no export. An
+          # export block here would be inert -- and would let a step-scoped
+          # guard pass vacuously on the step that actually matters.
           . ./deps.env
-          set +a
           docker build \
             -f contrib/k8s/Dockerfile.base \
             --build-arg DOLT_VERSION="$DOLT_VERSION" \

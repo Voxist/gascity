@@ -233,18 +233,29 @@ func TestBDVersionPins(t *testing.T) {
 	}
 }
 
-// TestDepsEnvSourcingExportsBridgePins proves that any workflow which sources
-// deps.env and then runs install-bd-archive.sh actually EXPORTS the bridge
-// pins. `. ./deps.env` alone makes BD_SOURCE_REF/BD_REPO shell variables, not
-// environment variables, and install-bd-archive.sh reads them from the
-// environment to choose the build-from-source path. Without them it falls back
-// to treating BD_VERSION as a release tag -- and BD_VERSION is currently
-// v1.2.2, which is ALSO a real published beads release on a different lineage
-// carrying schema 0053, so the miss installs the wrong binary through the
-// unpinned API fallback rather than failing loudly.
+// TestDepsEnvSourcingExportsBridgePins proves that the workflow STEP which
+// runs install-bd-archive.sh also EXPORTS the bridge pins it sources.
+//
+// Sourcing deps.env with a bare `. ./deps.env` makes BD_SOURCE_REF/BD_REPO
+// shell variables, not environment variables, and install-bd-archive.sh reads
+// them from the environment to choose the build-from-source path. Without them
+// it treats BD_VERSION as a release tag -- and BD_VERSION is v1.2.2, which is
+// ALSO a real published beads release on a different lineage carrying schema
+// 0053, so the miss silently installs the wrong binary through the forbidden
+// API digest fallback rather than failing loudly.
+//
+// The scan is per-STEP, not per-file. A file-level check passes vacuously:
+// container-scan.yml has more than one step that sources deps.env, and only
+// one runs the installer, so an unrelated step's `set -a` would satisfy a
+// whole-file scan while the step that matters had lost its own. Verified by
+// deleting only the installer step's directive -- a file-scoped version of
+// this test stayed green.
 func TestDepsEnvSourcingExportsBridgePins(t *testing.T) {
 	root := repoRoot(t)
 	dir := filepath.Join(root, ".github", "workflows")
+	// Any sourcing form, not just the literal `. ./deps.env`: `source`, and a
+	// path spelled through a variable, must trip the same requirement.
+	sourcesDepsEnv := regexp.MustCompile(`(?m)^\s*(\.|source)\s+\S*deps\.env\b`)
 	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -259,34 +270,65 @@ func TestDepsEnvSourcingExportsBridgePins(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		body := string(content)
-		if !strings.Contains(body, "install-bd-archive.sh") {
-			return nil
-		}
-		if !strings.Contains(body, ". ./deps.env") {
-			return nil
-		}
-		// Match the DIRECTIVE, not the substring: a comment explaining the
-		// rule also contains "set -a", and a substring check would happily
-		// accept a file whose comment survived while the directive was
-		// deleted. Only a real `set -a` line counts.
-		hasDirective := false
-		for _, line := range strings.Split(body, "\n") {
-			if strings.TrimSpace(line) == "set -a" {
-				hasDirective = true
-				break
+		rel, _ := filepath.Rel(root, path)
+		for _, step := range splitWorkflowSteps(string(content)) {
+			if !strings.Contains(step.body, "install-bd-archive.sh") {
+				continue
 			}
-		}
-		if !hasDirective {
-			rel, _ := filepath.Rel(root, path)
-			t.Errorf("%s sources deps.env and runs install-bd-archive.sh but never uses `set -a`; "+
-				"BD_SOURCE_REF/BD_REPO stay shell-local and the installer silently takes the release path", rel)
+			if !sourcesDepsEnv.MatchString(step.body) {
+				// Pins arrive some other way (job-level env:); nothing to require.
+				continue
+			}
+			hasDirective := false
+			for _, line := range strings.Split(step.body, "\n") {
+				if strings.TrimSpace(line) == "set -a" {
+					hasDirective = true
+					break
+				}
+			}
+			if !hasDirective {
+				t.Errorf("%s:%d the step that runs install-bd-archive.sh sources deps.env without `set -a`; "+
+					"BD_SOURCE_REF/BD_REPO stay shell-local and the installer silently takes the release path",
+					rel, step.line)
+			}
 		}
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("walk workflows: %v", err)
 	}
+}
+
+type workflowStep struct {
+	line int
+	body string
+}
+
+// splitWorkflowSteps chops a workflow into step-sized chunks on `- name:`
+// boundaries. This is deliberately a text split rather than a YAML parse: the
+// check only needs to keep one step's shell lines from vouching for another's,
+// and a chunk that is too large would reintroduce exactly the vacuous pass
+// this test exists to prevent.
+func splitWorkflowSteps(content string) []workflowStep {
+	lines := strings.Split(content, "\n")
+	boundary := regexp.MustCompile(`^\s*-\s+name:\s`)
+	var steps []workflowStep
+	cur := workflowStep{line: 1}
+	var buf []string
+	for i, line := range lines {
+		if boundary.MatchString(line) && len(buf) > 0 {
+			cur.body = strings.Join(buf, "\n")
+			steps = append(steps, cur)
+			cur = workflowStep{line: i + 1}
+			buf = nil
+		}
+		buf = append(buf, line)
+	}
+	if len(buf) > 0 {
+		cur.body = strings.Join(buf, "\n")
+		steps = append(steps, cur)
+	}
+	return steps
 }
 
 // TestScanPinAssignments proves the workflow pin scanner catches the partial
