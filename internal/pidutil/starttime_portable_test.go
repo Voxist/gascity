@@ -82,14 +82,20 @@ func TestPSStartTimeReturnsIdentity(t *testing.T) {
 // caller start a second copy alongside it. So an unreadable identity keeps the
 // Alive answer, exactly as the pre-existing doc comment promises.
 func TestAliveWithStartTime_UnreadableIdentityKeepsAliveAnswer(t *testing.T) {
-	if runtime.GOOS == "linux" {
-		t.Skip("on linux /proc answers directly, so a ps stub cannot make the identity unreadable")
-	}
 	binDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(binDir, "ps"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile(ps): %v", err)
 	}
 	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
+
+	// Stubbing ps only makes the identity unreadable on a host with no kernel
+	// process record to read: linux answers from /proc and darwin from
+	// sysctl(kern.proc.pid), so there the premise does not exist. Probe for the
+	// condition instead of naming platforms, so this keeps testing what it says
+	// it tests as mechanisms are added.
+	if _, err := StartTime(os.Getpid()); err == nil {
+		t.Skipf("%s answers StartTime from a kernel process record, so a ps stub cannot make the identity unreadable", runtime.GOOS)
+	}
 
 	if !AliveWithStartTime(os.Getpid(), "some-captured-identity") {
 		t.Fatal("AliveWithStartTime = false when the identity is unreadable; a live process must not be reported dead")

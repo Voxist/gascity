@@ -28,6 +28,12 @@ const (
 const psCmdlineTimeout = time.Second
 
 // Alive reports whether a PID exists and is not a zombie.
+//
+// The zombie check reads /proc where it exists, a kernel process record via
+// sysctl on darwin, and only then falls back to a ps subprocess. The fallback
+// is last because it fails open — a ps that misses its deadline reports "not a
+// zombie", i.e. alive — and on a host saturated with fork/exec that happens
+// often enough to make callers that poll Alive for a process to exit flaky.
 func Alive(pid int) bool {
 	if pid <= 0 {
 		return false
@@ -39,6 +45,9 @@ func Alive(pid int) bool {
 	statPath := filepath.Join("/proc", strconv.Itoa(pid), "stat")
 	data, err := os.ReadFile(statPath)
 	if err != nil {
+		if dead, known := procStateDead(pid); known {
+			return !dead
+		}
 		return !psReportsZombie(pid)
 	}
 	fields := strings.Fields(string(data))
@@ -53,12 +62,18 @@ func Alive(pid int) bool {
 // recycled PID from the original target. The kernel never reuses a (pid,
 // starttime) pair for the lifetime of a boot, so a changed start time on the
 // same PID proves the original process is gone and an unrelated one now holds
-// the number. Where /proc is unavailable (e.g. darwin) it falls back to ps,
-// which reports a wall-clock start date rather than jiffies; the token is
-// opaque and only ever compared against another read the same way on the same
-// host, so the differing format does not matter. It returns an error only when
-// neither mechanism can answer; callers treat that as "no identity signal
-// available" and fall back to plain liveness.
+// the number. Where /proc is unavailable it reads the kernel process record via
+// sysctl on darwin and otherwise falls back to ps, which reports a wall-clock
+// start date rather than jiffies; the token is opaque and only ever compared
+// against another read the same way on the same host, so the differing format
+// does not matter. It returns an error only when neither mechanism can answer;
+// callers treat that as "no identity signal available" and fall back to plain
+// liveness.
+//
+// The ps fallback is last for the reason given on Alive, plus one of its own:
+// `ps -o lstart=` resolves to the second, so two processes that occupy the same
+// recycled PID within the same second produce the same token and the reuse
+// guard aliases them. The sysctl path reports microseconds.
 //
 // The comm field (field 2) is wrapped in parens and may itself contain spaces
 // and parens, so parsing anchors on the final ')' and counts fields from
@@ -70,6 +85,9 @@ func StartTime(pid int) (string, error) {
 	}
 	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
 	if err != nil {
+		if token, ok := procStartTime(pid); ok {
+			return token, nil
+		}
 		return psStartTime(pid)
 	}
 	stat := string(data)
