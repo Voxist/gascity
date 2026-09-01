@@ -2493,6 +2493,45 @@ run_bd_pinned() {
     )
 }
 
+# bd >= 1.2 refuses to open a server-mode workspace that has a .beads/dolt root
+# but no .beads/.local_version witness: it classifies that shape as a pre-1.0
+# "legacy Dolt server workspace" and demands an explicit cross-era migration.
+# GC provisions the dolt root itself -- the managed Dolt server materializes it
+# before `bd init` ever runs -- so a freshly provisioned scope trips the guard
+# with nothing legacy involved, and city init dies with
+# "legacy Dolt server workspace detected; explicit migration is required".
+#
+# The witness records which bd last touched the workspace, so stamping the bd
+# about to run is the truthful value, not a bypass. Both safety conditions are
+# checked here rather than assumed from the call site.
+ensure_current_era_version_witness() {
+    local dir="$1"
+    local dolt_database="$2"
+    local witness="$dir/.beads/.local_version"
+
+    # Never overwrite an existing witness: the file is a ONE-SHOT upgrade
+    # signal bd consumes to drive its version-bump reconciliation, so
+    # rewriting it would silently swallow a pending migration.
+    [ -e "$witness" ] && return 0
+    [ -d "$dir/.beads" ] || return 0
+
+    # Positive evidence this is not the shape the guard protects. A populated
+    # legacy workspace has bd tables; if the schema is already present we must
+    # leave the guard to make its own decision.
+    if bd_runtime_schema_ready "$dolt_database" 2>/dev/null; then
+        return 0
+    fi
+
+    local version
+    version=$(bd version 2>/dev/null | sed -n 's/^bd version \([0-9][^ ]*\).*/\1/p')
+    case "$version" in
+        "" | 0.*) return 0 ;;
+    esac
+
+    ( umask 077 && printf '%s\n' "$version" > "$witness" ) 2>/dev/null || return 0
+    return 0
+}
+
 run_bd_init_pinned() {
     local dir="$1"
     local prefix="$2"
@@ -2850,6 +2889,7 @@ op_init() {
     # visible issue prefix, while `--database` tells bd which existing Dolt
     # database to initialize. Without `--database`, bd can seed beads_<prefix>
     # and leave the pinned database schema-less.
+    ensure_current_era_version_witness "$dir" "$dolt_database"
     run_bd_init_pinned "$dir" "$prefix" "$dolt_database" "$host" "${bd_init_force:+true}"
 
     # Re-register post-init: if bd init didn't catalog-register the DB

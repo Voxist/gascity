@@ -72,13 +72,15 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	const (
 		// FORK DIVERGENCE — FORK-FIRST BRIDGE (ga-zzcjs; supersedes the
 		// ADR-0026 C5 upstream bridge). The image builds bd from the
-		// Voxist/beads fork tip (schema 0062 plus fork-only fixes; the
-		// 0054->0062 store migration was rehearsed and cut over
+		// Voxist/beads fork tip (schema 0066 plus fork-only fixes; the
+		// 0062->0066 store migration was rehearsed and cut over
 		// deliberately). go.mod links BD_LIB_REF — the fork tip's newest
 		// upstream ancestor — because fork commits do not resolve on the
 		// module path. These values move together with deps.env and go.mod;
-		// a published release >= 0062 on a module-resolvable repo retires
-		// the bridge (one change: BD_VERSION=tag, drop the refs).
+		// a published release >= 0066 on a module-resolvable repo retires
+		// the bridge (one change: BD_VERSION=tag, drop the refs). Note the
+		// existing upstream v1.2.2 TAG is not such a release: it sits on a
+		// different lineage at schema 0053.
 		// BD_VERSION itself is NOT diverged — the pinned commit declares 1.2.2.
 		bdSourceRef    = "3e03250ee1675ebcd63ca3f5d1660560947eab7c"
 		bdSourceSHA256 = "587ad18b765d90e75b64ca4bb57c12520befd8bece96545d48e98add26bc8f0f"

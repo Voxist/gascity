@@ -176,7 +176,17 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # set -a: deps.env assignments must reach the ENVIRONMENT of the
+          # scripts below, not just this shell. install-bd-archive.sh reads
+          # BD_SOURCE_REF/BD_REPO from the environment to take the
+          # build-from-source bridge path; without them it treats BD_VERSION
+          # as a release tag. BD_VERSION is currently v1.2.2, which is ALSO a
+          # real published beads release on a different lineage carrying
+          # schema 0053 -- so a plain `. ./deps.env` here silently installs the
+          # wrong binary through the unpinned API fallback.
+          set -a
           . ./deps.env
+          set +a
           bin_dir="${RUNNER_TEMP}/gascity-container-scan-bin"
           mkdir -p "$bin_dir"
           BD_INSTALL_BIN_DIR="$bin_dir" .github/scripts/install-bd-archive.sh "$BD_VERSION"
@@ -188,7 +198,17 @@ jobs:
       - name: Build local images
         run: |
           set -euo pipefail
+          # set -a: deps.env assignments must reach the ENVIRONMENT of the
+          # scripts below, not just this shell. install-bd-archive.sh reads
+          # BD_SOURCE_REF/BD_REPO from the environment to take the
+          # build-from-source bridge path; without them it treats BD_VERSION
+          # as a release tag. BD_VERSION is currently v1.2.2, which is ALSO a
+          # real published beads release on a different lineage carrying
+          # schema 0053 -- so a plain `. ./deps.env` here silently installs the
+          # wrong binary through the unpinned API fallback.
+          set -a
           . ./deps.env
+          set +a
           docker build \
             -f contrib/k8s/Dockerfile.base \
             --build-arg DOLT_VERSION="$DOLT_VERSION" \

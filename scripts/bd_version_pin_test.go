@@ -233,6 +233,62 @@ func TestBDVersionPins(t *testing.T) {
 	}
 }
 
+// TestDepsEnvSourcingExportsBridgePins proves that any workflow which sources
+// deps.env and then runs install-bd-archive.sh actually EXPORTS the bridge
+// pins. `. ./deps.env` alone makes BD_SOURCE_REF/BD_REPO shell variables, not
+// environment variables, and install-bd-archive.sh reads them from the
+// environment to choose the build-from-source path. Without them it falls back
+// to treating BD_VERSION as a release tag -- and BD_VERSION is currently
+// v1.2.2, which is ALSO a real published beads release on a different lineage
+// carrying schema 0053, so the miss installs the wrong binary through the
+// unpinned API fallback rather than failing loudly.
+func TestDepsEnvSourcingExportsBridgePins(t *testing.T) {
+	root := repoRoot(t)
+	dir := filepath.Join(root, ".github", "workflows")
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if ext := filepath.Ext(path); ext != ".yml" && ext != ".yaml" {
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		body := string(content)
+		if !strings.Contains(body, "install-bd-archive.sh") {
+			return nil
+		}
+		if !strings.Contains(body, ". ./deps.env") {
+			return nil
+		}
+		// Match the DIRECTIVE, not the substring: a comment explaining the
+		// rule also contains "set -a", and a substring check would happily
+		// accept a file whose comment survived while the directive was
+		// deleted. Only a real `set -a` line counts.
+		hasDirective := false
+		for _, line := range strings.Split(body, "\n") {
+			if strings.TrimSpace(line) == "set -a" {
+				hasDirective = true
+				break
+			}
+		}
+		if !hasDirective {
+			rel, _ := filepath.Rel(root, path)
+			t.Errorf("%s sources deps.env and runs install-bd-archive.sh but never uses `set -a`; "+
+				"BD_SOURCE_REF/BD_REPO stay shell-local and the installer silently takes the release path", rel)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk workflows: %v", err)
+	}
+}
+
 // TestScanPinAssignments proves the workflow pin scanner catches the partial
 // drift a file-level presence check missed: a stale BD_VERSION sharing a file
 // with a correct one is still reported with its line, while a

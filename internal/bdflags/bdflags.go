@@ -3,7 +3,9 @@
 // and the gc lint check that validates bd invocations embedded in prompt
 // templates, so the two call sites cannot drift apart from each other.
 //
-// Sourced from bd <sub> --help output (2026-07-13, bd v1.1.0).
+// Sourced from bd <sub> --help output (2026-07-13, bd v1.1.0); kept current
+// against the pinned bd by TestBdFlagManifestCurrent (latest: bd 1.2.2 at
+// 3e03250ee, 2026-09-01).
 package bdflags
 
 import "sort"
@@ -154,12 +156,16 @@ var boolFlagsBySub = map[string]map[string]bool{
 		"--cascade": true, "--dry-run": true, "-f": true, "--force": true,
 	},
 	"ready": {
+		// --brief added 2026-09-01 against bd 3e03250ee (schema-0066 repin).
+		"--brief": true,
 		"--claim": true, "--explain": true, "--gated": true, "--include-deferred": true,
 		"--include-ephemeral": true, "--plain": true, "--pretty": true, "-u": true, "--unassigned": true,
 	},
 	"list": {
-		"--deps": true,
-		"--all":  true, "--deferred": true, "--empty-description": true, "--flat": true,
+		// --brief added 2026-09-01 against bd 3e03250ee (schema-0066 repin).
+		"--brief": true,
+		"--deps":  true,
+		"--all":   true, "--deferred": true, "--empty-description": true, "--flat": true,
 		"--include-ephemeral": true,
 		"--include-gates":     true, "--include-infra": true, "--include-templates": true,
 		"--long": true, "--no-assignee": true, "--no-labels": true, "--no-pager": true,
@@ -168,7 +174,9 @@ var boolFlagsBySub = map[string]map[string]bool{
 		"--skip-labels": true, "--tree": true, "-w": true, "--watch": true,
 	},
 	"show": {
-		"--children": true, "--current": true, "--include-comments": true,
+		// --brief-deps added 2026-09-01 against bd 3e03250ee (schema-0066 repin).
+		"--brief-deps": true,
+		"--children":   true, "--current": true, "--include-comments": true,
 		"--include-dependents": true, "--local-time": true, "--long": true,
 		"--refs": true, "--short": true, "--thread": true, "-w": true, "--watch": true,
 	},

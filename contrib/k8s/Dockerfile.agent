@@ -41,9 +41,11 @@ ARG XTEXT_VERSION=0.40.0
 # required. Both must be >= what the pinned source already declares — pinning
 # BELOW it silently downgrades the shipped binary (and drags x/net and x/crypto
 # back with it), which neither post-build assertion would catch. At
-# BD_SOURCE_REF 3e03250ee that floor is grpc 1.83.0 and x/text 0.40.0. Rebuild the exact released source with its production
-# CGO/pure-Go-regex configuration and release identity, changing only the
-# patched dependency versions.
+# BD_SOURCE_REF 3e03250ee that floor is grpc 1.83.0 and x/text 0.40.0.
+#
+# Rebuild the pinned fork source with its production CGO/pure-Go-regex
+# configuration and release identity, changing only the patched dependency
+# versions. (Pinned fork commit, not a published release.)
 RUN mkdir -p /src/bd /out \
     && curl -fsSL --retry 3 \
        "https://github.com/${BD_REPO}/archive/${BD_SOURCE_REF}.tar.gz" \
