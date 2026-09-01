@@ -207,6 +207,16 @@ func rigLocalDoltPIDFromSQLServerInfo(rigPath string) (pid int, port int, infoEx
 		return parsed, parsedPort, true, false
 	}
 	// Membership, not equality — see portHolderPIDs.
-	held, _ := portHeldByPID(strconv.Itoa(parsedPort), parsed)
-	return parsed, parsedPort, true, held
+	//
+	// Unknown is treated as BLOCKING. The probe cannot always answer: when
+	// /proc/net/tcp* is readable but the rig-local Dolt's /proc/<pid>/fd is not
+	// (a different uid), portHolderPIDsFromProc reports "checked, no holders" and
+	// the lsof fallback never runs. Discarding `known` there read that as "not
+	// held", cleared liveRigLocalBlocking, and let CanFix/Fix re-pin the rig
+	// port file at the managed city port while a rig-local server was in fact
+	// listening — precisely the case CanFix's own doc says must be left to the
+	// operator. A live pid on that port that we cannot prove is NOT holding it
+	// must not be fixed over.
+	held, known := portHeldByPID(strconv.Itoa(parsedPort), parsed)
+	return parsed, parsedPort, true, held || !known
 }

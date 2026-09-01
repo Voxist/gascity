@@ -184,7 +184,15 @@ func TestProcCmdlinePreservesArgumentsContainingSpaces(t *testing.T) {
 		t.Skip("kern.procargs2 is darwin-only; other platforms read /proc or ps")
 	}
 
-	const spacey = "sleep 60"
+	// A COMPOUND command, on purpose. POSIX shells exec-optimize a single
+	// simple command: `sh -c "sleep 60"` replaces itself with `sleep 60` and
+	// argv becomes ["sleep","60"] within milliseconds. With that subject this
+	// test only passed by winning a microsecond-scale race against the shell's
+	// exec — spawnProcess breaks on the FIRST successful Cmdline read, i.e. the
+	// pre-exec shell argv — and under load it lost. `sleep 60; :` cannot be
+	// exec-optimized, so the shell stays resident with its spacey argument for
+	// the whole test.
+	const spacey = "sleep 60; :"
 	pid := spawnProcess(t, "sh", "-c", spacey)
 
 	argv, ok := procCmdline(pid)

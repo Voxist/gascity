@@ -1735,8 +1735,18 @@ func validPublishedManagedDoltDoctorState(cityPath string, state managedDoltDoct
 	}
 	_ = conn.Close()
 	// Membership, not equality — see managedDoltDoctorPortHeldByPID.
-	if held, known := managedDoltDoctorPortHeldByPID(state.Port, state.PID); known {
-		return held
+	//
+	// Only a POSITIVE membership answer short-circuits. A negative one — even a
+	// "known" negative — still falls through to runtime ownership, because the
+	// port probes can be confidently wrong about a server they cannot see: an
+	// unprivileged lsof omits a socket owned by another uid, and /proc/net/tcp
+	// briefly shows no LISTEN row across a rebind. Before membership, the /proc
+	// walk returned "no holder" in those cases and the code fell through to
+	// managedDoltDoctorProcessOwnsRuntime, which reads the world-readable
+	// /proc/<pid>/cmdline and confirmed ownership; a managed Dolt started under a
+	// different uid than `gc doctor` must keep that path.
+	if held, known := managedDoltDoctorPortHeldByPID(state.Port, state.PID); known && held {
+		return true
 	}
 	return managedDoltDoctorProcessOwnsRuntime(state.PID, dataDir, resolveManagedDoltConfigPath(cityPath))
 }
@@ -1824,7 +1834,12 @@ func managedDoltDoctorPortHeldByPIDFromProc(port uint16, pid int) (held, checked
 		return false, false
 	}
 	if len(inodes) == 0 {
-		return false, true
+		// No LISTEN row is not evidence the pid does not hold the port: the
+		// caller dialed it successfully a moment ago, and a rebind or a socket
+		// in a netns this reader cannot see both present exactly this way.
+		// Report unknown, matching cmd/gc's portHeldByPID, so the runtime
+		// ownership fallback still runs.
+		return false, false
 	}
 	fdDir := filepath.Join("/proc", strconv.Itoa(pid), "fd")
 	fds, err := os.ReadDir(fdDir)

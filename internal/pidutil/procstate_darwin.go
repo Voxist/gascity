@@ -129,6 +129,15 @@ func procCmdline(pid int) ([]string, bool) {
 	}
 	rest = rest[end:]
 
+	// Bound argc by what is actually left before trusting it as a capacity.
+	// Every argument occupies at least its NUL terminator, so a well-formed
+	// buffer can never claim more arguments than remaining bytes; a short or
+	// malformed buffer with a large argc (0x7FFFFFFF) would otherwise allocate a
+	// multi-GB slice header before the parse loop ever got a chance to bail.
+	if argc > len(rest) {
+		return nil, false
+	}
+
 	argv := make([]string, 0, argc)
 	for len(argv) < argc {
 		i := 0
