@@ -207,11 +207,12 @@ for bad_case in "empty:" "zero:0" "negative:-1" "nonnumeric:abc"; do
         assert_contains "tunables.max_concurrent_${bad_name}_warns_by_name" "$TUNE_OUT" "PUSH_GATE_MAX_CONCURRENT"
     fi
 done
-# Host-scaled default (ga-4h8bu): with PUSH_GATE_MAX_CONCURRENT unset, the cap
-# is 4 on hosts with >=16 hardware threads and 2 below, read through the
-# shared gc_detect_cpus detector — so the GC_TEST_LOCAL_CPUS pin makes the
-# default testable on any host. Observed behaviorally: acquire until denied.
-for cpu_case in "16:4" "32:4" "8:2" "2:2"; do
+# Budget-derived default (ga-4h8bu): with PUSH_GATE_MAX_CONCURRENT unset, the
+# cap is test-local-job-count / 4 clamped to [1, 4]; the GC_TEST_LOCAL_CPUS
+# pin flows through the job-count helper, so the default is testable on any
+# host (memory here is not the binding factor). Observed behaviorally:
+# acquire until denied.
+for cpu_case in "16:4" "32:4" "8:2" "2:1"; do
     cpus="${cpu_case%%:*}"
     want="${cpu_case#*:}"
     CAP_OUT="$(LIB="$LIB" DIR="$WORK/hostcap-$cpus" GC_TEST_LOCAL_CPUS="$cpus" \

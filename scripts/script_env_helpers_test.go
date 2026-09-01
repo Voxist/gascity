@@ -88,3 +88,22 @@ func makeCommand(args ...string) *exec.Cmd {
 func testCommand(name string, args ...string) *exec.Cmd {
 	return exec.Command(name, args...)
 }
+
+func makeTargetBody(t *testing.T, makefile, target string) string {
+	t.Helper()
+	prefix := target + ":"
+	start := strings.Index(makefile, "\n"+prefix)
+	if start >= 0 {
+		start++
+	} else if strings.HasPrefix(makefile, prefix) {
+		start = 0
+	}
+	if start < 0 {
+		t.Fatalf("Makefile has no %s target", target)
+	}
+	body := makefile[start:]
+	if next := strings.Index(body, "\n## "); next >= 0 {
+		body = body[:next]
+	}
+	return body
+}

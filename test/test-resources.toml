@@ -19,16 +19,7 @@ resource = "subprocess"
 # one file. The gate's audible refusal is only observable by executing the
 # generated work_query script in a real shell; asserting on the string would
 # pin the script's text rather than its behavior.
-# 560 -> 561 (2026-09-01, execgrace lost-first-interrupt fix ga-rilhb):
-# internal/execgrace/apply_unix_test.go adds one subprocess site — the
-# regression test for re-signal escalation must run a real shell whose inner
-# process deterministically loses the first SIGINT; signal delivery to a
-# process group is only observable by executing one.
-# 562 -> 561 (2026-09-01, PR #141 round 2): the lost-interrupt re-signal
-# machinery was retired (one-interrupt-then-quiet-grace is the contract; the
-# lost-signal state is not observable from outside), and its regression
-# test's subprocess site went with it. The quiet-grace pin test remains.
-baseline_calls = 561
+baseline_calls = 560
 baseline_files = 169
 reported_calls = 495
 reported_files = 135
