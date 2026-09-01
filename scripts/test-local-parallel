@@ -186,10 +186,10 @@ add_unit_core_job() {
   #
   # Validation applies ONLY to a user-supplied override; the computed default
   # is clamped, never rejected. LOCAL_TEST_JOBS=1 is legal (and what
-  # test-local-job-count emits on low-memory hosts), and 1/2 == 0 used to trip
+  # test-local-job-count's low-memory floor yields), and 1/2 == 0 used to trip
   # the positivity check BEFORE the min-2 clamp four lines later could fix it,
-  # bricking the pre-push gate on exactly the constrained machines the
-  # job-count logic serves — while blaming an env var the user never set.
+  # bricking the pre-push gate on exactly the constrained machines that
+  # job-sizing logic serves — while blaming an env var the user never set.
   local unit_core_p
   if [[ -n "${GC_TEST_UNIT_CORE_P:-}" ]]; then
     unit_core_p="$GC_TEST_UNIT_CORE_P"
@@ -209,11 +209,14 @@ add_unit_core_job() {
   # a green gate that ran nothing, the exact silent-rot class
   # test-tier-coverage.sh exists to catch (post-merge review of #139,
   # reproduced: exit 0, "? github.com/gastownhall/gascity [no test files]").
+  # Flags live in one assignment so the budget guards
+  # (test_local_parallel_budget_test.go) can parse them: -count=1 defeats
+  # result caching, -timeout ${go_test_timeout} shares the cmd/gc shards'
+  # budget instead of inheriting Go's 10m default (ga-9au), and the explicit
+  # -p overrides GOFLAGS by go's documented rule.
+  local unit_core_go_flags="-p ${unit_core_p} -count=1 -timeout ${go_test_timeout}"
   add_job "unit-core" \
-    'GC_FAST_UNIT=1; pkgs=$(./scripts/test-tier-packages unit-core) && [ -n "$pkgs" ] || { echo "unit-core: test-tier-packages produced no packages" >&2; exit 1; }; GC_FAST_UNIT=1 go test -p '"${unit_core_p}"' -count=1 -timeout '"${go_test_timeout}"' $pkgs'
-    # MERGE NOTE: the guarded-pkgs structure and explicit -p are the tier-hotfix
-    # side; ${go_test_timeout} is this branch's upstream-resync side (upstream
-    # parameterized the timeout). Union of intents.
+    'GC_FAST_UNIT=1; pkgs=$(./scripts/test-tier-packages unit-core) && [ -n "$pkgs" ] || { echo "unit-core: test-tier-packages produced no packages" >&2; exit 1; }; GC_FAST_UNIT=1 go test '"${unit_core_go_flags}"' $pkgs'
 }
 
 # Direct shell job for the same resourcecensus reason as the selftests below:
