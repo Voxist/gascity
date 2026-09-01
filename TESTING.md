@@ -553,8 +553,15 @@ processes.
 Use these as the default entry points:
 
 ```bash
-# Fast unit baseline, with cmd/gc split into shards.
+# Fast unit baseline. unit-core is split into package-list shards
+# (UNIT_CORE_TOTAL, default 4) and cmd/gc into test shards
+# (CMD_GC_PROCESS_TOTAL, default 6). See "Fast-tier contract" below for what
+# this tier deliberately excludes.
 make test-fast-parallel
+
+# Only the packages a change can affect. Local iteration aid, not a gate; see
+# "Affected tests" below for its limits.
+make test-affected
 
 # Full process-backed cmd/gc suite, sharded.
 make test-cmd-gc-process-parallel
@@ -575,8 +582,63 @@ If memory cannot be detected, they use three jobs. An explicit override always
 wins:
 
 ```bash
-LOCAL_TEST_JOBS=48 CMD_GC_PROCESS_TOTAL=12 make test-local-full-parallel
+LOCAL_TEST_JOBS=48 CMD_GC_PROCESS_TOTAL=12 UNIT_CORE_TOTAL=8 make test-local-full-parallel
 ```
+
+#### Fast-tier contract
+
+The fast tier is the pre-push gauntlet and the `Check` lane, so its wall time
+is paid on every push by every agent. Its contract is: unit proofs only, no
+package that spawns real servers or drives full pipelines.
+
+Three packages are excluded from `unit-core` on that basis and run in the
+integration tier instead (`ga-4h8bu`, measured 2026-09-01):
+
+| Package | Fast-tier cost | Why it is integration-weight |
+| --- | --- | --- |
+| `examples/bd/dolt` | 562.9s | spawns real `dolt sql-server` processes |
+| `examples/gastown` | 445.3s | full pipeline shell tests |
+| `scripts` | 390.5s | drives real tooling end to end |
+
+That is ~23 minutes of CPU that used to sit inside the tier named fast, and
+sharding alone cannot absorb it: round-robin still lands `examples/bd/dolt`
+whole on one shard, so the critical path stayed ~9 minutes regardless of shard
+count. With the re-tiering and four `unit-core` shards, the tier dropped from
+8m27s to 4m20s on a 16-core machine, measured under higher load than the
+baseline.
+
+This is a re-tiering, not a coverage cut. The integration tier's
+`packages-core-N-of-4` shards enumerate `go list ./...` (minus
+`test/integration`, `cmd/gc`, and `internal/runtime/tmux`) and run it with
+`-tags integration`. All three packages are in that enumeration, and build tags
+only add files, so the integration run is a superset of the untagged fast-tier
+run. Verify with `./scripts/test-integration-shard packages-core-1-of-4`.
+Moving a package between tiers must keep this superset property; a package
+that leaves the fast tier and is not picked up by an integration bucket is a
+coverage regression, which is exactly what the 2026-07-15 thinner-gate lesson
+was about.
+
+The `unit-core` shard helper, `scripts/test-go-package-shard`, is a
+package-list shard and so cannot reuse `scripts/test-go-test-shard`, which
+slices the tests within a single package. Assignment is round-robin over the
+sorted package list: deterministic, so a package lands on the same shard every
+run and Go's build cache stays warm. The runner executes jobs under macOS's
+bash 3.2; the helper is written for that, not for the author's shell.
+
+#### Affected tests
+
+`make test-affected` runs `go test` over only the packages a change can
+affect. It shares `diff_records()` and `affected_package_args()` with
+`lint-affected` in `scripts/ci-static-select`, so its selection rules —
+embedded files, native consumers, and the fall-back-to-`./...` cases — are the
+same as the static lane's rather than a second, weaker implementation.
+
+It is a speed aid for the local iteration loop, not a gate. The pre-push
+gauntlet and CI still run the full tiers, so a selection miss costs time, never
+correctness. Its value also varies with what changed: it is narrow for a leaf
+package and broad for a widely-depended-on one, because reverse dependents are
+included. Touching `internal/deps`, for example, selects most of the tree. Use
+it for the edit-test loop; use the tier runners before pushing.
 
 For one package, shard top-level Go tests directly:
 
