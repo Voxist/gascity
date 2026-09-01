@@ -35,7 +35,11 @@ const (
 	// Re-derived for the fork-first bd repin (ga-zzcjs): BD_REPO joins
 	// BD_SOURCE_REF as a job-level env key at every pin site, so the shape
 	// moves again — deliberately.
-	expectedCIExecutionHash     = "05bef7bc82a0a2b11958464e540158b95fe55b48e72d2bd6729d9cef3e137160"
+	// Re-derived for the schema-0066 bd repin: BD_SOURCE_REF's VALUE moves at all
+	// 12 job-level pin sites (a75c226c9 -> 3e03250ee). Env values, not just env
+	// keys, are part of the execution shape, so this pin moves on a pure value
+	// change too — correct behavior, not noise.
+	expectedCIExecutionHash     = "fab0f6df78d47cdab8de4316fbbd82e10b9048de2d65481fd8440525810a2ab9"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
@@ -43,7 +47,9 @@ const (
 	// pin is an independent tripwire and must be re-derived on its own.
 	// Nightly re-derived with the same fork-first repin (BD_REPO env key at
 	// its two pin sites).
-	expectedNightlyExecutionHash = "8ee360a0c8d9aa9fe3d129f48a7b62c06dcb2092d3a7ceecbffdec20a641eda3"
+	// Nightly moves for the same schema-0066 repin (BD_SOURCE_REF value at its
+	// two pin sites).
+	expectedNightlyExecutionHash = "733bf7d111b3fa67ffc47222d352057ff5062bc4ce0afce144932f125c6a3a47"
 	expectedSetupActionHash      = "b7864038195cd054aee7fccfa903cab335b375bcab1a35239c17c5da7d32c07e"
 )
 

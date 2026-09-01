@@ -216,6 +216,21 @@ func TestBDVersionPins(t *testing.T) {
 	// assignment in both .yml and .yaml workflows: a file-level presence check
 	// would let a stale pin ride along beside a correct one.
 	assertWorkflowPins(t, root, "BD_VERSION", bdVersion)
+
+	// BD_VERSION alone is not enough. In bridge mode the workflows do not
+	// install a release: install-bd-archive.sh reads BD_SOURCE_REF verbatim and
+	// BUILDS bd from that commit, so a stale cell here ships CI a different bd
+	// than deps.env names while BD_VERSION still matches everywhere. That is not
+	// hypothetical — a 0062->0066 repin moved BD_VERSION at all 12 sites and
+	// left all 12 BD_SOURCE_REF cells on the old schema-0062 commit, and this
+	// test passed. BD_REPO decides which repo that commit is fetched from, so it
+	// pins for the same reason.
+	if bdSourceRef != "" {
+		assertWorkflowPins(t, root, "BD_SOURCE_REF", bdSourceRef)
+	}
+	if bdRepo := env["BD_REPO"]; bdRepo != "" {
+		assertWorkflowPins(t, root, "BD_REPO", bdRepo)
+	}
 }
 
 // TestScanPinAssignments proves the workflow pin scanner catches the partial

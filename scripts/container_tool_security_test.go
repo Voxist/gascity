@@ -85,7 +85,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		bdBuild        = "3e03250ee"
 		bdBranch       = "HEAD"
 		grpcVersion    = "1.83.0"
-		xtextVersion   = "0.39.0"
+		xtextVersion   = "0.40.0"
 	)
 
 	root := repoRoot(t)

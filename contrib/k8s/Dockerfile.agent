@@ -19,12 +19,14 @@ ARG BASE_IMAGE=gc-agent-base:latest
 
 FROM golang:1.26.5-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651 AS bd-builder
 
-# TIME-BOXED BRIDGE (ADR-0026 C5, vp-kpoi) — keep in lockstep with deps.env.
-# BD_VERSION is the version string the pinned source declares; BD_SOURCE_REF is
-# the commit built from. Upstream's ref (8e4e59d39) tops out at schema migration
-# 0053, but gc's linked beads library carries 0054, so a 0053 bd in this image
-# would skew from the linked lib. Repointed at the same commit go.mod pins.
-# Revert all three to upstream's values once a release carries 0054.
+# FORK-FIRST BRIDGE (supersedes the ADR-0026 C5 upstream bridge; ga-zzcjs) —
+# keep in lockstep with deps.env. BD_VERSION is the version string the pinned
+# source declares; BD_SOURCE_REF is the commit built from. No published
+# upstream release carries schema 0066 yet, so this image builds bd from the
+# Voxist/beads fork tip, whose newest upstream ancestor (BD_LIB_REF
+# d530cddfa64b) is the commit gc's go.mod links — same schema, no skew.
+# Retire the bridge once a release >= 0066 exists on a module-resolvable repo:
+# set BD_VERSION to that tag and drop BD_SOURCE_REF/BD_SOURCE_SHA256.
 ARG BD_VERSION=v1.2.2
 ARG BD_REPO=Voxist/beads
 ARG BD_SOURCE_REF=3e03250ee1675ebcd63ca3f5d1660560947eab7c
@@ -32,13 +34,14 @@ ARG BD_SOURCE_SHA256=587ad18b765d90e75b64ca4bb57c12520befd8bece96545d48e98add26b
 ARG BD_BUILD=3e03250ee
 ARG BD_BRANCH=HEAD
 ARG GRPC_VERSION=1.83.0
-ARG XTEXT_VERSION=0.39.0
+ARG XTEXT_VERSION=0.40.0
 
-# The published bd 1.1.0 binary embeds vulnerable grpc-go 1.80.0 and
-# golang.org/x/text 0.36.0 (CVE-2026-56852; the require line reads 0.35.0, MVS
-# resolves 0.36.0). bd resolves x/text through the beads module graph, not this
-# repo's, so the gc go.mod bump does not reach it and the override below is
-# required. Rebuild the exact released source with its production
+# bd resolves grpc and x/text through the beads module graph, not this repo's,
+# so gc's own go.mod bumps do not reach this image and the overrides below are
+# required. Both must be >= what the pinned source already declares — pinning
+# BELOW it silently downgrades the shipped binary (and drags x/net and x/crypto
+# back with it), which neither post-build assertion would catch. At
+# BD_SOURCE_REF 3e03250ee that floor is grpc 1.83.0 and x/text 0.40.0. Rebuild the exact released source with its production
 # CGO/pure-Go-regex configuration and release identity, changing only the
 # patched dependency versions.
 RUN mkdir -p /src/bd /out \
