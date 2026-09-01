@@ -19,7 +19,12 @@ resource = "subprocess"
 # one file. The gate's audible refusal is only observable by executing the
 # generated work_query script in a real shell; asserting on the string would
 # pin the script's text rather than its behavior.
-baseline_calls = 560
+# 560 -> 561 (2026-09-01, execgrace lost-first-interrupt fix ga-rilhb):
+# internal/execgrace/apply_unix_test.go adds one subprocess site — the
+# regression test for re-signal escalation must run a real shell whose inner
+# process deterministically loses the first SIGINT; signal delivery to a
+# process group is only observable by executing one.
+baseline_calls = 561
 baseline_files = 169
 reported_calls = 495
 reported_files = 135
