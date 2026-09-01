@@ -27,18 +27,27 @@ module="github.com/gastownhall/gascity"
 # cmd/gc has its own six fast shards (unit-cmd-gc-N-of-6), so excluding it
 # here loses nothing within the fast tier itself.
 #
-# The three heavy packages are integration-weight workloads (real dolt
-# servers, full pipeline shell tests) measured at 562.9s, 445.3s and 390.5s —
-# ~23 minutes of CPU that made the tier named "fast" take ~20 minutes and
-# serialized the fleet through the push gate (ga-4h8bu). They still run, with
-# MORE coverage (GC_FAST_UNIT=0 plus -tags integration), in the integration
-# tier's packages-core shards; scripts/test-tier-coverage.sh proves that on
-# every fast run.
+# The heavy packages are integration-weight workloads (real dolt servers,
+# full pipeline shell tests) measured at 562.9s and 445.3s — CPU that made the
+# tier named "fast" take ~20 minutes and serialized the fleet through the push
+# gate (ga-4h8bu). They still run, with MORE coverage (GC_FAST_UNIT=0 plus
+# -tags integration), in the integration tier's packages-core shards;
+# scripts/test-tier-coverage.sh proves that on every fast run.
+#
+# The scripts package is NOT excluded: it holds the guard/contract tests for
+# the push machinery itself (push_ownership_guard_test.go,
+# precommit_contract_test.go, the bd/dolt version pins), and de-gating those
+# meant a commit breaking the push hook's own guards passed the local gate
+# (post-merge review of #139, finding 4). Its slow pipeline tests (~95% of
+# its former 390.5s: pr_static_scope_contract, makefile_cgo, lint_readonly,
+# docker_session_protocol, go_test_observable, makefile_install, and one
+# extracted ci_critical_path test) carry //go:build integration, so the fast
+# tier runs only the cheap guards and the integration packages-core shards
+# run everything.
 unit_core_excludes=(
   "${module}/cmd/gc"
   "${module}/examples/bd/dolt"
   "${module}/examples/gastown"
-  "${module}/scripts"
 )
 
 # Packages excluded from the INTEGRATION tier's packages-core shards. Each has

@@ -1,3 +1,5 @@
+//go:build integration
+
 package scripts_test
 
 import (
@@ -12,37 +14,6 @@ import (
 	"strings"
 	"testing"
 )
-
-type observableTimingArtifact struct {
-	Schema     int                    `json:"schema"`
-	ShardID    string                 `json:"shard_id"`
-	Variant    string                 `json:"variant"`
-	CommitSHA  string                 `json:"commit_sha"`
-	Workflow   string                 `json:"workflow"`
-	RunID      string                 `json:"run_id"`
-	RunAttempt string                 `json:"run_attempt"`
-	Job        string                 `json:"job"`
-	Runner     observableTimingRunner `json:"runner"`
-	Units      []observableTimingUnit `json:"units"`
-}
-
-type observableTimingRunner struct {
-	Label    string `json:"label"`
-	Name     string `json:"name"`
-	OS       string `json:"os"`
-	Arch     string `json:"arch"`
-	CPUCount int    `json:"cpu_count"`
-}
-
-type observableTimingUnit struct {
-	UnitID          string  `json:"unit_id"`
-	Kind            string  `json:"kind"`
-	Package         string  `json:"package"`
-	Test            string  `json:"test"`
-	Subtest         string  `json:"subtest"`
-	Outcome         string  `json:"outcome"`
-	DurationSeconds float64 `json:"duration_seconds"`
-}
 
 func TestGoTestObservableDefaultLogPathIsUnique(t *testing.T) {
 	repoRoot := repoRoot(t)
@@ -329,21 +300,6 @@ exit 99
 		t.Fatalf("run observable: %v\n%s", err, out)
 	}
 	return exitErr.ExitCode(), out
-}
-
-func replaceScriptEnv(env []string, key, value string) []string {
-	prefix := key + "="
-	result := env[:0]
-	for _, entry := range env {
-		if !strings.HasPrefix(entry, prefix) {
-			result = append(result, entry)
-		}
-	}
-	return append(result, key+"="+value)
-}
-
-func scriptCommand(repoRoot, name string, args ...string) *exec.Cmd {
-	return exec.Command(filepath.Join(repoRoot, "scripts", name), args...)
 }
 
 func runObservableTestLogPath(t *testing.T, repoRoot, tmpDir string) string {

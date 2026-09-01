@@ -930,7 +930,7 @@ from real regressions.
 
 `scripts/test-local-parallel` — the one place all four heavy targets
 (`fast`, `cmd-gc-process`, `integration`, `full`) funnel through — acquires
-one of `PUSH_GATE_MAX_CONCURRENT` (default 2) numbered `flock(1)` slots
+one of `PUSH_GATE_MAX_CONCURRENT` (default 4, from the measured 2026-09-01 concurrency sweep on ga-4h8bu: the 6-way level crossed the 2.5x degradation knee, 4-way did not) numbered `flock(1)` slots
 under `<city_root>/.gc/gate-slots` (or, outside a city, the repository's
 common git dir — `<repo>/.git/gate-slots` in a normal clone, and the one
 shared common dir for all of a repo's linked worktrees) before running any
