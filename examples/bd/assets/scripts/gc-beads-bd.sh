@@ -2481,6 +2481,23 @@ run_bd_pinned() {
     (
         cd "$dir" || exit 1
         export BEADS_DIR="$beads_dir"
+        # Declare the shared server. Every bd invocation through this wrapper
+        # targets GC's managed Dolt server, so this is a statement of fact, not
+        # a flag to dodge a check -- and bd needs the fact.
+        #
+        # bd >= 1.2's legacy-workspace guard has a second branch beside the
+        # server-mode one: when the scope config reads embedded (or is empty)
+        # while a .beads/dolt root exists, it refuses with "legacy Dolt
+        # workspace detected". A managed scope can present exactly that shape
+        # mid-recovery -- e.g. after a hard kill and port rebind, which is what
+        # TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind covers.
+        # The only escape in that branch is doltserver.IsSharedServerMode(),
+        # which reads this variable.
+        #
+        # This does NOT blind the guard: it still refuses when the version
+        # witness names a genuinely legacy 0.55-0.62 server, because that arm
+        # is `IsSharedServerMode() && !(present && legacyServerVersion())`.
+        export BEADS_DOLT_SHARED_SERVER=1
         export GC_DOLT_HOST="$host"
         export BEADS_DOLT_SERVER_HOST="$host"
         export GC_DOLT_PORT="$DOLT_PORT"
