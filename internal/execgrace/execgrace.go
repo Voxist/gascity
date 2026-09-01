@@ -78,6 +78,13 @@ func InterruptThenKill(cmd *exec.Cmd, accepted *atomic.Bool) func() error {
 		err := interruptProcessGroup(cmd)
 		if err == nil {
 			accepted.Store(true)
+			// One interrupt is a one-shot race: it can land while the shell
+			// is inside its blocked-signal fork window, in which case the
+			// foreground child never sees it and the trap stays deferred
+			// behind the child's full runtime. Keep re-sending until the
+			// process is observed dead so delivery converges within the
+			// WaitDelay grace budget (see resignalUntilDone).
+			resignalUntilDone(cmd, cmd.WaitDelay)
 			return nil
 		}
 		if errors.Is(err, os.ErrProcessDone) {

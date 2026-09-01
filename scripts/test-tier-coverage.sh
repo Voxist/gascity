@@ -27,7 +27,13 @@ tiers="$repo_root/scripts/test-tier-packages"
 module="github.com/gastownhall/gascity"
 fail=0
 
-all_pkgs="$("$tiers" unit-core; "$tiers" unit-core-excludes)"
+# Two individually-checked substitutions: in the combined form
+# "$(a; b)" the exit status is b's alone, so a failure of the unit-core
+# printer while the pure-printf excludes succeeded went red with a ~190-line
+# membership diff pointing at tier lists instead of the actual helper failure.
+unit_core_pkgs="$("$tiers" unit-core)"
+unit_core_excl="$("$tiers" unit-core-excludes)"
+all_pkgs="$(printf '%s\n%s\n' "$unit_core_pkgs" "$unit_core_excl")"
 go_list="$(go list ./...)"
 
 # 1. The fast tier accounts for EVERY package: unit-core plus its documented

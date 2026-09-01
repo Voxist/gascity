@@ -10,7 +10,12 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 649
+# 649 -> 650 (2026-09-01, execgrace lost-first-interrupt fix ga-rilhb):
+# internal/execgrace/apply_unix_test.go adds one subprocess site — the
+# re-signal regression test must run a real shell whose inner process
+# deterministically loses the first SIGINT; group signal delivery is only
+# observable by executing one.
+baseline_calls = 650
 baseline_files = 189
 reported_calls = 495
 reported_files = 135
@@ -51,8 +56,12 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 434
-baseline_files = 128
+# 434/128 -> 431/125 (2026-09-01, ga-4h8bu scripts-package split):
+# six pipeline-heavy scripts test files moved behind //go:build integration,
+# taking their subprocess sites out of the untagged scope; banked per the
+# ratchet invariant.
+baseline_calls = 431
+baseline_files = 125
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
@@ -355,8 +364,10 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 427
-baseline_files = 124
+# 427/124 -> 425/122 (2026-09-01, ga-4h8bu scripts-package split):
+# same re-tag banked in the Small scope.
+baseline_calls = 425
+baseline_files = 122
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-80po0c.2.1"

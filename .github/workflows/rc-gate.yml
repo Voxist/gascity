@@ -49,7 +49,15 @@ jobs:
           - label: unit-core
             timeout_minutes: 20
             command: |
-              GC_FAST_UNIT=1 go test -timeout 8m $(go list ./... | grep -v '^github.com/gastownhall/gascity/cmd/gc$')
+              # Derived from the tier printer, not an inline list: the old
+              # grep-only-cmd/gc form still swept examples/bd/dolt (562.9s
+              # measured) against this job's own 8m per-binary timeout — an
+              # RC-gate red waiting on comparable hardware — and drifted from
+              # the local gate's membership with nothing to flag it. The
+              # non-empty guard mirrors scripts/test-local-parallel: go test
+              # with zero package args tests the repo root and reports ok.
+              pkgs=$(./scripts/test-tier-packages unit-core) && [ -n "$pkgs" ] || { echo "rc-gate: test-tier-packages produced no packages" >&2; exit 1; }
+              GC_FAST_UNIT=1 go test -count=1 -timeout 8m $pkgs
           - label: cmd-gc-1-of-6
             timeout_minutes: 20
             command: GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=20m ./scripts/test-go-test-shard ./cmd/gc 1 6

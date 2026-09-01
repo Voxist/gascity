@@ -5,6 +5,7 @@ package execgrace
 import (
 	"os"
 	"os/exec"
+	"time"
 )
 
 // setProcessGroup is a no-op on Windows, which has no POSIX process groups;
@@ -21,3 +22,8 @@ func interruptProcessGroup(cmd *exec.Cmd) error {
 	}
 	return cmd.Process.Signal(os.Interrupt)
 }
+
+// resignalUntilDone is a no-op on Windows: there is no process group to
+// re-signal, and cancellation already degrades to interrupt-then-Kill on the
+// leader alone.
+func resignalUntilDone(_ *exec.Cmd, _ time.Duration) {}
