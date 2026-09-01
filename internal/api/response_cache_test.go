@@ -202,6 +202,24 @@ func TestHandleStatusServesStaleAndRefreshesInBackground(t *testing.T) {
 		t.Fatalf("decode priming response: %v", err)
 	}
 
+	// The warm-StatusView path (vp-e0hv) is a THIRD fast cache this test
+	// predates and cannot disable through the two package vars above: priming
+	// populates it, and a freshly built warm body is served before the
+	// stale-while-revalidate branch this test exists to exercise is ever
+	// reached. That is why this test read 0 background rebuilds once the
+	// 2026-08-31 resync brought the two designs together.
+	//
+	// Clearing the warm entry puts this test back on the path it names, so the
+	// coalescing assertion below stays load-bearing instead of passing
+	// vacuously against a mechanism it does not measure. The warm path keeps
+	// its own coverage: TestHandleStatusRefreshesAgedWarmBody pins its
+	// background refresh (coalesced by buildAndStoreStatus's singleflight) and
+	// TestHandleStatusWarmServeReportsWarmBodyAgeWhenStoreIsFresh pins its
+	// staleness reporting.
+	srv.statusWarmMu.Lock()
+	srv.statusWarmFull = nil
+	srv.statusWarmMu.Unlock()
+
 	// Swap in a store that blocks List until released, then issue the
 	// cache-miss request. If the handler still blocks on a rebuild, this
 	// request hangs until the test's hang-guard fires; SWR must return

@@ -120,6 +120,11 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	// synchronous build is what made every cold `gc status` time out and fall
 	// back to the slow local probe. Refresh in the background once the body ages
 	// past statusWarmRefreshAfter; never block the request on the rebuild.
+	//
+	// This is the FIRST fast path after the bucket cache, above the TTL floor,
+	// deliberately: if the TTL floor answered first it would serve a body of
+	// almost the same age while skipping this branch, and statusWarmRefreshAfter
+	// would never fire.
 	if entry, ok := s.warmStatusBody(input.Lite); ok {
 		age := time.Since(entry.builtAt)
 		if age <= statusWarmServeMaxAge {
@@ -133,49 +138,61 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 			// replace-not-mutate, and nothing appends to a stored body. If a
 			// future handler enriches the body in place before serialization,
 			// clone here (matching response_cache.go's clone-on-read invariant).
+			//
 			// CacheAgeS reports the GREATER of the two staleness signals, the
-			// same rule the SWR path below applies: how long ago this warm
-			// entry was built, and the age of the CachingStore snapshot it was
-			// built from. Reporting only the store age hides the warm delay —
-			// statusWarmServeMaxAge is 5m while the CLI's staleness banner
-			// fires at 30s (cacheAgeBannerThresholdSeconds), so a
-			// minutes-old warm body sitting on a freshly reconciled store
-			// would report ~0 and silently suppress the banner on exactly the
-			// stale view the operator needs told about.
+			// same rule the SWR path below applies: how long ago this warm entry
+			// was built, and the age of the CachingStore snapshot it was built
+			// from. Reporting only the store age hides the warm delay —
+			// statusWarmServeMaxAge is 5m while the CLI's staleness banner fires
+			// at 30s (cacheAgeBannerThresholdSeconds), so a minutes-old warm body
+			// on a freshly reconciled store would report ~0 and silently suppress
+			// the banner on exactly the stale view the operator needs told about.
 			return &IndexOutput[StatusBody]{
 				Index:     index,
 				CacheAgeS: max(age.Seconds(), cacheAgeSeconds(store)),
 				Body:      entry.body,
 			}, nil
 		}
-		// Stale-while-revalidate (ra-4u2eqc): the bucket and TTL-floor caches
-		// both missed, so any entry that exists is older than
-		// statusResponseTTLFloor. buildStatusBody's fan-out (per-rig work
-		// counts, the session snapshot, StoreHealth's closed-history scan)
-		// measured ~3.65s on a 26-agent/1.2GB city — the same failure class
-		// that used to 503 the legacy runs/census endpoint at its internal
-		// budget. Rather than let a request pay that cost inline, serve the
-		// stale body immediately and refresh in the background so the next
-		// poll gets a fresh body. A genuine cold cache (nothing ever built)
-		// has nothing to serve here and falls through to the synchronous
-		// build below, same as before this change.
-		//
-		// CacheAgeS reports the GREATER of the two staleness signals: how
-		// long ago this response entry was built, and cacheAgeSeconds(store)
-		// — the age of the CachingStore snapshot the body was built from.
-		// Reporting only the response-entry age would let a recently built
-		// entry sitting on top of a lagging reconciler under-report true
-		// staleness and suppress the banner `gc status` renders above
-		// cacheAgeBannerThresholdSeconds; reporting only the store age would
-		// hide the SWR delay. The max preserves both.
-		if body, age, ok := staleResponseAs[StatusBody](s, cacheKey); ok {
-			s.refreshStatusResponseInBackground(cacheKey, input.Lite)
-			return &IndexOutput[StatusBody]{
-				Index:     index,
-				CacheAgeS: max(age.Seconds(), cacheAgeSeconds(store)),
-				Body:      body,
-			}, nil
-		}
+	}
+
+	// TTL-floor reuse (upstream): a body built within statusResponseTTLFloor is
+	// still good enough for a non-blocking caller once its time bucket rolled
+	// over. The 2026-08-31 resync dropped this, its only use site, leaving
+	// statusResponseTTLFloor declared, documented and inert.
+	if body, ok := cachedResponseWithinAgeAs[StatusBody](s, cacheKey, statusResponseTTLFloor); ok {
+		return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: body}, nil
+	}
+
+	// Stale-while-revalidate (ra-4u2eqc): the bucket, warm and TTL-floor caches
+	// all missed, so any entry that exists is older than statusResponseTTLFloor.
+	// buildStatusBody's fan-out (per-rig work counts, the session snapshot,
+	// StoreHealth's closed-history scan) measured ~3.65s on a 26-agent/1.2GB
+	// city — the same failure class that used to 503 the legacy runs/census
+	// endpoint at its internal budget. Rather than let a request pay that cost
+	// inline, serve the stale body immediately and refresh in the background so
+	// the next poll gets a fresh body. Concurrent misses coalesce onto one
+	// rebuild via beginResponseRefresh. A genuine cold cache (nothing ever
+	// built) has nothing to serve here and falls through to the synchronous
+	// build below.
+	//
+	// This sits at top level rather than inside the warm branch: nested there
+	// it was unreachable whenever no warm entry existed, which is exactly the
+	// cold-ish case it exists to cover.
+	//
+	// CacheAgeS reports the GREATER of the two staleness signals: how long ago
+	// this response entry was built, and cacheAgeSeconds(store) — the age of the
+	// CachingStore snapshot the body was built from. Reporting only the
+	// response-entry age would let a recently built entry sitting on top of a
+	// lagging reconciler under-report true staleness and suppress the banner
+	// `gc status` renders above cacheAgeBannerThresholdSeconds; reporting only
+	// the store age would hide the SWR delay. The max preserves both.
+	if body, age, ok := staleResponseAs[StatusBody](s, cacheKey); ok {
+		s.refreshStatusResponseInBackground(cacheKey, input.Lite)
+		return &IndexOutput[StatusBody]{
+			Index:     index,
+			CacheAgeS: max(age.Seconds(), cacheAgeSeconds(store)),
+			Body:      body,
+		}, nil
 	}
 
 	// No usable warm body (cold start or long idle): build synchronously once,
