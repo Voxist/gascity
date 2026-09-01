@@ -3,6 +3,7 @@
 package pidutil
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"syscall"
@@ -47,10 +48,100 @@ func procStateDead(pid int) (dead, known bool) {
 // process record. It replaces a `ps -o lstart=` subprocess that carries the same
 // starvation problem as procStateDead's, and whose one-second resolution cannot
 // distinguish a PID recycled within the same second from the original process.
+//
+// Measured on this host at load ~119: `ps -p PID -o lstart=` averages 6.9ms
+// (p95 10.3ms, max 24.3ms) against 162us (p95 335us, max 550us) for the sysctl,
+// and across 60 back-to-back spawns the sysctl produced 60 distinct tokens
+// where lstart produced 1 — 59 of the 60 processes were mutually
+// indistinguishable to the mechanism this replaces.
+//
+// The caller tags this value with startTimeMechSysctl; see StartTime for why a
+// token may never be compared against one produced by another mechanism.
 func procStartTime(pid int) (string, bool) {
 	kp, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
 	if err != nil || kp == nil {
 		return "", false
 	}
 	return fmt.Sprintf("%d.%06d", kp.Proc.P_starttime.Sec, kp.Proc.P_starttime.Usec), true
+}
+
+// procChildPIDs returns the live direct children of parent from the kernel
+// process table via sysctl(kern.proc.all), replacing a `ps -axo pid=,ppid=`
+// fork/exec. ok is false when the table cannot be read, which leaves the caller
+// on its portable ps fallback.
+//
+// kern.proc.ppid would answer this more narrowly, but darwin's
+// sysctlnametomib does not resolve that subname, so this filters the full
+// table. It costs ~8ms for ~1250 processes and still beats forking ps, which
+// must build and format the same table in a child process.
+//
+// Unlike the ps path there is no enumeration helper of our own in the result:
+// the syscall does not create a process, so a caller checking its own children
+// never has to exclude a probe that masqueraded as a leaked child.
+func procChildPIDs(parent int) ([]int, bool) {
+	all, err := unix.SysctlKinfoProcSlice("kern.proc.all")
+	if err != nil {
+		return nil, false
+	}
+	var children []int
+	for i := range all {
+		if int(all[i].Eproc.Ppid) == parent {
+			children = append(children, int(all[i].Proc.P_pid))
+		}
+	}
+	return children, true
+}
+
+// procCmdline returns pid's argv exactly, from sysctl(kern.procargs2).
+//
+// This is the mechanism the psCmdline doc comment describes as "KERN_PROCARGS2
+// via cgo, which is not worth it". It needs no cgo — unix.SysctlRaw resolves
+// the name — and it removes the accepted limitation that comment records: ps
+// renders argv as a single space-joined string, so an argument containing a
+// space is split in two and silently fails the match. This returns the
+// kernel's own NUL-separated argv, so spaces inside an argument survive.
+//
+// The buffer layout is: a native-endian int32 argc, the NUL-terminated
+// executable path, a run of NUL padding, then exactly argc NUL-terminated
+// argument strings (the environment follows, and is ignored). ok is false when
+// the buffer cannot be read or does not hold argc complete arguments — the
+// caller then falls back to ps rather than returning a truncated argv, because
+// a short argv fails the identity match and callers read a failed match as
+// "not my process".
+func procCmdline(pid int) ([]string, bool) {
+	buf, err := unix.SysctlRaw("kern.procargs2", pid)
+	if err != nil || len(buf) < 4 {
+		return nil, false
+	}
+	argc := int(binary.NativeEndian.Uint32(buf[:4]))
+	if argc <= 0 {
+		return nil, false
+	}
+	rest := buf[4:]
+
+	// Skip the executable path and the NUL padding that follows it.
+	end := 0
+	for end < len(rest) && rest[end] != 0 {
+		end++
+	}
+	for end < len(rest) && rest[end] == 0 {
+		end++
+	}
+	rest = rest[end:]
+
+	argv := make([]string, 0, argc)
+	for len(argv) < argc {
+		i := 0
+		for i < len(rest) && rest[i] != 0 {
+			i++
+		}
+		if i == len(rest) {
+			// Ran off the end without a terminator: argc arguments are not all
+			// present, so this read cannot be trusted as a complete argv.
+			return nil, false
+		}
+		argv = append(argv, string(rest[:i]))
+		rest = rest[i+1:]
+	}
+	return NormalizeArgv(argv), true
 }
