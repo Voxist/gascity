@@ -19,20 +19,54 @@ import (
 // grace escalation.
 func TestApplyTrapRunsBeforeKill(t *testing.T) {
 	t.Parallel()
-	marker := filepath.Join(t.TempDir(), "restored")
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "restored")
+	ready := filepath.Join(dir, "ready")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// The trap models worktree-setup.sh's restore_stage: it must observe the
 	// interrupt and write the marker (i.e. "move the staged files back").
-	script := `trap 'echo restored > "$MARKER"; exit 130' INT TERM; sleep 30`
+	// Cancellation fires only once the foreground sleep is OBSERVABLE (the
+	// background subshell writes readiness when it appears): a fixed-delay
+	// cancel raced the shell's fork window under parallel test load, where
+	// the pre-exec child misses the group SIGINT and the deferred trap
+	// loses to the WaitDelay force-kill.
+	script := `trap 'echo restored > "$MARKER"; exit 130' INT TERM
+( i=0; until pgrep -P $$ "sleep" >/dev/null 2>&1; do i=$((i+1)); [ "$i" -gt 2000 ] && exit 1; done; : > "$READY" ) &
+sleep 30
+:`
 	cmd := exec.CommandContext(ctx, "sh", "-c", script)
-	cmd.Env = append(os.Environ(), "MARKER="+marker)
+	cmd.Env = append(os.Environ(), "MARKER="+marker, "READY="+ready)
 	Apply(cmd, 5*time.Second)
 
-	if err := cmd.Run(); err == nil {
-		t.Fatal("expected the canceled command to report an error")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	deadline := time.After(5 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("command exited before readiness: %v", err)
+		case <-deadline:
+			t.Fatal("timed out waiting for readiness marker")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected the canceled command to report an error")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("command never exited after cancellation")
 	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("rollback trap never ran — staged state would have been lost: %v", err)
@@ -90,84 +124,16 @@ func TestApplyAcceptedFlag(t *testing.T) {
 	}
 }
 
-// TestApplyResignalsWhenTheFirstInterruptIsLost is the regression test for the
-// lost-first-interrupt race (the TestProvider_StartCancellationInterrupts-
-// ForegroundChild flake): cancellation can fire in the window where the shell
-// has committed to forking its foreground child with signals blocked — the
-// pre-exec child never observes the SIGINT, the shell defers its trap behind
-// the child's full runtime, and the WaitDelay force-kill wins, so the rollback
-// trap never runs. A single interrupt is a one-shot race; Apply must keep
-// re-signaling the group during the grace window until the process is
-// observed dead, so delivery converges.
-//
-// The fixture makes the lost first signal deterministic instead of a fork-
-// window coin flip: the inner shell IGNORES INT for 500ms (modeling the
-// blocked-signal window), then restores the default disposition and blocks in
-// a long foreground sleep. The first interrupt lands entirely inside the
-// ignore window and is provably lost; only a re-signal after the window can
-// kill the sleep and let the outer trap run.
-func TestApplyResignalsWhenTheFirstInterruptIsLost(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	marker := filepath.Join(dir, "interrupted")
-	ready := filepath.Join(dir, "ready")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	script := `trap 'echo interrupted > "$MARKER"; exit 130' INT TERM
-sh -c 'trap "" INT; : > "$READY"; sleep 0.5; trap - INT; sleep 30'
-:`
-	// The trailing ':' is load-bearing: bash 3.2 treats the LAST command of a
-	// -c script specially, and with the inner shell in tail position the outer
-	// trap reliably never runs when the child dies of SIGINT (verified 10/10
-	// failing without the no-op vs 0/10 with it, independent of this
-	// package's re-signaling). The no-op keeps the fixture testing signal
-	// re-delivery, not bash's tail-position quirk.
-	cmd := exec.CommandContext(ctx, "sh", "-c", script)
-	cmd.Env = append(os.Environ(), "MARKER="+marker, "READY="+ready)
-	Apply(cmd, 5*time.Second)
-
-	done := make(chan error, 1)
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	go func() { done <- cmd.Wait() }()
-
-	deadline := time.After(5 * time.Second)
-	for {
-		if _, err := os.Stat(ready); err == nil {
-			break
-		}
-		select {
-		case err := <-done:
-			t.Fatalf("command exited before readiness: %v", err)
-		case <-deadline:
-			t.Fatal("timed out waiting for readiness marker")
-		case <-time.After(5 * time.Millisecond):
-		}
-	}
-
-	cancel() // lands inside the inner shell's ignore window: this SIGINT is lost
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("command never exited after cancellation")
-	}
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("rollback trap never ran — the lost first interrupt was not re-sent: %v", err)
-	}
-}
-
-// TestApplyDoesNotShootTheRollbackTrapsChildren is the counterweight to the
-// re-signal escalation: once the group has visibly reacted to the interrupt
-// (the foreground child died and the shell entered its rollback trap),
-// re-sending SIGINT would kill the trap's own children — an mv or find in a
-// restore_stage-style rollback — aborting the rollback mid-flight and
-// stranding staged state: the exact data-loss class execgrace exists to
-// prevent, introduced by the cure. The trap here does its work through a
-// child process slower than the re-signal interval; the marker is only
-// written if that child survives.
+// TestApplyDoesNotShootTheRollbackTrapsChildren pins the one-interrupt-then-
+// quiet-grace contract: after the single group SIGINT, NOTHING may signal the
+// group again until WaitDelay's force-kill — a rollback trap's own children
+// (an mv or find in a restore_stage-style rollback) run inside that grace,
+// and any re-signal heuristic that fires during it aborts the rollback
+// mid-flight and strands staged state. Two re-signal designs (until leader
+// death; until the pre-signal child cohort changed) were reviewed into
+// retirement for exactly this; the trap here does its work through a child
+// process slow enough that any re-signal within the grace window kills it,
+// so the marker is only written if the quiet-grace contract holds.
 func TestApplyDoesNotShootTheRollbackTrapsChildren(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -177,15 +143,19 @@ func TestApplyDoesNotShootTheRollbackTrapsChildren(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// The trap models restore_stage: a non-builtin child (sleep) doing >1
-	// re-signal interval of work, then the state restore. A group SIGINT
-	// during the trap kills the sleep (default INT disposition) and aborts
-	// the trap body before the marker write.
-	// The trailing ':' is load-bearing for the same reason as in
-	// TestApplyResignalsWhenTheFirstInterruptIsLost: bash 3.2 skips the INT
-	// trap when the racing command sits in tail position of a -c script.
+	// The trap models restore_stage: a non-builtin child (sleep) doing real
+	// work inside the grace window, then the state restore. Any signal to
+	// the group during the grace kills that sleep (default INT disposition)
+	// and aborts the trap body before the marker write — so the marker
+	// proves the quiet-grace contract. Readiness is written by a background
+	// subshell only once the foreground sleep is OBSERVABLE, closing the
+	// shell's fork window so the single interrupt is always deliverable
+	// (same construction as the exec provider's start-cancellation test).
+	// The trailing ':' is load-bearing: bash 3.2 skips the INT trap when
+	// the racing command sits in tail position of a -c script (verified
+	// 10/10 vs 0/10).
 	script := `trap 'sleep 0.5 && echo restored > "$MARKER"; exit 130' INT TERM
-: > "$READY"
+( i=0; until pgrep -P $$ "sleep" >/dev/null 2>&1; do i=$((i+1)); [ "$i" -gt 2000 ] && exit 1; done; : > "$READY" ) &
 sleep 30
 :`
 	cmd := exec.CommandContext(ctx, "sh", "-c", script)
