@@ -4,7 +4,6 @@
 package scripts_test
 
 import (
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -90,39 +89,21 @@ func testCommand(name string, args ...string) *exec.Cmd {
 	return exec.Command(name, args...)
 }
 
-func filteredMakefileCGOTestEnv() []string {
-	env := os.Environ()
-	filtered := make([]string, 0, len(env))
-	for _, entry := range env {
-		if strings.HasPrefix(entry, "CGO_") {
-			continue
-		}
-		filtered = append(filtered, entry)
-	}
-	return filtered
-}
-
-func assertContains(t *testing.T, haystack, needle string) {
+func makeTargetBody(t *testing.T, makefile, target string) string {
 	t.Helper()
-	if !strings.Contains(haystack, needle) {
-		t.Fatalf("output missing %q:\n%s", needle, haystack)
+	prefix := target + ":"
+	start := strings.Index(makefile, "\n"+prefix)
+	if start >= 0 {
+		start++
+	} else if strings.HasPrefix(makefile, prefix) {
+		start = 0
 	}
-}
-
-func assertNotContains(t *testing.T, haystack, needle string) {
-	t.Helper()
-	if strings.Contains(haystack, needle) {
-		t.Fatalf("output contains %q:\n%s", needle, haystack)
+	if start < 0 {
+		t.Fatalf("Makefile has no %s target", target)
 	}
-}
-
-func lineWithPrefix(t *testing.T, output, prefix string) string {
-	t.Helper()
-	for _, line := range strings.Split(output, "\n") {
-		if strings.HasPrefix(line, prefix) {
-			return line
-		}
+	body := makefile[start:]
+	if next := strings.Index(body, "\n## "); next >= 0 {
+		body = body[:next]
 	}
-	t.Fatalf("output missing line prefix %q:\n%s", prefix, output)
-	return ""
+	return body
 }

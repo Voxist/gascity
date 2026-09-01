@@ -39,11 +39,10 @@ module="github.com/gastownhall/gascity"
 # precommit_contract_test.go, the bd/dolt version pins), and de-gating those
 # meant a commit breaking the push hook's own guards passed the local gate
 # (post-merge review of #139, finding 4). Its slow pipeline tests (~95% of
-# its former 390.5s: pr_static_scope_contract, makefile_cgo, lint_readonly,
-# docker_session_protocol, go_test_observable, makefile_install, and one
-# extracted ci_critical_path test) carry //go:build integration, so the fast
-# tier runs only the cheap guards and the integration packages-core shards
-# run everything.
+# its former cost) carry //go:build integration — the authoritative list is
+# `grep -l 'go:build integration' scripts/*_test.go` — so the fast tier
+# runs only the cheap guards and the integration packages-core shards run
+# everything.
 unit_core_excludes=(
   "${module}/cmd/gc"
   # internal/runtime/herdr fails whenever the herdr binary is absent, so it is

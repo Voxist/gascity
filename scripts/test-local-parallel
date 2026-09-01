@@ -197,9 +197,9 @@ add_unit_core_job() {
     fi
   else
     unit_core_p=$(( local_jobs / 2 ))
-  fi
-  if (( unit_core_p < 2 )); then
-    unit_core_p=2
+    if (( unit_core_p < 2 )); then
+      unit_core_p=2
+    fi
   fi
   # The package list is captured INSIDE the job so the printer's exit status
   # is honored (an unguarded $(...) in argument position discards it, and

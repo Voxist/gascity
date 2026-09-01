@@ -101,7 +101,7 @@
 #       (NFR4 fallback, never /tmp — see AGENTS.md Build Cache Conventions).
 #       Does not create the directory (push_gate_acquire_slot does).
 #   push_gate_acquire_slot <slot_dir> <fd_out_var> [holder_label]
-#       Reads tunables from env: PUSH_GATE_MAX_CONCURRENT (default 4 on hosts with >=16 hardware threads, else 2),
+#       Reads tunables from env: PUSH_GATE_MAX_CONCURRENT (default: test-local-job-count / 4, clamped to [1, 4]),
 #       PUSH_GATE_MAX_WAIT_SECONDS (default 600), PUSH_GATE_POLL_SECONDS
 #       (default 15); each is validated and falls back to its default on a
 #       malformed value. holder_label defaults to
@@ -242,9 +242,6 @@ _push_gate_fd_in_use() {
 # Print a validated numeric tunable. $1 = env var name, $2 = documented
 # default, $3 = minimum allowed value. A malformed value is reported by name
 # and replaced by the default, so it never reaches arithmetic or `sleep`.
-# shellcheck source=lib/cpu-count.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cpu-count.sh"
-
 _push_gate_tunable() {
     local _pgt_name="$1" _pgt_default="$2" _pgt_min="$3"
     local _pgt_value="${!_pgt_name:-$_pgt_default}"
@@ -281,22 +278,24 @@ push_gate_acquire_slot() {
     fi
 
     local _pgl_max _pgl_max_wait _pgl_poll
-    # The default scales with host capacity: 4 on >=16 hardware threads —
-    # from a measured concurrency sweep of the fast suite on the 16-core
-    # fleet host (ga-4h8bu: 4-way ran at 2.11x solo wall with the healthiest
-    # CPU profile; 6-way crossed the degradation knee at 2.78x) — and the
-    # prior conservative 2 on anything smaller, where the sweep's numbers
-    # do not transfer. Latency per gated push is the cost that matters (an
-    # agent blocks on it), so the cap sits below the knee, not at peak
-    # aggregate throughput. PUSH_GATE_MAX_CONCURRENT overrides either way.
-    local _pgl_default_max=2
-    local _pgl_ncpu
-    # Canonical detector shared with test-local-job-count (honors the
-    # GC_TEST_LOCAL_CPUS pin); an invalid pin degrades to the conservative
-    # default, matching how the other tunables treat malformed values.
-    _pgl_ncpu="$(gc_detect_cpus 2>/dev/null || echo 0)"
-    if [[ "$_pgl_ncpu" =~ ^[0-9]+$ ]] && (( _pgl_ncpu >= 16 )); then
-        _pgl_default_max=4
+    # The default derives from the SAME budget each gated invocation sizes
+    # itself with — scripts/test-local-job-count (CPU count, the 4 GiB-per-job
+    # memory budget, cgroup limits, Linux load-awareness, and the
+    # GC_TEST_LOCAL_CPUS pin all flow in from there): slots = jobs / 4,
+    # clamped to [1, 4]. A gate is jobs x ~2.8 GiB test binaries, so the
+    # slot count must shrink with the per-gate job count or a memory-bound
+    # host oversubscribes RAM four ways. The upper clamp is the measured
+    # ceiling on the 16-core fleet host (ga-4h8bu: 4-way ran at 2.11x solo
+    # wall; 6-way crossed the degradation knee) and is what a future sweep
+    # moves. Latency per gated push is the cost that matters (an agent
+    # blocks on it). PUSH_GATE_MAX_CONCURRENT overrides the derivation.
+    local _pgl_default_max=1
+    local _pgl_jobs
+    _pgl_jobs="$("$(dirname "${BASH_SOURCE[0]}")/test-local-job-count" 2>/dev/null || echo 0)"
+    if [[ "$_pgl_jobs" =~ ^[0-9]+$ ]]; then
+        _pgl_default_max=$(( _pgl_jobs / 4 ))
+        (( _pgl_default_max < 1 )) && _pgl_default_max=1
+        (( _pgl_default_max > 4 )) && _pgl_default_max=4
     fi
     _pgl_max="$(_push_gate_tunable PUSH_GATE_MAX_CONCURRENT "$_pgl_default_max" 1)"
     _pgl_max_wait="$(_push_gate_tunable PUSH_GATE_MAX_WAIT_SECONDS 600 0)"
