@@ -201,10 +201,11 @@ add_unit_core_job() {
   if (( unit_core_p < 2 )); then
     unit_core_p=2
   fi
-  # The package list is captured and checked non-empty INSIDE the job: an
-  # unguarded $(...) in argument position discards the printer's failure, and
-  # `go test` with zero package args tests only the repo root and reports ok —
-  # a green gate that ran nothing.
+  # The package list is captured INSIDE the job so the printer's exit status
+  # is honored (an unguarded $(...) in argument position discards it, and
+  # `go test` with zero package args tests only the repo root and reports
+  # ok — a green gate that ran nothing). The printer refuses to emit an
+  # empty tier, so the status check is the whole guard.
   # Flags live in one assignment so the budget guards
   # (test_local_parallel_budget_test.go) can parse them: -count=1 defeats
   # result caching (upstream policy, guard-mandated), -timeout
@@ -212,7 +213,7 @@ add_unit_core_job() {
   # explicit -p overrides GOFLAGS by go's documented rule.
   local unit_core_go_flags="-p ${unit_core_p} -count=1 -timeout ${go_test_timeout}"
   add_job "unit-core" \
-    'pkgs=$(./scripts/test-tier-packages unit-core) && [ -n "$pkgs" ] || { echo "unit-core: test-tier-packages produced no packages" >&2; exit 1; }; GC_FAST_UNIT=1 go test '"${unit_core_go_flags}"' $pkgs'
+    'pkgs=$(./scripts/test-tier-packages unit-core) || exit 1; GC_FAST_UNIT=1 go test '"${unit_core_go_flags}"' $pkgs'
 }
 
 # Direct shell job for the same resourcecensus reason as the selftests below:

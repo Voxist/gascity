@@ -40,7 +40,12 @@ const (
 	// from the candidate digest this package printed for the merged workflow,
 	// not from either side. The trigger pins below did not move — triggers
 	// merged to a shape identical to both sides, so they were left alone.
-	expectedCIExecutionHash     = "590f1f7feebd98cc2752db2163803213e618e8d83872918eb7924fb08e0f87f8"
+	// Re-derived once more for the ga-4h8bu scripts split (PR #141 round 2):
+	// the integration changes-filter widens to scripts/** so plain
+	// shell-script PRs trigger the shards that are the -tags integration
+	// tests' only CI home — a deliberate execution-shape change, pinned from
+	// the digest printed for the merged (resync + split) workflow.
+	expectedCIExecutionHash     = "efad32c36fdc35a7de9f9d8d9d5b14c35ab201da9ab17309b25d3745e7654d84"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
@@ -133,10 +138,11 @@ var requiredFilterPaths = map[string][]string{
 		".github/workflows/**",
 		"Makefile",
 		"**/*.go",
-		"scripts/test-integration-shard",
-		"scripts/test-go-test-shard",
-		"scripts/runtime-tmux-tests.manifest",
-		"scripts/go-test-observable",
+		// The whole scripts/ tree (subsumes the formerly named runner
+		// scripts): the scripts package's -tags integration tests have the
+		// integration shards as their only CI home, so a PR touching any
+		// plain shell script there must trigger them (ga-4h8bu split).
+		"scripts/**",
 		"examples/gastown/**",
 	},
 	"openclaw_bridge": {"contrib/openclaw-bridge/**", ".github/workflows/**"},

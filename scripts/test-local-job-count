@@ -19,18 +19,11 @@ fail() {
   exit 1
 }
 
-detect_cpus() {
-  if [[ -n "${GC_TEST_LOCAL_CPUS:-}" ]]; then
-    [[ "$GC_TEST_LOCAL_CPUS" =~ ^[0-9]+$ && "$GC_TEST_LOCAL_CPUS" -gt 0 ]] ||
-      fail "GC_TEST_LOCAL_CPUS must be a positive integer"
-    printf '%s\n' "$GC_TEST_LOCAL_CPUS"
-    return
-  fi
+# shellcheck source=lib/cpu-count.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cpu-count.sh"
 
-  nproc 2>/dev/null ||
-    getconf _NPROCESSORS_ONLN 2>/dev/null ||
-    sysctl -n hw.ncpu 2>/dev/null ||
-    printf '8\n'
+detect_cpus() {
+  gc_detect_cpus || fail "GC_TEST_LOCAL_CPUS must be a positive integer"
 }
 
 cgroup_remaining_kib() {

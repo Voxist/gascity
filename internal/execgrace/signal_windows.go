@@ -5,7 +5,6 @@ package execgrace
 import (
 	"os"
 	"os/exec"
-	"time"
 )
 
 // setProcessGroup is a no-op on Windows, which has no POSIX process groups;
@@ -22,10 +21,3 @@ func interruptProcessGroup(cmd *exec.Cmd) error {
 	}
 	return cmd.Process.Signal(os.Interrupt)
 }
-
-// preSignalCohort and resignalWhileUnchanged are no-ops on Windows: there is
-// no process group to observe or re-signal, and cancellation already degrades
-// to interrupt-then-Kill on the leader alone.
-func preSignalCohort(_ *exec.Cmd) map[int]bool { return nil }
-
-func resignalWhileUnchanged(_ *exec.Cmd, _ time.Duration, _ map[int]bool) {}

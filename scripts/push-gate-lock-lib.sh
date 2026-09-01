@@ -242,6 +242,9 @@ _push_gate_fd_in_use() {
 # Print a validated numeric tunable. $1 = env var name, $2 = documented
 # default, $3 = minimum allowed value. A malformed value is reported by name
 # and replaced by the default, so it never reaches arithmetic or `sleep`.
+# shellcheck source=lib/cpu-count.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cpu-count.sh"
+
 _push_gate_tunable() {
     local _pgt_name="$1" _pgt_default="$2" _pgt_min="$3"
     local _pgt_value="${!_pgt_name:-$_pgt_default}"
@@ -288,7 +291,10 @@ push_gate_acquire_slot() {
     # aggregate throughput. PUSH_GATE_MAX_CONCURRENT overrides either way.
     local _pgl_default_max=2
     local _pgl_ncpu
-    _pgl_ncpu="$( (command -v nproc >/dev/null && nproc) || sysctl -n hw.ncpu 2>/dev/null || echo 0 )"
+    # Canonical detector shared with test-local-job-count (honors the
+    # GC_TEST_LOCAL_CPUS pin); an invalid pin degrades to the conservative
+    # default, matching how the other tunables treat malformed values.
+    _pgl_ncpu="$(gc_detect_cpus 2>/dev/null || echo 0)"
     if [[ "$_pgl_ncpu" =~ ^[0-9]+$ ]] && (( _pgl_ncpu >= 16 )); then
         _pgl_default_max=4
     fi
