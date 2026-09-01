@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -57,12 +58,13 @@ func TestFindPortHolderPIDUsesProcBeforeLsof(t *testing.T) {
 	}
 }
 
-func TestPIDFromPlainPortLsofOutput(t *testing.T) {
+func TestPIDsFromPlainPortLsofOutput(t *testing.T) {
 	output := fmt.Sprintf(`COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
 dolt    %d user   12u  IPv4 0x1234      0t0  TCP *:3306 (LISTEN)
 `, os.Getpid())
-	if pid := pidFromPlainPortLsofOutput(output, "3306"); pid != os.Getpid() {
-		t.Fatalf("pidFromPlainPortLsofOutput() = %d, want %d", pid, os.Getpid())
+	pids := pidsFromPlainPortLsofOutput(output, "3306")
+	if len(pids) != 1 || pids[0] != os.Getpid() {
+		t.Fatalf("pidsFromPlainPortLsofOutput() = %v, want [%d]", pids, os.Getpid())
 	}
 }
 
@@ -157,5 +159,100 @@ dolt      123 user    5u   REG   1,4     4096  99 /tmp/my city/.beads/dolt/held.
 	}
 	if targets[0] != "/tmp/my city/.beads/dolt/held.db" {
 		t.Fatalf("target = %q, want full spaced path", targets[0])
+	}
+}
+
+// The ga-yeyt3 regression: a port NUMBER can be held by several processes at
+// once, because the same number bound to different local addresses (127.0.0.1
+// and ::1, or a second interface address) is a distinct bind the kernel
+// accepts. The concurrent fast-tier shards produce exactly that collision —
+// they all draw ephemeral ports from one small shared range — and the managed
+// Dolt ownership checks used to collapse the holder set to one arbitrary
+// element and compare it for equality against the PID they cared about. When
+// the arbitrary element was the stranger, a live managed Dolt was reported as
+// not owning its own port and the caller silently fell back to a stale one.
+
+// TestPIDsFromLsofPIDListKeepsEveryHolder pins the set at the parser, where it
+// is deterministic and needs no second process: a two-PID listing must survive
+// as two PIDs.
+func TestPIDsFromLsofPIDListKeepsEveryHolder(t *testing.T) {
+	stranger, mine := os.Getppid(), os.Getpid()
+	if stranger <= 0 || stranger == mine {
+		t.Skip("need two distinct live PIDs to represent two holders")
+	}
+
+	// lsof lists holders in process-table order, so the stranger comes first
+	// whenever it started first. That ordering used to decide the verdict.
+	pids := pidsFromLsofPIDList(fmt.Sprintf("%d\n%d\n", stranger, mine))
+	if len(pids) != 2 || !slices.Contains(pids, mine) {
+		t.Fatalf("pidsFromLsofPIDList = %v, want both holders including our pid %d", pids, mine)
+	}
+}
+
+// TestPIDsFromPlainPortLsofOutputKeepsEveryHolder is the same guarantee for the
+// fallback parser, which reads lsof's human listing rather than -t.
+func TestPIDsFromPlainPortLsofOutputKeepsEveryHolder(t *testing.T) {
+	stranger, mine := os.Getppid(), os.Getpid()
+	if stranger <= 0 || stranger == mine {
+		t.Skip("need two distinct live PIDs to represent two holders")
+	}
+
+	output := fmt.Sprintf(`COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+other   %d user   12u  IPv6 0x1234      0t0  TCP [::1]:3306 (LISTEN)
+dolt    %d user   13u  IPv4 0x5678      0t0  TCP 127.0.0.1:3306 (LISTEN)
+`, stranger, mine)
+	pids := pidsFromPlainPortLsofOutput(output, "3306")
+	if len(pids) != 2 || !slices.Contains(pids, mine) {
+		t.Fatalf("pidsFromPlainPortLsofOutput = %v, want both holders including our pid %d", pids, mine)
+	}
+}
+
+// TestPortHeldByPIDReportsUnknownForAnUnheldPort pins the third state: no
+// holder at all is "unknown", which callers must not read as "someone else
+// holds it".
+func TestPortHeldByPIDReportsUnknownForAnUnheldPort(t *testing.T) {
+	port := reserveRandomTCPPort(t)
+	held, known := portHeldByPID(strconv.Itoa(port), os.Getpid())
+	if held || known {
+		t.Fatalf("portHeldByPID(%d, self) = (held=%v, known=%v), want (false, false) on a port nobody is listening on", port, held, known)
+	}
+}
+
+// TestPortHolderPIDsReportsEveryHolderOnTheRealProbe is the end-to-end shape
+// against the actual lsof/proc probe: a separate process holds the port number
+// on 127.0.0.1 while we hold the same number on ::1. Both must be reported, and
+// we must be recognized as a holder of our own port even though a stranger also
+// holds it.
+func TestPortHolderPIDsReportsEveryHolderOnTheRealProbe(t *testing.T) {
+	port := reserveRandomTCPPort(t)
+	ours, err := listenOnAddr(net.JoinHostPort("::1", strconv.Itoa(port)))
+	if err != nil {
+		t.Skipf("cannot bind [::1]:%d (no IPv6 loopback?): %v", port, err)
+	}
+	defer ours.Close() //nolint:errcheck // test cleanup
+
+	// startTCPListenerProcessInDir binds 127.0.0.1 on the same number; it also
+	// carries the slow-process skip, so this runs in the cmd-gc-process tier.
+	stranger := startTCPListenerProcessInDir(t, port, t.TempDir())
+
+	// Assert on the whole set, not just our membership: which element an
+	// equality check would have picked depends on process-table order, so only
+	// "both holders are reported" pins the property independently of ordering.
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	poll := time.NewTicker(50 * time.Millisecond)
+	defer poll.Stop()
+	for {
+		holders := portHolderPIDs(strconv.Itoa(port))
+		held, known := portHeldByPID(strconv.Itoa(port), os.Getpid())
+		if known && held && slices.Contains(holders, stranger.Process.Pid) {
+			return
+		}
+		select {
+		case <-poll.C:
+		case <-deadline.C:
+			t.Fatalf("portHolderPIDs(%d) = %v, want both our pid %d and the stranger %d; portHeldByPID = (held=%v, known=%v)",
+				port, holders, os.Getpid(), stranger.Process.Pid, held, known)
+		}
 	}
 }

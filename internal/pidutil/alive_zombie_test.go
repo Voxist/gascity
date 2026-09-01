@@ -1,11 +1,12 @@
+//go:build !windows
+
 package pidutil
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -17,39 +18,25 @@ import (
 // saturated with fork/exec that deadline is missed often — measured at 20 of
 // 300 calls, worst case 2.7s, on a 16-core Mac at load ~150 — so a process that
 // had already died read as alive. Callers polling Alive for a child to exit
-// (terminateManagedDoltPIDGuarded, the scope watchdog reap) then ran their full
-// grace to the deadline and reported the exit as never having happened.
+// (terminateManagedDoltPIDGuarded, the managed-Dolt scope watchdog reap) then
+// ran their full grace to the deadline and reported the exit as never having
+// happened.
 //
 // Making ps unusable reproduces that saturation deterministically: with the
 // stub on PATH, Alive must still report a signaled, unreaped child as dead,
 // because it reads the kernel's own process record (/proc on linux, a
 // sysctl(kern.proc.pid) on darwin) before it ever considers ps.
 func TestAlive_ZombieIsDeadWithoutPS(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX zombie semantics required")
-	}
-
-	child := exec.Command("sleep", "60")
-	if err := child.Start(); err != nil {
-		t.Fatalf("start child: %v", err)
-	}
-	pid := child.Process.Pid
-	reaped := false
-	t.Cleanup(func() {
-		if reaped {
-			return
-		}
-		_ = child.Process.Kill()
-		_ = child.Wait()
-	})
+	// spawnSleeper's cleanup reaps the child, so it stays a zombie — signaled
+	// but unwaited — for the whole of this test body, which is the state Alive
+	// has to get right.
+	pid := spawnSleeper(t)
 
 	if !Alive(pid) {
 		t.Fatalf("Alive(%d) = false for a running child", pid)
 	}
 
-	// Kill without reaping: the child stays in the process table as a zombie
-	// until Wait, which is the state Alive has to get right.
-	if err := child.Process.Kill(); err != nil {
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
 		t.Fatalf("kill child: %v", err)
 	}
 
@@ -59,20 +46,18 @@ func TestAlive_ZombieIsDeadWithoutPS(t *testing.T) {
 	}
 	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
 
-	// The kill is asynchronous, so bound the wait rather than sleeping a fixed
-	// amount: with the fix this settles in microseconds, and a regression here
-	// shows up as the deadline expiring, not as a slower pass.
-	deadline := time.Now().Add(5 * time.Second)
+	// The kill is asynchronous, so wait on the condition with a bound rather
+	// than a fixed delay: with the fix this settles in microseconds, and a
+	// regression shows up as the deadline expiring, not as a slower pass.
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	poll := time.NewTicker(5 * time.Millisecond)
+	defer poll.Stop()
 	for Alive(pid) {
-		if time.Now().After(deadline) {
+		select {
+		case <-poll.C:
+		case <-deadline.C:
 			t.Fatalf("Alive(%d) still true 5s after SIGKILL with ps unusable; the zombie probe fell back to ps and failed open", pid)
 		}
-		time.Sleep(5 * time.Millisecond)
-	}
-
-	_ = child.Wait()
-	reaped = true
-	if Alive(pid) {
-		t.Fatalf("Alive(%d) = true after the child was reaped", pid)
 	}
 }

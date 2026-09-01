@@ -206,5 +206,7 @@ func rigLocalDoltPIDFromSQLServerInfo(rigPath string) (pid int, port int, infoEx
 	if !pidAlive(parsed) {
 		return parsed, parsedPort, true, false
 	}
-	return parsed, parsedPort, true, findPortHolderPID(strconv.Itoa(parsedPort)) == parsed
+	// Membership, not equality — see portHolderPIDs.
+	held, _ := portHeldByPID(strconv.Itoa(parsedPort), parsed)
+	return parsed, parsedPort, true, held
 }

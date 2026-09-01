@@ -1559,15 +1559,18 @@ func validDoltRuntimeStateIdentity(state doltRuntimeState, cityPath string) (man
 }
 
 func managedDoltRuntimeProcessOwned(state doltRuntimeState, layout managedDoltRuntimeLayout) bool {
-	holderPID := findPortHolderPID(strconv.Itoa(state.Port))
-	if holderPID > 0 && holderPID != state.PID {
+	// Membership, not equality: another process may legitimately hold the same
+	// port number on a different local address, and picking one holder at random
+	// to compare against would disown a live managed Dolt. See portHolderPIDs.
+	heldByState, known := portHeldByPID(strconv.Itoa(state.Port), state.PID)
+	if known && !heldByState {
 		return false
 	}
 	owned, deleted := inspectManagedDoltOwnership(state.PID, layout)
 	if deleted {
 		return false
 	}
-	if holderPID == state.PID {
+	if heldByState {
 		return true
 	}
 	return owned
