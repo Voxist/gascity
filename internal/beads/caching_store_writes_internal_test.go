@@ -228,9 +228,18 @@ func TestCachingStoreTxCloseClearsDependentProjectedIsBlocked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get blocked after tx close: %v", err)
 	}
-	if got.IsBlocked != nil {
-		t.Fatalf("dependent IsBlocked after tx close = %v, want nil fallback to cached deps", got.IsBlocked)
+	// ADR-0094: the cache records the invalidation in readyProjectionInvalid
+	// rather than nil-ing the row's verdict, so the reconcile differ keeps
+	// comparing like with like. The readiness fallback this line asserts is
+	// proven by the CachedReady check above; what remains to pin here is that
+	// the verdict really was invalidated.
+	cache.mu.RLock()
+	invalid := cache.readyProjectionInvalidLocked(blocked.ID)
+	cache.mu.RUnlock()
+	if !invalid {
+		t.Fatalf("dependent verdict after tx close was not invalidated; want the cached is_blocked marked for re-observation")
 	}
+	_ = got
 }
 
 func assertTxPreservedBead(t *testing.T, got Bead) {

@@ -85,7 +85,17 @@ type mergeEndState struct {
 	// readyLost is the set of rows whose is_blocked verdict the merge dropped
 	// without preserving, so readiness declines for them unless their own edges
 	// can reproduce it (ga-cfhgr).
-	readyLost      map[string]struct{}
+	readyLost map[string]struct{}
+	// readyInvalid is the set of rows whose cached is_blocked verdict this cache
+	// invalidated and has not yet re-observed (ADR-0094). The merge writes it
+	// only by DISCHARGE: absorbFreshLocked and evictLocked delete the mark, and
+	// nothing in the seam adds one, so the end set is always a subset of the
+	// start set. It is captured from both runs and compared directly rather
+	// than re-derived, because deciding "absorbed vs kept verbatim" from an end
+	// state alone is ambiguous whenever a fresh payload equals the cached row —
+	// an absorb still discharges the mark there, so an end-state oracle would
+	// silently disagree on exactly that cell.
+	readyInvalid   map[string]struct{}
 	state          cacheState
 	lastFreshAt    time.Time
 	mutationSeq    uint64
@@ -294,6 +304,7 @@ func captureEndState(c *CachingStore) mergeEndState {
 		localBeadAt:          cloneTimeMap(c.localBeadAt),
 		deletedSeq:           cloneU64Map(c.deletedSeq),
 		readyLost:            cloneDirty(c.readyProjectionLost),
+		readyInvalid:         cloneDirty(c.readyProjectionInvalid),
 		state:                c.state,
 		lastFreshAt:          c.lastFreshAt,
 		mutationSeq:          c.mutationSeq,

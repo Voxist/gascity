@@ -837,6 +837,18 @@ func (c *CachingStore) preserveCachedReadyProjectionLocked(items map[string]Bead
 		if !ok || cached.IsBlocked == nil {
 			continue
 		}
+		// ADR-0094 D1: preservation is not observation. A verdict this cache
+		// invalidated is exactly the one not to put back into service. The two
+		// guards below cannot stand in for this check: the local write that
+		// closes a blocker updates the blocker's cached status in the same
+		// critical section that raises the invalidation, so by reconcile time
+		// cached and fresh agree and neither deps nor target-status has moved.
+		// Under the old in-band sentinel this case was unreachable — the
+		// invalidation had already nil'd cached.IsBlocked, so the check above
+		// skipped it.
+		if c.readyProjectionInvalidLocked(id) {
+			continue
+		}
 		freshDeps := c.depsForReconcileLocked(id, item, depMap, useFreshDeps)
 		if depsChanged(c.deps[id], freshDeps) {
 			continue

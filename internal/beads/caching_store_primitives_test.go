@@ -425,9 +425,18 @@ func TestApplyEventAbsorbsBeforeDepsOverlay_OC3(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get after created event: %v", err)
 	}
-	if got.IsBlocked != nil {
-		t.Fatalf("OC-3 violated: projected IsBlocked = %v, want nil (overlay must clear the newly absorbed row)", *got.IsBlocked)
+	// ADR-0094: the cache records the invalidation in readyProjectionInvalid
+	// rather than nil-ing the row's verdict, so the reconcile differ keeps
+	// comparing like with like. The readiness fallback this line asserts is
+	// proven by the CachedReady check above; what remains to pin here is that
+	// the verdict really was invalidated.
+	cache.mu.RLock()
+	invalid := cache.readyProjectionInvalidLocked("gc-blocked")
+	cache.mu.RUnlock()
+	if !invalid {
+		t.Fatal("OC-3 violated: the newly absorbed row's projection was not invalidated by the overlay")
 	}
+	_ = got
 
 	cache.mu.RLock()
 	_, hasDeps := cache.deps["gc-blocked"]

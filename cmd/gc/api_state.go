@@ -1728,7 +1728,29 @@ func (cs *controllerState) CityBeadsDiagnostic() *beads.BeadsDiagnostic {
 		return nil
 	}
 	diag := *cs.cityBeadsDiagnostic
+	// Computed at READ time from the live store, not captured at open time, so
+	// status surfaces reflect the current breaker/cache state. Both fields
+	// exist on the wire (BeadsDiagnostic.degraded / gc_bd_inflight) and were
+	// left unpopulated by the 2026-08-31 resync, which made them permanently
+	// false/zero for every consumer.
+	diag.Degraded = storeReportsDegraded(cs.cityBeadStore)
+	diag.BdInflight = bdInflightForCity(cs.cityPath)
 	return &diag
+}
+
+// storeReportsDegraded reports whether the (possibly policy-wrapped) store is
+// serving last-good cached data because the backing store is unreachable or the
+// cache itself has degraded. Unwraps the policy layer so the question reaches
+// the CachingStore that can actually answer it.
+func storeReportsDegraded(store beads.Store) bool {
+	if store == nil {
+		return false
+	}
+	base, _, _ := unwrapBeadPolicyStore(store)
+	if d, ok := base.(interface{ Degraded() bool }); ok {
+		return d.Degraded()
+	}
+	return false
 }
 
 // Orders scans formula layers and returns active orders.

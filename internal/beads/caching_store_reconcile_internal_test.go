@@ -868,10 +868,17 @@ func TestUnchangedStatusEventDoesNotReopenTheReconcileLoop(t *testing.T) {
 	}
 	cs.ApplyEvent("bead.updated", payload)
 
+	// ADR-0094: invalidation is recorded in readyProjectionInvalid, not by
+	// writing a nil sentinel into the row. The row deliberately keeps what the
+	// backing last reported so the reconcile differ still compares like with
+	// like; the mark is what takes readiness reads to the dependency-derived
+	// fallback. Asserting the mark tests the same guarantee this line always
+	// meant — a real transition must invalidate the dependent — at the level it
+	// is now observable.
 	cs.mu.RLock()
-	cachedDependent = cs.beads[dependent.ID]
+	invalid := cs.readyProjectionInvalidLocked(dependent.ID)
 	cs.mu.RUnlock()
-	if cachedDependent.IsBlocked != nil {
+	if !invalid {
 		t.Fatalf("a real status change left %s's ready projection stale", dependent.ID)
 	}
 }

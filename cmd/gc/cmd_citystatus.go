@@ -420,6 +420,25 @@ type statusObservationTarget struct {
 	suspended          bool
 }
 
+// statusSnapshotTimeout resolves the session-snapshot load bound from city
+// config ([daemon] status_snapshot_timeout), falling back to the package
+// default when no config is available.
+//
+// Restored in the 2026-08-31 resync: the config field, its
+// StatusSnapshotTimeoutDuration accessor and its published schema default all
+// survived the merge, but the only reader did not — so the documented knob was
+// silently inert and an operator setting it saw no effect.
+//
+// The nil/empty check falls back to the package var rather than to
+// StatusSnapshotTimeoutDuration's hardcoded default so tests that override the
+// package var still take effect.
+func statusSnapshotTimeout(cfg *config.City) time.Duration {
+	if cfg == nil || strings.TrimSpace(cfg.Daemon.StatusSnapshotTimeout) == "" {
+		return statusSessionSnapshotTimeout
+	}
+	return cfg.Daemon.StatusSnapshotTimeoutDuration()
+}
+
 func loadStatusSessionSnapshot(cityPath string, cfg *config.City, store beads.Store, stderr io.Writer) *sessionBeadSnapshot {
 	if store == nil {
 		return newSessionBeadSnapshotFromInfos(nil)
@@ -447,7 +466,8 @@ func loadStatusSessionSnapshot(cityPath string, cfg *config.City, store beads.St
 	// made class-preserving (clone what it unwrapped, or refuse to unwrap a
 	// relocated store so this keeps reading through the routed store) as part of
 	// the split, where a real infra store makes the fix testable.
-	reqCtx, cancel := context.WithTimeout(context.Background(), statusSessionSnapshotTimeout)
+	snapshotTimeout := statusSnapshotTimeout(cfg)
+	reqCtx, cancel := context.WithTimeout(context.Background(), snapshotTimeout)
 	defer cancel()
 	readStore := store
 	if scoped, err := scopedStoreLike(reqCtx, cityPath, cfg, store); err != nil {
@@ -481,11 +501,11 @@ func loadStatusSessionSnapshot(cityPath string, cfg *config.City, store beads.St
 			return newSessionBeadSnapshotFromInfos(nil)
 		}
 		return result.snapshot
-	case <-time.After(statusSessionSnapshotTimeout):
+	case <-time.After(snapshotTimeout):
 		if stderr != nil {
-			fmt.Fprintf(stderr, "gc status: loading session snapshot timed out after %s; continuing with runtime-only status\n", statusSessionSnapshotTimeout) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc status: loading session snapshot timed out after %s; continuing with runtime-only status\n", snapshotTimeout) //nolint:errcheck // best-effort stderr
 		}
-		return newSessionBeadSnapshotWithError(fmt.Errorf("loading session snapshot timed out after %s", statusSessionSnapshotTimeout))
+		return newSessionBeadSnapshotWithError(fmt.Errorf("loading session snapshot timed out after %s", snapshotTimeout))
 	}
 }
 

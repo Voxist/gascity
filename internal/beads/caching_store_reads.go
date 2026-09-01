@@ -14,6 +14,28 @@ import (
 // reports corrupt entries and returning partial-result errors when backing
 // history cannot be fully read.
 func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
+	return c.ListCtx(context.Background(), query)
+}
+
+// ListCtx implements the optional CtxLister capability. It answers the
+// active-bead cache path exactly as List does — that path is pure in-memory
+// lookup, so it needs no ctx — but every branch that falls through to the
+// backing store (the query.Live/ParentID bypass, the IncludeClosed history
+// merge, and the cache-not-yet-servable fallback) routes through
+// backingListCtx so a canceled ctx can abort the backing read instead of
+// leaving a caller's abandoned goroutine (statusListStoreWithTimeout) to hold
+// the connection past its own deadline. The cache-not-servable fallback
+// matters most for a cold cache (fresh after a supervisor restart or long
+// idle): that is exactly when this path is taken.
+//
+// Restored in the 2026-08-31 resync. Dropping this method did not fail to
+// compile and broke nothing loudly — it simply stopped CachingStore from
+// satisfying CtxLister, so every `store.(CtxLister)` assertion silently took
+// the uncancellable fallback.
+func (c *CachingStore) ListCtx(ctx context.Context, query ListQuery) ([]Bead, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
@@ -30,7 +52,7 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 		c.mu.RLock()
 		startSeq := c.mutationSeq
 		c.mu.RUnlock()
-		items, err := c.backing.List(query)
+		items, err := c.backingListCtx(ctx, query)
 		if err == nil {
 			items = c.refreshCachedBeads(query, startSeq, items)
 		}
@@ -69,10 +91,10 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 		// The cache never has a complete closed-only or parent-history view, so
 		// preserve the old backing-store behavior for those query shapes.
 		if query.Status == "closed" || query.ParentID != "" {
-			return c.backing.List(liveListQuery(query))
+			return c.backingListCtx(ctx, liveListQuery(query))
 		}
 
-		all, err := c.backing.List(liveListQuery(query))
+		all, err := c.backingListCtx(ctx, liveListQuery(query))
 		if err != nil {
 			if !IsPartialResult(err) {
 				c.recordProblem("list include closed backing failure", err)
@@ -99,7 +121,7 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 	c.mu.RLock()
 	startSeq := c.mutationSeq
 	c.mu.RUnlock()
-	items, err := c.backing.List(liveListQuery(query))
+	items, err := c.backingListCtx(ctx, liveListQuery(query))
 	if err == nil {
 		// Fold the fresh rows into the snapshot so consecutive degraded reads
 		// cannot travel backwards in time: a read that succeeds and a read that
@@ -617,6 +639,7 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		statusByID   map[string]string
 		depsByID     map[string][]Dep
 		openBeads    []Bead
+		readyInvalid map[string]struct{}
 		unanswerable bool
 	)
 	// Ready requires a fully live cache with complete dependency coverage and a
@@ -649,6 +672,7 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 			for _, b := range openBeads {
 				depsByID[b.ID] = cloneDeps(c.deps[b.ID])
 			}
+			readyInvalid = c.readyProjectionInvalidSnapshotLocked(openBeads)
 		},
 	); err != nil {
 		return c.backing.Ready(query...)
@@ -661,7 +685,7 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 
 	var result []Bead
 	for _, b := range openBeads {
-		if cachedBeadReady(b, statusByID, depsByID[b.ID]) {
+		if cachedBeadReady(b, statusByID, depsByID[b.ID], mapHasKey(readyInvalid, b.ID)) {
 			result = append(result, cloneBead(b))
 		}
 	}
@@ -731,7 +755,7 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 		default:
 			return nil, false
 		}
-		if cachedBeadReady(b, statusByID, deps) {
+		if cachedBeadReady(b, statusByID, deps, c.readyProjectionInvalidLocked(b.ID)) {
 			result = append(result, cloneBead(b))
 		}
 	}
@@ -741,8 +765,14 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 	return result, true
 }
 
-func cachedBeadReady(b Bead, statusByID map[string]string, deps []Dep) bool {
-	if b.IsBlocked != nil {
+// projectionInvalid is ADR-0094's replacement for the nil sentinel: when the
+// cache has invalidated this row's is_blocked verdict and not yet re-observed
+// it, the cached value must be ignored and readiness derived from the
+// dependency edges instead — the same fallback an IsBlocked == nil row takes.
+// The verdict itself stays in the row so the reconcile differ keeps comparing
+// like with like (see CachingStore.readyProjectionInvalid).
+func cachedBeadReady(b Bead, statusByID map[string]string, deps []Dep, projectionInvalid bool) bool {
+	if b.IsBlocked != nil && !projectionInvalid {
 		return !*b.IsBlocked
 	}
 	for _, dep := range deps {
@@ -880,4 +910,21 @@ func (c *CachingStore) absorbBackingListLocked(items []Bead, startSeq uint64) {
 			clearDirty: true,
 		})
 	}
+}
+
+// mapHasKey reports set membership for the ADR-0094 invalidation snapshots,
+// which are nil when nothing is invalid.
+func mapHasKey(set map[string]struct{}, id string) bool {
+	_, ok := set[id]
+	return ok
+}
+
+// backingListCtx routes a backing-store list read through the backing's
+// optional CtxLister capability when it has one, so a canceled ctx aborts the
+// read; stores without the capability fall back to the plain List.
+func (c *CachingStore) backingListCtx(ctx context.Context, query ListQuery) ([]Bead, error) {
+	if cl, ok := c.backing.(CtxLister); ok {
+		return cl.ListCtx(ctx, query)
+	}
+	return c.backing.List(query)
 }

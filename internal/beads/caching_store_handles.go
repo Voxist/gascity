@@ -282,11 +282,12 @@ func (c *CachingStore) cachedReadyCompleteOnly(ctx context.Context, query ReadyQ
 		}
 		depsByID[b.ID] = cloneDeps(c.deps[b.ID])
 	}
+	readyInvalid := c.readyProjectionInvalidSnapshotLocked(openBeads)
 	c.mu.RUnlock()
 
 	// The maps above are a consistent snapshot, so sorting and dependency
 	// evaluation need not hold the cache lock or delay writers.
-	return cachedReadyRows(ctx, query, statusByID, openBeads, depsByID, true)
+	return cachedReadyRows(ctx, query, statusByID, openBeads, depsByID, true, readyInvalid)
 }
 
 func (c *CachingStore) cachedReadyLocked(query ReadyQuery) ([]Bead, error) {
@@ -311,7 +312,10 @@ func (c *CachingStore) cachedReadyLocked(query ReadyQuery) ([]Bead, error) {
 		}
 		openBeads = append(openBeads, cloneBead(b))
 	}
-	return cachedReadyRows(context.Background(), query, statusByID, openBeads, c.deps, c.depsComplete)
+	return cachedReadyRows(
+		context.Background(), query, statusByID, openBeads, c.deps, c.depsComplete,
+		c.readyProjectionInvalidSnapshotLocked(openBeads),
+	)
 }
 
 func cachedReadyRows(
@@ -321,6 +325,10 @@ func cachedReadyRows(
 	openBeads []Bead,
 	depsByID map[string][]Dep,
 	depsComplete bool,
+	// readyInvalid marks rows whose cached is_blocked verdict the cache has
+	// invalidated and not yet re-observed (ADR-0094); those fall back to
+	// dependency-derived readiness. A nil map means nothing is invalid.
+	readyInvalid map[string]struct{},
 ) ([]Bead, error) {
 	cancellable := ctx != nil && ctx.Done() != nil
 	// Sort candidates before the limit-bounded loop below: the cache source is
@@ -347,7 +355,7 @@ func cachedReadyRows(
 		default:
 			return nil, fmt.Errorf("reading ready deps from cache: %w", ErrCacheUnavailable)
 		}
-		if !cachedBeadReady(b, statusByID, deps) {
+		if !cachedBeadReady(b, statusByID, deps, mapHasKey(readyInvalid, b.ID)) {
 			continue
 		}
 		result = append(result, cloneBead(b))

@@ -286,10 +286,16 @@ func TestCachingStoreObservationInvalidatedByMutationPaths(t *testing.T) {
 		})
 		cache.mu.Lock()
 		changed := cache.clearAllReadyProjectionsLocked()
-		projected := cache.beads[bead.ID].IsBlocked
+		// ADR-0094: the clear records the invalidation in
+		// readyProjectionInvalid and deliberately LEAVES the row's verdict
+		// alone, so the reconcile differ does not read a cache-internal
+		// "re-ask" as a store-side transition. The point of this subtest — that
+		// an invalidated projection rejects a stale observation — is unchanged
+		// and asserted below.
+		invalid := cache.readyProjectionInvalidLocked(bead.ID)
 		cache.mu.Unlock()
-		if !changed || projected != nil {
-			t.Fatalf("clearAllReadyProjectionsLocked = %v, projection=%v; want true, nil", changed, projected)
+		if !changed || !invalid {
+			t.Fatalf("clearAllReadyProjectionsLocked = %v, invalidated=%v; want true, true", changed, invalid)
 		}
 		assertObservationRejected(t, cache, observation)
 	})

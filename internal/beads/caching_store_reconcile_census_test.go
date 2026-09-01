@@ -87,7 +87,11 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"beads": true, "deps": true, "depsComplete": true, "dirty": true,
 		"beadSeq": true, "localBeadAt": true, "deletedSeq": true, "state": true,
 		"readyProjectionLost": true, // compared as mergeEndState.readyLost
-		"lastFreshAt":         true, "mutationSeq": true, "primePartialErr": true,
+		// compared as mergeEndState.readyInvalid; the seam writes it only by
+		// discharge (absorbFreshLocked / evictLocked delete the mark), so it is
+		// captured from both runs and diffed rather than re-derived.
+		"readyProjectionInvalid": true,
+		"lastFreshAt":            true, "mutationSeq": true, "primePartialErr": true,
 		"syncFailures": true, "circuitTripped": true,
 		"stats": true, // stats compared field-wise below
 	}

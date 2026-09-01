@@ -29,19 +29,38 @@ type CachingStore struct {
 	backing  Store // runtime: usually *BdStore; tests and projections may use any Store
 	idPrefix string
 
-	mu                  sync.RWMutex
-	beads               map[string]Bead
-	deps                map[string][]Dep
-	depsComplete        bool
-	dirty               map[string]struct{}
-	beadSeq             map[string]uint64
-	localBeadAt         map[string]time.Time
-	deletedSeq          map[string]uint64
-	state               cacheState
-	lastFreshAt         time.Time
-	mutationSeq         uint64
-	observationRevision uint64
-	primePartialErr     error
+	mu           sync.RWMutex
+	beads        map[string]Bead
+	deps         map[string][]Dep
+	depsComplete bool
+	dirty        map[string]struct{}
+	beadSeq      map[string]uint64
+	localBeadAt  map[string]time.Time
+	deletedSeq   map[string]uint64
+	// readyProjectionInvalid holds the ids whose cached is_blocked verdict this
+	// cache has invalidated and not yet re-observed (ADR-0094, vc-493m3j).
+	//
+	// Invalidation is not a VALUE: writing a nil sentinel into the row's
+	// IsBlocked to mean "re-ask" is indistinguishable, to the reconcile differ,
+	// from the backing store reporting a genuine nil<->set transition — which
+	// is what made a whole-cache invalidation re-emit bead.updated for every
+	// row on every tick. The verdict stays in c.beads as what the backing last
+	// reported; only the readiness readers consult this set, exactly where they
+	// used to observe the sentinel.
+	//
+	// This is NOT redundant with observationRevision. That counter keeps
+	// invalidation out of the MUTATION fences the reconcile differ reads; this
+	// set keeps invalidation out of the row VALUES it compares. Restoring only
+	// the counter (as the 2026-08-31 resync did) leaves the sentinel write in
+	// place and the flood returns — proven by
+	// TestReconcileEmitsNoUpdatesAfterWholeCacheInvalidation, which failed with
+	// nine spurious bead.updated on tick 1 until this set came back.
+	readyProjectionInvalid map[string]struct{}
+	state                  cacheState
+	lastFreshAt            time.Time
+	mutationSeq            uint64
+	observationRevision    uint64
+	primePartialErr        error
 
 	// availabilityGate, when set, reports backing-store transport
 	// availability (the per-scope circuit breaker). See
@@ -335,17 +354,18 @@ func (c *CachingStore) SetPrimeRetryDelayForTest(fn func(attempt int) time.Durat
 
 func newCachingStore(backing Store, idPrefix string, onChange func(eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage)) *CachingStore {
 	return &CachingStore{
-		backing:             backing,
-		idPrefix:            normalizeIDPrefix(idPrefix),
-		beads:               make(map[string]Bead),
-		deps:                make(map[string][]Dep),
-		dirty:               make(map[string]struct{}),
-		beadSeq:             make(map[string]uint64),
-		localBeadAt:         make(map[string]time.Time),
-		deletedSeq:          make(map[string]uint64),
-		readyProjectionLost: make(map[string]struct{}),
-		problemLog:          make(map[string]cacheProblemLogState),
-		onChange:            onChange,
+		backing:                backing,
+		idPrefix:               normalizeIDPrefix(idPrefix),
+		beads:                  make(map[string]Bead),
+		deps:                   make(map[string][]Dep),
+		dirty:                  make(map[string]struct{}),
+		beadSeq:                make(map[string]uint64),
+		localBeadAt:            make(map[string]time.Time),
+		deletedSeq:             make(map[string]uint64),
+		readyProjectionInvalid: make(map[string]struct{}),
+		readyProjectionLost:    make(map[string]struct{}),
+		problemLog:             make(map[string]cacheProblemLogState),
+		onChange:               onChange,
 		problemf: func(msg string) {
 			log.Printf("beads cache: %s", msg)
 		},
@@ -409,6 +429,44 @@ func (c *CachingStore) advanceObservationLocked() {
 		return
 	}
 	c.observationRevision++
+}
+
+// markReadyProjectionInvalidLocked records that id's cached is_blocked verdict
+// must not be trusted until the next observation. It deliberately does not
+// touch c.beads: the row keeps what the backing last reported so the reconcile
+// differ still compares like with like. Caller must hold c.mu in write mode.
+func (c *CachingStore) markReadyProjectionInvalidLocked(id string) {
+	if c.readyProjectionInvalid == nil {
+		c.readyProjectionInvalid = make(map[string]struct{})
+	}
+	c.readyProjectionInvalid[id] = struct{}{}
+}
+
+// readyProjectionInvalidLocked reports whether id's cached verdict is awaiting
+// re-observation. Caller must hold c.mu.
+func (c *CachingStore) readyProjectionInvalidLocked(id string) bool {
+	_, invalid := c.readyProjectionInvalid[id]
+	return invalid
+}
+
+// readyProjectionInvalidSnapshotLocked copies the marks covering candidates so
+// readiness can be evaluated after the cache lock is released, the way
+// statusByID and depsByID already are. Returns nil when nothing is invalid,
+// which the readers treat the same as an empty set. Caller must hold c.mu.
+func (c *CachingStore) readyProjectionInvalidSnapshotLocked(candidates []Bead) map[string]struct{} {
+	if len(c.readyProjectionInvalid) == 0 {
+		return nil
+	}
+	var out map[string]struct{}
+	for _, b := range candidates {
+		if _, invalid := c.readyProjectionInvalid[b.ID]; invalid {
+			if out == nil {
+				out = make(map[string]struct{})
+			}
+			out[b.ID] = struct{}{}
+		}
+	}
+	return out
 }
 
 func (c *CachingStore) noteLocalMutationLocked(ids ...string) uint64 {
@@ -505,6 +563,11 @@ func (c *CachingStore) absorbFreshLocked(id string, bead Bead, now time.Time, op
 	c.advanceObservationLocked()
 	bead = c.absorbReadyProjectionLocked(id, bead, opts)
 	c.beads[id] = cloneBead(bead)
+	// An absorb is an observation: whatever the backing (or an event payload
+	// carrying the field) just reported supersedes this cache's own request to
+	// re-ask, so the invalidation is discharged here rather than at each of the
+	// ~20 call sites that raise it.
+	delete(c.readyProjectionInvalid, id)
 	switch opts.depsMode {
 	case depsExplicit:
 		c.deps[id] = cloneDeps(opts.deps)
@@ -680,6 +743,7 @@ func (c *CachingStore) evictLocked(id string) {
 	delete(c.beadSeq, id)
 	delete(c.localBeadAt, id)
 	delete(c.readyProjectionLost, id)
+	delete(c.readyProjectionInvalid, id)
 }
 
 // tombstoneLocked evicts id and installs a deletion fence at seq. seq must be a
@@ -1097,6 +1161,11 @@ func (c *CachingStore) prime(ctx context.Context) error {
 		// replaces gets a fresh verdict and its unknown mark drops. Only rows
 		// carried over from the old cache keep theirs.
 		nextReadyLost := make(map[string]struct{})
+		// Same reasoning for the ADR-0094 invalidation marks: the prime
+		// snapshot ran the ready projection over every row it carries, so those
+		// rows are freshly observed and their invalidation is discharged. Only
+		// rows kept from the old cache can still be awaiting re-observation.
+		nextReadyInvalid := make(map[string]struct{})
 		for id, current := range c.beads {
 			if fresh, exists := beadMap[id]; exists {
 				if _, keep := c.recentLocalBeadConflictLocked(id, fresh, now, true); keep {
@@ -1106,6 +1175,9 @@ func (c *CachingStore) prime(ctx context.Context) error {
 					}
 					if _, lost := c.readyProjectionLost[id]; lost {
 						nextReadyLost[id] = struct{}{}
+					}
+					if c.readyProjectionInvalidLocked(id) {
+						nextReadyInvalid[id] = struct{}{}
 					}
 					c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
 				}
@@ -1119,6 +1191,9 @@ func (c *CachingStore) prime(ctx context.Context) error {
 				if _, lost := c.readyProjectionLost[id]; lost {
 					nextReadyLost[id] = struct{}{}
 				}
+				if c.readyProjectionInvalidLocked(id) {
+					nextReadyInvalid[id] = struct{}{}
+				}
 				c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
 			}
 		}
@@ -1129,6 +1204,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 		c.beadSeq = nextBeadSeq
 		c.localBeadAt = nextLocalBeadAt
 		c.readyProjectionLost = nextReadyLost
+		c.readyProjectionInvalid = nextReadyInvalid
 		c.deletedSeq = make(map[string]uint64)
 	} else {
 		for id, b := range beadMap {

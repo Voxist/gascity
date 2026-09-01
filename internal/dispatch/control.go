@@ -1960,12 +1960,36 @@ func copyNonGCMetadata(dst, src map[string]string) {
 	}
 }
 
-func updateMetadataAndClose(store beads.Store, beadID string, metadata map[string]string) error {
+// closeBeadWithMetadata closes beadID carrying metadata, tolerating stores that
+// refuse a status-close of a blocked issue on the update path. bd 0055-era
+// enforces exactly that, and control beads legitimately close their subject
+// while still formally blocking it (a scope-check closes the scope body before
+// closing itself; an aborting scope skips members that block one another).
+// Close carries the sanctioned force escape for that shape, so on refusal fall
+// back to metadata-only update + Close rather than error-string matching a
+// specific store's message.
+//
+// Restored in the 2026-08-31 resync: the merge kept the combined update and
+// dropped the fallback, so a control bead in that shape stopped closing at all.
+func closeBeadWithMetadata(store beads.Store, beadID string, metadata map[string]string) error {
 	status := "closed"
-	if err := store.Update(beadID, beads.UpdateOpts{
-		Status:   &status,
-		Metadata: metadata,
-	}); err != nil {
+	err := store.Update(beadID, beads.UpdateOpts{Status: &status, Metadata: metadata})
+	if err == nil {
+		return nil
+	}
+	if len(metadata) > 0 {
+		if metaErr := store.Update(beadID, beads.UpdateOpts{Metadata: metadata}); metaErr != nil {
+			return errors.Join(err, metaErr)
+		}
+	}
+	if closeErr := store.Close(beadID); closeErr != nil {
+		return errors.Join(err, closeErr)
+	}
+	return nil
+}
+
+func updateMetadataAndClose(store beads.Store, beadID string, metadata map[string]string) error {
+	if err := closeBeadWithMetadata(store, beadID, metadata); err != nil {
 		return err
 	}
 	bead, err := store.Get(beadID)

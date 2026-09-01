@@ -411,16 +411,31 @@ func (c *CachingStore) ApplyDepEvent(beadID string, deps []Dep) {
 // column held.
 //
 // Caller must hold c.mu in write mode.
+// It records the invalidation in readyProjectionInvalid rather than writing a
+// nil sentinel into the row. Writing the sentinel into the row was the defect
+// ADR-0094 names: the reconcile differ reads IsBlocked as "what the backing
+// store reported", so a cache-internal "I don't know" written into that slot is
+// indistinguishable from bd flipping the projection — and the next enrichment,
+// restoring the very value the wipe removed, registered as a change for every
+// row it touched. Readiness reads consult readyProjectionInvalid instead,
+// exactly where the sentinel used to send them to the dependency-derived
+// fallback.
+//
+// Returns whether this call changed anything, so a second clear on an already
+// invalid row is not reported as a mutation. Caller must hold c.mu in write
+// mode.
 func (c *CachingStore) clearReadyProjectionLocked(id string) bool {
 	b, ok := c.beads[id]
 	if !ok || b.IsBlocked == nil {
 		return false
 	}
+	if c.readyProjectionInvalidLocked(id) {
+		return false
+	}
 	if *b.IsBlocked && !c.residentEdgesStillBlockLocked(id) {
 		c.markReadyProjectionLostLocked(id)
 	}
-	b.IsBlocked = nil
-	c.beads[id] = b
+	c.markReadyProjectionInvalidLocked(id)
 	return true
 }
 

@@ -973,6 +973,31 @@ type hookVisibility struct {
 	RouteTargets []string
 }
 
+// hookStoreUnavailableToken is the distinct stderr token gc hook emits
+// (with exit code 2) when the bead store is unreachable. Runtime hook
+// consumers match on it to distinguish "store down" from exit-1 no-work —
+// rendering an unreachable store as no-work is the chronic
+// idle-agents-with-work-waiting dead-drop (R-INV, plan item 1.3).
+const hookStoreUnavailableToken = "GC_HOOK_STORE_UNAVAILABLE"
+
+// classifyWorkQueryStoreUnavailable wraps transport-class work-query failures
+// as beads.ErrStoreUnavailable so doHook can report them as exit 2 rather than
+// letting a dead store masquerade as a drained queue. Errors that already carry
+// the sentinel pass through unchanged; anything that is not transport-class is
+// returned as-is and stays an ordinary exit-1 error.
+func classifyWorkQueryStoreUnavailable(err error) error {
+	if err == nil || errors.Is(err, beads.ErrStoreUnavailable) {
+		return err
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range bdTransportRetryableMarkers {
+		if strings.Contains(msg, marker) {
+			return fmt.Errorf("%w: %w", beads.ErrStoreUnavailable, err)
+		}
+	}
+	return err
+}
+
 // doHook is the pure logic for gc hook. Runs the work query and outputs
 // results based on mode. Without inject: prints normalized ready-only output,
 // returns 0 if work exists, 1 if empty. With inject: skips the work query and
@@ -984,6 +1009,13 @@ func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, 
 
 	output, err := runner(workQuery, dir)
 	if err != nil {
+		// A transport-class failure is an unreachable store, not an empty
+		// queue. Reporting it as exit-1 no-work is the dead-drop this token
+		// exists to prevent, so it exits 2 with a token consumers can match.
+		if classified := classifyWorkQueryStoreUnavailable(err); errors.Is(classified, beads.ErrStoreUnavailable) {
+			fmt.Fprintf(stderr, "gc hook: %s: %v\n", hookStoreUnavailableToken, classified) //nolint:errcheck // best-effort stderr
+			return 2
+		}
 		if normalized := normalizeWorkQueryOutput(strings.TrimSpace(output)); normalized != "" {
 			fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
 		}
