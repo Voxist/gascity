@@ -70,6 +70,13 @@ list_minus() {
   local -a excludes=("$@")
   local all_pkgs pkg skip ex emitted=""
   all_pkgs="$(go list ./...)"
+  # Guarded before the loop: `done <<< ""` still iterates once with an empty
+  # line (herestrings append a newline), which would emit a blank package and
+  # satisfy the emitted guard below.
+  if [[ -z "$all_pkgs" ]]; then
+    echo "test-tier-packages: go list produced no packages" >&2
+    exit 1
+  fi
   while IFS= read -r pkg; do
     skip=0
     for ex in "${excludes[@]}"; do
