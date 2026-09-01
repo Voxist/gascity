@@ -244,9 +244,16 @@ run_packages_core_shard() {
   # scripts/test-tier-coverage.sh asserts on every fast run that it does; the
   # excludes here (test/integration, cmd/gc, internal/runtime/tmux) each have
   # a dedicated shard family of their own.
+  # Captured to a variable, not process substitution: a substitution hides
+  # the printer's exit status from set -e, so a printer dying mid-emit would
+  # hand this loop a silently TRUNCATED package list and the modulo shards
+  # would distribute a subset. The capture makes any printer failure fatal
+  # here, and the printer itself refuses to emit an empty tier.
+  local tier_pkgs
+  tier_pkgs="$("$repo_root/scripts/test-tier-packages" integration-core)"
   while IFS= read -r line; do
     packages+=("$line")
-  done < <("$repo_root/scripts/test-tier-packages" integration-core)
+  done <<< "$tier_pkgs"
   if [[ ${#packages[@]} -eq 0 ]]; then
     echo "no core packages found" >&2
     exit 1

@@ -15,7 +15,12 @@ resource = "subprocess"
 # re-signal regression test must run a real shell whose inner process
 # deterministically loses the first SIGINT; group signal delivery is only
 # observable by executing one.
-baseline_calls = 650
+# 650 -> 651 (2026-09-01, PR #141 review finding 1):
+# internal/execgrace/apply_unix_test.go adds one subprocess site — the guard
+# proving re-signaling stops once a rollback trap is running must execute a
+# real shell whose trap spawns a real child slower than the re-signal
+# interval; only a live process tree can prove the child survives.
+baseline_calls = 651
 baseline_files = 189
 reported_calls = 495
 reported_files = 135

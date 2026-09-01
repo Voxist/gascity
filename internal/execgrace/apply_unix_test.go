@@ -158,3 +158,67 @@ sh -c 'trap "" INT; : > "$READY"; sleep 0.5; trap - INT; sleep 30'
 		t.Fatalf("rollback trap never ran — the lost first interrupt was not re-sent: %v", err)
 	}
 }
+
+// TestApplyDoesNotShootTheRollbackTrapsChildren is the counterweight to the
+// re-signal escalation: once the group has visibly reacted to the interrupt
+// (the foreground child died and the shell entered its rollback trap),
+// re-sending SIGINT would kill the trap's own children — an mv or find in a
+// restore_stage-style rollback — aborting the rollback mid-flight and
+// stranding staged state: the exact data-loss class execgrace exists to
+// prevent, introduced by the cure. The trap here does its work through a
+// child process slower than the re-signal interval; the marker is only
+// written if that child survives.
+func TestApplyDoesNotShootTheRollbackTrapsChildren(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "restored")
+	ready := filepath.Join(dir, "ready")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// The trap models restore_stage: a non-builtin child (sleep) doing >1
+	// re-signal interval of work, then the state restore. A group SIGINT
+	// during the trap kills the sleep (default INT disposition) and aborts
+	// the trap body before the marker write.
+	// The trailing ':' is load-bearing for the same reason as in
+	// TestApplyResignalsWhenTheFirstInterruptIsLost: bash 3.2 skips the INT
+	// trap when the racing command sits in tail position of a -c script.
+	script := `trap 'sleep 0.5 && echo restored > "$MARKER"; exit 130' INT TERM
+: > "$READY"
+sleep 30
+:`
+	cmd := exec.CommandContext(ctx, "sh", "-c", script)
+	cmd.Env = append(os.Environ(), "MARKER="+marker, "READY="+ready)
+	Apply(cmd, 5*time.Second)
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	deadline := time.After(5 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("command exited before readiness: %v", err)
+		case <-deadline:
+			t.Fatal("timed out waiting for readiness marker")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("command never exited after cancellation")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("rollback trap's child was killed by a re-signal — the rollback was aborted mid-flight: %v", err)
+	}
+}

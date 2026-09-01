@@ -167,29 +167,27 @@ add_fsys_compile_job() {
 add_unit_core_job() {
   # Package list comes from scripts/test-tier-packages — the single source of
   # truth for tier membership (ga-4h8bu): everything except cmd/gc (which has
-  # its own six fast shards) and the three integration-weight packages
-  # (examples/bd/dolt, examples/gastown, scripts — measured 562.9s/445.3s/
-  # 390.5s) that made the tier named "fast" take ~20 minutes. Those three run
+  # its own six fast shards) and the two integration-weight packages
+  # (examples/bd/dolt, examples/gastown) that made the tier named "fast" take
+  # ~20 minutes; the scripts package stays IN this tier (its guard/contract
+  # tests gate pushes) with its slow pipeline tests behind -tags integration.
+  # The excluded packages run
   # with strictly MORE coverage (GC_FAST_UNIT=0 plus -tags integration) in the
   # integration tier's packages-core shards, and the tier-coverage selftest
   # proves the tiers' union on every fast run.
   #
-  # unit-core also gets a LARGER -p than the shared inner_p: it is the one
-  # multi-package job (~190 packages), so under the flat jobs/shards split it
-  # walked them at -p=1 while the drained single-package shards' slots idled.
-  # -p is passed EXPLICITLY on the go test command line — go documents that
-  # explicit flags override GOFLAGS, unlike the duplicate-flag last-wins
-  # behaviour an earlier version leaned on. Budget note: the other concurrent
-  # jobs are single-package, where -p bounds only their dependency-build phase
-  # (see inner-parallelism.sh), so the brief overlap oversubscribes builds,
-  # not test execution.
+  # unit-core gets a LARGER -p than the shared inner_p: it is the one
+  # multi-package job (~190 packages) and would otherwise walk them at -p=1
+  # while the drained single-package shards' slots idle. -p goes EXPLICITLY
+  # on the go test command line (go's documented explicit-flags-override-
+  # GOFLAGS rule). -count=1 defeats the test-result cache, matching the
+  # Makefile test target and upstream policy. The other concurrent jobs are
+  # single-package, where -p bounds only their dependency-build phase
+  # (see inner-parallelism.sh).
   #
   # Validation applies ONLY to a user-supplied override; the computed default
-  # is clamped, never rejected. LOCAL_TEST_JOBS=1 is legal (and what
-  # test-local-job-count's low-memory floor yields), and 1/2 == 0 used to trip
-  # the positivity check BEFORE the min-2 clamp four lines later could fix it,
-  # bricking the pre-push gate on exactly the constrained machines that
-  # job-sizing logic serves — while blaming an env var the user never set.
+  # is clamped, never rejected — LOCAL_TEST_JOBS=1 is legal (it is what the
+  # job-sizing helper yields on low-memory hosts) and must not brick the gate.
   local unit_core_p
   if [[ -n "${GC_TEST_UNIT_CORE_P:-}" ]]; then
     unit_core_p="$GC_TEST_UNIT_CORE_P"
@@ -206,17 +204,15 @@ add_unit_core_job() {
   # The package list is captured and checked non-empty INSIDE the job: an
   # unguarded $(...) in argument position discards the printer's failure, and
   # `go test` with zero package args tests only the repo root and reports ok —
-  # a green gate that ran nothing, the exact silent-rot class
-  # test-tier-coverage.sh exists to catch (post-merge review of #139,
-  # reproduced: exit 0, "? github.com/gastownhall/gascity [no test files]").
+  # a green gate that ran nothing.
   # Flags live in one assignment so the budget guards
   # (test_local_parallel_budget_test.go) can parse them: -count=1 defeats
-  # result caching, -timeout ${go_test_timeout} shares the cmd/gc shards'
-  # budget instead of inheriting Go's 10m default (ga-9au), and the explicit
-  # -p overrides GOFLAGS by go's documented rule.
+  # result caching (upstream policy, guard-mandated), -timeout
+  # ${go_test_timeout} shares the cmd/gc shards' budget (ga-9au), and the
+  # explicit -p overrides GOFLAGS by go's documented rule.
   local unit_core_go_flags="-p ${unit_core_p} -count=1 -timeout ${go_test_timeout}"
   add_job "unit-core" \
-    'GC_FAST_UNIT=1; pkgs=$(./scripts/test-tier-packages unit-core) && [ -n "$pkgs" ] || { echo "unit-core: test-tier-packages produced no packages" >&2; exit 1; }; GC_FAST_UNIT=1 go test '"${unit_core_go_flags}"' $pkgs'
+    'pkgs=$(./scripts/test-tier-packages unit-core) && [ -n "$pkgs" ] || { echo "unit-core: test-tier-packages produced no packages" >&2; exit 1; }; GC_FAST_UNIT=1 go test '"${unit_core_go_flags}"' $pkgs'
 }
 
 # Direct shell job for the same resourcecensus reason as the selftests below:

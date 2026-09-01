@@ -75,16 +75,15 @@ func Apply(cmd *exec.Cmd, grace time.Duration) *atomic.Bool {
 // process groups or os.Interrupt (such as Windows) fall back to Kill.
 func InterruptThenKill(cmd *exec.Cmd, accepted *atomic.Bool) func() error {
 	return func() error {
+		// Snapshot the leader's direct children BEFORE the first interrupt:
+		// the re-signal loop may only fire while this exact set is still
+		// alive and unchanged — the provably-lost-signal state. See
+		// resignalWhileUnchanged for the full rationale.
+		cohort := preSignalCohort(cmd)
 		err := interruptProcessGroup(cmd)
 		if err == nil {
 			accepted.Store(true)
-			// One interrupt is a one-shot race: it can land while the shell
-			// is inside its blocked-signal fork window, in which case the
-			// foreground child never sees it and the trap stays deferred
-			// behind the child's full runtime. Keep re-sending until the
-			// process is observed dead so delivery converges within the
-			// WaitDelay grace budget (see resignalUntilDone).
-			resignalUntilDone(cmd, cmd.WaitDelay)
+			resignalWhileUnchanged(cmd, cmd.WaitDelay, cohort)
 			return nil
 		}
 		if errors.Is(err, os.ErrProcessDone) {
