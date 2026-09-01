@@ -106,21 +106,40 @@ add_unit_core_job() {
   # unit-core also gets a LARGER -p than the shared inner_p: it is the one
   # multi-package job (~190 packages), so under the flat jobs/shards split it
   # walked them at -p=1 while the drained single-package shards' slots idled.
-  # The job-level GOFLAGS assignment appends after the shared export below,
-  # and go's flag parsing takes the LAST -p (verified by execution). Budget
-  # note: the other concurrent jobs are single-package, where -p bounds only
-  # their dependency-build phase (see inner-parallelism.sh), so the brief
-  # overlap oversubscribes builds, not test execution.
-  local unit_core_p="${GC_TEST_UNIT_CORE_P:-$(( local_jobs / 2 ))}"
-  if ! [[ "$unit_core_p" =~ ^[0-9]+$ && "$unit_core_p" -gt 0 ]]; then
-    echo "GC_TEST_UNIT_CORE_P must be a positive integer" >&2
-    exit 1
+  # -p is passed EXPLICITLY on the go test command line — go documents that
+  # explicit flags override GOFLAGS, unlike the duplicate-flag last-wins
+  # behaviour an earlier version leaned on. Budget note: the other concurrent
+  # jobs are single-package, where -p bounds only their dependency-build phase
+  # (see inner-parallelism.sh), so the brief overlap oversubscribes builds,
+  # not test execution.
+  #
+  # Validation applies ONLY to a user-supplied override; the computed default
+  # is clamped, never rejected. LOCAL_TEST_JOBS=1 is legal (and what
+  # test-local-job-count emits on low-memory hosts), and 1/2 == 0 used to trip
+  # the positivity check BEFORE the min-2 clamp four lines later could fix it,
+  # bricking the pre-push gate on exactly the constrained machines the
+  # job-count logic serves — while blaming an env var the user never set.
+  local unit_core_p
+  if [[ -n "${GC_TEST_UNIT_CORE_P:-}" ]]; then
+    unit_core_p="$GC_TEST_UNIT_CORE_P"
+    if ! [[ "$unit_core_p" =~ ^[0-9]+$ && "$unit_core_p" -gt 0 ]]; then
+      echo "GC_TEST_UNIT_CORE_P must be a positive integer" >&2
+      exit 1
+    fi
+  else
+    unit_core_p=$(( local_jobs / 2 ))
   fi
   if (( unit_core_p < 2 )); then
     unit_core_p=2
   fi
+  # The package list is captured and checked non-empty INSIDE the job: an
+  # unguarded $(...) in argument position discards the printer's failure, and
+  # `go test` with zero package args tests only the repo root and reports ok —
+  # a green gate that ran nothing, the exact silent-rot class
+  # test-tier-coverage.sh exists to catch (post-merge review of #139,
+  # reproduced: exit 0, "? github.com/gastownhall/gascity [no test files]").
   add_job "unit-core" \
-    'GC_FAST_UNIT=1 GOFLAGS="${GOFLAGS:-} -p='"${unit_core_p}"'" go test -timeout 15m $(./scripts/test-tier-packages unit-core)'
+    'GC_FAST_UNIT=1; pkgs=$(./scripts/test-tier-packages unit-core) && [ -n "$pkgs" ] || { echo "unit-core: test-tier-packages produced no packages" >&2; exit 1; }; GC_FAST_UNIT=1 go test -p '"${unit_core_p}"' -count=1 -timeout 15m $pkgs'
 }
 
 # Direct shell job for the same resourcecensus reason as the selftests below:

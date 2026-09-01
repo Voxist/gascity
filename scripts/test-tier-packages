@@ -54,8 +54,16 @@ integration_core_excludes=(
 
 list_minus() {
   # Prints `go list ./...` minus the exact package paths given as arguments.
+  #
+  # go list is captured to a variable FIRST: feeding it through process
+  # substitution hides its exit status from set -euo pipefail, so a go list
+  # killed mid-stream (module-cache lock, OOM) used to yield a silently
+  # TRUNCATED package list with exit 0 — and the shard consumers guard only
+  # the fully-empty case, so the surviving subset would quietly become the
+  # tier (post-merge review of #139).
   local -a excludes=("$@")
-  local pkg skip ex
+  local all_pkgs pkg skip ex
+  all_pkgs="$(go list ./...)"
   while IFS= read -r pkg; do
     skip=0
     for ex in "${excludes[@]}"; do
@@ -67,7 +75,7 @@ list_minus() {
     if [[ "$skip" -eq 0 ]]; then
       printf '%s\n' "$pkg"
     fi
-  done < <(go list ./...)
+  done <<< "$all_pkgs"
 }
 
 case "${1:-}" in
