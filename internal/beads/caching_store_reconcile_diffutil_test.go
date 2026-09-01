@@ -21,7 +21,7 @@ func diffEndStates(want, got mergeEndState) string {
 	diffTimeMap(&b, "localBeadAt", want.localBeadAt, got.localBeadAt)
 	diffU64Map(&b, "deletedSeq", want.deletedSeq, got.deletedSeq)
 	diffStructSet(&b, "readyLost", want.readyLost, got.readyLost)
-	diffStructSet(&b, "readyInvalid", want.readyInvalid, got.readyInvalid)
+	diffBoolMap(&b, "readyInvalid", want.readyInvalid, got.readyInvalid)
 	if want.depsComplete != got.depsComplete {
 		fmt.Fprintf(&b, "  depsComplete: want=%v got=%v\n", want.depsComplete, got.depsComplete)
 	}
@@ -182,4 +182,24 @@ func unionKeysTime(a, b map[string]time.Time) []string {
 		set[k] = struct{}{}
 	}
 	return sortedKeysAny(set)
+}
+
+// diffBoolMap reports key AND value differences: for readyInvalid the value is
+// the disowned verdict the differ substitutes, so agreeing on membership while
+// disagreeing on a value is a real divergence (the two runs would flood
+// differently), not a formatting detail.
+func diffBoolMap(b *strings.Builder, name string, want, got map[string]bool) {
+	for k, wv := range want {
+		gv, ok := got[k]
+		if !ok {
+			fmt.Fprintf(b, "%s[%s]: want %v, got absent\n", name, k, wv)
+		} else if gv != wv {
+			fmt.Fprintf(b, "%s[%s]: want %v, got %v\n", name, k, wv, gv)
+		}
+	}
+	for k, gv := range got {
+		if _, ok := want[k]; !ok {
+			fmt.Fprintf(b, "%s[%s]: want absent, got %v\n", name, k, gv)
+		}
+	}
 }

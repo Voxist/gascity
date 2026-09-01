@@ -699,8 +699,15 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 			// an idle store: the controller counted demand for this seat, so
 			// draining here would convert a transport failure into a false idle,
 			// reap the seat, and leave the work for the next tick to rediscover.
-			// Exit non-zero, keep the seat, and let the event above carry the
-			// cause; the idle-claim backstop re-drives the hook.
+			// Keep the seat and let the event above carry the cause; the
+			// idle-claim backstop re-drives the hook. That behaviour is
+			// orthogonal to the exit CODE, which follows the token's published
+			// contract: hookStoreUnavailableToken documents exit 2, and a
+			// consumer gating on the code must be able to tell a dead store from
+			// no-work on this path too — it is the form agents run.
+			if errors.Is(classifyWorkQueryStoreUnavailable(err), beads.ErrStoreUnavailable) {
+				return 2
+			}
 			return 1
 		}
 		if isZeroHookStore(selected) {

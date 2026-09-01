@@ -118,8 +118,12 @@ func TestClaimHookStoreUnavailableEmitsToken(t *testing.T) {
 		&stdout, &stderr,
 	)
 
-	if code == 0 {
-		t.Fatalf("claim hook returned 0 on a transport failure; stderr=%q", stderr.String())
+	// The code, not just the token: hookStoreUnavailableToken's doc publishes
+	// exit 2, and a consumer gating on the code must be able to tell a dead
+	// store from no-work on the path agents actually run.
+	if code != 2 {
+		t.Fatalf("claim hook returned %d on a transport failure, want 2 (the exit code the token documents); stderr=%q",
+			code, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), hookStoreUnavailableToken) {
 		t.Fatalf("claim path did not emit %s on a transport-class failure; a dead store is still "+

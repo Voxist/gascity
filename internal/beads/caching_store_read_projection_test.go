@@ -77,28 +77,32 @@ func TestGetWithholdsInvalidatedReadyProjection(t *testing.T) {
 	if !ok {
 		t.Fatal("row evicted; cannot assert the stored verdict")
 	}
-	if stored.IsBlocked == nil {
-		t.Fatal("stored verdict was nil-ed; ADR-0094 requires it to stay resident so the reconcile differ compares like with like")
+	// OPTION 2: residency moved to the side map — the ROW is nil'd (safe by
+	// default for every reader) and the differ substitutes the disowned value.
+	if stored.IsBlocked != nil {
+		t.Fatal("row verdict was not nil-ed; under Option 2 the row is the sentinel")
+	}
+	if v, ok2 := cache.readyProjectionInvalid[blocked.ID]; !ok2 || !v {
+		t.Fatal("disowned value not retained in readyProjectionInvalid; the reconcile differ would see nil->set and flood")
 	}
 	if !invalid {
 		t.Fatal("row is not marked invalid; the scrub above would be untested")
 	}
 }
 
-// TestUnobservedAbsorbDoesNotDischargeInvalidation pins the second half of the
-// ADR-0094 discharge rule: only an absorb that OBSERVED an is_blocked value may
-// clear the invalidation mark.
+// TestVerdictlessAbsorbDoesNotDischargeInvalidation pins the ADR-0094
+// discharge rule under the nil-the-row design: an absorb discharges the
+// invalidation ONLY when the incoming row actually carries an is_blocked
+// verdict.
 //
-// This is a unit test on absorbFreshLocked rather than an ApplyEvent scenario
-// deliberately. The hazard is structural: mergeCacheEventPatch seeds the merged
-// row from the CACHED row and overwrites IsBlocked only when the event carried
-// is_blocked, so an absorb can receive a non-nil, authoritative-LOOKING verdict
-// that observed nothing. Inferring observation from the value alone therefore
-// lets unrelated traffic silently cancel a pending re-ask. Driving that through
-// ApplyEvent is unreliable (the conflict guards drop most such events before
-// they reach the absorb), and a test that cannot steer the path is a test that
-// passes vacuously — so the rule is asserted where it lives.
-func TestUnobservedAbsorbDoesNotDischargeInvalidation(t *testing.T) {
+// This matters because an invalidated row is nil'd, and every cache-seeded
+// merge (mergeCacheEventPatch on an event that lacks is_blocked) therefore
+// arrives verdict-LESS — it observed nothing and must leave both the mark and
+// the disowned value in place, or unrelated traffic silently cancels a pending
+// re-ask and the differ loses the value it substitutes. Only a row that
+// genuinely carries the field (a backing read, a graph apply, an event with
+// is_blocked) may discharge.
+func TestVerdictlessAbsorbDoesNotDischargeInvalidation(t *testing.T) {
 	t.Parallel()
 
 	seed := func(t *testing.T) (*CachingStore, string) {
@@ -116,45 +120,41 @@ func TestUnobservedAbsorbDoesNotDischargeInvalidation(t *testing.T) {
 			t.Fatalf("prime: %v", err)
 		}
 		cache.mu.Lock()
-		cache.markReadyProjectionInvalidLocked(b.ID)
+		if !cache.clearReadyProjectionLocked(b.ID) {
+			cache.mu.Unlock()
+			t.Fatal("fixture row had no verdict to invalidate; this guard would pass vacuously")
+		}
 		cache.mu.Unlock()
 		return cache, b.ID
 	}
 
-	// A cache-seeded verdict: non-nil, but copied rather than observed.
-	cacheSeeded := func(c *CachingStore, id string) Bead {
-		c.mu.RLock()
-		defer c.mu.RUnlock()
-		return cloneBead(c.beads[id])
-	}
-
-	t.Run("unobserved absorb keeps the mark", func(t *testing.T) {
+	t.Run("verdict-less absorb keeps the mark", func(t *testing.T) {
 		cache, id := seed(t)
-		row := cacheSeeded(cache, id)
-		if row.IsBlocked == nil {
-			t.Fatal("fixture row carries no verdict; this guard would pass vacuously")
+		// What a cache-seeded merge produces for an invalidated row: nil.
+		cache.mu.RLock()
+		row := cloneBead(cache.beads[id])
+		cache.mu.RUnlock()
+		if row.IsBlocked != nil {
+			t.Fatal("invalidated row still carries a verdict; the nil-the-row invariant is broken and this guard is mistargeted")
 		}
 		cache.mu.Lock()
 		cache.absorbFreshLocked(id, row, time.Now(), absorbOpts{
 			depsMode: depsKeepCached, seqMode: seqKeep, clearDirty: true,
-			readyProjectionUnobserved: true,
 		})
-		still := cache.readyProjectionInvalidLocked(id)
+		_, still := cache.readyProjectionInvalid[id]
 		cache.mu.Unlock()
 		if !still {
-			t.Fatal("an absorb that observed nothing discharged the invalidation; " +
-				"a cache-seeded verdict must not read as an observation")
+			t.Fatal("a verdict-less absorb discharged the invalidation; unrelated traffic can now cancel a pending re-ask")
 		}
 	})
 
-	t.Run("observed absorb discharges the mark", func(t *testing.T) {
+	t.Run("verdict-carrying absorb discharges", func(t *testing.T) {
 		cache, id := seed(t)
-		row := cacheSeeded(cache, id)
+		observed := false
 		cache.mu.Lock()
-		cache.absorbFreshLocked(id, row, time.Now(), absorbOpts{
-			depsMode: depsKeepCached, seqMode: seqKeep, clearDirty: true,
-		})
-		still := cache.readyProjectionInvalidLocked(id)
+		cache.absorbFreshLocked(id, Bead{ID: id, Title: "blocked", Status: "open", Type: "task", IsBlocked: &observed},
+			time.Now(), absorbOpts{depsMode: depsKeepCached, seqMode: seqKeep, clearDirty: true})
+		_, still := cache.readyProjectionInvalid[id]
 		cache.mu.Unlock()
 		if still {
 			t.Fatal("a genuine observation did not discharge the invalidation; the mark would never clear")

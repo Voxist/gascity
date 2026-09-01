@@ -37,25 +37,22 @@ type CachingStore struct {
 	beadSeq      map[string]uint64
 	localBeadAt  map[string]time.Time
 	deletedSeq   map[string]uint64
-	// readyProjectionInvalid holds the ids whose cached is_blocked verdict this
+	// readyProjectionInvalid holds, per bead id, the is_blocked verdict this
 	// cache has invalidated and not yet re-observed (ADR-0094, vc-493m3j).
 	//
-	// Invalidation is not a VALUE: writing a nil sentinel into the row's
-	// IsBlocked to mean "re-ask" is indistinguishable, to the reconcile differ,
-	// from the backing store reporting a genuine nil<->set transition — which
-	// is what made a whole-cache invalidation re-emit bead.updated for every
-	// row on every tick. The verdict stays in c.beads as what the backing last
-	// reported; only the readiness readers consult this set, exactly where they
-	// used to observe the sentinel.
+	// KEY membership = "the verdict is disowned". The row's own IsBlocked is
+	// nil'd at invalidation time — upstream's sentinel contract — so every
+	// reader, present or future, is safe by DEFAULT: there is nothing in the
+	// row to leak. Three review rounds proved the inverse design (keep the
+	// value in the row, scrub at each exit) cannot be audited by reading; ten
+	// of eleven escape surfaces leaked.
 	//
-	// This is NOT redundant with observationRevision. That counter keeps
-	// invalidation out of the MUTATION fences the reconcile differ reads; this
-	// set keeps invalidation out of the row VALUES it compares. Restoring only
-	// the counter (as the 2026-08-31 resync did) leaves the sentinel write in
-	// place and the flood returns — proven by
-	// TestReconcileEmitsNoUpdatesAfterWholeCacheInvalidation, which failed with
-	// nine spurious bead.updated on tick 1 until this set came back.
-	readyProjectionInvalid map[string]struct{}
+	// VALUE = the verdict that was nil'd out, consulted ONLY by the reconcile
+	// differ's comparison so the nil does not read as a store-side nil<->set
+	// transition — which is the ADR-0094 bead.updated flood. Key set and value
+	// set share one lifecycle by construction: clearReadyProjectionLocked only
+	// fires when a verdict exists, so every mark carries its disowned value.
+	readyProjectionInvalid map[string]bool
 	state                  cacheState
 	lastFreshAt            time.Time
 	mutationSeq            uint64
@@ -362,7 +359,7 @@ func newCachingStore(backing Store, idPrefix string, onChange func(eventType, be
 		beadSeq:                make(map[string]uint64),
 		localBeadAt:            make(map[string]time.Time),
 		deletedSeq:             make(map[string]uint64),
-		readyProjectionInvalid: make(map[string]struct{}),
+		readyProjectionInvalid: make(map[string]bool),
 		readyProjectionLost:    make(map[string]struct{}),
 		problemLog:             make(map[string]cacheProblemLogState),
 		onChange:               onChange,
@@ -431,15 +428,14 @@ func (c *CachingStore) advanceObservationLocked() {
 	c.observationRevision++
 }
 
-// markReadyProjectionInvalidLocked records that id's cached is_blocked verdict
-// must not be trusted until the next observation. It deliberately does not
-// touch c.beads: the row keeps what the backing last reported so the reconcile
-// differ still compares like with like. Caller must hold c.mu in write mode.
-func (c *CachingStore) markReadyProjectionInvalidLocked(id string) {
+// markReadyProjectionInvalidLocked records that id's verdict — value — has been
+// nil'd out of the row and must not be trusted until the next observation.
+// Caller must hold c.mu in write mode.
+func (c *CachingStore) markReadyProjectionInvalidLocked(id string, value bool) {
 	if c.readyProjectionInvalid == nil {
-		c.readyProjectionInvalid = make(map[string]struct{})
+		c.readyProjectionInvalid = make(map[string]bool)
 	}
-	c.readyProjectionInvalid[id] = struct{}{}
+	c.readyProjectionInvalid[id] = value
 }
 
 // readyProjectionInvalidLocked reports whether id's cached verdict is awaiting
@@ -447,26 +443,6 @@ func (c *CachingStore) markReadyProjectionInvalidLocked(id string) {
 func (c *CachingStore) readyProjectionInvalidLocked(id string) bool {
 	_, invalid := c.readyProjectionInvalid[id]
 	return invalid
-}
-
-// readyProjectionInvalidSnapshotLocked copies the marks covering candidates so
-// readiness can be evaluated after the cache lock is released, the way
-// statusByID and depsByID already are. Returns nil when nothing is invalid,
-// which the readers treat the same as an empty set. Caller must hold c.mu.
-func (c *CachingStore) readyProjectionInvalidSnapshotLocked(candidates []Bead) map[string]struct{} {
-	if len(c.readyProjectionInvalid) == 0 {
-		return nil
-	}
-	var out map[string]struct{}
-	for _, b := range candidates {
-		if _, invalid := c.readyProjectionInvalid[b.ID]; invalid {
-			if out == nil {
-				out = make(map[string]struct{})
-			}
-			out[b.ID] = struct{}{}
-		}
-	}
-	return out
 }
 
 func (c *CachingStore) noteLocalMutationLocked(ids ...string) uint64 {
@@ -553,16 +529,6 @@ type absorbOpts struct {
 	seqMode    absorbSeqMode
 	readyMode  absorbReadyMode
 	clearDirty bool
-	// readyProjectionUnobserved marks an absorb whose incoming row carries an
-	// is_blocked value that was NOT observed this cycle — it was copied from
-	// the cache. mergeCacheEventPatch seeds the merged row from the cached row
-	// and overwrites IsBlocked only when the event actually carried the field,
-	// so on any other field's bead.updated the value looks authoritative while
-	// observing nothing. Without this flag such an absorb would discharge an
-	// ADR-0094 invalidation, letting unrelated traffic silently cancel a
-	// pending re-ask. Default false: every caller that really did observe
-	// (backing reads, graph applies, creates) keeps discharging.
-	readyProjectionUnobserved bool
 }
 
 // absorbFreshLocked installs a fresh row for id per opts. It is the only code
@@ -574,20 +540,18 @@ func (c *CachingStore) absorbFreshLocked(id string, bead Bead, now time.Time, op
 	// Whether the INCOMING row carried its own verdict, read before
 	// absorbReadyProjectionLocked runs — that helper may copy the cache's own
 	// cached verdict forward under readyPreserveWhenDepsUnchanged, after which
-	// bead.IsBlocked is no longer evidence of an observation.
+	// bead.IsBlocked is no longer evidence of an observation. An invalidated
+	// row is nil'd, so a merge seeded from the cache can never masquerade as
+	// an observation here; only a row that genuinely carried is_blocked
+	// (a backing read, a graph apply, an event with the field) discharges.
 	observedVerdict := bead.IsBlocked != nil
 	bead = c.absorbReadyProjectionLocked(id, bead, opts)
 	c.beads[id] = cloneBead(bead)
 	// An absorb discharges the ADR-0094 invalidation only when it actually
-	// OBSERVED a verdict: what the backing (or an event payload carrying the
-	// field) just reported supersedes this cache's own request to re-ask. A
-	// preserve-branch absorb copies the cache's own — possibly disowned —
-	// verdict forward and observes nothing, so it must NOT discharge the mark.
-	// That is the same distinction preserveCachedReadyProjectionLocked makes
-	// (D1: preservation is not observation); under the old in-band sentinel it
-	// was unreachable, because an invalidation had already nil-ed the cached
-	// verdict and the preserve branch could not fire.
-	if observedVerdict && !opts.readyProjectionUnobserved {
+	// OBSERVED a verdict; a verdict-less absorb leaves the mark (and the
+	// disowned value the differ substitutes) in place until something real
+	// answers.
+	if observedVerdict {
 		delete(c.readyProjectionInvalid, id)
 	}
 	switch opts.depsMode {
@@ -1187,7 +1151,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 		// snapshot ran the ready projection over every row it carries, so those
 		// rows are freshly observed and their invalidation is discharged. Only
 		// rows kept from the old cache can still be awaiting re-observation.
-		nextReadyInvalid := make(map[string]struct{})
+		nextReadyInvalid := make(map[string]bool)
 		for id, current := range c.beads {
 			if fresh, exists := beadMap[id]; exists {
 				if _, keep := c.recentLocalBeadConflictLocked(id, fresh, now, true); keep {
@@ -1198,8 +1162,8 @@ func (c *CachingStore) prime(ctx context.Context) error {
 					if _, lost := c.readyProjectionLost[id]; lost {
 						nextReadyLost[id] = struct{}{}
 					}
-					if c.readyProjectionInvalidLocked(id) {
-						nextReadyInvalid[id] = struct{}{}
+					if v, ok := c.readyProjectionInvalid[id]; ok {
+						nextReadyInvalid[id] = v
 					}
 					c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
 				}
@@ -1213,8 +1177,8 @@ func (c *CachingStore) prime(ctx context.Context) error {
 				if _, lost := c.readyProjectionLost[id]; lost {
 					nextReadyLost[id] = struct{}{}
 				}
-				if c.readyProjectionInvalidLocked(id) {
-					nextReadyInvalid[id] = struct{}{}
+				if v, ok := c.readyProjectionInvalid[id]; ok {
+					nextReadyInvalid[id] = v
 				}
 				c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
 			}

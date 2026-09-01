@@ -528,6 +528,15 @@ func (c *CachingStore) mergeSnapshotLocked(
 	for id, freshBead := range freshByID {
 		freshDeps := c.depsForReconcileLocked(id, freshBead, depMap, useFreshDeps)
 		cached, cachedExists := c.beads[id]
+		// OPTION 2 differ substitution: a nil'd (invalidated) verdict compares
+		// as the value the cache disowned, so the invalidation itself never
+		// reads as a store-side nil<->set transition (the ADR-0094 flood).
+		if cachedExists && cached.IsBlocked == nil {
+			if v, ok := c.readyProjectionInvalid[id]; ok {
+				vv := v
+				cached.IsBlocked = &vv
+			}
+		}
 		cachedDeps, hasCachedDeps := c.deps[id]
 		d := reconcileMergeDecision(mergeRowInput{
 			freshExists:   true,
@@ -837,18 +846,10 @@ func (c *CachingStore) preserveCachedReadyProjectionLocked(items map[string]Bead
 		if !ok || cached.IsBlocked == nil {
 			continue
 		}
-		// ADR-0094 D1: preservation is not observation. A verdict this cache
-		// invalidated is exactly the one not to put back into service. The two
-		// guards below cannot stand in for this check: the local write that
-		// closes a blocker updates the blocker's cached status in the same
-		// critical section that raises the invalidation, so by reconcile time
-		// cached and fresh agree and neither deps nor target-status has moved.
-		// Under the old in-band sentinel this case was unreachable — the
-		// invalidation had already nil'd cached.IsBlocked, so the check above
-		// skipped it.
-		if c.readyProjectionInvalidLocked(id) {
-			continue
-		}
+		// D1 (preservation is not observation) is STRUCTURAL again: an
+		// invalidated row's cached.IsBlocked is nil, so the guard above already
+		// skips it — the same way upstream's in-band sentinel made this case
+		// unreachable. No separate mark-check needed.
 		freshDeps := c.depsForReconcileLocked(id, item, depMap, useFreshDeps)
 		if depsChanged(c.deps[id], freshDeps) {
 			continue

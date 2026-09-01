@@ -575,9 +575,8 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 	if _, mutated := c.beadSeq[id]; mutated {
 		if _, dirty := c.dirty[id]; !dirty {
 			if b, ok := c.beads[id]; ok {
-				invalid := c.readyProjectionInvalidLocked(id)
 				c.mu.RUnlock()
-				return projectCachedBead(b, invalid), nil
+				return cloneBead(b), nil
 			}
 		}
 	}
@@ -604,9 +603,8 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 					return c.getBackingOrLastGood(id)
 				}
 				if current, ok := c.beads[id]; ok {
-					invalid := c.readyProjectionInvalidLocked(id)
 					c.mu.Unlock()
-					return projectCachedBead(current, invalid), nil
+					return cloneBead(current), nil
 				}
 				c.mu.Unlock()
 				return Bead{}, ErrNotFound
@@ -622,9 +620,8 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 			return fresh, nil
 		}
 		if b, ok := c.beads[id]; ok {
-			invalid := c.readyProjectionInvalidLocked(id)
 			c.mu.RUnlock()
-			return projectCachedBead(b, invalid), nil
+			return cloneBead(b), nil
 		}
 		c.mu.RUnlock()
 		return c.getBackingOrLastGood(id)
@@ -642,7 +639,6 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		statusByID   map[string]string
 		depsByID     map[string][]Dep
 		openBeads    []Bead
-		readyInvalid map[string]struct{}
 		unanswerable bool
 	)
 	// Ready requires a fully live cache with complete dependency coverage and a
@@ -675,7 +671,6 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 			for _, b := range openBeads {
 				depsByID[b.ID] = cloneDeps(c.deps[b.ID])
 			}
-			readyInvalid = c.readyProjectionInvalidSnapshotLocked(openBeads)
 		},
 	); err != nil {
 		return c.backing.Ready(query...)
@@ -688,7 +683,7 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 
 	var result []Bead
 	for _, b := range openBeads {
-		if cachedBeadReady(b, statusByID, depsByID[b.ID], mapHasKey(readyInvalid, b.ID)) {
+		if cachedBeadReady(b, statusByID, depsByID[b.ID]) {
 			result = append(result, cloneBead(b))
 		}
 	}
@@ -758,7 +753,7 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 		default:
 			return nil, false
 		}
-		if cachedBeadReady(b, statusByID, deps, c.readyProjectionInvalidLocked(b.ID)) {
+		if cachedBeadReady(b, statusByID, deps) {
 			result = append(result, cloneBead(b))
 		}
 	}
@@ -768,14 +763,8 @@ func (c *CachingStore) CachedReady() ([]Bead, bool) {
 	return result, true
 }
 
-// projectionInvalid is ADR-0094's replacement for the nil sentinel: when the
-// cache has invalidated this row's is_blocked verdict and not yet re-observed
-// it, the cached value must be ignored and readiness derived from the
-// dependency edges instead — the same fallback an IsBlocked == nil row takes.
-// The verdict itself stays in the row so the reconcile differ keeps comparing
-// like with like (see CachingStore.readyProjectionInvalid).
-func cachedBeadReady(b Bead, statusByID map[string]string, deps []Dep, projectionInvalid bool) bool {
-	if b.IsBlocked != nil && !projectionInvalid {
+func cachedBeadReady(b Bead, statusByID map[string]string, deps []Dep) bool {
+	if b.IsBlocked != nil {
 		return !*b.IsBlocked
 	}
 	for _, dep := range deps {
@@ -915,13 +904,6 @@ func (c *CachingStore) absorbBackingListLocked(items []Bead, startSeq uint64) {
 	}
 }
 
-// mapHasKey reports set membership for the ADR-0094 invalidation snapshots,
-// which are nil when nothing is invalid.
-func mapHasKey(set map[string]struct{}, id string) bool {
-	_, ok := set[id]
-	return ok
-}
-
 // backingListCtx routes a backing-store list read through the backing's
 // optional CtxLister capability when it has one, so a canceled ctx aborts the
 // read; stores without the capability fall back to the plain List.
@@ -930,28 +912,4 @@ func (c *CachingStore) backingListCtx(ctx context.Context, query ListQuery) ([]B
 		return cl.ListCtx(ctx, query)
 	}
 	return c.backing.List(query)
-}
-
-// projectCachedBead clones a cached row for an EXTERNAL reader, withholding an
-// is_blocked verdict this cache has invalidated and not yet re-observed.
-//
-// ADR-0094 keeps the invalidated verdict in c.beads on purpose: the reconcile
-// differ must compare what the backing last reported, or a cache-internal
-// "re-ask" reads as a store-side transition and floods bead.updated. But every
-// reader OUTSIDE this package reads Bead.IsBlocked as the backing's answer, and
-// several treat nil as their fail-open case (bindNamedSessionTriggerBead's
-// staleness test, computeAwakeBridge's blocked test, gc bead state). Handing
-// them a verdict this cache has already disowned makes them act on a value the
-// cache itself does not trust.
-//
-// So the value is STORED but not SERVED: the differ keeps its like-for-like
-// comparison, and callers see the same nil the in-band sentinel used to give
-// them. The readiness readers do not go through here — they take the
-// projectionInvalid flag directly (see cachedBeadReady).
-func projectCachedBead(b Bead, projectionInvalid bool) Bead {
-	out := cloneBead(b)
-	if projectionInvalid {
-		out.IsBlocked = nil
-	}
-	return out
 }

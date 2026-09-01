@@ -86,16 +86,14 @@ type mergeEndState struct {
 	// without preserving, so readiness declines for them unless their own edges
 	// can reproduce it (ga-cfhgr).
 	readyLost map[string]struct{}
-	// readyInvalid is the set of rows whose cached is_blocked verdict this cache
-	// invalidated and has not yet re-observed (ADR-0094). The merge writes it
-	// only by DISCHARGE: absorbFreshLocked and evictLocked delete the mark, and
-	// nothing in the seam adds one, so the end set is always a subset of the
-	// start set. It is captured from both runs and compared directly rather
-	// than re-derived, because deciding "absorbed vs kept verbatim" from an end
-	// state alone is ambiguous whenever a fresh payload equals the cached row —
-	// an absorb still discharges the mark there, so an end-state oracle would
-	// silently disagree on exactly that cell.
-	readyInvalid   map[string]struct{}
+	// readyInvalid maps each invalidated row to the is_blocked verdict the
+	// cache nil'd out of it (ADR-0094). The merge writes it only by DISCHARGE
+	// (absorbFreshLocked and evictLocked delete entries; nothing in the seam
+	// adds one), so the end map is always a subset of the start map. Captured
+	// from both runs and compared VALUES INCLUDED: the disowned value feeds the
+	// differ's substitution, so two runs that agree on membership but disagree
+	// on a value would flood differently.
+	readyInvalid   map[string]bool
 	state          cacheState
 	lastFreshAt    time.Time
 	mutationSeq    uint64
@@ -304,7 +302,7 @@ func captureEndState(c *CachingStore) mergeEndState {
 		localBeadAt:          cloneTimeMap(c.localBeadAt),
 		deletedSeq:           cloneU64Map(c.deletedSeq),
 		readyLost:            cloneDirty(c.readyProjectionLost),
-		readyInvalid:         cloneDirty(c.readyProjectionInvalid),
+		readyInvalid:         cloneBoolMap(c.readyProjectionInvalid),
 		state:                c.state,
 		lastFreshAt:          c.lastFreshAt,
 		mutationSeq:          c.mutationSeq,
@@ -581,4 +579,15 @@ func legacyBranchBMerge(
 // injected inputs across all runs, so DeepEqual compares them soundly.
 func endStatesEqual(a, b mergeEndState) bool {
 	return reflect.DeepEqual(a, b)
+}
+
+func cloneBoolMap(in map[string]bool) map[string]bool {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }

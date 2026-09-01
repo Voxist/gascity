@@ -91,7 +91,10 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		// discharge (absorbFreshLocked / evictLocked delete the mark), so it is
 		// captured from both runs and diffed rather than re-derived.
 		"readyProjectionInvalid": true,
-		"lastFreshAt":            true, "mutationSeq": true, "primePartialErr": true,
+		// OPTION 2 prototype: disowned-value side map; a real implementation
+		// must capture+diff it like readyInvalid.
+		"readyProjectionDisowned": true,
+		"lastFreshAt":             true, "mutationSeq": true, "primePartialErr": true,
 		"syncFailures": true, "circuitTripped": true,
 		"stats": true, // stats compared field-wise below
 	}
