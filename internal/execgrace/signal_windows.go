@@ -23,7 +23,9 @@ func interruptProcessGroup(cmd *exec.Cmd) error {
 	return cmd.Process.Signal(os.Interrupt)
 }
 
-// resignalUntilDone is a no-op on Windows: there is no process group to
-// re-signal, and cancellation already degrades to interrupt-then-Kill on the
-// leader alone.
-func resignalUntilDone(_ *exec.Cmd, _ time.Duration) {}
+// preSignalCohort and resignalWhileUnchanged are no-ops on Windows: there is
+// no process group to observe or re-signal, and cancellation already degrades
+// to interrupt-then-Kill on the leader alone.
+func preSignalCohort(_ *exec.Cmd) map[int]bool { return nil }
+
+func resignalWhileUnchanged(_ *exec.Cmd, _ time.Duration, _ map[int]bool) {}

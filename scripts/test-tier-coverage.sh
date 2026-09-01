@@ -3,7 +3,8 @@
 # every package in the module (ga-4h8bu).
 #
 # The fast tier deliberately excludes a few packages (cmd/gc runs in its own
-# fast shards; three integration-weight packages run in the integration tier).
+# fast shards; two integration-weight packages plus the scripts package's
+# integration-tagged pipeline tests run in the integration tier).
 # The hazard is silent coverage rot: a package dropped from one tier without
 # being picked up by another fails no build and no test — it just stops
 # running anywhere, which is exactly how the 2026-07-15 resync shipped four
@@ -27,10 +28,8 @@ tiers="$repo_root/scripts/test-tier-packages"
 module="github.com/gastownhall/gascity"
 fail=0
 
-# Two individually-checked substitutions: in the combined form
-# "$(a; b)" the exit status is b's alone, so a failure of the unit-core
-# printer while the pure-printf excludes succeeded went red with a ~190-line
-# membership diff pointing at tier lists instead of the actual helper failure.
+# Two individually-checked substitutions: in the combined form "$(a; b)" the
+# exit status is b's alone, which would mask a printer failure.
 unit_core_pkgs="$("$tiers" unit-core)"
 unit_core_excl="$("$tiers" unit-core-excludes)"
 all_pkgs="$(printf '%s\n%s\n' "$unit_core_pkgs" "$unit_core_excl")"

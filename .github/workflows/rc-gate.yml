@@ -49,11 +49,9 @@ jobs:
           - label: unit-core
             timeout_minutes: 20
             command: |
-              # Derived from the tier printer, not an inline list: the old
-              # grep-only-cmd/gc form still swept examples/bd/dolt (562.9s
-              # measured) against this job's own 8m per-binary timeout — an
-              # RC-gate red waiting on comparable hardware — and drifted from
-              # the local gate's membership with nothing to flag it. The
+              # Derived from the tier printer so CI and the local gate share
+              # one tier membership; an inline list here would drift silently
+              # and can sweep a package heavier than this job's timeout. The
               # non-empty guard mirrors scripts/test-local-parallel: go test
               # with zero package args tests the repo root and reports ok.
               pkgs=$(./scripts/test-tier-packages unit-core) && [ -n "$pkgs" ] || { echo "rc-gate: test-tier-packages produced no packages" >&2; exit 1; }

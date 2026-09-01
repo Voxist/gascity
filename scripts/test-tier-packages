@@ -65,13 +65,10 @@ list_minus() {
   # Prints `go list ./...` minus the exact package paths given as arguments.
   #
   # go list is captured to a variable FIRST: feeding it through process
-  # substitution hides its exit status from set -euo pipefail, so a go list
-  # killed mid-stream (module-cache lock, OOM) used to yield a silently
-  # TRUNCATED package list with exit 0 — and the shard consumers guard only
-  # the fully-empty case, so the surviving subset would quietly become the
-  # tier (post-merge review of #139).
+  # substitution would hide its exit status from set -euo pipefail, letting a
+  # go list killed mid-stream hand consumers a silently truncated tier.
   local -a excludes=("$@")
-  local all_pkgs pkg skip ex
+  local all_pkgs pkg skip ex emitted=""
   all_pkgs="$(go list ./...)"
   while IFS= read -r pkg; do
     skip=0
@@ -83,8 +80,13 @@ list_minus() {
     done
     if [[ "$skip" -eq 0 ]]; then
       printf '%s\n' "$pkg"
+      emitted=1
     fi
   done <<< "$all_pkgs"
+  if [ -z "$emitted" ]; then
+    echo "test-tier-packages: tier expansion produced no packages" >&2
+    exit 1
+  fi
 }
 
 case "${1:-}" in

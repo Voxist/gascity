@@ -101,7 +101,7 @@
 #       (NFR4 fallback, never /tmp — see AGENTS.md Build Cache Conventions).
 #       Does not create the directory (push_gate_acquire_slot does).
 #   push_gate_acquire_slot <slot_dir> <fd_out_var> [holder_label]
-#       Reads tunables from env: PUSH_GATE_MAX_CONCURRENT (default 4),
+#       Reads tunables from env: PUSH_GATE_MAX_CONCURRENT (default 4 on hosts with >=16 hardware threads, else 2),
 #       PUSH_GATE_MAX_WAIT_SECONDS (default 600), PUSH_GATE_POLL_SECONDS
 #       (default 15); each is validated and falls back to its default on a
 #       malformed value. holder_label defaults to
@@ -278,14 +278,21 @@ push_gate_acquire_slot() {
     fi
 
     local _pgl_max _pgl_max_wait _pgl_poll
-    # Default 4, set from a measured concurrency sweep of the post-#139 fast
-    # suite on the 16-core fleet host (ga-4h8bu, 2026-09-01): solo 605s;
-    # 2-way worst 1.30x; 4-way 2.11x with the healthiest CPU profile of the
-    # sweep (85% user); 6-way crossed the degradation knee at 2.78x and
-    # returned the box to ~48% kernel time. Latency per gated push is the
-    # cost that matters (an agent blocks on it), so the cap sits at the last
-    # level before the knee, not at peak aggregate throughput.
-    _pgl_max="$(_push_gate_tunable PUSH_GATE_MAX_CONCURRENT 4 1)"
+    # The default scales with host capacity: 4 on >=16 hardware threads —
+    # from a measured concurrency sweep of the fast suite on the 16-core
+    # fleet host (ga-4h8bu: 4-way ran at 2.11x solo wall with the healthiest
+    # CPU profile; 6-way crossed the degradation knee at 2.78x) — and the
+    # prior conservative 2 on anything smaller, where the sweep's numbers
+    # do not transfer. Latency per gated push is the cost that matters (an
+    # agent blocks on it), so the cap sits below the knee, not at peak
+    # aggregate throughput. PUSH_GATE_MAX_CONCURRENT overrides either way.
+    local _pgl_default_max=2
+    local _pgl_ncpu
+    _pgl_ncpu="$( (command -v nproc >/dev/null && nproc) || sysctl -n hw.ncpu 2>/dev/null || echo 0 )"
+    if [[ "$_pgl_ncpu" =~ ^[0-9]+$ ]] && (( _pgl_ncpu >= 16 )); then
+        _pgl_default_max=4
+    fi
+    _pgl_max="$(_push_gate_tunable PUSH_GATE_MAX_CONCURRENT "$_pgl_default_max" 1)"
     _pgl_max_wait="$(_push_gate_tunable PUSH_GATE_MAX_WAIT_SECONDS 600 0)"
     _pgl_poll="$(_push_gate_tunable PUSH_GATE_POLL_SECONDS 15 1)"
     local _pgl_host
