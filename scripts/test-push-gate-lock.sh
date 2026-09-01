@@ -207,6 +207,19 @@ for bad_case in "empty:" "zero:0" "negative:-1" "nonnumeric:abc"; do
         assert_contains "tunables.max_concurrent_${bad_name}_warns_by_name" "$TUNE_OUT" "PUSH_GATE_MAX_CONCURRENT"
     fi
 done
+# Budget-derived default (ga-4h8bu): with PUSH_GATE_MAX_CONCURRENT unset, the
+# cap is test-local-job-count / 4 clamped to [1, 4]; the GC_TEST_LOCAL_CPUS
+# pin flows through the job-count helper, so the default is testable on any
+# host (memory here is not the binding factor). Observed behaviorally:
+# acquire until denied.
+for cpu_case in "16:4" "32:4" "8:2" "2:1"; do
+    cpus="${cpu_case%%:*}"
+    want="${cpu_case#*:}"
+    CAP_OUT="$(LIB="$LIB" DIR="$WORK/hostcap-$cpus" GC_TEST_LOCAL_CPUS="$cpus" \
+        PUSH_GATE_MAX_WAIT_SECONDS=0 PUSH_GATE_POLL_SECONDS=1 \
+        env -u PUSH_GATE_MAX_CONCURRENT bash -c '. "$LIB"; n=0; for i in 1 2 3 4 5 6; do if push_gate_acquire_slot "$DIR" "FD$i" "holder-$i" 2>/dev/null; then n=$((n+1)); else break; fi; done; echo "acquired=$n"' 2>&1)"
+    assert_contains "hostcap.cpus_${cpus}_defaults_to_${want}_slots" "$CAP_OUT" "acquired=$want"
+done
 for bad_tunable in PUSH_GATE_MAX_WAIT_SECONDS PUSH_GATE_POLL_SECONDS; do
     TUNE_OUT="$(LIB="$LIB" DIR="$WORK/tunables-$bad_tunable" BAD="$bad_tunable" \
         bash -c 'export "$BAD=abc"; . "$LIB"; push_gate_acquire_slot "$DIR" z holder-T; echo "rc=$?"' 2>&1)"

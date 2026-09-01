@@ -27,18 +27,26 @@ module="github.com/gastownhall/gascity"
 # cmd/gc has its own six fast shards (unit-cmd-gc-N-of-6), so excluding it
 # here loses nothing within the fast tier itself.
 #
-# The three heavy packages are integration-weight workloads (real dolt
-# servers, full pipeline shell tests) measured at 562.9s, 445.3s and 390.5s —
-# ~23 minutes of CPU that made the tier named "fast" take ~20 minutes and
-# serialized the fleet through the push gate (ga-4h8bu). They still run, with
-# MORE coverage (GC_FAST_UNIT=0 plus -tags integration), in the integration
-# tier's packages-core shards; scripts/test-tier-coverage.sh proves that on
-# every fast run.
+# The heavy packages are integration-weight workloads (real dolt servers,
+# full pipeline shell tests) measured at 562.9s and 445.3s — CPU that made the
+# tier named "fast" take ~20 minutes and serialized the fleet through the push
+# gate (ga-4h8bu). They still run, with MORE coverage (GC_FAST_UNIT=0 plus
+# -tags integration), in the integration tier's packages-core shards;
+# scripts/test-tier-coverage.sh proves that on every fast run.
+#
+# The scripts package is NOT excluded: it holds the guard/contract tests for
+# the push machinery itself (push_ownership_guard_test.go,
+# precommit_contract_test.go, the bd/dolt version pins), and de-gating those
+# meant a commit breaking the push hook's own guards passed the local gate
+# (post-merge review of #139, finding 4). Its slow pipeline tests (~95% of
+# its former cost) carry //go:build integration — the authoritative list is
+# `grep -l 'go:build integration' scripts/*_test.go` — so the fast tier
+# runs only the cheap guards and the integration packages-core shards run
+# everything.
 unit_core_excludes=(
   "${module}/cmd/gc"
   "${module}/examples/bd/dolt"
   "${module}/examples/gastown"
-  "${module}/scripts"
 )
 
 # Packages excluded from the INTEGRATION tier's packages-core shards. Each has
@@ -54,8 +62,20 @@ integration_core_excludes=(
 
 list_minus() {
   # Prints `go list ./...` minus the exact package paths given as arguments.
+  #
+  # go list is captured to a variable FIRST: feeding it through process
+  # substitution would hide its exit status from set -euo pipefail, letting a
+  # go list killed mid-stream hand consumers a silently truncated tier.
   local -a excludes=("$@")
-  local pkg skip ex
+  local all_pkgs pkg skip ex emitted=""
+  all_pkgs="$(go list ./...)"
+  # Guarded before the loop: `done <<< ""` still iterates once with an empty
+  # line (herestrings append a newline), which would emit a blank package and
+  # satisfy the emitted guard below.
+  if [[ -z "$all_pkgs" ]]; then
+    echo "test-tier-packages: go list produced no packages" >&2
+    exit 1
+  fi
   while IFS= read -r pkg; do
     skip=0
     for ex in "${excludes[@]}"; do
@@ -66,8 +86,13 @@ list_minus() {
     done
     if [[ "$skip" -eq 0 ]]; then
       printf '%s\n' "$pkg"
+      emitted=1
     fi
-  done < <(go list ./...)
+  done <<< "$all_pkgs"
+  if [ -z "$emitted" ]; then
+    echo "test-tier-packages: tier expansion produced no packages" >&2
+    exit 1
+  fi
 }
 
 case "${1:-}" in

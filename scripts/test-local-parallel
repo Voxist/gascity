@@ -96,31 +96,47 @@ add_fsys_compile_job() {
 add_unit_core_job() {
   # Package list comes from scripts/test-tier-packages — the single source of
   # truth for tier membership (ga-4h8bu): everything except cmd/gc (which has
-  # its own six fast shards) and the three integration-weight packages
-  # (examples/bd/dolt, examples/gastown, scripts — measured 562.9s/445.3s/
-  # 390.5s) that made the tier named "fast" take ~20 minutes. Those three run
+  # its own six fast shards) and the two integration-weight packages
+  # (examples/bd/dolt, examples/gastown) that made the tier named "fast" take
+  # ~20 minutes; the scripts package stays IN this tier (its guard/contract
+  # tests gate pushes) with its slow pipeline tests behind -tags integration.
+  # The excluded packages run
   # with strictly MORE coverage (GC_FAST_UNIT=0 plus -tags integration) in the
   # integration tier's packages-core shards, and the tier-coverage selftest
   # proves the tiers' union on every fast run.
   #
-  # unit-core also gets a LARGER -p than the shared inner_p: it is the one
-  # multi-package job (~190 packages), so under the flat jobs/shards split it
-  # walked them at -p=1 while the drained single-package shards' slots idled.
-  # The job-level GOFLAGS assignment appends after the shared export below,
-  # and go's flag parsing takes the LAST -p (verified by execution). Budget
-  # note: the other concurrent jobs are single-package, where -p bounds only
-  # their dependency-build phase (see inner-parallelism.sh), so the brief
-  # overlap oversubscribes builds, not test execution.
-  local unit_core_p="${GC_TEST_UNIT_CORE_P:-$(( local_jobs / 2 ))}"
-  if ! [[ "$unit_core_p" =~ ^[0-9]+$ && "$unit_core_p" -gt 0 ]]; then
-    echo "GC_TEST_UNIT_CORE_P must be a positive integer" >&2
-    exit 1
+  # unit-core gets a LARGER -p than the shared inner_p: it is the one
+  # multi-package job (~190 packages) and would otherwise walk them at -p=1
+  # while the drained single-package shards' slots idle. -p goes EXPLICITLY
+  # on the go test command line (go's documented explicit-flags-override-
+  # GOFLAGS rule). -count=1 defeats the test-result cache, matching the
+  # Makefile test target and upstream policy. The other concurrent jobs are
+  # single-package, where -p bounds only their dependency-build phase
+  # (see inner-parallelism.sh).
+  #
+  # Validation applies ONLY to a user-supplied override; the computed default
+  # is clamped, never rejected — LOCAL_TEST_JOBS=1 is legal (it is what the
+  # job-count helper yields on low-memory hosts) and must not brick the gate.
+  local unit_core_p
+  if [[ -n "${GC_TEST_UNIT_CORE_P:-}" ]]; then
+    unit_core_p="$GC_TEST_UNIT_CORE_P"
+    if ! [[ "$unit_core_p" =~ ^[0-9]+$ && "$unit_core_p" -gt 0 ]]; then
+      echo "GC_TEST_UNIT_CORE_P must be a positive integer" >&2
+      exit 1
+    fi
+  else
+    unit_core_p=$(( local_jobs / 2 ))
+    if (( unit_core_p < 2 )); then
+      unit_core_p=2
+    fi
   fi
-  if (( unit_core_p < 2 )); then
-    unit_core_p=2
-  fi
+  # The package list is captured INSIDE the job so the printer's exit status
+  # is honored (an unguarded $(...) in argument position discards it, and
+  # `go test` with zero package args tests only the repo root and reports
+  # ok — a green gate that ran nothing). The printer refuses to emit an
+  # empty tier, so the status check is the whole guard.
   add_job "unit-core" \
-    'GC_FAST_UNIT=1 GOFLAGS="${GOFLAGS:-} -p='"${unit_core_p}"'" go test -timeout 15m $(./scripts/test-tier-packages unit-core)'
+    'pkgs=$(./scripts/test-tier-packages unit-core) || exit 1; GC_FAST_UNIT=1 go test -p '"${unit_core_p}"' -count=1 -timeout 15m $pkgs'
 }
 
 # Direct shell job for the same resourcecensus reason as the selftests below:
