@@ -25,13 +25,13 @@ FROM golang:1.26.5-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93
 # 0053, but gc's linked beads library carries 0054, so a 0053 bd in this image
 # would skew from the linked lib. Repointed at the same commit go.mod pins.
 # Revert all three to upstream's values once a release carries 0054.
-ARG BD_VERSION=v1.1.0
+ARG BD_VERSION=v1.2.2
 ARG BD_REPO=Voxist/beads
-ARG BD_SOURCE_REF=a75c226c97d8ab7c0ae0359fb258e6cfd80bf72b
-ARG BD_SOURCE_SHA256=10f9356ebd047266997d417082b51eb7dc913eff63b4facef918c63ce0e1b4b7
-ARG BD_BUILD=a75c226c9
+ARG BD_SOURCE_REF=3e03250ee1675ebcd63ca3f5d1660560947eab7c
+ARG BD_SOURCE_SHA256=587ad18b765d90e75b64ca4bb57c12520befd8bece96545d48e98add26bc8f0f
+ARG BD_BUILD=3e03250ee
 ARG BD_BRANCH=HEAD
-ARG GRPC_VERSION=1.82.1
+ARG GRPC_VERSION=1.83.0
 ARG XTEXT_VERSION=0.39.0
 
 # The published bd 1.1.0 binary embeds vulnerable grpc-go 1.80.0 and

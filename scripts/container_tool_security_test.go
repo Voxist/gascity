@@ -13,7 +13,7 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 		ghVersion                 = "2.96.0"
 		ghSourceRef               = "b300f2ec7ec9dc9addc39b2ad88c54097ded7ca0"
 		doltSourceRef             = "781cbb730221ea7df4fc7995255bb336df9c3864"
-		grpcVersion               = "1.82.1"
+		grpcVersion               = "1.83.0"
 		xtextVersion              = "0.39.0"
 		ghSourceSHA256            = "a0c18c98c73f7333f73e19b3a0bf5bd18673f3dc226193ab6478b3ea1ea18f03"
 		doltSourceSHA256          = "0b0c9bce8baef26baa7e0e5825cd2d7d6101daf6fc9673f38dac9670afb66847"
@@ -79,19 +79,19 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		// module path. These values move together with deps.env and go.mod;
 		// a published release >= 0062 on a module-resolvable repo retires
 		// the bridge (one change: BD_VERSION=tag, drop the refs).
-		// BD_VERSION itself is NOT diverged — the pinned commit declares 1.1.0.
-		bdSourceRef    = "a75c226c97d8ab7c0ae0359fb258e6cfd80bf72b"
-		bdSourceSHA256 = "10f9356ebd047266997d417082b51eb7dc913eff63b4facef918c63ce0e1b4b7"
-		bdBuild        = "a75c226c9"
+		// BD_VERSION itself is NOT diverged — the pinned commit declares 1.2.2.
+		bdSourceRef    = "3e03250ee1675ebcd63ca3f5d1660560947eab7c"
+		bdSourceSHA256 = "587ad18b765d90e75b64ca4bb57c12520befd8bece96545d48e98add26bc8f0f"
+		bdBuild        = "3e03250ee"
 		bdBranch       = "HEAD"
-		grpcVersion    = "1.82.1"
+		grpcVersion    = "1.83.0"
 		xtextVersion   = "0.39.0"
 	)
 
 	root := repoRoot(t)
 	bdVersion := readDotenv(t, root+"/deps.env")["BD_VERSION"]
-	if bdVersion != "v1.1.0" {
-		t.Fatalf("deps.env BD_VERSION = %q, want v1.1.0 for the pinned source build", bdVersion)
+	if bdVersion != "v1.2.2" {
+		t.Fatalf("deps.env BD_VERSION = %q, want v1.2.2 for the pinned source build", bdVersion)
 	}
 
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")

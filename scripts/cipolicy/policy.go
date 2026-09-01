@@ -35,7 +35,7 @@ const (
 	// Re-derived for the fork-first bd repin (ga-zzcjs): BD_REPO joins
 	// BD_SOURCE_REF as a job-level env key at every pin site, so the shape
 	// moves again — deliberately.
-	expectedCIExecutionHash     = "fb5eebf7e2995c5a5ea7527c15b7640d035d41e1957d454bf7f470766aac4226"
+	expectedCIExecutionHash     = "05bef7bc82a0a2b11958464e540158b95fe55b48e72d2bd6729d9cef3e137160"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
@@ -43,7 +43,7 @@ const (
 	// pin is an independent tripwire and must be re-derived on its own.
 	// Nightly re-derived with the same fork-first repin (BD_REPO env key at
 	// its two pin sites).
-	expectedNightlyExecutionHash = "efc14757064eb2e9201fc97e16601490faa2c35417864a1fbb867808fc701b53"
+	expectedNightlyExecutionHash = "8ee360a0c8d9aa9fe3d129f48a7b62c06dcb2092d3a7ceecbffdec20a641eda3"
 	expectedSetupActionHash      = "b7864038195cd054aee7fccfa903cab335b375bcab1a35239c17c5da7d32c07e"
 )
 
