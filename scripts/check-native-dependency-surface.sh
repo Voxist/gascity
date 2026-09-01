@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 740 = 738 + 2 for the 0066-era beads library (BD_LIB_REF d530cddfa):
+# cloud.google.com/go/pubsub/v2 and github.com/zeebo/errs enter as transitive
+# requirements of the newer beads module. `go mod why -m` reports "main module
+# does not need module" for both — they are module-graph entries only, never
+# linked into the gc binary (which held at ~252 MB against the 270 MB cap).
+# Revisit with the same trigger as the line below.
+#
 # 738 = 728 + 10 for the 0062-era beads library (the ga-zzcjs repin,
 # BD_LIB_REF): beads main grew an OpenAPI toolchain (kin-openapi,
 # oapi-codegen, oasdiff/yaml, speakeasy jsonpath/overlay, marshmallow,
 # go-yit, yaml-jsonpath, deepcopy, decimal128) that rides gc's module graph
 # as indirect requirements. Revisit when beads trims its api-gen deps or a
 # release supersedes the bridge.
-max_modules="${GC_NATIVE_DEP_MAX_MODULES:-738}"
+max_modules="${GC_NATIVE_DEP_MAX_MODULES:-740}"
 max_binary_bytes="${GC_NATIVE_DEP_MAX_BINARY_BYTES:-270000000}"
 max_aws_modules="${GC_NATIVE_DEP_MAX_AWS_MODULES:-25}"
 max_azure_modules="${GC_NATIVE_DEP_MAX_AZURE_MODULES:-9}"
