@@ -39,9 +39,26 @@ func inspectManagedDoltProcess(cityPath, port string) (managedDoltProcessInspect
 	if info.ManagedPID > 0 {
 		info.ManagedOwned, info.ManagedDeletedInodes = inspectManagedDoltOwnership(info.ManagedPID, layout)
 	}
-	info.PortHolderPID = findPortHolderPID(port)
-	if info.PortHolderPID > 0 {
-		info.PortHolderOwned, info.PortHolderDeletedInodes = inspectManagedDoltOwnership(info.PortHolderPID, layout)
+	// Pick the holder that PASSES the ownership check, not whichever sorts
+	// first. lsof and /proc report several pids for one port number because the
+	// same port on a different local address (127.0.0.1 vs ::1) is a distinct
+	// bind, so deriving ownership from element [0] reports a live managed Dolt
+	// as not running whenever a stranger sorts first — dolt_probe_managed.go
+	// computes Running from PortHolderOwned, and dolt_stop_managed.go then
+	// declines to select that server as the terminate target.
+	//
+	// When no holder is owned, the first one is still reported, so the
+	// diagnostic keeps naming a real occupant of the port.
+	for i, pid := range portHolderPIDs(port) {
+		owned, deleted := inspectManagedDoltOwnership(pid, layout)
+		if i == 0 || owned {
+			info.PortHolderPID = pid
+			info.PortHolderOwned = owned
+			info.PortHolderDeletedInodes = deleted
+		}
+		if owned {
+			break
+		}
 	}
 	return info, nil
 }

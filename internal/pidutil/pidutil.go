@@ -198,12 +198,24 @@ func AliveWithStartTime(pid int, startTime string) bool {
 	if startTime == "" {
 		return true
 	}
-	current, err := StartTime(pid)
+	current, err := startTimeForIdentity(pid)
 	if err != nil {
 		return true
 	}
 	return sameStartIdentity(startTime, current)
 }
+
+// startTimeForIdentity is the seam the unreadable-identity test drives.
+//
+// It exists because that case can no longer be produced from the outside: the
+// test used to stub `ps` on PATH, but every supported host now answers
+// StartTime from a kernel record (/proc on linux, sysctl on darwin), so the
+// stub stopped having any effect and the test silently skipped on BOTH
+// platforms — leaving "an unreadable identity must keep the Alive answer"
+// asserted in no CI lane at all. That is the dangerous direction to leave
+// uncovered: a regression there reports a live process as dead, and a caller
+// that believes its process died will start a second copy of it.
+var startTimeForIdentity = StartTime
 
 // AliveWithCmdline reports whether a PID exists, is not a zombie, and its
 // command line satisfies match.
