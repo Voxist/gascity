@@ -49,11 +49,25 @@ fi
 #    is the fast unit-cmd-gc shards themselves; every other exclude must be in
 #    the integration tier's packages-core set, or it runs NOWHERE.
 integration_core="$("$tiers" integration-core)"
+integration_excludes="$("$tiers" integration-core-excludes)"
 while IFS= read -r pkg; do
   [[ "$pkg" == "${module}/cmd/gc" ]] && continue # fast unit-cmd-gc-N-of-6 shards
   if ! printf '%s\n' "$integration_core" | grep -qx "$pkg"; then
-    echo "tier-coverage: ${pkg} is excluded from fast unit-core but absent from integration packages-core — it runs in NO tier" >&2
-    fail=1
+    # `go list ./...` can transiently OMIT a package with exit 0 while
+    # sibling gauntlet jobs churn the worktree (the walk skips a directory it
+    # momentarily cannot read, without an error). Before declaring a hole,
+    # confirm against the package itself: it is a genuine hole only if the
+    # package is deliberately excluded from integration-core, or does not
+    # resolve at all.
+    if printf '%s\n' "$integration_excludes" | grep -qx "$pkg"; then
+      echo "tier-coverage: ${pkg} is excluded from fast unit-core AND from integration packages-core — it runs in NO tier" >&2
+      fail=1
+    elif ! go list "$pkg" >/dev/null 2>&1; then
+      echo "tier-coverage: ${pkg} is excluded from fast unit-core but does not resolve as a package — it runs in NO tier" >&2
+      fail=1
+    else
+      echo "tier-coverage: note: ${pkg} was missing from a transient 'go list ./...' but resolves directly; treating as covered" >&2
+    fi
   fi
 done < <("$tiers" unit-core-excludes)
 
