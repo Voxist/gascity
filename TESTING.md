@@ -569,6 +569,39 @@ make test-integration-shards-parallel
 make test-local-full-parallel
 ```
 
+### Tier membership and the coverage guard
+
+Which Go packages each tier runs is defined in **one** place:
+`scripts/test-tier-packages` (ga-4h8bu). Both the fast tier's `unit-core`
+job and the integration tier's `packages-core` shards derive their package
+lists from it; edit tier membership there, nowhere else.
+
+The fast tier's `unit-core` job excludes four packages:
+
+- `cmd/gc` — runs in the fast tier's own six `unit-cmd-gc` shards.
+- `examples/bd/dolt`, `examples/gastown`, `scripts` — integration-weight
+  workloads (real dolt servers, full pipeline shell tests; measured at
+  562.9s, 445.3s and 390.5s) that made the tier named "fast" take
+  ~20 minutes and serialized the fleet through the push gate. They run —
+  with strictly *more* coverage (`GC_FAST_UNIT=0` plus `-tags
+  integration`) — in the integration tier's `packages-core` shards.
+
+`scripts/test-tier-coverage.sh` runs as a job in every `fast` and `full`
+invocation and asserts the tiers' union: every package in `go list ./...`
+is accounted for by fast's `unit-core` plus its documented excludes, every
+fast exclude has a home in another tier, and the integration tier's own
+exclude list is pinned to the three package families with dedicated shards.
+A package dropped from one tier without being picked up by another fails no
+build and no test — it just stops running anywhere — so the guard makes
+that rot loud on every fast run instead. The gate gets faster; total
+cross-tier coverage never shrinks.
+
+The `unit-core` job also receives a larger `GOFLAGS -p` share than the
+other jobs (`GC_TEST_UNIT_CORE_P`, default `LOCAL_TEST_JOBS/2`, min 2): it
+is the one multi-package job, and under the previous flat split it walked
+~190 packages at `-p=1` while the drained single-package shards' slots sat
+idle.
+
 By default, the local runners bound concurrency by both detected CPUs and
 available memory, budgeting 4 GiB per job and capping automatic fan-out at 16.
 If memory cannot be detected, they use three jobs. An explicit override always

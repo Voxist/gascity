@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# test-tier-packages — the single source of truth for which Go packages each
+# local test tier runs (ga-4h8bu).
+#
+# Both scripts/test-local-parallel (fast tier: the unit-core job) and
+# scripts/test-integration-shard (integration tier: the packages-core shards)
+# derive their package lists from here, and scripts/test-tier-coverage.sh
+# asserts the tiers' union still covers `go list ./...`. Editing a tier's
+# membership anywhere else silently rots coverage; editing it here is checked
+# on every fast run.
+#
+# Usage:
+#   scripts/test-tier-packages unit-core            # fast tier's unit-core set
+#   scripts/test-tier-packages unit-core-excludes   # what unit-core leaves out
+#   scripts/test-tier-packages integration-core     # integration packages-core set
+#   scripts/test-tier-packages integration-core-excludes
+
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+module="github.com/gastownhall/gascity"
+
+# Packages excluded from the FAST tier's unit-core job.
+#
+# cmd/gc has its own six fast shards (unit-cmd-gc-N-of-6), so excluding it
+# here loses nothing within the fast tier itself.
+#
+# The three heavy packages are integration-weight workloads (real dolt
+# servers, full pipeline shell tests) measured at 562.9s, 445.3s and 390.5s —
+# ~23 minutes of CPU that made the tier named "fast" take ~20 minutes and
+# serialized the fleet through the push gate (ga-4h8bu). They still run, with
+# MORE coverage (GC_FAST_UNIT=0 plus -tags integration), in the integration
+# tier's packages-core shards; scripts/test-tier-coverage.sh proves that on
+# every fast run.
+unit_core_excludes=(
+  "${module}/cmd/gc"
+  "${module}/examples/bd/dolt"
+  "${module}/examples/gastown"
+  "${module}/scripts"
+)
+
+# Packages excluded from the INTEGRATION tier's packages-core shards. Each has
+# a dedicated integration-tier home of its own:
+#   test/integration      -> the review-formulas / bdstore / rest shards
+#   cmd/gc                -> the packages-cmd-gc-N-of-6 shards
+#   internal/runtime/tmux -> the packages-runtime-tmux-N-of-3 shards
+integration_core_excludes=(
+  "${module}/test/integration"
+  "${module}/cmd/gc"
+  "${module}/internal/runtime/tmux"
+)
+
+list_minus() {
+  # Prints `go list ./...` minus the exact package paths given as arguments.
+  local -a excludes=("$@")
+  local pkg skip ex
+  while IFS= read -r pkg; do
+    skip=0
+    for ex in "${excludes[@]}"; do
+      if [[ "$pkg" == "$ex" ]]; then
+        skip=1
+        break
+      fi
+    done
+    if [[ "$skip" -eq 0 ]]; then
+      printf '%s\n' "$pkg"
+    fi
+  done < <(go list ./...)
+}
+
+case "${1:-}" in
+  unit-core)
+    list_minus "${unit_core_excludes[@]}"
+    ;;
+  unit-core-excludes)
+    printf '%s\n' "${unit_core_excludes[@]}"
+    ;;
+  integration-core)
+    list_minus "${integration_core_excludes[@]}"
+    ;;
+  integration-core-excludes)
+    printf '%s\n' "${integration_core_excludes[@]}"
+    ;;
+  *)
+    echo "usage: $0 <unit-core|unit-core-excludes|integration-core|integration-core-excludes>" >&2
+    exit 1
+    ;;
+esac
