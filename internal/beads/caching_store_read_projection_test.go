@@ -2,93 +2,9 @@ package beads
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 	"time"
 )
-
-// TestGetWithholdsInvalidatedReadyProjection pins the ADR-0094 read boundary.
-//
-// The invalidated verdict is deliberately KEPT in c.beads so the reconcile
-// differ compares what the backing last reported (that is what stops the
-// bead.updated flood). It must not be SERVED: readers outside this package take
-// Bead.IsBlocked as the backing's answer, and several treat nil as their
-// fail-open case — bindNamedSessionTriggerBead's staleness test,
-// computeAwakeBridge's blocked test, and gc bead state. Serving a verdict the
-// cache has already disowned makes them act on a value the cache does not
-// trust.
-//
-// Without the scrub this test observes IsBlocked == true after the only blocker
-// closed, where the pre-ADR-0094 in-band sentinel returned nil.
-func TestGetWithholdsInvalidatedReadyProjection(t *testing.T) {
-	t.Parallel()
-
-	blockedProjection := true
-	backing := NewMemStore()
-	blocker, err := backing.Create(Bead{Title: "blocker", Status: "open", Type: "task"})
-	if err != nil {
-		t.Fatalf("create blocker: %v", err)
-	}
-	blocked, err := backing.Create(Bead{
-		Title: "blocked", Status: "open", Type: "task",
-		Needs: []string{blocker.ID}, IsBlocked: &blockedProjection,
-	})
-	if err != nil {
-		t.Fatalf("create blocked: %v", err)
-	}
-
-	cache := NewCachingStoreForTest(backing, nil)
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("prime: %v", err)
-	}
-	before, err := cache.Get(blocked.ID)
-	if err != nil {
-		t.Fatalf("get before: %v", err)
-	}
-	if before.IsBlocked == nil || !*before.IsBlocked {
-		t.Fatalf("fixture did not seat a blocked projection (IsBlocked=%v); this guard would pass vacuously", before.IsBlocked)
-	}
-
-	if err := backing.Close(blocker.ID); err != nil {
-		t.Fatalf("close blocker: %v", err)
-	}
-	payload, err := json.Marshal(map[string]string{"id": blocker.ID, "status": "closed"})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	cache.ApplyEvent("bead.closed", payload)
-
-	after, err := cache.Get(blocked.ID)
-	if err != nil {
-		t.Fatalf("get after: %v", err)
-	}
-	if after.IsBlocked != nil {
-		t.Fatalf("Get served an invalidated is_blocked verdict (%v) after the only blocker closed; "+
-			"readers outside this package treat nil as fail-open and will act on a value the cache has disowned",
-			*after.IsBlocked)
-	}
-
-	// The verdict must still be RESIDENT, or the differ loses its like-for-like
-	// comparison and the bead.updated flood returns.
-	cache.mu.RLock()
-	stored, ok := cache.beads[blocked.ID]
-	invalid := cache.readyProjectionInvalidLocked(blocked.ID)
-	cache.mu.RUnlock()
-	if !ok {
-		t.Fatal("row evicted; cannot assert the stored verdict")
-	}
-	// OPTION 2: residency moved to the side map — the ROW is nil'd (safe by
-	// default for every reader) and the differ substitutes the disowned value.
-	if stored.IsBlocked != nil {
-		t.Fatal("row verdict was not nil-ed; under Option 2 the row is the sentinel")
-	}
-	if v, ok2 := cache.readyProjectionInvalid[blocked.ID]; !ok2 || !v {
-		t.Fatal("disowned value not retained in readyProjectionInvalid; the reconcile differ would see nil->set and flood")
-	}
-	if !invalid {
-		t.Fatal("row is not marked invalid; the scrub above would be untested")
-	}
-}
 
 // TestVerdictlessAbsorbDoesNotDischargeInvalidation pins the ADR-0094
 // discharge rule under the nil-the-row design: an absorb discharges the

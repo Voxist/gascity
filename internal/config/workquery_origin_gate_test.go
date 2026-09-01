@@ -41,7 +41,7 @@ func runGate(t *testing.T, origin, shellPrefix string) (stdout, stderr string, e
 	return out.String(), errb.String(), runErr
 }
 
-const gateSignalMarker = "work_query pool tier not probed"
+const gateSignalMarker = PoolDemandOriginGateRefusalPrefix
 
 func TestPoolDemandOriginGateRefusesNamedOriginAudibly(t *testing.T) {
 	stdout, stderr, err := runGate(t, "named", "")

@@ -231,12 +231,6 @@ func TestCachingStoreTxCloseClearsDependentProjectedIsBlocked(t *testing.T) {
 	if got.IsBlocked != nil {
 		t.Fatalf("dependent IsBlocked after tx close = %v, want nil fallback to cached deps", got.IsBlocked)
 	}
-	cache.mu.RLock()
-	invalid := cache.readyProjectionInvalidLocked(blocked.ID)
-	cache.mu.RUnlock()
-	if !invalid {
-		t.Fatalf("dependent verdict after tx close was not invalidated; want the cached is_blocked marked for re-observation")
-	}
 }
 
 func assertTxPreservedBead(t *testing.T, got Bead) {

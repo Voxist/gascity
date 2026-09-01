@@ -1143,8 +1143,6 @@ func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runti
 		// Storeless fallback: write the flock'd state.json authority directly.
 		// The shadow bead is observability-only and its store open is exactly
 		// the failure domain this path exists to avoid (vl-3hb WS-B).
-		// enqueueQueuedNudgeWithStore is upstream's name for the fork's
-		// enqueueQueuedNudgeInto — the same clockless storeless transport.
 		enqueue = func() error { return enqueueQueuedNudgeStoreless(target.cityPath, item) }
 	}
 	if err := enqueue(); err != nil {
@@ -2141,9 +2139,7 @@ func enqueueQueuedNudgeWithStoreAndClock(cityPath string, store beads.NudgesStor
 // It is deliberately NOT enqueueQueuedNudgeWithStore(cityPath,
 // beads.NudgesStore{}, item). That form reads a nil store as "open one for
 // me", which is precisely the store open this path exists to avoid — under a
-// hung store it blocks forever rather than falling back. (The fork's
-// enqueueQueuedNudgeInto had the opposite nil-store semantics; the two are
-// name-alike, not behaviour-alike.)
+// hung store it blocks forever rather than falling back.
 func enqueueQueuedNudgeStoreless(cityPath string, item queuedNudge) error {
 	return enqueueQueuedNudgeBody(cityPath, beads.NudgesStore{}, item, clock.Real{})
 }

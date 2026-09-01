@@ -705,12 +705,19 @@ func poolDemandProbeCallScript(arg string) string {
 	return `[ "$pool_gate_skipped" = "0" ] && probe_pool_demand ` + arg + `; `
 }
 
+// PoolDemandOriginGateRefusalPrefix is the stable stderr prefix the generated
+// work_query script prints when the origin gate refuses to probe the pool tier
+// (vc-ozanp5). It is the one definition the emitter below, the agent-script
+// classifier in cmd/gc, and the guard tests all read, so the emitted line and
+// its consumers cannot drift apart.
+const PoolDemandOriginGateRefusalPrefix = "gc: work_query pool tier not probed:"
+
 // poolDemandGatedTailScript closes the pool tier: it reports a skipped probe on
 // stderr, then prints the empty fallthrough. It fires whenever the gate
 // refused, not only when the tier turned out empty.
 func poolDemandGatedTailScript() string {
 	return `[ "$pool_gate_skipped" = "1" ] && ` +
-		`printf "gc: work_query pool tier not probed: origin=%s is not ephemeral; routed pool work (if any) was NOT considered\n" "$GC_SESSION_ORIGIN" >&2; ` +
+		`printf "` + PoolDemandOriginGateRefusalPrefix + ` origin=%s is not ephemeral; routed pool work (if any) was NOT considered\n" "$GC_SESSION_ORIGIN" >&2; ` +
 		`printf "[]"`
 }
 

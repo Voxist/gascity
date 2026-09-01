@@ -17,6 +17,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 const agentScriptActionTimeout = 5 * time.Minute
@@ -799,14 +801,10 @@ func agentScriptHookBeadWithRunner(stderr io.Writer, runHook agentScriptHookRunn
 	return beads[0], true, nil
 }
 
-// originGateRefusalPrefix is the stable prefix of the vc-ozanp5 origin-gate
-// disclosure poolDemandGatedTailScript (internal/config/workquery.go) prints
-// on stderr whenever a non-ephemeral session's work query declines to probe
-// the routed pool tier. It is a POLICY DISCLOSURE on every named session's
-// empty poll, not a failure — deliberately audible (ga-bea6p) so an empty
-// hook is distinguishable from a drained queue. Kept in lockstep with the
-// emitter by TestOriginGateRefusalPrefixMatchesEmitter.
-const originGateRefusalPrefix = "gc: work_query pool tier not probed:"
+// originGateRefusalPrefix is config's single definition of the origin-gate
+// refusal line (vc-ozanp5), read here so the classifier and the emitter cannot
+// drift apart.
+const originGateRefusalPrefix = config.PoolDemandOriginGateRefusalPrefix
 
 func agentScriptHookExitIsNoWork(output, stderr string) bool {
 	if workQueryHasReadyWork(output) {

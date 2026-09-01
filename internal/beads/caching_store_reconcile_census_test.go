@@ -93,8 +93,7 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"readyProjectionInvalid": true,
 		// OPTION 2 prototype: disowned-value side map; a real implementation
 		// must capture+diff it like readyInvalid.
-		"readyProjectionDisowned": true,
-		"lastFreshAt":             true, "mutationSeq": true, "primePartialErr": true,
+		"lastFreshAt": true, "mutationSeq": true, "primePartialErr": true,
 		"syncFailures": true, "circuitTripped": true,
 		"stats": true, // stats compared field-wise below
 	}

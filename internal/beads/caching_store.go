@@ -432,17 +432,7 @@ func (c *CachingStore) advanceObservationLocked() {
 // nil'd out of the row and must not be trusted until the next observation.
 // Caller must hold c.mu in write mode.
 func (c *CachingStore) markReadyProjectionInvalidLocked(id string, value bool) {
-	if c.readyProjectionInvalid == nil {
-		c.readyProjectionInvalid = make(map[string]bool)
-	}
 	c.readyProjectionInvalid[id] = value
-}
-
-// readyProjectionInvalidLocked reports whether id's cached verdict is awaiting
-// re-observation. Caller must hold c.mu.
-func (c *CachingStore) readyProjectionInvalidLocked(id string) bool {
-	_, invalid := c.readyProjectionInvalid[id]
-	return invalid
 }
 
 func (c *CachingStore) noteLocalMutationLocked(ids ...string) uint64 {

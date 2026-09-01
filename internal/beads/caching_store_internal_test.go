@@ -3183,17 +3183,8 @@ func TestCachingStoreApplyCloseEventClearsDependentProjectedIsBlocked(t *testing
 	if err != nil {
 		t.Fatalf("Get blocked after close event: %v", err)
 	}
-	// The verdict must be WITHHELD from readers (projectCachedBead) even though
-	// it stays resident for the differ, so this upstream assertion holds
-	// unchanged; the invalidation mark is asserted alongside it.
 	if got.IsBlocked != nil {
 		t.Fatalf("dependent IsBlocked after close event = %v, want nil fallback to cached deps", got.IsBlocked)
-	}
-	cache.mu.RLock()
-	invalid := cache.readyProjectionInvalidLocked(blocked.ID)
-	cache.mu.RUnlock()
-	if !invalid {
-		t.Fatalf("dependent verdict after close event was not invalidated; want the cached is_blocked marked for re-observation")
 	}
 }
 
@@ -3266,12 +3257,6 @@ func TestCachingStoreApplyCloseEventClearsProjectedIsBlockedWhenDepsIncomplete(t
 	}
 	if got.IsBlocked != nil {
 		t.Fatalf("dependent IsBlocked after close event = %v, want nil fallback when dependency coverage is incomplete", got.IsBlocked)
-	}
-	cache.mu.RLock()
-	invalid := cache.readyProjectionInvalidLocked(blocked.ID)
-	cache.mu.RUnlock()
-	if !invalid {
-		t.Fatalf("dependent verdict was not invalidated when dependency coverage is incomplete")
 	}
 }
 

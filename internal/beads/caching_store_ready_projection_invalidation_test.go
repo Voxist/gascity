@@ -130,15 +130,11 @@ func TestReconcileEmitsNoUpdatesAfterWholeCacheInvalidation(t *testing.T) {
 		f.cache.mu.Unlock()
 		t.Fatal("clearDependentReadyProjectionsLocked reported no invalidation; the fixture no longer exercises the whole-cache branch")
 	}
-	// Non-vacuity probe, re-expressed for upstream's observation fence
-	// (2026-08-31 resync). The fork recorded invalidation as a per-id set
-	// (readyProjectionInvalid) and this line counted it; upstream solves the
-	// same ADR-0094 problem — keeping invalidation out of the mutation fences
-	// the reconcile differ reads — with a global observationRevision counter.
-	// The counter is strictly coarser (it invalidates every observation, not
-	// just the affected ids), so it satisfies this guard's premise a fortiori.
-	// Restoring the fork's set alongside it would double-fence the same event.
-	// The ten-tick assertion below is mechanism-independent and unchanged.
+	// Non-vacuity probe on upstream's observation fence: a real invalidation
+	// must bump observationRevision (the counter is coarser than the per-id
+	// readyProjectionInvalid map, which the reconcile differ alone reads, so
+	// it satisfies this guard's premise a fortiori). The ten-tick assertion
+	// below is mechanism-independent.
 	afterObservation := f.cache.observationRevision
 	f.cache.mu.Unlock()
 

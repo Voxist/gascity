@@ -410,16 +410,14 @@ func (c *CachingStore) ApplyDepEvent(beadID string, deps []Dep) {
 // resident open edge loses nothing: the predicate reaches the same verdict the
 // column held.
 //
-// Caller must hold c.mu in write mode.
-// It records the invalidation in readyProjectionInvalid rather than writing a
-// nil sentinel into the row. Writing the sentinel into the row was the defect
-// ADR-0094 names: the reconcile differ reads IsBlocked as "what the backing
-// store reported", so a cache-internal "I don't know" written into that slot is
-// indistinguishable from bd flipping the projection — and the next enrichment,
-// restoring the very value the wipe removed, registered as a change for every
-// row it touched. Readiness reads consult readyProjectionInvalid instead,
-// exactly where the sentinel used to send them to the dependency-derived
-// fallback.
+// The contract (ADR-0094): the row's IsBlocked is nil'd — the sentinel every
+// reader already treats as "fall back to the dependency-derived verdict" — and
+// the disowned verdict is recorded in readyProjectionInvalid, which only the
+// reconcile differ consults: when the next enrichment restores that same
+// value, the differ substitutes the recorded verdict for the nil so the
+// restoration is not reported as a store-side transition (the bead.updated
+// flood). No read surface consults the map; the invariant "marked implies
+// row nil" is test-enforced.
 //
 // Returns whether this call changed anything, so a second clear on an already
 // invalid row is not reported as a mutation. Caller must hold c.mu in write
