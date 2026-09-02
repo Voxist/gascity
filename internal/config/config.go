@@ -3771,9 +3771,10 @@ type Agent struct {
 	// On failure, the last 4 KiB of the command's stdout/stderr is included
 	// in the error and may appear in controller and reconciler logs; avoid
 	// set -x or echoing secrets in setup commands.
-	// Template expansion is strict (see session_setup); a session_live entry
-	// that cannot be expanded is skipped with a warning at session start so
-	// a cosmetic typo never blocks stopping or resuming a running session.
+	// Template expansion is strict (see session_setup), but because these
+	// commands are cosmetic an entry that cannot be expanded is a warning at
+	// config load and is skipped at session start, so a typo never keeps a
+	// city from starting nor blocks managing a running session.
 	SessionLive []string `toml:"session_live,omitempty"`
 	// OverlayDir is a directory whose contents are recursively copied (additive)
 	// into the agent's working directory at startup. Existing files are not

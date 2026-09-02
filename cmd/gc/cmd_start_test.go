@@ -2004,9 +2004,7 @@ func TestDoStart_FlagValidationRunsBeforeDriftCheck(t *testing.T) {
 }
 
 // A pre_start entry whose placeholder cannot be expanded must stop session
-// resolution instead of reaching sh verbatim (ga-iwz7u). The old raw-string
-// fallback let "worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}}"
-// run literally and mint a git worktree at .gc/agents/{{.AgentBase}}.
+// resolution instead of reaching sh verbatim.
 func TestResolveTemplate_PreStartUnexpandablePlaceholderFailsClosed(t *testing.T) {
 	cityDir := t.TempDir()
 	cfgAgent := &config.Agent{
@@ -2039,8 +2037,7 @@ func TestResolveTemplate_PreStartUnexpandablePlaceholderFailsClosed(t *testing.T
 }
 
 // A session_live entry that cannot be expanded is cosmetic: resolution must
-// succeed with the entry skipped and a warning, never fail (which would drop
-// the agent from the desired set and drain its running sessions).
+// succeed with only that entry skipped and a warning, never fail.
 func TestResolveTemplate_SessionLiveUnexpandablePlaceholderIsSkipped(t *testing.T) {
 	cityDir := t.TempDir()
 	var stderr bytes.Buffer
@@ -2066,8 +2063,8 @@ func TestResolveTemplate_SessionLiveUnexpandablePlaceholderIsSkipped(t *testing.
 	if err != nil {
 		t.Fatalf("resolveTemplate failed on a session_live typo: %v", err)
 	}
-	if len(tp.Hints.SessionLive) != 0 {
-		t.Errorf("SessionLive = %q, want none (skipped)", tp.Hints.SessionLive)
+	if len(tp.Hints.SessionLive) != 1 || tp.Hints.SessionLive[0] != "tmux set-option -t worker status-style bg=blue" {
+		t.Errorf("SessionLive = %q, want only the good entry", tp.Hints.SessionLive)
 	}
 	for _, want := range []string{"session_live[1]", "NoSuchField", "skipped"} {
 		if !strings.Contains(stderr.String(), want) {

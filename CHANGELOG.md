@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrading Notes
+
+- `session_setup` and `pre_start` entries are now validated as Go templates
+  at config load. An entry that carries literal braces for another tool
+  (`docker ps --format '{{.Names}}'`, `kubectl -o go-template`, `gh
+  --template`) previously ran verbatim and is now rejected; escape the
+  opening braces as `{{"{{"}}` (for example `'{{"{{"}}.Names}}'`).
+
 ### Added
 
 - **Managed Dolt starts now arm a bounded delivery-drain window before the
@@ -34,18 +42,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Session command templates fail closed instead of running unexpanded.**
-  `expandSessionSetup` kept the raw command when a `command`, `session_setup`,
-  `pre_start` or `session_live` template failed to parse or expand, so sh
-  received a literal `{{.AgentBase}}` and `worktree-setup.sh` minted a real
-  git worktree at `.gc/agents/{{.AgentBase}}`. Now a malformed template or an
-  unknown placeholder is rejected at config load (`gc start` / reload /
-  doctor) with the list of available placeholders; at session start the
-  first three fields refuse to start the session, and `session_live` (cosmetic)
-  is skipped with a warning so a typo never blocks stopping or resuming a
-  running session. Literal braces meant for another tool must be escaped as
-  `{{"{{"}}`. The example `worktree-setup.sh` scripts also refuse unexpanded
-  or shifted arguments. (ga-iwz7u; the `work_query`/`scale_check`/`on_boot`/
-  `on_death` expander keeps its raw-command fallback, tracked as ga-a85qk.)
+  A `session_setup` or `pre_start` template that failed to parse or expand
+  used to reach sh verbatim, so `worktree-setup.sh` received a literal
+  `{{.AgentBase}}` and minted a git worktree at `.gc/agents/{{.AgentBase}}`.
+  Now such a template is rejected at config load (`gc start` / reload /
+  doctor / supervisor restart) with the list of available placeholders, and
+  at session start it refuses to start the session. `session_live` is
+  cosmetic: a bad entry is a load-time warning and is skipped at session
+  start, leaving its neighbours in place. The provider launch command keeps
+  its raw-command behaviour (now with a warning), since it is assembled at
+  resolve time and is where braces meant for another tool usually live. The
+  example `worktree-setup.sh` scripts also refuse unexpanded or shifted
+  arguments. (ga-iwz7u; the `work_query`/`scale_check`/`on_boot`/`on_death`
+  expander keeps its raw-command fallback, tracked as ga-a85qk.)
 
 - **Runtime-provider waiver expiries are now independent per entry instead of
   sharing one hardcoded date.** All nine `runtime.Provider` contract waivers

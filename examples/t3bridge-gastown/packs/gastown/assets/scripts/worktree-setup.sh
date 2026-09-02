@@ -1,9 +1,8 @@
 #!/bin/sh
 set -eu
 
-# Fail closed on unexpanded Go template placeholders. If gc ever hands this
-# script a literal "{{.AgentBase}}" (ga-iwz7u), creating a worktree from it
-# would mint .gc/agents/{{.AgentBase}} on branch gc-{{.AgentBase}}-<hash>.
+# Refuse unexpanded Go template placeholders: a worktree must never be
+# created from a literal "{{.AgentBase}}".
 for arg in "$@"; do
   case "$arg" in
     *'{{'*) echo "worktree-setup.sh: refusing unexpanded template placeholder in argument: $arg" >&2; exit 64 ;;

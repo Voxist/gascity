@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -10,7 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"text/template"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
@@ -206,50 +205,20 @@ func parseScaleCheckCount(agentName, check, out string) (int, error) {
 	return n, nil
 }
 
-// SessionSetupContext holds template variables for session_setup command expansion.
-type SessionSetupContext struct {
-	Session   string // tmux session name
-	Agent     string // qualified agent name
-	AgentBase string // unqualified agent name or pool instance name
-	Rig       string // rig name (empty for city-scoped)
-	RigRoot   string // absolute path to the rig root (empty for city-scoped)
-	CityRoot  string // city directory path
-	CityName  string // workspace name
-	WorkDir   string // agent working directory
-	ConfigDir string // source directory where agent config was defined
-}
+// SessionSetupContext is the template context for session_setup, pre_start
+// and session_live commands; config validation and runtime expansion share
+// the one type in internal/config.
+type SessionSetupContext = config.SessionCommandTemplateContext
 
-// expandSessionSetup expands Go text/template strings in the command,
-// session_setup, pre_start and session_live entries of one agent. field is the
-// config field name used in error messages.
-//
-// It fails closed: a command whose template does not parse, or references a
-// field SessionSetupContext does not carry, yields an error and NO commands.
-// The previous "keep the raw command" fallback handed sh a literal
-// "{{.AgentBase}}", and worktree-setup.sh then minted a real git worktree at
-// .gc/agents/{{.AgentBase}} on branch gc-{{.AgentBase}}-<hash> (ga-iwz7u).
-// A command that still carries template placeholders must never run. Config
-// load rejects the same class up front (config.validateSessionCommandTemplates),
-// so reaching this error at session start means the context, not the config,
-// is at fault. The work_query/scale_check/on_boot/on_death expander
-// (expandAgentCommandTemplate) still keeps the raw command; that is ga-a85qk.
-func expandSessionSetup(cmds []string, ctx SessionSetupContext, field string) ([]string, error) {
-	if len(cmds) == 0 {
-		return nil, nil
+// sessionTemplateWarned dedupes session-template warnings that would
+// otherwise repeat on every reconcile tick and every session handle.
+var sessionTemplateWarned sync.Map
+
+// warnSessionTemplateOnce runs emit the first time key is seen.
+func warnSessionTemplateOnce(key string, emit func()) {
+	if _, seen := sessionTemplateWarned.LoadOrStore(key, struct{}{}); !seen {
+		emit()
 	}
-	result := make([]string, len(cmds))
-	for i, raw := range cmds {
-		tmpl, err := template.New(field).Parse(raw)
-		if err != nil {
-			return nil, fmt.Errorf("%s[%d] %q: parsing template: %w", field, i, raw, err)
-		}
-		var buf bytes.Buffer
-		if err := tmpl.Execute(&buf, ctx); err != nil {
-			return nil, fmt.Errorf("%s[%d] %q: expanding template: %w", field, i, raw, err)
-		}
-		result[i] = buf.String()
-	}
-	return result, nil
 }
 
 // deepCopyAgent creates a deep copy of a config.Agent with a new name and dir.

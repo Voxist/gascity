@@ -617,15 +617,15 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 			setupCtx.ConfigDir = agentCfg.SourceDir
 		}
 		// This resolver runs for every handle on an existing session,
-		// including stop/kill and the reconciler's liveness probe. A
-		// session_live expansion failure must degrade to "no re-theming",
-		// never to "the session cannot be managed". Same policy as
-		// resolveTemplate.
-		var err error
-		sessionLive, err = expandSessionSetup(agentCfg.SessionLive, setupCtx, "session_live")
-		if err != nil {
-			log.Printf("agent %q: %v (session_live skipped)", qualifiedName, err)
-			sessionLive = nil
+		// including stop/kill and the reconciler's liveness probe, so a
+		// session_live entry that does not expand is skipped (and reported
+		// once), never turned into "the session cannot be managed".
+		var skipped []error
+		sessionLive, skipped = config.ExpandSessionCommandTemplatesLenient(agentCfg.SessionLive, setupCtx, "session_live")
+		for _, skipErr := range skipped {
+			warnSessionTemplateOnce("session_live|"+qualifiedName+"|"+skipErr.Error(), func() {
+				log.Printf("agent %q: %v (session_live entry skipped)", qualifiedName, skipErr)
+			})
 		}
 	}
 	// Project the resolved hint subset through the single StartupHints →

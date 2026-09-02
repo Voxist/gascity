@@ -292,7 +292,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "SessionLive is a list of shell commands that are safe to re-apply\nwithout restarting the agent. Run at startup (after session_setup)\nand re-applied on config change without triggering a restart.\nMust be idempotent. Typical use: tmux theming, keybindings, status bars.\nSame template placeholders as session_setup.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands.\nTemplate expansion is strict (see session_setup); a session_live entry\nthat cannot be expanded is skipped with a warning at session start so\na cosmetic typo never blocks stopping or resuming a running session."
+          "description": "SessionLive is a list of shell commands that are safe to re-apply\nwithout restarting the agent. Run at startup (after session_setup)\nand re-applied on config change without triggering a restart.\nMust be idempotent. Typical use: tmux theming, keybindings, status bars.\nSame template placeholders as session_setup.\nOn failure, the last 4 KiB of the command's stdout/stderr is included\nin the error and may appear in controller and reconciler logs; avoid\nset -x or echoing secrets in setup commands.\nTemplate expansion is strict (see session_setup), but because these\ncommands are cosmetic an entry that cannot be expanded is a warning at\nconfig load and is skipped at session start, so a typo never keeps a\ncity from starting nor blocks managing a running session."
         },
         "overlay_dir": {
           "type": "string",

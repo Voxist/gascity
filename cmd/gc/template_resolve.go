@@ -514,32 +514,40 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		WorkDir:   workDir,
 		ConfigDir: configDir,
 	}
+	// The launch command is assembled from provider command + args and cannot
+	// be validated at config load; braces in it are also the ones most
+	// likely meant for another tool. Keep the raw command on failure, as
+	// before, but say so once.
 	if strings.Contains(command, "{{") {
-		expanded, err := expandSessionSetup([]string{command}, setupCtx, "command")
-		if err != nil {
-			return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
+		if expanded, err := config.ExpandSessionCommandTemplates([]string{command}, setupCtx, "command"); err == nil {
+			command = expanded[0]
+		} else {
+			warnSessionTemplateOnce("command|"+qualifiedName+"|"+command, func() {
+				if p.stderr != nil {
+					fmt.Fprintf(p.stderr, "agent %q: %v (using raw command)\n", qualifiedName, err) //nolint:errcheck
+				}
+			})
 		}
-		command = expanded[0]
 	}
-	expandedSetup, err := expandSessionSetup(cfgAgent.SessionSetup, setupCtx, "session_setup")
+	expandedSetup, err := config.ExpandSessionCommandTemplates(cfgAgent.SessionSetup, setupCtx, "session_setup")
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
 	resolvedScript := config.ResolveSessionSetupScriptPath(p.cityPath, cfgAgent.SourceDir, cfgAgent.SessionSetupScript)
-	expandedPreStart, err := expandSessionSetup(cfgAgent.PreStart, setupCtx, "pre_start")
+	expandedPreStart, err := config.ExpandSessionCommandTemplates(cfgAgent.PreStart, setupCtx, "pre_start")
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
-	// session_live is cosmetic (theming, keybindings) and its runtime failures
-	// are already warnings; an expansion failure must not make the agent
-	// unresolvable, which would drop it from the desired set and drain its
-	// running sessions. Skip the entries and warn instead.
-	expandedLive, err := expandSessionSetup(cfgAgent.SessionLive, setupCtx, "session_live")
-	if err != nil {
-		if p.stderr != nil {
-			fmt.Fprintf(p.stderr, "agent %q: %v (session_live skipped)\n", qualifiedName, err) //nolint:errcheck
-		}
-		expandedLive = nil
+	// session_live is cosmetic: skip the entries that do not expand so the
+	// agent stays resolvable and the good entries (pack-global theming
+	// included) still run.
+	expandedLive, skipped := config.ExpandSessionCommandTemplatesLenient(cfgAgent.SessionLive, setupCtx, "session_live")
+	for _, skipErr := range skipped {
+		warnSessionTemplateOnce("session_live|"+qualifiedName+"|"+skipErr.Error(), func() {
+			if p.stderr != nil {
+				fmt.Fprintf(p.stderr, "agent %q: %v (session_live entry skipped)\n", qualifiedName, skipErr) //nolint:errcheck
+			}
+		})
 	}
 
 	// Step 11b: Skill materialization integration (per engdocs
