@@ -10,7 +10,11 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 649
+# 649 -> 650 (2026-09-02, ga-dmvyf bridge bd CGO fix, #146): test/integration's
+# bridge builder verifies the built (and cached) bd's build shape through
+# `go version -m` — the only way to read a binary's CGO_ENABLED — so a cached
+# non-CGO bd is rebuilt instead of reused forever.
+baseline_calls = 650
 baseline_files = 189
 reported_calls = 495
 reported_files = 135
