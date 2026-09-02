@@ -331,6 +331,14 @@ func TestResolveNudgeTargetStorelessResolvesAgentFromRuntimeIdentityMeta(t *test
 			Name:     "worker",
 			Provider: "custom-provider",
 			Session:  "acp",
+		}, {
+			// A second identity the metadata can point at, so a wrong
+			// precedence resolves to a DIFFERENT provider rather than
+			// falling back to the same agent.
+			Dir:      "rig",
+			Name:     "other-agent",
+			Provider: "other-provider",
+			Session:  "tmux",
 		}},
 	}
 	for _, tc := range []struct {
@@ -347,6 +355,13 @@ func TestResolveNudgeTargetStorelessResolvesAgentFromRuntimeIdentityMeta(t *test
 			name:       "named-session alias with GC_TEMPLATE",
 			identifier: "planner-a",
 			meta:       map[string]string{"GC_ALIAS": "planner-a", "GC_AGENT": "planner-a", "GC_TEMPLATE": "rig/worker"},
+		},
+		{
+			// A config identity is authoritative: stale or reused-session
+			// metadata naming another agent must not out-rank it.
+			name:       "config identity beats stale session metadata",
+			identifier: "rig/worker",
+			meta:       map[string]string{"GC_AGENT": "rig/other-agent"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

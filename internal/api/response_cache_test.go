@@ -187,6 +187,7 @@ func TestHandleStatusServesStaleAndRefreshesInBackground(t *testing.T) {
 		lastFresh: now.Add(-time.Duration(staleSnapshotAgeS) * time.Second),
 	}
 	srv := New(state)
+	joinRefresh := joinableStatusBuildHook(t)
 	h := newTestCityHandlerWith(t, state, srv)
 
 	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/status"), nil)
@@ -310,15 +311,9 @@ func TestHandleStatusServesStaleAndRefreshesInBackground(t *testing.T) {
 	// them, not one apiece.
 	listCallsBeforeRefresh := fastStore.listCalls
 	closeRelease()
-	srv.waitForBackground()
+	joinRefresh()
 	if got := fastStore.listCalls - listCallsBeforeRefresh; got != 1 {
 		t.Fatalf("rig List calls during background refresh = %d, want exactly 1 (%d concurrent misses must coalesce onto one rebuild)", got, concurrentMisses+1)
-	}
-
-	// The in-flight guard must clear after completion; a leaked guard would
-	// wedge every future refresh for this key.
-	if srv.responseRefreshing["status"] {
-		t.Fatal("responseRefreshing[\"status\"] still true after background refresh completed (leaked guard)")
 	}
 }
 
@@ -360,6 +355,7 @@ func TestHandleStatusBackgroundRefreshPanicDoesNotCrashServer(t *testing.T) {
 	fastStore := &countingStore{Store: beads.NewMemStore()}
 	state.stores["myrig"] = fastStore
 	srv := New(state)
+	joinRefresh := joinableStatusBuildHook(t)
 	h := newTestCityHandlerWith(t, state, srv)
 
 	// Prime the cache with a healthy build, so the request below has a stale
@@ -394,11 +390,7 @@ func TestHandleStatusBackgroundRefreshPanicDoesNotCrashServer(t *testing.T) {
 
 	// If the refresh did not recover, the process is already gone and this
 	// line never runs; reaching it at all is half the assertion.
-	srv.waitForBackground()
-
-	if srv.responseRefreshing["status"] {
-		t.Fatal("responseRefreshing[\"status\"] still true after a panicking background refresh (leaked guard wedges every future refresh)")
-	}
+	joinRefresh()
 }
 
 // TestHandleStatusBlockingBypassesTimeCache verifies the preserved
@@ -706,4 +698,24 @@ func TestHandleBeadListAllBlockingBypassesTimeCache(t *testing.T) {
 	if store.listCalls != 2 {
 		t.Fatalf("List calls after blocking request = %d, want 2 (blocking must bypass time cache)", store.listCalls)
 	}
+}
+
+// joinableStatusBuildHook replaces statusBuildAsyncHook for the test with an
+// async spawn that can be joined: the refresh must stay asynchronous (these
+// tests block the store to observe stale serves) but the assertions must run
+// only after it completes. Returns the join function; restores the hook on
+// cleanup.
+func joinableStatusBuildHook(t *testing.T) func() {
+	t.Helper()
+	var wg sync.WaitGroup
+	old := statusBuildAsyncHook
+	statusBuildAsyncHook = func(build func()) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			build()
+		}()
+	}
+	t.Cleanup(func() { statusBuildAsyncHook = old })
+	return wg.Wait
 }

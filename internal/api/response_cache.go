@@ -269,33 +269,6 @@ func staleResponseAs[T any](s *Server, key string) (T, time.Duration, bool) {
 	return body, age, true
 }
 
-// beginResponseRefresh reports whether the caller won the right to run a
-// background stale-while-revalidate refresh for key. Returns false when a
-// refresh for key is already in flight, so concurrent cache-miss requests
-// for the same key coalesce onto a single background rebuild instead of
-// each launching their own (ra-4u2eqc). Pair with endResponseRefresh, which
-// the refresh must call on every exit path (including panics via defer).
-func (s *Server) beginResponseRefresh(key string) bool {
-	s.responseCacheMu.Lock()
-	defer s.responseCacheMu.Unlock()
-	if s.responseRefreshing == nil {
-		s.responseRefreshing = make(map[string]bool)
-	}
-	if s.responseRefreshing[key] {
-		return false
-	}
-	s.responseRefreshing[key] = true
-	return true
-}
-
-// endResponseRefresh releases the in-flight guard beginResponseRefresh took
-// for key, so the next cache-miss request may trigger another refresh.
-func (s *Server) endResponseRefresh(key string) {
-	s.responseCacheMu.Lock()
-	defer s.responseCacheMu.Unlock()
-	delete(s.responseRefreshing, key)
-}
-
 // cachedResponseAs is a generic helper: retrieve the cached value and
 // deep-copy it via a JSON roundtrip before returning.
 func cachedResponseAs[T any](s *Server, key string, index uint64) (T, bool) {

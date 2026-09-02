@@ -807,11 +807,7 @@ func agentScriptHookBeadWithRunner(stderr io.Writer, runHook agentScriptHookRunn
 //  1. exit 2 is the store-unavailable contract (reportWorkQueryFailure): a
 //     failure whatever stderr says. Any exit other than 1 is likewise never
 //     the empty turn.
-//  2. a stderr line carrying hookStoreUnavailableToken is a failure whatever
-//     else the line says — it embeds bd's own stderr, which routinely contains
-//     "warning" (the auto-import fallback preface), and bd may emit further
-//     "warning:" lines before it.
-//  3. exit 1 is benign only if every remaining stderr line is a stamped
+//  2. exit 1 is benign only if every remaining stderr line is a stamped
 //     exit-0 diagnostic (hookWorkQueryDiagPrefix, forwarded by
 //     hookWorkQueryRunner — the origin-gate refusal, driver reconnect chatter
 //     on a federated city) or a warning. Any other line is a failure report
@@ -827,9 +823,9 @@ func agentScriptHookExitIsNoWork(code int, output, stderr string) bool {
 	if workQueryHasReadyWork(output) {
 		return false
 	}
-	if strings.Contains(stderr, hookStoreUnavailableToken) {
-		return false
-	}
+	// The store-unavailable token always travels with exit 2 (its only
+	// emitter is reportWorkQueryFailure), so the exit-code check above already
+	// covers it; there is no exit-1 path that carries the token.
 	for _, line := range strings.Split(stderr, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {

@@ -136,9 +136,15 @@ func resolveNudgeTargetStoreless(cityPath string, cfg *config.City, sp runtime.P
 		seen[name] = true
 		candidates = append(candidates, name)
 	}
+	// An identifier that resolves to a config identity is authoritative for
+	// the agent (it is what the store-backed path would use); the live
+	// session's GC_AGENT metadata is the fallback for raw session names and
+	// aliases, and the caller's identifier the last resort.
+	configAgent := ""
 	if cfg != nil {
 		if found, ok := resolveAgentIdentity(cfg, identifier, ""); ok {
-			add(agent.SessionNameFor(loadedCityName(cfg, cityPath), found.QualifiedName(), cfg.Workspace.SessionTemplate))
+			configAgent = found.QualifiedName()
+			add(agent.SessionNameFor(loadedCityName(cfg, cityPath), configAgent, cfg.Workspace.SessionTemplate))
 		}
 	}
 	add(agent.SanitizeQualifiedNameForSession(identifier))
@@ -157,7 +163,7 @@ func resolveNudgeTargetStoreless(cityPath string, cfg *config.City, sp runtime.P
 		target := buildNudgeTarget(cityPath, cfg, nudgeTargetFields{
 			sessionName:       name,
 			alias:             identifier,
-			agentName:         firstNonEmpty(meta("GC_AGENT"), identifier),
+			agentName:         firstNonEmpty(configAgent, meta("GC_AGENT"), identifier),
 			template:          meta("GC_TEMPLATE"),
 			commonName:        identifier,
 			sessionID:         meta("GC_SESSION_ID"),

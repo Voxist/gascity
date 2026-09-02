@@ -1104,20 +1104,6 @@ func TestAgentScriptHookExitTwoIsFailureRegardlessOfStderr(t *testing.T) {
 	}
 }
 
-// TestAgentScriptHookTokenLineIsFailureDespiteWarningText pins the second
-// signal: a stderr line carrying hookStoreUnavailableToken is a failure even
-// when the exit code reads 1 and the line itself contains "warning" (the token
-// line embeds bd's stderr, which routinely does).
-func TestAgentScriptHookTokenLineIsFailureDespiteWarningText(t *testing.T) {
-	t.Parallel()
-	if agentScriptHookExitIsNoWork(1, "", bdWarningStderrSample) {
-		t.Fatal("a stderr line carrying the store-unavailable token was classified as no-work because it also says \"warning\"")
-	}
-	if agentScriptHookExitIsNoWork(1, "", hookWorkQueryDiagPrefix+"warning: "+hookStoreUnavailableToken+"\n") {
-		t.Fatal("a stamped diagnostic carrying the store-unavailable token was classified as no-work")
-	}
-}
-
 // TestAgentScriptHookExitOneWarningStderrStaysNoWork keeps the benign
 // exit-1 classification intact once the code and token checks come first.
 func TestAgentScriptHookExitOneWarningStderrStaysNoWork(t *testing.T) {

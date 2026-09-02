@@ -392,6 +392,11 @@ func (s *emittingClassStore) OpenedIdentity() identity.ScopeIdentity {
 	return identity.ScopeIdentity{}
 }
 
+// AssertOpenedIdentity forwards the identity assertion to the wrapped store.
+// A wrapped store without the capability fails CLOSED with a documented
+// identity.Result class rather than a zero Result, so a caller gating on the
+// class can never mistake "no capability" for "identity matched"
+// (TestEmittingClassStoreIdentityForwardFailsClosed).
 func (s *emittingClassStore) AssertOpenedIdentity(configured identity.ScopeIdentity) identity.Result {
 	if inner, ok := s.Store.(interface {
 		AssertOpenedIdentity(identity.ScopeIdentity) identity.Result

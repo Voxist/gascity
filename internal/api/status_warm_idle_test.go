@@ -12,8 +12,8 @@ import (
 )
 
 // TestHandleStatusReseedsWarmEntryAfterLongIdle pins the warm path's
-// long-idle contract: once the warm StatusView entry ages past
-// statusWarmServeMaxAge (a >5m idle), the next poll serves it immediately
+// long-idle contract: once the warm StatusView entry has idled past
+// statusWarmRefreshAfter, the next poll serves it immediately
 // (stale, flagged by CacheAgeS) without blocking, and its background refresh
 // must re-seed the warm
 // entry and every subsequent poll must be served from the warm path again.
@@ -30,7 +30,7 @@ func TestHandleStatusReseedsWarmEntryAfterLongIdle(t *testing.T) {
 	oldTTL := timeBucketResponseCacheTTL
 	timeBucketResponseCacheTTL = time.Nanosecond // bucket cache misses every request
 	oldRefresh := statusWarmRefreshAfter
-	statusWarmRefreshAfter = time.Hour // a re-seeded warm body must serve without refreshing
+	statusWarmRefreshAfter = time.Minute // the idle entry refreshes; a re-seeded body (~0 age) does not
 	// The background refresh runs synchronously so the assertions are on
 	// state, never on goroutine timing (the package's other warm tests pin
 	// the hook the same way).
@@ -51,7 +51,7 @@ func TestHandleStatusReseedsWarmEntryAfterLongIdle(t *testing.T) {
 	// A long idle: both entries buildAndStoreStatus seeds together are now well
 	// past statusWarmServeMaxAge. The bodies carry distinct names so the served
 	// body identifies which path answered.
-	idle := 2 * statusWarmServeMaxAge
+	idle := 10 * time.Minute // well past any refresh threshold
 	seededAt := time.Now().Add(-idle)
 	srv.setWarmStatusBody(false, StatusBody{Name: "expired-warm-body"}, seededAt)
 	srv.responseCacheMu.Lock()

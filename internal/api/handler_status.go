@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
-	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -139,17 +137,15 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		// never blocks on the ~28s O(store) build (vp-e0hv). The refresh goes
 		// through buildAndStoreStatus — singleflight, statusWarmBuildTimeout,
 		// seeds this entry and the response cache together — so an entry that
-		// idled past statusWarmServeMaxAge is stale for exactly one more poll,
-		// not for the process lifetime, and no poll pays the rebuild inline.
-		// (Rebuilding synchronously here bounded staleness at the cost of the
-		// very blocking the warm cache exists to remove; falling through to the
-		// upstream stale-while-revalidate branch instead used to lock the
-		// handler out of this path because its refresher seeded only the
-		// response cache.) Pinned by TestHandleStatusReseedsWarmEntryAfterLongIdle.
-		// statusWarmRefreshAfter is the soft refresh threshold; statusWarmServeMaxAge
-		// is the hard one — past it a refresh is kicked whatever the soft
-		// threshold says, so a warm body is never served stale beyond one poll.
-		if age > statusWarmRefreshAfter || age > statusWarmServeMaxAge {
+		// idled for hours is stale for exactly one more poll while rebuilds
+		// succeed, and no poll pays the rebuild inline. There is deliberately
+		// no upper age bound: a rebuild that keeps failing (recovered panic,
+		// perpetual wedge past statusWarmBuildTimeout) leaves this body served
+		// with CacheAgeS growing, and that header — rendered by the CLI as a
+		// stalled-build banner past cacheAgeStaleBuildThresholdSeconds — is the
+		// signal; blocking the request instead would only hide it behind a
+		// timeout. Pinned by TestHandleStatusReseedsWarmEntryAfterLongIdle.
+		if age > statusWarmRefreshAfter {
 			s.refreshStatusBodyAsync(input.Lite)
 		}
 		// entry.body is served without the cloneCachedValue deep-copy used by
@@ -164,8 +160,8 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		// same rule the SWR path below applies: how long ago this warm entry
 		// was built, and the age of the CachingStore snapshot it was built
 		// from. Reporting only the store age hides the warm delay —
-		// statusWarmServeMaxAge is 5m while the CLI's staleness banner fires
-		// at 30s (cacheAgeBannerThresholdSeconds), so a minutes-old warm body
+		// statusWarmRefreshAfter is seconds while the CLI's staleness banner
+		// fires at 30s (cacheAgeBannerThresholdSeconds), so a minutes-old warm body
 		// on a freshly reconciled store would report ~0 and silently suppress
 		// the banner on exactly the stale view the operator needs told about.
 		return &IndexOutput[StatusBody]{
@@ -190,18 +186,18 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	// city — the same failure class that used to 503 the legacy runs/census
 	// endpoint at its internal budget. Rather than let a request pay that cost
 	// inline, serve the stale body immediately and refresh in the background so
-	// the next poll gets a fresh body. Concurrent misses coalesce onto one
-	// rebuild via beginResponseRefresh. A genuine cold cache (nothing ever
-	// built) has nothing to serve here and falls through to the synchronous
-	// build below.
+	// the next poll gets a fresh body. The refresh is the warm path's own
+	// spawn point (refreshStatusBodyAsync -> buildAndStoreStatus, which
+	// singleflights per variant and seeds the warm entry and the response
+	// cache together), so this branch is a one-shot detour back onto the
+	// warm path, never a regime the handler can get stuck in. A genuine cold
+	// cache (nothing ever built) has nothing to serve here and falls through
+	// to the synchronous build below.
 	//
 	// This sits at top level rather than inside the warm branch: nested there
 	// it was unreachable whenever no warm entry existed, which is exactly the
 	// cold-ish case it exists to cover. It is reached only when NO warm entry
-	// exists (an expired one rebuilds synchronously above). Its refresher
-	// builds through buildAndStoreStatus and so re-seeds the warm entry too,
-	// which is what keeps this branch a one-shot detour rather than a regime
-	// the handler can get stuck in.
+	// exists (a warm entry, whatever its age, is served above).
 	//
 	// CacheAgeS reports the GREATER of the two staleness signals: how long ago
 	// this response entry was built, and cacheAgeSeconds(store) — the age of the
@@ -211,7 +207,7 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	// `gc status` renders above cacheAgeBannerThresholdSeconds; reporting only
 	// the store age would hide the SWR delay. The max preserves both.
 	if body, age, ok := staleResponseAs[StatusBody](s, cacheKey); ok {
-		s.refreshStatusResponseInBackground(cacheKey, input.Lite)
+		s.refreshStatusBodyAsync(input.Lite)
 		return &IndexOutput[StatusBody]{
 			Index:     index,
 			CacheAgeS: max(age.Seconds(), cacheAgeSeconds(store)),
@@ -219,51 +215,13 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		}, nil
 	}
 
-	// No usable warm body (cold start or long idle): build synchronously once,
-	// single-flighted so a burst of cold requests shares one build, then serve
-	// it and seed the warm entry. Only this first build after a (re)start or
-	// long idle pays the O(store) cost; every subsequent request is served from
-	// the warm entry above without blocking.
+	// No warm body at all (cold start): build synchronously once, single-flighted
+	// so a burst of cold requests shares one build, then serve it and seed the
+	// warm entry. Only this first build after a (re)start pays the O(store)
+	// cost inline; every subsequent request is served from the warm entry
+	// above without blocking.
 	resp := s.buildAndStoreStatus(input.Lite)
 	return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: resp}, nil
-}
-
-// refreshStatusResponseInBackground kicks a detached rebuild of the /status
-// body for cacheKey, so the next poll is served a fresh body without any
-// caller paying the rebuild cost inline (ra-4u2eqc). Coalesced via
-// beginResponseRefresh: a refresh already in flight for cacheKey is not
-// duplicated. Detached from the triggering request's context, since the
-// refresh must outlive the request that happened to trigger it and benefits
-// every subsequent poller, not just this one.
-//
-// The rebuild goes through buildAndStoreStatus, not buildStatusBody +
-// storeResponse: one build then seeds BOTH the warm StatusView entry and the
-// response cache under the same singleflight and statusWarmBuildTimeout the
-// warm path uses, so whichever branch of humaHandleStatus kicked it, the
-// handler lands back on the warm path and the branch order stops mattering.
-// A refresher that seeded only the response cache re-created the regime lock
-// (TestHandleStatusReseedsWarmEntryAfterLongIdle) the moment anything reached
-// it with a cleared warm entry. buildAndStoreStatus owns the build's timeout
-// and recovers its own panics; runBackground's ctx is unused, the wrapper is
-// kept so waitForBackground still observes the refresh. Pinned by
-// TestRefreshStatusResponseInBackgroundReseedsWarmEntry.
-func (s *Server) refreshStatusResponseInBackground(cacheKey string, lite bool) {
-	if !s.beginResponseRefresh(cacheKey) {
-		return
-	}
-	s.runBackground(func(context.Context) {
-		defer func() {
-			if r := recover(); r != nil {
-				// The background refresh is best-effort: a panic here must not
-				// take the controller down. The request path's recover
-				// (withRecovery, middleware.go) does not cover detached
-				// goroutines, and the next poll simply rebuilds.
-				log.Printf("api: panic in background /status refresh: %v\n%s", r, debug.Stack())
-			}
-		}()
-		defer s.endResponseRefresh(cacheKey)
-		s.buildAndStoreStatus(lite)
-	})
 }
 
 // buildStatusBody constructs the status response body. ctx bounds the

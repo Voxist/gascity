@@ -1,6 +1,8 @@
 package dispatch
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -358,5 +360,207 @@ func TestReconcileTerminalScopedMemberRepairsLegacyEdgeOntoPreservedControl(t *t
 	}
 	if controlAfter := mustGetBead(t, store, control.ID); controlAfter.Status != "open" {
 		t.Fatalf("preserved control status = %q, want open — it is the replay path", controlAfter.Status)
+	}
+}
+
+// addDanglingBlocker records a readiness-blocking dep from id onto a bead that
+// is then deleted, leaving the edge behind. That is the shape a purged
+// ephemeral wisp leaves in a CachingStore whose c.deps[id] outlives the row
+// until the next reconcile; bd's own close guard (IsBlockedInTx) drops a
+// blocker with no row, so the dep neither stops the close nor names itself in
+// the refusal — it is invisible to bd and must be invisible to the repair.
+func addDanglingBlocker(t *testing.T, store *strictCloseStore, id string) string {
+	t.Helper()
+	ghost := mustCreateWorkflowBead(t, store, beads.Bead{Title: "purged wisp", Type: "task"})
+	mustDepAdd(t, store, id, ghost.ID, "blocks")
+	if err := store.Delete(ghost.ID); err != nil {
+		t.Fatalf("delete ghost blocker: %v", err)
+	}
+	if _, err := store.Get(ghost.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("ghost lookup = %v, want ErrNotFound", err)
+	}
+	if deps := mustDepTypes(t, store, id); deps[ghost.ID] != "blocks" {
+		t.Fatalf("deps of %s = %v, want the dangling edge retained", id, deps)
+	}
+	return ghost.ID
+}
+
+// TestLegacyCycleRepairSkipsDanglingBlockers: a dangling dep on the subject
+// must not abort the repair. Before the fix the repair returned the lookup's
+// ErrNotFound, the legacy edge stayed, and the scope-check burned its whole
+// semantic budget into quarantine on every sweep — the exact outcome the
+// repair exists to prevent.
+func TestLegacyCycleRepairSkipsDanglingBlockers(t *testing.T) {
+	t.Parallel()
+
+	t.Run("scope body", func(t *testing.T) {
+		t.Parallel()
+
+		store := newStrictCloseStore()
+		control, body := legacyScopeCheckFixture(t, store)
+		ghost := addDanglingBlocker(t, store, body.ID)
+
+		result, err := ProcessControl(store, control, ProcessOptions{})
+		if err != nil {
+			t.Fatalf("ProcessControl(scope-check with dangling dep): %v (tier %v)", err, ClassifyControllerError(err))
+		}
+		if !result.Processed || result.Action != "scope-pass" {
+			t.Fatalf("result = %+v, want processed scope-pass", result)
+		}
+		bodyAfter := mustGetBead(t, store, body.ID)
+		if bodyAfter.Status != "closed" || bodyAfter.Metadata["gc.outcome"] != "pass" {
+			t.Fatalf("body = status %q outcome %q, want closed/pass", bodyAfter.Status, bodyAfter.Metadata["gc.outcome"])
+		}
+		deps := mustDepTypes(t, store, body.ID)
+		if deps[control.ID] != "" {
+			t.Fatalf("body still depends on its own scope-check: %v", deps)
+		}
+		// The dangling edge is not the repair's to remove: it is not a legacy
+		// self-closing edge, and reconcile owns cache hygiene.
+		if deps[ghost] != "blocks" {
+			t.Fatalf("repair removed the dangling edge: %v", deps)
+		}
+	})
+
+	t.Run("workflow root", func(t *testing.T) {
+		t.Parallel()
+
+		store := newStrictCloseStore()
+		finalizer, root := legacyWorkflowFinalizeFixture(t, store)
+		addDanglingBlocker(t, store, root.ID)
+
+		result, err := ProcessControl(store, finalizer, ProcessOptions{})
+		if err != nil {
+			t.Fatalf("ProcessControl(workflow-finalize with dangling dep): %v (tier %v)", err, ClassifyControllerError(err))
+		}
+		if !result.Processed || result.Action != "workflow-pass" {
+			t.Fatalf("result = %+v, want processed workflow-pass — not missing_root over a live root", result)
+		}
+		rootAfter := mustGetBead(t, store, root.ID)
+		if rootAfter.Status != "closed" || rootAfter.Metadata["gc.outcome"] != "pass" {
+			t.Fatalf("root = status %q outcome %q, want closed/pass", rootAfter.Status, rootAfter.Metadata["gc.outcome"])
+		}
+		finalizerAfter := mustGetBead(t, store, finalizer.ID)
+		if finalizerAfter.Status != "closed" || finalizerAfter.Metadata["gc.outcome"] != "pass" {
+			t.Fatalf("finalizer = status %q outcome %q, want closed/pass", finalizerAfter.Status, finalizerAfter.Metadata["gc.outcome"])
+		}
+		if deps := mustDepTypes(t, store, root.ID); deps[finalizer.ID] != "" {
+			t.Fatalf("root still depends on its own finalizer: %v", deps)
+		}
+	})
+}
+
+// TestLegacyCycleRepairDanglingBlockerDoesNotMaskForeignBlocker: the dangling
+// dep is skipped, but a genuinely open foreign blocker next to it still keeps
+// the refusal on the semantic tier with no edge touched.
+func TestLegacyCycleRepairDanglingBlockerDoesNotMaskForeignBlocker(t *testing.T) {
+	t.Parallel()
+
+	store := newStrictCloseStore()
+	control, body := legacyScopeCheckFixture(t, store)
+	ghost := addDanglingBlocker(t, store, body.ID)
+	foreign := mustCreateWorkflowBead(t, store, beads.Bead{Title: "unrelated open work", Type: "task"})
+	mustDepAdd(t, store, body.ID, foreign.ID, "blocks")
+
+	_, err := ProcessControl(store, control, ProcessOptions{})
+	if err == nil {
+		t.Fatal("ProcessControl succeeded; the foreign blocker should have refused the body close")
+	}
+	if got := ClassifyControllerError(err); got != TierSemantic {
+		t.Fatalf("tier = %v, want TierSemantic for %v", got, err)
+	}
+	deps := mustDepTypes(t, store, body.ID)
+	if deps[control.ID] != "blocks" || deps[foreign.ID] != "blocks" || deps[ghost] != "blocks" {
+		t.Fatalf("body deps = %v, want every edge untouched", deps)
+	}
+	if bodyAfter := mustGetBead(t, store, body.ID); bodyAfter.Status == "closed" {
+		t.Fatal("body closed despite an open foreign blocker")
+	}
+}
+
+// foreignNotFoundCloseStore fails the close of failID with an error that wraps
+// beads.ErrNotFound for a DIFFERENT bead while failID itself exists. It is the
+// error shape closeSubjectForControl produced before the repair skipped
+// dangling deps: errors.Join(refusal, ...ErrNotFound), errors.Is-matchable
+// even though the subject is alive.
+type foreignNotFoundCloseStore struct {
+	*strictCloseStore
+	failID string
+}
+
+func (s *foreignNotFoundCloseStore) Update(id string, opts beads.UpdateOpts) error {
+	if id == s.failID && opts.Status != nil && *opts.Status == "closed" {
+		return errors.Join(
+			fmt.Errorf("cannot close blocked issue: %s is blocked by [ghost]", id),
+			fmt.Errorf("repairing legacy self-closing edges on %s: getting bead %q: %w", id, "ghost", beads.ErrNotFound),
+		)
+	}
+	return s.strictCloseStore.Update(id, opts)
+}
+
+// TestProcessWorkflowFinalizeMissingRootIsDecidedByTheRootNotTheErrorChain
+// pins the finalizer's orphan branch to the root's own existence. A close
+// error that merely carries ErrNotFound for some other bead must not close the
+// finalizer as missing_root while the root is open — that orphans the root
+// with no retry. The error is surfaced and both beads stay open for the next
+// sweep.
+func TestProcessWorkflowFinalizeMissingRootIsDecidedByTheRootNotTheErrorChain(t *testing.T) {
+	t.Parallel()
+
+	strict := newStrictCloseStore()
+	finalizer, root := legacyWorkflowFinalizeFixture(t, strict)
+	if err := strict.DepRemove(root.ID, finalizer.ID); err != nil {
+		t.Fatalf("drop legacy edge: %v", err)
+	}
+	store := &foreignNotFoundCloseStore{strictCloseStore: strict, failID: root.ID}
+
+	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	if err == nil {
+		t.Fatalf("ProcessControl returned %+v with no error; the root close failure must surface", result)
+	}
+	if !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("err = %v, want the injected chain (test double miswired)", err)
+	}
+	if result.Processed || result.Action == "workflow-missing_root" {
+		t.Fatalf("result = %+v, want unprocessed and not missing_root", result)
+	}
+	rootAfter := mustGetBead(t, store, root.ID)
+	if rootAfter.Status == "closed" {
+		t.Fatal("root closed despite the injected close failure")
+	}
+	finalizerAfter := mustGetBead(t, store, finalizer.ID)
+	if finalizerAfter.Status == "closed" {
+		t.Fatalf("finalizer closed (outcome %q) over a live, open root", finalizerAfter.Metadata["gc.outcome"])
+	}
+	if got := finalizerAfter.Metadata["gc.outcome"]; got != "" {
+		t.Fatalf("finalizer outcome = %q, want none", got)
+	}
+	if finalizerAfter.Metadata[workflowFinalizeErrorMetadataKey] == "" {
+		t.Fatal("finalizer close failure was not recorded on the bead")
+	}
+}
+
+// TestProcessWorkflowFinalizeGenuinelyMissingRootStillClosesAsMissingRoot is
+// the control for the branch above on the strict store: when the root really
+// is gone, the finalizer is still closed as missing_root.
+func TestProcessWorkflowFinalizeGenuinelyMissingRootStillClosesAsMissingRoot(t *testing.T) {
+	t.Parallel()
+
+	store := newStrictCloseStore()
+	finalizer, root := legacyWorkflowFinalizeFixture(t, store)
+	if err := store.Delete(root.ID); err != nil {
+		t.Fatalf("delete root: %v", err)
+	}
+
+	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(finalize with deleted root): %v", err)
+	}
+	if !result.Processed || result.Action != "workflow-missing_root" {
+		t.Fatalf("result = %+v, want processed workflow-missing_root", result)
+	}
+	finalizerAfter := mustGetBead(t, store, finalizer.ID)
+	if finalizerAfter.Status != "closed" || finalizerAfter.Metadata["gc.outcome"] != "missing_root" {
+		t.Fatalf("finalizer = status %q outcome %q, want closed/missing_root", finalizerAfter.Status, finalizerAfter.Metadata["gc.outcome"])
 	}
 }

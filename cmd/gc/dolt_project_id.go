@@ -164,30 +164,55 @@ func ensureManagedDoltProjectIDWithRecorder(metadataPath, host, port, user, data
 		return managedDoltProjectIDReport{}, err
 	}
 
-	// L0 pre-heal: if city.toml [identity_map] has a canonical ID for this rig
-	// and the DB (L3) confirms it, but L1 is absent or was regenerated to the
-	// wrong value, repair L1+L2 from the canonical source before reconcile runs.
-	// This closes the recovery gap from the 2026-06-20 incident (vp-cz7o.21).
+	// L0 pre-heal: city.toml [identity_map] is the canonical source for a
+	// rig's identity. When L1 is absent or was regenerated to the wrong value,
+	// repair L1+L2 from L0 before reconcile runs, provided L3 either confirms
+	// L0 or is empty (re-initialized database). When L3 or L2 contradicts L0
+	// there is no safe repair, so refuse rather than let reconcile adopt or
+	// mint an identity. This closes the recovery gap from the 2026-06-20
+	// incident (vp-cz7o.21).
+	var preHeal l0PreHealResult
 	if cityPath != "" {
 		l0, l0ok, l0err := readCityIdentityMapEntry(cityPath, scopeRoot)
 		switch {
 		case l0err != nil:
-			// Non-fatal: emit an event so it's observable, then fall through.
-			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "l0_read_error", "L0", "", "")
-		case l0ok && ok && databaseProjectID == l0 && (!identityOK || identityProjectID != l0):
+			// Fail closed: a transient config error must never mint identity.
+			// The payload has no reason field, so the read error travels in
+			// new_id; the l0_read_error source tells consumers it is not an id.
+			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "l0_read_error", "L0", "", l0err.Error())
+			return managedDoltProjectIDReport{}, fmt.Errorf("reading city identity map for %s: %w", scopeRoot, l0err)
+		case l0ok && ok && databaseProjectID != l0:
+			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "canonical_l3_mismatch", "L0", l0, databaseProjectID)
+			return managedDoltProjectIDReport{}, formatCanonicalMismatchError(scopeRoot, l0, "database", databaseProjectID)
+		case l0ok && ok && (!identityOK || identityProjectID != l0):
 			// DB confirms the canonical ID; L1 is absent or stale. Auto-repair.
-			if writeErr := contract.WriteProjectIdentity(fs, scopeRoot, l0); writeErr != nil {
-				return managedDoltProjectIDReport{}, fmt.Errorf("L0 pre-heal write identity: %w", writeErr)
-			}
-			if _, writeErr := writeManagedMetadataProjectID(metadataPath, l0); writeErr != nil {
-				return managedDoltProjectIDReport{}, fmt.Errorf("L0 pre-heal write metadata: %w", writeErr)
+			preHeal, err = restoreIdentityFromCanonical(fs, scopeRoot, metadataPath, l0)
+			if err != nil {
+				return managedDoltProjectIDReport{}, err
 			}
 			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "restored_from_canonical", "L0", identityProjectID, l0)
 			identityProjectID, identityOK = l0, true
 			metadataProjectID, metadataOK = l0, true
-		case l0ok && ok && databaseProjectID != l0:
-			// L3 disagrees with the canonical map — do not auto-repair; needs human triage.
-			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "canonical_l3_mismatch", "L0", l0, databaseProjectID)
+		case l0ok && !ok && identityOK && identityProjectID != l0:
+			// L1 disagrees with L0 and there is no L3 to break the tie: refuse
+			// rather than let reconcile seed L3 from the wrong L1.
+			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "canonical_l1_mismatch", "L0", l0, identityProjectID)
+			return managedDoltProjectIDReport{}, formatCanonicalMismatchError(scopeRoot, l0, "identity file", identityProjectID)
+		case l0ok && !ok && !identityOK:
+			// Re-initialized (empty) database and no L1: restore L1+L2 from L0
+			// and let reconcile seed L3 from L1. An L2 that disagrees with L0
+			// has no L3 to break the tie, so it is refused rather than guessed.
+			if metadataOK && metadataProjectID != l0 {
+				emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "canonical_l2_mismatch", "L0", l0, metadataProjectID)
+				return managedDoltProjectIDReport{}, formatCanonicalMismatchError(scopeRoot, l0, "metadata.json", metadataProjectID)
+			}
+			preHeal, err = restoreIdentityFromCanonical(fs, scopeRoot, metadataPath, l0)
+			if err != nil {
+				return managedDoltProjectIDReport{}, err
+			}
+			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "restored_from_canonical", "L0", "", l0)
+			identityProjectID, identityOK = l0, true
+			metadataProjectID, metadataOK = l0, true
 		}
 	}
 
@@ -195,7 +220,49 @@ func ensureManagedDoltProjectIDWithRecorder(metadataPath, host, port, user, data
 	seedL3 := func(ctx context.Context, projectID string) (bool, error) {
 		return seedDatabaseProjectID(ctx, db, projectID)
 	}
-	return applyReconcileDecision(ctx, fs, scopeRoot, metadataPath, decision, cityPath, rec, seedL3)
+	report, err := applyReconcileDecision(ctx, fs, scopeRoot, metadataPath, decision, cityPath, rec, seedL3)
+	if err != nil {
+		return managedDoltProjectIDReport{}, err
+	}
+	return preHeal.overlay(report), nil
+}
+
+// l0PreHealResult records which layers the L0 pre-heal rewrote so the final
+// report reflects them; after the pre-heal, reconcile sees the layers in
+// agreement and would otherwise report a plain match.
+type l0PreHealResult struct {
+	applied         bool
+	identityUpdated bool
+	metadataUpdated bool
+}
+
+func (p l0PreHealResult) overlay(report managedDoltProjectIDReport) managedDoltProjectIDReport {
+	if !p.applied {
+		return report
+	}
+	report.IdentityFileUpdated = report.IdentityFileUpdated || p.identityUpdated
+	report.MetadataUpdated = report.MetadataUpdated || p.metadataUpdated
+	report.Source = "restored_from_canonical"
+	report.Layer = "l0"
+	return report
+}
+
+// restoreIdentityFromCanonical writes the canonical L0 id into L1 and L2.
+// Callers only invoke it when L1 is absent or holds a different id, so the
+// identity file always counts as updated; L2 may already match.
+func restoreIdentityFromCanonical(fs fsys.FS, scopeRoot, metadataPath, canonical string) (l0PreHealResult, error) {
+	if err := contract.WriteProjectIdentity(fs, scopeRoot, canonical); err != nil {
+		return l0PreHealResult{}, fmt.Errorf("L0 pre-heal write identity: %w", err)
+	}
+	metadataUpdated, err := writeManagedMetadataProjectID(metadataPath, canonical)
+	if err != nil {
+		return l0PreHealResult{}, fmt.Errorf("L0 pre-heal write metadata: %w", err)
+	}
+	return l0PreHealResult{
+		applied:         true,
+		identityUpdated: true,
+		metadataUpdated: metadataUpdated,
+	}, nil
 }
 
 func managedDoltProjectIDFields(report managedDoltProjectIDReport) []string {
@@ -500,6 +567,10 @@ func formatL1L3MismatchError(l1, l3 string) error {
 			"Inspect both values and resolve manually before reconnecting.",
 		l1, l3,
 	)
+}
+
+func formatCanonicalMismatchError(scopeRoot, l0, otherLayer, otherID string) error {
+	return fmt.Errorf("canonical identity mismatch for %s: city.toml identity_map says %s, %s says %s; needs human triage", scopeRoot, l0, otherLayer, otherID)
 }
 
 func formatLegacyL2L3MismatchError(l2, l3 string) error {

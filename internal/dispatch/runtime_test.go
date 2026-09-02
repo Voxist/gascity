@@ -2987,6 +2987,13 @@ func (s *strictCloseStore) openBlockersOf(id string) ([]string, error) {
 		}
 		blocker, err := s.Get(dep.DependsOnID)
 		if err != nil {
+			// bd resolves blocker status with a batched lookup and drops any
+			// dep whose target has no row (IsBlockedInTx: `if !ok { continue }`),
+			// so a dangling edge — a purged wisp still named in the dep list —
+			// neither stops the close nor appears in the refusal.
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
 			return nil, err
 		}
 		if blockerStopsClose(blocker.Status) {
@@ -3193,6 +3200,17 @@ func TestStrictCloseStoreMirrorsBdClosePolicy(t *testing.T) {
 				subject, blocker := newBead(t, store, "subject"), newBead(t, store, "blocker")
 				mustDepAdd(t, store, subject.ID, blocker.ID, "blocks")
 				setStatus(t, store, blocker.ID, "pinned")
+				return subject.ID
+			},
+		},
+		{
+			name: "dangling blocker allows because bd drops a blocker with no row",
+			build: func(t *testing.T, store *strictCloseStore) string {
+				subject, blocker := newBead(t, store, "subject"), newBead(t, store, "blocker")
+				mustDepAdd(t, store, subject.ID, blocker.ID, "blocks")
+				if err := store.Delete(blocker.ID); err != nil {
+					t.Fatalf("delete blocker: %v", err)
+				}
 				return subject.ID
 			},
 		},

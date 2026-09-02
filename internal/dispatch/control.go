@@ -2052,11 +2052,11 @@ func closeSubjectForControl(store beads.Store, subjectID, outcome, closerID stri
 func repairLegacySelfClosingEdges(store beads.Store, subjectID, closerID string, opts ProcessOptions) (bool, error) {
 	subject, err := store.Get(subjectID)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("loading subject %s: %w", subjectID, err)
 	}
 	deps, err := store.DepList(subjectID, "down")
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("listing deps of %s: %w", subjectID, err)
 	}
 	var legacy []string
 	for _, dep := range deps {
@@ -2065,7 +2065,16 @@ func repairLegacySelfClosingEdges(store beads.Store, subjectID, closerID string,
 		}
 		blocker, err := store.Get(dep.DependsOnID)
 		if err != nil {
-			return false, err
+			// A dep whose target no longer exists (a purged wisp the cached dep
+			// list still names) is not why bd refused the close: bd's guard
+			// drops a blocker with no row. It is neither ours to remove nor a
+			// reason to abort — and returning its ErrNotFound would let a
+			// caller mistake it for the subject going missing.
+			if errors.Is(err, beads.ErrNotFound) {
+				opts.tracef("legacy-cycle-repair subject=%s closer=%s skip reason=dangling_dep blocker=%s", subjectID, closerID, dep.DependsOnID)
+				continue
+			}
+			return false, fmt.Errorf("loading blocker %s of %s: %w", dep.DependsOnID, subjectID, err)
 		}
 		// Pinned and closed blockers do not stop a close in bd; they are
 		// neither a reason for the refusal nor ours to remove.
@@ -2104,29 +2113,25 @@ func repairLegacySelfClosingEdges(store beads.Store, subjectID, closerID string,
 // edge. Anything else (another workflow's control, a retry-eval, an ordinary
 // task) is a real blocker and is left alone.
 func isLegacySelfClosingBlocker(blocker, subject beads.Bead, closerID string) bool {
-	kind := blocker.Metadata[beadmeta.KindMetadataKey]
-	if !beadmeta.IsSelfClosingControlKind(kind) {
+	if !beadmeta.IsSelfClosingControlKind(blocker.Metadata[beadmeta.KindMetadataKey]) {
 		return false
 	}
 	if blocker.ID == closerID {
 		return true
 	}
-	switch kind {
-	case beadmeta.KindScopeCheck:
-		if subject.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindScope ||
-			subject.Metadata[beadmeta.ScopeRoleMetadataKey] != beadmeta.ScopeRoleBody {
-			return false
-		}
-		if blocker.Metadata[beadmeta.RootBeadIDMetadataKey] != subject.Metadata[beadmeta.RootBeadIDMetadataKey] {
-			return false
-		}
-		return matchesScopeRef(subject, blocker.Metadata[beadmeta.ScopeRefMetadataKey])
-	case beadmeta.KindWorkflowFinalize:
-		return subject.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow &&
-			blocker.Metadata[beadmeta.RootBeadIDMetadataKey] == subject.ID
-	default:
+	// beadmeta.ControlClosesNode is the compiler's "this control closes that
+	// node" predicate (scope-check -> its scope body by scope_ref; finalize ->
+	// a workflow root). At runtime it must additionally be the SAME workflow:
+	// the control's root_bead_id is the scope body's root, or the workflow
+	// root itself — a finalize control of another workflow is foreign.
+	if !beadmeta.ControlClosesNode(blocker.Metadata, subject.ID, subject.Metadata) {
 		return false
 	}
+	root := subject.Metadata[beadmeta.RootBeadIDMetadataKey]
+	if subject.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow {
+		root = subject.ID
+	}
+	return root != "" && blocker.Metadata[beadmeta.RootBeadIDMetadataKey] == root
 }
 
 // Note: setOutcomeAndClose, propagateRetrySubjectMetadata,

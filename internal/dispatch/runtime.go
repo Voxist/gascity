@@ -945,6 +945,18 @@ func isRetryAttemptSubject(subject beads.Bead) bool {
 	return false
 }
 
+// workflowRootMissing reports whether the root a finalizer failed to close is
+// absent from the store, decided by looking the root up rather than by
+// inspecting the close error. The error is not evidence on its own:
+// closeSubjectForControl joins repair-side failures onto the refusal, so an
+// ErrNotFound that concerns some OTHER bead would be errors.Is-matchable and,
+// read as "root missing", would close the finalizer over a live, open root
+// with nothing left to retry it.
+func workflowRootMissing(store beads.Store, rootID string) bool {
+	_, err := store.Get(rootID)
+	return errors.Is(err, beads.ErrNotFound)
+}
+
 func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
 	rootID := bead.Metadata[beadmeta.RootBeadIDMetadataKey]
 	if rootID == "" {
@@ -975,7 +987,7 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	// so retryable scan failures keep the root live for singleton scans, but
 	// source beads are not mutated until the root is durably closed.
 	if err := closeSubjectForControl(store, rootID, outcome, bead.ID, opts); err != nil {
-		if errors.Is(err, beads.ErrNotFound) {
+		if workflowRootMissing(store, rootID) {
 			if closeErr := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeMissingRoot); closeErr != nil {
 				return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing orphaned finalizer (root %s missing): %w", bead.ID, rootID, closeErr))
 			}

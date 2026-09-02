@@ -283,7 +283,7 @@ func renderCityStatusFromAPI(cityPath string, cr api.CachedRead[api.StatusView],
 		fmt.Fprintf(stdout, "Sessions: %d active, %d suspended\n", cr.Body.SessionCounts.Active, cr.Body.SessionCounts.Suspended) //nolint:errcheck // best-effort stdout
 	}
 	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
+		fmt.Fprint(stdout, cacheAgeBanner(cr.AgeSeconds)) //nolint:errcheck // best-effort stdout
 	}
 	return 0
 }
@@ -801,4 +801,19 @@ func controllerStatusGuidance(ctrl ControllerJSON, cityPath string) []string {
 		}
 	}
 	return nil
+}
+
+// cacheAgeStaleBuildThresholdSeconds separates a lagging reconciler from a
+// status build that is not completing at all. The server serves its warm
+// /status body at any age and refreshes it in the background after seconds;
+// past this age the refreshes themselves have been failing or wedging for
+// many cycles, so the banner must say so instead of blaming the reconciler.
+const cacheAgeStaleBuildThresholdSeconds = 600
+
+// cacheAgeBanner renders the staleness line for a served cache age.
+func cacheAgeBanner(ageSeconds float64) string {
+	if ageSeconds > cacheAgeStaleBuildThresholdSeconds {
+		return fmt.Sprintf("(cache age: %.0fs — status rebuilds are not completing; the view below is stale)\n", ageSeconds)
+	}
+	return fmt.Sprintf("(cache age: %.0fs — reconciler may be lagging)\n", ageSeconds)
 }

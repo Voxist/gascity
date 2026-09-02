@@ -164,7 +164,7 @@ func renderBeadsListFromAPI(cr api.CachedRead[[]beads.Bead], format string, filt
 	} else {
 		writeBeadTable(filtered, stdout, true)
 		if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-			fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
+			fmt.Fprint(stdout, cacheAgeBanner(cr.AgeSeconds)) //nolint:errcheck // best-effort stdout
 		}
 	}
 	return 0
@@ -248,7 +248,7 @@ func renderBeadsShowFromAPI(cr api.CachedRead[beads.Bead], format string, stdout
 	} else {
 		writeBeadDetail(cr.Body, stdout)
 		if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-			fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
+			fmt.Fprint(stdout, cacheAgeBanner(cr.AgeSeconds)) //nolint:errcheck // best-effort stdout
 		}
 	}
 	return 0

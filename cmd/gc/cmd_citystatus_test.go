@@ -1522,3 +1522,17 @@ func TestRenderCityStatusFromAPIPartialRendersUnknownNotStopped(t *testing.T) {
 		t.Fatalf("status.PartialErrors = empty, want runtime partial diagnostic")
 	}
 }
+
+// TestCacheAgeBannerDistinguishesStalledBuild pins the two staleness messages:
+// a lagging reconciler for a recent body, and a stalled status build once the
+// age is far past any healthy background refresh — the server serves its warm
+// body at any age, so the banner text is the operator's only signal that
+// rebuilds have stopped landing.
+func TestCacheAgeBannerDistinguishesStalledBuild(t *testing.T) {
+	if got := cacheAgeBanner(45); !strings.Contains(got, "reconciler may be lagging") {
+		t.Fatalf("banner at 45s = %q, want the lagging-reconciler text", got)
+	}
+	if got := cacheAgeBanner(cacheAgeStaleBuildThresholdSeconds + 1); !strings.Contains(got, "status rebuilds are not completing") {
+		t.Fatalf("banner past the stalled-build threshold = %q, want the stalled-build text", got)
+	}
+}
