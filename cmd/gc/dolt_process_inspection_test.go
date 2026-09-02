@@ -210,11 +210,43 @@ dolt    %d user   13u  IPv4 0x5678      0t0  TCP 127.0.0.1:3306 (LISTEN)
 // TestPortHeldByPIDReportsUnknownForAnUnheldPort pins the third state: no
 // holder at all is "unknown", which callers must not read as "someone else
 // holds it".
-func TestPortHeldByPIDReportsUnknownForAnUnheldPort(t *testing.T) {
+// TestPortHeldByPIDReportsAKnownNegativeForAnUnheldPort pins the split between
+// "checked, nobody listens" and "could not check".
+//
+// An earlier draft of this test asserted unknown here, because the probe
+// collapsed both cases into an empty []int. That collapse is not survivable
+// once a caller acts on unknown: cmd_doctor_drift treats unknown as blocking
+// (a live pid we cannot prove is NOT holding the port must not be repinned
+// over), so an unheld port reported as unknown made
+// TestDoltDriftCheckTreatsLivePIDWithoutMatchingPortAsStale fail — a live pid
+// on a port it does not hold is exactly the stale case, not a blocking one.
+//
+// An empty listing from a probe that RAN is a real negative. Unknown is
+// reserved for a probe that could not answer: no lsof and no /proc, or LISTEN
+// rows that exist while no readable /proc/<pid>/fd maps to them (a holder under
+// another uid). That last case is the one the doctor's sibling helper reports
+// as unknown, and it is not constructible portably here, so it is pinned by the
+// drift-check tests rather than by this unit.
+func TestPortHeldByPIDReportsAKnownNegativeForAnUnheldPort(t *testing.T) {
 	port := reserveRandomTCPPort(t)
 	held, known := portHeldByPID(strconv.Itoa(port), os.Getpid())
-	if held || known {
-		t.Fatalf("portHeldByPID(%d, self) = (held=%v, known=%v), want (false, false) on a port nobody is listening on", port, held, known)
+	if held {
+		t.Fatalf("portHeldByPID(%d, self) = held=true on a port nobody is listening on", port)
+	}
+	if !known {
+		t.Fatalf("portHeldByPID(%d, self) = known=false on a port nobody is listening on; a probe that ran and found no holders is a real negative, not an undetermined one — callers that treat unknown as blocking cannot distinguish an unused port from a failed probe", port)
+	}
+}
+
+// TestPortHeldByPIDReportsUnknownWhenNoProbeCanAnswer pins the other half: with
+// no port to ask about there is nothing to determine, and the answer must not
+// read as a confident "not held".
+func TestPortHeldByPIDReportsUnknownWhenNoProbeCanAnswer(t *testing.T) {
+	if held, known := portHeldByPID("", os.Getpid()); held || known {
+		t.Fatalf("portHeldByPID(\"\", self) = (held=%v, known=%v), want (false, false)", held, known)
+	}
+	if held, known := portHeldByPID("1", 0); held || known {
+		t.Fatalf("portHeldByPID(\"1\", 0) = (held=%v, known=%v), want (false, false)", held, known)
 	}
 }
 
