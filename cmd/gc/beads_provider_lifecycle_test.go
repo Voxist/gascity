@@ -7189,12 +7189,7 @@ esac
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command(script, "init", cityPath, "gc", "hq")
-	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
-		"GC_CITY_PATH="+cityPath,
-		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-	)...)
-	out, err := cmd.CombinedOutput()
+	out, err := runGcBeadsBdInitHQ(t, script, cityPath, binDir)
 	if err != nil {
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
 	}
@@ -7314,12 +7309,7 @@ esac
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command(script, "init", cityPath, "gc", "hq")
-	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
-		"GC_CITY_PATH="+cityPath,
-		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-	)...)
-	out, err := cmd.CombinedOutput()
+	out, err := runGcBeadsBdInitHQ(t, script, cityPath, binDir)
 	if err != nil {
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
 	}
@@ -7426,12 +7416,7 @@ esac
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command(script, "init", cityPath, "gc", "hq")
-	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
-		"GC_CITY_PATH="+cityPath,
-		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-	)...)
-	out, err := cmd.CombinedOutput()
+	out, err := runGcBeadsBdInitHQ(t, script, cityPath, binDir)
 	if err != nil {
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
 	}
@@ -7555,12 +7540,7 @@ esac
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command(script, "init", cityPath, "gc", "hq")
-	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
-		"GC_CITY_PATH="+cityPath,
-		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-	)...)
-	out, err := cmd.CombinedOutput()
+	out, err := runGcBeadsBdInitHQ(t, script, cityPath, binDir)
 	if err != nil {
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
 	}
@@ -7704,12 +7684,7 @@ esac
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command(script, "init", cityPath, "gc", "hq")
-	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
-		"GC_CITY_PATH="+cityPath,
-		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
-	)...)
-	out, err := cmd.CombinedOutput()
+	out, err := runGcBeadsBdInitHQ(t, script, cityPath, binDir)
 	if err != nil {
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
 	}
@@ -7726,6 +7701,117 @@ esac
 		if !strings.Contains(gotState, want) {
 			t.Fatalf("init state missing %q:\n%s", want, gotState)
 		}
+	}
+}
+
+// runGcBeadsBdInitHQ runs the provider script's init for the hub scope
+// ("gc"/"hq") with the stubbed tool directory first on PATH, the way the
+// metadata-only and forced-fallback lifecycle tests all do. One shared exec
+// site keeps those tests inside the subprocess census instead of each
+// carrying its own.
+func runGcBeadsBdInitHQ(t *testing.T, script, cityPath, binDir string) ([]byte, error) {
+	t.Helper()
+	cmd := exec.Command(script, "init", cityPath, "gc", "hq")
+	cmd.Env = sanitizedBaseEnv(append(gcBeadsBdTestHomeEnv(t),
+		"GC_CITY_PATH="+cityPath,
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)...)
+	return cmd.CombinedOutput()
+}
+
+// TestGcBeadsBdInitRefusesToForceWhenSchemaProbeFailsForAnotherReason pins the
+// third state of the schema probe. With canonical metadata already beside the
+// store, the script decides between "schema present, normalize and exit" and
+// "schema missing, re-seed with --force" from one SELECT against the pinned
+// database. When that SELECT fails for a reason other than the table being
+// absent (here: the server not answering), nothing is known about the
+// database, and the only safe answer is to refuse: a forced init onto a live,
+// migrated database with bd's ordinary uncommitted counters in its working
+// set trips bd's dirty-table guard, which is how CI lost the fresh-city init
+// intermittently before this test existed.
+func TestGcBeadsBdInitRefusesToForceWhenSchemaProbeFailsForAnotherReason(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	materializeBuiltinPacksForTest(t, cityPath)
+	script := gcBeadsBdScriptPath(cityPath)
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(binDir, "sleep"), "#!/bin/sh\nexit 0\n")
+
+	initArgsFile := filepath.Join(t.TempDir(), "bd-init-args")
+	writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
+set -eu
+case "${1:-}" in
+  init)
+    printf '%%s\n' "$*" >> %q
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, initArgsFile))
+
+	probeCountFile := filepath.Join(t.TempDir(), "probe-count")
+	writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf(`#!/bin/sh
+set -eu
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+case "$query" in
+  'USE `+"`hq`"+`; SELECT 1 FROM config LIMIT 1')
+    count=0
+    if [ -f %q ]; then
+      count=$(cat %q)
+    fi
+    printf '%%s\n' "$((count + 1))" > %q
+    echo "error on line 1 for query USE hq: dial tcp 127.0.0.1:3307: connect: connection refused" >&2
+    exit 1
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, probeCountFile, probeCountFile, probeCountFile))
+
+	out, err := runGcBeadsBdInitHQ(t, script, cityPath, binDir)
+	if err == nil {
+		t.Fatalf("gc-beads-bd init succeeded although the schema probe never answered:\n%s", out)
+	}
+	if !strings.Contains(string(out), "refusing to force-reinitialize") {
+		t.Fatalf("expected a data-safety refusal, got:\n%s", out)
+	}
+	if !strings.Contains(string(out), "connection refused") {
+		t.Fatalf("refusal must carry the probe's own error, got:\n%s", out)
+	}
+	if args, err := os.ReadFile(initArgsFile); err == nil {
+		t.Fatalf("bd init must not run when the schema state is unknown, ran with:\n%s", args)
+	}
+	count, err := os.ReadFile(probeCountFile)
+	if err != nil {
+		t.Fatalf("probe never ran: %v", err)
+	}
+	if got := strings.TrimSpace(string(count)); got != "3" {
+		t.Fatalf("probe attempts = %s, want 3 (retry an unknown answer before refusing)", got)
 	}
 }
 

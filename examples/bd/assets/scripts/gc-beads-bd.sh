@@ -682,11 +682,70 @@ ensure_doltlite_runtime_custom_types() {
     ensure_doltlite_runtime_config_value "$db_path" "types.custom" "$types"
 }
 
-bd_runtime_schema_ready() {
+# bd_runtime_schema_state answers three ways, and every caller that would
+# force a re-initialization on the answer must honour all three:
+#   0  the pinned database carries a bd schema (the probe query answered)
+#   1  it does not (dolt reported the config table missing)
+#   2  unknown: the probe itself failed (server not answering, database not
+#      selectable, timeout). Its output is left in BD_SCHEMA_PROBE_ERROR.
+# The bare yes/no this replaced collapsed 2 into 1. Under CI load a transient
+# probe failure then forced `bd init --force` onto a live database whose
+# schema was complete and committed (dolt_log showed migration 0066 applied)
+# with bd's ordinary uncommitted counters in the working set; bd's guard
+# refused, and the init died on "pending ignored schema migrations alter
+# pre-existing dirty tables: child_counters" (see dump_bd_init_forensics).
+BD_SCHEMA_PROBE_ERROR=""
+bd_runtime_schema_state() {
     local db="$1"
-    [ -n "$db" ] || return 1
-    valid_sql_name "$db" || return 1
-    server_sql "USE \`$db\`; SELECT 1 FROM config LIMIT 1" >/dev/null 2>&1
+    local out
+    BD_SCHEMA_PROBE_ERROR=""
+    if [ -z "$db" ]; then
+        BD_SCHEMA_PROBE_ERROR="no database name"
+        return 2
+    fi
+    if ! valid_sql_name "$db"; then
+        BD_SCHEMA_PROBE_ERROR="invalid database name"
+        return 2
+    fi
+    if out=$(server_sql "USE \`$db\`; SELECT 1 FROM config LIMIT 1" 2>&1); then
+        return 0
+    fi
+    case "$out" in
+        *"table not found: config"*) return 1 ;;
+    esac
+    BD_SCHEMA_PROBE_ERROR="$out"
+    return 2
+}
+
+# bd_runtime_schema_ready is the read-only view: true only when the schema is
+# known to be present. Callers that decide to FORCE on a negative answer must
+# use probe_schema_state_or_die instead, which never lets "unknown" pass for
+# "missing".
+bd_runtime_schema_ready() {
+    bd_runtime_schema_state "$1"
+}
+
+# probe_schema_state_or_die returns 0 (schema present) or 1 (schema missing),
+# retrying an unknown answer a few times, and refuses to go on when it stays
+# unknown: forcing a re-initialization onto a database nobody could inspect is
+# the same data-safety failure the unreachable-server check refuses.
+probe_schema_state_or_die() {
+    local db="$1"
+    local attempt=0
+    local state
+    while :; do
+        bd_runtime_schema_state "$db"
+        state=$?
+        if [ "$state" -ne 2 ]; then
+            return "$state"
+        fi
+        attempt=$((attempt + 1))
+        if [ "$attempt" -ge 3 ]; then
+            break
+        fi
+        sleep 1
+    done
+    die "cannot tell whether database '$db' already carries a bd schema (probe failed: ${BD_SCHEMA_PROBE_ERROR:-no output}); refusing to force-reinitialize (data-safety). retry once the Dolt server answers"
 }
 
 # server_reachable reports whether the managed Dolt server answers a
@@ -2995,7 +3054,7 @@ op_init() {
             die "managed Dolt server unreachable while inspecting existing store '$dolt_database'; refusing to force-reinitialize (data-safety). retry once the Dolt server is reachable."
         fi
         if ensure_database_registered "$dolt_database"; then
-            if bd_runtime_schema_ready "$dolt_database"; then
+            if probe_schema_state_or_die "$dolt_database"; then
                 # GC owns canonical metadata/config normalization after this backend
                 # bridge returns. Keep the backend focused on database registration
                 # and bd-specific bootstrap only.
@@ -3040,7 +3099,7 @@ op_init() {
     # database to initialize. Without `--database`, bd can seed beads_<prefix>
     # and leave the pinned database schema-less.
     ensure_current_era_scope_metadata "$dir" "$prefix" "$dolt_database"
-    if [ "$GC_SCOPE_METADATA_PRESEEDED" = "1" ] && [ -z "$bd_init_force" ] && ! bd_runtime_schema_ready "$dolt_database"; then
+    if [ "$GC_SCOPE_METADATA_PRESEEDED" = "1" ] && [ -z "$bd_init_force" ] && ! probe_schema_state_or_die "$dolt_database"; then
         # We just wrote the metadata bd reads as "initialized"; the database
         # has no bd schema yet. Seed it the way the schema-repair path does.
         bd_init_force="--force"
