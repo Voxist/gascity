@@ -1,6 +1,7 @@
 package cipolicy
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -619,8 +620,10 @@ func TestPolicyErrorsIdentifyTheBrokenContract(t *testing.T) {
 // job put the cheap work in series ahead of the expensive work for no reason.
 // A future edit that moves lint back alongside the guards — or drops either
 // job from the gates — silently restores that, so both halves are pinned here:
-// they are separate jobs, and both are required by ci-required and
-// ci-preflight.
+// they are separate jobs, and both are listed in the needs of check and
+// ci-preflight. (ci-required does not name them directly; it reaches them
+// through ci-preflight, which is why the loop below asserts the two jobs that
+// do list them.)
 func TestLintDoesNotRunBehindTheBoundaryGuards(t *testing.T) {
 	docs := loadPolicyDocuments(t)
 
@@ -632,12 +635,6 @@ func TestLintDoesNotRunBehindTheBoundaryGuards(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, run := range lintRunSteps {
-		if countSteps(guardSteps, "run", run) > 0 {
-			t.Errorf("preflight-guards runs %q; the lint work belongs in preflight-static so it does not queue behind the guards", run)
-		}
-	}
-
 	static, err := workflowJob(docs.ci, "preflight-static")
 	if err != nil {
 		t.Fatalf("preflight-static: %v", err)
@@ -646,10 +643,8 @@ func TestLintDoesNotRunBehindTheBoundaryGuards(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, run := range guardRunSteps {
-		if countSteps(staticSteps, "run", run) > 0 {
-			t.Errorf("preflight-static runs %q; the guards belong in preflight-guards so lint is not serialized behind them", run)
-		}
+	for _, violation := range splitViolations(guardSteps, staticSteps) {
+		t.Error(violation)
 	}
 
 	// Splitting a job is only safe if both halves still gate.
@@ -700,9 +695,15 @@ var (
 // countSteps counts steps whose field equals value. findStep cannot be used
 // for an ABSENCE assertion: it returns -1 both when a step is missing and when
 // it appears more than once (its ambiguity guard), so `findStep(...) >= 0`
-// reads a DUPLICATED step as absent. This workflow already runs the same
-// command twice under the scope == 'changed' / != 'changed' pair, so that
-// shape is reachable here, not hypothetical.
+// reads a DUPLICATED step as absent.
+//
+// No run string is duplicated in ci.yml today, and
+// TestPreflightStaticScopesOrdinaryPRsWithoutWeakeningProtectedRuns pins the
+// scope pair to one step each — the pair runs DIFFERENT commands
+// (make lint-affected vs make lint, make fmt-check-changed vs make fmt-check).
+// The duplicate shape is what a bad merge produces, which is exactly when this
+// tripwire has to bite, so it is guarded rather than assumed away.
+// TestCountStepsSeesDuplicates covers it.
 func countSteps(steps []map[string]any, field, value string) int {
 	n := 0
 	for _, step := range steps {
@@ -711,4 +712,80 @@ func countSteps(steps []map[string]any, field, value string) int {
 		}
 	}
 	return n
+}
+
+// splitViolations reports run strings that landed in the wrong half of the
+// ga-dejjh split: lint commands in the guards job, guard commands in the static
+// job. It takes the step lists rather than reading ci.yml so that
+// TestSplitViolationsSeeDuplicatedSteps can hand it the shape a bad merge
+// makes, which the real workflow never has.
+func splitViolations(guardSteps, staticSteps []map[string]any) []string {
+	var violations []string
+	for _, run := range lintRunSteps {
+		if countSteps(guardSteps, "run", run) > 0 {
+			violations = append(violations, fmt.Sprintf("preflight-guards runs %q; the lint work belongs in preflight-static so it does not queue behind the guards", run))
+		}
+	}
+	for _, run := range guardRunSteps {
+		if countSteps(staticSteps, "run", run) > 0 {
+			violations = append(violations, fmt.Sprintf("preflight-static runs %q; the guards belong in preflight-guards so lint is not serialized behind them", run))
+		}
+	}
+	return violations
+}
+
+// TestSplitViolationsSeeDuplicatedSteps is the regression guard for the swap
+// this PR makes: the split check must catch a forbidden step that a merge left
+// in TWICE, which `findStep(...) >= 0` read as absent.
+//
+// The real ci.yml holds no duplicate, so without a fixture the two call sites
+// could be reverted to findStep and the whole suite would stay green — the
+// regression could silently re-land. Each case below fails if that revert
+// happens.
+func TestSplitViolationsSeeDuplicatedSteps(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		guardSteps   []map[string]any
+		staticSteps  []map[string]any
+		wantContains string
+	}{
+		{
+			name: "lint duplicated into the guards job",
+			guardSteps: []map[string]any{
+				{"run": "make test-ci-policy"},
+				{"run": "make lint"},
+				{"run": "make check-gomod-replace"},
+				{"run": "make lint"},
+			},
+			wantContains: "preflight-guards runs \"make lint\"",
+		},
+		{
+			name: "a guard duplicated into the static job",
+			staticSteps: []map[string]any{
+				{"run": "make check-core-boundary"},
+				{"run": "make lint"},
+				{"run": "make check-core-boundary"},
+			},
+			wantContains: "preflight-static runs \"make check-core-boundary\"",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := splitViolations(tc.guardSteps, tc.staticSteps)
+			if len(got) == 0 {
+				t.Fatalf("a duplicated step was reported as absent; findStep's -1 ambiguity is back")
+			}
+			if !strings.Contains(strings.Join(got, "\n"), tc.wantContains) {
+				t.Errorf("violations = %q, want one mentioning %s", got, tc.wantContains)
+			}
+		})
+	}
+
+	// The single-step case must still be caught, and a clean split must stay
+	// silent, or the guard would be trivially satisfied.
+	if got := splitViolations([]map[string]any{{"run": "make vet"}}, nil); len(got) != 1 {
+		t.Errorf("a single misplaced step produced %d violations, want 1", len(got))
+	}
+	if got := splitViolations([]map[string]any{{"run": "make test-ci-policy"}}, []map[string]any{{"run": "make lint"}}); len(got) != 0 {
+		t.Errorf("a correct split reported %q, want no violations", got)
+	}
 }
