@@ -338,6 +338,31 @@ server_sql_retry() {
     return 1
 }
 
+# managed_backing_store_exists reports whether a Dolt database directory
+# backing SQL name $1 already exists under DATA_DIR. Catalog invisibility is
+# NOT proof of freshness: CREATE DATABASE IF NOT EXISTS adopts an existing
+# on-disk directory (see ensure_database_registered's header), so only the
+# disk answers "did this invocation create it". Dolt normalizes '-' to '_'
+# when exposing a directory as a SQL database, so compare normalized names.
+# Fails closed (reports "exists") when the server's disk is not ours to
+# inspect — a missing witness only re-arms bd's migration guard, while a
+# wrongly-written one bypasses it.
+managed_backing_store_exists() {
+    local want="$1" d base
+    is_remote && return 0
+    [ -n "$DATA_DIR" ] || return 0
+    [ -d "$DATA_DIR" ] || return 1
+    want=$(printf '%s' "$want" | tr '-' '_')
+    for d in "$DATA_DIR"/*/; do
+        [ -d "$d" ] || continue
+        base=$(basename "$d")
+        if [ "$(printf '%s' "$base" | tr '-' '_')" = "$want" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 # ensure_database_registered creates the database on the running server if
 # it doesn't already exist. Dolt's CREATE DATABASE both creates the on-disk
 # directory and registers it in the server's in-memory catalog. If the
@@ -349,6 +374,7 @@ server_sql_retry() {
 # (CREATE DATABASE returns before the catalog is fully updated).
 ensure_database_registered() {
     local db="$1"
+    GC_DATABASE_CREATED_BY_ENSURE=false
 
     # Validate database name before SQL interpolation (upstream 38f7b380).
     if ! valid_sql_name "$db"; then
@@ -359,6 +385,13 @@ ensure_database_registered() {
     # Check if already visible.
     if server_sql "USE \`$db\`" >/dev/null 2>&1; then
         return 0
+    fi
+
+    # Capture disk state BEFORE CREATE: adoption and creation are
+    # indistinguishable from the catalog's point of view.
+    local backing_absent=false
+    if ! managed_backing_store_exists "$db"; then
+        backing_absent=true
     fi
 
     # Register with the server (use retry for lock contention).
@@ -373,6 +406,9 @@ ensure_database_registered() {
     backoff_ms=100
     for attempt in 1 2 3 4 5; do
         if server_sql "USE \`$db\`" >/dev/null 2>&1; then
+            if [ "$backing_absent" = true ]; then
+                GC_DATABASE_CREATED_BY_ENSURE=true
+            fi
             return 0
         fi
         sleep_ms "$backoff_ms" 2>/dev/null || sleep 1
@@ -382,7 +418,6 @@ ensure_database_registered() {
     echo "warning: database $db not visible after 5 catalog probes" >&2
     return 1
 }
-
 
 database_exists() {
     local db="$1"
@@ -2785,7 +2820,27 @@ ensure_current_era_version_witness() {
     local schema_state=0
     bd_runtime_schema_state "$dolt_database" 2>/dev/null || schema_state=$?
     case "$schema_state" in
-        1) ;;
+        1)
+            # "No bd schema" is NOT by itself proof of freshness. CREATE
+            # DATABASE IF NOT EXISTS ADOPTS an existing on-disk directory, and
+            # an adopted store whose database carries no config table lands
+            # here looking brand new. Stamping it would bypass bd's cross-era
+            # migration guard on exactly the workspace that needs it. Only the
+            # disk, sampled BEFORE the CREATE, answers whether this invocation
+            # created the store, so defer to that (upstream #5294's insight).
+            # Fail closed: an unset flag means no create was observed, and a
+            # missing witness only re-arms bd's guard, while a wrongly-written
+            # one disarms it.
+            # Refuse when the backing store already existed when this
+            # invocation STARTED: that is the adoption case, and stamping it
+            # would disarm bd's guard on exactly the workspace that needs it.
+            # A store this invocation created, or none at all (metadata-only
+            # re-seed), is a legitimate stamp.
+            if [ "${GC_STORE_PREEXISTED:-false}" = true ] \
+                && [ "${GC_DATABASE_CREATED_BY_ENSURE:-false}" != true ]; then
+                return 0
+            fi
+            ;;
         0)
             if ! server_sql "USE \`$dolt_database\`; SELECT 1 FROM schema_migrations LIMIT 1" >/dev/null 2>&1; then
                 return 0
@@ -3032,6 +3087,17 @@ op_init() {
         fi
     fi
 
+    # Sample disk provenance ONCE, here, before anything in this invocation can
+    # create a backing store. This is the only honest answer to "did the store
+    # already exist when we started": ensure_database_registered's own flag is
+    # not it, because that function early-returns when the database is already
+    # catalogued (leaving the flag false) and can also run after bd has put the
+    # store on disk itself. Consulted by ensure_current_era_version_witness.
+    GC_STORE_PREEXISTED=false
+    if [ -n "${dolt_database:-}" ] && managed_backing_store_exists "$dolt_database"; then
+        GC_STORE_PREEXISTED=true
+    fi
+
     # Validate prefix before SQL interpolation (upstream 38f7b380).
     if ! valid_sql_name "$prefix"; then
         die "invalid beads prefix: $prefix (must be alphanumeric, hyphens, underscores)"
@@ -3214,6 +3280,11 @@ op_init() {
     if ! ensure_database_registered "$dolt_database"; then
         die "failed to register Dolt database '$dolt_database' on running server (CREATE DATABASE failed); see warnings above. cannot proceed with bd init."
     fi
+
+    # Gas City creates its managed server root at .beads/dolt before bd init.
+    # For a database proven to have been created above by this invocation,
+    # record the current bd version before bd's legacy-workspace guard runs.
+    # Pre-existing databases deliberately receive no marker here.
 
     # Run bd init in server mode through the pinned wrapper so the fallback
     # path uses the same authenticated Dolt target as the rest of init.

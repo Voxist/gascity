@@ -135,39 +135,25 @@ func TestAliveWithCmdline_NilMatchIsFalse(t *testing.T) {
 // caller then assumes no poller is running and starts one. A duplicate poller is
 // recoverable; a silently absent one is not.
 //
-// The subject is PID 1 rather than this process. Stubbing ps alone no longer
-// makes argv unreadable now that Cmdline reads kern.procargs2 first, and that
-// sysctl answers for any process this test could spawn. It does NOT answer for
-// a process owned by another user: launchd is root's, so kern.procargs2 returns
-// EINVAL to an unprivileged caller. Stubbing ps on top of that closes the last
-// mechanism and produces the genuinely-unreadable argv this test needs, without
-// depending on a stub for the platform's primary path. Nothing is signaled;
-// PID 1 is only read.
+// PID 1 is the probe target rather than a stubbed ps on PATH: Cmdline reads
+// /proc directly on linux and kern.procargs2 directly on darwin for any live,
+// readable PID, so a ps stub never affected self's argv on either platform —
+// on darwin specifically, #5176 added the sysctl path, which made this
+// untestable there regardless of the stub. PID 1's argv, unlike this
+// process's own, is genuinely unreadable to an unprivileged caller on
+// darwin, which is the real permission boundary this test needs. Skip where
+// it IS readable (e.g. linux, where /proc/1/cmdline is typically
+// world-readable) rather than assert something false.
 func TestCmdline_FailsClosedWhenUnreadable(t *testing.T) {
-	if runtime.GOOS == "linux" {
-		t.Skip("on linux /proc answers directly, so the ps stub cannot make argv unreadable")
+	if _, err := Cmdline(1); err == nil {
+		t.Skip("PID 1 argv is readable in this environment; cannot exercise the fail-closed path this way")
 	}
 	if os.Geteuid() == 0 {
 		t.Skip("running as root, which can read any process's argv, so no PID is unreadable")
 	}
 
-	binDir := t.TempDir()
-	// A ps that produces nothing, so the last fallback has no argv to offer.
-	if err := os.WriteFile(filepath.Join(binDir, "ps"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
-		t.Fatalf("WriteFile(ps): %v", err)
-	}
-	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
-
-	const initPID = 1
-	if _, err := Cmdline(initPID); err == nil {
-		t.Skipf("%s let this process read PID 1's argv, so the premise (an alive PID with no readable argv) does not hold here", runtime.GOOS)
-	}
-	if !Alive(initPID) {
-		t.Fatal("Alive(1) = false; PID 1 must be alive for this to test the argv path rather than liveness")
-	}
-
-	if AliveWithCmdline(initPID, func([]string) bool { return true }) {
-		t.Fatal("AliveWithCmdline = true with no readable argv; must fail closed so the caller starts its poller")
+	if AliveWithCmdline(1, func([]string) bool { return true }) {
+		t.Fatal("AliveWithCmdline(1, ...) = true with unreadable argv; must fail closed so the caller starts its poller")
 	}
 }
 
