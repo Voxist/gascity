@@ -1734,9 +1734,19 @@ func validPublishedManagedDoltDoctorState(cityPath string, state managedDoltDoct
 		return false
 	}
 	_ = conn.Close()
-	holderPID := managedDoltDoctorPortHolderPID(state.Port)
-	if holderPID > 0 {
-		return holderPID == state.PID
+	// Membership, not equality — see managedDoltDoctorPortHeldByPID.
+	//
+	// Only a POSITIVE membership answer short-circuits. A negative one — even a
+	// "known" negative — still falls through to runtime ownership, because the
+	// port probes can be confidently wrong about a server they cannot see: an
+	// unprivileged lsof omits a socket owned by another uid, and /proc/net/tcp
+	// briefly shows no LISTEN row across a rebind. Before membership, the /proc
+	// walk returned "no holder" in those cases and the code fell through to
+	// managedDoltDoctorProcessOwnsRuntime, which reads the world-readable
+	// /proc/<pid>/cmdline and confirmed ownership; a managed Dolt started under a
+	// different uid than `gc doctor` must keep that path.
+	if held, known := managedDoltDoctorPortHeldByPID(state.Port, state.PID); known && held {
+		return true
 	}
 	return managedDoltDoctorProcessOwnsRuntime(state.PID, dataDir, resolveManagedDoltConfigPath(cityPath))
 }
@@ -1769,19 +1779,35 @@ func managedDoltDoctorProcCmdline(pid int) string {
 	return strings.TrimSpace(string(out))
 }
 
-func managedDoltDoctorPortHolderPID(port int) int {
-	if port <= 0 {
-		return 0
+// managedDoltDoctorPortHeldByPID reports whether pid is one of the processes
+// listening on port. known is false when neither mechanism could answer, which
+// leaves the caller on its runtime-ownership fallback.
+//
+// MEMBERSHIP, not equality. lsof and /proc/net/tcp{,6} legitimately report
+// SEVERAL pids for a single port number, because the same port on a different
+// local address (127.0.0.1 vs ::1) is a distinct bind — which is exactly why
+// the proc reader consults both files. Collapsing that set to one element and
+// comparing it for equality disowns the real holder whenever an unrelated
+// process sorts first: an earlier-started stranger on [::1]:P made this check
+// declare a healthy managed Dolt's published state invalid and drive repair
+// against a working server.
+//
+// Asking about one pid is also cheaper than enumerating holders: the proc path
+// reads only that pid's fd directory instead of walking all of /proc.
+func managedDoltDoctorPortHeldByPID(port, pid int) (held, known bool) {
+	if port <= 0 || pid <= 0 {
+		return false, false
 	}
-	if pid, checked := managedDoltDoctorPortHolderFromProc(uint16(port)); checked {
-		return pid
+	if held, checked := managedDoltDoctorPortHeldByPIDFromProc(uint16(port), pid); checked {
+		return held, true
 	}
-	return managedDoltDoctorPortHolderFromLsof(port)
+	return managedDoltDoctorPortHeldByPIDFromLsof(port, pid)
 }
 
-func managedDoltDoctorPortHolderFromProc(port uint16) (int, bool) {
+// managedDoltDoctorPortHeldByPIDFromProc answers membership from
+// /proc/net/tcp{,6} plus the single pid's fd directory.
+func managedDoltDoctorPortHeldByPIDFromProc(port uint16, pid int) (held, checked bool) {
 	inodes := map[string]struct{}{}
-	checked := false
 	for _, path := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -1805,56 +1831,57 @@ func managedDoltDoctorPortHolderFromProc(port uint16) (int, bool) {
 		}
 	}
 	if !checked {
-		return 0, false
+		return false, false
 	}
 	if len(inodes) == 0 {
-		return 0, true
+		// No LISTEN row is not evidence the pid does not hold the port: the
+		// caller dialed it successfully a moment ago, and a rebind or a socket
+		// in a netns this reader cannot see both present exactly this way.
+		// Report unknown, matching cmd/gc's portHeldByPID, so the runtime
+		// ownership fallback still runs.
+		return false, false
 	}
-	entries, err := os.ReadDir("/proc")
+	fdDir := filepath.Join("/proc", strconv.Itoa(pid), "fd")
+	fds, err := os.ReadDir(fdDir)
 	if err != nil {
-		return 0, true
+		// The pid may have exited, or be unreadable. Not evidence either way.
+		return false, false
 	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || !pidutil.Alive(pid) {
-			continue
-		}
-		fdDir := filepath.Join("/proc", entry.Name(), "fd")
-		fds, err := os.ReadDir(fdDir)
+	for _, fd := range fds {
+		target, err := os.Readlink(filepath.Join(fdDir, fd.Name()))
 		if err != nil {
 			continue
 		}
-		for _, fd := range fds {
-			target, err := os.Readlink(filepath.Join(fdDir, fd.Name()))
-			if err != nil || !strings.HasPrefix(target, "socket:[") || !strings.HasSuffix(target, "]") {
-				continue
-			}
-			inode := strings.TrimSuffix(strings.TrimPrefix(target, "socket:["), "]")
-			if _, ok := inodes[inode]; ok {
-				return pid, true
-			}
+		inode := strings.TrimSuffix(strings.TrimPrefix(target, "socket:["), "]")
+		if inode == target {
+			continue
+		}
+		if _, ok := inodes[inode]; ok {
+			return true, true
 		}
 	}
-	return 0, true
+	return false, true
 }
 
-func managedDoltDoctorPortHolderFromLsof(port int) int {
+// managedDoltDoctorPortHeldByPIDFromLsof answers membership from lsof's full
+// pid list rather than its first entry.
+func managedDoltDoctorPortHeldByPIDFromLsof(port, pid int) (held, known bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "lsof", "-nP", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN", "-t").Output()
 	if err != nil {
-		return 0
+		return false, false
 	}
 	for _, field := range strings.Fields(string(out)) {
-		pid, err := strconv.Atoi(field)
-		if err == nil && pidutil.Alive(pid) {
-			return pid
+		got, err := strconv.Atoi(field)
+		if err != nil {
+			continue
+		}
+		if got == pid {
+			return true, true
 		}
 	}
-	return 0
+	return false, true
 }
 
 func managedDoltDoctorDefaultDataDirExists(cityPath, dataDir string) bool {

@@ -25,9 +25,15 @@ func KillByPID(pid int) error {
 	// process; without this, a recycled PID reads as "still alive" and we would
 	// wrongly report a target that is actually gone as not-confirmed-dead,
 	// spuriously refusing a legitimate Start. StartTime reads /proc where it
-	// exists and falls back to ps elsewhere, so it is empty only when neither
-	// mechanism can answer, in which case runLive falls back to plain liveness
-	// — current behavior preserved.
+	// exists, the kernel process record via sysctl on darwin, and ps only as a
+	// last resort, so it is empty only when no mechanism can answer, in which
+	// case runLive falls back to plain liveness — current behavior preserved.
+	//
+	// The token records which mechanism produced it, and AliveWithStartTime
+	// will not compare across mechanisms: this capture and the re-reads during
+	// the reap wait can legitimately land on different ones, and a
+	// cross-mechanism difference must not be read as PID reuse — that would
+	// report a live process as confirmed dead.
 	startTime, _ := pidutil.StartTime(pid)
 	return killByPID(
 		pid,
