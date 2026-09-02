@@ -678,7 +678,16 @@ func (sm *SupervisorMux) humaHandleEventList(_ context.Context, input *Superviso
 	var err error
 	optimizedTail := input.Limit > 0 && supervisorEventListFilterIsEmpty(filter)
 	if optimizedTail {
-		evts, err = mux.ListTail(filter, input.Limit)
+		// This is a history page like the events-list API's first page: right
+		// after a rotation the active log may hold a handful of rows while
+		// the newest archive holds the page, and Total=len(rows) below would
+		// present that as "the server only had N events". Opt into the
+		// archive walk (Filter.SpanArchives) for exactly this read; the
+		// bounded tail readers (order triggers, gc order check, doctor,
+		// storehealth) keep the active-only default.
+		tailFilter := filter
+		tailFilter.SpanArchives = true
+		evts, err = mux.ListTail(tailFilter, input.Limit)
 	} else {
 		evts, err = mux.ListAll(filter)
 	}

@@ -110,10 +110,18 @@ func resolveNudgeTargetViaStoreBounded(cityPath string, cfg *config.City, identi
 // specific first: the config-derived name (session_template applied to the
 // resolved agent identity), the deterministic tmux-safe encoding of the
 // identifier, then the raw identifier. The first candidate with a live runtime
-// session wins. Session id / continuation epoch are enriched best-effort from
-// runtime metadata so queue items and generation matching keep working when
-// the live session advertises them; queue items keep the caller's identifier
-// as their Agent value (alias) so hook-drain matching is unchanged.
+// session wins.
+//
+// The store-backed path reads the agent identity off the session bead and
+// buildNudgeTarget resolves it to the config.Agent whose provider and session
+// transport delivery branches on. Storeless, that identity comes from the live
+// session's GC_AGENT / GC_TEMPLATE metadata (the same values the lifecycle
+// stamps on every runtime session), with the caller's identifier as the last
+// candidate — so a raw session name or a named-session alias still lands on
+// the configured agent instead of the workspace default provider. Session id
+// / continuation epoch are enriched best-effort the same way so queue items
+// and generation matching keep working; queue items keep the caller's
+// identifier as their Agent value (alias) so hook-drain matching is unchanged.
 func resolveNudgeTargetStoreless(cityPath string, cfg *config.City, sp runtime.Provider, identifier string) (nudgeTarget, error) {
 	if sp == nil {
 		return nudgeTarget{}, fmt.Errorf("%w: %q (storeless resolution requires a runtime provider)", session.ErrSessionNotFound, identifier)
@@ -128,9 +136,15 @@ func resolveNudgeTargetStoreless(cityPath string, cfg *config.City, sp runtime.P
 		seen[name] = true
 		candidates = append(candidates, name)
 	}
+	// An identifier that resolves to a config identity is authoritative for
+	// the agent (it is what the store-backed path would use); the live
+	// session's GC_AGENT metadata is the fallback for raw session names and
+	// aliases, and the caller's identifier the last resort.
+	configAgent := ""
 	if cfg != nil {
 		if found, ok := resolveAgentIdentity(cfg, identifier, ""); ok {
-			add(agent.SessionNameFor(loadedCityName(cfg, cityPath), found.QualifiedName(), cfg.Workspace.SessionTemplate))
+			configAgent = found.QualifiedName()
+			add(agent.SessionNameFor(loadedCityName(cfg, cityPath), configAgent, cfg.Workspace.SessionTemplate))
 		}
 	}
 	add(agent.SanitizeQualifiedNameForSession(identifier))
@@ -139,18 +153,23 @@ func resolveNudgeTargetStoreless(cityPath string, cfg *config.City, sp runtime.P
 		if !sp.IsRunning(name) {
 			continue
 		}
+		meta := func(key string) string {
+			v, err := sp.GetMeta(name, key)
+			if err != nil {
+				return ""
+			}
+			return strings.TrimSpace(v)
+		}
 		target := buildNudgeTarget(cityPath, cfg, nudgeTargetFields{
-			sessionName: name,
-			alias:       identifier,
-			agentName:   identifier,
+			sessionName:       name,
+			alias:             identifier,
+			agentName:         firstNonEmpty(configAgent, meta("GC_AGENT"), identifier),
+			template:          meta("GC_TEMPLATE"),
+			commonName:        identifier,
+			sessionID:         meta("GC_SESSION_ID"),
+			continuationEpoch: meta("GC_CONTINUATION_EPOCH"),
 		})
 		target.storeless = true
-		if v, err := sp.GetMeta(name, "GC_SESSION_ID"); err == nil && strings.TrimSpace(v) != "" {
-			target.sessionID = strings.TrimSpace(v)
-		}
-		if v, err := sp.GetMeta(name, "GC_CONTINUATION_EPOCH"); err == nil && strings.TrimSpace(v) != "" {
-			target.continuationEpoch = strings.TrimSpace(v)
-		}
 		return target, nil
 	}
 	return nudgeTarget{}, fmt.Errorf("%w: %q (storeless resolution found no live runtime session)", session.ErrSessionNotFound, identifier)

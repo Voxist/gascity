@@ -21,6 +21,13 @@ func TestSplitGlobalFlagsSkipsGlobalFlagValues(t *testing.T) {
 		{"-C dir", []string{"-C", "/some/dir", "update", "bd-1"}, "update", []string{"bd-1"}},
 		{"--db", []string{"--db", "/x/y.db", "update", "bd-1"}, "update", []string{"bd-1"}},
 		{"--directory", []string{"--directory", "/d", "close", "bd-1"}, "close", []string{"bd-1"}},
+		{"--dolt-auto-commit", []string{"--dolt-auto-commit", "off", "update", "bd-1"}, "update", []string{"bd-1"}},
+		{"--database", []string{"--database", "beads_global", "update", "bd-1"}, "update", []string{"bd-1"}},
+		{"--mem-profile", []string{"--mem-profile", "update", "update", "bd-1"}, "update", []string{"bd-1"}},
+		// --format is a HIDDEN persistent StringVar, so it appears in no
+		// `bd --help` output; it is nonetheless accepted before the verb and
+		// consumes the next token. Reading "json" as the verb is the bypass.
+		{"--format", []string{"--format", "json", "update", "bd-1"}, "update", []string{"bd-1"}},
 		{"inline form consumes nothing", []string{"--actor=bob", "update", "bd-1"}, "update", []string{"bd-1"}},
 		{"bool global", []string{"--json", "update", "bd-1"}, "update", []string{"bd-1"}},
 		{"stacked", []string{"--actor", "bob", "--json", "-C", "/d", "update", "bd-1"}, "update", []string{"bd-1"}},
@@ -45,20 +52,81 @@ func TestSplitGlobalFlagsSkipsGlobalFlagValues(t *testing.T) {
 // bypass below: SplitGlobalFlags would read that flag's value as the verb, and
 // every guard keyed off the verb stops firing — with no test failing.
 //
-// Sourced from `bd --help` (bd 1.1.0, fork-first repin a75c226c9). bd declares
-// exactly five persistent flags that consume the next argument; -C and
-// --directory are the two spellings of one of them, and --database is the
-// 0062-era proxied database override. Every other persistent flag (--global,
+// Classification derived 2026-08-31 from `rootCmd.PersistentFlags()` in beads
+// cmd/bd/main.go across the supported range (deps.env: BD_PREV_VERSION v1.0.4
+// through BD_SOURCE_REF a75c226c9), cross-checked against `bd --help` on bd
+// 1.1.0 (a75c226c9). Reading `bd --help` alone is NOT sufficient: --format is
+// registered persistent and then MarkHidden'd, so it appears in no help output
+// while still consuming the next token. -C and --directory are two spellings
+// of one flag; --database is the 0062-era proxied database override;
+// --mem-profile takes a FILE. Every other persistent flag (--global,
 // --ignore-schema-skew, --json, --no-color, --profile, --cpu-profile,
-// --mem-profile, -q/--quiet, --readonly, --sandbox, -v/--verbose, -h/--help,
-// -V/--version) is boolean and consumes nothing.
+// -q/--quiet, --readonly, --sandbox, -v/--verbose, plus the per-command
+// -h/--help) is boolean and consumes nothing. -V/--version is root-LOCAL, not
+// persistent, and is in neither table — see TestVersionFlagNeedsNoGlobalEntry.
 func TestGlobalValueFlagsIsComplete(t *testing.T) {
 	want := map[string]bool{
 		"--actor": true, "--db": true, "-C": true, "--directory": true,
 		"--dolt-auto-commit": true, "--database": true,
+		"--mem-profile": true, "--format": true,
 	}
 	if got := GlobalValueFlags(); !reflect.DeepEqual(got, want) {
 		t.Errorf("GlobalValueFlags() = %v, want %v; re-check `bd --help` persistent flags", got, want)
+	}
+}
+
+// TestGlobalBoolFlagsIsComplete is the same pin for the valueless half. A
+// caller that must distinguish a KNOWN valueless flag from an unrecognized one
+// — because the unrecognized case means the verb is no longer decidable and the
+// guard has to fall back — reads a flag missing from this table as unknown, and
+// silently takes the ambiguous branch for an ordinary bd invocation.
+//
+// Same provenance as the value-flag table above. This half is a SUPERSET
+// allowlist over the supported bd range, so it is not expected to match any one
+// binary exactly: --profile is the pre-rename spelling of --cpu-profile, real
+// on v1.0.4/v1.0.5/the released v1.1.0 tag CI installs and rejected by the
+// newer build the fleet runs. Both stay. Dropping --profile because the local
+// bd rejects it has already broken CI once (3289b5673, reverted by 570e38be5).
+func TestGlobalBoolFlagsIsComplete(t *testing.T) {
+	want := map[string]bool{
+		"--global": true, "--ignore-schema-skew": true, "--json": true,
+		"--profile": true, "-q": true, "--quiet": true, "--readonly": true,
+		"--sandbox": true, "-v": true, "--verbose": true, "-h": true, "--help": true,
+		// Verified against `bd --help` (1.1.0): both are value-less. Contrast
+		// --mem-profile, which takes a FILE and lives in the VALUE table.
+		"--cpu-profile": true, "--no-color": true,
+	}
+	if got := GlobalBoolFlags(); !reflect.DeepEqual(got, want) {
+		t.Errorf("GlobalBoolFlags() = %v, want %v; re-check `bd --help` persistent flags", got, want)
+	}
+}
+
+// TestVersionFlagNeedsNoGlobalEntry pins the reasoning for -V/--version being
+// in NEITHER global table, so the next audit does not "fix" its absence.
+//
+// beads registers it as `rootCmd.Flags().BoolP("version", "V", ...)` — local to
+// the root command, not persistent. VERIFIED on bd 1.1.0 (a75c226c9):
+// `bd --version` and `bd -V` print the version, while `bd show --version`
+// fails with "unknown flag: --version". So it is not "accepted by every bd
+// subcommand" and does not meet either table's contract.
+//
+// Adding it would also be actively wrong: it would make the walker resolve a
+// verb out of `bd --version show x`, an argv on which bd prints its version and
+// never runs show. Omitting it costs nothing, because a --version argv carries
+// no verb at all.
+func TestVersionFlagNeedsNoGlobalEntry(t *testing.T) {
+	for _, flag := range []string{"--version", "-V"} {
+		if GlobalValueFlags()[flag] {
+			t.Errorf("%s is in GlobalValueFlags; it is a root-local BOOL, and treating it as value-taking eats the following token", flag)
+		}
+		if GlobalBoolFlags()[flag] {
+			t.Errorf("%s is in GlobalBoolFlags; bd rejects it on every subcommand (`bd show --version` -> unknown flag), so it is not global", flag)
+		}
+		// The whole argv bd actually accepts for this flag. No verb is present,
+		// and none must be invented from the flag token itself.
+		if verb, rest := SplitGlobalFlags([]string{flag}); verb != "" || rest != nil {
+			t.Errorf("SplitGlobalFlags(%v) = (%q, %v), want (\"\", nil); a version-only argv has no subcommand", []string{flag}, verb, rest)
+		}
 	}
 }
 
@@ -78,6 +146,9 @@ func TestRefusalFiresBehindAGlobalFlag(t *testing.T) {
 		{"--db", "/x/y.db"},
 		{"--directory", "/d"},
 		{"--dolt-auto-commit", "off"},
+		{"--database", "beads_global"},
+		{"--mem-profile", "/tmp/heap.out"},
+		{"--format", "json"},
 		{"--actor", "bob", "--json", "-C", "/d"},
 	}
 	for _, prefix := range prefixes {

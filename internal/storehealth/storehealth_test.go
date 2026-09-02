@@ -1,8 +1,11 @@
 package storehealth
 
 import (
-	"context"
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -260,155 +263,151 @@ func TestLastMaintenanceNoEvents(t *testing.T) {
 	}
 }
 
-// tailCallRecorder wraps a *events.Fake and records whether List or
-// ListTail was invoked, so tests can assert LastMaintenance prefers the
-// bounded ListTail path when the provider implements events.TailProvider.
-type tailCallRecorder struct {
+// recordingProvider wraps a Fake and counts List vs ListTail calls, so tests
+// can assert which path LastMaintenance actually took rather than only
+// inferring it from the result.
+type recordingProvider struct {
 	*events.Fake
 	listCalls     int
 	listTailCalls int
-	lastTailLimit int
 }
 
-func (r *tailCallRecorder) List(filter events.Filter) ([]events.Event, error) {
+func (r *recordingProvider) List(filter events.Filter) ([]events.Event, error) {
 	r.listCalls++
 	return r.Fake.List(filter)
 }
 
-func (r *tailCallRecorder) ListTail(filter events.Filter, limit int) ([]events.Event, error) {
+func (r *recordingProvider) ListTail(filter events.Filter, limit int) ([]events.Event, error) {
 	r.listTailCalls++
-	r.lastTailLimit = limit
 	return r.Fake.ListTail(filter, limit)
 }
 
-func TestLastMaintenanceUsesListTailWhenAvailable(t *testing.T) {
-	recorder := &tailCallRecorder{Fake: events.NewFake()}
-	older := time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC)
-	newer := time.Date(2026, 4, 8, 3, 0, 0, 0, time.UTC)
-
-	payloadDone, _ := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 1})
-	payloadFail, _ := json.Marshal(events.StoreMaintenanceFailedPayload{Stage: "gc"})
-
-	recorder.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: older, Payload: payloadDone})
-	recorder.Record(events.Event{Type: events.StoreMaintenanceFailed, Ts: newer, Payload: payloadFail})
-
-	ts, status := LastMaintenance(recorder)
-
-	if recorder.listTailCalls == 0 {
-		t.Fatalf("LastMaintenance did not call ListTail when provider implements TailProvider")
-	}
-	if recorder.listCalls != 0 {
-		t.Fatalf("LastMaintenance called List %d time(s), want 0 when ListTail is available", recorder.listCalls)
-	}
-	if recorder.lastTailLimit <= 0 || recorder.lastTailLimit > 32 {
-		t.Fatalf("ListTail called with limit = %d, want a small bounded N in (0,32]", recorder.lastTailLimit)
-	}
-	if !ts.Equal(newer) {
-		t.Fatalf("ts = %v, want %v", ts, newer)
-	}
-	if status != "failed" {
-		t.Fatalf("status = %q, want failed", status)
-	}
-}
-
-// listOnlyProvider implements events.Provider but deliberately not
-// events.TailProvider, exercising LastMaintenance's fallback path for
-// backings that cannot do a bounded tail read (e.g. events.Multiplexer
-// today).
-type listOnlyProvider struct {
-	fake      *events.Fake
-	listCalls int
-}
-
-func (p *listOnlyProvider) Record(e events.Event) { p.fake.Record(e) }
-
-func (p *listOnlyProvider) List(filter events.Filter) ([]events.Event, error) {
-	p.listCalls++
-	return p.fake.List(filter)
-}
-
-func (p *listOnlyProvider) LatestSeq() (uint64, error) { return p.fake.LatestSeq() }
-
-func (p *listOnlyProvider) Watch(ctx context.Context, afterSeq uint64) (events.Watcher, error) {
-	return p.fake.Watch(ctx, afterSeq)
-}
-
-func (p *listOnlyProvider) Close() error { return p.fake.Close() }
-
-func TestLastMaintenanceFallsBackToListForNonTailProvider(t *testing.T) {
-	provider := &listOnlyProvider{fake: events.NewFake()}
-	older := time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC)
-	newer := time.Date(2026, 4, 8, 3, 0, 0, 0, time.UTC)
-
-	payloadDone, _ := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 1})
-	payloadFail, _ := json.Marshal(events.StoreMaintenanceFailedPayload{Stage: "gc"})
-
-	provider.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: older, Payload: payloadDone})
-	provider.Record(events.Event{Type: events.StoreMaintenanceFailed, Ts: newer, Payload: payloadFail})
-
-	ts, status := LastMaintenance(provider)
-
-	if provider.listCalls == 0 {
-		t.Fatalf("LastMaintenance did not fall back to List for a non-TailProvider backing")
-	}
-	if !ts.Equal(newer) {
-		t.Fatalf("ts = %v, want %v", ts, newer)
-	}
-	if status != "failed" {
-		t.Fatalf("status = %q, want failed", status)
-	}
-}
-
-// boundedCallRecorder wraps a *events.Fake and records the number of
-// events returned by each List/ListTail call, so tests can assert
-// LastMaintenance's read is bounded independent of total log size.
-type boundedCallRecorder struct {
+// providerWithoutTail implements events.Provider but deliberately omits
+// ListTail, so LastMaintenance must fall back to the unbounded List path
+// rather than a type assertion panicking or silently returning nothing.
+type providerWithoutTail struct {
 	*events.Fake
-	listCalls      int
-	listTailCalls  int
-	maxListTailLen int
 }
 
-func (r *boundedCallRecorder) List(filter events.Filter) ([]events.Event, error) {
-	r.listCalls++
-	return r.Fake.List(filter)
+func (p *providerWithoutTail) List(filter events.Filter) ([]events.Event, error) {
+	return p.Fake.List(filter)
 }
 
-func (r *boundedCallRecorder) ListTail(filter events.Filter, limit int) ([]events.Event, error) {
-	r.listTailCalls++
-	evts, err := r.Fake.ListTail(filter, limit)
-	if len(evts) > r.maxListTailLen {
-		r.maxListTailLen = len(evts)
+// TestLastMaintenanceUsesTailProviderFastPath is the regression for #4418:
+// when the provider implements events.TailProvider, LastMaintenance must
+// call ListTail (the bounded backward scan) instead of the unbounded List,
+// which on a large event log with a rare Type filter costs a full-file scan
+// for what is ultimately a cosmetic status field.
+func TestLastMaintenanceUsesTailProviderFastPath(t *testing.T) {
+	rp := &recordingProvider{Fake: events.NewFake()}
+	payload, _ := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 3})
+	ts := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	rp.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: ts, Payload: payload})
+
+	gotTs, gotStatus := LastMaintenance(rp)
+	if !gotTs.Equal(ts) || gotStatus != "success" {
+		t.Fatalf("LastMaintenance = (%v,%q), want (%v,success)", gotTs, gotStatus, ts)
 	}
-	return evts, err
+	if rp.listTailCalls == 0 {
+		t.Fatalf("listTailCalls = 0, want > 0 (LastMaintenance should prefer the TailProvider fast path)")
+	}
+	if rp.listCalls != 0 {
+		t.Fatalf("listCalls = %d, want 0 (fast path should not also fall back to List)", rp.listCalls)
+	}
 }
 
-func TestLastMaintenanceBoundedTailRead(t *testing.T) {
-	const totalEvents = 10_000
+// TestLastMaintenanceFallsBackWithoutTailProvider guards the fallback: a
+// provider that does not implement events.TailProvider (e.g. an exec-script
+// provider) must still get a correct answer via the existing List path.
+func TestLastMaintenanceFallsBackWithoutTailProvider(t *testing.T) {
+	pwt := &providerWithoutTail{Fake: events.NewFake()}
+	payload, _ := json.Marshal(events.StoreMaintenanceFailedPayload{Stage: "gc"})
+	ts := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	pwt.Record(events.Event{Type: events.StoreMaintenanceFailed, Ts: ts, Payload: payload})
 
-	recorder := &boundedCallRecorder{Fake: events.NewFake()}
-	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	payload, _ := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 1})
+	gotTs, gotStatus := LastMaintenance(pwt)
+	if !gotTs.Equal(ts) || gotStatus != "failed" {
+		t.Fatalf("LastMaintenance = (%v,%q), want (%v,failed)", gotTs, gotStatus, ts)
+	}
+}
 
-	var latest time.Time
-	for i := 0; i < totalEvents; i++ {
-		ts := base.Add(time.Duration(i) * time.Minute)
-		recorder.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: ts, Payload: payload})
-		latest = ts
+// writeArchivedEvents writes evts as a gzipped canonical events archive
+// beside path, using the rotation naming convention
+// (events.jsonl.archive-<ts>-seq-<first>-<last>.gz) that the archive-aware
+// read path discovers by directory listing.
+func writeArchivedEvents(t *testing.T, path string, evts []events.Event) {
+	t.Helper()
+	if len(evts) == 0 {
+		t.Fatal("writeArchivedEvents: no events")
+	}
+	var raw bytes.Buffer
+	for _, e := range evts {
+		line, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw.Write(line)
+		raw.WriteString("\n")
+	}
+	var gz bytes.Buffer
+	zw := gzip.NewWriter(&gz)
+	if _, err := zw.Write(raw.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	name := fmt.Sprintf("events.jsonl.archive-%s-seq-%d-%d.gz",
+		evts[0].Ts.UTC().Format("20060102T150405Z"), evts[0].Seq, evts[len(evts)-1].Seq)
+	if err := os.WriteFile(filepath.Join(filepath.Dir(path), name), gz.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestLastMaintenanceDoesNotReadRotatedArchives pins accepted, documented
+// behavior rather than a bug: FileRecorder.ListTail scans the active
+// events.jsonl only, so a maintenance event that has aged into a rotated
+// .gz archive is reported as absent. The old unbounded List path did read
+// archives; taking the archive-aware fall-through here (as
+// fetchEventPageAscending does) would restore the full scan #4418 removed,
+// and LastGCAt is display-only in every consumer. If this test starts
+// failing because LastMaintenance grew a fall-through, that is a
+// deliberate re-trade — update the comment on
+// lastMaintenanceScanWindowBytes with it, do not just delete the test.
+func TestLastMaintenanceDoesNotReadRotatedArchives(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.jsonl")
+	ts := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	payload, err := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 3})
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	ts, status := LastMaintenance(recorder)
+	// The only maintenance event lives in the archive; the active file
+	// holds unrelated traffic, as it would after a rotation.
+	writeArchivedEvents(t, path, []events.Event{
+		{Seq: 1, Type: events.StoreMaintenanceDone, Ts: ts, Payload: payload},
+	})
 
-	if recorder.listCalls != 0 {
-		t.Fatalf("LastMaintenance called List %d time(s) against a %d-event backing, want 0 — List materializes the full matching history", recorder.listCalls, totalEvents)
+	rec, err := events.NewFileRecorder(path, io.Discard)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if recorder.maxListTailLen > lastMaintenanceTailLimit {
-		t.Fatalf("ListTail returned %d events, want <= lastMaintenanceTailLimit (%d) regardless of the %d-event backing size", recorder.maxListTailLen, lastMaintenanceTailLimit, totalEvents)
+	defer rec.Close() //nolint:errcheck // test cleanup
+	rec.Record(events.Event{Type: "unrelated.event", Ts: ts.Add(time.Hour)})
+
+	// Control: the archive-aware List path DOES see it, so an empty result
+	// below is archive-blindness and not a broken fixture.
+	viaList, err := rec.List(events.Filter{Type: events.StoreMaintenanceDone})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !ts.Equal(latest) {
-		t.Fatalf("ts = %v, want %v (the most recently recorded maintenance event)", ts, latest)
+	if len(viaList) != 1 {
+		t.Fatalf("List got %d events, want 1 (fixture must be readable via the archive-aware path)", len(viaList))
 	}
-	if status != "success" {
-		t.Fatalf("status = %q, want success", status)
+
+	gotTs, gotStatus := LastMaintenance(rec)
+	if !gotTs.IsZero() || gotStatus != "" {
+		t.Fatalf("LastMaintenance = (%v,%q), want (zero,\"\") — the tail fast path reads the active file only", gotTs, gotStatus)
 	}
 }

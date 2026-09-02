@@ -35,19 +35,22 @@ const (
 	// Re-derived for the fork-first bd repin (ga-zzcjs): BD_REPO joins
 	// BD_SOURCE_REF as a job-level env key at every pin site, so the shape
 	// moves again — deliberately.
-	// Re-derived for the schema-0066 bd repin: BD_SOURCE_REF's VALUE moves at all
-	// 12 job-level pin sites (a75c226c9 -> 3e03250ee). Env values, not just env
-	// keys, are part of the execution shape, so this pin moves on a pure value
-	// change too — correct behavior, not noise.
-	//
-	// Re-derived AGAIN on the merge with main, which had independently moved
-	// this pin for the ga-4h8bu scripts split (PR #141 round 2: the integration
-	// changes-filter widened to scripts/** so plain shell-script PRs trigger the
-	// shards that are the -tags integration tests' only CI home). Two
-	// independent shape changes met here, so the merged workflow hashes to
-	// NEITHER side's value — this is the case the header rule is about: always
-	// re-derive from the merged file, never adopt a side.
-	expectedCIExecutionHash     = "ff8d0586f0c1a60a67539a8eec2e653f7410053116e42c0aa8d4791faeda8e26"
+	// Re-derived again at the 2026-08-31 resync: ci.yml auto-merged both sides,
+	// so the merged execution shape hashes to neither side's prior pin. Taken
+	// from the candidate digest this package printed for the merged workflow,
+	// not from either side. The trigger pins below did not move — triggers
+	// merged to a shape identical to both sides, so they were left alone.
+	// Re-derived once more for the ga-4h8bu scripts split (PR #141 round 2):
+	// the integration changes-filter widens to scripts/** so plain
+	// shell-script PRs trigger the shards that are the -tags integration
+	// tests' only CI home — a deliberate execution-shape change, pinned from
+	// the digest printed for the merged (resync + split) workflow.
+	// Re-derived on the merge of the schema-0066 repin branch with the
+	// 2026-08-31 upstream resync (#137): the resync moved this pin for its own
+	// reasons and the repin moves BD_SOURCE_REF values at all job-level pin
+	// sites, so the merged ci.yml hashes to neither side. Taken from the
+	// digest this package printed for the merged file, never from a side.
+	expectedCIExecutionHash     = "64d713f5fbb079c29805e452cbd2a99677df3279e62dca81ae52dde569da4472"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
@@ -55,16 +58,18 @@ const (
 	// pin is an independent tripwire and must be re-derived on its own.
 	// Nightly re-derived with the same fork-first repin (BD_REPO env key at
 	// its two pin sites).
-	// Nightly moves for the same schema-0066 repin (BD_SOURCE_REF value at its
-	// two pin sites).
-	expectedNightlyExecutionHash = "733bf7d111b3fa67ffc47222d352057ff5062bc4ce0afce144932f125c6a3a47"
-	// Re-derived for the Go 1.26.5 -> 1.26.8 toolchain bump: the composite
-	// setup actions' go-version default is part of the execution shape, and the
-	// bump is deliberate — trivy lists Go 1.26.6 as the fix for five stdlib
-	// CVEs (CVE-2026-33818, -39821, -46600, -56853, -56858) that the gc binary
-	// inherits from whatever toolchain builds it. The go.mod directive moves
-	// with it so a build from any lane cannot silently fall back to 1.26.5.
-	expectedSetupActionHash = "af8167709863fd4e8e34dcfc42f3a652774a4e1ebfd91582530bfb6600304b90"
+	// Re-derived again at the 2026-08-31 resync: nightly.yml auto-merged both
+	// sides too, so this pin also lands on neither side's prior value.
+	// Same merge, same rule: nightly carries the repin's BD_SOURCE_REF values at
+	// its two pin sites on top of the resync's shape, so it lands on neither
+	// side's prior value. Setup-action pin below is untouched: the composite
+	// actions were taken from the resync verbatim (go version now derives
+	// from the go.mod directive, which the repin moves to 1.26.8).
+	expectedNightlyExecutionHash = "ae810fdba17ca29c0076c2337516d9ceb1ddc8aa803e6e2df67c162c40e4288d"
+	// Re-derived at the 2026-08-31 resync: the composite setup actions under
+	// .github/actions/setup-gascity-* auto-merged both sides as well, moving
+	// this pin along with the two workflow execution pins above.
+	expectedSetupActionHash = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
 )
 
 var requiredFilterPaths = map[string][]string{

@@ -777,7 +777,7 @@ func agentScriptHookBeadWithRunner(stderr io.Writer, runHook agentScriptHookRunn
 	output := strings.TrimSpace(hookOut.String())
 	hasWork := workQueryHasReadyWork(output)
 	if code != 0 {
-		if !hasWork && agentScriptHookExitIsNoWork(output, hookErr.String()) {
+		if !hasWork && agentScriptHookExitIsNoWork(code, output, hookErr.String()) {
 			return agentScriptBead{}, false, nil
 		}
 		return agentScriptBead{}, false, errors.New("gc hook failed")
@@ -799,13 +799,40 @@ func agentScriptHookBeadWithRunner(stderr io.Writer, runHook agentScriptHookRunn
 	return beads[0], true, nil
 }
 
-func agentScriptHookExitIsNoWork(output, stderr string) bool {
+// agentScriptHookExitIsNoWork decides whether a non-zero `gc hook` exit with
+// no ready work is the graceful empty turn or a hook failure. Script mode runs
+// the hook in-process, so it has the exit code, and the code is the primary
+// signal; stderr text is only the secondary filter for exit 1. Precedence:
+//
+//  1. exit 2 is the store-unavailable contract (reportWorkQueryFailure): a
+//     failure whatever stderr says. Any exit other than 1 is likewise never
+//     the empty turn.
+//  2. exit 1 is benign only if every remaining stderr line is a stamped
+//     exit-0 diagnostic (hookWorkQueryDiagPrefix, forwarded by
+//     hookWorkQueryRunner — the origin-gate refusal, driver reconnect chatter
+//     on a federated city) or a warning. Any other line is a failure report
+//     the hook itself wrote.
+//
+// Reading stderr text first let a store outage whose every line said
+// "warning" fall through to the empty turn: the classifier-side
+// idle-agents-with-work-waiting dead-drop.
+func agentScriptHookExitIsNoWork(code int, output, stderr string) bool {
+	if code != 1 {
+		return false
+	}
 	if workQueryHasReadyWork(output) {
 		return false
 	}
+	// The store-unavailable token always travels with exit 2 (its only
+	// emitter is reportWorkQueryFailure), so the exit-code check above already
+	// covers it; there is no exit-1 path that carries the token.
 	for _, line := range strings.Split(stderr, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, hookWorkQueryDiagPrefix) {
+			// Forwarded from a work query that exited 0: audible, not a failure.
 			continue
 		}
 		if !strings.Contains(strings.ToLower(line), "warning") {

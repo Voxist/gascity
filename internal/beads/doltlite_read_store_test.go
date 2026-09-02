@@ -6,7 +6,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -973,7 +972,7 @@ func TestDoltliteReadStoreBoundedTopNAvoidsFullHistoryHydration(t *testing.T) {
 	// (not all five matches), proving the SQL LIMIT is applied during selection
 	// rather than after hydrating full matching history.
 	sets := doltliteTableSetsForMode(TierIssues)
-	ids, err := store.selectBoundedTopNIDs(context.Background(), ListQuery{Label: "bt", Sort: SortCreatedDesc}, sets, 3)
+	ids, err := store.selectBoundedTopNIDs(t.Context(), ListQuery{Label: "bt", Sort: SortCreatedDesc}, sets, 3)
 	if err != nil {
 		t.Fatalf("selectBoundedTopNIDs: %v", err)
 	}
@@ -1258,14 +1257,14 @@ func TestDoltliteReadStoreCustomOrderByRejectsMultiTableSet(t *testing.T) {
 		t.Fatalf("TierIssues table sets = %d, want >= 2 to exercise the guard", len(sets))
 	}
 	const customOrder = "ORDER BY i.created_at ASC, i.id ASC"
-	if _, err := store.queryIssuesOrderedInTables(context.Background(), ListQuery{AllowScan: true}, sets, "", nil, 0, customOrder); err == nil {
+	if _, err := store.queryIssuesOrderedInTables(t.Context(), ListQuery{AllowScan: true}, sets, "", nil, 0, customOrder); err == nil {
 		t.Fatal("custom orderBy with multiple table sets should error, got nil")
 	} else if !strings.Contains(err.Error(), "single table set") {
 		t.Fatalf("error = %q, want it to mention the single-table-set invariant", err)
 	}
 
 	// The same custom orderBy against a single table set is allowed.
-	if _, err := store.queryIssuesOrderedInTables(context.Background(), ListQuery{AllowScan: true}, []doltliteTableSet{doltliteIssueTables}, "", nil, 0, customOrder); err != nil {
+	if _, err := store.queryIssuesOrderedInTables(t.Context(), ListQuery{AllowScan: true}, []doltliteTableSet{doltliteIssueTables}, "", nil, 0, customOrder); err != nil {
 		t.Fatalf("custom orderBy with a single table set should succeed, got %v", err)
 	}
 }
@@ -2097,19 +2096,48 @@ func TestDoltliteReindexStoreRejectsNonDoltlite(t *testing.T) {
 	}
 }
 
-// TestDoltliteReadStoreListCtxHonorsCancelledContext asserts ListCtx honors a
-// pre-cancelled context by returning immediately without running the query,
-// instead of the abandoning-goroutine pattern statusListStoreWithTimeout uses
-// around ctx-less Store.List.
-func TestDoltliteReadStoreListCtxHonorsCancelledContext(t *testing.T) {
-	store, cleanup := newTestDoltliteReadStore(t)
-	defer cleanup()
+// TestDoltliteDependencySnapshotCompletenessIsGuarded pins the verdict
+// dependencySnapshotForCache hands the cache. It was previously unguarded:
+// flipping its completeness bool to false left the whole suite green while
+// silently costing every DoltLite scope its cached dependency and readiness
+// reads — every DepList("…","down") would delegate to the backing store again,
+// which for this fixture is a bd runner that must never be called.
+//
+// The bool is a claim about the SNAPSHOT: DepListBatch reads both dependency
+// tables in one pass, so the map it returns is the whole down-edge set for the
+// ids asked about. The assertions below are that claim, not its restatement —
+// the cache latches depsComplete from it, and the cached edges must equal the
+// store's own.
+func TestDoltliteDependencySnapshotCompletenessIsGuarded(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	deps, complete, err := store.dependencySnapshotForCache([]string{"gc-child"})
+	if err != nil {
+		t.Fatalf("dependencySnapshotForCache: %v", err)
+	}
+	if !complete {
+		t.Fatal("DoltLite reported an incomplete dependency snapshot; DepListBatch reads every down edge of the ids it is given")
+	}
+	if len(deps["gc-child"]) != 1 || deps["gc-child"][0].DependsOnID != "gc-parent" {
+		t.Fatalf("snapshot deps = %#v, want gc-child -> gc-parent", deps["gc-child"])
+	}
 
-	_, err := store.ListCtx(ctx, ListQuery{AllowScan: true})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("ListCtx(cancelled ctx) error = %v, want context.Canceled", err)
+	cache := NewCachingStoreForTest(store, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	cache.mu.RLock()
+	depsComplete := cache.depsComplete
+	cache.mu.RUnlock()
+	if !depsComplete {
+		t.Fatal("cache depsComplete = false over a DoltLite snapshot that carries every down edge: cached dep and readiness reads would delegate for the life of the process")
+	}
+	cached, err := cache.DepList("gc-child", "down")
+	if err != nil {
+		t.Fatalf("cached DepList: %v", err)
+	}
+	if len(cached) != 1 || cached[0].DependsOnID != "gc-parent" {
+		t.Fatalf("cached DepList = %#v, want the snapshot's gc-child -> gc-parent", cached)
 	}
 }

@@ -10,12 +10,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"text/template"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
@@ -67,6 +69,13 @@ const hookTimeout = 30 * time.Second
 // non-nil, it is merged into the subprocess environment after sanitizing
 // inherited GC_DOLT_* and BEADS_* keys.
 func shellCommand(command, dir string, timeout time.Duration, env map[string]string) (string, error) {
+	return runShellCommand(command, dir, timeout, env, nil)
+}
+
+// runShellCommand is the shared `sh -c` body. prepare, when non-nil, adjusts
+// the command before it starts — it is how a caller opts into a cancellation
+// policy stronger than CommandContext's default.
+func runShellCommand(command, dir string, timeout time.Duration, env map[string]string, prepare func(*exec.Cmd)) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
@@ -75,11 +84,36 @@ func shellCommand(command, dir string, timeout time.Duration, env map[string]str
 		cmd.Dir = dir
 	}
 	cmd.Env = mergeRuntimeEnv(os.Environ(), env)
+	if prepare != nil {
+		prepare(cmd)
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("running command %q: %w", command, err)
 	}
 	return string(out), nil
+}
+
+// hookSignalGrace is how long a canceled hook's process group gets to exit on
+// SIGTERM before it is SIGKILLed. Matches the order-exec path's grace.
+const hookSignalGrace = 2 * time.Second
+
+// hookProcessGroupCleanup makes a hook its own process-group leader and
+// terminates that GROUP when the command is canceled.
+//
+// Without it, a timed-out hook leaks its descendants. CommandContext kills the
+// `sh` it started, and WaitDelay then stops waiting on the pipe — but WaitDelay
+// closes I/O, it does not signal a process tree, so the pipeline the hook
+// spawned (bd, and whatever it is piped into) keeps running and keeps holding a
+// store connection. That is worse here than it looks: the hook's semaphore slot
+// is released the moment the shell dies, so the pool admits the next hook while
+// the previous one's bd is still connected, and the bound that exists to stop a
+// boot-time read storm quietly stops bounding anything.
+func hookProcessGroupCleanup(cmd *exec.Cmd) {
+	processgroup.StartCommandInNewGroup(cmd)
+	cmd.Cancel = func() error {
+		return processgroup.TerminateCommand(cmd, 0, hookSignalGrace, processgroup.Options{})
+	}
 }
 
 // parseBDProbeTimeout reads GC_BD_PROBE_TIMEOUT and returns the parsed duration.
@@ -113,8 +147,14 @@ func shellScaleCheck(command, dir string, env map[string]string) (string, error)
 // sh -c with the shorter hookTimeout (30s). Separated from
 // shellScaleCheck so that hung hooks don't stall the reconciler for
 // the full bd probe timeout.
+//
+// Hooks run in their own process group so a timeout reaps the whole pipeline
+// rather than just the shell; see hookProcessGroupCleanup for why the on_boot
+// bound depends on it. shellScaleCheck deliberately keeps the default
+// cancellation policy: those probes run on the reconciler tick under their own
+// bound and timeout, and their signal semantics are not this path's to change.
 func shellRunHook(command, dir string, env map[string]string) (string, error) {
-	return shellCommand(command, dir, hookTimeout, env)
+	return runShellCommand(command, dir, hookTimeout, env, hookProcessGroupCleanup)
 }
 
 // scaleParams holds the resolved scaling parameters for an agent.
@@ -132,13 +172,13 @@ type scaleParams struct {
 // decisions and worker claim decisions structurally symmetric. See
 // engdocs/architecture/dispatch.md "scale_check ↔ work_query correspondence".
 func scaleParamsFor(a *config.Agent) scaleParams {
-	return scaleParamsForBeads(a, config.BeadsConfig{})
+	return scaleParamsForTopology(a, config.QueryTopology{})
 }
 
-func scaleParamsForBeads(a *config.Agent, beadsCfg config.BeadsConfig) scaleParams {
+func scaleParamsForTopology(a *config.Agent, topo config.QueryTopology) scaleParams {
 	sp := scaleParams{
 		Min:   a.EffectiveMinActiveSessions(),
-		Check: a.EffectivePoolDemandQueryForBeads(beadsCfg),
+		Check: a.EffectivePoolDemandQueryFor(topo),
 	}
 	if m := a.EffectiveMaxActiveSessions(); m != nil {
 		sp.Max = *m
@@ -246,209 +286,141 @@ func expandSessionSetup(cmds []string, ctx SessionSetupContext) []string {
 // Slice and map fields are independently allocated so mutations to the copy
 // don't affect the original.
 func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
-	dst := config.Agent{
-		Name:              name,
-		Description:       src.Description,
-		Dir:               dir,
-		WorkDir:           src.WorkDir,
-		TmuxAlias:         src.TmuxAlias,
-		Scope:             src.Scope,
-		Session:           src.Session,
-		Provider:          src.Provider,
-		Upstream:          src.Upstream,
-		InheritedProvider: src.InheritedProvider,
-		PromptTemplate:    src.PromptTemplate,
-		Nudge:             src.Nudge,
-		StartCommand:      src.StartCommand,
-		Lifecycle:         src.Lifecycle,
-		PromptMode:        src.PromptMode,
-		PromptFlag:        src.PromptFlag,
-		ReadyPromptPrefix: src.ReadyPromptPrefix,
-		// DefaultSlingFormula: deep-copied below with other pointer fields.
-		WorkQuery:          src.WorkQuery,
-		SlingQuery:         src.SlingQuery,
-		SessionSetupScript: src.SessionSetupScript,
-		OverlayDir:         src.OverlayDir,
-		SourceDir:          src.SourceDir,
-		// InheritedDefaultSlingFormula: deep-copied below with other pointer fields.
-		IdleTimeout:          src.IdleTimeout,
-		MaxSessionAge:        src.MaxSessionAge,
-		MaxSessionAgeJitter:  src.MaxSessionAgeJitter,
-		SleepAfterIdle:       src.SleepAfterIdle,
-		SleepAfterIdleSource: src.SleepAfterIdleSource,
-		Suspended:            src.Suspended,
-		ResumeCommand:        src.ResumeCommand,
-		WakeMode:             src.WakeMode,
-		MouseMode:            src.MouseMode,
-		Tier:                 src.Tier,
-		PoolName:             src.QualifiedName(),
-		Implicit:             src.Implicit,
-		ScaleCheck:           src.ScaleCheck,
-		BindingName:          src.BindingName,
-		PackName:             src.PackName,
-	}
-	if len(src.DependsOn) > 0 {
-		dst.DependsOn = make([]string, len(src.DependsOn))
-		copy(dst.DependsOn, src.DependsOn)
-	}
-	if len(src.Args) > 0 {
-		dst.Args = make([]string, len(src.Args))
-		copy(dst.Args, src.Args)
-	}
-	if len(src.ProcessNames) > 0 {
-		dst.ProcessNames = make([]string, len(src.ProcessNames))
-		copy(dst.ProcessNames, src.ProcessNames)
-	}
-	if len(src.Env) > 0 {
-		dst.Env = make(map[string]string, len(src.Env))
-		for k, v := range src.Env {
-			dst.Env[k] = v
-		}
-	}
-	if len(src.PreStart) > 0 {
-		dst.PreStart = make([]string, len(src.PreStart))
-		copy(dst.PreStart, src.PreStart)
-	}
-	if len(src.SessionSetup) > 0 {
-		dst.SessionSetup = make([]string, len(src.SessionSetup))
-		copy(dst.SessionSetup, src.SessionSetup)
-	}
-	if len(src.SessionLive) > 0 {
-		dst.SessionLive = make([]string, len(src.SessionLive))
-		copy(dst.SessionLive, src.SessionLive)
-	}
-	if len(src.InjectFragments) > 0 {
-		dst.InjectFragments = make([]string, len(src.InjectFragments))
-		copy(dst.InjectFragments, src.InjectFragments)
-	}
-	if len(src.AppendFragments) > 0 {
-		dst.AppendFragments = make([]string, len(src.AppendFragments))
-		copy(dst.AppendFragments, src.AppendFragments)
-	}
-	if len(src.InheritedAppendFragments) > 0 {
-		dst.InheritedAppendFragments = make([]string, len(src.InheritedAppendFragments))
-		copy(dst.InheritedAppendFragments, src.InheritedAppendFragments)
-	}
-	if len(src.InstallAgentHooks) > 0 {
-		dst.InstallAgentHooks = make([]string, len(src.InstallAgentHooks))
-		copy(dst.InstallAgentHooks, src.InstallAgentHooks)
-	}
-	dst.SkillsDir = src.SkillsDir
-	dst.MCPDir = src.MCPDir
-	if src.MaxActiveSessions != nil {
-		v := *src.MaxActiveSessions
-		dst.MaxActiveSessions = &v
-	}
-	dst.MinActiveSessions = src.MinActiveSessions
-	dst.ScaleCheck = src.ScaleCheck
-	if len(src.NamepoolNames) > 0 {
-		dst.NamepoolNames = make([]string, len(src.NamepoolNames))
-		copy(dst.NamepoolNames, src.NamepoolNames)
-	}
-	dst.DrainTimeout = src.DrainTimeout
-	dst.OnBoot = src.OnBoot
-	dst.OnDeath = src.OnDeath
-	dst.Namepool = src.Namepool
-	if src.ReadyDelayMs != nil {
-		v := *src.ReadyDelayMs
-		dst.ReadyDelayMs = &v
-	}
-	if src.EmitsPermissionWarning != nil {
-		v := *src.EmitsPermissionWarning
-		dst.EmitsPermissionWarning = &v
-	}
-	if src.HooksInstalled != nil {
-		v := *src.HooksInstalled
-		dst.HooksInstalled = &v
-	}
-	if src.InjectAssignedSkills != nil {
-		v := *src.InjectAssignedSkills
-		dst.InjectAssignedSkills = &v
-	}
-	if src.DefaultSlingFormula != nil {
-		v := *src.DefaultSlingFormula
-		dst.DefaultSlingFormula = &v
-	}
-	if src.InheritedDefaultSlingFormula != nil {
-		v := *src.InheritedDefaultSlingFormula
-		dst.InheritedDefaultSlingFormula = &v
-	}
-	if src.Attach != nil {
-		v := *src.Attach
-		dst.Attach = &v
-	}
-	if src.MaxActiveSessions != nil {
-		v := *src.MaxActiveSessions
-		dst.MaxActiveSessions = &v
-	}
-	if src.MinActiveSessions != nil {
-		v := *src.MinActiveSessions
-		dst.MinActiveSessions = &v
-	}
-	if len(src.OptionDefaults) > 0 {
-		dst.OptionDefaults = make(map[string]string, len(src.OptionDefaults))
-		for k, v := range src.OptionDefaults {
-			dst.OptionDefaults[k] = v
-		}
-	}
-	if src.AssignedWorkDeferLimit != nil {
-		v := *src.AssignedWorkDeferLimit
-		dst.AssignedWorkDeferLimit = &v
-	}
+	// Agent.Clone is the single deep-copy source (config.go): scalars copy by
+	// struct assignment and every slice/map/pointer is deep-copied there under
+	// TestAgentCloneIsDeep, so a field added to config.Agent is carried here
+	// without a matching edit — the drift this replaces is exactly how a
+	// resync silently dropped Tier and declassified every pool-expanded agent
+	// for the provider governor. Only the pool-expansion identity differs.
+	dst := src.Clone()
+	dst.Name = name
+	dst.Dir = dir
+	dst.PoolName = src.QualifiedName()
 	return dst
 }
 
-// onBootStaggerSleep is the pause primitive used between successive
-// on_boot hooks. Overridable in tests so they can assert the stagger
-// without real wall-clock delay.
-var onBootStaggerSleep = time.Sleep
+// poolOnBootConcurrency bounds how many on_boot hooks run at once.
+//
+// Six, because the hooks are light bd probes with their own hookTimeout and the
+// cost being removed here is the SUM of those timeouts: a city with a dozen pool
+// agents paid a dozen sequential probe budgets before it could serve, 3m12s of
+// one maintainer-city boot (ga-1e78j). A bound keeps a city with many pools from
+// turning its own recovery sweep into a store-wide read storm.
+const poolOnBootConcurrency = 6
+
+// poolOnBootHook is one agent's resolved on_boot invocation.
+type poolOnBootHook struct {
+	agent   string
+	command string
+	dir     string
+	env     map[string]string
+}
 
 // runPoolOnBoot runs on_boot commands for all pool agents at controller startup.
 // Errors are logged but not fatal — the controller continues regardless.
 //
-// on_boot hooks issue bd list/query/update to reopen stranded in_progress
-// beads. Firing them back-to-back for every agent template — multiplied by
-// every rig booting at once — bursts the shared dolt connection pool into
-// saturation. To spread that priming load, a configurable stagger
-// ([daemon].on_boot_stagger, default DefaultOnBootStagger) is inserted
-// between successive hooks. Set the knob to "0" to disable. See vp-hsau.
+// Planning is serial and execution is parallel, and the split is load-bearing
+// rather than stylistic. Resolving a hook's environment goes through
+// controllerQueryRuntimeEnv, whose recovery-enabled path can restart a managed
+// Dolt server; running that from every agent at once is precisely the read storm
+// the no-recovery variants exist to bound (ga-cdmx6x). Template expansion also
+// reports malformed commands to the shared stderr. So the impure half stays on
+// one goroutine, and only the subprocesses fan out.
 func runPoolOnBoot(cfg *config.City, cityPath string, runner ScaleCheckRunner, stderr io.Writer) {
+	runPoolOnBootHooks(planPoolOnBootHooks(cfg, cityPath, stderr), runner, stderr)
+}
+
+// planPoolOnBootHooks resolves every eligible pool agent's on_boot command,
+// working directory and environment, in config order. An agent whose
+// environment cannot be resolved is reported and dropped, exactly as the serial
+// loop did.
+func planPoolOnBootHooks(cfg *config.City, cityPath string, stderr io.Writer) []poolOnBootHook {
 	cityName := workdirutil.CityName(cityPath, cfg)
-	stagger := cfg.Daemon.OnBootStaggerDuration()
-	ranOne := false
+	var hooks []poolOnBootHook
 	for _, a := range cfg.Agents {
 		if !a.SupportsInstanceExpansion() || a.Implicit {
 			continue
 		}
-		cmd := a.EffectiveOnBootForBeads(cfg.Beads)
+		cmd := a.EffectiveOnBootFor(config.QueryTopology{Beads: cfg.Beads})
 		if cmd == "" {
 			continue
 		}
 		cmd = expandAgentCommandTemplate(cityPath, cityName, &a, cfg.Rigs, "on_boot", cmd, stderr)
-		dir := agentCommandDir(cityPath, &a, cfg.Rigs)
 		env, err := controllerQueryRuntimeEnv(cityPath, cfg, &a)
 		if err != nil {
 			fmt.Fprintf(stderr, "on_boot %s env: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort stderr
 			continue
 		}
-		// Stagger before every hook except the first one that actually
-		// runs, so a single-agent city pays no boot-latency penalty.
-		if ranOne && stagger > 0 {
-			onBootStaggerSleep(stagger)
-		}
-		ranOne = true
-		out, err := runner(cmd, dir, env)
-		if err != nil {
-			fmt.Fprintf(stderr, "on_boot %s: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort stderr
-		}
-		// Surface only the DEFAULT hook's gc-recovery diagnostic — a bd release
-		// the loop could not complete, which exits 0 (so err is nil and the
-		// diagnostic rides stdout). A user on_boot override is passed through
-		// verbatim and carries no marker, so its arbitrary stdout is left alone.
-		if strings.Contains(out, config.RecoveryHookMarker) {
-			fmt.Fprintf(stderr, "on_boot %s: %s\n", a.QualifiedName(), strings.TrimSpace(out)) //nolint:errcheck // best-effort stderr
-		}
+		hooks = append(hooks, poolOnBootHook{
+			agent:   a.QualifiedName(),
+			command: cmd,
+			dir:     agentCommandDir(cityPath, &a, cfg.Rigs),
+			env:     env,
+		})
 	}
+	return hooks
+}
+
+// runPoolOnBootHooks runs the planned hooks concurrently, bounded by
+// poolOnBootConcurrency, and returns only once every one of them has finished.
+//
+// Each hook's log lines are buffered and written in a single call, so an
+// agent's failure and its recovery diagnostic stay together instead of
+// interleaving with another agent's.
+func runPoolOnBootHooks(hooks []poolOnBootHook, runner ScaleCheckRunner, stderr io.Writer) {
+	if len(hooks) == 0 {
+		return
+	}
+	var logMu sync.Mutex
+	emit := func(block []byte) {
+		if len(block) == 0 {
+			return
+		}
+		logMu.Lock()
+		defer logMu.Unlock()
+		stderr.Write(block) //nolint:errcheck // best-effort stderr
+	}
+
+	sem := make(chan struct{}, poolOnBootConcurrency)
+	var wg sync.WaitGroup
+	for _, hook := range hooks {
+		wg.Add(1)
+		go func(hook poolOnBootHook) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			// Registered last so it runs FIRST on the way out: the panic is
+			// recovered and folded into this hook's block before the slot is
+			// released and before wg.Done. A panic escaping here would take the
+			// whole supervisor down — every city, not just this one — because a
+			// goroutine has nothing above it to recover. Serially these hooks ran
+			// under the per-city recover in startCityWorkers, so containing them
+			// is preserving that, not adding to it. on_boot is best-effort
+			// recovery work, so a panicking hook is logged and skipped exactly
+			// like a failing one.
+			var block bytes.Buffer
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Fprintf(&block, "on_boot %s: hook panicked: %v\n", hook.agent, r) //nolint:errcheck // bytes.Buffer
+				}
+				emit(block.Bytes())
+			}()
+
+			out, err := runner(hook.command, hook.dir, hook.env)
+			if err != nil {
+				fmt.Fprintf(&block, "on_boot %s: %v\n", hook.agent, err) //nolint:errcheck // bytes.Buffer
+			}
+			// Surface only the DEFAULT hook's gc-recovery diagnostic — a bd release
+			// the loop could not complete, which exits 0 (so err is nil and the
+			// diagnostic rides stdout). A user on_boot override is passed through
+			// verbatim and carries no marker, so its arbitrary stdout is left alone.
+			if strings.Contains(out, config.RecoveryHookMarker) {
+				fmt.Fprintf(&block, "on_boot %s: %s\n", hook.agent, strings.TrimSpace(out)) //nolint:errcheck // bytes.Buffer
+			}
+		}(hook)
+	}
+	wg.Wait()
 }
 
 // discoverPoolInstances returns qualified runtime identities for a pool-shaped
