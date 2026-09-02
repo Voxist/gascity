@@ -949,6 +949,7 @@ func TestCIPreflightFansInDirectlyWithoutWaitingForHistoricalCheck(t *testing.T)
 		"runner-policy",
 		"changes",
 		"preflight-static",
+		"preflight-guards",
 		"preflight-acceptance",
 		"preflight-generated",
 		"contract-acceptance-previous",

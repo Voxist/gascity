@@ -41,7 +41,7 @@
 #
 # REQUIRED / BLOCKING as of the Phase-0 promotion (feature-flag ADR Resolved
 # decision 1; operator-authorized 2026-07-05). The baseline was verified clean on
-# origin/main before the flip. It runs as a blocking step in preflight-static — a
+# origin/main before the flip. It runs as a blocking step in preflight-guards — a
 # violation fails the check and blocks the merge.
 set -uo pipefail # intentionally NOT -e: run every check and aggregate.
 

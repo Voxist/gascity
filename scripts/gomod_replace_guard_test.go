@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // TestCheckGomodReplaceGuard verifies the check-gomod-replace script:
@@ -267,16 +269,40 @@ func TestCheckGomodReplaceGuardWiredIntoMakefile(t *testing.T) {
 	}
 }
 
-// TestCheckGomodReplaceGuardWiredIntoCI verifies that the guard is wired
-// into the preflight-static CI job so every PR is checked.
+// TestCheckGomodReplaceGuardWiredIntoCI verifies that the guard runs as a step
+// of the preflight-guards CI job, so every PR is checked.
+//
+// This parses the workflow rather than substring-matching the file: the old
+// whole-file strings.Contains passed as long as the name appeared ANYWHERE —
+// including in a comment, with the step deleted — and could not tell which job
+// ran it, so it stayed green through the job split that moved the step
+// (ga-dejjh).
 func TestCheckGomodReplaceGuardWiredIntoCI(t *testing.T) {
 	repoRoot := repoRoot(t)
 
-	workflow, err := os.ReadFile(filepath.Join(repoRoot, ".github", "workflows", "ci.yml"))
+	raw, err := os.ReadFile(filepath.Join(repoRoot, ".github", "workflows", "ci.yml"))
 	if err != nil {
 		t.Fatalf("read ci.yml: %v", err)
 	}
-	if !strings.Contains(string(workflow), "check-gomod-replace") {
-		t.Error("ci.yml preflight-static job is missing the check-gomod-replace step")
+	var workflow struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Run string `yaml:"run"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
 	}
+	if err := yaml.Unmarshal(raw, &workflow); err != nil {
+		t.Fatalf("parse ci.yml: %v", err)
+	}
+	const job = "preflight-guards"
+	steps, ok := workflow.Jobs[job]
+	if !ok {
+		t.Fatalf("ci.yml has no %s job", job)
+	}
+	for _, step := range steps.Steps {
+		if strings.Contains(step.Run, "check-gomod-replace") {
+			return
+		}
+	}
+	t.Errorf("ci.yml %s job is missing the check-gomod-replace step", job)
 }

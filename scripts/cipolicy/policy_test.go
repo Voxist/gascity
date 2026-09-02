@@ -632,8 +632,8 @@ func TestLintDoesNotRunBehindTheBoundaryGuards(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, run := range []string{"make lint", "make lint-affected", "make fmt-check", "make vet"} {
-		if findStep(guardSteps, "run", run) >= 0 {
+	for _, run := range lintRunSteps {
+		if countSteps(guardSteps, "run", run) > 0 {
 			t.Errorf("preflight-guards runs %q; the lint work belongs in preflight-static so it does not queue behind the guards", run)
 		}
 	}
@@ -646,8 +646,8 @@ func TestLintDoesNotRunBehindTheBoundaryGuards(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, run := range []string{"make check-gomod-replace", "make check-core-boundary", "make test-native-doltlite-beads"} {
-		if findStep(staticSteps, "run", run) >= 0 {
+	for _, run := range guardRunSteps {
+		if countSteps(staticSteps, "run", run) > 0 {
 			t.Errorf("preflight-static runs %q; the guards belong in preflight-guards so lint is not serialized behind them", run)
 		}
 	}
@@ -675,4 +675,40 @@ func TestLintDoesNotRunBehindTheBoundaryGuards(t *testing.T) {
 			}
 		}
 	}
+}
+
+// lintRunSteps and guardRunSteps are the COMPLETE command sets each job owns.
+// A partial list lets a partial re-merge through: an edit that moved only
+// `make fmt-check-changed` back into the guards job would re-serialize that
+// work while a list naming just `make fmt-check` stayed green.
+var (
+	lintRunSteps = []string{
+		"make lint", "make lint-affected",
+		"make fmt-check", "make fmt-check-changed",
+		"make vet", "make check-docs",
+	}
+	guardRunSteps = []string{
+		"make test-ci-policy",
+		"make check-gomod-replace",
+		"make check-native-dependency-surface",
+		"make check-eventexport-isolation",
+		"make check-core-boundary",
+		"make test-native-doltlite-beads",
+	}
+)
+
+// countSteps counts steps whose field equals value. findStep cannot be used
+// for an ABSENCE assertion: it returns -1 both when a step is missing and when
+// it appears more than once (its ambiguity guard), so `findStep(...) >= 0`
+// reads a DUPLICATED step as absent. This workflow already runs the same
+// command twice under the scope == 'changed' / != 'changed' pair, so that
+// shape is reachable here, not hypothetical.
+func countSteps(steps []map[string]any, field, value string) int {
+	n := 0
+	for _, step := range steps {
+		if step[field] == value {
+			n++
+		}
+	}
+	return n
 }
