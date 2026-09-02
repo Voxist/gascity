@@ -3,6 +3,7 @@
 package beads
 
 import (
+	"context"
 	"sort"
 	"strings"
 )
@@ -31,7 +32,10 @@ func (s *DoltliteReadStore) ReadyGraphOnly(query ...ReadyQuery) ([]Bead, error) 
 		q.Limit = rq.Limit
 	}
 	depWhere, depArgs := doltliteWispDepGate()
-	return s.queryIssuesOrderedInTables(q, []doltliteTableSet{doltliteWispTables}, depWhere, depArgs, q.Limit, "ORDER BY COALESCE(i.priority, 2) ASC, i.created_at ASC, i.id ASC")
+	// context.Background(): ReadyGraphOnly implements the ctx-less
+	// GraphOnlyReadyStore interface, the same shape the sibling Ready() takes
+	// on the ctx-carrying query helper.
+	return s.queryIssuesOrderedInTables(context.Background(), q, []doltliteTableSet{doltliteWispTables}, depWhere, depArgs, q.Limit, "ORDER BY COALESCE(i.priority, 2) ASC, i.created_at ASC, i.id ASC")
 }
 
 // doltliteWispDepGate returns the blocking-dependency predicate for the wisp
