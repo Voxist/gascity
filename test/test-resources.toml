@@ -19,7 +19,11 @@ resource = "subprocess"
 # one file. The gate's audible refusal is only observable by executing the
 # generated work_query script in a real shell; asserting on the string would
 # pin the script's text rather than its behavior.
-baseline_calls = 560
+# 560 -> 561 (2026-09-02, ga-dmvyf bridge bd CGO fix): test/integration's
+# bridge builder verifies the built (and cached) bd's build shape through
+# `go version -m` — the only way to read a binary's CGO_ENABLED — so a cached
+# non-CGO bd is rebuilt instead of reused forever.
+baseline_calls = 561
 baseline_files = 169
 reported_calls = 495
 reported_files = 135

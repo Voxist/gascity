@@ -465,7 +465,12 @@ func buildBridgeIntegrationBDBinary() (string, bool, error) {
 	}
 	binPath := filepath.Join(cacheRoot, "gc-integration-bd", ref, "bd")
 	if info, statErr := os.Stat(binPath); statErr == nil && info.Mode()&0o111 != 0 {
-		return binPath, true, nil
+		// The cache is keyed by ref only, so a binary built before the CGO
+		// requirement below would be reused forever; verify the build shape,
+		// not just presence.
+		if bdBinaryIsCGO(binPath) {
+			return binPath, true, nil
+		}
 	}
 	srcDir, err := os.MkdirTemp("", "bridge-bd-src")
 	if err != nil {
@@ -492,13 +497,39 @@ func buildBridgeIntegrationBDBinary() (string, bool, error) {
 	if err := os.MkdirAll(filepath.Dir(binPath), 0o755); err != nil {
 		return "", true, fmt.Errorf("create bridge bd cache dir: %w", err)
 	}
+	// CGO_ENABLED=1 + gms_pure_go is the embedded-capable bd build (per beads
+	// INSTALLING.md and the module-path builder above): `bd init` defaults to
+	// embedded Dolt, which a CGO_ENABLED=0 binary refuses at runtime — the
+	// static CGO_ENABLED=0 shape belongs to contrib/k8s/Dockerfile.agent, whose
+	// containers use the proxied server and never open an embedded store. The
+	// result is asserted so a wrong build fails here, at the harness, instead
+	// of inside every test that runs `bd init`.
 	build := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", binPath, "./cmd/bd")
 	build.Dir = srcDir
-	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	build.Env = append(os.Environ(), "CGO_ENABLED=1")
 	if out, buildErr := build.CombinedOutput(); buildErr != nil {
 		return "", true, fmt.Errorf("build bridge bd from %s@%s: %w\n%s", repo, ref, buildErr, out)
 	}
+	if !bdBinaryIsCGO(binPath) {
+		return "", true, fmt.Errorf("bridge bd built from %s@%s is not a CGO build; embedded Dolt would be unavailable to every test that runs bd init", repo, ref)
+	}
 	return binPath, true, nil
+}
+
+// bdBinaryIsCGO reports whether the Go binary at path was built with cgo, read
+// from its embedded build info (`go version -m`).
+func bdBinaryIsCGO(path string) bool {
+	out, err := exec.Command("go", "version", "-m", path).Output()
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "build" && fields[1] == "CGO_ENABLED=1" {
+			return true
+		}
+	}
+	return false
 }
 
 // pinnedBdStoreCommandRunner keeps direct BdStore integration tests on the
