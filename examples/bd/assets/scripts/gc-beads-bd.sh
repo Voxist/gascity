@@ -717,6 +717,15 @@ bd_runtime_schema_state() {
     return 2
 }
 
+# server_sql_scalar runs a single-column, single-row query and prints the
+# cell, whatever dolt prints around the table (the old-version notice goes to
+# stdout on some builds, so "line 4 of the output" is not the value).
+server_sql_scalar() {
+    local out
+    out=$(server_sql "$1" 2>/dev/null) || return 1
+    printf '%s\n' "$out" | grep -E '^\| ' | grep -vE '^\| *[A-Za-z_(*)]+ *\|$' | tail -1 | sed -E 's/^\| *//; s/ *\|$//'
+}
+
 # bd_bootstrap_interrupted reports whether the pinned database looks like a
 # bootstrap that died between a migration's DDL and its per-step commit:
 # uncommitted table changes in the working set and no user data at all
@@ -735,10 +744,10 @@ bd_runtime_schema_state() {
 bd_bootstrap_interrupted() {
     local db="$1" dirty issues
     valid_sql_name "$db" || return 1
-    dirty=$(server_sql "USE \`$db\`; SELECT COUNT(*) FROM dolt_status" 2>/dev/null | sed -n '4p' | tr -dc '0-9')
+    dirty=$(server_sql_scalar "USE \`$db\`; SELECT COUNT(*) FROM dolt_status" | tr -dc '0-9')
     [ -n "$dirty" ] && [ "$dirty" -gt 0 ] || return 1
     if server_sql "USE \`$db\`; SELECT 1 FROM issues LIMIT 1" >/dev/null 2>&1; then
-        issues=$(server_sql "USE \`$db\`; SELECT COUNT(*) FROM issues" 2>/dev/null | sed -n '4p' | tr -dc '0-9')
+        issues=$(server_sql_scalar "USE \`$db\`; SELECT COUNT(*) FROM issues" | tr -dc '0-9')
         [ "${issues:-1}" = "0" ] || return 1
     fi
     return 0
@@ -2780,8 +2789,11 @@ dump_bd_init_forensics() {
     if [ -n "$db" ] && valid_sql_name "$db"; then
         echo "  dolt_status:" >&2
         server_sql "USE \`$db\`; SELECT table_name, staged, status FROM dolt_status" 2>&1 | sed 's/^/    /' >&2
-        echo "  dolt_log (last 3):" >&2
-        server_sql "USE \`$db\`; SELECT commit_hash, committer, message FROM dolt_log LIMIT 3" 2>&1 | sed 's/^/    /' >&2
+        echo "  dolt_log (newest 3 of $(server_sql_scalar "USE \`$db\`; SELECT COUNT(*) FROM dolt_log" | tr -dc '0-9')):" >&2
+        server_sql "USE \`$db\`; SELECT commit_hash, committer, date, message FROM dolt_log ORDER BY date DESC LIMIT 3" 2>&1 | sed 's/^/    /' >&2
+        echo "  tables:" >&2
+        server_sql "USE \`$db\`; SHOW TABLES" 2>&1 | sed 's/^/    /' >&2
+        echo "  issues: $(server_sql_scalar "USE \`$db\`; SELECT COUNT(*) FROM issues" 2>/dev/null || echo 'no table')  interrupted-bootstrap signature: $(bd_bootstrap_interrupted "$db" && echo yes || echo no)" >&2
     fi
 }
 
