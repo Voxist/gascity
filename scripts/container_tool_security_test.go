@@ -10,11 +10,14 @@ import (
 
 func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 	const (
-		ghVersion                 = "2.96.0"
-		ghSourceRef               = "b300f2ec7ec9dc9addc39b2ad88c54097ded7ca0"
-		doltSourceRef             = "781cbb730221ea7df4fc7995255bb336df9c3864"
-		grpcVersion               = "1.82.1"
-		xtextVersion              = "0.39.0"
+		ghVersion     = "2.96.0"
+		ghSourceRef   = "b300f2ec7ec9dc9addc39b2ad88c54097ded7ca0"
+		doltSourceRef = "781cbb730221ea7df4fc7995255bb336df9c3864"
+		grpcVersion   = "1.83.1"
+		xtextVersion  = "0.41.0"
+		// Floors for the gh and dolt builds; see Dockerfile.base.
+		xcryptoVersion            = "0.55.0"
+		xmodVersion               = "0.40.0"
 		ghSourceSHA256            = "a0c18c98c73f7333f73e19b3a0bf5bd18673f3dc226193ab6478b3ea1ea18f03"
 		doltSourceSHA256          = "0b0c9bce8baef26baa7e0e5825cd2d7d6101daf6fc9673f38dac9670afb66847"
 		doltToolchainRelease      = "20260611_0.0.5_trixie"
@@ -32,6 +35,8 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 		"ARG DOLT_SOURCE_SHA256=" + doltSourceSHA256,
 		"ARG GRPC_VERSION=" + grpcVersion,
 		"ARG XTEXT_VERSION=" + xtextVersion,
+		"ARG XCRYPTO_VERSION=" + xcryptoVersion,
+		"ARG XMOD_VERSION=" + xmodVersion,
 		"ARG DOLT_TOOLCHAIN_RELEASE=" + doltToolchainRelease,
 		"ARG DOLT_OPTCROSS_X86_64_SHA256=" + doltOptcrossX8664SHA256,
 		"ARG DOLT_OPTCROSS_AARCH64_SHA256=" + doltOptcrossAarch64SHA256,
@@ -51,6 +56,14 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 	}
 	if got := strings.Count(dockerfile, `go get "google.golang.org/grpc@v${GRPC_VERSION}"`); got != 2 {
 		t.Errorf("contrib/k8s/Dockerfile.base applies the grpc override %d times, want exactly 2 (gh and Dolt)", got)
+	}
+	for _, override := range []string{
+		`go get "golang.org/x/crypto@v${XCRYPTO_VERSION}"`,
+		`go get "golang.org/x/mod@v${XMOD_VERSION}"`,
+	} {
+		if got := strings.Count(dockerfile, override); got != 2 {
+			t.Errorf("contrib/k8s/Dockerfile.base applies %s %d times, want exactly 2 (gh and dolt)", override, got)
+		}
 	}
 	if got := strings.Count(dockerfile, `go get "golang.org/x/text@v${XTEXT_VERSION}"`); got != 2 {
 		t.Errorf("contrib/k8s/Dockerfile.base applies the x/text override %d times, want exactly 2 (gh and Dolt)", got)
@@ -72,26 +85,37 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	const (
 		// FORK DIVERGENCE — FORK-FIRST BRIDGE (ga-zzcjs; supersedes the
 		// ADR-0026 C5 upstream bridge). The image builds bd from the
-		// Voxist/beads fork tip (schema 0062 plus fork-only fixes; the
-		// 0054->0062 store migration was rehearsed and cut over
+		// Voxist/beads fork tip (schema 0066 plus fork-only fixes; the
+		// 0062->0066 store migration was rehearsed and cut over
 		// deliberately). go.mod links BD_LIB_REF — the fork tip's newest
 		// upstream ancestor — because fork commits do not resolve on the
 		// module path. These values move together with deps.env and go.mod;
-		// a published release >= 0062 on a module-resolvable repo retires
-		// the bridge (one change: BD_VERSION=tag, drop the refs).
-		// BD_VERSION itself is NOT diverged — the pinned commit declares 1.1.0.
-		bdSourceRef    = "a75c226c97d8ab7c0ae0359fb258e6cfd80bf72b"
-		bdSourceSHA256 = "10f9356ebd047266997d417082b51eb7dc913eff63b4facef918c63ce0e1b4b7"
-		bdBuild        = "a75c226c9"
+		// a published release >= 0066 on a module-resolvable repo retires
+		// the bridge (one change: BD_VERSION=tag, drop the refs). Note the
+		// existing upstream v1.2.2 TAG is not such a release: it sits on a
+		// different lineage at schema 0053.
+		// BD_VERSION itself is NOT diverged — the pinned commit declares 1.2.2.
+		bdSourceRef    = "3e03250ee1675ebcd63ca3f5d1660560947eab7c"
+		bdSourceSHA256 = "587ad18b765d90e75b64ca4bb57c12520befd8bece96545d48e98add26bc8f0f"
+		bdBuild        = "3e03250ee"
 		bdBranch       = "HEAD"
-		grpcVersion    = "1.82.1"
-		xtextVersion   = "0.39.0"
+		grpcVersion    = "1.83.1"
+		// Floors, not exact pins: each must be >= what the pinned source
+		// resolves, because pinning BELOW that is a silent downgrade
+		// (ga-0emb8). x/text is 0.41.0 in both images now: the x/crypto floor
+		// drags x/text there in bd's, gh's and dolt's module graphs alike.
+		xtextVersion = "0.41.0"
+		// CVE-2026-56854 (CRITICAL, fixed 0.55.0) and CVE-2026-56864 (HIGH,
+		// fixed 0.40.0). The pinned source declares x/crypto 0.54.0 and x/mod
+		// 0.37.0, and the image scan gates HIGH+CRITICAL with --exit-code 1.
+		xcryptoVersion = "0.55.0"
+		xmodVersion    = "0.40.0"
 	)
 
 	root := repoRoot(t)
 	bdVersion := readDotenv(t, root+"/deps.env")["BD_VERSION"]
-	if bdVersion != "v1.1.0" {
-		t.Fatalf("deps.env BD_VERSION = %q, want v1.1.0 for the pinned source build", bdVersion)
+	if bdVersion != "v1.2.2" {
+		t.Fatalf("deps.env BD_VERSION = %q, want v1.2.2 for the pinned source build", bdVersion)
 	}
 
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")
@@ -103,12 +127,18 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		"ARG BD_BRANCH=" + bdBranch,
 		"ARG GRPC_VERSION=" + grpcVersion,
 		"ARG XTEXT_VERSION=" + xtextVersion,
+		"ARG XCRYPTO_VERSION=" + xcryptoVersion,
+		"ARG XMOD_VERSION=" + xmodVersion,
 		"ARG BD_REPO=Voxist/beads",
 		`https://github.com/${BD_REPO}/archive/${BD_SOURCE_REF}.tar.gz`,
 		`echo "${BD_SOURCE_SHA256}  /tmp/bd-source.tar.gz" | sha256sum --check --strict`,
 		`grep -Fq "Version = \"${bd_version}\"" cmd/bd/version.go`,
 		`go get "google.golang.org/grpc@v${GRPC_VERSION}"`,
 		`go get "golang.org/x/text@v${XTEXT_VERSION}"`,
+		`go get "golang.org/x/crypto@v${XCRYPTO_VERSION}"`,
+		`go get "golang.org/x/mod@v${XMOD_VERSION}"`,
+		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/crypto v${XCRYPTO_VERSION} "`,
+		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/mod v${XMOD_VERSION} "`,
 		`CGO_ENABLED=1 go build`,
 		`-tags="gms_pure_go"`,
 		`-X main.Version=${bd_version}`,
@@ -129,6 +159,14 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	if got := strings.Count(dockerfile, `go get "golang.org/x/text@v${XTEXT_VERSION}"`); got != 1 {
 		t.Errorf("contrib/k8s/Dockerfile.agent applies the bd x/text override %d times, want exactly 1", got)
 	}
+	for _, override := range []string{
+		`go get "golang.org/x/crypto@v${XCRYPTO_VERSION}"`,
+		`go get "golang.org/x/mod@v${XMOD_VERSION}"`,
+	} {
+		if got := strings.Count(dockerfile, override); got != 1 {
+			t.Errorf("contrib/k8s/Dockerfile.agent applies %s %d times, want exactly 1", override, got)
+		}
+	}
 	if strings.Contains(dockerfile, "COPY bd /usr/local/bin/bd") {
 		t.Error("contrib/k8s/Dockerfile.agent still copies the vulnerable prebuilt bd binary")
 	}
@@ -145,8 +183,35 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	}
 	// bd resolves x/text through its own module graph, not gc's, so the gc binary
 	// and the bd binary each need their own floor. This is the gc side.
-	if got := goModVersion(t, goMod, "golang.org/x/text"); !semverAtLeast(got, parseModuleSemver(t, "v"+xtextVersion)) {
-		t.Errorf("go.mod pins golang.org/x/text %v, want >= v%s so the gc binary clears CVE-2026-56852", got, xtextVersion)
+	//
+	// The FLOOR is the security requirement; the image ARGs above are the
+	// versions bd's graph actually resolves to, and those must be >= the floor,
+	// not equal to it (the Dockerfile asserts its ARGs by exact `go version -m`
+	// match, so an ARG has to track the resolved value). Conflating the two is
+	// how the x/text override silently became a downgrade: see ga-0emb8.
+	const (
+		xtextFloor   = "0.40.0" // CVE-2026-56852
+		xcryptoFloor = "0.55.0" // CVE-2026-56854 (CRITICAL)
+		xmodFloor    = "0.40.0" // CVE-2026-56864 (HIGH)
+	)
+	for _, f := range []struct{ module, floor, cve string }{
+		{"golang.org/x/text", xtextFloor, "CVE-2026-56852"},
+		{"golang.org/x/crypto", xcryptoFloor, "CVE-2026-56854"},
+		{"golang.org/x/mod", xmodFloor, "CVE-2026-56864"},
+	} {
+		if got := goModVersion(t, goMod, f.module); !semverAtLeast(got, parseModuleSemver(t, "v"+f.floor)) {
+			t.Errorf("go.mod pins %s %v, want >= v%s so the gc binary clears %s", f.module, got, f.floor, f.cve)
+		}
+	}
+	// And the image ARGs must not sit BELOW the same floors.
+	for _, f := range []struct{ name, arg, floor string }{
+		{"XTEXT_VERSION", xtextVersion, xtextFloor},
+		{"XCRYPTO_VERSION", xcryptoVersion, xcryptoFloor},
+		{"XMOD_VERSION", xmodVersion, xmodFloor},
+	} {
+		if !semverAtLeast(parseModuleSemver(t, "v"+f.arg), parseModuleSemver(t, "v"+f.floor)) {
+			t.Errorf("Dockerfile.agent %s=%s is below the security floor v%s — an override that pins below what the source resolves is a downgrade", f.name, f.arg, f.floor)
+		}
 	}
 
 	workflow := readFile(t, root, ".github/workflows/container-scan.yml")
@@ -236,6 +301,46 @@ func TestRebuiltToolsAssertPatchedXTextArtifact(t *testing.T) {
 	want := `go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/text v${XTEXT_VERSION} "`
 	if !strings.Contains(agent, want) {
 		t.Errorf("contrib/k8s/Dockerfile.agent must assert /out/bd embeds patched x/text; missing %q", want)
+	}
+}
+
+// TestRebuiltToolsAssertPatchedXCryptoAndXModArtifacts mirrors the grpc and
+// x/text artifact guards for golang.org/x/crypto and golang.org/x/mod. The
+// three rebuilt CLIs each `go get` these floors, and the header comment in
+// Dockerfile.base says the post-build `go version -m` check is what turns a
+// silently-not-applied floor into a build failure (ga-0emb8). Until this
+// test existed only bd carried the two assertions; gh and dolt applied the
+// floors with no check, so a downgrade there shipped with a green build.
+func TestRebuiltToolsAssertPatchedXCryptoAndXModArtifacts(t *testing.T) {
+	root := repoRoot(t)
+
+	// dolt links x/crypto but not x/mod (go version -m lists no x/mod line
+	// for it), so its x/mod check is an absence assertion; gh links both.
+	for _, mod := range []struct {
+		name, arg string
+		bins      []string
+	}{
+		{"x/crypto", "XCRYPTO_VERSION", []string{"/out/gh", "/out/dolt"}},
+		{"x/mod", "XMOD_VERSION", []string{"/out/gh"}},
+	} {
+		base := readFile(t, root, "contrib/k8s/Dockerfile.base")
+		for _, bin := range mod.bins {
+			want := `go version -m ` + bin + ` | tr '\t' ' ' | grep -Fq "dep golang.org/` + mod.name + ` v${` + mod.arg + `} "`
+			if !strings.Contains(base, want) {
+				t.Errorf("contrib/k8s/Dockerfile.base must assert %s embeds patched %s; missing %q", bin, mod.name, want)
+			}
+		}
+		if mod.name == "x/mod" {
+			want := `! go version -m /out/dolt | tr '\t' ' ' | grep -q "dep golang.org/x/mod "`
+			if !strings.Contains(base, want) {
+				t.Errorf("contrib/k8s/Dockerfile.base must assert /out/dolt does not link x/mod (it never has; if it starts to, switch to the exact-version form); missing %q", want)
+			}
+		}
+		agent := readFile(t, root, "contrib/k8s/Dockerfile.agent")
+		want := `go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/` + mod.name + ` v${` + mod.arg + `} "`
+		if !strings.Contains(agent, want) {
+			t.Errorf("contrib/k8s/Dockerfile.agent must assert /out/bd embeds patched %s; missing %q", mod.name, want)
+		}
 	}
 }
 

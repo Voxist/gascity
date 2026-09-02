@@ -17,30 +17,48 @@
 # Local build-layer image produced by Dockerfile.base, not a registry pull.
 ARG BASE_IMAGE=gc-agent-base:latest
 
-FROM golang:1.26.6-bookworm@sha256:433f9dc4f8ea3a1ce4e28f9f15d0f7c056b10475307f886d6f1ac1ccc4abd976 AS bd-builder
+FROM golang:1.26.8-bookworm@sha256:9fdc884aacc3bec89b20ffc69f4bb369c78210e3e4f600387b5128b12c199f81 AS bd-builder
 
-# TIME-BOXED BRIDGE (ADR-0026 C5, vp-kpoi) — keep in lockstep with deps.env.
-# BD_VERSION is the version string the pinned source declares; BD_SOURCE_REF is
-# the commit built from. Upstream's ref (8e4e59d39) tops out at schema migration
-# 0053, but gc's linked beads library carries 0054, so a 0053 bd in this image
-# would skew from the linked lib. Repointed at the same commit go.mod pins.
-# Revert all three to upstream's values once a release carries 0054.
-ARG BD_VERSION=v1.1.0
+# FORK-FIRST BRIDGE (supersedes the ADR-0026 C5 upstream bridge; ga-zzcjs) —
+# keep in lockstep with deps.env. BD_VERSION is the version string the pinned
+# source declares; BD_SOURCE_REF is the commit built from. No published
+# upstream release carries schema 0066 yet, so this image builds bd from the
+# Voxist/beads fork tip, whose newest upstream ancestor (BD_LIB_REF
+# d530cddfa64b) is the commit gc's go.mod links — same schema, no skew.
+# Retire the bridge once a release >= 0066 exists on a module-resolvable repo:
+# set BD_VERSION to that tag and drop BD_SOURCE_REF/BD_SOURCE_SHA256.
+ARG BD_VERSION=v1.2.2
 ARG BD_REPO=Voxist/beads
-ARG BD_SOURCE_REF=a75c226c97d8ab7c0ae0359fb258e6cfd80bf72b
-ARG BD_SOURCE_SHA256=10f9356ebd047266997d417082b51eb7dc913eff63b4facef918c63ce0e1b4b7
-ARG BD_BUILD=a75c226c9
+ARG BD_SOURCE_REF=3e03250ee1675ebcd63ca3f5d1660560947eab7c
+ARG BD_SOURCE_SHA256=587ad18b765d90e75b64ca4bb57c12520befd8bece96545d48e98add26bc8f0f
+ARG BD_BUILD=3e03250ee
 ARG BD_BRANCH=HEAD
-ARG GRPC_VERSION=1.82.1
-ARG XTEXT_VERSION=0.39.0
+# 1.83.1, not 1.83.0: CVE-2026-84304 (HIGH) is in 1.83.0 and fixed in 1.83.1.
+ARG GRPC_VERSION=1.83.1
+# x/text 0.41.0, not 0.40.0: the x/crypto floor below drags x/text to 0.41.0,
+# and pinning BELOW what the module graph then selects is a silent downgrade
+# (ga-0emb8). Every override here must be >= what the pinned source resolves.
+ARG XTEXT_VERSION=0.41.0
+# The pinned beads source declares x/crypto 0.54.0 (CVE-2026-56854, CRITICAL,
+# fixed 0.55.0) and x/mod 0.37.0 (CVE-2026-56864, HIGH, fixed 0.40.0). The
+# image scan gates HIGH+CRITICAL with --exit-code 1, so both floors are needed
+# for a green scan; verified against the exact pinned source: all upgrades, no
+# downgrades, bd builds.
+ARG XCRYPTO_VERSION=0.55.0
+ARG XMOD_VERSION=0.40.0
 
-# The published bd 1.1.0 binary embeds vulnerable grpc-go 1.80.0 and
-# golang.org/x/text 0.36.0 (CVE-2026-56852; the require line reads 0.35.0, MVS
-# resolves 0.36.0). bd resolves x/text through the beads module graph, not this
-# repo's, so the gc go.mod bump does not reach it and the override below is
-# required. Rebuild the exact released source with its production
-# CGO/pure-Go-regex configuration and release identity, changing only the
-# patched dependency versions.
+# bd resolves grpc and x/text through the beads module graph, not this repo's,
+# so gc's own go.mod bumps do not reach this image and the overrides below are
+# required. Both must be >= what the pinned source already declares — pinning
+# BELOW it silently downgrades the shipped binary (and drags x/net and x/crypto
+# back with it), which neither post-build assertion would catch. At
+# BD_SOURCE_REF 3e03250ee the source resolves grpc 1.83.0 and x/text 0.40.0;
+# the floors below sit above both (grpc 1.83.1 for CVE-2026-84304, and x/text
+# 0.41.0 because the x/crypto floor drags it there).
+#
+# Rebuild the pinned fork source with its production CGO/pure-Go-regex
+# configuration and release identity, changing only the patched dependency
+# versions. (Pinned fork commit, not a published release.)
 RUN mkdir -p /src/bd /out \
     && curl -fsSL --retry 3 \
        "https://github.com/${BD_REPO}/archive/${BD_SOURCE_REF}.tar.gz" \
@@ -54,6 +72,8 @@ RUN bd_version="${BD_VERSION#v}" \
     && grep -Fq "Version = \"${bd_version}\"" cmd/bd/version.go \
     && go get "google.golang.org/grpc@v${GRPC_VERSION}" \
     && go get "golang.org/x/text@v${XTEXT_VERSION}" \
+    && go get "golang.org/x/crypto@v${XCRYPTO_VERSION}" \
+    && go get "golang.org/x/mod@v${XMOD_VERSION}" \
     && CGO_ENABLED=1 go build \
        -tags="gms_pure_go" \
        -trimpath \
@@ -62,7 +82,9 @@ RUN bd_version="${BD_VERSION#v}" \
        ./cmd/bd \
     && /out/bd --version | grep -Fq "bd version ${bd_version} (${BD_BUILD})" \
     && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep google.golang.org/grpc v${GRPC_VERSION} " \
-    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/text v${XTEXT_VERSION} "
+    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/text v${XTEXT_VERSION} " \
+    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/crypto v${XCRYPTO_VERSION} " \
+    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/mod v${XMOD_VERSION} "
 
 FROM ${BASE_IMAGE}
 
