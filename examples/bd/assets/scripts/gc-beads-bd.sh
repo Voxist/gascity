@@ -2766,16 +2766,33 @@ ensure_current_era_version_witness() {
     [ -e "$witness" ] && return 0
     [ -d "$dir/.beads" ] || return 0
 
-    # Stamp only on a DEFINITE "no bd schema" answer. A populated legacy
-    # workspace has bd tables, so a present schema leaves the guard to make
-    # its own decision; and an unanswered probe (server not responding,
-    # database not selectable) proves nothing either way, so it must not
-    # stamp past the guard on a workspace whose shape was never established.
+    # Stamp only on a DEFINITE answer, never on an unanswered probe (server
+    # not responding, database not selectable): that proves nothing either
+    # way and must not stamp past the guard on a workspace whose shape was
+    # never established.
+    #   1 (no bd schema): the database is empty or brand new; bd init will
+    #     create the current-era schema, so the witness is true by
+    #     construction.
+    #   0 (schema present): bd writes the witness only on a successful init,
+    #     so a NEW scope directory pointed at an existing database (a rig
+    #     re-clone, or a second scope on a shared server) never gets one and
+    #     bd's server-branch guard refuses it as "legacy Dolt server
+    #     workspace" forever. schema_migrations is a >= 1.0 table (pre-1.0
+    #     stores tracked versions in config), so its presence is positive
+    #     evidence of a current-era store, and the witness may be stamped.
+    #     Without it the schema is present but its era unknown: leave the
+    #     guard to decide.
     local schema_state=0
     bd_runtime_schema_state "$dolt_database" 2>/dev/null || schema_state=$?
-    if [ "$schema_state" -ne 1 ]; then
-        return 0
-    fi
+    case "$schema_state" in
+        1) ;;
+        0)
+            if ! server_sql "USE \`$dolt_database\`; SELECT 1 FROM schema_migrations LIMIT 1" >/dev/null 2>&1; then
+                return 0
+            fi
+            ;;
+        *) return 0 ;;
+    esac
 
     # [0-9v]: bd's own writeLocalVersion and classifyVersionWitness accept a
     # v-prefixed value (release tooling can stamp `v1.2.2`), so a digit-only
@@ -3144,6 +3161,10 @@ op_init() {
                 if bd_bootstrap_interrupted "$dolt_database"; then
                     heal_interrupted_bootstrap "$dolt_database"
                 fi
+                # Witness before the first bd command (see the fresh-scope
+                # path below): a scope whose metadata was written by hand or
+                # by an older gc may have none.
+                ensure_current_era_version_witness "$dir" "$dolt_database"
                 # A config table proves a bootstrap started, not that it
                 # finished. Complete any pending migrations before reporting
                 # the scope ready: a healed database, or one whose bootstrap
@@ -3203,12 +3224,36 @@ op_init() {
     # database to initialize. Without `--database`, bd can seed beads_<prefix>
     # and leave the pinned database schema-less.
     ensure_current_era_scope_metadata "$dir" "$prefix" "$dolt_database"
-    if [ "$GC_SCOPE_METADATA_PRESEEDED" = "1" ] && [ -z "$bd_init_force" ] && ! probe_schema_state_or_die "$dolt_database"; then
+    # A scope with no metadata.json is not proof of a fresh database. The
+    # database can already hold an interrupted bootstrap from an earlier init
+    # of the same scope (CI's template city, killed after migration 0050:
+    # config present, issues/comments/events dirty, no issues), or a complete
+    # schema (a re-cloned rig, a second scope on a shared server), and bd's
+    # plain init refuses the latter as "already initialized". So once the
+    # canonical metadata is in place this path takes the same decision the
+    # metadata-present branch takes: heal an interrupted bootstrap, then
+    # ADOPT a present schema (finish its migrations, normalize, identity) or
+    # FORCE-seed a missing one. Only a database with no bd schema reaches
+    # bd init at all.
+    if bd_bootstrap_interrupted "$dolt_database"; then
+        heal_interrupted_bootstrap "$dolt_database"
+    fi
+    if [ "$GC_SCOPE_METADATA_PRESEEDED" = "1" ] && [ -z "$bd_init_force" ]; then
+        if probe_schema_state_or_die "$dolt_database"; then
+            # Witness BEFORE the first bd command: bd's server-branch guard
+            # refuses a server-mode scope with no .local_version as a legacy
+            # workspace, and `bd migrate schema` is a bd command.
+            ensure_current_era_version_witness "$dir" "$dolt_database"
+            finish_bd_schema_migrations "$dir" "$dolt_database"
+            ensure_beads_dir_permissions "$dir"
+            normalize_scope_after_init "$dir" "$prefix" "$dolt_database"
+            ensure_bd_runtime_custom_types "$dolt_database" "$custom_types"
+            ensure_bd_runtime_issue_prefix "$dolt_database" "$prefix"
+            ensure_project_identity "$dir"
+            exit 0
+        fi
         # We just wrote the metadata bd reads as "initialized"; the database
         # has no bd schema yet. Seed it the way the schema-repair path does.
-        if bd_bootstrap_interrupted "$dolt_database"; then
-            heal_interrupted_bootstrap "$dolt_database"
-        fi
         bd_init_force="--force"
     fi
     ensure_current_era_version_witness "$dir" "$dolt_database"

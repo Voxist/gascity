@@ -314,15 +314,26 @@ func TestRebuiltToolsAssertPatchedXTextArtifact(t *testing.T) {
 func TestRebuiltToolsAssertPatchedXCryptoAndXModArtifacts(t *testing.T) {
 	root := repoRoot(t)
 
-	for _, mod := range []struct{ name, arg string }{
-		{"x/crypto", "XCRYPTO_VERSION"},
-		{"x/mod", "XMOD_VERSION"},
+	// dolt links x/crypto but not x/mod (go version -m lists no x/mod line
+	// for it), so its x/mod check is an absence assertion; gh links both.
+	for _, mod := range []struct {
+		name, arg string
+		bins      []string
+	}{
+		{"x/crypto", "XCRYPTO_VERSION", []string{"/out/gh", "/out/dolt"}},
+		{"x/mod", "XMOD_VERSION", []string{"/out/gh"}},
 	} {
 		base := readFile(t, root, "contrib/k8s/Dockerfile.base")
-		for _, bin := range []string{"/out/gh", "/out/dolt"} {
+		for _, bin := range mod.bins {
 			want := `go version -m ` + bin + ` | tr '\t' ' ' | grep -Fq "dep golang.org/` + mod.name + ` v${` + mod.arg + `} "`
 			if !strings.Contains(base, want) {
 				t.Errorf("contrib/k8s/Dockerfile.base must assert %s embeds patched %s; missing %q", bin, mod.name, want)
+			}
+		}
+		if mod.name == "x/mod" {
+			want := `! go version -m /out/dolt | tr '\t' ' ' | grep -q "dep golang.org/x/mod "`
+			if !strings.Contains(base, want) {
+				t.Errorf("contrib/k8s/Dockerfile.base must assert /out/dolt does not link x/mod (it never has; if it starts to, switch to the exact-version form); missing %q", want)
 			}
 		}
 		agent := readFile(t, root, "contrib/k8s/Dockerfile.agent")

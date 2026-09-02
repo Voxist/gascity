@@ -7995,6 +7995,101 @@ func TestGcBeadsBdInitNeverResetsADatabaseWithIssues(t *testing.T) {
 	}
 }
 
+// TestGcBeadsBdInitAdoptsAnExistingSchemaFromAFreshScope pins the fresh-scope
+// for a scope whose database is already initialized but which carries no
+// version witness: a re-cloned rig, or a second scope directory pointed at
+// a shared server. bd's plain init refuses that database ("already
+// initialized") and bd's server-branch guard refuses any bd command on a
+// witness-less server-mode scope, so the script must stamp the witness first,
+// then finish pending migrations and adopt, and never run bd init. The dolt
+// stub answers every probe as "schema present, schema_migrations present,
+// clean working set".
+func TestGcBeadsBdInitAdoptsAnExistingSchemaFromAFreshScope(t *testing.T) {
+	cityPath := t.TempDir()
+	for _, d := range []string{".gc", ".beads"} {
+		if err := os.MkdirAll(filepath.Join(cityPath, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Canonical server-mode metadata but NO .local_version witness: the
+	// shape gc leaves after normalizing a re-cloned rig (and what the
+	// fresh-scope path produces before its own adopt decision). No gc
+	// helper is on PATH here, so the metadata is written up front.
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	materializeBuiltinPacksForTest(t, cityPath)
+	script := gcBeadsBdScriptPath(cityPath)
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(binDir, "sleep"), "#!/bin/sh\nexit 0\n")
+	bdLog := filepath.Join(t.TempDir(), "bd-args.log")
+	// The stub behaves like bd's server-branch legacy guard: any command
+	// other than `bd version` on a server-mode scope with no .local_version
+	// witness is refused. That is what makes the witness ordering testable.
+	writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
+set -eu
+printf '%%s\n' "$*" >> %q
+case "${1:-}" in
+  version) echo "bd version 1.2.2 (test)"; exit 0 ;;
+esac
+if [ ! -f "${BEADS_DIR:?}/.local_version" ]; then
+  echo "Error: legacy Dolt server workspace detected (stub: no .local_version witness)" >&2
+  exit 1
+fi
+exit 0
+`, bdLog))
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+set -eu
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+case "$query" in
+  *'SELECT COUNT(*) FROM dolt_status'*)
+    printf '+---+\n| c |\n+---+\n| 0 |\n+---+\n'
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`)
+
+	out, err := runGcBeadsBdInitHQ(t, script, cityPath, binDir)
+	if err != nil {
+		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+	}
+	args, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("bd never ran: %v", err)
+	}
+	if strings.Contains(string(args), "init ") {
+		t.Fatalf("a fresh scope over an already-initialized database must adopt it, not run bd init (bd refuses that as \"already initialized\"); bd was invoked with:\n%s", args)
+	}
+	if !strings.Contains(string(args), "migrate schema") {
+		t.Fatalf("adopting an existing schema must finish its pending migrations; bd was invoked with:\n%s", args)
+	}
+	meta, err := os.ReadFile(filepath.Join(cityPath, ".beads", "metadata.json"))
+	if err != nil {
+		t.Fatalf("canonical metadata must be written on adopt: %v", err)
+	}
+	if !strings.Contains(string(meta), `"dolt_mode"`) || !strings.Contains(string(meta), `"server"`) {
+		t.Fatalf("metadata is not canonical server-mode:\n%s", meta)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".beads", ".local_version")); err != nil {
+		t.Fatalf("adopting a current-era schema must stamp the version witness, or bd's server-branch guard refuses the scope: %v", err)
+	}
+}
+
 func TestGcBeadsBdInitDoltliteInitializesDelegatedBdWrites(t *testing.T) {
 	bdPath, err := exec.LookPath("bd")
 	if err != nil {
