@@ -46,15 +46,20 @@ unique_words = $(if $1,$(firstword $1) $(call unique_words,$(filter-out $(firstw
 # believes ICU is configured. That is how the Mac regression lane broke — the
 # runner never installed icu4c (ga-mac-icu). Pinned by
 # TestMakefileDarwinICUFlagsRequireTheHeaderToExist.
+# `icu4c` is an ALIAS for the newest versioned formula (icu4c@78 today), and
+# the alias can resolve to a version that is not the one installed — the macOS
+# runner reports icu4c as installed via `brew list --formula icu4c` while
+# $(brew --prefix icu4c)/include holds nothing. So every candidate prefix is
+# considered and the first one that actually carries the header wins.
 ifeq ($(shell uname),Darwin)
-ICU_PREFIX := $(shell brew --prefix icu4c 2>/dev/null)
+BREW_PREFIX := $(shell brew --prefix 2>/dev/null)
+ICU_CANDIDATES := $(shell brew --prefix icu4c 2>/dev/null) $(sort $(wildcard $(BREW_PREFIX)/opt/icu4c@*)) $(sort $(wildcard $(BREW_PREFIX)/Cellar/icu4c*/*))
+ICU_PREFIX := $(firstword $(foreach p,$(ICU_CANDIDATES),$(if $(wildcard $(p)/include/unicode/regex.h),$(p))))
 ifneq ($(ICU_PREFIX),)
-ifneq ($(wildcard $(ICU_PREFIX)/include/unicode/regex.h),)
 CGO_CPPFLAGS += -I$(ICU_PREFIX)/include
 CGO_LDFLAGS += -L$(ICU_PREFIX)/lib
 export CGO_CPPFLAGS
 export CGO_LDFLAGS
-endif
 endif
 endif
 

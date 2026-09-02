@@ -90,11 +90,7 @@ runs:
         # its caches on an exotic failure).
         lock_file="${RUNNER_TOOL_CACHE:-$HOME/.local}/gascity-brew.lock"
         mkdir -p "$(dirname "$lock_file")"
-        # icu4c is a transitive Dolt / go-icu-regex CGO build dependency and is
-        # NOT part of the runner image; without it every Mac job that compiles
-        # CGO fails with "'unicode/regex.h' file not found" (ga-mac-icu). It is
-        # keg-only, so the Makefile also has to point CGO at its prefix.
-        pkgs=(tmux jq flock icu4c)
+        pkgs=(tmux jq flock)
         install_missing() {
           local missing=()
           for pkg in "${pkgs[@]}"; do
@@ -119,6 +115,43 @@ runs:
             exit 1
           }
         done
+
+        # icu4c: a transitive Dolt / go-icu-regex CGO build dependency. Presence
+        # is decided by the HEADER, never by `brew list` — the runner reports
+        # icu4c as installed while $(brew --prefix icu4c)/include is empty,
+        # because `icu4c` is an alias for the newest versioned formula and the
+        # installed one is a different version. Believing brew there is how
+        # every CGO-compiling Mac job came to die on
+        # "'unicode/regex.h' file not found" (ga-mac-icu). The Makefile scans
+        # the same candidates; this step guarantees at least one of them exists
+        # and prints the state so a future failure is diagnosable from the log.
+        icu_header_prefix() {
+          local brew_prefix
+          brew_prefix="$(brew --prefix 2>/dev/null)"
+          for p in "$(brew --prefix icu4c 2>/dev/null)" "$brew_prefix"/opt/icu4c@* "$brew_prefix"/Cellar/icu4c*/*; do
+            [ -n "$p" ] && [ -f "$p/include/unicode/regex.h" ] && { printf '%s\n' "$p"; return 0; }
+          done
+          return 1
+        }
+        echo "icu4c alias prefix: $(brew --prefix icu4c 2>&1 || true)"
+        echo "icu4c installed versions: $(brew list --versions 'icu4c*' 2>&1 | tr '\n' ' ' || true)"
+        if found="$(icu_header_prefix)"; then
+          echo "ICU headers found at: $found"
+        else
+          echo "ICU headers absent from every candidate prefix; installing icu4c"
+          (
+            flock -w 300 9 || { echo "timed out waiting for brew lock" >&2; exit 1; }
+            brew install icu4c
+          ) 9>"$lock_file"
+          if found="$(icu_header_prefix)"; then
+            echo "ICU headers found at: $found"
+          else
+            echo "icu4c is installed but no candidate prefix carries include/unicode/regex.h;" >&2
+            echo "every CGO build on this runner would fail. Candidates checked:" >&2
+            ls -d "$(brew --prefix)"/opt/icu4c* "$(brew --prefix)"/Cellar/icu4c* 2>&1 >&2 || true
+            exit 1
+          fi
+        fi
 
     - name: Install dolt v${{ inputs.dolt-version }}
       shell: bash
