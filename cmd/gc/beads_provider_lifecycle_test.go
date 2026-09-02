@@ -7466,7 +7466,19 @@ esac
 	}
 }
 
-func TestGcBeadsBdInitDropsMetadataBeforeRetryingInitAfterForcedFallback(t *testing.T) {
+// TestGcBeadsBdInitKeepsMetadataAndReseedsForcedOnRetryAfterForcedFallback pins
+// the retry sequence for a metadata-only scope whose forced init "succeeds"
+// but leaves the schema missing.
+//
+// This test used to expect the opposite second step: drop metadata.json and
+// retry with a PLAIN init through a fresh top-level invocation, the manual
+// recovery path that worked with the old bd. bd >= 1.2 refuses that shape
+// outright — a .beads/dolt root with no metadata beside it reads as a pre-1.0
+// workspace ("legacy Dolt workspace detected") and never gets as far as init.
+// Measured on the real binary (TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind):
+// the only sequence that recovers is to keep the canonical server-mode
+// metadata and let the re-exec's schema-missing branch re-seed with --force.
+func TestGcBeadsBdInitKeepsMetadataAndReseedsForcedOnRetryAfterForcedFallback(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
@@ -7587,7 +7599,7 @@ esac
 	gotState := string(stateData)
 	for _, want := range []string{
 		"metadata=yes args=init --force --quiet --server -p gc --database hq",
-		"metadata=no args=init --quiet --server -p gc --database hq",
+		"metadata=yes args=init --force --quiet --server -p gc --database hq",
 	} {
 		if !strings.Contains(gotState, want) {
 			t.Fatalf("init state missing %q:\n%s", want, gotState)

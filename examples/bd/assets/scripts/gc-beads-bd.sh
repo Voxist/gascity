@@ -2537,7 +2537,12 @@ ensure_current_era_scope_metadata() {
         return 0
     fi
     normalize_scope_after_init "$dir" "$prefix" "$dolt_database"
-    GC_SCOPE_METADATA_PRESEEDED=1
+    # Only count it as preseeded if metadata really is there now. Without a gc
+    # helper binary normalize_scope_after_init only clears runtime files, and a
+    # scope that is still metadata-less must keep taking the plain init path.
+    if [ -f "$meta" ] && grep -q '"dolt_mode"[[:space:]]*:[[:space:]]*"server"' "$meta" 2>/dev/null; then
+        GC_SCOPE_METADATA_PRESEEDED=1
+    fi
 }
 
 # bd >= 1.2 refuses to open a server-mode workspace that has a .beads/dolt root
@@ -2974,12 +2979,12 @@ op_init() {
     ensure_beads_dir_permissions "$dir"
     if ! wait_for_bd_runtime_schema "$dolt_database"; then
         if [ "${GC_BD_INIT_RETRY:-0}" != "1" ]; then
-            if [ -n "$bd_init_force" ]; then
-                # Metadata-only scopes can still confuse bd's first forced server init.
-                # Drop the preseeded metadata and retry through a fresh top-level
-                # invocation, matching the successful manual recovery path.
-                rm -f "$dir/.beads/metadata.json"
-            fi
+            # The retry used to drop metadata.json first, so the re-exec ran a
+            # plain init on a metadata-less scope — the manual recovery path
+            # that worked with the old bd. bd >= 1.2 refuses that shape outright
+            # ("legacy Dolt workspace detected": a dolt root with no metadata
+            # reads as pre-1.0), so the canonical metadata is kept, and the
+            # re-exec's schema-missing branch re-seeds with a forced init.
             echo "warning: bd schema for '$dolt_database' not visible after init; retrying init" >&2
             GC_BD_INIT_RETRY=1 exec "$0" init "$dir" "$prefix" "$dolt_database"
             die "failed to re-exec init for $dir"
