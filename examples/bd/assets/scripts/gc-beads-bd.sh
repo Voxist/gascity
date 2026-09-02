@@ -2831,13 +2831,13 @@ ensure_current_era_version_witness() {
             # Fail closed: an unset flag means no create was observed, and a
             # missing witness only re-arms bd's guard, while a wrongly-written
             # one disarms it.
-            # Refuse only when BOTH are true: this invocation did not create
-            # the database, AND a backing store is present on disk. A visible
-            # database with no store on disk (metadata-only re-seed) is still
-            # a legitimate stamp; a store that already exists on disk is the
-            # adoption case and must be left to bd's guard.
-            if [ "${GC_DATABASE_CREATED_BY_ENSURE:-false}" != true ] \
-                && managed_backing_store_exists "$dolt_database"; then
+            # Refuse when the backing store already existed when this
+            # invocation STARTED: that is the adoption case, and stamping it
+            # would disarm bd's guard on exactly the workspace that needs it.
+            # A store this invocation created, or none at all (metadata-only
+            # re-seed), is a legitimate stamp.
+            if [ "${GC_STORE_PREEXISTED:-false}" = true ] \
+                && [ "${GC_DATABASE_CREATED_BY_ENSURE:-false}" != true ]; then
                 return 0
             fi
             ;;
@@ -3085,6 +3085,17 @@ op_init() {
         if [ -n "$existing_db" ] && is_legacy_managed_probe_database_name "$existing_db"; then
             allow_reserved_existing=true
         fi
+    fi
+
+    # Sample disk provenance ONCE, here, before anything in this invocation can
+    # create a backing store. This is the only honest answer to "did the store
+    # already exist when we started": ensure_database_registered's own flag is
+    # not it, because that function early-returns when the database is already
+    # catalogued (leaving the flag false) and can also run after bd has put the
+    # store on disk itself. Consulted by ensure_current_era_version_witness.
+    GC_STORE_PREEXISTED=false
+    if [ -n "${dolt_database:-}" ] && managed_backing_store_exists "$dolt_database"; then
+        GC_STORE_PREEXISTED=true
     fi
 
     # Validate prefix before SQL interpolation (upstream 38f7b380).
