@@ -50,7 +50,7 @@ const (
 	// reasons and the repin moves BD_SOURCE_REF values at all job-level pin
 	// sites, so the merged ci.yml hashes to neither side. Taken from the
 	// digest this package printed for the merged file, never from a side.
-	expectedCIExecutionHash     = "64d713f5fbb079c29805e452cbd2a99677df3279e62dca81ae52dde569da4472"
+	expectedCIExecutionHash     = "e666aa23f57c845bb10c244fd289a6918ff16b6372821d2d8698e98deba41a98"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale

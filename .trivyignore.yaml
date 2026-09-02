@@ -294,3 +294,28 @@ vulnerabilities:
       - "usr/local/bin/kubectl"
     expired_at: 2026-09-07
     statement: golang.org/x/net fix is 0.56.0; the prebuilt kubectl v1.36.0 links x/net 0.49.0. Same remedy as CVE-2026-33818 above (kubectl v1.37.0), same expiry.
+  - id: CVE-2026-56853
+    paths:
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-09-07
+    statement: External prebuilt kubectl still embeds Go 1.26.2 stdlib (Go 1.26.6 fix, surfaced 2026-09-02 on the schema-0066 repin); same cause and expiry as the waivers above, replaced by the kubectl 1.37.0 bump tracked in ga-7jqwr.
+  - id: CVE-2026-56858
+    paths:
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-09-07
+    statement: External prebuilt kubectl still embeds Go 1.26.2 stdlib (Go 1.26.6 fix, surfaced 2026-09-02 on the schema-0066 repin); same cause and expiry as the waivers above, replaced by the kubectl 1.37.0 bump tracked in ga-7jqwr.
+  - id: CVE-2026-56859
+    paths:
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-09-07
+    statement: External prebuilt kubectl still embeds Go 1.26.2 stdlib (Go 1.26.6 fix, surfaced 2026-09-02 on the schema-0066 repin); same cause and expiry as the waivers above, replaced by the kubectl 1.37.0 bump tracked in ga-7jqwr.
+  - id: CVE-2026-56860
+    paths:
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-09-07
+    statement: External prebuilt kubectl still embeds Go 1.26.2 stdlib (Go 1.26.6 fix, surfaced 2026-09-02 on the schema-0066 repin); same cause and expiry as the waivers above, replaced by the kubectl 1.37.0 bump tracked in ga-7jqwr.
+  - id: CVE-2026-56862
+    paths:
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-09-07
+    statement: External prebuilt kubectl still embeds Go 1.26.2 stdlib (Go 1.26.6 fix, surfaced 2026-09-02 on the schema-0066 repin); same cause and expiry as the waivers above, replaced by the kubectl 1.37.0 bump tracked in ga-7jqwr.
