@@ -448,9 +448,34 @@ fmt-check-changed: $(GOLANGCI_LINT)
 fmt: $(GOLANGCI_LINT)
 	$(GOLANGCI_LINT) fmt ./...
 
-## vet: run go vet
+## VET_TAG_SCOPES: build tags that gate test code the default vet never
+## compiles, each with the package pattern that carries it. Vetted one by
+## one so a file that only exists under one tag (test/acceptance/worker_inference
+## is acceptance_c-only) cannot reach main uncompilable: a 2026-09-02 gofmt
+## reshape broke two multi-value returns there and every fast-tier gate
+## passed, because nothing before the nightly ever built that tag. Scoped to
+## the carrying packages so the whole pass stays in the tens of seconds
+## (vetting ./... per tag took 6 minutes).
+VET_TAG_SCOPES ?= \
+	acceptance_a=./test/acceptance/... \
+	acceptance_b=./test/acceptance/... \
+	acceptance_c=./test/acceptance/... \
+	acceptance_bd_contract=./test/acceptance/... \
+	chaos_dolt=./test/integration/... \
+	loadharness=./test/loadharness/... \
+	tmux_integration=./internal/runtime/tmux/... \
+	liveprobe=./cmd/gc/... \
+	productmetrics_testhook=./cmd/gc/...,./internal/productmetrics/... \
+	gascity_native_beads=./cmd/gc/...,./internal/beads/...
+
+## vet: run go vet, plus one scoped pass per build tag that gates test code
 vet:
 	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" go vet ./...
+	@for scope in $(VET_TAG_SCOPES); do \
+		tag=$${scope%%=*}; pkgs=$$(printf '%s' "$${scope#*=}" | tr ',' ' '); \
+		echo "vet -tags $$tag $$pkgs"; \
+		GOFLAGS="$(QUALITY_GATE_GOFLAGS)" go vet -tags "$$tag" $$pkgs || exit 1; \
+	done
 
 ## TEST_ENV: env -i wrapper for `go test` invocations. Strips host env so
 ## agent-session vars (GC_CITY, GC_HOME, GC_SESSION_ID, ...) cannot leak into

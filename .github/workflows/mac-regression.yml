@@ -75,9 +75,9 @@ concurrency:
 
 env:
   DOLT_VERSION: "2.1.7"
-  BD_VERSION: "v1.1.0" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
+  BD_VERSION: "v1.2.2" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
   BD_REPO: "Voxist/beads"
-  BD_SOURCE_REF: "a75c226c97d8ab7c0ae0359fb258e6cfd80bf72b" # fork-tip bd commit (schema 0062) — built from BD_REPO source by install-bd-archive.sh
+  BD_SOURCE_REF: "3e03250ee1675ebcd63ca3f5d1660560947eab7c" # fork-tip bd commit (schema 0066) — built from BD_REPO source by install-bd-archive.sh
 
 # Tier routing is centralized in the `gate` job below, which always runs
 # and computes run_smoke/run_full/run_review_formulas plus a human-readable
@@ -199,13 +199,15 @@ jobs:
   # Fast quality gates that Linux runs on every PR. Keep these cheap so a
   # Mac-parity loop stays interactive.
   #
-  # No golangci-lint here. Lint is platform-independent apart from
-  # darwin-tagged files, and a full-repo lint on a 3-core hosted macOS runner
-  # ran past the 35-minute job cap cold (~10 min even warm on Linux); a
-  # cancelled job never saves the lint cache, so it stayed cold forever and
-  # the Mac lane could never go green (ga-w9jdf). The darwin-specific
-  # coverage moves to a GOOS=darwin pass in the Linux static checks
-  # (ga-fhih9).
+  # No full-repo `make lint` here (golangci-lint is still installed: the
+  # Format step is `golangci-lint fmt --diff`). Lint is platform-independent
+  # apart from darwin-tagged files, and a full-repo lint on a 3-core hosted
+  # macOS runner ran past the 35-minute job cap cold (~10 min even warm on
+  # Linux); a cancelled job never saves the lint cache, so it stayed cold
+  # forever and the Mac lane could never go green (ga-w9jdf). Until the
+  # GOOS=darwin lint pass on Linux exists (ga-fhih9, not yet implemented),
+  # the darwin-tagged files have no lint coverage anywhere; vet still
+  # compiles them here.
   mac-quality:
     name: Mac / quality (fmt, vet, docs)
     needs:
@@ -213,15 +215,10 @@ jobs:
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    # 60, not 35: on a COLD golangci-lint cache a whole-repo lint on the macOS
-    # runner needs more than 30 minutes, and the cache is cold until this job
-    # succeeds once (actions/cache saves at post-job, which a timeout skips —
-    # so the 35-minute budget kept the cache empty and guaranteed the next run
-    # was cold too). Before the ICU fix (ga-mac-icu) the job died in ~2 minutes
-    # on a compiler error and never reached lint, which is why the budget
-    # looked sufficient. The other CGO-compiling jobs run 20-25 and passed at
-    # 16/16 on this branch; integration jobs already use 60-90.
-    timeout-minutes: 60
+    # 35 like mac-unit: without the full-repo lint the job is install-tools,
+    # fmt-check, vet and docs (about 10 minutes); a hang should not burn an
+    # hour of macOS runner time, least of all on the nightly schedule.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:

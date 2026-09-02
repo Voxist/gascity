@@ -2453,14 +2453,15 @@ func startManagedInferenceSession(
 		evidence["start_timed_out"] = "true"
 	}
 
-	return inferenceSessionRun{
+	run := inferenceSessionRun{
 		CityDir:      c.Dir,
 		SessionID:    sessionInfo.ID,
 		SessionAlias: sessionInfo.Alias,
 		SessionName:  sessionInfo.SessionName,
 		SessionKey:   sessionInfo.SessionKey,
 		LastStatus:   strings.TrimSpace(statusOut),
-	}, client, cityScope, evidence, nil
+	}
+	return run, client, cityScope, evidence, nil
 }
 
 func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel string, setupFn func(cityDir string) error) (inferenceRun, map[string]string, map[string]string, string, error) {
@@ -3512,42 +3513,45 @@ func runFreshNamedSessionTurn(t *testing.T, provider, identity, prompt, outputRe
 	nudgeTimedOut := isRunTimeout(err)
 	outputPath := filepath.Join(c.Dir, outputRel)
 	if err != nil && !nudgeTimedOut {
-		return inferenceSessionRun{
-				CityDir:      c.Dir,
-				Identity:     identity,
-				SessionID:    sessionInfo.ID,
-				SessionAlias: sessionInfo.Alias,
-				SessionName:  sessionInfo.SessionName,
-				SessionKey:   sessionInfo.SessionKey,
-				OutputPath:   outputPath,
-				LastStatus:   strings.TrimSpace(statusOut),
-			}, map[string]string{
-				"city_dir":              c.Dir,
-				"provider":              provider,
-				"identity":              identity,
-				"session_id":            sessionInfo.ID,
-				"session_name":          sessionInfo.SessionName,
-				"session_key":           sessionInfo.SessionKey,
-				"gc_session_id":         sessionInfo.SessionKey,
-				"bootstrap_transcript":  bootstrapPath,
-				"bootstrap_entry_count": strconv.Itoa(len(bootstrapSnapshot.Entries)),
-				"init_out":              strings.TrimSpace(initOut),
-				"start_out":             strings.TrimSpace(startOut),
-				"status":                strings.TrimSpace(statusOut),
-				"output_rel":            outputRel,
-			}, map[string]string{
-				"city_dir":              c.Dir,
-				"provider":              provider,
-				"identity":              identity,
-				"session_id":            sessionInfo.ID,
-				"session_name":          sessionInfo.SessionName,
-				"session_key":           sessionInfo.SessionKey,
-				"gc_session_id":         sessionInfo.SessionKey,
-				"bootstrap_transcript":  bootstrapPath,
-				"bootstrap_entry_count": strconv.Itoa(len(bootstrapSnapshot.Entries)),
-				"nudge_out":             strings.TrimSpace(nudgeOut),
-				"output_path":           outputPath,
-			}, "task", fmt.Errorf("gc session nudge failed: %w", err)
+		run := inferenceSessionRun{
+			CityDir:      c.Dir,
+			Identity:     identity,
+			SessionID:    sessionInfo.ID,
+			SessionAlias: sessionInfo.Alias,
+			SessionName:  sessionInfo.SessionName,
+			SessionKey:   sessionInfo.SessionKey,
+			OutputPath:   outputPath,
+			LastStatus:   strings.TrimSpace(statusOut),
+		}
+		fields := map[string]string{
+			"city_dir":              c.Dir,
+			"provider":              provider,
+			"identity":              identity,
+			"session_id":            sessionInfo.ID,
+			"session_name":          sessionInfo.SessionName,
+			"session_key":           sessionInfo.SessionKey,
+			"gc_session_id":         sessionInfo.SessionKey,
+			"bootstrap_transcript":  bootstrapPath,
+			"bootstrap_entry_count": strconv.Itoa(len(bootstrapSnapshot.Entries)),
+			"init_out":              strings.TrimSpace(initOut),
+			"start_out":             strings.TrimSpace(startOut),
+			"status":                strings.TrimSpace(statusOut),
+			"output_rel":            outputRel,
+		}
+		details := map[string]string{
+			"city_dir":              c.Dir,
+			"provider":              provider,
+			"identity":              identity,
+			"session_id":            sessionInfo.ID,
+			"session_name":          sessionInfo.SessionName,
+			"session_key":           sessionInfo.SessionKey,
+			"gc_session_id":         sessionInfo.SessionKey,
+			"bootstrap_transcript":  bootstrapPath,
+			"bootstrap_entry_count": strconv.Itoa(len(bootstrapSnapshot.Entries)),
+			"nudge_out":             strings.TrimSpace(nudgeOut),
+			"output_path":           outputPath,
+		}
+		return run, fields, details, "task", fmt.Errorf("gc session nudge failed: %w", err)
 	}
 	if nudgeTimedOut {
 		if blocked, blockErr := detectLiveBlockedInteraction(c.Dir, sessionInfo.SessionName); blockErr == nil && blocked != nil {

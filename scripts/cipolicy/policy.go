@@ -50,10 +50,12 @@ const (
 	// stops running in series behind them. Both jobs are listed in the needs of
 	// check and ci-preflight (ci-required reaches them through ci-preflight),
 	// so the gate is unchanged — only the shape is.
-	// Re-derived for the noncmdgc unit-cover shard matrix (ga-gmhbf): the job
-	// that set the run's wall time became a 3-way matrix. Same jobs, same
+	// Re-derived on the merge with #152 (static-checks split): both sides moved
+	// ci.yml, so the merged file hashes to neither side.
+	// Re-derived again for the noncmdgc unit-cover shard matrix (ga-gmhbf): the
+	// job that set the run's wall time became a 3-way matrix. Same jobs, same
 	// needs; only the matrix expansion and the job name changed.
-	expectedCIExecutionHash     = "454a0e9922d566f274347a4a3e3aed71b6a8029dc1bff2b946d2606e05263e7b"
+	expectedCIExecutionHash     = "ae5f7712f9b086bcec8acfe160cabac65c9a56f89e5184754b8dd4a0cdbde2fc"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
@@ -63,7 +65,12 @@ const (
 	// its two pin sites).
 	// Re-derived again at the 2026-08-31 resync: nightly.yml auto-merged both
 	// sides too, so this pin also lands on neither side's prior value.
-	expectedNightlyExecutionHash = "e3c1b410352a25fe4e808d3b8aeda25b91f3c35b38fced9943a830caccf11730"
+	// Same merge, same rule: nightly carries the repin's BD_SOURCE_REF values at
+	// its two pin sites on top of the resync's shape, so it lands on neither
+	// side's prior value. Setup-action pin below is untouched: the composite
+	// actions were taken from the resync verbatim (go version now derives
+	// from the go.mod directive, which the repin moves to 1.26.8).
+	expectedNightlyExecutionHash = "ae810fdba17ca29c0076c2337516d9ceb1ddc8aa803e6e2df67c162c40e4288d"
 	// Re-derived at the 2026-08-31 resync: the composite setup actions under
 	// .github/actions/setup-gascity-* auto-merged both sides as well, moving
 	// this pin along with the two workflow execution pins above.
