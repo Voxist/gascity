@@ -1260,10 +1260,11 @@ func TestProxyProcessSurvivesHardParentExit(t *testing.T) {
 // could not be performed. Every subprocess this package's tests spawn is
 // reaped by the code under test (Manager.Close / stopProcessGroup) before
 // the spawning test returns, so any survivor found after m.Run() means a
-// leak. Enumerates portably via pidutil.ChildPIDs (ps-based) rather than a
-// /proc walk: a /proc-only walk returns nil unconditionally on darwin,
-// which would make the guard below report a false "no leaks" on any
-// platform where it cannot actually look (ga-gxmz9n).
+// leak. Enumerates portably via pidutil.ChildPIDs (the kernel process table
+// on darwin, ps elsewhere) rather than a /proc walk: a /proc-only walk
+// returns nil unconditionally on darwin, which would make the guard below
+// report a false "no leaks" on any platform where it cannot actually look
+// (ga-gxmz9n).
 func livingTestChildren() ([]int, error) {
 	return pidutil.ChildPIDs(os.Getpid())
 }

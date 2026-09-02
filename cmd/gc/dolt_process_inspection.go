@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -38,9 +39,33 @@ func inspectManagedDoltProcess(cityPath, port string) (managedDoltProcessInspect
 	if info.ManagedPID > 0 {
 		info.ManagedOwned, info.ManagedDeletedInodes = inspectManagedDoltOwnership(info.ManagedPID, layout)
 	}
-	info.PortHolderPID = findPortHolderPID(port)
-	if info.PortHolderPID > 0 {
-		info.PortHolderOwned, info.PortHolderDeletedInodes = inspectManagedDoltOwnership(info.PortHolderPID, layout)
+	// Pick the holder that PASSES the ownership check, not whichever sorts
+	// first. lsof and /proc report several pids for one port number because the
+	// same port on a different local address (127.0.0.1 vs ::1) is a distinct
+	// bind, so deriving ownership from element [0] reports a live managed Dolt
+	// as not running whenever a stranger sorts first — dolt_probe_managed.go
+	// computes Running from PortHolderOwned, and dolt_stop_managed.go then
+	// declines to select that server as the terminate target.
+	//
+	// When no holder is owned, the first one is still reported, so the
+	// diagnostic keeps naming a real occupant of the port.
+	//
+	// Select with the CHEAP predicate, then inspect once. inspectManagedDoltOwnership
+	// polls for up to 500ms (at 25ms, forking lsof each pass on darwin) whenever a
+	// pid is NOT owned, so calling it per holder burned up to N x 500ms and ~20 lsof
+	// forks per stranger before reaching the real server — on the interactive
+	// `gc dolt probe` / `gc dolt stop` paths, in exactly the multi-holder case this
+	// exists to handle.
+	if holders := portHolderPIDs(port); len(holders) > 0 {
+		chosen := holders[0]
+		for _, pid := range holders {
+			if managedDoltProcessOwnedWithStateDir(pid, layout, layout.DataDir) {
+				chosen = pid
+				break
+			}
+		}
+		info.PortHolderPID = chosen
+		info.PortHolderOwned, info.PortHolderDeletedInodes = inspectManagedDoltOwnership(chosen, layout)
 	}
 	return info, nil
 }
@@ -49,8 +74,24 @@ func findManagedDoltPID(layout managedDoltRuntimeLayout, port string) (int, stri
 	if pid := managedPIDFromPIDFile(layout.PIDFile); pid > 0 {
 		return pid, "pid-file"
 	}
-	if pid := findPortHolderPID(port); pid > 0 {
-		return pid, "port-holder"
+	// Only an OWNED holder counts as the managed pid. An arbitrary holder with
+	// no ownership check named an unrelated stranger as managed_pid while
+	// ManagedSource claimed "port-holder", and short-circuited the ps-based
+	// lookups below that would have found the real server. When no holder is
+	// owned, fall through to them.
+	//
+	// But an UNOWNED holder is still reported when no owned one exists. A
+	// process squatting on the managed port with our data-dir files open — a
+	// stale or foreign server — is exactly what the deleted-inode / not-reusable
+	// checks downstream exist to catch, and they need a pid to inspect. Dropping
+	// it here would hide that condition, not fix it.
+	if holders := portHolderPIDs(port); len(holders) > 0 {
+		for _, pid := range holders {
+			if managedDoltProcessOwnedWithStateDir(pid, layout, layout.DataDir) {
+				return pid, "port-holder"
+			}
+		}
+		return holders[0], "port-holder"
 	}
 	if pid := managedPIDFromPSByConfig(layout.ConfigFile); pid > 0 {
 		return pid, "config"
@@ -74,47 +115,105 @@ func managedPIDFromPIDFile(pidFile string) int {
 	return pid
 }
 
+// findPortHolderPID returns one live process listening on port, for callers
+// that are trying to DISCOVER the holder (see findManagedDoltPID). A caller
+// asking whether one PARTICULAR process holds the port must use portHeldByPID
+// instead — see portHolderPIDs for why the difference matters.
 func findPortHolderPID(port string) int {
-	port = strings.TrimSpace(port)
-	if port == "" {
+	pids := portHolderPIDs(port)
+	if len(pids) == 0 {
 		return 0
 	}
-	if pid, checked := findPortHolderPIDFromProc(port); checked {
-		return pid
-	}
-	return findPortHolderPIDFromLsof(port)
+	return pids[0]
 }
 
-func findPortHolderPIDFromLsof(port string) int {
+// portHolderPIDs returns every live process listening on port, in the order the
+// underlying mechanism reports them.
+//
+// A port NUMBER can be held by more than one process at the same time: the same
+// number bound to different local addresses (127.0.0.1 and ::1, or a second
+// interface address) is a distinct bind that the kernel accepts, and the
+// concurrent test shards hit this routinely because they all draw ephemeral
+// ports from one small shared range. Collapsing that set to a single arbitrary
+// element and comparing it for equality against a known PID is therefore wrong
+// in both directions, and the failure is silent: a live managed Dolt whose port
+// number happened to collide with an unrelated listener elsewhere on the box
+// was reported as not owning its own port, and the caller fell back to a stale
+// port. That is ga-yeyt3.
+func portHolderPIDs(port string) []int {
+	pids, _ := portHolderPIDsKnown(port)
+	return pids
+}
+
+// portHolderPIDsKnown is portHolderPIDs plus whether the answer is trustworthy.
+//
+// known distinguishes "checked, nobody listens" (a real, usable negative) from
+// "could not check" (no answer at all). The two used to be collapsed, and it
+// cut both ways: an unused port read as unknown, so a live-but-not-listening
+// pid could not be classified stale; and a port whose LISTEN rows exist but
+// whose owning pid's /proc fd directory is unreadable (a different uid) read as
+// a confident "nobody", skipping the lsof fallback and letting a rig-port repin
+// proceed over a live server.
+func portHolderPIDsKnown(port string) ([]int, bool) {
+	port = strings.TrimSpace(port)
+	if port == "" {
+		return nil, false
+	}
+	if pids, checked := portHolderPIDsFromProc(port); checked {
+		return pids, true
+	}
+	return portHolderPIDsFromLsof(port)
+}
+
+// portHeldByPID reports whether pid is among the processes listening on port.
+// known is false when no holder could be determined at all — an empty listing,
+// or a probe that failed — which callers must not confuse with "someone else
+// holds it".
+func portHeldByPID(port string, pid int) (held, known bool) {
+	if pid <= 0 {
+		return false, false
+	}
+	pids, known := portHolderPIDsKnown(port)
+	if !known {
+		return false, false
+	}
+	return slices.Contains(pids, pid), true
+}
+
+func portHolderPIDsFromLsof(port string) ([]int, bool) {
 	if _, err := exec.LookPath("lsof"); err != nil {
-		return 0
+		return nil, false
 	}
 	out, err := lsofOutput("-nP", "-iTCP:"+port, "-sTCP:LISTEN", "-t")
 	if err == nil {
-		if pid := pidFromLsofPIDList(string(out)); pid > 0 {
-			return pid
+		if pids := pidsFromLsofPIDList(string(out)); len(pids) > 0 {
+			return pids, true
 		}
 	}
 
 	out, err = lsofOutput("-nP", "-iTCP:"+port, "-sTCP:LISTEN")
 	if err != nil {
-		return 0
+		// lsof exits non-zero when nothing matches, which is a checked empty
+		// listing, not a failed probe; only a missing binary above is unknown.
+		return nil, true
 	}
-	return pidFromPlainPortLsofOutput(string(out), port)
+	return pidsFromPlainPortLsofOutput(string(out), port), true
 }
 
-func pidFromLsofPIDList(output string) int {
+func pidsFromLsofPIDList(output string) []int {
+	var pids []int
 	for _, field := range strings.Fields(output) {
 		pid, err := strconv.Atoi(field)
-		if err == nil && pidAlive(pid) {
-			return pid
+		if err == nil && pidAlive(pid) && !slices.Contains(pids, pid) {
+			pids = append(pids, pid)
 		}
 	}
-	return 0
+	return pids
 }
 
-func pidFromPlainPortLsofOutput(output, port string) int {
+func pidsFromPlainPortLsofOutput(output, port string) []int {
 	portSuffix := ":" + strings.TrimSpace(port)
+	var pids []int
 	for _, line := range strings.Split(output, "\n") {
 		if !strings.Contains(line, portSuffix) || !strings.Contains(line, "(LISTEN)") {
 			continue
@@ -124,11 +223,11 @@ func pidFromPlainPortLsofOutput(output, port string) int {
 			continue
 		}
 		pid, err := strconv.Atoi(fields[1])
-		if err == nil && pidAlive(pid) {
-			return pid
+		if err == nil && pidAlive(pid) && !slices.Contains(pids, pid) {
+			pids = append(pids, pid)
 		}
 	}
-	return 0
+	return pids
 }
 
 func cwdFromFormattedLsofOutput(output string) (string, bool) {
@@ -376,19 +475,27 @@ func processHasDeletedDataInodesWithin(pid int, dataDir string, timeout time.Dur
 	return false
 }
 
-func findPortHolderPIDFromProc(port string) (int, bool) {
+func portHolderPIDsFromProc(port string) ([]int, bool) {
 	portNum, err := strconv.ParseUint(port, 10, 16)
 	if err != nil {
-		return 0, true
+		return nil, true
 	}
 	inodes, checked := listeningSocketInodesFromProc(uint16(portNum))
 	if !checked {
-		return 0, false
+		return nil, false
 	}
 	if len(inodes) == 0 {
-		return 0, true
+		return nil, true
 	}
-	return processWithSocketInodes(inodes), true
+	pids := processesWithSocketInodes(inodes)
+	if len(pids) == 0 {
+		// Something IS listening — the LISTEN rows say so — but no readable
+		// /proc/<pid>/fd maps to it (typically a holder under another uid).
+		// That is not "nobody"; report unknown so callers try lsof or treat
+		// it as undetermined, rather than acting on a confident wrong answer.
+		return nil, false
+	}
+	return pids, true
 }
 
 func listeningSocketInodesFromProc(port uint16) (map[string]struct{}, bool) {
@@ -420,11 +527,12 @@ func listeningSocketInodesFromProc(port uint16) (map[string]struct{}, bool) {
 	return inodes, checked
 }
 
-func processWithSocketInodes(inodes map[string]struct{}) int {
+func processesWithSocketInodes(inodes map[string]struct{}) []int {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
-		return 0
+		return nil
 	}
+	var pids []int
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -445,11 +553,12 @@ func processWithSocketInodes(inodes map[string]struct{}) int {
 			}
 			inode := strings.TrimSuffix(strings.TrimPrefix(target, "socket:["), "]")
 			if _, ok := inodes[inode]; ok {
-				return pid
+				pids = append(pids, pid)
+				break
 			}
 		}
 	}
-	return 0
+	return pids
 }
 
 func managedPIDFromPSByConfig(configFile string) int {
