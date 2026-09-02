@@ -90,7 +90,7 @@ runs:
         # its caches on an exotic failure).
         lock_file="${RUNNER_TOOL_CACHE:-$HOME/.local}/gascity-brew.lock"
         mkdir -p "$(dirname "$lock_file")"
-        pkgs=(tmux jq flock icu4c)
+        pkgs=(tmux jq flock)
         install_missing() {
           local missing=()
           for pkg in "${pkgs[@]}"; do
@@ -116,26 +116,59 @@ runs:
           }
         done
 
-    - name: Export ICU headers for CGO builds
-      shell: bash
-      run: |
-        # go-icu-regex (via go-mysql-server/dolt, reached from the beads
-        # embedded store) compiles a C++ shim that includes unicode/regex.h.
-        # Homebrew's icu4c is keg-only, so its headers and libraries are not
-        # on the default search paths and every CGO build on the macOS lane
-        # (gc test binaries and the from-source bd build alike) fails with
-        # "fatal error: 'unicode/regex.h' file not found". Point CGO at the
-        # keg for the rest of the job, and fail here with a clear message if
-        # the header is missing rather than deep inside a compile.
-        set -euo pipefail
-        icu_prefix="$(brew --prefix icu4c)"
-        if [ ! -f "${icu_prefix}/include/unicode/regex.h" ]; then
-          echo "ICU headers not found under ${icu_prefix}/include (brew --prefix icu4c)" >&2
-          exit 1
+        # icu4c: a transitive Dolt / go-icu-regex CGO build dependency. Presence
+        # is decided by the HEADER, never by `brew list` — the runner reports
+        # icu4c as installed while $(brew --prefix icu4c)/include is empty,
+        # because `icu4c` is an alias for the newest versioned formula and the
+        # installed one is a different version. Believing brew there is how
+        # every CGO-compiling Mac job came to die on
+        # "'unicode/regex.h' file not found" (ga-mac-icu). The Makefile scans
+        # the same candidates; this step guarantees at least one of them exists
+        # and prints the state so a future failure is diagnosable from the log.
+        icu_header_prefix() {
+          local brew_prefix
+          brew_prefix="$(brew --prefix 2>/dev/null)"
+          for p in "$(brew --prefix icu4c 2>/dev/null)" "$brew_prefix"/opt/icu4c@* "$brew_prefix"/Cellar/icu4c*/*; do
+            [ -n "$p" ] && [ -f "$p/include/unicode/regex.h" ] && { printf '%s\n' "$p"; return 0; }
+          done
+          return 1
+        }
+        echo "icu4c alias prefix: $(brew --prefix icu4c 2>&1 || true)"
+        echo "icu4c installed versions: $(brew list --versions 'icu4c*' 2>&1 | tr '\n' ' ' || true)"
+        publish_icu_flags() {
+          # Export the DISCOVERED prefix for every later step. The Makefile has
+          # the same scan for local developers, but it resolves the prefix
+          # through `$(shell brew --prefix ...)`, which depends on brew being
+          # reachable in whatever environment make runs under — and on this
+          # runner it is not: the headers sit at /opt/homebrew/opt/icu4c@78
+          # (brew does not even track icu4c as installed here) while make
+          # computed empty CGO flags and every CGO build died on
+          # "'unicode/regex.h' file not found". Publishing the flags removes
+          # that dependency for make and non-make compiles alike (ga-mac-icu).
+          local prefix="$1"
+          printf 'CGO_CPPFLAGS=%s -I%s/include\n' "${CGO_CPPFLAGS:-}" "$prefix" >> "$GITHUB_ENV"
+          printf 'CGO_LDFLAGS=%s -L%s/lib\n' "${CGO_LDFLAGS:-}" "$prefix" >> "$GITHUB_ENV"
+          echo "Published CGO flags for ICU at $prefix"
+        }
+        if found="$(icu_header_prefix)"; then
+          echo "ICU headers found at: $found"
+          publish_icu_flags "$found"
+        else
+          echo "ICU headers absent from every candidate prefix; installing icu4c"
+          (
+            flock -w 300 9 || { echo "timed out waiting for brew lock" >&2; exit 1; }
+            brew install icu4c
+          ) 9>"$lock_file"
+          if found="$(icu_header_prefix)"; then
+            echo "ICU headers found at: $found"
+            publish_icu_flags "$found"
+          else
+            echo "icu4c is installed but no candidate prefix carries include/unicode/regex.h;" >&2
+            echo "every CGO build on this runner would fail. Candidates checked:" >&2
+            ls -d "$(brew --prefix)"/opt/icu4c* "$(brew --prefix)"/Cellar/icu4c* 2>&1 >&2 || true
+            exit 1
+          fi
         fi
-        echo "CGO_CPPFLAGS=-I${icu_prefix}/include${CGO_CPPFLAGS:+ ${CGO_CPPFLAGS}}" >> "$GITHUB_ENV"
-        echo "CGO_LDFLAGS=-L${icu_prefix}/lib${CGO_LDFLAGS:+ ${CGO_LDFLAGS}}" >> "$GITHUB_ENV"
-        echo "ICU for CGO: ${icu_prefix}"
 
     - name: Install dolt v${{ inputs.dolt-version }}
       shell: bash
