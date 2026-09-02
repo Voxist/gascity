@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -1598,18 +1597,20 @@ func TestParseBDProbeTimeout_InvalidDuration(t *testing.T) {
 	}
 }
 
-// SessionSetupContext is the surface config.SessionCommandTemplateFields
-// promises to config validation; the two must not drift.
-func TestSessionSetupContextFieldsMatchConfigAllowlist(t *testing.T) {
-	rt := reflect.TypeOf(SessionSetupContext{})
-	got := make([]string, 0, rt.NumField())
-	for i := 0; i < rt.NumField(); i++ {
-		got = append(got, rt.Field(i).Name)
+// SessionSetupContext is the surface config validation executes templates
+// against (config.SessionCommandTemplateContext); the two structs must not
+// drift, or load-time validation would accept a placeholder that fails at
+// session start (or reject one that would work).
+func TestSessionSetupContextMatchesConfigTemplateContext(t *testing.T) {
+	got := reflect.TypeOf(SessionSetupContext{})
+	want := reflect.TypeOf(config.SessionCommandTemplateContext{})
+	if got.NumField() != want.NumField() {
+		t.Fatalf("SessionSetupContext has %d fields, config.SessionCommandTemplateContext has %d", got.NumField(), want.NumField())
 	}
-	want := append([]string(nil), config.SessionCommandTemplateFields...)
-	sort.Strings(got)
-	sort.Strings(want)
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("SessionSetupContext fields %v != config.SessionCommandTemplateFields %v", got, want)
+	for i := 0; i < got.NumField(); i++ {
+		g, w := got.Field(i), want.Field(i)
+		if g.Name != w.Name || g.Type != w.Type {
+			t.Errorf("field %d: SessionSetupContext %s %s != config.SessionCommandTemplateContext %s %s", i, g.Name, g.Type, w.Name, w.Type)
+		}
 	}
 }
