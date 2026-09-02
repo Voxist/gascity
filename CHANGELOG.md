@@ -33,6 +33,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Session command templates fail closed instead of running unexpanded.**
+  `expandSessionSetup` kept the raw command when a `command`, `session_setup`,
+  `pre_start` or `session_live` template failed to parse or expand, so sh
+  received a literal `{{.AgentBase}}` and `worktree-setup.sh` minted a real
+  git worktree at `.gc/agents/{{.AgentBase}}`. Now a malformed template or an
+  unknown placeholder is rejected at config load (`gc start` / reload /
+  doctor) with the list of available placeholders; at session start the
+  first three fields refuse to start the session, and `session_live` (cosmetic)
+  is skipped with a warning so a typo never blocks stopping or resuming a
+  running session. Literal braces meant for another tool must be escaped as
+  `{{"{{"}}`. The example `worktree-setup.sh` scripts also refuse unexpanded
+  or shifted arguments. (ga-iwz7u; the `work_query`/`scale_check`/`on_boot`/
+  `on_death` expander keeps its raw-command fallback, tracked as ga-a85qk.)
+
 - **Runtime-provider waiver expiries are now independent per entry instead of
   sharing one hardcoded date.** All nine `runtime.Provider` contract waivers
   in `internal/testutil/providerledger` previously expired on the same

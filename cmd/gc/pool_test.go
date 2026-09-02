@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -621,7 +622,7 @@ func TestExpandSessionSetup_Basic(t *testing.T) {
 		"tmux set-option -t {{.Session}} status-style 'bg=blue'",
 		"tmux set-option -t {{.Session}} status-left ' {{.Agent}} '",
 	}
-	got, err := expandSessionSetup(cmds, ctx)
+	got, err := expandSessionSetup(cmds, ctx, "session_setup")
 	if err != nil {
 		t.Fatalf("expandSessionSetup: %v", err)
 	}
@@ -650,7 +651,7 @@ func TestExpandSessionSetup_AllVariables(t *testing.T) {
 	cmds := []string{
 		"echo {{.Session}} {{.Agent}} {{.AgentBase}} {{.Rig}} {{.RigRoot}} {{.CityRoot}} {{.CityName}} {{.WorkDir}}",
 	}
-	got, err := expandSessionSetup(cmds, ctx)
+	got, err := expandSessionSetup(cmds, ctx, "session_setup")
 	if err != nil {
 		t.Fatalf("expandSessionSetup: %v", err)
 	}
@@ -667,7 +668,7 @@ func TestExpandSessionSetup_InvalidTemplateFailsClosed(t *testing.T) {
 		"tmux {{.BadSyntax",    // invalid template
 		"tmux {{.Session}} ok", // valid
 	}
-	got, err := expandSessionSetup(cmds, ctx)
+	got, err := expandSessionSetup(cmds, ctx, "session_setup")
 	if err == nil {
 		t.Fatalf("expandSessionSetup(%q) returned nil error, want parse failure", cmds[1])
 	}
@@ -676,7 +677,7 @@ func TestExpandSessionSetup_InvalidTemplateFailsClosed(t *testing.T) {
 	if got != nil {
 		t.Errorf("got %v, want nil on error", got)
 	}
-	for _, want := range []string{"tmux {{.BadSyntax", "[1]"} {
+	for _, want := range []string{"tmux {{.BadSyntax", "session_setup[1]"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not name %q", err, want)
 		}
@@ -691,7 +692,7 @@ func TestExpandSessionSetup_InvalidTemplateFailsClosed(t *testing.T) {
 func TestExpandSessionSetup_UnknownFieldFailsClosed(t *testing.T) {
 	ctx := SessionSetupContext{Session: "polecat-1", AgentBase: "polecat-1"}
 	cmds := []string{"worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.NoSuchField}} --sync"}
-	got, err := expandSessionSetup(cmds, ctx)
+	got, err := expandSessionSetup(cmds, ctx, "session_setup")
 	if err == nil {
 		t.Fatalf("expandSessionSetup(%q) returned nil error, want execute failure", cmds[0])
 	}
@@ -704,7 +705,7 @@ func TestExpandSessionSetup_UnknownFieldFailsClosed(t *testing.T) {
 }
 
 func TestExpandSessionSetup_Nil(t *testing.T) {
-	got, err := expandSessionSetup(nil, SessionSetupContext{})
+	got, err := expandSessionSetup(nil, SessionSetupContext{}, "session_setup")
 	if err != nil {
 		t.Fatalf("expandSessionSetup(nil): %v", err)
 	}
@@ -714,7 +715,7 @@ func TestExpandSessionSetup_Nil(t *testing.T) {
 }
 
 func TestExpandSessionSetup_Empty(t *testing.T) {
-	got, err := expandSessionSetup([]string{}, SessionSetupContext{})
+	got, err := expandSessionSetup([]string{}, SessionSetupContext{}, "session_setup")
 	if err != nil {
 		t.Fatalf("expandSessionSetup(empty): %v", err)
 	}
@@ -790,7 +791,7 @@ func TestExpandSessionSetup_ConfigDir(t *testing.T) {
 	cmds := []string{
 		"{{.ConfigDir}}/assets/scripts/status-line.sh {{.Agent}}",
 	}
-	got, err := expandSessionSetup(cmds, ctx)
+	got, err := expandSessionSetup(cmds, ctx, "session_setup")
 	if err != nil {
 		t.Fatalf("expandSessionSetup: %v", err)
 	}
@@ -1594,5 +1595,21 @@ func TestParseBDProbeTimeout_InvalidDuration(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "invalid") || !strings.Contains(buf.String(), "GC_BD_PROBE_TIMEOUT") {
 		t.Errorf("expected parse error warning, got: %q", buf.String())
+	}
+}
+
+// SessionSetupContext is the surface config.SessionCommandTemplateFields
+// promises to config validation; the two must not drift.
+func TestSessionSetupContextFieldsMatchConfigAllowlist(t *testing.T) {
+	rt := reflect.TypeOf(SessionSetupContext{})
+	got := make([]string, 0, rt.NumField())
+	for i := 0; i < rt.NumField(); i++ {
+		got = append(got, rt.Field(i).Name)
+	}
+	want := append([]string(nil), config.SessionCommandTemplateFields...)
+	sort.Strings(got)
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("SessionSetupContext fields %v != config.SessionCommandTemplateFields %v", got, want)
 	}
 }

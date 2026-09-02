@@ -219,28 +219,33 @@ type SessionSetupContext struct {
 	ConfigDir string // source directory where agent config was defined
 }
 
-// expandSessionSetup expands Go text/template strings in session_setup,
-// pre_start and session_live commands.
+// expandSessionSetup expands Go text/template strings in the command,
+// session_setup, pre_start and session_live entries of one agent. field is the
+// config field name used in error messages.
 //
 // It fails closed: a command whose template does not parse, or references a
 // field SessionSetupContext does not carry, yields an error and NO commands.
 // The previous "keep the raw command" fallback handed sh a literal
 // "{{.AgentBase}}", and worktree-setup.sh then minted a real git worktree at
 // .gc/agents/{{.AgentBase}} on branch gc-{{.AgentBase}}-<hash> (ga-iwz7u).
-// A command that still carries template placeholders must never run.
-func expandSessionSetup(cmds []string, ctx SessionSetupContext) ([]string, error) {
+// A command that still carries template placeholders must never run. Config
+// load rejects the same class up front (config.validateSessionCommandTemplates),
+// so reaching this error at session start means the context, not the config,
+// is at fault. The work_query/scale_check/on_boot/on_death expander
+// (expandAgentCommandTemplate) still keeps the raw command; that is ga-a85qk.
+func expandSessionSetup(cmds []string, ctx SessionSetupContext, field string) ([]string, error) {
 	if len(cmds) == 0 {
 		return nil, nil
 	}
 	result := make([]string, len(cmds))
 	for i, raw := range cmds {
-		tmpl, err := template.New("setup").Option("missingkey=error").Parse(raw)
+		tmpl, err := template.New(field).Parse(raw)
 		if err != nil {
-			return nil, fmt.Errorf("session setup command [%d] %q: parsing template: %w", i, raw, err)
+			return nil, fmt.Errorf("%s[%d] %q: parsing template: %w", field, i, raw, err)
 		}
 		var buf bytes.Buffer
 		if err := tmpl.Execute(&buf, ctx); err != nil {
-			return nil, fmt.Errorf("session setup command [%d] %q: expanding template: %w", i, raw, err)
+			return nil, fmt.Errorf("%s[%d] %q: expanding template: %w", field, i, raw, err)
 		}
 		result[i] = buf.String()
 	}

@@ -9,6 +9,14 @@ for arg in "$@"; do
     *'{{'*) echo "worktree-setup.sh: refusing unexpanded template placeholder in argument: $arg" >&2; exit 64 ;;
   esac
 done
+# An empty expansion ({{.RigRoot}} is "" for city-scoped agents) collapses
+# under sh -c and shifts every positional left, so "--sync" lands in $3.
+# Refuse any of the three path/name positionals that looks like a flag.
+for arg in "${1-}" "${2-}" "${3-}"; do
+  case "$arg" in
+    --*) echo "worktree-setup.sh: positional argument looks like a flag ($arg): an earlier placeholder expanded to nothing" >&2; exit 64 ;;
+  esac
+done
 
 rig_root="${1:?rig root required}"
 work_dir="${2:?work dir required}"

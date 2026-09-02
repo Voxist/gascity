@@ -3564,6 +3564,11 @@ type Agent struct {
 	// On failure, the last 4 KiB of the command's stdout/stderr is included
 	// in the error and may appear in controller and reconciler logs; avoid
 	// set -x or echoing secrets in setup commands.
+	// Template expansion is strict: a malformed template or a placeholder
+	// outside that list is rejected at config load (gc start / reload /
+	// doctor) and would otherwise stop the session from starting rather
+	// than reach sh unexpanded. Literal braces meant for another tool
+	// (docker --format, kubectl -o go-template) must be escaped as {{"{{"}}.
 	PreStart []string `toml:"pre_start,omitempty"`
 	// PromptTemplate is the path to this agent's prompt template file.
 	// Relative paths resolve against the city directory.
@@ -3744,6 +3749,11 @@ type Agent struct {
 	// On failure, the last 4 KiB of the command's stdout/stderr is included
 	// in the error and may appear in controller and reconciler logs; avoid
 	// set -x or echoing secrets in setup commands.
+	// Template expansion is strict: a malformed template or a placeholder
+	// outside that list is rejected at config load (gc start / reload /
+	// doctor) and would otherwise stop the session from starting rather
+	// than reach sh unexpanded. Literal braces meant for another tool
+	// (docker --format, kubectl -o go-template) must be escaped as {{"{{"}}.
 	SessionSetup []string `toml:"session_setup,omitempty"`
 	// SessionSetupScript is the path to a script run after session_setup commands.
 	// Relative paths resolve against the declaring config file's directory
@@ -3761,6 +3771,9 @@ type Agent struct {
 	// On failure, the last 4 KiB of the command's stdout/stderr is included
 	// in the error and may appear in controller and reconciler logs; avoid
 	// set -x or echoing secrets in setup commands.
+	// Template expansion is strict (see session_setup); a session_live entry
+	// that cannot be expanded is skipped with a warning at session start so
+	// a cosmetic typo never blocks stopping or resuming a running session.
 	SessionLive []string `toml:"session_live,omitempty"`
 	// OverlayDir is a directory whose contents are recursively copied (additive)
 	// into the agent's working directory at startup. Existing files are not
@@ -4479,6 +4492,12 @@ func ValidateAgents(agents []Agent) error {
 			*a.MaxActiveSessions >= 0 && *a.MinActiveSessions > *a.MaxActiveSessions {
 			return fmt.Errorf("agent %q: min_active_sessions (%d) must be <= max_active_sessions (%d)",
 				a.Name, *a.MinActiveSessions, *a.MaxActiveSessions)
+		}
+	}
+
+	for _, a := range agents {
+		if err := validateSessionCommandTemplates(a); err != nil {
+			return err
 		}
 	}
 

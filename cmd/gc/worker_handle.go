@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os/exec"
 	"strings"
 	"time"
@@ -615,10 +616,16 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 		if agentCfg.SourceDir != "" {
 			setupCtx.ConfigDir = agentCfg.SourceDir
 		}
+		// This resolver runs for every handle on an existing session,
+		// including stop/kill and the reconciler's liveness probe. A
+		// session_live expansion failure must degrade to "no re-theming",
+		// never to "the session cannot be managed". Same policy as
+		// resolveTemplate.
 		var err error
-		sessionLive, err = expandSessionSetup(agentCfg.SessionLive, setupCtx)
+		sessionLive, err = expandSessionSetup(agentCfg.SessionLive, setupCtx, "session_live")
 		if err != nil {
-			return nil, fmt.Errorf("agent %q: session_live: %w", qualifiedName, err)
+			log.Printf("agent %q: %v (session_live skipped)", qualifiedName, err)
+			sessionLive = nil
 		}
 	}
 	// Project the resolved hint subset through the single StartupHints →

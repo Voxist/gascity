@@ -515,24 +515,31 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		ConfigDir: configDir,
 	}
 	if strings.Contains(command, "{{") {
-		expanded, err := expandSessionSetup([]string{command}, setupCtx)
+		expanded, err := expandSessionSetup([]string{command}, setupCtx, "command")
 		if err != nil {
-			return TemplateParams{}, fmt.Errorf("agent %q: command: %w", qualifiedName, err)
+			return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 		}
 		command = expanded[0]
 	}
-	expandedSetup, err := expandSessionSetup(cfgAgent.SessionSetup, setupCtx)
+	expandedSetup, err := expandSessionSetup(cfgAgent.SessionSetup, setupCtx, "session_setup")
 	if err != nil {
-		return TemplateParams{}, fmt.Errorf("agent %q: session_setup: %w", qualifiedName, err)
+		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
 	resolvedScript := config.ResolveSessionSetupScriptPath(p.cityPath, cfgAgent.SourceDir, cfgAgent.SessionSetupScript)
-	expandedPreStart, err := expandSessionSetup(cfgAgent.PreStart, setupCtx)
+	expandedPreStart, err := expandSessionSetup(cfgAgent.PreStart, setupCtx, "pre_start")
 	if err != nil {
-		return TemplateParams{}, fmt.Errorf("agent %q: pre_start: %w", qualifiedName, err)
+		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
-	expandedLive, err := expandSessionSetup(cfgAgent.SessionLive, setupCtx)
+	// session_live is cosmetic (theming, keybindings) and its runtime failures
+	// are already warnings; an expansion failure must not make the agent
+	// unresolvable, which would drop it from the desired set and drain its
+	// running sessions. Skip the entries and warn instead.
+	expandedLive, err := expandSessionSetup(cfgAgent.SessionLive, setupCtx, "session_live")
 	if err != nil {
-		return TemplateParams{}, fmt.Errorf("agent %q: session_live: %w", qualifiedName, err)
+		if p.stderr != nil {
+			fmt.Fprintf(p.stderr, "agent %q: %v (session_live skipped)\n", qualifiedName, err) //nolint:errcheck
+		}
+		expandedLive = nil
 	}
 
 	// Step 11b: Skill materialization integration (per engdocs

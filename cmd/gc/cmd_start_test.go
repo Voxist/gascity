@@ -2037,3 +2037,41 @@ func TestResolveTemplate_PreStartUnexpandablePlaceholderFailsClosed(t *testing.T
 		}
 	}
 }
+
+// A session_live entry that cannot be expanded is cosmetic: resolution must
+// succeed with the entry skipped and a warning, never fail (which would drop
+// the agent from the desired set and drain its running sessions).
+func TestResolveTemplate_SessionLiveUnexpandablePlaceholderIsSkipped(t *testing.T) {
+	cityDir := t.TempDir()
+	var stderr bytes.Buffer
+	cfgAgent := &config.Agent{
+		Name:        "worker",
+		Provider:    "claude",
+		SessionLive: []string{"tmux set-option -t {{.Session}} status-style bg=blue", "tmux set -g status-right '{{.NoSuchField}}'"},
+	}
+	bp := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityDir,
+		workspace:  &config.Workspace{Provider: "claude"},
+		providers:  config.BuiltinProviders(),
+		lookPath:   func(name string) (string, error) { return "/bin/" + name, nil },
+		fs:         fsys.OSFS{},
+		rigs:       []config.Rig{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     &stderr,
+	}
+
+	tp, err := resolveTemplate(bp, cfgAgent, "worker", nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate failed on a session_live typo: %v", err)
+	}
+	if len(tp.Hints.SessionLive) != 0 {
+		t.Errorf("SessionLive = %q, want none (skipped)", tp.Hints.SessionLive)
+	}
+	for _, want := range []string{"session_live[1]", "NoSuchField", "skipped"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr %q does not mention %q", stderr.String(), want)
+		}
+	}
+}
