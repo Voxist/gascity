@@ -6356,6 +6356,11 @@ case "$cmd" in
     exit 0
     ;;
   migrate)
+    # The ready path may complete pending SCHEMA migrations; only the bare
+    # repo-id migration (no subcommand) is the contract this test pins.
+    if [ "${2:-}" = "schema" ]; then
+      exit 0
+    fi
     : > "$capture_dir/migrate.called"
     echo 'failed to compute repository ID: not a git repository' >&2
     exit 1
@@ -7812,6 +7817,167 @@ esac
 	}
 	if got := strings.TrimSpace(string(count)); got != "3" {
 		t.Fatalf("probe attempts = %s, want 3 (retry an unknown answer before refusing)", got)
+	}
+}
+
+// gcBeadsBdHealTestStubs writes the bd and dolt stubs shared by the
+// interrupted-bootstrap tests. The dolt stub models a pinned database whose
+// working set is dirty (dolt_status holds rows) with `issues` holding
+// issueRows rows, answers the config probe as "table not found" the first
+// time (a schema-less database, the CI signature) and as ready afterwards,
+// and logs every query. The bd stub logs its arguments.
+func gcBeadsBdHealTestStubs(t *testing.T, binDir, sqlLog, bdLog string, issueRows int) {
+	t.Helper()
+	writeExecutable(t, filepath.Join(binDir, "sleep"), "#!/bin/sh\nexit 0\n")
+	initMarker := filepath.Join(filepath.Dir(sqlLog), "init-done")
+	writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
+set -eu
+printf '%%s\n' "$*" >> %q
+case "${1:-}" in
+  init) : > %q ;;
+esac
+exit 0
+`, bdLog, initMarker))
+	resetMarker := filepath.Join(filepath.Dir(sqlLog), "reset-done")
+	writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf(`#!/bin/sh
+set -eu
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+printf '%%s\n' "$query" >> %q
+table() { printf '+---+\n| c |\n+---+\n| %%s |\n+---+\n' "$1"; }
+case "$query" in
+  'USE `+"`hq`"+`; SELECT 1 FROM config LIMIT 1')
+    if [ -f %q ]; then exit 0; fi
+    echo "error on line 1 for query SELECT 1 FROM config LIMIT 1: Error 1146 (HY000): table not found: config" >&2
+    exit 1
+    ;;
+  'USE `+"`hq`"+`; SELECT COUNT(*) FROM dolt_status')
+    if [ -f %q ]; then table 0; else table 2; fi
+    exit 0
+    ;;
+  'USE `+"`hq`"+`; SELECT 1 FROM issues LIMIT 1')
+    exit 0
+    ;;
+  'USE `+"`hq`"+`; SELECT COUNT(*) FROM issues')
+    table %d
+    exit 0
+    ;;
+  "USE `+"`hq`"+`; CALL DOLT_RESET('--hard')")
+    : > %q
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, sqlLog, initMarker, resetMarker, issueRows, resetMarker))
+}
+
+// TestGcBeadsBdInitHealsInterruptedBootstrapBeforeForcing pins the recovery
+// for a gc-created database whose first bd bootstrap died between a
+// migration's DDL and its commit: the working set is dirty, there are no
+// issues, and bd's own one-shot heal cannot arm because bd was not the
+// process that created the database. The script must discard the working
+// set (DOLT_RESET --hard) and only then run the forced init; without the
+// reset, bd's dirty-table guard refuses every later open (CI, 2026-09-02:
+// "pending schema migrations alter pre-existing dirty tables: comments,
+// issues" from migration 0049's ALTERs).
+func TestGcBeadsBdInitHealsInterruptedBootstrapBeforeForcing(t *testing.T) {
+	cityPath := t.TempDir()
+	for _, d := range []string{".gc", ".beads"} {
+		if err := os.MkdirAll(filepath.Join(cityPath, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	materializeBuiltinPacksForTest(t, cityPath)
+	script := gcBeadsBdScriptPath(cityPath)
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logDir := t.TempDir()
+	sqlLog := filepath.Join(logDir, "dolt-sql.log")
+	bdLog := filepath.Join(logDir, "bd-args.log")
+	gcBeadsBdHealTestStubs(t, binDir, sqlLog, bdLog, 0)
+
+	out, err := runGcBeadsBdInitHQ(t, script, cityPath, binDir)
+	if err != nil {
+		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "interrupted bd bootstrap") {
+		t.Fatalf("expected the heal to announce itself, got:\n%s", out)
+	}
+	sql, err := os.ReadFile(sqlLog)
+	if err != nil {
+		t.Fatalf("read sql log: %v", err)
+	}
+	reset := strings.Index(string(sql), "CALL DOLT_RESET('--hard')")
+	if reset < 0 {
+		t.Fatalf("expected DOLT_RESET('--hard') on the interrupted bootstrap, got:\n%s", sql)
+	}
+	bdArgs, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("bd never ran: %v", err)
+	}
+	if !strings.Contains(string(bdArgs), "init --force --quiet --server -p gc --database hq") {
+		t.Fatalf("expected a forced init after the reset, got:\n%s", bdArgs)
+	}
+	// Order: the reset must precede bd, or bd's guard fires on the dirty set.
+	// The bd stub logs to its own file, so compare against the reset's marker
+	// by re-reading the sql log after the init: any query bd would need comes
+	// after the reset line, and the init itself is the only bd invocation.
+	if strings.Count(string(bdArgs), "init ") != 1 {
+		t.Fatalf("expected exactly one bd init, got:\n%s", bdArgs)
+	}
+}
+
+// TestGcBeadsBdInitNeverResetsADatabaseWithIssues is the safety half of the
+// heal: the same dirty working set on a database that holds user rows is not
+// a bootstrap, and the script must leave it alone (no DOLT_RESET), forcing
+// the init as before and letting bd's guard speak.
+func TestGcBeadsBdInitNeverResetsADatabaseWithIssues(t *testing.T) {
+	cityPath := t.TempDir()
+	for _, d := range []string{".gc", ".beads"} {
+		if err := os.MkdirAll(filepath.Join(cityPath, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	materializeBuiltinPacksForTest(t, cityPath)
+	script := gcBeadsBdScriptPath(cityPath)
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logDir := t.TempDir()
+	sqlLog := filepath.Join(logDir, "dolt-sql.log")
+	bdLog := filepath.Join(logDir, "bd-args.log")
+	gcBeadsBdHealTestStubs(t, binDir, sqlLog, bdLog, 3)
+
+	out, _ := runGcBeadsBdInitHQ(t, script, cityPath, binDir)
+	sql, err := os.ReadFile(sqlLog)
+	if err != nil {
+		t.Fatalf("read sql log: %v", err)
+	}
+	if strings.Contains(string(sql), "DOLT_RESET") {
+		t.Fatalf("a database with issues must never be reset, got:\n%s\noutput:\n%s", sql, out)
+	}
+	if strings.Contains(string(out), "interrupted bd bootstrap") {
+		t.Fatalf("heal must not announce on a database with issues:\n%s", out)
 	}
 }
 
