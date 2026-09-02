@@ -200,7 +200,13 @@ func portHolderPIDsFromLsofWithTimeout(timeout time.Duration, port string) ([]in
 	if _, err := exec.LookPath("lsof"); err != nil {
 		return nil, false
 	}
-	out, err := lsofOutputWithTimeout(timeout, "-nP", "-iTCP:"+port, "-sTCP:LISTEN", "-t")
+	// -w suppresses lsof's WARNING lines (unreadable filesystems, stat
+	// failures on entries it walks past). Those go to stderr and can make lsof
+	// exit non-zero even when the listing itself is complete — which the
+	// classifier below would read as a failed probe. doltorphan's runLsofW
+	// passes -w for the same reason; with it, a non-empty stderr means a real
+	// error, not a warning about some unrelated mount.
+	out, err := lsofOutputWithTimeout(timeout, "-w", "-nP", "-iTCP:"+port, "-sTCP:LISTEN", "-t")
 	if errors.Is(err, context.DeadlineExceeded) {
 		return nil, false
 	}
@@ -210,7 +216,7 @@ func portHolderPIDsFromLsofWithTimeout(timeout time.Duration, port string) ([]in
 		}
 	}
 
-	out, err = lsofOutputWithTimeout(timeout, "-nP", "-iTCP:"+port, "-sTCP:LISTEN")
+	out, err = lsofOutputWithTimeout(timeout, "-w", "-nP", "-iTCP:"+port, "-sTCP:LISTEN")
 	if errors.Is(err, context.DeadlineExceeded) {
 		return nil, false
 	}
