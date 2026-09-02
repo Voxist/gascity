@@ -19,9 +19,11 @@ import (
 // and passes in the cmd/gc cover shards, and the one thing that catches the
 // drift never runs. This file is the second route, the one
 // scripts/gomod_replace_guard_test.go already established: ./scripts is inside
-// UNIT_COVER_PKGS_NONCMDGC, which CI runs as "Preflight / unit cover
-// (noncmdgc)", so exec'ing the script from a Go test puts it in CI with no
-// ci.yml edit and no workflow shape-hash bump.
+// UNIT_COVER_PKGS_NONCMDGC, which CI runs across the "Preflight / unit cover
+// (noncmdgc N of 3)" shard matrix, so exec'ing the script from a Go test puts
+// it in CI with no ci.yml edit and no workflow shape-hash bump. Which shard
+// carries ./scripts follows from the package order, so look for the guard in
+// whichever noncmdgc shard ran it rather than a single fixed job name.
 //
 // It also gives the guard the thing it did not have: a test of its own bite. An
 // edit to the Rule A pattern or the fan-out helper list can otherwise defang it

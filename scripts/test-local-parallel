@@ -160,8 +160,8 @@ add_fsys_compile_job() {
 #
 # REMOVE THIS once #5653 lands. It is a gate hole while it stands.
 # The package still runs in the push-triggered `Preflight / unit cover
-# (noncmdgc)` job (.github/workflows/ci.yml:268, `if: github.event_name ==
-# 'push'`) and in the manual RC gate (.github/workflows/rc-gate.yml:47, which
+# (noncmdgc N of 3)` shard matrix (.github/workflows/ci.yml, `if:
+# github.event_name == 'push'`) and in the manual RC gate (.github/workflows/rc-gate.yml:47, which
 # still carries the cmd/gc-only exclusion). Neither runs on pull_request, so
 # diff the #5653 removal against rc-gate.yml:47, not against this line.
 add_unit_core_job() {

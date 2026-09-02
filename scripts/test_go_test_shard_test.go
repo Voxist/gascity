@@ -791,7 +791,9 @@ func TestNoncmdgcShardPartitionsThePackageList(t *testing.T) {
 	}
 	pkgs := strings.Join(input, "\n")
 
-	for _, total := range []int{1, 2, 3, 4, 11, 12} {
+	// Totals stay at or below the package count: a total larger than the input
+	// leaves a shard empty, which the slicer rejects (see the empty-slice test).
+	for _, total := range []int{1, 2, 3, 4, 11} {
 		seen := map[string]int{}
 		for i := 1; i <= total; i++ {
 			code, out := noncmdgcShardCommand(t, pkgs, strconv.Itoa(i), strconv.Itoa(total))
@@ -829,5 +831,35 @@ func TestNoncmdgcShardRejectsInvalidBounds(t *testing.T) {
 		if code, out := noncmdgcShardCommand(t, "github.com/example/a", tc.index, tc.total); code == 0 {
 			t.Errorf("shard %q of %q was accepted (output %q); want a rejection", tc.index, tc.total, out)
 		}
+	}
+}
+
+// TestNoncmdgcShardRejectsEmptySlice pins the guard that keeps an empty shard
+// from reporting success.
+//
+// The Makefile feeds this script's stdout to `go test`. With no package
+// arguments `go test` tests the current directory, prints "no test files" and
+// exits 0, so an empty slice would upload a coverage profile holding only its
+// header while the shard reports green. More shards than packages, or an empty
+// package list from a failed `go list`, must fail the shard instead.
+func TestNoncmdgcShardRejectsEmptySlice(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		pkgs         string
+		index, total string
+	}{
+		{"more shards than packages", "github.com/example/a\ngithub.com/example/b", "3", "3"},
+		{"empty package list", "", "1", "3"},
+		{"blank lines only", "\n\n", "1", "1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, out := noncmdgcShardCommand(t, tc.pkgs, tc.index, tc.total)
+			if code == 0 {
+				t.Errorf("empty slice for shard %q of %q was accepted (output %q); want a rejection", tc.index, tc.total, out)
+			}
+			if !strings.Contains(string(out), "no packages selected") {
+				t.Errorf("error message = %q, want it to mention no packages selected", out)
+			}
+		})
 	}
 }
