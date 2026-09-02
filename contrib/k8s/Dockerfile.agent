@@ -17,7 +17,7 @@
 # Local build-layer image produced by Dockerfile.base, not a registry pull.
 ARG BASE_IMAGE=gc-agent-base:latest
 
-FROM golang:1.26.5-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651 AS bd-builder
+FROM golang:1.26.6-bookworm@sha256:433f9dc4f8ea3a1ce4e28f9f15d0f7c056b10475307f886d6f1ac1ccc4abd976 AS bd-builder
 
 # TIME-BOXED BRIDGE (ADR-0026 C5, vp-kpoi) — keep in lockstep with deps.env.
 # BD_VERSION is the version string the pinned source declares; BD_SOURCE_REF is

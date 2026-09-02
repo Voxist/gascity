@@ -25,6 +25,7 @@ City is the top-level configuration for a Gas City instance.
 | `named_session` | []NamedSession |  |  | NamedSessions lists canonical alias-backed sessions built from reusable agent templates. |
 | `rigs` | []Rig |  |  | Rigs lists external projects registered in the city. |
 | `patches` | Patches |  |  | Patches holds targeted modifications applied after fragment merge. |
+| `storage` | StorageConfig |  |  | Storage assigns the six semantic storage classes to immutable named bindings. Nil preserves the existing all-Work storage topology. |
 | `beads` | BeadsConfig |  |  | Beads configures the bead store backend. |
 | `session` | SessionConfig |  |  | Session configures the session provider backend. |
 | `mail` | MailConfig |  |  | Mail configures the mail provider backend. |
@@ -89,7 +90,7 @@ Agent defines a configured agent in the city.
 | `suspended` | boolean |  |  | Suspended prevents the reconciler from spawning this agent. Toggle with gc agent suspend/resume. |
 | `pre_start` | []string |  |  | PreStart is a list of shell commands run before session creation. Commands run on the target filesystem: locally for tmux, inside the pod/container for exec providers. Template variables same as session_setup. On failure, the last 4 KiB of the command's stdout/stderr is included in the error and may appear in controller and reconciler logs; avoid set -x or echoing secrets in setup commands. |
 | `prompt_template` | string |  |  | PromptTemplate is the path to this agent's prompt template file. Relative paths resolve against the city directory. |
-| `nudge` | string |  |  | Nudge is text typed into the agent's tmux session after startup. Used for CLI agents that don't accept command-line prompts. |
+| `nudge` | string |  |  | Nudge is text typed into the agent's session after startup. Used for CLI agents that don't accept command-line prompts. For a known pool session whose trigger remains unclaimed after the 90-second recovery grace period, an empty or whitespace-only Nudge does not opt out: it sends "Run gc hook --claim --drain-ack --json now; if it returns work, execute it immediately." This fallback applies only to the initial stalled-claim recovery; continuation-claim recovery remains configured-only. Unknown templates receive no fallback. |
 | `session` | string |  |  | Session overrides the session transport for this agent. "" (default) uses the city-level session provider (typically tmux). "acp" uses the Agent Client Protocol (JSON-RPC over stdio). The agent's resolved provider must have supports_acp = true. Enum: `acp` |
 | `provider` | string |  |  | Provider names the provider preset to use for this agent. |
 | `upstream` | string |  |  | Upstream selects the model-serving endpoint (a key in [upstreams]) for this agent — WHO serves the model. "" (default) falls back to agent_defaults.upstream; if still empty, no upstream env is injected (ambient behavior). Switching it relaunches the agent in the warm box. |
@@ -215,11 +216,12 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 
 ## AgentPatch
 
-AgentPatch modifies an existing agent identified by (Dir, Name).
+AgentPatch modifies existing agents identified by rig scope and Name.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `dir` | string | **yes** |  | Dir is the targeting key (required with Name). Identifies the agent's working directory scope. Empty for city-scoped agents. |
+| `dir` | string |  |  | Dir is the legacy targeting key for rig identity. Empty means city-scoped. New configs should set Rig instead; Dir remains the canonical resolved identity that both keys feed into. |
+| `rig` | string |  |  | Rig is new targeting key for rig identity (replaces Dir). "*" matches all rigs + city. Empty means city-scoped unless Dir is set. |
 | `name` | string | **yes** |  | Name is the targeting key (required). Must match an existing agent's name. |
 | `work_dir` | string |  |  | WorkDir overrides the agent's session working directory. |
 | `tmux_alias` | string |  |  | TmuxAlias overrides the tmux session name template (see Agent.TmuxAlias for semantics). |
@@ -362,8 +364,8 @@ DaemonConfig holds controller daemon settings.
 | `max_wakes_per_tick` | integer |  | `5` | MaxWakesPerTick caps how many sessions the reconciler may start in a single tick. Fresh generic pool session-bead creation uses the same budget so the controller does not materialize more ordinary pool sessions than it can wake. Bounded dependency-floor prerequisites are exempt. Nil (unset) defaults to 5. Values &lt;= 0 are treated as the default — set a positive integer to override. |
 | `nudge_dispatcher` | string |  | `legacy` | NudgeDispatcher selects how queued nudges get delivered to running sessions. "legacy" (default) auto-spawns a per-session `gc nudge poll` process that polls the file-backed queue every 2s. "supervisor" runs the delivery loop inside the city runtime instead, with a unix-socket wake fast path triggered by enqueue, eliminating the per-session bd shellout storm. Enum: `legacy`, `supervisor` |
 | `auto_restart_on_drift` | boolean |  | `true` | AutoRestartOnDrift controls whether `gc start` automatically restarts the supervisor when it detects the running supervisor's binary or pack snapshot has drifted from on-disk state. Nil (unset) defaults to true — operators get the correct-by-default behavior. Set to false as a global kill switch (e.g., for production cities where a rebuild on the host should not auto-restart the supervisor). |
-| `auto_reap_closed_bead_worktrees` | boolean |  | `false` | AutoReapClosedBeadWorktrees controls whether the reconciler patrol automatically removes per-bead git worktrees once their associated work bead reaches closed status. Only worktrees with a clean working tree, no unpushed commits, and no stashes are removed; unsafe worktrees are logged as warnings and left in place for operator review. Session home directories (agent template directories) are never touched. Defaults to false. Set to true to enable automated worktree cleanup. |
-| `auto_reap_closed_bead_worktrees_dry_run` | boolean |  | `false` | AutoReapClosedBeadWorktreesDryRun makes the reconciler patrol run the full worktree-reap classification each tick — discovery, closed-bead match, liveness gate, and git-safety probes — but emit bead.worktree.reap_skipped events describing what it WOULD reap and what it protected, without removing anything. This is the safe staged-rollout surface: an operator enables dry-run first, confirms via `gc events` that no live worktree appears in the would-reap set, then enables AutoReapClosedBeadWorktrees for real removal. Dry-run has no effect when AutoReapClosedBeadWorktrees is already true (real removal supersedes it). Defaults to false. |
+| `auto_reap_closed_bead_worktrees` | boolean |  | `false` | AutoReapClosedBeadWorktrees controls whether the reconciler patrol automatically removes per-bead git worktrees once their associated work bead reaches closed status. Only worktrees with a clean working tree, no stashes, and no commits that removal would orphan — commits reachable from no branch, tag, or remote-tracking ref — are removed; push state is deliberately not the test, since `git worktree remove` deletes the checkout and not refs/heads. Unsafe worktrees are logged as warnings and left in place for operator review. Session home directories (agent template directories) are never touched. Defaults to false. Set to true to enable automated worktree cleanup. |
+| `auto_reap_closed_bead_worktrees_dry_run` | boolean |  | `false` | AutoReapClosedBeadWorktreesDryRun makes the reconciler patrol run the full worktree-reap classification each tick — discovery, closed-bead match, liveness gate, and git-safety probes — but emit bead.worktree.reap_skipped events describing what it WOULD reap and what it protected, without removing anything. This is the safe staged-rollout surface: an operator enables dry-run first, confirms via `gc events` that no live worktree appears in the would-reap set, then enables AutoReapClosedBeadWorktrees for real removal. Those events are edge-triggered: each worktree is reported when the patrol first classifies it and again whenever its verdict changes, not once per tick, so the would-reap set is complete right after dry-run is enabled rather than reprinted every sweep. Dry-run has no effect when AutoReapClosedBeadWorktrees is already true (real removal supersedes it). Defaults to false. |
 | `auto_reap_closed_bead_worktrees_min_age_minutes` | integer |  | `10` | AutoReapClosedBeadWorktreesMinAgeMinutes is the minimum worktree age, in minutes, before a closed-bead worktree becomes eligible for reap classification at all (borrow-veto scan and beyond). This quarantines a worktree against the race between its creation and its owning bead's gc.work_dir/work_dir metadata being stamped by the next reconcile pass — without it, a just-created worktree could look unclaimed to the borrow-veto scan before the metadata that would protect it has been written. Nil (unset) defaults to DefaultAutoReapClosedBeadWorktreesMinAgeMinutes. Zero disables the quarantine entirely (every closed-bead worktree is immediately eligible for the rest of the gate chain, regardless of age). |
 | `start_ready_timeout` | string |  | `5m` | StartReadyTimeout is how long `gc start` and `gc register` wait for the supervisor to report the city as Running. Cities with many registered or adopted sessions take longer to start because the per-tick wake budget (max_wakes_per_tick) throttles startup: wall time to wake N sessions is roughly ceil(N / max_wakes_per_tick) * patrol_interval. At the defaults (5 wakes / 30s), ~40 sessions need ~4 minutes. Duration string (e.g., "5m", "10m"). Defaults to DefaultStartReadyTimeout (5m). When set, this value replaces the default start/register budget; [session].startup_timeout may still extend the effective wait for a slow single session. |
 | `tick_debounce` | string |  |  | TickDebounce coalesces bursty event-driven ticks (pokeCh, controlDispatcherCh) within this window. A first event in a quiet period arms a timer; subsequent events arriving before the timer fires are dropped (the single delayed tick re-reads authoritative state covering all collapsed events). Zero (the default) disables debouncing — each event fires its own tick, matching pre-existing behavior. Duration string (e.g., "250ms", "500ms"). Trade-off: adds tick latency up to this value when set. |
@@ -393,8 +395,9 @@ DoltConfig holds optional dolt server overrides.
 | `archive_level` | integer |  | `0` | ArchiveLevel controls Dolt's auto_gc archive aggressiveness. 0 disables archive compaction (lower CPU on startup). 1 enables archive compaction (higher CPU on startup). nil (omitted) defaults to 0. |
 | `auto_gc_enabled` | boolean |  | `true` | AutoGCEnabled toggles Dolt's incremental auto-GC on the managed sql-server. Auto-GC bounds the noms journal so it never reaches GB scale, which shrinks both the unclean-stop corruption window and the recovery blast radius. nil (omitted) defaults to true. |
 | `max_connections` | integer |  | `256` | MaxConnections overrides the managed Dolt listener max_connections. 0 means use the managed default. |
-| `read_timeout_millis` | integer |  | `15000` | ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis. 0 means use the managed default. |
+| `read_timeout_millis` | integer |  | `120000` | ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis. 0 means use the managed default. |
 | `write_timeout_millis` | integer |  | `300000` | WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis. 0 means use the managed default. |
+| `wait_timeout_seconds` | integer |  | `30` | WaitTimeoutSeconds overrides the managed server's wait_timeout system variable. Despite the name, wait_timeout does not currently reap idle connections -- measured inert on dolt 2.2.3 for #5383 (see DefaultDoltWaitTimeoutSeconds); read_timeout is the only reaper. The knob is kept and still emitted regardless: it is harmless, and becomes correct the moment dolt implements it. Before this field existed the only way to set it was GC_DOLT_WAIT_TIMEOUT in the supervisor's process environment, which no city.toml could express and no shell-invoked restart inherited — so a restart from an operator shell silently rewrote the value. 0 (omitted) means use the managed default. |
 | `dolt_lock_release_timeout` | string |  | `1m` | DoltLockReleaseTimeout is how long managed-dolt lifecycle operations wait for dolt's on-disk exclusive store locks (the root-level `&lt;data_dir&gt;/.dolt/noms/LOCK` and per-database `&lt;data_dir&gt;/&lt;db&gt;/.dolt/noms/LOCK` forms) to be released by a prior server process before failing closed. The start path refuses to launch a second `dolt sql-server` against a data_dir whose lock is still held — a prior instance that is shutting down holds the lock until its chunk journal is flushed, and binding before release corrupts the journal (see gastownhall/gascity#3174). The stop path uses the same window to wait for lock release after process exit before reporting success. Duration string (e.g., "1m", "90s"). Defaults to "1m", which covers the flush window of multi-GB journals on commodity SSDs. Set to "0s" to probe once with no wait (still fail-closed when held). Negative values are rejected at config load. The managed lifecycle also projects this value into the gc-beads-bd.sh shell fallback as GC_DOLT_LOCK_RELEASE_TIMEOUT_MS (milliseconds), so both paths honor the configured window. |
 
 ## DoltMaintenance
@@ -624,7 +627,7 @@ OrdersConfig holds order settings for orders discovered from flat TOML files (on
 |-------|------|----------|---------|-------------|
 | `skip` | []string |  |  | Skip lists order names to exclude from scanning. |
 | `max_timeout` | string |  |  | MaxTimeout is an operator hard cap on the per-order dispatch timeout: no order's dispatched exec/formula runs longer than this. Go duration string (e.g., "60s"). Empty means uncapped (no override). This bounds the dispatch timeout only; a condition trigger's check_timeout is a separate probe deadline and is not capped here. |
-| `max_dispatches_per_tick` | integer |  | `32` | MaxDispatchesPerTick caps how many due orders the dispatcher admits per controller tick. Unset (nil) or &lt;=0 uses the built-in default. On cities whose auto-order count exceeds default×(tick rate ÷ order interval), the round-robin budget starves short-interval orders down to one fire per full ring rotation regardless of their configured interval — raise this cap there (voxist vp-cixi.6: 122 orders × ~94s ticks × budget 4 ⇒ 30s orders fired every 33–90 min). Pointer so the zero value stays out of marshaled default configs. |
+| `max_dispatches_per_tick` | integer |  | `32` | *int rather than int so an unset value stays out of marshaled config: BurntSushi's omitempty does not drop a zero int, so a plain int would emit max_dispatches_per_tick = 0 into every marshaled city.toml. MaxDispatchesPerTick caps how many due orders the dispatcher admits per controller tick. Unset (nil) or &lt;=0 uses the built-in default. On cities whose auto-order count exceeds default×(tick rate ÷ order interval), the round-robin budget starves short-interval orders down to one fire per full ring rotation regardless of their configured interval — raise this cap there (voxist vp-cixi.6: 122 orders × ~94s ticks × budget 4 ⇒ 30s orders fired every 33–90 min). Pointer so the zero value stays out of marshaled default configs. |
 | `overrides` | []OrderOverride |  |  | Overrides apply per-order field overrides after scanning. Each override targets an order by name and optionally by rig. |
 
 ## PackDefaults
@@ -649,7 +652,7 @@ Patches holds all patch blocks from composition.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `agent` | []AgentPatch |  |  | Agents targets agents by (dir, name). |
+| `agent` | []AgentPatch |  |  | Agents targets agents by rig scope + name. |
 | `named_session` | []NamedSessionPatch |  |  | NamedSessions targets configured named sessions by (dir, template). |
 | `rigs` | []RigPatch |  |  | Rigs targets rigs by name. |
 | `providers` | []ProviderPatch |  |  | Providers targets providers by name. |
@@ -856,6 +859,40 @@ SessionSleepConfig configures default idle sleep policies by session class.
 | `interactive_resume` | string |  |  | InteractiveResume applies to attachable sessions using wake_mode=resume. Accepts a duration string or "off". |
 | `interactive_fresh` | string |  |  | InteractiveFresh applies to attachable sessions using wake_mode=fresh. Accepts a duration string or "off". |
 | `noninteractive` | string |  |  | NonInteractive applies to sessions with attach=false. Accepts a duration string or "off". |
+
+## StorageBindingConfig
+
+StorageBindingConfig selects one compiled storage provider and its typed, secret-free configuration; the SQLite provider accepts `path` (default `.gc/store`), while every other provider accepts an opaque `config_ref` that provider resolves.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `provider` | string | **yes** |  | Provider is the exact ID of a provider compiled into this gc binary. |
+| `path` | string |  | `.gc/store` | Path is the SQLite binding root, relative to the city unless absolute. Empty defaults to ".gc/store". |
+| `config_ref` | string |  |  | ConfigRef is an opaque, secret-free reference resolved by the provider that owns the binding, within the city that declares it. |
+| `url` | string |  |  | URL is the http or https endpoint a remote beads workspace is served from, for a binding whose workspace backend does not live on this disk. It carries no credentials, query, or fragment; a path prefix is allowed because an edge may mount the service below the root. Empty means the workspace named by config_ref is local, which is the default. |
+| `auth` | string |  |  | Auth is a reference to the credential for URL, never the credential itself: "gasworks" mints one through the configured credential-provider command, and "env:NAME" reads one from an environment variable. |
+
+## StorageClasses
+
+StorageClasses is the closed set of semantic storage assignments; when `[storage]` is authored, all six fields are required after fragment layering, while omission assigns every class to `work`.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `work` | string | **yes** |  | Work selects the binding for the shareable work ledger. |
+| `graph` | string | **yes** |  | Graph selects the binding for formula graph state. |
+| `sessions` | string | **yes** |  | Sessions selects the binding for session lifecycle and durable waits. |
+| `messaging` | string | **yes** |  | Messaging selects the binding for mail and external-message state. |
+| `orders` | string | **yes** |  | Orders selects the binding for order-run state. |
+| `nudges` | string | **yes** |  | Nudges selects the binding for the durable nudge queue. |
+
+## StorageConfig
+
+StorageConfig assigns each semantic storage class to a named binding and defines every nonreserved binding used by those assignments; omitting `[storage]` keeps every class on the reserved `work` binding.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `classes` | StorageClasses | **yes** |  | Classes contains the complete class-to-binding assignment. |
+| `bindings` | map[string]StorageBindingConfig |  |  | Bindings defines named provider-backed bindings. The reserved work binding is synthesized and must not appear here. |
 
 ## StoreHealthConfig
 

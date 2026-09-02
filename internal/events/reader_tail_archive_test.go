@@ -10,11 +10,13 @@ import (
 )
 
 // TestReadFilteredTailSpansArchivesNewestFirst is the T-001 regression for
-// vp-x7x8w: a bounded descending tail read must walk archives newest-first
-// and stop as soon as `limit` events are collected, never opening older
-// archives once the cap is satisfied. Today ReadFilteredTail reads only the
-// active file, so a limit larger than the active file's own event count
-// silently returns fewer than limit instead of reaching into archives.
+// vp-x7x8w: a bounded descending tail read that opts into SpanArchives must
+// walk archives newest-first and stop as soon as `limit` events are
+// collected, never opening older archives once the cap is satisfied. Without
+// the opt-in ReadFilteredTail reads only the active file
+// (TestReadFilteredTailActiveOnlyByDefault), so a limit larger than the
+// active file's own event count returns fewer than limit instead of reaching
+// into archives.
 func TestReadFilteredTailSpansArchivesNewestFirst(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.jsonl")
@@ -41,7 +43,7 @@ func TestReadFilteredTailSpansArchivesNewestFirst(t *testing.T) {
 	// Active file: seqs 7-9 (newest).
 	writeJSONLEvents(t, path, 7, 8, 9)
 
-	got, err := ReadFilteredTail(path, Filter{}, 5)
+	got, err := ReadFilteredTail(path, Filter{SpanArchives: true}, 5)
 	if err != nil {
 		t.Fatalf("ReadFilteredTail: %v (a non-nil error means the poisoned "+
 			"oldest archive was opened)", err)
@@ -53,14 +55,13 @@ func TestReadFilteredTailSpansArchivesNewestFirst(t *testing.T) {
 }
 
 // TestReadFilteredTailDegradesCorruptArchive is the degraded-contract regression
-// for vp-x7x8w: now that ReadFilteredTail spans archives, a corrupt (truncated
-// gzip) archive in the newest-first walk must be SKIPPED, not fail the whole
-// read. The walk continues into older archives so the result can only get older,
-// never silently short. This mirrors the contract ReadFilteredWithWarnings and
-// ReadLatestMatch already follow (vc-89s), and it is load-bearing for the doctor
-// order-firing check: its order.fired read calls ReadFilteredTail and must not
-// hard-fail when a single sibling archive is unreadable (the degraded warning
-// surfaces separately via the controller-start ReadLatestMatch path).
+// for vp-x7x8w: when ReadFilteredTail spans archives (SpanArchives), a corrupt
+// (truncated gzip) archive in the newest-first walk must be SKIPPED, not fail
+// the whole read. The walk continues into older archives so the result can only
+// get older, never silently short. This mirrors the contract
+// ReadFilteredWithWarnings and ReadLatestMatch already follow (vc-89s), and it
+// is load-bearing for the events-list API, whose first page must not error on
+// a single unreadable sibling archive.
 func TestReadFilteredTailDegradesCorruptArchive(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.jsonl")
@@ -83,7 +84,7 @@ func TestReadFilteredTailDegradesCorruptArchive(t *testing.T) {
 	// must reach into the archives to fill the page.
 	writeJSONLEvents(t, path, 6, 7)
 
-	got, err := ReadFilteredTail(path, Filter{}, 5)
+	got, err := ReadFilteredTail(path, Filter{SpanArchives: true}, 5)
 	if err != nil {
 		t.Fatalf("ReadFilteredTail: %v (a non-nil error means the corrupt newer "+
 			"archive failed the whole read instead of being skipped)", err)
@@ -107,7 +108,7 @@ func writeCorruptArchive(dir string, rotatedAt time.Time, firstSeq, lastSeq uint
 }
 
 // TestReadFilteredTailBoundedArchiveOpens is the T-006 latency guard: a first-page
-// (no cursor) descending read must open only O(1) archives — the ones whose seq
+// (no cursor) descending SpanArchives read must open only O(1) archives — the ones whose seq
 // window actually overlaps the needed tail — never O(archives). This keeps the
 // vp-x7x8w regression from silently returning: if a future change reverts the
 // bounded newest-first walk, the poisoned older archives are opened and gzip
@@ -136,7 +137,7 @@ func TestReadFilteredTailBoundedArchiveOpens(t *testing.T) {
 	// limit=5 without reaching into any archive.
 	writeJSONLEvents(t, path, 16, 17, 18, 19, 20)
 
-	got, err := ReadFilteredTail(path, Filter{}, 5)
+	got, err := ReadFilteredTail(path, Filter{SpanArchives: true}, 5)
 	if err != nil {
 		t.Fatalf("ReadFilteredTail: %v (a non-nil error means a poisoned archive "+
 			"was opened — the bounded read should have stopped at the active file)", err)

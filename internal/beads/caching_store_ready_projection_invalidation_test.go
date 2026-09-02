@@ -125,15 +125,21 @@ func TestReconcileEmitsNoUpdatesAfterWholeCacheInvalidation(t *testing.T) {
 
 	f.cache.mu.Lock()
 	f.cache.depsComplete = false
+	beforeObservation := f.cache.observationRevision
 	if !f.cache.clearDependentReadyProjectionsLocked(f.blockerID) {
 		f.cache.mu.Unlock()
 		t.Fatal("clearDependentReadyProjectionsLocked reported no invalidation; the fixture no longer exercises the whole-cache branch")
 	}
-	invalidated := len(f.cache.readyProjectionInvalid)
+	// Non-vacuity probe on upstream's observation fence: a real invalidation
+	// must bump observationRevision (the counter is coarser than the per-id
+	// readyProjectionInvalid map, which the reconcile differ alone reads, so
+	// it satisfies this guard's premise a fortiori). The ten-tick assertion
+	// below is mechanism-independent.
+	afterObservation := f.cache.observationRevision
 	f.cache.mu.Unlock()
 
-	if invalidated == 0 {
-		t.Fatal("no row was marked invalid, so this guard would pass vacuously")
+	if afterObservation == beforeObservation {
+		t.Fatal("observationRevision did not advance, so nothing was invalidated and this guard would pass vacuously")
 	}
 
 	for tick := 1; tick <= 10; tick++ {
@@ -296,4 +302,74 @@ func slicesContains(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// TestDegradedProjectionDoesNotRefloodMarkedRows pins the second flood shape
+// (round-4 review): with a row invalidated AND the ready projection degraded,
+// reconcile's fresh rows carry IsBlocked=nil. If the differ substitutes the
+// disowned value against that fresh nil, it manufactures a value-vs-nil
+// difference out of two nils — and because a verdict-less absorb keeps the
+// mark, the identical spurious bead.updated re-fires on EVERY tick until the
+// projection recovers. Reproduced at exactly 1 event/tick before the
+// fresh-verdict gate on the substitution. Fresh-nil vs cached-nil must compare
+// silently, as upstream's sentinel always did in this shape.
+func TestDegradedProjectionDoesNotRefloodMarkedRows(t *testing.T) {
+	t.Parallel()
+
+	mem := NewMemStore()
+	blocker, err := mem.Create(Bead{Title: "blocker"})
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	blocked := true
+	dependent, err := mem.Create(Bead{Title: "dependent", IsBlocked: &blocked})
+	if err != nil {
+		t.Fatalf("create dependent: %v", err)
+	}
+	if err := mem.DepAdd(dependent.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatalf("DepAdd: %v", err)
+	}
+
+	var events []string
+	backing := &projectionStrippingStore{Store: mem}
+	cache := NewCachingStoreForTest(backing, func(eventType, beadID string, _ json.RawMessage) {
+		events = append(events, eventType+":"+beadID)
+	})
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("prime: %v", err)
+	}
+	closed := "closed"
+	if err := cache.Update(blocker.ID, UpdateOpts{Status: &closed}); err != nil {
+		t.Fatalf("close blocker: %v", err)
+	}
+
+	// Non-vacuity: the dependent really is marked, and the projection really
+	// is degraded (fresh rows verdict-less), before asserting silence.
+	cache.mu.RLock()
+	_, marked := cache.readyProjectionInvalid[dependent.ID]
+	cache.mu.RUnlock()
+	if !marked {
+		t.Fatal("dependent was not invalidated; this guard would pass vacuously")
+	}
+	backing.strip = true
+
+	for tick := 1; tick <= 4; tick++ {
+		events = events[:0]
+		cache.runReconciliation()
+		for _, e := range events {
+			if e == "bead.updated:"+dependent.ID {
+				t.Fatalf("tick %d under a degraded projection emitted bead.updated for the marked row; "+
+					"the substitution manufactured a transition out of two nils and the flood is sustained", tick)
+			}
+		}
+	}
+
+	// The mark must survive degradation — a verdict-less reconcile observed
+	// nothing, so discharging here would lose the disowned value.
+	cache.mu.RLock()
+	_, still := cache.readyProjectionInvalid[dependent.ID]
+	cache.mu.RUnlock()
+	if !still {
+		t.Fatal("degraded reconcile discharged the invalidation without observing a verdict")
+	}
 }

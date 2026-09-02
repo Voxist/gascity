@@ -609,10 +609,11 @@ func TestCanonicalExistingPathResolvesSymlinkedGrandparentWithTwoMissingLevels(t
 	missing := filepath.Join(aliasDir, "missing-parent", "missing-leaf")
 	got := canonicalExistingPath(missing)
 
-	resolvedAlias, err := filepath.EvalSymlinks(aliasDir)
-	if err != nil {
-		t.Fatalf("EvalSymlinks(aliasDir): %v", err)
-	}
+	// Canonicalize the expectation through the production normalizer rather
+	// than bare EvalSymlinks: on macOS the two disagree on whether the temp
+	// root is spelled /var/... or /private/var/..., and only the former is
+	// what canonicalExistingPath returns. The comparison stays exact.
+	resolvedAlias := testutil.CanonicalPath(aliasDir)
 	want := filepath.Join(resolvedAlias, "missing-parent", "missing-leaf")
 	// Compared via testutil.AssertSamePath rather than ==: the expectation is
 	// built with bare filepath.EvalSymlinks, but the function under test

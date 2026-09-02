@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -203,5 +205,64 @@ func TestBuildAndStoreStatusEscapesWedgedBuild(t *testing.T) {
 	got2 := s.buildAndStoreStatus(false)
 	if got2.StoreHealth == nil || got2.StoreHealth.SizeBytes != 2 {
 		t.Fatalf("buildAndStoreStatus after timeout = %+v, want a fresh build (StoreHealth.SizeBytes=2), not a join to the wedged leader", got2)
+	}
+}
+
+// TestRefreshStatusBodyAsyncCoalescesWithoutRelyingOnScheduling pins the
+// synchronous in-flight guard. buildAndStoreStatus's singleflight coalesces
+// only builds that OVERLAP, so before the guard a burst of cache misses whose
+// goroutines the scheduler spread past the first build's completion each
+// started their own ~28s O(store) build (CI caught exactly that:
+// "rig List calls during background refresh = 2, want exactly 1"). The guard
+// is taken in the caller's goroutine, so the property holds whatever the
+// scheduler does: while a refresh for a variant is in flight, no second one
+// is ever spawned.
+func TestRefreshStatusBodyAsyncCoalescesWithoutRelyingOnScheduling(t *testing.T) {
+	state := newFakeState(t)
+	s := &Server{state: state}
+
+	var spawned atomic.Int64
+	release := make(chan struct{})
+	var wg sync.WaitGroup
+	oldHook := statusBuildAsyncHook
+	statusBuildAsyncHook = func(build func()) {
+		spawned.Add(1)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-release // hold the "build" open so every later call races the guard
+			build()
+		}()
+	}
+	t.Cleanup(func() { statusBuildAsyncHook = oldHook })
+
+	// First call spawns; the next four must not, whatever order they run in.
+	s.refreshStatusBodyAsync(false)
+	var callers sync.WaitGroup
+	for range 4 {
+		callers.Add(1)
+		go func() {
+			defer callers.Done()
+			s.refreshStatusBodyAsync(false)
+		}()
+	}
+	callers.Wait()
+	if got := spawned.Load(); got != 1 {
+		t.Fatalf("builds spawned while one was in flight = %d, want exactly 1", got)
+	}
+
+	// The other variant is independent: it has its own guard.
+	s.refreshStatusBodyAsync(true)
+	if got := spawned.Load(); got != 2 {
+		t.Fatalf("builds spawned after the lite variant joined = %d, want 2 (one per variant)", got)
+	}
+
+	close(release)
+	wg.Wait()
+	// Once a refresh completes its guard is released, so a later refresh runs.
+	s.refreshStatusBodyAsync(false)
+	wg.Wait()
+	if got := spawned.Load(); got != 3 {
+		t.Fatalf("builds spawned after the first completed = %d, want 3 (the guard must not leak)", got)
 	}
 }
