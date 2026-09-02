@@ -37,8 +37,24 @@ unique_words = $(if $1,$(firstword $1) $(call unique_words,$(filter-out $(firstw
 # search path. Point CGO at them when icu4c is present. This is a no-op on
 # Linux and other platforms (where system ICU, e.g. libicu-dev, is found
 # normally) and a no-op on macOS when icu4c is not installed.
+#
+# The prefix is accepted only when the ICU header is actually THERE.
+# `brew --prefix <formula>` prints the formula's would-be prefix and exits 0
+# whether or not it is installed, so its exit code cannot stand in for
+# presence: believing it points CGO at a directory that does not exist and the
+# build dies with "'unicode/regex.h' file not found" while the Makefile
+# believes ICU is configured. That is how the Mac regression lane broke — the
+# runner never installed icu4c (ga-mac-icu). Pinned by
+# TestMakefileDarwinICUFlagsRequireTheHeaderToExist.
+# `icu4c` is an ALIAS for the newest versioned formula (icu4c@78 today), and
+# the alias can resolve to a version that is not the one installed — the macOS
+# runner reports icu4c as installed via `brew list --formula icu4c` while
+# $(brew --prefix icu4c)/include holds nothing. So every candidate prefix is
+# considered and the first one that actually carries the header wins.
 ifeq ($(shell uname),Darwin)
-ICU_PREFIX := $(shell brew --prefix icu4c 2>/dev/null)
+BREW_PREFIX := $(shell brew --prefix 2>/dev/null)
+ICU_CANDIDATES := $(shell brew --prefix icu4c 2>/dev/null) $(sort $(wildcard $(BREW_PREFIX)/opt/icu4c@*)) $(sort $(wildcard $(BREW_PREFIX)/Cellar/icu4c*/*))
+ICU_PREFIX := $(firstword $(foreach p,$(ICU_CANDIDATES),$(if $(wildcard $(p)/include/unicode/regex.h),$(p))))
 ifneq ($(ICU_PREFIX),)
 CGO_CPPFLAGS += -I$(ICU_PREFIX)/include
 CGO_LDFLAGS += -L$(ICU_PREFIX)/lib
