@@ -11633,6 +11633,13 @@ YAML
 	printf '%s\n' "$*" > "` + bdInitLog + `"
 	exit 0
 	;;
+  migrate)
+	# The ready path completes pending schema migrations after adopting an
+	# initialized database; only the schema subcommand is expected here.
+	[ "${2:-}" = "schema" ] && exit 0
+	echo "unexpected bd command: $*" >&2
+	exit 64
+	;;
   *)
 	echo "unexpected bd command: $*" >&2
 	exit 64
@@ -11643,8 +11650,37 @@ esac
 		t.Fatal(err)
 	}
 
+	// The dolt stub must answer the readiness probe like a real fresh
+	// database: "table not found: config" until bd init has run. A stub that
+	// answers every query with success reads as an already-initialized
+	// database, which the fresh-scope path correctly ADOPTS instead of
+	// running the bd init this test is about.
 	fakeDolt := filepath.Join(binDir, "dolt")
-	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	fakeDoltScript := `#!/bin/sh
+set -eu
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+case "$query" in
+  *'SELECT 1 FROM config LIMIT 1')
+    if [ -f "` + bdInitLog + `" ]; then
+      exit 0
+    fi
+    echo "error on line 1 for query SELECT 1 FROM config LIMIT 1: Error 1146 (HY000): table not found: config" >&2
+    exit 1
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(fakeDolt, []byte(fakeDoltScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
