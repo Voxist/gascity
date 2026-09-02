@@ -101,7 +101,9 @@ RUN go get "google.golang.org/grpc@v${GRPC_VERSION}" \
        go run script/build.go bin/gh \
     && install -m 0755 bin/gh /out/gh \
     && go version -m /out/gh | tr '\t' ' ' | grep -Fq "dep google.golang.org/grpc v${GRPC_VERSION} " \
-    && go version -m /out/gh | tr '\t' ' ' | grep -Fq "dep golang.org/x/text v${XTEXT_VERSION} "
+    && go version -m /out/gh | tr '\t' ' ' | grep -Fq "dep golang.org/x/text v${XTEXT_VERSION} " \
+    && go version -m /out/gh | tr '\t' ' ' | grep -Fq "dep golang.org/x/crypto v${XCRYPTO_VERSION} " \
+    && go version -m /out/gh | tr '\t' ' ' | grep -Fq "dep golang.org/x/mod v${XMOD_VERSION} "
 
 WORKDIR /src/dolt/go
 RUN case "${TARGETARCH}" in \
@@ -124,7 +126,9 @@ RUN case "${TARGETARCH}" in \
        ./cmd/dolt \
     && file /out/dolt | grep -Fq "statically linked" \
     && go version -m /out/dolt | tr '\t' ' ' | grep -Fq "dep google.golang.org/grpc v${GRPC_VERSION} " \
-    && go version -m /out/dolt | tr '\t' ' ' | grep -Fq "dep golang.org/x/text v${XTEXT_VERSION} "
+    && go version -m /out/dolt | tr '\t' ' ' | grep -Fq "dep golang.org/x/text v${XTEXT_VERSION} " \
+    && go version -m /out/dolt | tr '\t' ' ' | grep -Fq "dep golang.org/x/crypto v${XCRYPTO_VERSION} " \
+    && go version -m /out/dolt | tr '\t' ' ' | grep -Fq "dep golang.org/x/mod v${XMOD_VERSION} "
 
 FROM ubuntu:24.04@sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b
 

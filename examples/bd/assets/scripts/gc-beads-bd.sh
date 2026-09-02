@@ -3228,11 +3228,9 @@ op_init() {
     ensure_beads_dir_permissions "$dir"
     if ! wait_for_bd_runtime_schema "$dolt_database"; then
         if [ "${GC_BD_INIT_RETRY:-0}" != "1" ]; then
-            # The retry used to drop metadata.json first, so the re-exec ran a
-            # plain init on a metadata-less scope — the manual recovery path
-            # that worked with the old bd. bd >= 1.2 refuses that shape outright
-            # ("legacy Dolt workspace detected": a dolt root with no metadata
-            # reads as pre-1.0), so the canonical metadata is kept, and the
+            # Keep the canonical metadata for the re-exec: bd >= 1.2 reads a
+            # dolt root with no metadata beside it as a pre-1.0 workspace
+            # ("legacy Dolt workspace detected") and refuses to init it. The
             # re-exec's schema-missing branch re-seeds with a forced init.
             echo "warning: bd schema for '$dolt_database' not visible after init; retrying init" >&2
             GC_BD_INIT_RETRY=1 exec "$0" init "$dir" "$prefix" "$dolt_database"

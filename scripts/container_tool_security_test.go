@@ -304,6 +304,35 @@ func TestRebuiltToolsAssertPatchedXTextArtifact(t *testing.T) {
 	}
 }
 
+// TestRebuiltToolsAssertPatchedXCryptoAndXModArtifacts mirrors the grpc and
+// x/text artifact guards for golang.org/x/crypto and golang.org/x/mod. The
+// three rebuilt CLIs each `go get` these floors, and the header comment in
+// Dockerfile.base says the post-build `go version -m` check is what turns a
+// silently-not-applied floor into a build failure (ga-0emb8). Until this
+// test existed only bd carried the two assertions; gh and dolt applied the
+// floors with no check, so a downgrade there shipped with a green build.
+func TestRebuiltToolsAssertPatchedXCryptoAndXModArtifacts(t *testing.T) {
+	root := repoRoot(t)
+
+	for _, mod := range []struct{ name, arg string }{
+		{"x/crypto", "XCRYPTO_VERSION"},
+		{"x/mod", "XMOD_VERSION"},
+	} {
+		base := readFile(t, root, "contrib/k8s/Dockerfile.base")
+		for _, bin := range []string{"/out/gh", "/out/dolt"} {
+			want := `go version -m ` + bin + ` | tr '\t' ' ' | grep -Fq "dep golang.org/` + mod.name + ` v${` + mod.arg + `} "`
+			if !strings.Contains(base, want) {
+				t.Errorf("contrib/k8s/Dockerfile.base must assert %s embeds patched %s; missing %q", bin, mod.name, want)
+			}
+		}
+		agent := readFile(t, root, "contrib/k8s/Dockerfile.agent")
+		want := `go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/` + mod.name + ` v${` + mod.arg + `} "`
+		if !strings.Contains(agent, want) {
+			t.Errorf("contrib/k8s/Dockerfile.agent must assert /out/bd embeds patched %s; missing %q", mod.name, want)
+		}
+	}
+}
+
 // TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools enforces that the rebuilt-from-
 // source tools (bd, dolt, gh) carry no Go-stdlib CVE waiver. The image build rebuilds
 // them with the Go 1.26.5 toolchain, which fixes every stdlib CVE listed, so a waiver

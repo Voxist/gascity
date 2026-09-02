@@ -86,8 +86,22 @@ configure_cgo_platform_paths() {
 
     case "$(uname)" in
         Darwin)
-            local icu_prefix
-            icu_prefix="$(brew --prefix icu4c 2>/dev/null || true)"
+            # Same scan as the Makefile and setup-gascity-macos: `icu4c` is an
+            # alias for the newest versioned formula, and the alias prefix can
+            # exist with an empty include/ while the installed keg is
+            # icu4c@NN. Only a candidate that carries the header counts; the
+            # shards that run outside make (test-integration-shard,
+            # test-go-test-shard) otherwise get -I<empty>/include and die on
+            # unicode/regex.h.
+            local brew_prefix icu_prefix candidate
+            brew_prefix="$(brew --prefix 2>/dev/null || true)"
+            icu_prefix=""
+            for candidate in "$(brew --prefix icu4c 2>/dev/null || true)" "$brew_prefix"/opt/icu4c@* "$brew_prefix"/Cellar/icu4c*/*; do
+                if [[ -n "$candidate" && -f "$candidate/include/unicode/regex.h" ]]; then
+                    icu_prefix="$candidate"
+                    break
+                fi
+            done
             if [[ -n "$icu_prefix" ]]; then
                 append_word_once cgo_cppflags "-I${icu_prefix}/include"
                 append_word_once cgo_ldflags "-L${icu_prefix}/lib"

@@ -7587,14 +7587,11 @@ esac
 // the retry sequence for a metadata-only scope whose forced init "succeeds"
 // but leaves the schema missing.
 //
-// This test used to expect the opposite second step: drop metadata.json and
-// retry with a PLAIN init through a fresh top-level invocation, the manual
-// recovery path that worked with the old bd. bd >= 1.2 refuses that shape
-// outright — a .beads/dolt root with no metadata beside it reads as a pre-1.0
-// workspace ("legacy Dolt workspace detected") and never gets as far as init.
-// Measured on the real binary (TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind):
-// the only sequence that recovers is to keep the canonical server-mode
-// metadata and let the re-exec's schema-missing branch re-seed with --force.
+// bd >= 1.2 reads a .beads/dolt root with no metadata beside it as a pre-1.0
+// workspace ("legacy Dolt workspace detected") and refuses to init it, so the
+// retry must keep the canonical server-mode metadata in place and let the
+// re-exec's schema-missing branch re-seed with --force. Measured on the real
+// binary (TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind).
 func TestGcBeadsBdInitKeepsMetadataAndReseedsForcedOnRetryAfterForcedFallback(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -7709,13 +7706,20 @@ esac
 		t.Fatalf("read init state: %v", err)
 	}
 	gotState := string(stateData)
-	for _, want := range []string{
-		"metadata=yes args=init --force --quiet --server -p gc --database hq",
-		"metadata=yes args=init --force --quiet --server -p gc --database hq",
-	} {
-		if !strings.Contains(gotState, want) {
-			t.Fatalf("init state missing %q:\n%s", want, gotState)
-		}
+	// Both inits must be forced AND both must keep the metadata: two
+	// identical lines, not one. A Contains over the same string twice proved
+	// only that one forced init ran; the retry that used to drop
+	// metadata.json and re-init plainly would have passed it.
+	want := "metadata=yes args=init --force --quiet --server -p gc --database hq"
+	if got := strings.Count(gotState, want); got != 2 {
+		t.Fatalf("forced-with-metadata inits = %d, want 2:\n%s", got, gotState)
+	}
+	countData, err := os.ReadFile(initCountFile)
+	if err != nil {
+		t.Fatalf("read init count: %v", err)
+	}
+	if got := strings.TrimSpace(string(countData)); got != "2" {
+		t.Fatalf("bd init invocations = %s, want 2", got)
 	}
 }
 

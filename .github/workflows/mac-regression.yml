@@ -199,13 +199,15 @@ jobs:
   # Fast quality gates that Linux runs on every PR. Keep these cheap so a
   # Mac-parity loop stays interactive.
   #
-  # No golangci-lint here. Lint is platform-independent apart from
-  # darwin-tagged files, and a full-repo lint on a 3-core hosted macOS runner
-  # ran past the 35-minute job cap cold (~10 min even warm on Linux); a
-  # cancelled job never saves the lint cache, so it stayed cold forever and
-  # the Mac lane could never go green (ga-w9jdf). The darwin-specific
-  # coverage moves to a GOOS=darwin pass in the Linux static checks
-  # (ga-fhih9).
+  # No full-repo `make lint` here (golangci-lint is still installed: the
+  # Format step is `golangci-lint fmt --diff`). Lint is platform-independent
+  # apart from darwin-tagged files, and a full-repo lint on a 3-core hosted
+  # macOS runner ran past the 35-minute job cap cold (~10 min even warm on
+  # Linux); a cancelled job never saves the lint cache, so it stayed cold
+  # forever and the Mac lane could never go green (ga-w9jdf). Until the
+  # GOOS=darwin lint pass on Linux exists (ga-fhih9, not yet implemented),
+  # the darwin-tagged files have no lint coverage anywhere; vet still
+  # compiles them here.
   mac-quality:
     name: Mac / quality (fmt, vet, docs)
     needs:
@@ -213,15 +215,10 @@ jobs:
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    # 60, not 35: on a COLD golangci-lint cache a whole-repo lint on the macOS
-    # runner needs more than 30 minutes, and the cache is cold until this job
-    # succeeds once (actions/cache saves at post-job, which a timeout skips —
-    # so the 35-minute budget kept the cache empty and guaranteed the next run
-    # was cold too). Before the ICU fix (ga-mac-icu) the job died in ~2 minutes
-    # on a compiler error and never reached lint, which is why the budget
-    # looked sufficient. The other CGO-compiling jobs run 20-25 and passed at
-    # 16/16 on this branch; integration jobs already use 60-90.
-    timeout-minutes: 60
+    # 35 like mac-unit: without the full-repo lint the job is install-tools,
+    # fmt-check, vet and docs (about 10 minutes); a hang should not burn an
+    # hour of macOS runner time, least of all on the nightly schedule.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
