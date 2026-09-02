@@ -101,7 +101,7 @@
 #       (NFR4 fallback, never /tmp — see AGENTS.md Build Cache Conventions).
 #       Does not create the directory (push_gate_acquire_slot does).
 #   push_gate_acquire_slot <slot_dir> <fd_out_var> [holder_label]
-#       Reads tunables from env: PUSH_GATE_MAX_CONCURRENT (default 2),
+#       Reads tunables from env: PUSH_GATE_MAX_CONCURRENT (default: test-local-job-count / 4, clamped to [1, 4]),
 #       PUSH_GATE_MAX_WAIT_SECONDS (default 600), PUSH_GATE_POLL_SECONDS
 #       (default 15); each is validated and falls back to its default on a
 #       malformed value. holder_label defaults to
@@ -278,7 +278,26 @@ push_gate_acquire_slot() {
     fi
 
     local _pgl_max _pgl_max_wait _pgl_poll
-    _pgl_max="$(_push_gate_tunable PUSH_GATE_MAX_CONCURRENT 2 1)"
+    # The default derives from the SAME budget each gated invocation sizes
+    # itself with — scripts/test-local-job-count (CPU count, the 4 GiB-per-job
+    # memory budget, cgroup limits, Linux load-awareness, and the
+    # GC_TEST_LOCAL_CPUS pin all flow in from there): slots = jobs / 4,
+    # clamped to [1, 4]. A gate is jobs x ~2.8 GiB test binaries, so the
+    # slot count must shrink with the per-gate job count or a memory-bound
+    # host oversubscribes RAM four ways. The upper clamp is the measured
+    # ceiling on the 16-core fleet host (ga-4h8bu: 4-way ran at 2.11x solo
+    # wall; 6-way crossed the degradation knee) and is what a future sweep
+    # moves. Latency per gated push is the cost that matters (an agent
+    # blocks on it). PUSH_GATE_MAX_CONCURRENT overrides the derivation.
+    local _pgl_default_max=1
+    local _pgl_jobs
+    _pgl_jobs="$("$(dirname "${BASH_SOURCE[0]}")/test-local-job-count" 2>/dev/null || echo 0)"
+    if [[ "$_pgl_jobs" =~ ^[0-9]+$ ]]; then
+        _pgl_default_max=$(( _pgl_jobs / 4 ))
+        (( _pgl_default_max < 1 )) && _pgl_default_max=1
+        (( _pgl_default_max > 4 )) && _pgl_default_max=4
+    fi
+    _pgl_max="$(_push_gate_tunable PUSH_GATE_MAX_CONCURRENT "$_pgl_default_max" 1)"
     _pgl_max_wait="$(_push_gate_tunable PUSH_GATE_MAX_WAIT_SECONDS 600 0)"
     _pgl_poll="$(_push_gate_tunable PUSH_GATE_POLL_SECONDS 15 1)"
     local _pgl_host

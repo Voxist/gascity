@@ -39,7 +39,15 @@ const (
 	// 12 job-level pin sites (a75c226c9 -> 3e03250ee). Env values, not just env
 	// keys, are part of the execution shape, so this pin moves on a pure value
 	// change too — correct behavior, not noise.
-	expectedCIExecutionHash     = "fab0f6df78d47cdab8de4316fbbd82e10b9048de2d65481fd8440525810a2ab9"
+	//
+	// Re-derived AGAIN on the merge with main, which had independently moved
+	// this pin for the ga-4h8bu scripts split (PR #141 round 2: the integration
+	// changes-filter widened to scripts/** so plain shell-script PRs trigger the
+	// shards that are the -tags integration tests' only CI home). Two
+	// independent shape changes met here, so the merged workflow hashes to
+	// NEITHER side's value — this is the case the header rule is about: always
+	// re-derive from the merged file, never adopt a side.
+	expectedCIExecutionHash     = "ff8d0586f0c1a60a67539a8eec2e653f7410053116e42c0aa8d4791faeda8e26"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
@@ -129,10 +137,11 @@ var requiredFilterPaths = map[string][]string{
 		".github/workflows/**",
 		"Makefile",
 		"**/*.go",
-		"scripts/test-integration-shard",
-		"scripts/test-go-test-shard",
-		"scripts/runtime-tmux-tests.manifest",
-		"scripts/go-test-observable",
+		// The whole scripts/ tree (subsumes the formerly named runner
+		// scripts): the scripts package's -tags integration tests have the
+		// integration shards as their only CI home, so a PR touching any
+		// plain shell script there must trigger them (ga-4h8bu split).
+		"scripts/**",
 		"examples/gastown/**",
 	},
 	"openclaw_bridge": {"contrib/openclaw-bridge/**", ".github/workflows/**"},

@@ -19,7 +19,11 @@ resource = "subprocess"
 # one file. The gate's audible refusal is only observable by executing the
 # generated work_query script in a real shell; asserting on the string would
 # pin the script's text rather than its behavior.
-baseline_calls = 560
+# 560 -> 561 (2026-09-02, ga-dmvyf bridge bd CGO fix): test/integration's
+# bridge builder verifies the built (and cached) bd's build shape through
+# `go version -m` — the only way to read a binary's CGO_ENABLED — so a cached
+# non-CGO bd is rebuilt instead of reused forever.
+baseline_calls = 561
 baseline_files = 169
 reported_calls = 495
 reported_files = 135
@@ -65,8 +69,12 @@ resource = "subprocess"
 # one file. The gate's audible refusal is only observable by executing the
 # generated work_query script in a real shell; asserting on the string would
 # pin the script's text rather than its behavior.
-baseline_calls = 416
-baseline_files = 118
+# 416 -> 413, files 118 -> 115 (2026-09-01, ga-4h8bu scripts-package split):
+# six pipeline-heavy scripts test files moved behind //go:build integration,
+# taking their subprocess sites out of the untagged scope; banked per the
+# ratchet invariant.
+baseline_calls = 413
+baseline_files = 115
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
@@ -363,8 +371,10 @@ resource = "subprocess"
 # one file. The gate's audible refusal is only observable by executing the
 # generated work_query script in a real shell; asserting on the string would
 # pin the script's text rather than its behavior.
-baseline_calls = 410
-baseline_files = 115
+# 410 -> 408, files 115 -> 113 (2026-09-01, ga-4h8bu scripts-package split):
+# same re-tag banked in the Small scope.
+baseline_calls = 408
+baseline_files = 113
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-80po0c.2.1"

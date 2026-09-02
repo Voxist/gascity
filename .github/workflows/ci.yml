@@ -146,10 +146,12 @@ jobs:
               - '.github/workflows/**'
               - 'Makefile'
               - '**/*.go'
-              - 'scripts/test-integration-shard'
-              - 'scripts/test-go-test-shard'
-              - 'scripts/runtime-tmux-tests.manifest'
-              - 'scripts/go-test-observable'
+              # The whole scripts/ tree, not only named files: the scripts
+              # package's pipeline tests carry -tags integration (ga-4h8bu
+              # split), so a PR touching only a plain shell script there —
+              # scripts/lint, gc-session-docker — must trigger the
+              # integration shards that are those tests' only CI home.
+              - 'scripts/**'
               - 'examples/gastown/**'
             openclaw_bridge:
               - 'contrib/openclaw-bridge/**'

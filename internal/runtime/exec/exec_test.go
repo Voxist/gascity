@@ -1375,11 +1375,18 @@ func TestProvider_StartCancellationInterruptsForegroundChild(t *testing.T) {
 	dir := t.TempDir()
 	readyFile := filepath.Join(dir, "ready")
 	interruptFile := filepath.Join(dir, "interrupted")
+	// Readiness is written by a background subshell only once a `sleep` child
+	// of the adapter shell is OBSERVABLE — not merely "about to be forked".
+	// Writing it before the fork let the test cancel inside the shell's
+	// ~1-2ms blocked-signal fork window on ~13/100 runs (the pre-exec child
+	// never sees the group SIGINT and the trap stays deferred behind the
+	// full sleep); production cancellation is uncorrelated with fork timing,
+	// so that window is the test's own artifact, closed here by construction.
 	script := writeScript(t, dir, fmt.Sprintf(`
 case "$1" in
   start)
     trap 'printf "%%s\n" interrupted > "%s"; exit 0' INT
-    : > "%s"
+    ( i=0; until pgrep -P $$ sleep >/dev/null 2>&1; do i=$((i+1)); [ "$i" -gt 2000 ] && exit 1; done; : > "%s" ) &
     sleep 30
     ;;
   *) exit 2 ;;

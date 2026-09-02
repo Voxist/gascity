@@ -1,8 +1,9 @@
+//go:build integration
+
 package scripts_test
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -327,74 +328,4 @@ print-cgo-flags:
 		t.Fatalf("make print-cgo-flags failed: %v\n%s", err, out)
 	}
 	return string(out)
-}
-
-func makeCommand(args ...string) *exec.Cmd {
-	return testCommand("make", args...)
-}
-
-func testCommand(name string, args ...string) *exec.Cmd {
-	return exec.Command(name, args...)
-}
-
-func filteredMakefileCGOTestEnv() []string {
-	env := os.Environ()
-	filtered := make([]string, 0, len(env))
-	for _, entry := range env {
-		if strings.HasPrefix(entry, "CGO_") {
-			continue
-		}
-		filtered = append(filtered, entry)
-	}
-	return filtered
-}
-
-func assertContains(t *testing.T, haystack, needle string) {
-	t.Helper()
-	if !strings.Contains(haystack, needle) {
-		t.Fatalf("output missing %q:\n%s", needle, haystack)
-	}
-}
-
-func assertNotContains(t *testing.T, haystack, needle string) {
-	t.Helper()
-	if strings.Contains(haystack, needle) {
-		t.Fatalf("output contains %q:\n%s", needle, haystack)
-	}
-}
-
-func lineWithPrefix(t *testing.T, output, prefix string) string {
-	t.Helper()
-	for _, line := range strings.Split(output, "\n") {
-		if strings.HasPrefix(line, prefix) {
-			return line
-		}
-	}
-	t.Fatalf("output missing line prefix %q:\n%s", prefix, output)
-	return ""
-}
-
-func countExactField(fields, want string) int {
-	count := 0
-	for _, field := range strings.Fields(fields) {
-		if field == want {
-			count++
-		}
-	}
-	return count
-}
-
-func assertFieldsInOrder(t *testing.T, fields string, want ...string) {
-	t.Helper()
-	allFields := strings.Fields(fields)
-	next := 0
-	for _, field := range allFields {
-		if field == want[next] {
-			next++
-			if next == len(want) {
-				return
-			}
-		}
-	}
-	t.Fatalf("fields are not in required order %v:\n%s", want, fields)
 }
