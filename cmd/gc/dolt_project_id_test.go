@@ -689,6 +689,72 @@ func TestEnsureProjectIDRestoresFromCityIdentityMap(t *testing.T) {
 		}
 	})
 
+	t.Run("case7_stale_identity_map_with_consistent_layers_opens_the_store", func(t *testing.T) {
+		// The map disagrees with the database, but L1==L2==L3 already agree:
+		// this is a STALE [identity_map] entry (a re-mint, or a rig re-added
+		// under a new id), and reconcile has nothing to write. Failing here
+		// would strand a healthy rig with no operator override, so the drift is
+		// reported as an event and the store opens.
+		scopeRoot := t.TempDir()
+		cityDir := t.TempDir()
+		writeCityTOMLForRig(t, cityDir, "my-rig", scopeRoot, canonicalID)
+		if err := contract.WriteProjectIdentity(fsys.OSFS{}, scopeRoot, differentID); err != nil {
+			t.Fatal(err)
+		}
+		metadataPath := writeProjectIDMetadataFile(t, scopeRoot, differentID)
+		port, cleanup := startProjectIDTestServer(t, seedDatabaseProjectIDQueries(differentID)...)
+		defer cleanup()
+		rec := &projectIdentityRecordingRecorder{}
+		report, err := ensureManagedDoltProjectIDWithRecorder(metadataPath, "127.0.0.1", port, "root", "hq", cityDir, rec)
+		if err != nil {
+			t.Fatalf("ensureManagedDoltProjectIDWithRecorder refused a consistent scope over a stale identity_map entry: %v", err)
+		}
+		if report.ProjectID != differentID {
+			t.Fatalf("report = %+v, want the scope's own consistent id %q", report, differentID)
+		}
+		if report.IdentityFileUpdated || report.MetadataUpdated {
+			t.Fatalf("report = %+v, want no writes when nothing is pending", report)
+		}
+		assertProjectIdentityFile(t, scopeRoot, differentID)
+		assertMetadataProjectID(t, metadataPath, differentID)
+		assertDatabaseProjectID(t, port, differentID)
+		payloads := decodeProjectIdentityStampedPayloads(t, rec.records)
+		if len(payloads) != 1 || payloads[0].Source != "canonical_l3_mismatch" {
+			t.Fatalf("events = %+v, want exactly one canonical_l3_mismatch so the drift stays visible", payloads)
+		}
+	})
+
+	t.Run("case8_unreadable_city_toml_with_consistent_layers_opens_the_store", func(t *testing.T) {
+		// city.toml is momentarily unreadable (city-config-reload pulls it every
+		// 120s). With L1==L2==L3 agreeing there is nothing for reconcile to get
+		// wrong, so a torn read must not fail this scope — otherwise one bad
+		// read takes every managed store down at once, including scopes the map
+		// never mentioned.
+		scopeRoot := t.TempDir()
+		cityDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[[rigs]\nname = \"broken"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := contract.WriteProjectIdentity(fsys.OSFS{}, scopeRoot, canonicalID); err != nil {
+			t.Fatal(err)
+		}
+		metadataPath := writeProjectIDMetadataFile(t, scopeRoot, canonicalID)
+		port, cleanup := startProjectIDTestServer(t, seedDatabaseProjectIDQueries(canonicalID)...)
+		defer cleanup()
+		rec := &projectIdentityRecordingRecorder{}
+		report, err := ensureManagedDoltProjectIDWithRecorder(metadataPath, "127.0.0.1", port, "root", "hq", cityDir, rec)
+		if err != nil {
+			t.Fatalf("ensureManagedDoltProjectIDWithRecorder failed a consistent scope over an unreadable city.toml: %v", err)
+		}
+		if report.ProjectID != canonicalID || report.IdentityFileUpdated || report.MetadataUpdated {
+			t.Fatalf("report = %+v, want the existing id and no writes", report)
+		}
+		payloads := decodeProjectIdentityStampedPayloads(t, rec.records)
+		if len(payloads) != 1 || payloads[0].Source != "l0_read_error" {
+			t.Fatalf("events = %+v, want exactly one l0_read_error so the unreadable map stays visible", payloads)
+		}
+	})
+
 	t.Run("case6_city_toml_unreadable_fails_closed", func(t *testing.T) {
 		// A malformed city.toml (e.g. mid-edit by city-config-reload) must not
 		// let reconcile mint a fresh id for a rig whose canonical id may be

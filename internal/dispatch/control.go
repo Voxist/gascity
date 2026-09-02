@@ -2113,25 +2113,36 @@ func repairLegacySelfClosingEdges(store beads.Store, subjectID, closerID string,
 // edge. Anything else (another workflow's control, a retry-eval, an ordinary
 // task) is a real blocker and is left alone.
 func isLegacySelfClosingBlocker(blocker, subject beads.Bead, closerID string) bool {
-	if !beadmeta.IsSelfClosingControlKind(blocker.Metadata[beadmeta.KindMetadataKey]) {
+	kind := blocker.Metadata[beadmeta.KindMetadataKey]
+	if !beadmeta.IsSelfClosingControlKind(kind) {
 		return false
 	}
 	if blocker.ID == closerID {
 		return true
 	}
-	// beadmeta.ControlClosesNode is the compiler's "this control closes that
-	// node" predicate (scope-check -> its scope body by scope_ref; finalize ->
-	// a workflow root). At runtime it must additionally be the SAME workflow:
-	// the control's root_bead_id is the scope body's root, or the workflow
-	// root itself — a finalize control of another workflow is foreign.
-	if !beadmeta.ControlClosesNode(blocker.Metadata, subject.ID, subject.Metadata) {
+	// Deliberately NOT beadmeta.ControlClosesNode/NodeIsScope: those resolve
+	// COMPILER nodes by declared identity (node id / step ref / step id), and a
+	// materialized scope body identifies itself by gc.scope_ref — which they do
+	// not consult. Matching a runtime bead with them silently misses the
+	// pre-#5202 bodies this repair exists for, leaving the legacy edge in place
+	// and the scope-check burning its budget into quarantine every sweep
+	// (TestLegacyCycleRepairMatchesBodyByScopeRefAlone).
+	switch kind {
+	case beadmeta.KindScopeCheck:
+		if subject.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindScope ||
+			subject.Metadata[beadmeta.ScopeRoleMetadataKey] != beadmeta.ScopeRoleBody {
+			return false
+		}
+		if blocker.Metadata[beadmeta.RootBeadIDMetadataKey] != subject.Metadata[beadmeta.RootBeadIDMetadataKey] {
+			return false
+		}
+		return matchesScopeRef(subject, blocker.Metadata[beadmeta.ScopeRefMetadataKey])
+	case beadmeta.KindWorkflowFinalize:
+		return subject.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow &&
+			blocker.Metadata[beadmeta.RootBeadIDMetadataKey] == subject.ID
+	default:
 		return false
 	}
-	root := subject.Metadata[beadmeta.RootBeadIDMetadataKey]
-	if subject.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow {
-		root = subject.ID
-	}
-	return root != "" && blocker.Metadata[beadmeta.RootBeadIDMetadataKey] == root
 }
 
 // Note: setOutcomeAndClose, propagateRetrySubjectMetadata,

@@ -564,3 +564,86 @@ func TestProcessWorkflowFinalizeGenuinelyMissingRootStillClosesAsMissingRoot(t *
 		t.Fatalf("finalizer = status %q outcome %q, want closed/missing_root", finalizerAfter.Status, finalizerAfter.Metadata["gc.outcome"])
 	}
 }
+
+// legacyScopeCheckFixtureScopeRefOnly builds the same pre-#5202 graph as
+// legacyScopeCheckFixture, except the body identifies itself ONLY by
+// gc.scope_ref — no gc.step_ref. That is a real materialized shape (the
+// runtime predicate matchesScopeRef checks gc.scope_ref first, precisely for
+// it), and it is the shape a compiler-node predicate resolving by node id /
+// step ref / step id cannot see.
+func legacyScopeCheckFixtureScopeRefOnly(t *testing.T, store beads.Store) (control, body beads.Bead) {
+	t.Helper()
+	body = mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": "wf-legacy-sr",
+			"gc.scope_ref":    "body",
+		},
+	})
+	subject := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "implement",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": "wf-legacy-sr",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+			"gc.outcome":      "pass",
+		},
+	})
+	control = mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize scope for implement",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": "wf-legacy-sr",
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "control",
+		},
+	})
+	mustDepAdd(t, store, control.ID, subject.ID, "blocks")
+	mustDepAdd(t, store, body.ID, control.ID, "blocks")
+	return mustGetBead(t, store, control.ID), body
+}
+
+// TestLegacyCycleRepairMatchesBodyByScopeRefAlone pins the scope-arm predicate
+// against a body that carries gc.scope_ref and no gc.step_ref. It runs the
+// MEMBER path, where the blocker is a preserved scope-check that is NOT the
+// closer, so the identity shortcut does not apply and the scope_ref match is
+// what decides. Resolving the pair with a compiler-node predicate
+// (beadmeta.NodeIsScope / ControlClosesNode, which consult node id, step ref
+// and step id but never gc.scope_ref) leaves this body unmatched: the legacy
+// self-edge is not removed, the close stays refused, and the scope-check burns
+// the semantic budget into quarantine on every sweep — the deadlock the repair
+// exists to break.
+func TestLegacyCycleRepairMatchesBodyByScopeRefAlone(t *testing.T) {
+	t.Parallel()
+
+	store := newStrictCloseStore()
+	control, body := legacyScopeCheckFixtureScopeRefOnly(t, store)
+	var subjectID string
+	for id := range mustDepTypes(t, store, control.ID) {
+		subjectID = id
+	}
+	if err := store.SetMetadata(subjectID, "gc.outcome", "fail"); err != nil {
+		t.Fatalf("mark subject failed: %v", err)
+	}
+
+	result, err := reconcileTerminalScopedMember(store, mustGetBead(t, store, subjectID))
+	if err != nil {
+		t.Fatalf("reconcileTerminalScopedMember(body identified by gc.scope_ref only): %v (tier %v)", err, ClassifyControllerError(err))
+	}
+	if result.Action != "scope-fail" {
+		t.Fatalf("result = %+v, want scope-fail", result)
+	}
+	bodyAfter := mustGetBead(t, store, body.ID)
+	if bodyAfter.Status != "closed" || bodyAfter.Metadata["gc.outcome"] != "fail" {
+		t.Fatalf("body = status %q outcome %q, want closed/fail", bodyAfter.Status, bodyAfter.Metadata["gc.outcome"])
+	}
+	if deps := mustDepTypes(t, store, body.ID); deps[control.ID] != "" {
+		t.Fatalf("legacy self-edge not removed: %v", deps)
+	}
+}

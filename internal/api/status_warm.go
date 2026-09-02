@@ -125,7 +125,33 @@ func (s *Server) buildAndStoreStatus(lite bool) StatusBody {
 // rebuild. statusBuildAsyncHook is the spawn point, overridable in tests to run
 // the build inline and deterministically.
 func (s *Server) refreshStatusBodyAsync(lite bool) {
-	statusBuildAsyncHook(func() { s.buildAndStoreStatus(lite) })
+	// The in-flight guard is taken SYNCHRONOUSLY, in the caller's goroutine,
+	// before anything is spawned. buildAndStoreStatus's singleflight coalesces
+	// only calls that OVERLAP, so a burst of cache misses whose goroutines the
+	// scheduler spreads past the first build's completion would each start
+	// their own ~28s O(store) build. This guard makes "one refresh per variant
+	// in flight" independent of scheduling, for the warm path and the
+	// stale-while-revalidate path alike (both spawn here). Pinned by
+	// TestHandleStatusServesStaleAndRefreshesInBackground.
+	s.statusRefreshMu.Lock()
+	if s.statusRefreshing == nil {
+		s.statusRefreshing = make(map[bool]bool, 2)
+	}
+	if s.statusRefreshing[lite] {
+		s.statusRefreshMu.Unlock()
+		return
+	}
+	s.statusRefreshing[lite] = true
+	s.statusRefreshMu.Unlock()
+
+	statusBuildAsyncHook(func() {
+		defer func() {
+			s.statusRefreshMu.Lock()
+			delete(s.statusRefreshing, lite)
+			s.statusRefreshMu.Unlock()
+		}()
+		s.buildAndStoreStatus(lite)
+	})
 }
 
 // statusBuildAsyncHook spawns the background build. Tests override it to run the

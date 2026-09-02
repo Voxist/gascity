@@ -53,6 +53,23 @@ const (
 	actionGenerate
 )
 
+// writesIdentity reports whether acting on this decision would WRITE an
+// identity somewhere (repair, seed, migrate, adopt or mint). The L0 canonical
+// guards below refuse only when it does: a stale [identity_map] entry, or a
+// city.toml that momentarily cannot be read, is not a reason to fail a store
+// whose own layers already agree — that would turn a config-file hiccup into
+// a fleet-wide outage (city-config-reload pulls city.toml every 120s). When a
+// write IS pending, the same disagreement means the write could be wrong, and
+// refusing is the only safe answer.
+func (d reconcileDecision) writesIdentity() bool {
+	switch d.Action {
+	case actionNoOp, actionRefuseL1L3Mismatch, actionRefuseLegacyMismatch:
+		return false
+	default:
+		return true
+	}
+}
+
 type reconcileDecision struct {
 	Action     reconcileAction
 	ResolvedID string
@@ -176,14 +193,28 @@ func ensureManagedDoltProjectIDWithRecorder(metadataPath, host, port, user, data
 		l0, l0ok, l0err := readCityIdentityMapEntry(cityPath, scopeRoot)
 		switch {
 		case l0err != nil:
-			// Fail closed: a transient config error must never mint identity.
-			// The payload has no reason field, so the read error travels in
-			// new_id; the l0_read_error source tells consumers it is not an id.
+			// Fail closed ONLY if a write is pending: an unreadable city.toml
+			// must never let reconcile mint or adopt an identity the canonical
+			// map may already name, but it must not fail a scope whose layers
+			// already agree (nothing to get wrong) — including scopes the map
+			// never mentioned. The payload has no reason field, so the read
+			// error travels in new_id; the l0_read_error source tells consumers
+			// it is not an id.
 			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "l0_read_error", "L0", "", l0err.Error())
-			return managedDoltProjectIDReport{}, fmt.Errorf("reading city identity map for %s: %w", scopeRoot, l0err)
+			if pending := decideReconcile(identityProjectID, identityOK, metadataProjectID, metadataOK, databaseProjectID, ok); pending.writesIdentity() {
+				return managedDoltProjectIDReport{}, fmt.Errorf("reading city identity map for %s: %w", scopeRoot, l0err)
+			}
 		case l0ok && ok && databaseProjectID != l0:
+			// The map disagrees with the database. Refuse only while a write is
+			// pending (reconcile would adopt or seed the non-canonical id);
+			// once L1/L2/L3 agree with each other this is a STALE map entry —
+			// after a re-mint or a rig re-add — and failing the store would
+			// strand a healthy rig with no operator override. The event is
+			// emitted either way so the drift is visible.
 			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "canonical_l3_mismatch", "L0", l0, databaseProjectID)
-			return managedDoltProjectIDReport{}, formatCanonicalMismatchError(scopeRoot, l0, "database", databaseProjectID)
+			if pending := decideReconcile(identityProjectID, identityOK, metadataProjectID, metadataOK, databaseProjectID, ok); pending.writesIdentity() {
+				return managedDoltProjectIDReport{}, formatCanonicalMismatchError(scopeRoot, l0, "database", databaseProjectID)
+			}
 		case l0ok && ok && (!identityOK || identityProjectID != l0):
 			// DB confirms the canonical ID; L1 is absent or stale. Auto-repair.
 			preHeal, err = restoreIdentityFromCanonical(fs, scopeRoot, metadataPath, l0)
