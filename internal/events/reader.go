@@ -42,27 +42,20 @@ type Filter struct {
 	// ReadFiltered's forward scan or on List/ListTail implementations
 	// that are not byte-scanning a file (e.g. Fake, Multiplexer).
 	MaxScanBytes int64
-	// ActiveOnly confines a tail scan to the ACTIVE events.jsonl, never
-	// opening the sibling .gz archives, so "no match in the active file" is
-	// returned as no match rather than escalating into an archive walk.
-	//
-	// It exists because two callers hold directly opposing, separately tested
-	// contracts for the same method. FileRecorder.ListTail must span archives
-	// by default (vp-x7x8w / T-003,
-	// TestFileRecorderListTailSpansArchivesAfterRotation): before that fix a
-	// rotation silently truncated event history. But storehealth's
-	// LastMaintenance must NOT see archived records
-	// (TestLastMaintenanceDoesNotReadRotatedArchives): resurrecting a rotated
-	// maintenance timestamp reports a store as recently maintained when it is
-	// not, which is the permissive branch of an unknown (ADR-0043 RULE 1) on
-	// the durability surface. Whether a record sits in the active file or an
-	// archive is an artifact of rotation timing, so neither behaviour can be
-	// the silent default for both — the caller declares which it needs.
-	//
-	// Like MaxScanBytes, this is for callers where "no match within the recent
-	// window" is an acceptable, already-representable result, and it likewise
-	// has no effect on non-byte-scanning implementations (Fake, Multiplexer).
-	ActiveOnly bool
+	// SpanArchives lets a tail scan that finds fewer than `limit` matches in
+	// the ACTIVE events.jsonl continue into the sibling .gz archives,
+	// newest-first. The default (false) is the active-only contract every
+	// tail reader holds — order triggers, `gc order check`, doctor, and
+	// storehealth (TestLastMaintenanceDoesNotReadRotatedArchives: a rotated
+	// maintenance timestamp must not report a store as recently maintained).
+	// The one reader that must span archives is the events-list API's first
+	// page after a rotation (vp-x7x8w, TestFetchEventPageFirstPageBounded-
+	// AfterRotation), which opts in; whether a record sits in the active file
+	// or an archive is an artifact of rotation timing, so the caller that
+	// wants history declares it rather than every bounded reader paying an
+	// archive walk. No effect on non-byte-scanning implementations (Fake,
+	// Multiplexer).
+	SpanArchives bool
 }
 
 // matchesFilter reports whether e satisfies all non-zero predicates in f.
@@ -514,21 +507,6 @@ func streamArchive(path string, _ Filter, fn func(Event) bool) error {
 	return nil
 }
 
-// ReadFilteredTail reads the trailing matching events from path, spanning
-// the active log and the sibling .gz archives. A positive limit returns at
-// most that many events in chronological (seq-ascending) order; limit <= 0
-// falls back to ReadFiltered (unbounded).
-//
-// The active log is read first (it holds the newest events) via the
-// backwards chunk reader, then archives are walked NEWEST-FIRST (reverse of
-// the ascending seq order) until `limit` matching events are collected. This
-// makes the descending read authoritative across rotation: a first-page read
-// that needs older matches reaches into the newest archive only, instead of
-// gunzipping the whole history oldest-first — the vp-x7x8w residual of the
-// vp-8jig archive-decode pathology. `archiveOverlapsFilter` still gates each
-// archive so a BeforeSeq/AfterSeq/Since cursor page skips non-overlapping
-// archives without opening them.
-
 // LatestArchivedMatch returns the newest archived event matching filter, and
 // whether one was found. Archives are scanned newest-first and the scan stops
 // at the first archive holding a match, so the cost is one archive rather than
@@ -583,17 +561,13 @@ func LatestArchivedMatch(path string, filter Filter) (Event, bool, error) {
 	return Event{}, false, nil
 }
 
-// ReadFilteredTail reads the trailing matching events from path. A positive
-// limit returns at most that many events in chronological order; limit <= 0
-// falls back to ReadFiltered.
+// ReadFilteredTail reads the trailing matching events from the ACTIVE log. A
+// positive limit returns at most that many events in chronological order;
+// limit <= 0 falls back to ReadFiltered. Only a caller that sets
+// Filter.SpanArchives continues into the sibling .gz archives (newest-first)
+// when the active log holds fewer than limit matches.
 func ReadFilteredTail(path string, filter Filter, limit int) ([]Event, error) {
 	if limit <= 0 {
-		// ReadFiltered honours ActiveOnly itself (archiveOverlapsFilter skips
-		// every archive when it is set), so the unbounded branch needs no
-		// special case. An earlier attempt routed ActiveOnly to
-		// tailActive(path, filter, 0) instead, which returns NOTHING: the tail
-		// walk is guarded by len(reversed) < limit and a zero limit stops it
-		// before it reads a byte — trading a silent-ignore for a silent-empty.
 		return ReadFiltered(path, filter)
 	}
 
@@ -602,15 +576,11 @@ func ReadFilteredTail(path string, filter Filter, limit int) ([]Event, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(result) >= limit {
+	if len(result) >= limit || !filter.SpanArchives {
 		return result, nil
 	}
 
-	// Not enough matches in the active file — reach into archives newest-first,
-	// unless the caller confined the scan to the active log (Filter.ActiveOnly).
-	if filter.ActiveOnly {
-		return result, nil
-	}
+	// The caller asked for history: reach into archives newest-first.
 	return tailArchives(path, filter, limit, result)
 }
 
@@ -643,11 +613,9 @@ func tailActive(path string, filter Filter, limit int) ([]Event, error) {
 // An unreadable archive (truncated gzip, torn write) is SKIPPED, not failed —
 // the same degraded contract ReadFilteredWithWarnings and ReadLatestMatch follow
 // (vc-89s). The walk continues into older archives, so a corrupt archive can
-// only make the result OLDER, never silently short. This matters for callers
-// that route a tail read over the archive set: the doctor order-firing check's
-// order.fired read must survive a single corrupt sibling (its degraded warning
-// for that archive surfaces via the separate controller-start ReadLatestMatch
-// path), and the events-list API degrades to a slightly shorter page instead of
+// only make the result OLDER, never silently short. This matters for the
+// caller that opts a tail read into the archive set (the events-list API,
+// Filter.SpanArchives), which degrades to a slightly shorter page instead of
 // erroring. A failed directory listing is handled the same lenient way.
 func tailArchives(path string, filter Filter, limit int, active []Event) ([]Event, error) {
 	dir := filepath.Dir(path)
@@ -662,7 +630,7 @@ func tailArchives(path string, filter Filter, limit int, active []Event) ([]Even
 	// as soon as the cap is satisfied and never open older archives.
 	result := active
 	for i := len(archives) - 1; i >= 0; i-- {
-		if len(result) >= limit {
+		if len(result) >= limit || !filter.SpanArchives {
 			break
 		}
 		info := archives[i]

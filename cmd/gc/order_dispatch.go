@@ -714,8 +714,12 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 	// store — so doing it for every order costs the tick nothing and gives the
 	// parallel pass its complete work list.
 	candidates := make([]*orderDispatchCandidate, 0, total)
-	for offset := 0; offset < total; offset++ {
-		idx := (start + offset) % total
+	// Admission order is most-overdue-first from the ring position (see
+	// orderAdmissionOrder): a bounded dispatch budget otherwise degrades every
+	// order to one fire per full rotation regardless of interval, starving
+	// short-interval orders behind long ones (vp-cixi.6). Phase 2 follows this
+	// order through the candidates slice.
+	for _, idx := range orderAdmissionOrder(m.aa, start, now, m.peekLastRun) {
 		a := m.aa[idx]
 		// Skip orders targeting suspended rigs.
 		if m.orderRigSuspended(a) {

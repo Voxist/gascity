@@ -160,6 +160,17 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 				Body:      entry.body,
 			}, nil
 		}
+		// Expired warm entry (idle longer than statusWarmServeMaxAge): rebuild
+		// synchronously and re-seed it, exactly as before the 2026-08-31 resync.
+		// Falling through to the upstream branches below instead locks the
+		// handler out of the warm path for the rest of the process: the TTL
+		// floor misses, stale-while-revalidate answers (its entry has no age
+		// bound), and its refresher seeds only the response cache — never the
+		// warm entry — so this branch is skipped again on every later poll and
+		// each one runs the ~28s build under runBackground's 30s budget with
+		// no singleflight. Pinned by TestHandleStatusReseedsWarmEntryAfterLongIdle.
+		resp := s.buildAndStoreStatus(input.Lite)
+		return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: resp}, nil
 	}
 
 	// TTL-floor reuse (upstream): a body built within statusResponseTTLFloor is
@@ -184,7 +195,9 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	//
 	// This sits at top level rather than inside the warm branch: nested there
 	// it was unreachable whenever no warm entry existed, which is exactly the
-	// cold-ish case it exists to cover.
+	// cold-ish case it exists to cover. It is reached only when NO warm entry
+	// exists (an expired one rebuilds synchronously above), since its refresher
+	// does not seed the warm entry.
 	//
 	// CacheAgeS reports the GREATER of the two staleness signals: how long ago
 	// this response entry was built, and cacheAgeSeconds(store) — the age of the

@@ -52,6 +52,16 @@ type CachingStore struct {
 	// transition — which is the ADR-0094 bead.updated flood. Key set and value
 	// set share one lifecycle by construction: clearReadyProjectionLocked only
 	// fires when a verdict exists, so every mark carries its disowned value.
+	//
+	// This is deliberately a fork-owned map BESIDE upstream's
+	// readyProjectionLost rather than a change to that field's type: widening
+	// an upstream-owned field to carry the verdict would conflict on every
+	// resync, while a parallel map keeps the divergence additive. The cost —
+	// every lifecycle site (newCachingStore, absorbFreshLocked, evictLocked,
+	// both prime carry-over branches) must maintain both maps — is guarded by
+	// TestNoReadSurfaceServesADisownedVerdict and
+	// TestInvalidationNilsTheRowAcrossMutationFamilies, which fail if a
+	// lifecycle site drops the mark or leaks a disowned verdict.
 	readyProjectionInvalid map[string]bool
 	state                  cacheState
 	lastFreshAt            time.Time
@@ -63,7 +73,7 @@ type CachingStore struct {
 	// availability (the per-scope circuit breaker). See
 	// SetAvailabilityGate. Guarded by mu.
 	// Atomic, NOT mu-guarded: read on every List/Count/Get, so putting it
-	// under c.mu made a cancelled caller block on a contended cache lock
+	// under c.mu made a canceled caller block on a contended cache lock
 	// just to learn whether the breaker is open
 	// (TestCachingStoreCountContextCancelsWhileWaitingForLock). This also
 	// matches the rule stated on Degraded(): foreign breaker code must

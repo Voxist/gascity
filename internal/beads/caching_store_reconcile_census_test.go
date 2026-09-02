@@ -120,7 +120,7 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		// injected collaborator, unavailableSkipLogged dedupes one problem entry
 		// per outage episode, and degradedReads is a monotonic counter of reads
 		// served from last-good. None is written by mergeSnapshotLocked and the
-		// merge end state does not depend on any of them; their behaviour is
+		// merge end state does not depend on any of them; their behavior is
 		// pinned by the caching_store_unavailable / reality_first suites.
 		"availabilityGate": true, "unavailableSkipLogged": true,
 		"degradedReads": true,

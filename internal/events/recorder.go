@@ -579,7 +579,10 @@ func (r *FileRecorder) ListInFlight(filter Filter) ([]Event, error) {
 	return ReadFilteredWithInFlight(r.path, filter)
 }
 
-// ListTail returns trailing matching events from the underlying file.
+// ListTail returns trailing matching events from the underlying file. It
+// reads the ACTIVE events.jsonl only unless filter.SpanArchives is set, in
+// which case a short active tail is filled from the rotated .gz archives
+// newest-first (see ReadFilteredTail).
 func (r *FileRecorder) ListTail(filter Filter, limit int) ([]Event, error) {
 	return ReadFilteredTail(r.path, filter, limit)
 }

@@ -685,44 +685,19 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		discovered, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, run)
 		if err != nil {
 			emitFailure(workQuery, err)
-			// Same store-unavailable classification the read path applies. This
-			// is the form agents actually run in the dispatch loop, so without
-			// the token here a transport-class failure is still indistinguishable
-			// from "no work" to every consumer that matches on it — the dead-drop
-			// the token exists to close.
-			// Classified ONCE and reused for both the stderr token and the exit
-			// code below, so the published contract (token <=> exit 2) cannot be
-			// split by an edit reaching one call site and not the other.
-			classified := classifyWorkQueryStoreUnavailable(err)
-			storeUnavailable := errors.Is(classified, beads.ErrStoreUnavailable)
-			if storeUnavailable {
-				fmt.Fprintf(stderr, "gc hook --claim: %s: %v\n", hookStoreUnavailableToken, classified) //nolint:errcheck // best-effort stderr
-			} else {
-				fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
-			}
-			// Deliberately NO drain result and NO drain-ack. A failed read is not
-			// an idle store: the controller counted demand for this seat, so
-			// draining here would convert a transport failure into a false idle,
-			// reap the seat, and leave the work for the next tick to rediscover.
-			// Keep the seat and let the event above carry the cause; the
-			// idle-claim backstop re-drives the hook. That behaviour is
-			// orthogonal to the exit CODE, which follows the token's published
-			// contract: hookStoreUnavailableToken documents exit 2, and a
-			// consumer gating on the code must be able to tell a dead store from
-			// no-work on this path too — it is the form agents run.
-			if storeUnavailable {
-				return 2
-			}
-			return 1
+			return reportClaimWorkQueryFailure(err, stderr)
 		}
 		if isZeroHookStore(selected) {
 			break // no remaining store has ready work
 		}
+		// On a multi-leg city this re-reads the selected store before the
+		// mutation, and a primary-leg failure there is surfaced exactly like a
+		// discovery failure: it is the same read of the same store, moments
+		// later, so it gets the same classification.
 		claimOutput, claimStore, err := claimStoreWithFallback(workQuery, remaining, selected, primary, discovered, run)
 		if err != nil {
 			emitFailure(workQuery, err)
-			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
+			return reportClaimWorkQueryFailure(err, stderr)
 		}
 		if isZeroHookStore(claimStore) {
 			break // selected store emptied and no later store has ready work
@@ -754,6 +729,38 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		remaining = removeHookStore(remaining, claimStore)
 	}
 	return writeHookClaimNoWork(claimOpts, ops, claimsErrored, workDir, stdout, stderr)
+}
+
+// reportClaimWorkQueryFailure reports a failed claim-path work query on stderr
+// and returns the exit code for it. Every read the claim performs — discovery
+// and the claim-time re-validation on a multi-leg city — funnels through here,
+// so a transport-class failure on either carries the token and exit 2.
+//
+// This is the same store-unavailable classification the read path applies.
+// --claim is the form agents actually run in the dispatch loop, so without the
+// token here a transport-class failure is still indistinguishable from "no
+// work" to every consumer that matches on it — the dead-drop the token exists
+// to close. The error is classified ONCE and reused for both the stderr token
+// and the exit code, so the published contract (token <=> exit 2) cannot be
+// split by an edit reaching one and not the other.
+//
+// Deliberately NO drain result and NO drain-ack. A failed read is not an idle
+// store: the controller counted demand for this seat, so draining here would
+// convert a transport failure into a false idle, reap the seat, and leave the
+// work for the next tick to rediscover. Keep the seat and let the event the
+// caller emitted carry the cause; the idle-claim backstop re-drives the hook.
+// That behavior is orthogonal to the exit CODE, which follows the token's
+// published contract: hookStoreUnavailableToken documents exit 2, and a
+// consumer gating on the code must be able to tell a dead store from no-work on
+// this path too.
+func reportClaimWorkQueryFailure(err error, stderr io.Writer) int {
+	classified := classifyWorkQueryStoreUnavailable(err)
+	if errors.Is(classified, beads.ErrStoreUnavailable) {
+		fmt.Fprintf(stderr, "gc hook --claim: %s: %v\n", hookStoreUnavailableToken, classified) //nolint:errcheck // best-effort stderr
+		return 2
+	}
+	fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
+	return 1
 }
 
 // Claim-read retry pacing. A work-query ERROR is a failed read, and the failures
@@ -1349,9 +1356,21 @@ func shellWorkQueryWithEnvDiag(command, dir string, env []string, diag io.Writer
 	return string(out), nil
 }
 
+// hookWorkQueryDiagPrefix marks a stderr line that a work query wrote while
+// EXITING 0. It carries the query's exit status into gc hook's own stderr,
+// which is the only channel a consumer of `gc hook` has: the hook exits 1 for
+// both no-work and a failed read, so a consumer cannot tell from the code
+// alone whether a stderr line is a failure report or chatter from a read that
+// succeeded. Lines under this prefix are the latter by construction — the
+// origin-gate refusal, a driver logging a reconnect before its retry returned
+// the rows — and agentScriptHookExitIsNoWork treats them as such. A failed
+// query never reaches this path: its stderr rides the error instead.
+const hookWorkQueryDiagPrefix = "gc hook: work_query (exit 0) stderr: "
+
 // hookWorkQueryRunner returns the work-query runner `gc hook` uses: the
 // production shell runner, with each query's own stderr diagnostics forwarded
-// to diag so a successful-but-gated query is not silently empty.
+// to diag under hookWorkQueryDiagPrefix so a successful-but-gated query is not
+// silently empty, and so that forwarding is never mistaken for failure.
 //
 // Lines are de-duplicated for the lifetime of one hook invocation because a
 // federated hook runs the same query against every store in the set, and an
@@ -1368,7 +1387,7 @@ func hookWorkQueryRunner(diag io.Writer) hookStoreRunner {
 				continue
 			}
 			seen[line] = true
-			fmt.Fprintln(diag, line) //nolint:errcheck // best-effort diagnostic
+			fmt.Fprintln(diag, hookWorkQueryDiagPrefix+line) //nolint:errcheck // best-effort diagnostic
 		}
 		return out, err
 	}

@@ -18,7 +18,7 @@ type blockUntilCtxStore struct {
 	*MemStore
 }
 
-func (s *blockUntilCtxStore) ListCtx(ctx context.Context, q ListQuery) ([]Bead, error) {
+func (s *blockUntilCtxStore) ListCtx(ctx context.Context, _ ListQuery) ([]Bead, error) {
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
@@ -99,7 +99,7 @@ func TestGetFallbackPassesThroughCancellationAndMapsTombstones(t *testing.T) {
 		}
 		_, err := cache.getBackingOrLastGood(b.ID)
 		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("err = %v; a cancelled backing read was answered from last-good — the cancellation budget is swallowed", err)
+			t.Fatalf("err = %v; a canceled backing read was answered from last-good — the cancellation budget is swallowed", err)
 		}
 	})
 

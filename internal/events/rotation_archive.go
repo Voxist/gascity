@@ -129,13 +129,6 @@ func parseLegacyArchiveBasename(name string) (time.Time, error) {
 // already been excluded by the caller's AfterSeq, BeforeSeq or Since
 // predicate.
 func archiveOverlapsFilter(info archiveInfo, filter Filter) bool {
-	// ActiveOnly confines the read to the live events.jsonl, so no archive is
-	// eligible regardless of its seq/time window. Applying it here makes the
-	// bound hold on BOTH readers — the forward ReadFiltered walk and the
-	// backward tail — instead of only where it is spelled out again.
-	if filter.ActiveOnly {
-		return false
-	}
 	if filter.AfterSeq > 0 && info.LastSeq <= filter.AfterSeq {
 		return false
 	}

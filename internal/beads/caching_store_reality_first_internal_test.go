@@ -567,6 +567,29 @@ func (s *cancelingListerStore) ListCtx(ctx context.Context, _ ListQuery) ([]Bead
 // TestCachingStoreFallbackPropagatesCallerDeadline: once the CALLER's budget
 // is spent, serving a stale snapshot with a nil error would mask the very
 // slowness the deadline exists to surface — the dial's error stands.
+func TestCachingStoreFallbackPropagatesCallerDeadline(t *testing.T) {
+	t.Parallel()
+
+	mem := NewMemStore()
+	if _, err := mem.Create(Bead{Title: "a", Status: "open"}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	backing := &cancelingListerStore{Store: mem}
+	cache := NewCachingStore(backing, nil)
+	if err := cache.Prime(t.Context()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	cache.mu.Lock()
+	cache.state = cacheDegraded
+	cache.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	backing.cancel = cancel
+	got, err := cache.ListCtx(ctx, ListQuery{Status: "open", AllowScan: true})
+	if err == nil {
+		t.Fatalf("ListCtx past the caller's deadline = (%d beads, nil); stale data after budget exhaustion masks the slowness", len(got))
+	}
+}
 
 // TestCachingStoreDegradedDialSuccessRefreshesSnapshot: a successful
 // degraded-path dial folds its rows into the snapshot, so a fallback moments

@@ -177,7 +177,7 @@ func (c *CachingStore) Count(ctx context.Context, query ListQuery, excludeTypes 
 		return 0, fmt.Errorf("counting beads: %w", ErrCountUnsupported)
 	}
 	// Context BEFORE any lock acquisition: servingDegraded() reads gate state
-	// under c.mu, so checking the gate first would make a cancelled caller wait
+	// under c.mu, so checking the gate first would make a canceled caller wait
 	// on the cache lock — the exact contract
 	// TestCachingStoreCountContextCancelsWhileWaitingForLock pins.
 	if ctx != nil {
@@ -558,7 +558,7 @@ func (c *CachingStore) ListOpen(status ...string) ([]Bead, error) {
 func (c *CachingStore) getBackingOrLastGood(id string) (Bead, error) {
 	fresh, err := c.backing.Get(id)
 	// PartialResult and context.Canceled are ANSWERS, not outages: a partial
-	// carries rows plus a typed caveat the caller must see, and a cancelled
+	// carries rows plus a typed caveat the caller must see, and a canceled
 	// read is the caller's own budget firing — swallowing either into a
 	// stale-with-nil last-good hides exactly the degradation/cancellation
 	// signal it exists to carry. (This helper was authored in the 2026-08-31

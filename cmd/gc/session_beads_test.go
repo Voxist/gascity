@@ -9098,7 +9098,10 @@ func TestReapPhantomSessionBeads(t *testing.T) {
 			}
 
 			var stderr bytes.Buffer
-			got := reapPhantomSessionBeads(store, sp, dt, clock.Real{}, &stderr)
+			// A fixed fake clock: the reaper stamps closed_at from its clock, so
+			// the stamp is asserted against a known instant rather than wall time.
+			clk := &clock.Fake{Time: time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)}
+			got := reapPhantomSessionBeads(store, sp, dt, clk, &stderr)
 			if got != tc.wantReaped {
 				t.Errorf("reapPhantomSessionBeads() = %d, want %d; stderr=%q", got, tc.wantReaped, stderr.String())
 			}

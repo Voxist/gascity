@@ -806,6 +806,14 @@ func agentScriptHookBeadWithRunner(stderr io.Writer, runHook agentScriptHookRunn
 // drift apart.
 const originGateRefusalPrefix = config.PoolDemandOriginGateRefusalPrefix
 
+// agentScriptHookExitIsNoWork decides whether a non-zero `gc hook` exit with
+// no ready work is the graceful empty turn or a hook failure. gc hook exits 1
+// for both, so the decision reads its stderr — but only lines the hook itself
+// wrote as failure reports count. Anything the work query said while exiting
+// 0 arrives under hookWorkQueryDiagPrefix (hookWorkQueryRunner) and is
+// diagnostics by construction, never a failure signal; on a federated city the
+// bd legs run with stderr attached and log benign driver chatter on every idle
+// poll, which this must not turn into "gc hook failed".
 func agentScriptHookExitIsNoWork(output, stderr string) bool {
 	if workQueryHasReadyWork(output) {
 		return false
@@ -815,10 +823,16 @@ func agentScriptHookExitIsNoWork(output, stderr string) bool {
 		if line == "" {
 			continue
 		}
+		if strings.HasPrefix(line, hookWorkQueryDiagPrefix) {
+			// Forwarded from a work query that exited 0: audible, not a failure.
+			continue
+		}
 		if strings.HasPrefix(line, originGateRefusalPrefix) {
 			// Benign-empty: the origin gate disclosing that it did not probe
 			// the routed pool tier for this non-ephemeral session. The line
 			// stays audible on stderr; only its CLASSIFICATION is no-work.
+			// (Kept for the raw form; through hookWorkQueryRunner it arrives
+			// under hookWorkQueryDiagPrefix and is handled above.)
 			continue
 		}
 		if !strings.Contains(strings.ToLower(line), "warning") {

@@ -47,7 +47,7 @@ func TestHostedCityRunnersWithholdAmbientBeadsEnv(t *testing.T) {
 	})
 
 	t.Run("managed-retry runner", func(t *testing.T) {
-		envFn := func(dir string) (map[string]string, error) { return map[string]string{}, nil }
+		envFn := func(_ string) (map[string]string, error) { return map[string]string{}, nil }
 		out, err := bdCommandRunnerWithManagedRetryErr(cityPath, envFn)(workDir, "bd", "probe")
 		if err != nil {
 			t.Fatalf("runner: %v\n%s", err, out)
