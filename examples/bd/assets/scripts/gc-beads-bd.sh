@@ -2655,6 +2655,27 @@ ensure_current_era_version_witness() {
     return 0
 }
 
+# dump_bd_init_forensics prints, on a failed bd init, the facts needed to tell
+# apart the ways a "fresh" database can already be dirty: what dolt_status
+# holds (working vs staged tables), the last commits, and whether git/dolt
+# carry a committer identity (presence only, never the values). bd's schema
+# guard refuses to migrate over dirty pre-existing tables, and the guard's
+# message alone cannot say who left them there.
+dump_bd_init_forensics() {
+    local db="$1"
+    echo "bd init forensics for database '$db':" >&2
+    echo "  bd: $(bd version 2>/dev/null | head -1)" >&2
+    echo "  dolt: $(dolt version 2>/dev/null | head -1)" >&2
+    echo "  git identity: name=$(git config --global user.name >/dev/null 2>&1 && echo set || echo unset) email=$(git config --global user.email >/dev/null 2>&1 && echo set || echo unset)" >&2
+    echo "  dolt identity: name=$(dolt config --global --get user.name >/dev/null 2>&1 && echo set || echo unset) email=$(dolt config --global --get user.email >/dev/null 2>&1 && echo set || echo unset)" >&2
+    if [ -n "$db" ] && valid_sql_name "$db"; then
+        echo "  dolt_status:" >&2
+        server_sql "USE \`$db\`; SELECT table_name, staged, status FROM dolt_status" 2>&1 | sed 's/^/    /' >&2
+        echo "  dolt_log (last 3):" >&2
+        server_sql "USE \`$db\`; SELECT commit_hash, committer, message FROM dolt_log LIMIT 3" 2>&1 | sed 's/^/    /' >&2
+    fi
+}
+
 run_bd_init_pinned() {
     local dir="$1"
     local prefix="$2"
@@ -2663,12 +2684,18 @@ run_bd_init_pinned() {
     local force_init="${5:-false}"
     if [ "$force_init" = "true" ]; then
         run_bd_pinned "$dir" init --force --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
-            --server-host "$host" --server-port "$DOLT_PORT" "$dir" || die "bd init failed for $dir"
+            --server-host "$host" --server-port "$DOLT_PORT" "$dir" || {
+                dump_bd_init_forensics "$dolt_database"
+                die "bd init failed for $dir"
+            }
         return 0
     fi
 
     run_bd_pinned "$dir" init --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
-        --server-host "$host" --server-port "$DOLT_PORT" "$dir" || die "bd init failed for $dir"
+        --server-host "$host" --server-port "$DOLT_PORT" "$dir" || {
+            dump_bd_init_forensics "$dolt_database"
+            die "bd init failed for $dir"
+        }
 }
 
 run_bd_doltlite() {
