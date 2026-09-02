@@ -182,8 +182,14 @@ jobs:
           SHARED_FILTER_RESULT: ${{ steps.filter.outputs.shared }}
         run: python3 .github/workflows/scripts/ci_suite_coverage.py classify "$SHARED_FILTER_RESULT"
 
-  preflight-static:
-    name: Preflight / static checks
+  # Split from one serial job (ga-dejjh): the boundary guards and the
+  # native-DoltLite suite are ~2 minutes and have nothing to do with
+  # golangci-lint, which dominates this lane at 13-15 minutes on a PR run and
+  # is the whole critical path. Running them in parallel takes the path down to
+  # the lint job alone. Both halves are listed in `needs` by ci-required and
+  # ci-preflight, so neither can be dropped without failing those gates.
+  preflight-guards:
+    name: Preflight / boundary guards
     needs: runner-policy
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     steps:
@@ -195,14 +201,6 @@ jobs:
           go-version-file: go.mod
       - name: CI workflow policy
         run: make test-ci-policy
-      - name: Classify static-analysis scope
-        id: static-scope
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          scope="$(scripts/ci-static-scope)"
-          printf 'scope=%s\n' "$scope" >> "$GITHUB_OUTPUT"
       - name: go.mod replace guard
         run: make check-gomod-replace
       - name: Native dependency surface guard
@@ -213,6 +211,26 @@ jobs:
         run: make check-core-boundary
       - name: Native DoltLite beads tests
         run: make test-native-doltlite-beads
+
+  preflight-static:
+    name: Preflight / static checks
+    needs: runner-policy
+    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+      - name: Classify static-analysis scope
+        id: static-scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          scope="$(scripts/ci-static-scope)"
+          printf 'scope=%s\n' "$scope" >> "$GITHUB_OUTPUT"
       - name: Get golangci-lint + Go toolchain versions for cache key
         id: glint-version
         run: |
@@ -507,6 +525,7 @@ jobs:
       # the path-gated contract-acceptance-current cell. Mirrors ci-required.
       - changes
       - preflight-static
+      - preflight-guards
       - preflight-acceptance
       - preflight-generated
       - contract-acceptance-previous
@@ -1453,6 +1472,7 @@ jobs:
       - runner-policy
       - changes
       - preflight-static
+      - preflight-guards
       - preflight-acceptance
       - preflight-generated
       - contract-acceptance-previous
