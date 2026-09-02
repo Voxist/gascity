@@ -2481,23 +2481,6 @@ run_bd_pinned() {
     (
         cd "$dir" || exit 1
         export BEADS_DIR="$beads_dir"
-        # Declare the shared server. Every bd invocation through this wrapper
-        # targets GC's managed Dolt server, so this is a statement of fact, not
-        # a flag to dodge a check -- and bd needs the fact.
-        #
-        # bd >= 1.2's legacy-workspace guard has a second branch beside the
-        # server-mode one: when the scope config reads embedded (or is empty)
-        # while a .beads/dolt root exists, it refuses with "legacy Dolt
-        # workspace detected". A managed scope can present exactly that shape
-        # mid-recovery -- e.g. after a hard kill and port rebind, which is what
-        # TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind covers.
-        # The only escape in that branch is doltserver.IsSharedServerMode(),
-        # which reads this variable.
-        #
-        # This does NOT blind the guard: it still refuses when the version
-        # witness names a genuinely legacy 0.55-0.62 server, because that arm
-        # is `IsSharedServerMode() && !(present && legacyServerVersion())`.
-        export BEADS_DOLT_SHARED_SERVER=1
         export GC_DOLT_HOST="$host"
         export BEADS_DOLT_SERVER_HOST="$host"
         export GC_DOLT_PORT="$DOLT_PORT"
@@ -2508,6 +2491,53 @@ run_bd_pinned() {
         export BEADS_DOLT_PASSWORD="$DOLT_PASSWORD"
         bd "$@"
     )
+}
+
+# ensure_current_era_scope_metadata writes the canonical scope metadata BEFORE
+# the first `bd init` when it is missing or not server-mode.
+#
+# GC's managed Dolt materializes .beads/dolt before bd ever runs. If bd then
+# finds no metadata.json beside it (a fresh scope reached through op_init, or
+# the retry path that deliberately drops metadata), bd's legacy-workspace guard
+# reads cfg == nil and takes its EMBEDDED branch — "legacy Dolt workspace
+# detected" — and that branch never consults the version witness. The server
+# branch does. So the scope has to SAY it is server-mode before bd reads it,
+# which is simply true: every init through this wrapper is --server against
+# GC's managed host/port.
+#
+# This reuses `gc dolt-config normalize-scope`, the same Go writer
+# (ensureCanonicalScopeMetadata -> contract.EnsureCanonicalMetadata,
+# dolt_mode="server") that every post-init and reconcile path already uses, so
+# there is one definition of canonical metadata, not a second one in bash.
+#
+# Two earlier attempts at this same failure are recorded so nobody retries
+# them: exporting BEADS_DOLT_SHARED_SERVER=1 does satisfy the guard's embedded
+# branch, but it also routes `bd init` onto the shared-server path where bd
+# tries to START and own the server (reclaimPort) and refuses GC's managed one
+# as "another project's dolt server"; adding --external to skip that start then
+# skips project identity too, and the native store gate (identity_match) falls
+# back to the bd subprocess store — the original symptom. Writing the metadata
+# bd expects is the fix; changing bd's mode is not.
+#
+# Writing it has one consequence the caller must honour: to bd, metadata beside
+# a registered database means "already initialized", and a plain `bd init`
+# aborts with "This workspace is already initialized". That is the metadata-only
+# scope the script already knows about — schema-repair on such a scope must be a
+# forced init so bd seeds the missing tables into the pinned database. So this
+# sets GC_SCOPE_METADATA_PRESEEDED=1 when it wrote, and op_init forces the init
+# when that is set and the database still has no bd schema. Never forced over a
+# database that already carries a schema: that is a live store.
+GC_SCOPE_METADATA_PRESEEDED=0
+ensure_current_era_scope_metadata() {
+    local dir="$1"
+    local prefix="$2"
+    local dolt_database="$3"
+    local meta="$dir/.beads/metadata.json"
+    if [ -f "$meta" ] && grep -q '"dolt_mode"[[:space:]]*:[[:space:]]*"server"' "$meta" 2>/dev/null; then
+        return 0
+    fi
+    normalize_scope_after_init "$dir" "$prefix" "$dolt_database"
+    GC_SCOPE_METADATA_PRESEEDED=1
 }
 
 # bd >= 1.2 refuses to open a server-mode workspace that has a .beads/dolt root
@@ -2921,6 +2951,12 @@ op_init() {
     # visible issue prefix, while `--database` tells bd which existing Dolt
     # database to initialize. Without `--database`, bd can seed beads_<prefix>
     # and leave the pinned database schema-less.
+    ensure_current_era_scope_metadata "$dir" "$prefix" "$dolt_database"
+    if [ "$GC_SCOPE_METADATA_PRESEEDED" = "1" ] && [ -z "$bd_init_force" ] && ! bd_runtime_schema_ready "$dolt_database"; then
+        # We just wrote the metadata bd reads as "initialized"; the database
+        # has no bd schema yet. Seed it the way the schema-repair path does.
+        bd_init_force="--force"
+    fi
     ensure_current_era_version_witness "$dir" "$dolt_database"
     run_bd_init_pinned "$dir" "$prefix" "$dolt_database" "$host" "${bd_init_force:+true}"
 

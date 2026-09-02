@@ -284,3 +284,13 @@ vulnerabilities:
       - "usr/local/bin/bd"
     expired_at: 2026-09-07
     statement: golang.org/x/crypto/ssh CVE; present in bd (beads v1.1.0). gc cleared by the golang.org/x/crypto v0.52.0 bump in this change. Remove once bd rebuilds against x/crypto >= 0.52.0.
+  - id: CVE-2026-33818
+    paths:
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-09-07
+    statement: Go stdlib CVE fixed in Go 1.26.6; the prebuilt kubectl v1.36.0 embeds Go 1.26.2. Every tool we build from source (bd, gc, gh, dolt) is on Go 1.26.8 and is not waived. Durable fix is kubectl v1.37.0, which embeds Go 1.26.6 (ga-7jqwr); a k8s minor bump with client/server skew to weigh, so tracked rather than done in a security-floor PR.
+  - id: CVE-2026-46600
+    paths:
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-09-07
+    statement: golang.org/x/net fix is 0.56.0; the prebuilt kubectl v1.36.0 links x/net 0.49.0. Same remedy as CVE-2026-33818 above (kubectl v1.37.0), same expiry.
