@@ -45,7 +45,12 @@ const (
 	// shell-script PRs trigger the shards that are the -tags integration
 	// tests' only CI home — a deliberate execution-shape change, pinned from
 	// the digest printed for the merged (resync + split) workflow.
-	expectedCIExecutionHash     = "efad32c36fdc35a7de9f9d8d9d5b14c35ab201da9ab17309b25d3745e7654d84"
+	// Re-derived for the static-checks split (ga-dejjh): the boundary guards
+	// and the native-DoltLite suite moved to preflight-guards so golangci-lint
+	// stops running in series behind them. Both jobs are required by
+	// ci-required and ci-preflight, so the gate is unchanged — only the shape
+	// is.
+	expectedCIExecutionHash     = "1429821f605d2a1118d46ed4b1937a8c277176c6aac00b1417db2b531b18e5ba"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
@@ -294,12 +299,21 @@ func validateChangesJob(workflow map[string]any) error {
 	return nil
 }
 
+// policyGuardJob is the job that runs the focused CI policy and the boundary
+// guards it validates. The pair was split out of preflight-static (ga-dejjh)
+// so golangci-lint — 13-15 minutes and the whole critical path — no longer
+// runs in series behind ~2 minutes of guards. What this validator pins is the
+// ORDER, not the job name: the policy check must run unconditionally right
+// after setup-go and before the guards, so a workflow edit that weakens a
+// guard cannot also disable the check that would have caught it.
+const policyGuardJob = "preflight-guards"
+
 func validatePolicyWiring(workflow map[string]any) error {
-	staticJob, err := workflowJob(workflow, "preflight-static")
+	guardJob, err := workflowJob(workflow, policyGuardJob)
 	if err != nil {
 		return err
 	}
-	steps, err := mappingSlice(staticJob["steps"], "preflight-static steps")
+	steps, err := mappingSlice(guardJob["steps"], policyGuardJob+" steps")
 	if err != nil {
 		return err
 	}
@@ -308,12 +322,13 @@ func validatePolicyWiring(workflow map[string]any) error {
 	firstGuardIndex := findStep(steps, "run", "make check-gomod-replace")
 	if setupIndex < 0 || policyIndex != setupIndex+1 || firstGuardIndex <= policyIndex {
 		return fmt.Errorf(
-			"preflight-static must run the focused CI policy immediately after setup-go and before other guards",
+			"%s must run the focused CI policy immediately after setup-go and before other guards",
+			policyGuardJob,
 		)
 	}
 	want := map[string]any{"run": "make test-ci-policy"}
 	if got := projectStep(steps[policyIndex]); !reflect.DeepEqual(got, want) {
-		return fmt.Errorf("preflight-static CI policy step must be unconditional and blocking")
+		return fmt.Errorf("%s CI policy step must be unconditional and blocking", policyGuardJob)
 	}
 	return nil
 }
