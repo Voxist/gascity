@@ -6228,6 +6228,11 @@ cmd="${1:-}"
     exit 0
     ;;
   migrate)
+    # The ready path may complete pending SCHEMA migrations; only the bare
+    # repo-id migration (no subcommand) is the contract this test pins.
+    if [ "${2:-}" = "schema" ]; then
+      exit 0
+    fi
     : > "$capture_dir/migrate.called"
     exit 0
     ;;
@@ -6496,6 +6501,11 @@ JSON
     exit 0
     ;;
   migrate)
+    # The ready path may complete pending SCHEMA migrations; only the bare
+    # repo-id migration (no subcommand) is the contract this test pins.
+    if [ "${2:-}" = "schema" ]; then
+      exit 0
+    fi
     : > "$capture_dir/migrate.called"
     exit 0
     ;;
