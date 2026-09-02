@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -181,20 +182,45 @@ func portHeldByPID(port string, pid int) (held, known bool) {
 }
 
 func portHolderPIDsFromLsof(port string) ([]int, bool) {
+	return portHolderPIDsFromLsofWithTimeout(lsofCommandTimeout, port)
+}
+
+// portHolderPIDsFromLsofWithTimeout is portHolderPIDsFromLsof with the lsof
+// deadline injectable, so the timeout path can be driven in a test.
+//
+// The distinction it preserves: lsof exiting non-zero because NOTHING MATCHED
+// is a checked, complete, empty listing — a real negative. lsof being killed
+// at its deadline is not a listing at all. lsofOutputWithTimeout reports the
+// latter as an error wrapping context.DeadlineExceeded precisely so callers can
+// tell a truncated result from a complete one; collapsing both into "known:
+// nobody holds it" turned a starved probe into a confident wrong answer — the
+// same shape as the ps liveness bug, one layer over.
+func portHolderPIDsFromLsofWithTimeout(timeout time.Duration, port string) ([]int, bool) {
 	if _, err := exec.LookPath("lsof"); err != nil {
 		return nil, false
 	}
-	out, err := lsofOutput("-nP", "-iTCP:"+port, "-sTCP:LISTEN", "-t")
+	out, err := lsofOutputWithTimeout(timeout, "-nP", "-iTCP:"+port, "-sTCP:LISTEN", "-t")
+	if errors.Is(err, context.DeadlineExceeded) {
+		return nil, false
+	}
 	if err == nil {
 		if pids := pidsFromLsofPIDList(string(out)); len(pids) > 0 {
 			return pids, true
 		}
 	}
 
-	out, err = lsofOutput("-nP", "-iTCP:"+port, "-sTCP:LISTEN")
+	out, err = lsofOutputWithTimeout(timeout, "-nP", "-iTCP:"+port, "-sTCP:LISTEN")
+	if errors.Is(err, context.DeadlineExceeded) {
+		return nil, false
+	}
 	if err != nil {
-		// lsof exits non-zero when nothing matches, which is a checked empty
-		// listing, not a failed probe; only a missing binary above is unknown.
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			// Could not run lsof at all: no answer, not an empty one.
+			return nil, false
+		}
+		// A non-zero exit with the process having run to completion is lsof's
+		// "no files matched" — a checked empty listing.
 		return nil, true
 	}
 	return pidsFromPlainPortLsofOutput(string(out), port), true

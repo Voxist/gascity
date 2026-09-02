@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -247,6 +248,42 @@ func TestPortHeldByPIDReportsUnknownWhenNoProbeCanAnswer(t *testing.T) {
 	}
 	if held, known := portHeldByPID("1", 0); held || known {
 		t.Fatalf("portHeldByPID(\"1\", 0) = (held=%v, known=%v), want (false, false)", held, known)
+	}
+}
+
+// TestPortHolderPIDsFromLsofTimeoutIsUnknownNotEmpty pins the difference
+// between "lsof found nobody" and "lsof was killed at its deadline". Both used
+// to come back as (nil, true) — a checked-empty listing — so a starved probe
+// read as a confident "nobody holds this port", which for the drift check means
+// a live rig-local Dolt can be repinned over. A deadline hit must be UNKNOWN.
+//
+// Driven through the timeout seam with a deadline no lsof can meet, against a
+// port we actually hold, so a false "known: not held" cannot hide behind a
+// genuinely empty port.
+func TestPortHolderPIDsFromLsofTimeoutIsUnknownNotEmpty(t *testing.T) {
+	if _, err := exec.LookPath("lsof"); err != nil {
+		t.Skip("lsof not installed")
+	}
+	port := reserveRandomTCPPort(t)
+	ln, err := listenOnAddr(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close() //nolint:errcheck // test cleanup
+
+	pids, known := portHolderPIDsFromLsofWithTimeout(time.Nanosecond, strconv.Itoa(port))
+	if known {
+		t.Fatalf("portHolderPIDsFromLsofWithTimeout(1ns) = (pids=%v, known=true); a deadline hit is not a listing and must not read as a confident answer", pids)
+	}
+	if len(pids) != 0 {
+		t.Fatalf("portHolderPIDsFromLsofWithTimeout(1ns) returned pids %v alongside unknown", pids)
+	}
+
+	// And with a real deadline the same probe reports us as the holder, so the
+	// unknown above is the timeout, not the probe being broken.
+	pids, known = portHolderPIDsFromLsofWithTimeout(lsofCommandTimeout, strconv.Itoa(port))
+	if !known || !slices.Contains(pids, os.Getpid()) {
+		t.Fatalf("portHolderPIDsFromLsofWithTimeout(real) = (pids=%v, known=%v), want self among holders with known=true", pids, known)
 	}
 }
 
