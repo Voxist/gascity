@@ -90,7 +90,11 @@ runs:
         # its caches on an exotic failure).
         lock_file="${RUNNER_TOOL_CACHE:-$HOME/.local}/gascity-brew.lock"
         mkdir -p "$(dirname "$lock_file")"
-        pkgs=(tmux jq flock)
+        # icu4c is a transitive Dolt / go-icu-regex CGO build dependency and is
+        # NOT part of the runner image; without it every Mac job that compiles
+        # CGO fails with "'unicode/regex.h' file not found" (ga-mac-icu). It is
+        # keg-only, so the Makefile also has to point CGO at its prefix.
+        pkgs=(tmux jq flock icu4c)
         install_missing() {
           local missing=()
           for pkg in "${pkgs[@]}"; do

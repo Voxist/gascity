@@ -329,3 +329,54 @@ print-cgo-flags:
 	}
 	return string(out)
 }
+
+// TestMakefileDarwinICUFlagsRequireTheHeaderToExist pins the macOS ICU guard
+// against `brew --prefix`'s actual contract: it prints a formula's would-be
+// prefix and exits 0 whether or not the formula is INSTALLED (verified:
+// `brew --prefix cowsay` prints /opt/homebrew/opt/cowsay with cowsay absent).
+// Treating that exit code as "icu4c is present" points CGO_CPPFLAGS at a
+// directory that does not exist, and the Dolt/go-icu-regex build then fails
+// with `'unicode/regex.h' file not found` — which is exactly how the Mac
+// regression lane broke: the runner never installs icu4c, so every job that
+// compiles CGO died while the Makefile believed it had configured ICU.
+func TestMakefileDarwinICUFlagsRequireTheHeaderToExist(t *testing.T) {
+	t.Setenv("CGO_CPPFLAGS", "")
+	t.Setenv("CGO_LDFLAGS", "")
+	repoRoot := repoRoot(t)
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	// A prefix that exists as a path but carries no ICU headers — the
+	// not-installed shape.
+	emptyPrefix := filepath.Join(tmp, "opt", "icu4c")
+	if err := os.MkdirAll(emptyPrefix, 0o755); err != nil {
+		t.Fatalf("mkdir empty prefix: %v", err)
+	}
+	writeExecutable(t, filepath.Join(binDir, "uname"), "#!/usr/bin/env sh\necho Darwin\n")
+	writeExecutable(t, filepath.Join(binDir, "brew"),
+		"#!/usr/bin/env sh\nif [ \"$1\" = \"--prefix\" ]; then printf '%s\\n' '"+emptyPrefix+"'; exit 0; fi\nexit 0\n")
+
+	out := runMakefileCGOPrintTarget(t, repoRoot, tmp, binDir)
+	if strings.Contains(out, emptyPrefix) {
+		t.Fatalf("CGO flags point at an icu4c prefix that has no unicode headers:\n%s\n"+
+			"brew --prefix exits 0 for a formula that is not installed, so its exit code cannot stand in for the header's presence", out)
+	}
+
+	// With the header actually present the flags must be added, or the guard
+	// would be useless on a correctly provisioned machine.
+	if err := os.MkdirAll(filepath.Join(emptyPrefix, "include", "unicode"), 0o755); err != nil {
+		t.Fatalf("mkdir unicode include: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(emptyPrefix, "include", "unicode", "regex.h"), []byte(""), 0o644); err != nil {
+		t.Fatalf("write ICU header: %v", err)
+	}
+	out = runMakefileCGOPrintTarget(t, repoRoot, tmp, binDir)
+	if !strings.Contains(out, "-I"+filepath.Join(emptyPrefix, "include")) {
+		t.Fatalf("CGO_CPPFLAGS missing the icu4c include path when the header IS present:\n%s", out)
+	}
+	if !strings.Contains(out, "-L"+filepath.Join(emptyPrefix, "lib")) {
+		t.Fatalf("CGO_LDFLAGS missing the icu4c lib path when the header IS present:\n%s", out)
+	}
+}
