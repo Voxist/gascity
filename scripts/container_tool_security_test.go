@@ -10,11 +10,14 @@ import (
 
 func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 	const (
-		ghVersion                 = "2.96.0"
-		ghSourceRef               = "b300f2ec7ec9dc9addc39b2ad88c54097ded7ca0"
-		doltSourceRef             = "781cbb730221ea7df4fc7995255bb336df9c3864"
-		grpcVersion               = "1.83.0"
-		xtextVersion              = "0.39.0"
+		ghVersion     = "2.96.0"
+		ghSourceRef   = "b300f2ec7ec9dc9addc39b2ad88c54097ded7ca0"
+		doltSourceRef = "781cbb730221ea7df4fc7995255bb336df9c3864"
+		grpcVersion   = "1.83.1"
+		xtextVersion  = "0.41.0"
+		// Floors for the gh and dolt builds; see Dockerfile.base.
+		xcryptoVersion            = "0.55.0"
+		xmodVersion               = "0.40.0"
 		ghSourceSHA256            = "a0c18c98c73f7333f73e19b3a0bf5bd18673f3dc226193ab6478b3ea1ea18f03"
 		doltSourceSHA256          = "0b0c9bce8baef26baa7e0e5825cd2d7d6101daf6fc9673f38dac9670afb66847"
 		doltToolchainRelease      = "20260611_0.0.5_trixie"
@@ -32,6 +35,8 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 		"ARG DOLT_SOURCE_SHA256=" + doltSourceSHA256,
 		"ARG GRPC_VERSION=" + grpcVersion,
 		"ARG XTEXT_VERSION=" + xtextVersion,
+		"ARG XCRYPTO_VERSION=" + xcryptoVersion,
+		"ARG XMOD_VERSION=" + xmodVersion,
 		"ARG DOLT_TOOLCHAIN_RELEASE=" + doltToolchainRelease,
 		"ARG DOLT_OPTCROSS_X86_64_SHA256=" + doltOptcrossX8664SHA256,
 		"ARG DOLT_OPTCROSS_AARCH64_SHA256=" + doltOptcrossAarch64SHA256,
@@ -51,6 +56,14 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 	}
 	if got := strings.Count(dockerfile, `go get "google.golang.org/grpc@v${GRPC_VERSION}"`); got != 2 {
 		t.Errorf("contrib/k8s/Dockerfile.base applies the grpc override %d times, want exactly 2 (gh and Dolt)", got)
+	}
+	for _, override := range []string{
+		`go get "golang.org/x/crypto@v${XCRYPTO_VERSION}"`,
+		`go get "golang.org/x/mod@v${XMOD_VERSION}"`,
+	} {
+		if got := strings.Count(dockerfile, override); got != 2 {
+			t.Errorf("contrib/k8s/Dockerfile.base applies %s %d times, want exactly 2 (gh and dolt)", override, got)
+		}
 	}
 	if got := strings.Count(dockerfile, `go get "golang.org/x/text@v${XTEXT_VERSION}"`); got != 2 {
 		t.Errorf("contrib/k8s/Dockerfile.base applies the x/text override %d times, want exactly 2 (gh and Dolt)", got)
@@ -86,11 +99,11 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		bdSourceSHA256 = "587ad18b765d90e75b64ca4bb57c12520befd8bece96545d48e98add26bc8f0f"
 		bdBuild        = "3e03250ee"
 		bdBranch       = "HEAD"
-		grpcVersion    = "1.83.0"
+		grpcVersion    = "1.83.1"
 		// Floors, not exact pins: each must be >= what the pinned source
 		// resolves, because pinning BELOW that is a silent downgrade
-		// (ga-0emb8). x/text is 0.41.0 here and 0.39.0 for the base image
-		// because the x/crypto floor drags x/text up in bd's module graph only.
+		// (ga-0emb8). x/text is 0.41.0 in both images now: the x/crypto floor
+		// drags x/text there in bd's, gh's and dolt's module graphs alike.
 		xtextVersion = "0.41.0"
 		// CVE-2026-56854 (CRITICAL, fixed 0.55.0) and CVE-2026-56864 (HIGH,
 		// fixed 0.40.0). The pinned source declares x/crypto 0.54.0 and x/mod

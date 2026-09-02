@@ -58,7 +58,13 @@ const (
 	// Nightly moves for the same schema-0066 repin (BD_SOURCE_REF value at its
 	// two pin sites).
 	expectedNightlyExecutionHash = "733bf7d111b3fa67ffc47222d352057ff5062bc4ce0afce144932f125c6a3a47"
-	expectedSetupActionHash      = "b7864038195cd054aee7fccfa903cab335b375bcab1a35239c17c5da7d32c07e"
+	// Re-derived for the Go 1.26.5 -> 1.26.8 toolchain bump: the composite
+	// setup actions' go-version default is part of the execution shape, and the
+	// bump is deliberate — trivy lists Go 1.26.6 as the fix for five stdlib
+	// CVEs (CVE-2026-33818, -39821, -46600, -56853, -56858) that the gc binary
+	// inherits from whatever toolchain builds it. The go.mod directive moves
+	// with it so a build from any lane cannot silently fall back to 1.26.5.
+	expectedSetupActionHash = "af8167709863fd4e8e34dcfc42f3a652774a4e1ebfd91582530bfb6600304b90"
 )
 
 var requiredFilterPaths = map[string][]string{
