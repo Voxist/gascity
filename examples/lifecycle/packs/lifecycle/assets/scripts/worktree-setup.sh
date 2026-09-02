@@ -13,6 +13,15 @@
 
 set -eu
 
+# Fail closed on unexpanded Go template placeholders. If gc ever hands this
+# script a literal "{{.AgentBase}}" (ga-iwz7u), creating a worktree from it
+# would mint .gc/agents/{{.AgentBase}} on branch gc-{{.AgentBase}}-<hash>.
+for arg in "$@"; do
+  case "$arg" in
+    *'{{'*) echo "worktree-setup.sh: refusing unexpanded template placeholder in argument: $arg" >&2; exit 64 ;;
+  esac
+done
+
 RIG_ROOT="${1:?usage: worktree-setup.sh <rig-root> <target-dir> <agent-name> [--sync]}"
 ARG2="${2:?missing target-dir}"
 ARG3="${3:?missing agent-name}"

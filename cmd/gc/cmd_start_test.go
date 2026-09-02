@@ -2002,3 +2002,38 @@ func TestDoStart_FlagValidationRunsBeforeDriftCheck(t *testing.T) {
 		t.Errorf("supervisor restart attempted despite flag rejection:\n%s", stdout.String())
 	}
 }
+
+// A pre_start entry whose placeholder cannot be expanded must stop session
+// resolution instead of reaching sh verbatim (ga-iwz7u). The old raw-string
+// fallback let "worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}}"
+// run literally and mint a git worktree at .gc/agents/{{.AgentBase}}.
+func TestResolveTemplate_PreStartUnexpandablePlaceholderFailsClosed(t *testing.T) {
+	cityDir := t.TempDir()
+	cfgAgent := &config.Agent{
+		Name:     "worker",
+		Provider: "claude",
+		PreStart: []string{"worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.NoSuchField}} --sync"},
+	}
+	bp := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityDir,
+		workspace:  &config.Workspace{Provider: "claude"},
+		providers:  config.BuiltinProviders(),
+		lookPath:   func(name string) (string, error) { return "/bin/" + name, nil },
+		fs:         fsys.OSFS{},
+		rigs:       []config.Rig{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	_, err := resolveTemplate(bp, cfgAgent, "worker", nil)
+	if err == nil {
+		t.Fatal("resolveTemplate returned nil error for an unexpandable pre_start placeholder")
+	}
+	for _, want := range []string{"pre_start", "NoSuchField"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}

@@ -615,7 +615,11 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 		if agentCfg.SourceDir != "" {
 			setupCtx.ConfigDir = agentCfg.SourceDir
 		}
-		sessionLive = expandSessionSetup(agentCfg.SessionLive, setupCtx)
+		var err error
+		sessionLive, err = expandSessionSetup(agentCfg.SessionLive, setupCtx)
+		if err != nil {
+			return nil, fmt.Errorf("agent %q: session_live: %w", qualifiedName, err)
+		}
 	}
 	// Project the resolved hint subset through the single StartupHints →
 	// runtime.Config mapping (gc-0tna7), then layer the caller-owned

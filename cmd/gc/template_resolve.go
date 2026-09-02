@@ -515,13 +515,25 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		ConfigDir: configDir,
 	}
 	if strings.Contains(command, "{{") {
-		expanded := expandSessionSetup([]string{command}, setupCtx)
+		expanded, err := expandSessionSetup([]string{command}, setupCtx)
+		if err != nil {
+			return TemplateParams{}, fmt.Errorf("agent %q: command: %w", qualifiedName, err)
+		}
 		command = expanded[0]
 	}
-	expandedSetup := expandSessionSetup(cfgAgent.SessionSetup, setupCtx)
+	expandedSetup, err := expandSessionSetup(cfgAgent.SessionSetup, setupCtx)
+	if err != nil {
+		return TemplateParams{}, fmt.Errorf("agent %q: session_setup: %w", qualifiedName, err)
+	}
 	resolvedScript := config.ResolveSessionSetupScriptPath(p.cityPath, cfgAgent.SourceDir, cfgAgent.SessionSetupScript)
-	expandedPreStart := expandSessionSetup(cfgAgent.PreStart, setupCtx)
-	expandedLive := expandSessionSetup(cfgAgent.SessionLive, setupCtx)
+	expandedPreStart, err := expandSessionSetup(cfgAgent.PreStart, setupCtx)
+	if err != nil {
+		return TemplateParams{}, fmt.Errorf("agent %q: pre_start: %w", qualifiedName, err)
+	}
+	expandedLive, err := expandSessionSetup(cfgAgent.SessionLive, setupCtx)
+	if err != nil {
+		return TemplateParams{}, fmt.Errorf("agent %q: session_live: %w", qualifiedName, err)
+	}
 
 	// Step 11b: Skill materialization integration (per engdocs
 	// skill-materialization.md § "When FingerprintExtra[\"skills:*\"]

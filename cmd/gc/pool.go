@@ -219,27 +219,32 @@ type SessionSetupContext struct {
 	ConfigDir string // source directory where agent config was defined
 }
 
-// expandSessionSetup expands Go text/template strings in session_setup commands.
-// On parse or execute error, the raw command is kept (graceful fallback).
-func expandSessionSetup(cmds []string, ctx SessionSetupContext) []string {
+// expandSessionSetup expands Go text/template strings in session_setup,
+// pre_start and session_live commands.
+//
+// It fails closed: a command whose template does not parse, or references a
+// field SessionSetupContext does not carry, yields an error and NO commands.
+// The previous "keep the raw command" fallback handed sh a literal
+// "{{.AgentBase}}", and worktree-setup.sh then minted a real git worktree at
+// .gc/agents/{{.AgentBase}} on branch gc-{{.AgentBase}}-<hash> (ga-iwz7u).
+// A command that still carries template placeholders must never run.
+func expandSessionSetup(cmds []string, ctx SessionSetupContext) ([]string, error) {
 	if len(cmds) == 0 {
-		return nil
+		return nil, nil
 	}
 	result := make([]string, len(cmds))
 	for i, raw := range cmds {
-		tmpl, err := template.New("setup").Parse(raw)
+		tmpl, err := template.New("setup").Option("missingkey=error").Parse(raw)
 		if err != nil {
-			result[i] = raw
-			continue
+			return nil, fmt.Errorf("session setup command [%d] %q: parsing template: %w", i, raw, err)
 		}
 		var buf bytes.Buffer
 		if err := tmpl.Execute(&buf, ctx); err != nil {
-			result[i] = raw
-			continue
+			return nil, fmt.Errorf("session setup command [%d] %q: expanding template: %w", i, raw, err)
 		}
 		result[i] = buf.String()
 	}
-	return result
+	return result, nil
 }
 
 // deepCopyAgent creates a deep copy of a config.Agent with a new name and dir.

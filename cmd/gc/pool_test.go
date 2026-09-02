@@ -621,7 +621,10 @@ func TestExpandSessionSetup_Basic(t *testing.T) {
 		"tmux set-option -t {{.Session}} status-style 'bg=blue'",
 		"tmux set-option -t {{.Session}} status-left ' {{.Agent}} '",
 	}
-	got := expandSessionSetup(cmds, ctx)
+	got, err := expandSessionSetup(cmds, ctx)
+	if err != nil {
+		t.Fatalf("expandSessionSetup: %v", err)
+	}
 	if len(got) != 2 {
 		t.Fatalf("len = %d, want 2", len(got))
 	}
@@ -647,42 +650,74 @@ func TestExpandSessionSetup_AllVariables(t *testing.T) {
 	cmds := []string{
 		"echo {{.Session}} {{.Agent}} {{.AgentBase}} {{.Rig}} {{.RigRoot}} {{.CityRoot}} {{.CityName}} {{.WorkDir}}",
 	}
-	got := expandSessionSetup(cmds, ctx)
+	got, err := expandSessionSetup(cmds, ctx)
+	if err != nil {
+		t.Fatalf("expandSessionSetup: %v", err)
+	}
 	want := "echo hw--polecat hw/polecat polecat hello-world /repos/hello-world /city bl /city/.gc/worktrees/polecat"
 	if got[0] != want {
 		t.Errorf("got %q, want %q", got[0], want)
 	}
 }
 
-func TestExpandSessionSetup_InvalidTemplate(t *testing.T) {
+func TestExpandSessionSetup_InvalidTemplateFailsClosed(t *testing.T) {
 	ctx := SessionSetupContext{Session: "test"}
 	cmds := []string{
 		"tmux {{.Session}}",    // valid
 		"tmux {{.BadSyntax",    // invalid template
 		"tmux {{.Session}} ok", // valid
 	}
-	got := expandSessionSetup(cmds, ctx)
-	if got[0] != "tmux test" {
-		t.Errorf("cmd[0] = %q, want expanded", got[0])
+	got, err := expandSessionSetup(cmds, ctx)
+	if err == nil {
+		t.Fatalf("expandSessionSetup(%q) returned nil error, want parse failure", cmds[1])
 	}
-	// Invalid template → raw command preserved.
-	if got[1] != "tmux {{.BadSyntax" {
-		t.Errorf("cmd[1] = %q, want raw (fallback)", got[1])
+	// A malformed entry must poison the whole list: nothing may reach sh
+	// with a raw "{{" in it, not even the valid neighbors.
+	if got != nil {
+		t.Errorf("got %v, want nil on error", got)
 	}
-	if got[2] != "tmux test ok" {
-		t.Errorf("cmd[2] = %q, want expanded", got[2])
+	for _, want := range []string{"tmux {{.BadSyntax", "[1]"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+}
+
+// A placeholder that parses but names a field the context does not have
+// (the {{.AgentBase}} class of failure: ga-iwz7u) must fail closed. The old
+// raw-string fallback let `worktree-setup.sh {{.RigRoot}} {{.WorkDir}}
+// {{.AgentBase}}` reach sh verbatim, which minted a real git worktree at
+// .gc/agents/{{.AgentBase}} on branch gc-{{.AgentBase}}-<hash>.
+func TestExpandSessionSetup_UnknownFieldFailsClosed(t *testing.T) {
+	ctx := SessionSetupContext{Session: "polecat-1", AgentBase: "polecat-1"}
+	cmds := []string{"worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.NoSuchField}} --sync"}
+	got, err := expandSessionSetup(cmds, ctx)
+	if err == nil {
+		t.Fatalf("expandSessionSetup(%q) returned nil error, want execute failure", cmds[0])
+	}
+	if got != nil {
+		t.Errorf("got %v, want nil on error", got)
+	}
+	if !strings.Contains(err.Error(), "NoSuchField") {
+		t.Errorf("error %q does not name the missing field", err)
 	}
 }
 
 func TestExpandSessionSetup_Nil(t *testing.T) {
-	got := expandSessionSetup(nil, SessionSetupContext{})
+	got, err := expandSessionSetup(nil, SessionSetupContext{})
+	if err != nil {
+		t.Fatalf("expandSessionSetup(nil): %v", err)
+	}
 	if got != nil {
 		t.Errorf("got %v, want nil", got)
 	}
 }
 
 func TestExpandSessionSetup_Empty(t *testing.T) {
-	got := expandSessionSetup([]string{}, SessionSetupContext{})
+	got, err := expandSessionSetup([]string{}, SessionSetupContext{})
+	if err != nil {
+		t.Fatalf("expandSessionSetup(empty): %v", err)
+	}
 	if got != nil {
 		t.Errorf("got %v, want nil", got)
 	}
@@ -755,7 +790,10 @@ func TestExpandSessionSetup_ConfigDir(t *testing.T) {
 	cmds := []string{
 		"{{.ConfigDir}}/assets/scripts/status-line.sh {{.Agent}}",
 	}
-	got := expandSessionSetup(cmds, ctx)
+	got, err := expandSessionSetup(cmds, ctx)
+	if err != nil {
+		t.Fatalf("expandSessionSetup: %v", err)
+	}
 	want := "/home/user/city/packs/gastown/assets/scripts/status-line.sh mayor"
 	if got[0] != want {
 		t.Errorf("got %q, want %q", got[0], want)
