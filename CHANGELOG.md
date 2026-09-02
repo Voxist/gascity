@@ -137,6 +137,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   but not yet pushed continues to satisfy the gate as it did before.
   (gascity#5037)
 
+### Upgrading Notes
+
+- `session_setup` and `pre_start` entries are now validated as Go templates
+  at config load. An entry that carries literal braces for another tool
+  (`docker ps --format '{{.Names}}'`, `kubectl -o go-template`, `gh
+  --template`) previously ran verbatim and is now rejected; escape the
+  opening braces as `{{"{{"}}` (for example `'{{"{{"}}.Names}}'`).
+
 ### Added
 
 - **Managed Dolt starts now arm a bounded delivery-drain window before the
@@ -162,6 +170,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `GC_DOLT_DELIVERY_WINDOW=0`. (vp-o52ia, ADR-0064)
 
 ### Fixed
+
+- **Session command templates fail closed instead of running unexpanded.**
+  A `session_setup` or `pre_start` template that failed to parse or expand
+  used to reach sh verbatim, so `worktree-setup.sh` received a literal
+  `{{.AgentBase}}` and minted a git worktree at `.gc/agents/{{.AgentBase}}`.
+  Now such a template is rejected at config load (`gc start` / reload /
+  doctor / supervisor restart) with the list of available placeholders; like
+  every other agent validation error this refuses the whole city, including
+  for a template that arrives through an imported pack. Validation expands
+  against sample contexts (one-character values, with and without a rig), so
+  a placeholder reachable only behind a comparison neither sample satisfies
+  is still caught at session start, where the agent is skipped for that
+  tick. `session_live` is cosmetic: a bad entry is a non-fatal load-time
+  warning (also under strict mode and in supervisor-managed loads) and is
+  skipped at session start, leaving its neighbours in place. The provider launch command keeps
+  its raw-command behaviour (now with a warning), since it is assembled at
+  resolve time and is where braces meant for another tool usually live. The
+  example `worktree-setup.sh` scripts also refuse unexpanded or shifted
+  arguments. (ga-iwz7u; the `work_query`/`scale_check`/`on_boot`/`on_death`
+  expander and the pack-command script expander keep their raw-command
+  fallback, tracked as ga-a85qk.)
 
 - **Runtime-provider waiver expiries are now independent per entry instead of
   sharing one hardcoded date.** All nine `runtime.Provider` contract waivers

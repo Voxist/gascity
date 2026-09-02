@@ -604,90 +604,6 @@ func TestFormatMaxSessions_ZeroValue(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Session setup template expansion tests
-// ---------------------------------------------------------------------------
-
-func TestExpandSessionSetup_Basic(t *testing.T) {
-	ctx := SessionSetupContext{
-		Session:  "mayor",
-		Agent:    "mayor",
-		Rig:      "",
-		CityRoot: "/home/user/city",
-		CityName: "bright-lights",
-		WorkDir:  "/home/user/city",
-	}
-	cmds := []string{
-		"tmux set-option -t {{.Session}} status-style 'bg=blue'",
-		"tmux set-option -t {{.Session}} status-left ' {{.Agent}} '",
-	}
-	got := expandSessionSetup(cmds, ctx)
-	if len(got) != 2 {
-		t.Fatalf("len = %d, want 2", len(got))
-	}
-	if got[0] != "tmux set-option -t mayor status-style 'bg=blue'" {
-		t.Errorf("cmd[0] = %q", got[0])
-	}
-	if got[1] != "tmux set-option -t mayor status-left ' mayor '" {
-		t.Errorf("cmd[1] = %q", got[1])
-	}
-}
-
-func TestExpandSessionSetup_AllVariables(t *testing.T) {
-	ctx := SessionSetupContext{
-		Session:   "hw--polecat",
-		Agent:     "hw/polecat",
-		AgentBase: "polecat",
-		Rig:       "hello-world",
-		RigRoot:   "/repos/hello-world",
-		CityRoot:  "/city",
-		CityName:  "bl",
-		WorkDir:   "/city/.gc/worktrees/polecat",
-	}
-	cmds := []string{
-		"echo {{.Session}} {{.Agent}} {{.AgentBase}} {{.Rig}} {{.RigRoot}} {{.CityRoot}} {{.CityName}} {{.WorkDir}}",
-	}
-	got := expandSessionSetup(cmds, ctx)
-	want := "echo hw--polecat hw/polecat polecat hello-world /repos/hello-world /city bl /city/.gc/worktrees/polecat"
-	if got[0] != want {
-		t.Errorf("got %q, want %q", got[0], want)
-	}
-}
-
-func TestExpandSessionSetup_InvalidTemplate(t *testing.T) {
-	ctx := SessionSetupContext{Session: "test"}
-	cmds := []string{
-		"tmux {{.Session}}",    // valid
-		"tmux {{.BadSyntax",    // invalid template
-		"tmux {{.Session}} ok", // valid
-	}
-	got := expandSessionSetup(cmds, ctx)
-	if got[0] != "tmux test" {
-		t.Errorf("cmd[0] = %q, want expanded", got[0])
-	}
-	// Invalid template → raw command preserved.
-	if got[1] != "tmux {{.BadSyntax" {
-		t.Errorf("cmd[1] = %q, want raw (fallback)", got[1])
-	}
-	if got[2] != "tmux test ok" {
-		t.Errorf("cmd[2] = %q, want expanded", got[2])
-	}
-}
-
-func TestExpandSessionSetup_Nil(t *testing.T) {
-	got := expandSessionSetup(nil, SessionSetupContext{})
-	if got != nil {
-		t.Errorf("got %v, want nil", got)
-	}
-}
-
-func TestExpandSessionSetup_Empty(t *testing.T) {
-	got := expandSessionSetup([]string{}, SessionSetupContext{})
-	if got != nil {
-		t.Errorf("got %v, want nil", got)
-	}
-}
-
 func TestResolveSetupScript_Relative(t *testing.T) {
 	got := config.ResolveSessionSetupScriptPath("/home/user/city", "/home/user/city/packs/gastown", "scripts/setup.sh")
 	if got != "/home/user/city/packs/gastown/scripts/setup.sh" {
@@ -740,25 +656,6 @@ func TestResolveSetupScript_Empty(t *testing.T) {
 	got := config.ResolveSessionSetupScriptPath("/home/user/city", "/home/user/city/packs/gastown", "")
 	if got != "" {
 		t.Errorf("got %q, want empty", got)
-	}
-}
-
-func TestExpandSessionSetup_ConfigDir(t *testing.T) {
-	ctx := SessionSetupContext{
-		Session:   "mayor",
-		Agent:     "mayor",
-		CityRoot:  "/home/user/city",
-		CityName:  "bright-lights",
-		WorkDir:   "/home/user/city",
-		ConfigDir: "/home/user/city/packs/gastown",
-	}
-	cmds := []string{
-		"{{.ConfigDir}}/assets/scripts/status-line.sh {{.Agent}}",
-	}
-	got := expandSessionSetup(cmds, ctx)
-	want := "/home/user/city/packs/gastown/assets/scripts/status-line.sh mayor"
-	if got[0] != want {
-		t.Errorf("got %q, want %q", got[0], want)
 	}
 }
 

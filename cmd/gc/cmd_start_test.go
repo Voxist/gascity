@@ -2036,6 +2036,105 @@ func TestDoStart_FlagValidationRunsBeforeDriftCheck(t *testing.T) {
 	}
 }
 
+// A pre_start entry whose placeholder cannot be expanded must stop session
+// resolution instead of reaching sh verbatim.
+func TestResolveTemplate_PreStartUnexpandablePlaceholderFailsClosed(t *testing.T) {
+	cityDir := t.TempDir()
+	cfgAgent := &config.Agent{
+		Name:     "worker",
+		Provider: "claude",
+		PreStart: []string{"worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.NoSuchField}} --sync"},
+	}
+	bp := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityDir,
+		workspace:  &config.Workspace{Provider: "claude"},
+		providers:  config.BuiltinProviders(),
+		lookPath:   func(name string) (string, error) { return "/bin/" + name, nil },
+		fs:         fsys.OSFS{},
+		rigs:       []config.Rig{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	_, err := resolveTemplate(bp, cfgAgent, "worker", nil)
+	if err == nil {
+		t.Fatal("resolveTemplate returned nil error for an unexpandable pre_start placeholder")
+	}
+	for _, want := range []string{"pre_start", "NoSuchField"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+// A session_live entry that cannot be expanded is cosmetic: resolution must
+// succeed with only that entry skipped, never fail.
+func TestResolveTemplate_SessionLiveUnexpandablePlaceholderIsSkipped(t *testing.T) {
+	var stderr bytes.Buffer
+	cityDir := t.TempDir()
+	cfgAgent := &config.Agent{
+		Name:        "worker",
+		Provider:    "claude",
+		SessionLive: []string{"tmux set-option -t {{.Session}} status-style bg=blue", "tmux set -g status-right '{{.NoSuchField}}'"},
+	}
+	bp := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityDir,
+		workspace:  &config.Workspace{Provider: "claude"},
+		providers:  config.BuiltinProviders(),
+		lookPath:   func(name string) (string, error) { return "/bin/" + name, nil },
+		fs:         fsys.OSFS{},
+		rigs:       []config.Rig{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     &stderr,
+	}
+
+	tp, err := resolveTemplate(bp, cfgAgent, "worker", nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate failed on a session_live typo: %v", err)
+	}
+	if len(tp.Hints.SessionLive) != 1 || tp.Hints.SessionLive[0] != "tmux set-option -t worker status-style bg=blue" {
+		t.Errorf("SessionLive = %q, want only the good entry", tp.Hints.SessionLive)
+	}
+
+	// A dropped entry must say so. Load-time validation only reaches the
+	// entries its two sample contexts expand, so for anything behind a
+	// comparison neither sample satisfies this line is the only signal the
+	// operator gets that the entry silently stopped applying.
+	out := stderr.String()
+	if !strings.Contains(out, "NoSuchField") {
+		t.Errorf("stderr = %q, want it to name the field that failed to expand", out)
+	}
+	if !strings.Contains(out, "session_live") {
+		t.Errorf("stderr = %q, want it to name the field being skipped", out)
+	}
+	if strings.Contains(out, "status-style bg=blue") {
+		t.Errorf("stderr = %q, reported the entry that expanded fine", out)
+	}
+}
+
+// The session_live load-time warning must stay a warning under strict mode
+// and must be shown by the ordinary config loaders, or the "cosmetic" policy
+// is fatal in one deployment mode and invisible in the other.
+func TestSessionLiveTemplateWarningIsNonFatalAndVisible(t *testing.T) {
+	warnings := config.ValidateSemantics(&config.City{Agents: []config.Agent{{Name: "w", SessionLive: []string{"tmux set -g x '{{.Nope}}'"}}}}, "city.toml")
+	if len(warnings) == 0 {
+		t.Fatal("no warning produced")
+	}
+	fatal, nonFatal := splitStrictConfigWarnings(warnings)
+	if len(fatal) != 0 || len(nonFatal) != len(warnings) {
+		t.Errorf("strict split: fatal=%q nonFatal=%q", fatal, nonFatal)
+	}
+	for _, w := range warnings {
+		if !isNonFatalLoadConfigWarning(w) {
+			t.Errorf("load-config filter would drop %q", w)
+		}
+	}
+}
+
 // The map-level guards above are necessary but were never sufficient: the
 // session env is an OVERLAY, and every runtime lays it over an environment the
 // child already has. internal/runtime/subprocess and internal/runtime/acp build

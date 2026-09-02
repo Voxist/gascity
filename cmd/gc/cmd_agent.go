@@ -198,6 +198,9 @@ func isNonFatalLoadConfigWarning(warning string) bool {
 	if config.IsNonFatalSiteBindingWarning(warning) {
 		return true
 	}
+	if config.IsSessionLiveTemplateWarning(warning) {
+		return true
+	}
 	if strings.Contains(warning, "[agents] is a deprecated compatibility alias for [agent_defaults]") {
 		return true
 	}

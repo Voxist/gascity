@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"text/template"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
@@ -246,41 +245,10 @@ func parseScaleCheckCount(agentName, check, out string) (int, error) {
 	return n, nil
 }
 
-// SessionSetupContext holds template variables for session_setup command expansion.
-type SessionSetupContext struct {
-	Session   string // tmux session name
-	Agent     string // qualified agent name
-	AgentBase string // unqualified agent name or pool instance name
-	Rig       string // rig name (empty for city-scoped)
-	RigRoot   string // absolute path to the rig root (empty for city-scoped)
-	CityRoot  string // city directory path
-	CityName  string // workspace name
-	WorkDir   string // agent working directory
-	ConfigDir string // source directory where agent config was defined
-}
-
-// expandSessionSetup expands Go text/template strings in session_setup commands.
-// On parse or execute error, the raw command is kept (graceful fallback).
-func expandSessionSetup(cmds []string, ctx SessionSetupContext) []string {
-	if len(cmds) == 0 {
-		return nil
-	}
-	result := make([]string, len(cmds))
-	for i, raw := range cmds {
-		tmpl, err := template.New("setup").Parse(raw)
-		if err != nil {
-			result[i] = raw
-			continue
-		}
-		var buf bytes.Buffer
-		if err := tmpl.Execute(&buf, ctx); err != nil {
-			result[i] = raw
-			continue
-		}
-		result[i] = buf.String()
-	}
-	return result
-}
+// SessionSetupContext is the template context for session_setup, pre_start
+// and session_live commands; config validation and runtime expansion share
+// the one type in internal/config.
+type SessionSetupContext = config.SessionCommandTemplateContext
 
 // deepCopyAgent creates a deep copy of a config.Agent with a new name and dir.
 // Slice and map fields are independently allocated so mutations to the copy

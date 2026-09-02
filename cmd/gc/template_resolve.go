@@ -544,14 +544,34 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		WorkDir:   workDir,
 		ConfigDir: configDir,
 	}
-	if strings.Contains(command, "{{") {
-		expanded := expandSessionSetup([]string{command}, setupCtx)
-		command = expanded[0]
+	// The launch command is assembled from provider command + args and cannot
+	// be validated at config load; braces in it are also the ones most
+	// likely meant for another tool. Keep the raw command on failure and say
+	// so, like the work_query/on_boot expander does.
+	if expanded, err := config.ExpandSessionCommandTemplate(command, setupCtx, "command", 0); err == nil {
+		command = expanded
+	} else if p.stderr != nil {
+		fmt.Fprintf(p.stderr, "agent %q: %v (using raw command)\n", qualifiedName, err) //nolint:errcheck
 	}
-	expandedSetup := expandSessionSetup(cfgAgent.SessionSetup, setupCtx)
+	// session_setup/pre_start fail closed; session_live entries that do not
+	// expand are skipped rather than blocking the session.
+	//
+	// Config load warns about the ones its sample contexts can reach, but a
+	// placeholder behind a comparison neither sample satisfies is only caught
+	// here, so report what was dropped instead of letting the entry vanish.
+	sessionCmds, err := config.ExpandAgentSessionCommands(*cfgAgent, setupCtx)
+	if err != nil {
+		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
+	}
+	if p.stderr != nil {
+		for _, skipped := range sessionCmds.Skipped {
+			fmt.Fprintf(p.stderr, "agent %q: %v (skipping this session_live entry)\n", qualifiedName, skipped) //nolint:errcheck
+		}
+	}
+	expandedSetup := sessionCmds.SessionSetup
+	expandedPreStart := sessionCmds.PreStart
+	expandedLive := sessionCmds.SessionLive
 	resolvedScript := config.ResolveSessionSetupScriptPath(p.cityPath, cfgAgent.SourceDir, cfgAgent.SessionSetupScript)
-	expandedPreStart := expandSessionSetup(cfgAgent.PreStart, setupCtx)
-	expandedLive := expandSessionSetup(cfgAgent.SessionLive, setupCtx)
 
 	// Step 11b: Skill materialization integration (per engdocs
 	// skill-materialization.md § "When FingerprintExtra[\"skills:*\"]

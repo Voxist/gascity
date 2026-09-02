@@ -621,7 +621,15 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 		if agentCfg.SourceDir != "" {
 			setupCtx.ConfigDir = agentCfg.SourceDir
 		}
-		sessionLive = expandSessionSetup(agentCfg.SessionLive, setupCtx)
+		// This resolver runs for every handle on an existing session,
+		// including stop/kill and the reconciler's liveness probe, so a
+		// session_live entry that does not expand is skipped (config load
+		// warned about it), never turned into "the session cannot be managed".
+		// session_setup/pre_start are not re-run on resume, so the strict
+		// error cannot fire here for a config that loaded.
+		if cmds, err := config.ExpandAgentSessionCommands(config.Agent{SessionLive: agentCfg.SessionLive}, setupCtx); err == nil {
+			sessionLive = cmds.SessionLive
+		}
 	}
 	// Project the resolved hint subset through the single StartupHints →
 	// runtime.Config mapping (gc-0tna7), then layer the caller-owned
