@@ -383,7 +383,6 @@ ensure_database_registered() {
     return 1
 }
 
-
 database_exists() {
     local db="$1"
     [ -n "$db" ] || return 1
@@ -3214,6 +3213,11 @@ op_init() {
     if ! ensure_database_registered "$dolt_database"; then
         die "failed to register Dolt database '$dolt_database' on running server (CREATE DATABASE failed); see warnings above. cannot proceed with bd init."
     fi
+
+    # Gas City creates its managed server root at .beads/dolt before bd init.
+    # For a database proven to have been created above by this invocation,
+    # record the current bd version before bd's legacy-workspace guard runs.
+    # Pre-existing databases deliberately receive no marker here.
 
     # Run bd init in server mode through the pinned wrapper so the fallback
     # path uses the same authenticated Dolt target as the rest of init.

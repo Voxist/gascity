@@ -10,16 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-# 650 -> 646 (2026-09-02, ga-w9jdf/#140 probe tri-state): six identical
-#   gc-beads-bd init invocations in cmd/gc/beads_provider_lifecycle_test.go
-#   folded into one runGcBeadsBdInitHQ helper (net -4 call sites) so the new
-#   probe-refusal regression test could join without raising this baseline.
-# 649 -> 650 (2026-09-02, ga-dmvyf bridge bd CGO fix, #146): test/integration's
-# bridge builder verifies the built (and cached) bd's build shape through
-# `go version -m` — the only way to read a binary's CGO_ENABLED — so a cached
-# non-CGO bd is rebuilt instead of reused forever.
-baseline_calls = 646
-baseline_files = 189
+baseline_calls = 657
+baseline_files = 188
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
@@ -32,7 +24,7 @@ expires = "2026-10-01"
 scope = "all"
 resource = "fixed_sleep"
 baseline_calls = 477
-baseline_files = 171
+baseline_files = 172
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-80po0c.2"
@@ -59,16 +51,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-# 431 -> 427 (2026-09-02, ga-w9jdf/#140 probe tri-state): six identical
-#   gc-beads-bd init invocations in cmd/gc/beads_provider_lifecycle_test.go
-#   folded into one runGcBeadsBdInitHQ helper (net -4 call sites) so the new
-#   probe-refusal regression test could join without raising this baseline.
-# 434/128 -> 431/125 (2026-09-01, ga-4h8bu scripts-package split):
-# six pipeline-heavy scripts test files moved behind //go:build integration,
-# taking their subprocess sites out of the untagged scope; banked per the
-# ratchet invariant.
-baseline_calls = 427
-baseline_files = 125
+baseline_calls = 444
+baseline_files = 126
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
@@ -80,7 +64,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 322
+baseline_calls = 321
 baseline_files = 121
 reported_calls = 295
 reported_files = 114
@@ -119,7 +103,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "slow_process_gate"
-baseline_calls = 59
+baseline_calls = 58
 baseline_files = 24
 reported_calls = 78
 reported_files = 27
@@ -132,8 +116,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "http_test_server"
-baseline_calls = 333
-baseline_files = 70
+baseline_calls = 318
+baseline_files = 66
 reported_calls = 255
 reported_files = 56
 owner_bead = "ga-80po0c.2.2"
@@ -371,13 +355,7 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-# 425 -> 421 (2026-09-02, ga-w9jdf/#140 probe tri-state): six identical
-#   gc-beads-bd init invocations in cmd/gc/beads_provider_lifecycle_test.go
-#   folded into one runGcBeadsBdInitHQ helper (net -4 call sites) so the new
-#   probe-refusal regression test could join without raising this baseline.
-# 427/124 -> 425/122 (2026-09-01, ga-4h8bu scripts-package split):
-# same re-tag banked in the Small scope.
-baseline_calls = 421
+baseline_calls = 437
 baseline_files = 122
 reported_calls = 394
 reported_files = 105
@@ -390,7 +368,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 322
+baseline_calls = 321
 baseline_files = 121
 reported_calls = 287
 reported_files = 113
@@ -429,7 +407,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "slow_process_gate"
-baseline_calls = 59
+baseline_calls = 58
 baseline_files = 24
 reported_calls = 75
 reported_files = 25
@@ -442,8 +420,8 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "http_test_server"
-baseline_calls = 333
-baseline_files = 70
+baseline_calls = 318
+baseline_files = 66
 reported_calls = 300
 reported_files = 66
 owner_bead = "ga-80po0c.2.2"
