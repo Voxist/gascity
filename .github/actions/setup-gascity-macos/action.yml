@@ -90,7 +90,7 @@ runs:
         # its caches on an exotic failure).
         lock_file="${RUNNER_TOOL_CACHE:-$HOME/.local}/gascity-brew.lock"
         mkdir -p "$(dirname "$lock_file")"
-        pkgs=(tmux jq flock)
+        pkgs=(tmux jq flock icu4c)
         install_missing() {
           local missing=()
           for pkg in "${pkgs[@]}"; do
@@ -115,6 +115,27 @@ runs:
             exit 1
           }
         done
+
+    - name: Export ICU headers for CGO builds
+      shell: bash
+      run: |
+        # go-icu-regex (via go-mysql-server/dolt, reached from the beads
+        # embedded store) compiles a C++ shim that includes unicode/regex.h.
+        # Homebrew's icu4c is keg-only, so its headers and libraries are not
+        # on the default search paths and every CGO build on the macOS lane
+        # (gc test binaries and the from-source bd build alike) fails with
+        # "fatal error: 'unicode/regex.h' file not found". Point CGO at the
+        # keg for the rest of the job, and fail here with a clear message if
+        # the header is missing rather than deep inside a compile.
+        set -euo pipefail
+        icu_prefix="$(brew --prefix icu4c)"
+        if [ ! -f "${icu_prefix}/include/unicode/regex.h" ]; then
+          echo "ICU headers not found under ${icu_prefix}/include (brew --prefix icu4c)" >&2
+          exit 1
+        fi
+        echo "CGO_CPPFLAGS=-I${icu_prefix}/include${CGO_CPPFLAGS:+ ${CGO_CPPFLAGS}}" >> "$GITHUB_ENV"
+        echo "CGO_LDFLAGS=-L${icu_prefix}/lib${CGO_LDFLAGS:+ ${CGO_LDFLAGS}}" >> "$GITHUB_ENV"
+        echo "ICU for CGO: ${icu_prefix}"
 
     - name: Install dolt v${{ inputs.dolt-version }}
       shell: bash
