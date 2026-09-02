@@ -35,7 +35,11 @@ const (
 	// Re-derived for the fork-first bd repin (ga-zzcjs): BD_REPO joins
 	// BD_SOURCE_REF as a job-level env key at every pin site, so the shape
 	// moves again — deliberately.
-	expectedCIExecutionHash     = "fb5eebf7e2995c5a5ea7527c15b7640d035d41e1957d454bf7f470766aac4226"
+	// Re-derived for the ga-4h8bu scripts split (PR #141 round 2): the
+	// integration changes-filter widens to scripts/** so plain shell-script
+	// PRs trigger the shards that are the -tags integration tests' only CI
+	// home — a deliberate execution-shape change.
+	expectedCIExecutionHash     = "a5f644dc53ff7258763428b057982a562ba26c1458089bc87d55fdedda844115"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
@@ -123,10 +127,11 @@ var requiredFilterPaths = map[string][]string{
 		".github/workflows/**",
 		"Makefile",
 		"**/*.go",
-		"scripts/test-integration-shard",
-		"scripts/test-go-test-shard",
-		"scripts/runtime-tmux-tests.manifest",
-		"scripts/go-test-observable",
+		// The whole scripts/ tree (subsumes the formerly named runner
+		// scripts): the scripts package's -tags integration tests have the
+		// integration shards as their only CI home, so a PR touching any
+		// plain shell script there must trigger them (ga-4h8bu split).
+		"scripts/**",
 		"examples/gastown/**",
 	},
 	"openclaw_bridge": {"contrib/openclaw-bridge/**", ".github/workflows/**"},

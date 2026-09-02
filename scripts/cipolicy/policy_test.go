@@ -24,7 +24,13 @@ func TestCurrentWorkflowsMatchPolicy(t *testing.T) {
 }
 
 func TestMakeTestCIPolicyRunsStaticScopeContracts(t *testing.T) {
-	const want = "\t$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -run '^(TestPreflightStaticScopesOrdinaryPRsWithoutWeakeningProtectedRuns|TestFullStaticLintExplicitlyOwnsConfiguredGolangCIGovet|TestChangedStaticTargetsScopeLintAndFormattingToTheDiff|TestCIStaticScopeClassifierFailsClosedOutsideValidatedPullRequestMerge)$$' ./scripts"
+	// -tags integration is load-bearing: two of the named contracts live in
+	// the integration-tagged pr_static_scope_contract_test.go (ga-4h8bu
+	// scripts split — the 669s static-scope pipeline test cannot sit in the
+	// fast push gate), and a -run alternation naming tests the build does
+	// not compile matches nothing and reports ok. The scripts package's
+	// TestCIPolicyRunPatternNamesExistingTests guards that class generally.
+	const want = "\t$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -tags integration -run '^(TestPreflightStaticScopesOrdinaryPRsWithoutWeakeningProtectedRuns|TestFullStaticLintExplicitlyOwnsConfiguredGolangCIGovet|TestChangedStaticTargetsScopeLintAndFormattingToTheDiff|TestCIStaticScopeClassifierFailsClosedOutsideValidatedPullRequestMerge)$$' ./scripts"
 
 	makefilePath := filepath.Join("..", "..", "Makefile")
 	body, err := os.ReadFile(makefilePath)

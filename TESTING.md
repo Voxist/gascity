@@ -453,7 +453,7 @@ all-source audit while staying outside untagged and Small debt.
 | --- | --- | --- | --- | --- | --- | --- |
 | Audit baseline | all tracked test source | fixed_sleep: 437 calls / 161 files (historical regex census: 447 / 157) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
 | Audit baseline | all tracked test source | listener_helper: 58 calls / 23 files | ga-80po0c.2.2.3 | all-source listener-helper call/file totals cannot drift without an explicit checked policy update; ga-80po0c.2.2.3 owns this all-source audit; tagged calls stay Large and receive no Medium exemption | P0.4c-listener-helper | 2026-10-01 |
-| Audit baseline | all tracked test source | subprocess: 560 calls / 169 files (historical regex census: 495 / 135) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
+| Audit baseline | all tracked test source | subprocess: 561 calls / 169 files (historical regex census: 495 / 135) | ga-80po0c.2 | tracked test source totals remain visible as audit evidence; ga-80po0c.2 owns this point-in-time source census | P0.4a | 2026-10-01 |
 | Medium owner | `cmd/gc` package `main` | TestMain: environment, tmux | ga-80po0c.2.1 | cmd/gc TestMain is the checked package-level Medium owner for process environment and tmux namespace setup; only declared environment and tmux calls lexically inside TestMain leave Small debt | P0.4b/P0.4c-tmux | 2026-10-01 |
 | Medium owner | `internal/api` package `api` | TestEveryEmittedErrorCodeIsRegistered: subprocess | ga-80po0c.2.1 | internal/api tracked-source error URN guard is a checked Medium owner; only the git ls-files call lexically inside TestEveryEmittedErrorCodeIsRegistered leaves Small debt | P0.4b | 2026-10-01 |
 | Medium owner | `internal/doctor` package `doctor` | TestCustomTypesCheck_TableDrift: subprocess | ga-80po0c.2.1 | doctor custom-types config-CSV-vs-table drift detect+heal proof is a checked Medium owner; the bd and dolt subprocesses are confined to TestCustomTypesCheck_TableDrift, which manufactures and heals real table drift against a throwaway store | P0.4b | 2026-10-01 |
@@ -472,7 +472,7 @@ all-source audit while staying outside untagged and Small debt.
 | Small debt ratchet | all untagged test source | net_listen: 93 calls / 35 files (historical regex census: 92 / 34) | ga-80po0c.2.2.2 | untagged Small stream-listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move stream-listener tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-01 |
 | Small debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-80po0c.2.2.2 | untagged Small net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move ListenConfig-backed tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-01 |
 | Small debt ratchet | all untagged test source | net_listen_packet: 3 calls / 2 files | ga-80po0c.2.2.2 | untagged Small packet-listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move packet-listener tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-01 |
-| Small debt ratchet | all untagged test source | subprocess: 410 calls / 115 files (historical regex census: 394 / 105) | ga-80po0c.2.1 | untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners remove or replace each process call site | D1/D2/D5/D6/E6 | 2026-10-01 |
+| Small debt ratchet | all untagged test source | subprocess: 408 calls / 113 files (historical regex census: 394 / 105) | ga-80po0c.2.1 | untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners remove or replace each process call site | D1/D2/D5/D6/E6 | 2026-10-01 |
 | Small debt ratchet | all untagged test source | syscall_listen: 1 calls / 1 files | ga-80po0c.2.2 | untagged Small syscall.Listen call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move syscall-backed listener tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-01 |
 | Small debt ratchet | all untagged test source | tmux: 0 calls / 0 files | ga-80po0c.2.2.1 | untagged Small tmux dependency call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace tmux with a fake executor or declare exact isolated ownership | P0.4c-tmux | 2026-10-01 |
 | Source debt ratchet | `cmd/gc` untagged test source | cwd: 174 calls / 16 files (historical regex census: 98 / 13) | ga-80po0c.2.3 | untagged cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized cwd mutation | D5/D6 | 2026-10-01 |
@@ -484,7 +484,7 @@ all-source audit while staying outside untagged and Small debt.
 | Source debt ratchet | all untagged test source | net_listen: 95 calls / 36 files (historical regex census: 92 / 34) | ga-80po0c.2.2.2 | untagged stream-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its stream listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-01 |
 | Source debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-80po0c.2.2.2 | untagged net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its configured listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-01 |
 | Source debt ratchet | all untagged test source | net_listen_packet: 3 calls / 2 files | ga-80po0c.2.2.2 | untagged packet-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its packet listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-01 |
-| Source debt ratchet | all untagged test source | subprocess: 416 calls / 118 files (historical regex census: 380 / 98) | ga-80po0c.2 | untagged subprocess call/file totals cannot grow; reductions must lower this baseline; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-01 |
+| Source debt ratchet | all untagged test source | subprocess: 413 calls / 115 files (historical regex census: 380 / 98) | ga-80po0c.2 | untagged subprocess call/file totals cannot grow; reductions must lower this baseline; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-01 |
 | Source debt ratchet | all untagged test source | syscall_listen: 1 calls / 1 files | ga-80po0c.2.2 | untagged syscall.Listen call/file totals cannot grow; reductions must lower this baseline; each owning test closes its listening file descriptor and removes duplicate listener-backed coverage | P0.4c | 2026-10-01 |
 | Source debt ratchet | all untagged test source | tmux: 6 calls / 2 files | ga-80po0c.2.2.1 | untagged tmux dependency call/file totals cannot grow; reductions must lower this baseline; each owning test confines tmux processes and sockets to its isolated namespace and cleanup | P0.4c-tmux | 2026-10-01 |
 
@@ -576,13 +576,16 @@ Which Go packages each tier runs is defined in **one** place:
 job and the integration tier's `packages-core` shards derive their package
 lists from it; edit tier membership there, nowhere else.
 
-The fast tier's `unit-core` job excludes four packages:
+The fast tier's `unit-core` job excludes three packages:
 
 - `cmd/gc` — runs in the fast tier's own six `unit-cmd-gc` shards.
-- `examples/bd/dolt`, `examples/gastown`, `scripts` — integration-weight
-  workloads (real dolt servers, full pipeline shell tests; measured at
-  562.9s, 445.3s and 390.5s) that made the tier named "fast" take
-  ~20 minutes and serialized the fleet through the push gate. They run —
+- `examples/bd/dolt`, `examples/gastown` — integration-weight workloads
+  (real dolt servers, full pipeline shell tests) that made the tier named
+  "fast" take ~20 minutes and serialized the fleet through the push gate.
+  The `scripts` package is NOT excluded: its guard/contract tests
+  (push-ownership, pre-commit contract, version pins) gate pushes in this
+  tier, while its slow pipeline tests carry `//go:build integration` and run
+  only in the integration tier. The excluded packages run —
   with strictly *more* coverage (`GC_FAST_UNIT=0` plus `-tags
   integration`) — in the integration tier's `packages-core` shards.
 
@@ -596,11 +599,11 @@ build and no test — it just stops running anywhere — so the guard makes
 that rot loud on every fast run instead. The gate gets faster; total
 cross-tier coverage never shrinks.
 
-The `unit-core` job also receives a larger `GOFLAGS -p` share than the
-other jobs (`GC_TEST_UNIT_CORE_P`, default `LOCAL_TEST_JOBS/2`, min 2): it
-is the one multi-package job, and under the previous flat split it walked
-~190 packages at `-p=1` while the drained single-package shards' slots sat
-idle.
+The `unit-core` job also receives a larger `-p` than the other jobs
+(`GC_TEST_UNIT_CORE_P`, default `LOCAL_TEST_JOBS/2`, min 2), passed
+explicitly on its `go test` command line: it is the one multi-package job,
+and a flat split would walk ~190 packages at `-p=1` while the drained
+single-package shards' slots sat idle.
 
 By default, the local runners bound concurrency by both detected CPUs and
 available memory, budgeting 4 GiB per job and capping automatic fan-out at 16.
@@ -930,7 +933,11 @@ from real regressions.
 
 `scripts/test-local-parallel` — the one place all four heavy targets
 (`fast`, `cmd-gc-process`, `integration`, `full`) funnel through — acquires
-one of `PUSH_GATE_MAX_CONCURRENT` (default 2) numbered `flock(1)` slots
+one of `PUSH_GATE_MAX_CONCURRENT` numbered `flock(1)` slots — by default
+`test-local-job-count / 4`, clamped to `[1, 4]`, so the per-gate job budget
+(CPUs, the 4 GiB-per-job memory budget, cgroup limits, the
+`GC_TEST_LOCAL_CPUS` pin) bounds the slot count too; the upper clamp is the
+measured ceiling on the 16-core fleet host (ga-4h8bu) —
 under `<city_root>/.gc/gate-slots` (or, outside a city, the repository's
 common git dir — `<repo>/.git/gate-slots` in a normal clone, and the one
 shared common dir for all of a repo's linked worktrees) before running any

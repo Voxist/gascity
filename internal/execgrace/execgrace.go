@@ -75,6 +75,21 @@ func Apply(cmd *exec.Cmd, grace time.Duration) *atomic.Bool {
 // process groups or os.Interrupt (such as Windows) fall back to Kill.
 func InterruptThenKill(cmd *exec.Cmd, accepted *atomic.Bool) func() error {
 	return func() error {
+		// Exactly ONE interrupt, then a quiet grace window until WaitDelay's
+		// force-kill. This is a deliberate contract, twice re-derived: any
+		// re-signal heuristic must distinguish "the SIGINT was lost in the
+		// shell's blocked-signal fork window" from "the SIGINT was delivered
+		// and a child (or trap) is handling it gracefully in place", and
+		// that distinction is not observable from outside the process —
+		// leader-death and cohort-change designs were both reviewed into
+		// retirement for double-signaling handlers that honor the
+		// second-SIGINT-means-force-quit convention (docker, terraform, the
+		// trap's own children), aborting the very cleanup the grace exists
+		// for. The fork-window loss is real but microseconds wide; a
+		// cancellation uncorrelated with the command's fork timing almost
+		// never lands in it, and WaitDelay's force-kill is its designed
+		// backstop. Tests that hammer the window must close it in their
+		// fixture (wait until the foreground child is observable), not here.
 		err := interruptProcessGroup(cmd)
 		if err == nil {
 			accepted.Store(true)

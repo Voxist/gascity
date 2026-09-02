@@ -1375,23 +1375,19 @@ func TestProvider_StartCancellationInterruptsForegroundChild(t *testing.T) {
 	dir := t.TempDir()
 	readyFile := filepath.Join(dir, "ready")
 	interruptFile := filepath.Join(dir, "interrupted")
-	// Readiness is announced by the foreground CHILD, not by the trap-owning
-	// shell, and that placement is load-bearing. Writing the marker from the
-	// shell itself only proves the shell reached the line before `sleep`: a
-	// cancellation landing in the window between that write and the fork leaves
-	// the shell with a pending INT trap that POSIX shells do not run until the
-	// command they are about to start has finished — so the trap waits out the
-	// full `sleep 30`, the 2s execgrace WaitDelay kills the shell first, and the
-	// marker never appears. Measured on a loaded 16-core Mac, that window was
-	// taken about half the time when the poll fired immediately, and 9% of the
-	// time at this test's 10ms poll. Announcing from inside the child means the
-	// marker cannot exist until the shell is already blocked in its foreground
-	// wait, which is the condition the assertion below actually depends on.
+	// Readiness is written by a background subshell only once a `sleep` child
+	// of the adapter shell is OBSERVABLE — not merely "about to be forked".
+	// Writing it before the fork let the test cancel inside the shell's
+	// ~1-2ms blocked-signal fork window on ~13/100 runs (the pre-exec child
+	// never sees the group SIGINT and the trap stays deferred behind the
+	// full sleep); production cancellation is uncorrelated with fork timing,
+	// so that window is the test's own artifact, closed here by construction.
 	script := writeScript(t, dir, fmt.Sprintf(`
 case "$1" in
   start)
     trap 'printf "%%s\n" interrupted > "%s"; exit 0' INT
-    sh -c ': > "%s"; exec sleep 30'
+    ( i=0; until pgrep -P $$ sleep >/dev/null 2>&1; do i=$((i+1)); [ "$i" -gt 2000 ] && exit 1; done; : > "%s" ) &
+    sleep 30
     ;;
   *) exit 2 ;;
 esac
@@ -1405,7 +1401,7 @@ esac
 		done <- p.Start(ctx, "test-sess", runtime.Config{})
 	}()
 
-	// Wait until the adapter is blocked in the foreground child.
+	// Wait until the adapter is blocked in the foreground sleep.
 	readyDeadline := time.NewTimer(5 * time.Second)
 	defer readyDeadline.Stop()
 	readyPoll := time.NewTicker(10 * time.Millisecond)
