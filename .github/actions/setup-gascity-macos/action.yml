@@ -135,8 +135,24 @@ runs:
         }
         echo "icu4c alias prefix: $(brew --prefix icu4c 2>&1 || true)"
         echo "icu4c installed versions: $(brew list --versions 'icu4c*' 2>&1 | tr '\n' ' ' || true)"
+        publish_icu_flags() {
+          # Export the DISCOVERED prefix for every later step. The Makefile has
+          # the same scan for local developers, but it resolves the prefix
+          # through `$(shell brew --prefix ...)`, which depends on brew being
+          # reachable in whatever environment make runs under — and on this
+          # runner it is not: the headers sit at /opt/homebrew/opt/icu4c@78
+          # (brew does not even track icu4c as installed here) while make
+          # computed empty CGO flags and every CGO build died on
+          # "'unicode/regex.h' file not found". Publishing the flags removes
+          # that dependency for make and non-make compiles alike (ga-mac-icu).
+          local prefix="$1"
+          printf 'CGO_CPPFLAGS=%s -I%s/include\n' "${CGO_CPPFLAGS:-}" "$prefix" >> "$GITHUB_ENV"
+          printf 'CGO_LDFLAGS=%s -L%s/lib\n' "${CGO_LDFLAGS:-}" "$prefix" >> "$GITHUB_ENV"
+          echo "Published CGO flags for ICU at $prefix"
+        }
         if found="$(icu_header_prefix)"; then
           echo "ICU headers found at: $found"
+          publish_icu_flags "$found"
         else
           echo "ICU headers absent from every candidate prefix; installing icu4c"
           (
@@ -145,6 +161,7 @@ runs:
           ) 9>"$lock_file"
           if found="$(icu_header_prefix)"; then
             echo "ICU headers found at: $found"
+            publish_icu_flags "$found"
           else
             echo "icu4c is installed but no candidate prefix carries include/unicode/regex.h;" >&2
             echo "every CGO build on this runner would fail. Candidates checked:" >&2
