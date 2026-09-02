@@ -746,6 +746,16 @@ bd_bootstrap_interrupted() {
     valid_sql_name "$db" || return 1
     dirty=$(server_sql_scalar "USE \`$db\`; SELECT COUNT(*) FROM dolt_status" | tr -dc '0-9')
     [ -n "$dirty" ] && [ "$dirty" -gt 0 ] || return 1
+    # bd's SetConfig/SetMetadata land in the working set and are only
+    # committed by a later write's DOLT_COMMIT; a user's `bd config set` on a
+    # scope that has no issues yet is therefore uncommitted but NOT a
+    # bootstrap remnant. A dirty config or metadata table disqualifies the
+    # reset: this script's own runtime-config writes are committed
+    # (record_bd_runtime_config), so on a genuinely interrupted bootstrap
+    # neither table is dirty.
+    if server_sql "USE \`$db\`; SELECT table_name FROM dolt_status" 2>/dev/null | grep -qE '^\| *(config|metadata) *\|'; then
+        return 1
+    fi
     if server_sql "USE \`$db\`; SELECT 1 FROM issues LIMIT 1" >/dev/null 2>&1; then
         issues=$(server_sql_scalar "USE \`$db\`; SELECT COUNT(*) FROM issues" | tr -dc '0-9')
         [ "${issues:-1}" = "0" ] || return 1
@@ -771,6 +781,18 @@ heal_interrupted_bootstrap() {
 finish_bd_schema_migrations() {
     local dir="$1" db="$2" out
     if ! out=$(run_bd_pinned "$dir" migrate schema --quiet 2>&1); then
+        # A remote-backed scope refuses unattended migration by design (bd's
+        # remote-migrate gate, #4259): that is an operator decision, not a
+        # broken bootstrap, and this ready path ran no bd command at all
+        # before the heal existed. Report it and carry on; the scope stays
+        # usable at its current schema and bd says what to do next.
+        case "$out" in
+            *remote*migrat*|*"remote-migrate"*|*"designated migrator"*)
+                echo "warning: pending bd schema migrations for '$db' were not applied (remote-backed scope; see bd's message below)" >&2
+                printf '%s\n' "$out" >&2
+                return 0
+                ;;
+        esac
         printf '%s\n' "$out" >&2
         die "failed to complete bd schema migrations for database '$db'"
     fi

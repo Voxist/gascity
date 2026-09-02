@@ -2460,7 +2460,8 @@ func startManagedInferenceSession(
 		SessionName:  sessionInfo.SessionName,
 		SessionKey:   sessionInfo.SessionKey,
 		LastStatus:   strings.TrimSpace(statusOut),
-	}, client, cityScope, evidence, nil
+	}
+	return run, client, cityScope, evidence, nil
 }
 
 func runFreshInitSlingWorkWithSetup(t *testing.T, provider, prompt, outputRel string, setupFn func(cityDir string) error) (inferenceRun, map[string]string, map[string]string, string, error) {
@@ -3550,8 +3551,7 @@ func runFreshNamedSessionTurn(t *testing.T, provider, identity, prompt, outputRe
 			"nudge_out":             strings.TrimSpace(nudgeOut),
 			"output_path":           outputPath,
 		}
-		return run, fields, details
-		return run, "task", fmt.Errorf("gc session nudge failed: %w", err)
+		return run, fields, details, "task", fmt.Errorf("gc session nudge failed: %w", err)
 	}
 	if nudgeTimedOut {
 		if blocked, blockErr := detectLiveBlockedInteraction(c.Dir, sessionInfo.SessionName); blockErr == nil && blocked != nil {
