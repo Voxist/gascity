@@ -2072,6 +2072,7 @@ func TestResolveTemplate_PreStartUnexpandablePlaceholderFailsClosed(t *testing.T
 // A session_live entry that cannot be expanded is cosmetic: resolution must
 // succeed with only that entry skipped, never fail.
 func TestResolveTemplate_SessionLiveUnexpandablePlaceholderIsSkipped(t *testing.T) {
+	var stderr bytes.Buffer
 	cityDir := t.TempDir()
 	cfgAgent := &config.Agent{
 		Name:        "worker",
@@ -2088,7 +2089,7 @@ func TestResolveTemplate_SessionLiveUnexpandablePlaceholderIsSkipped(t *testing.
 		rigs:       []config.Rig{},
 		beaconTime: time.Unix(0, 0),
 		beadNames:  make(map[string]string),
-		stderr:     io.Discard,
+		stderr:     &stderr,
 	}
 
 	tp, err := resolveTemplate(bp, cfgAgent, "worker", nil)
@@ -2097,6 +2098,21 @@ func TestResolveTemplate_SessionLiveUnexpandablePlaceholderIsSkipped(t *testing.
 	}
 	if len(tp.Hints.SessionLive) != 1 || tp.Hints.SessionLive[0] != "tmux set-option -t worker status-style bg=blue" {
 		t.Errorf("SessionLive = %q, want only the good entry", tp.Hints.SessionLive)
+	}
+
+	// A dropped entry must say so. Load-time validation only reaches the
+	// entries its two sample contexts expand, so for anything behind a
+	// comparison neither sample satisfies this line is the only signal the
+	// operator gets that the entry silently stopped applying.
+	out := stderr.String()
+	if !strings.Contains(out, "NoSuchField") {
+		t.Errorf("stderr = %q, want it to name the field that failed to expand", out)
+	}
+	if !strings.Contains(out, "session_live") {
+		t.Errorf("stderr = %q, want it to name the field being skipped", out)
+	}
+	if strings.Contains(out, "status-style bg=blue") {
+		t.Errorf("stderr = %q, reported the entry that expanded fine", out)
 	}
 }
 

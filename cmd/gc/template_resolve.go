@@ -554,10 +554,19 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		fmt.Fprintf(p.stderr, "agent %q: %v (using raw command)\n", qualifiedName, err) //nolint:errcheck
 	}
 	// session_setup/pre_start fail closed; session_live entries that do not
-	// expand are skipped (config load already warned about them).
+	// expand are skipped rather than blocking the session.
+	//
+	// Config load warns about the ones its sample contexts can reach, but a
+	// placeholder behind a comparison neither sample satisfies is only caught
+	// here, so report what was dropped instead of letting the entry vanish.
 	sessionCmds, err := config.ExpandAgentSessionCommands(*cfgAgent, setupCtx)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
+	}
+	if p.stderr != nil {
+		for _, skipped := range sessionCmds.Skipped {
+			fmt.Fprintf(p.stderr, "agent %q: %v (skipping this session_live entry)\n", qualifiedName, skipped) //nolint:errcheck
+		}
 	}
 	expandedSetup := sessionCmds.SessionSetup
 	expandedPreStart := sessionCmds.PreStart

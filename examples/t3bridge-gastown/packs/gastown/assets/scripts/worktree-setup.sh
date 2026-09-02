@@ -19,7 +19,13 @@ done
 
 rig_root="${1:?rig root required}"
 work_dir="${2:?work dir required}"
-agent="${3:-agent}"
+# Required, not defaulted: the flag check above only catches the collapse when
+# a trailing flag shifts into $3. Without one ("... {{.RigRoot}} {{.WorkDir}}
+# {{.AgentBase}}"), an empty rig root leaves $1=work_dir, $2=agent, $3 unset,
+# both guards pass, and a default would silently create the worktree under the
+# wrong name in the wrong place. The lifecycle variant of this script requires
+# it for the same reason.
+agent="${3:?agent name required (an earlier placeholder may have expanded to nothing)}"
 mode="${4:---sync}"
 
 mkdir -p "$(dirname "$work_dir")"
