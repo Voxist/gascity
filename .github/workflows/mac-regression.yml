@@ -205,7 +205,15 @@ jobs:
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    timeout-minutes: 35
+    # 60, not 35: on a COLD golangci-lint cache a whole-repo lint on the macOS
+    # runner needs more than 30 minutes, and the cache is cold until this job
+    # succeeds once (actions/cache saves at post-job, which a timeout skips —
+    # so the 35-minute budget kept the cache empty and guaranteed the next run
+    # was cold too). Before the ICU fix (ga-mac-icu) the job died in ~2 minutes
+    # on a compiler error and never reached lint, which is why the budget
+    # looked sufficient. The other CGO-compiling jobs run 20-25 and passed at
+    # 16/16 on this branch; integration jobs already use 60-90.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
