@@ -612,3 +612,67 @@ func TestPolicyErrorsIdentifyTheBrokenContract(t *testing.T) {
 		t.Fatalf("error = %v, want integration-shards context", err)
 	}
 }
+
+// TestLintDoesNotRunBehindTheBoundaryGuards pins the ga-dejjh split. The
+// boundary guards and the native-DoltLite suite are ~2 minutes; golangci-lint
+// is 13-15 on a PR run and is the whole critical path. Running them in one
+// job put the cheap work in series ahead of the expensive work for no reason.
+// A future edit that moves lint back alongside the guards — or drops either
+// job from the gates — silently restores that, so both halves are pinned here:
+// they are separate jobs, and both are required by ci-required and
+// ci-preflight.
+func TestLintDoesNotRunBehindTheBoundaryGuards(t *testing.T) {
+	docs := loadPolicyDocuments(t)
+
+	guards, err := workflowJob(docs.ci, "preflight-guards")
+	if err != nil {
+		t.Fatalf("preflight-guards: %v", err)
+	}
+	guardSteps, err := mappingSlice(guards["steps"], "preflight-guards steps")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, run := range []string{"make lint", "make lint-affected", "make fmt-check", "make vet"} {
+		if findStep(guardSteps, "run", run) >= 0 {
+			t.Errorf("preflight-guards runs %q; the lint work belongs in preflight-static so it does not queue behind the guards", run)
+		}
+	}
+
+	static, err := workflowJob(docs.ci, "preflight-static")
+	if err != nil {
+		t.Fatalf("preflight-static: %v", err)
+	}
+	staticSteps, err := mappingSlice(static["steps"], "preflight-static steps")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, run := range []string{"make check-gomod-replace", "make check-core-boundary", "make test-native-doltlite-beads"} {
+		if findStep(staticSteps, "run", run) >= 0 {
+			t.Errorf("preflight-static runs %q; the guards belong in preflight-guards so lint is not serialized behind them", run)
+		}
+	}
+
+	// Splitting a job is only safe if both halves still gate.
+	for _, gate := range []string{"check", "ci-preflight"} {
+		job, err := workflowJob(docs.ci, gate)
+		if err != nil {
+			t.Fatalf("%s: %v", gate, err)
+		}
+		needs, ok := job["needs"].([]any)
+		if !ok {
+			t.Fatalf("%s needs is not a list: %T", gate, job["needs"])
+		}
+		for _, want := range []string{"preflight-static", "preflight-guards"} {
+			found := false
+			for _, n := range needs {
+				if text, ok := n.(string); ok && text == want {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("%s does not require %s; a failure there would not fail the gate", gate, want)
+			}
+		}
+	}
+}

@@ -142,3 +142,75 @@ func TestUnresolvedAgentPatchWarningClassifier(t *testing.T) {
 		}
 	}
 }
+
+// TestLoadWithIncludes_WildcardPatchTargetMissingWarnsAndSkips extends the
+// vc-9wa / vc-quqf invariant to upstream's rig="*" wildcard branch. The
+// 2026-08-31 resync applied the fail-soft only to the (dir, name) branch and
+// routed a nothing-matching wildcard into ApplyPatches' hard error, so one
+// typo'd wildcard patch aborted the whole city config load — verified by
+// running this exact fixture at the merge head (hard error) and at the fork
+// parent 15913af6a^1 (warn-skipped). A wildcard that DOES match must still
+// apply without a warning, so both halves are asserted here.
+func TestLoadWithIncludes_WildcardPatchTargetMissingWarnsAndSkips(t *testing.T) {
+	dir := t.TempDir()
+	cityTOML := `
+[workspace]
+name = "test"
+
+[providers.claude]
+base = "builtin:claude"
+
+[[agent]]
+name = "claude"
+provider = "claude"
+
+[[patches.agent]]
+rig = "*"
+name = "claude"
+suspended = true
+
+[[patches.agent]]
+rig = "*"
+name = "ghost-agent"
+suspended = true
+`
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, prov, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes failed; a nothing-matching wildcard patch must degrade, not abort (vc-9wa): %v", err)
+	}
+
+	// The matching wildcard still applied.
+	var found bool
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		if a.Name == "claude" {
+			found = true
+			if !a.Suspended {
+				t.Errorf("agent %q: Suspended=false, want true (a MATCHING wildcard patch must still apply)", a.QualifiedName())
+			}
+		}
+	}
+	if !found {
+		t.Fatal("agent \"claude\" not present in composed config")
+	}
+
+	// Exactly one unresolved-patch warning, for the ghost only, and it is the
+	// lint-recognized shape so the typo still blocks pre-commit.
+	var hits []string
+	for _, w := range prov.Warnings {
+		if IsUnresolvedAgentPatchWarning(w) {
+			hits = append(hits, w)
+		}
+	}
+	if len(hits) != 1 {
+		t.Fatalf("unresolved-patch warnings = %d (%q), want exactly 1; all warnings: %q", len(hits), hits, prov.Warnings)
+	}
+	for _, want := range []string{"patches.agent[1]", `"*/ghost-agent"`} {
+		if !strings.Contains(hits[0], want) {
+			t.Errorf("warning %q missing %q", hits[0], want)
+		}
+	}
+}

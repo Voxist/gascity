@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -247,6 +250,93 @@ func TestPortHeldByPIDReportsUnknownWhenNoProbeCanAnswer(t *testing.T) {
 	}
 	if held, known := portHeldByPID("1", 0); held || known {
 		t.Fatalf("portHeldByPID(\"1\", 0) = (held=%v, known=%v), want (false, false)", held, known)
+	}
+}
+
+// TestPortHolderPIDsFromLsofTimeoutIsUnknownNotEmpty pins the difference
+// between "lsof found nobody" and "lsof was killed at its deadline". Both used
+// to come back as (nil, true) — a checked-empty listing — so a starved probe
+// read as a confident "nobody holds this port", which for the drift check means
+// a live rig-local Dolt can be repinned over. A deadline hit must be UNKNOWN.
+//
+// Driven through the timeout seam with a deadline no lsof can meet, against a
+// port we actually hold, so a false "known: not held" cannot hide behind a
+// genuinely empty port.
+func TestPortHolderPIDsFromLsofTimeoutIsUnknownNotEmpty(t *testing.T) {
+	if _, err := exec.LookPath("lsof"); err != nil {
+		t.Skip("lsof not installed")
+	}
+	port := reserveRandomTCPPort(t)
+	ln, err := listenOnAddr(net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close() //nolint:errcheck // test cleanup
+
+	pids, known := portHolderPIDsFromLsofWithTimeout(time.Nanosecond, strconv.Itoa(port))
+	if known {
+		t.Fatalf("portHolderPIDsFromLsofWithTimeout(1ns) = (pids=%v, known=true); a deadline hit is not a listing and must not read as a confident answer", pids)
+	}
+	if len(pids) != 0 {
+		t.Fatalf("portHolderPIDsFromLsofWithTimeout(1ns) returned pids %v alongside unknown", pids)
+	}
+
+	// And with a real deadline the same probe reports us as the holder, so the
+	// unknown above is the timeout, not the probe being broken.
+	pids, known = portHolderPIDsFromLsofWithTimeout(lsofCommandTimeout, strconv.Itoa(port))
+	if !known || !slices.Contains(pids, os.Getpid()) {
+		t.Fatalf("portHolderPIDsFromLsofWithTimeout(real) = (pids=%v, known=%v), want self among holders with known=true", pids, known)
+	}
+}
+
+// TestLsofExitIsNoMatchDistinguishesEmptyFromError pins the only signal that
+// separates lsof's two exit-1 cases: "nothing matched" has empty stderr, a real
+// failure does not.
+//
+// The errors are constructed, not produced by spawning processes: the
+// classifier's whole contract is ExitError.Stderr, which cmd.Output() fills
+// from the child's stderr, and constructing the value exercises exactly that
+// field. Spawning `sh` here would also add two unregistered subprocess sites
+// to the resource census ratchet (internal/testpolicy/resourcecensus), which
+// forbids raising its baseline to absorb growth.
+func TestLsofExitIsNoMatchDistinguishesEmptyFromError(t *testing.T) {
+	// An ExitError built without a ProcessState reports exit status -1, the
+	// same shape a signal-killed lsof has: empty stderr, no status 1. That is
+	// lsof failing to report, not reporting an empty listing.
+	killed := &exec.ExitError{Stderr: nil}
+	if lsofExitIsNoMatch(killed) {
+		t.Fatal("an ExitError without lsof's own exit status 1 must read as unknown, not as a checked empty listing")
+	}
+	// The pure decision carries the exit status explicitly, so the status-1
+	// cases are covered without a ProcessState (which only a real process
+	// can produce, and spawning one is what the census forbids).
+	if !lsofNoMatch(1, nil) {
+		t.Fatal("exit 1 with empty stderr must read as a checked empty listing")
+	}
+	if !lsofNoMatch(1, []byte("  \n")) {
+		t.Fatal("exit 1 with whitespace-only stderr must read as a checked empty listing")
+	}
+	if lsofNoMatch(1, []byte("lsof: unknown option\n")) {
+		t.Fatal("exit 1 with a message on stderr is a failed probe, not an empty listing")
+	}
+	for _, code := range []int{-1, 0, 2, 137} {
+		if lsofNoMatch(code, nil) {
+			t.Fatalf("exit %d with empty stderr must read as unknown, not as a checked empty listing", code)
+		}
+	}
+	noisy := &exec.ExitError{Stderr: []byte("lsof: unknown option\n")}
+	if lsofExitIsNoMatch(noisy) {
+		t.Fatal("exit with a message on stderr is a failed probe, not an empty listing")
+	}
+	wrapped := fmt.Errorf("lsof: %w", noisy)
+	if lsofExitIsNoMatch(wrapped) {
+		t.Fatal("a wrapped noisy ExitError must still read as a failed probe")
+	}
+	if lsofExitIsNoMatch(errors.New("not an exit error")) {
+		t.Fatal("a non-ExitError must never read as a checked empty listing")
+	}
+	if lsofExitIsNoMatch(fmt.Errorf("lsof: %w", context.DeadlineExceeded)) {
+		t.Fatal("a deadline hit must never read as a checked empty listing")
 	}
 }
 

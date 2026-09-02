@@ -149,14 +149,18 @@ func parseEventBeforeSeq(cursor string) (uint64, error) {
 // has-more signal. It returns the fetched events and scanned — the best-effort
 // count of matching rows the read could see, used as the filtered Total.
 //
-// ListTail is the primary path. For the production FileRecorder it is
-// AUTHORITATIVE across rotation: ReadFilteredTail tails the active log, then
-// walks the .gz archives newest-first, stopping as soon as `limit+1` matches
-// are collected (vp-x7x8w). So a first-page or filtered read — the cases whose
+// ListTail is the primary path. This handler opts into Filter.SpanArchives,
+// so for the production FileRecorder it is AUTHORITATIVE across rotation:
+// ReadFilteredTail tails the active log, then walks the .gz archives
+// newest-first, stopping as soon as `limit+1` matches are collected
+// (vp-x7x8w). So a first-page or filtered read — the cases whose
 // zero/BeforeSeq cursor once forced the oldest-first full archive scan — now
 // returns a full page from the bounded walk alone. The result is trusted when
 // it yields a full limit+1 rows, which the archive-spanning tail does whenever
-// that many matches exist anywhere in the log.
+// that many matches exist anywhere in the log. The opt-in is this handler's
+// alone: ListTail's default stays active-only for the per-tick readers
+// (order triggers, `gc order check`, doctor, storehealth) that must never
+// decode the archive set on a zero cursor.
 //
 // The fall-through to listWithInFlight is the genuine fallback, not the hot
 // path: it covers a short tail that genuinely exhausted the log (fewer than
@@ -170,7 +174,9 @@ func parseEventBeforeSeq(cursor string) (uint64, error) {
 func fetchEventPageAscending(ep events.Provider, filter events.Filter, limit int) ([]events.Event, int, error) {
 	fetch := limit + 1
 	if tp, ok := ep.(events.TailProvider); ok {
-		tail, err := tp.ListTail(filter, fetch)
+		tailFilter := filter
+		tailFilter.SpanArchives = true
+		tail, err := tp.ListTail(tailFilter, fetch)
 		if err != nil {
 			return nil, 0, err
 		}

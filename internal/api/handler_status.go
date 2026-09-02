@@ -31,6 +31,14 @@ type (
 
 var statusStoreReadTimeout = time.Second
 
+// statusResponseTTLFloor bounds how often a full status rebuild runs, so
+// callers never pay a full fan-out rebuild more than once per floor window
+// (#1896). Blocking (long-poll) requests bypass it because they explicitly
+// wait for change. Var, not const, so tests can pin index-driven
+// invalidation behavior. Restored in the 2026-08-31 resync: the auto-merge
+// dropped it while keeping every other upstream definition in this file.
+var statusResponseTTLFloor = 3 * time.Second
+
 // statusWorkExcludedTypes are bead types counted as infrastructure, not
 // work, by the status endpoint's work-count buckets.
 var statusWorkExcludedTypes = []string{"message", "convoy", "convergence"}
@@ -63,6 +71,13 @@ type StatusInput struct {
 // snapshot instead of rendering partial/empty data. CacheAgeS surfaces the
 // age of the latest fresh observation so `gc status` can append a staleness
 // banner when the supervisor is lagging.
+//
+// The gate and the age both read the WORK store, which is the class the body's
+// expensive legs come from (work counts, store health). It deliberately does
+// not gate the session-class store: a CachingStore that cannot serve a read
+// from cache falls through to its backing store rather than answering empty,
+// so a priming sessions binding surfaces as a "sessions:" partial error from
+// statusSessionSnapshot, never as a silent zero-session fleet.
 func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*IndexOutput[StatusBody], error) {
 	store := s.state.CityBeadStore()
 	if err := cacheLiveOr503(store); err != nil {
@@ -103,28 +118,116 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	// synchronous build is what made every cold `gc status` time out and fall
 	// back to the slow local probe. Refresh in the background once the body ages
 	// past statusWarmRefreshAfter; never block the request on the rebuild.
+	//
+	// This is the FIRST fast path after the bucket cache, above the TTL floor,
+	// deliberately. With the current constants the floor (3s) is TIGHTER than
+	// statusWarmRefreshAfter (5s), so ordering it first would not by itself
+	// suppress every refresh — but it would answer for the whole 0-3s window
+	// without ever entering this branch, so the refresh could only ever be
+	// kicked by requests landing in the 3-5s gap, and any future widening of
+	// the floor past statusWarmRefreshAfter would silence it entirely. The
+	// warm entry is also the fresher of the two (a background rebuild seeds it
+	// and the response cache together, and only this branch reports the warm
+	// body's own age). Pinned by TestHandleStatusRefreshesAgedWarmBody, which
+	// fails if these two are swapped.
 	if entry, ok := s.warmStatusBody(input.Lite); ok {
 		age := time.Since(entry.builtAt)
-		if age <= statusWarmServeMaxAge {
-			if age > statusWarmRefreshAfter {
-				s.refreshStatusBodyAsync(input.Lite)
-			}
-			// entry.body is served without the cloneCachedValue deep-copy used by
-			// the bucket-cache path above. Safe because a built StatusBody is
-			// immutable after publish: buildStatusBody constructs every slice
-			// fresh and the two pointer fields (StoreHealth, Beads) are
-			// replace-not-mutate, and nothing appends to a stored body. If a
-			// future handler enriches the body in place before serialization,
-			// clone here (matching response_cache.go's clone-on-read invariant).
-			return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: entry.body}, nil
+		// A warm entry is ALWAYS served, whatever its age, and refreshed in the
+		// background once it is older than statusWarmRefreshAfter; the request
+		// never blocks on the ~28s O(store) build (vp-e0hv). The refresh goes
+		// through buildAndStoreStatus — singleflight, statusWarmBuildTimeout,
+		// seeds this entry and the response cache together — so an entry that
+		// idled for hours is stale for exactly one more poll while rebuilds
+		// succeed, and no poll pays the rebuild inline. There is deliberately
+		// no upper age bound: a rebuild that keeps failing (recovered panic,
+		// perpetual wedge past statusWarmBuildTimeout) leaves this body served
+		// with CacheAgeS growing, and that header — rendered by the CLI as a
+		// stalled-build banner past cacheAgeStaleBuildThresholdSeconds — is the
+		// signal; blocking the request instead would only hide it behind a
+		// timeout. Pinned by TestHandleStatusReseedsWarmEntryAfterLongIdle.
+		if age > statusWarmRefreshAfter {
+			s.refreshStatusBodyAsync(input.Lite)
 		}
+		// entry.body is served without the cloneCachedValue deep-copy used by
+		// the bucket-cache path above. Safe because a built StatusBody is
+		// immutable after publish: buildStatusBody constructs every slice
+		// fresh and the two pointer fields (StoreHealth, Beads) are
+		// replace-not-mutate, and nothing appends to a stored body. If a
+		// future handler enriches the body in place before serialization,
+		// clone here (matching response_cache.go's clone-on-read invariant).
+		//
+		// CacheAgeS reports the GREATER of the two staleness signals, the
+		// same rule the SWR path below applies: how long ago this warm entry
+		// was built, and the age of the CachingStore snapshot it was built
+		// from. Reporting only the store age hides the warm delay —
+		// statusWarmRefreshAfter is seconds while the CLI's staleness banner
+		// fires at 30s (cacheAgeBannerThresholdSeconds), so a minutes-old warm body
+		// on a freshly reconciled store would report ~0 and silently suppress
+		// the banner on exactly the stale view the operator needs told about.
+		return &IndexOutput[StatusBody]{
+			Index:     index,
+			CacheAgeS: max(age.Seconds(), cacheAgeSeconds(store)),
+			Body:      entry.body,
+		}, nil
 	}
 
-	// No usable warm body (cold start or long idle): build synchronously once,
-	// single-flighted so a burst of cold requests shares one build, then serve
-	// it and seed the warm entry. Only this first build after a (re)start or
-	// long idle pays the O(store) cost; every subsequent request is served from
-	// the warm entry above without blocking.
+	// TTL-floor reuse (upstream): a body built within statusResponseTTLFloor is
+	// still good enough for a non-blocking caller once its time bucket rolled
+	// over. The 2026-08-31 resync dropped this, its only use site, leaving
+	// statusResponseTTLFloor declared, documented and inert.
+	if body, ok := cachedResponseWithinAgeAs[StatusBody](s, cacheKey, statusResponseTTLFloor); ok {
+		return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: body}, nil
+	}
+
+	// Stale-while-revalidate (ra-4u2eqc): the bucket, warm and TTL-floor caches
+	// all missed, so any entry that exists is older than statusResponseTTLFloor.
+	// buildStatusBody's fan-out (per-rig work counts, the session snapshot,
+	// StoreHealth's closed-history scan) measured ~3.65s on a 26-agent/1.2GB
+	// city — the same failure class that used to 503 the legacy runs/census
+	// endpoint at its internal budget. Rather than let a request pay that cost
+	// inline, serve the stale body immediately and refresh in the background so
+	// the next poll gets a fresh body. The refresh is the warm path's own
+	// spawn point (refreshStatusBodyAsync -> buildAndStoreStatus, which
+	// singleflights per variant and seeds the warm entry and the response
+	// cache together), so this branch is a one-shot detour back onto the
+	// warm path, never a regime the handler can get stuck in. A genuine cold
+	// cache (nothing ever built) has nothing to serve here and falls through
+	// to the synchronous build below.
+	//
+	// Reachability, stated plainly: today NOTHING produces a response-cache
+	// entry without a warm entry — buildAndStoreStatus is the only writer of
+	// these keys and it calls setWarmStatusBody first — and the warm branch
+	// above serves at any age, so this branch and the TTL floor before it are
+	// unreachable in production. They are kept as upstream's code, made inert
+	// rather than deleted: the refresher below goes through buildAndStoreStatus
+	// like every other path, so if a future change ever does clear a warm entry
+	// (an invalidation path, a variant added without one) this branch seeds
+	// both caches and returns the handler to the warm path instead of stranding
+	// it. TestHandleStatusSWRRefreshReseedsWarmEntry documents that contract by
+	// constructing the state deliberately; it is a guard on the branch, not
+	// evidence the branch fires.
+	//
+	// CacheAgeS reports the GREATER of the two staleness signals: how long ago
+	// this response entry was built, and cacheAgeSeconds(store) — the age of the
+	// CachingStore snapshot the body was built from. Reporting only the
+	// response-entry age would let a recently built entry sitting on top of a
+	// lagging reconciler under-report true staleness and suppress the banner
+	// `gc status` renders above cacheAgeBannerThresholdSeconds; reporting only
+	// the store age would hide the SWR delay. The max preserves both.
+	if body, age, ok := staleResponseAs[StatusBody](s, cacheKey); ok {
+		s.refreshStatusBodyAsync(input.Lite)
+		return &IndexOutput[StatusBody]{
+			Index:     index,
+			CacheAgeS: max(age.Seconds(), cacheAgeSeconds(store)),
+			Body:      body,
+		}, nil
+	}
+
+	// No warm body at all (cold start): build synchronously once, single-flighted
+	// so a burst of cold requests shares one build, then serve it and seed the
+	// warm entry. Only this first build after a (re)start pays the O(store)
+	// cost inline; every subsequent request is served from the warm entry
+	// above without blocking.
 	resp := s.buildAndStoreStatus(input.Lite)
 	return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: resp}, nil
 }
@@ -173,6 +276,10 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	}
 	perRigAgentTotals := make(map[string]int, len(cfg.Rigs))
 	perRigAgentsSuspended := make(map[string]int, len(cfg.Rigs))
+	// Active graph-resident work, indexed once per request by agent session
+	// name. On a single-store city this is nil, so every lookup below misses
+	// and the counts stay byte-identical to the provider-only behavior.
+	graphWork := s.graphActiveWorkBySession()
 	for _, a := range cfg.Agents {
 		rigName := workdirutil.ConfiguredRigName(s.state.CityPath(), a, cfg.Rigs)
 		scope := "city"
@@ -192,7 +299,12 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 			sessName := agentSessionName(cityName, ea.qualifiedName, sessTmpl)
 			info, hasInfo := sessionSnapshot.bySessionName[sessName]
 			running := statusProviderRunning(sp, sessName)
-			if running {
+			// An agent whose work runs under a relocated-graph wisp session is
+			// effectively running even when its named provider session is down.
+			// hasGraphWork is always false on a single-store city.
+			_, hasGraphWork := graphWork[sessName]
+			effectiveRunning := running || hasGraphWork
+			if effectiveRunning {
 				rawRunning++
 			}
 			suspended := ea.suspended || a.Suspended || (rigName != "" && suspendedRigs[rigName]) || (hasInfo && info.state == session.StateSuspended)
@@ -204,14 +316,14 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 				ac.Suspended++
 			case s.state.IsQuarantined(sessName):
 				ac.Quarantined++
-			case running:
+			case effectiveRunning:
 				ac.Running++
 			}
 
 			detail := StatusAgentDetail{
 				QualifiedName: ea.qualifiedName,
 				Scope:         scope,
-				Running:       running,
+				Running:       effectiveRunning,
 				Suspended:     suspended,
 				SessionName:   sessName,
 				GroupName:     groupName,
@@ -301,7 +413,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 		})
 	}
 
-	// Session counts: walk the city bead store for session beads. Omitted in
+	// Session counts: derived from the session-class snapshot. Omitted in
 	// lite mode (detail block, not needed for the high-frequency overview).
 	var sessionCounts *StatusSessionCountsDetail
 	if !lite && len(sessionSnapshot.bySessionName) > 0 {
@@ -490,13 +602,35 @@ type statusSessionInfo struct {
 	state       session.State
 }
 
+// statusSessionSnapshot reads the session-class beads every session-derived
+// field of the status body is built from: per-agent running/suspended state,
+// named-session status, the unlimited-pool expansion, and the session counts.
+//
+// It reads SessionsBeadStore(), not CityBeadStore(). Those are the same store
+// on a city that relocates nothing, so this is byte-identical there; on a city
+// with [beads.classes.sessions] relocated the session beads live in the class
+// binding, and reading them off the work ledger returned an empty fleet at
+// whatever the work ledger costs — on a cross-region hosted work store that is
+// seconds, so the read blew statusStoreReadTimeout and /status reported
+// "sessions: loading session snapshot timed out after 1s" for data sitting in a
+// local store.
 func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapshot {
 	snapshot := statusSessionSnapshot{
 		bySessionName: make(map[string]statusSessionInfo),
 		byTemplate:    make(map[string][]statusSessionInfo),
 	}
-	store := s.state.CityBeadStore()
+	sessions := s.state.SessionsBeadStore()
+	store := sessions.Store
 	if store == nil {
+		// A nil session-class store is benign only when the city has no bead
+		// store at all. When the work store IS present, the sessions binding
+		// failed to resolve and this projection cannot see the class: say so
+		// rather than reporting an empty fleet, and do NOT fall back to the
+		// work store. Reading session beads off the work ledger is precisely
+		// what kept this mis-routing invisible.
+		if s.state.CityBeadStore() != nil {
+			snapshot.partialErrors = []string{"sessions: session-class bead store unavailable"}
+		}
 		return snapshot
 	}
 
@@ -523,14 +657,14 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 		// it hung the whole handler past its read budget, dragging the
 		// supervisor loop (gc-08qgn). Under the goroutine the same time.After
 		// as the read bounds it.
-		readStore := store
+		readSessions := sessions
 		if scoped, err := s.state.ScopedStoreLike(reqCtx, store); err != nil {
 			done <- snapshotResult{err: fmt.Errorf("resolving scoped store: %w", err)}
 			return
 		} else if scoped != nil {
-			readStore = scoped
+			readSessions = beads.SessionStore{Store: scoped}
 		}
-		infos, partialErrors, err := sessionReadModelInfos(session.NewStore(beads.SessionStore{Store: readStore}))
+		infos, partialErrors, err := sessionReadModelInfos(session.NewStore(readSessions))
 		done <- snapshotResult{infos: infos, partialErrors: partialErrors, err: err}
 	}()
 
@@ -592,11 +726,20 @@ type statusWorkResult struct {
 }
 
 // statusWorkCounts tallies persisted open/in_progress work across BeadStores
-// and federates canonical Ready work exactly like GET /beads/ready: the city
-// store first, then BeadStores excluding the CityName alias. Stores exposing
-// beads.Counter answer persisted counts without hydrating rows — the caching
-// layer counts matches in memory when its cache is clean (#1896). Stores are
-// queried concurrently; results aggregate in deterministic city/rig order.
+// and federates canonical Ready work the way GET /beads/ready does over the
+// work stores: the city store first, then BeadStores excluding the CityName
+// alias. Stores exposing beads.Counter answer persisted counts without
+// hydrating rows — the caching layer counts matches in memory when its cache is
+// clean (#1896). Stores are queried concurrently; results aggregate in
+// deterministic city/rig order.
+//
+// NOT identical to GET /beads/ready on a split city: that handler grew a
+// relocated-graph-store leg (huma_handlers_beads.go) and this one has none, so
+// on a city with [beads.classes.graph] relocated the status ready count omits
+// graph-class ready work while /beads/ready includes it. Left divergent
+// deliberately rather than fixed here: this read is cache-only and error-lenient
+// by design (see cacheColdRigs below), which is the opposite of the graph leg's
+// fail-loud contract, so wiring one in is its own slice, not a rider.
 //
 // Rigs in cacheColdRigs are asked for persisted counts but not for ready work.
 // Their store runs no background cache refresh, so the cache-only Ready

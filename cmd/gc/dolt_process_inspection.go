@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -181,23 +183,81 @@ func portHeldByPID(port string, pid int) (held, known bool) {
 }
 
 func portHolderPIDsFromLsof(port string) ([]int, bool) {
+	return portHolderPIDsFromLsofWithTimeout(lsofCommandTimeout, port)
+}
+
+// portHolderPIDsFromLsofWithTimeout is portHolderPIDsFromLsof with the lsof
+// deadline injectable, so the timeout path can be driven in a test.
+//
+// The distinction it preserves: lsof exiting non-zero because NOTHING MATCHED
+// is a checked, complete, empty listing — a real negative. lsof being killed
+// at its deadline is not a listing at all. lsofOutputWithTimeout reports the
+// latter as an error wrapping context.DeadlineExceeded precisely so callers can
+// tell a truncated result from a complete one; collapsing both into "known:
+// nobody holds it" turned a starved probe into a confident wrong answer — the
+// same shape as the ps liveness bug, one layer over.
+func portHolderPIDsFromLsofWithTimeout(timeout time.Duration, port string) ([]int, bool) {
 	if _, err := exec.LookPath("lsof"); err != nil {
 		return nil, false
 	}
-	out, err := lsofOutput("-nP", "-iTCP:"+port, "-sTCP:LISTEN", "-t")
+	// -w suppresses lsof's WARNING lines (unreadable filesystems, stat
+	// failures on entries it walks past). Those go to stderr and can make lsof
+	// exit non-zero even when the listing itself is complete — which the
+	// classifier below would read as a failed probe. doltorphan's runLsofW
+	// passes -w for the same reason; with it, a non-empty stderr means a real
+	// error, not a warning about some unrelated mount.
+	out, err := lsofOutputWithTimeout(timeout, "-w", "-nP", "-iTCP:"+port, "-sTCP:LISTEN", "-t")
+	if errors.Is(err, context.DeadlineExceeded) {
+		return nil, false
+	}
 	if err == nil {
 		if pids := pidsFromLsofPIDList(string(out)); len(pids) > 0 {
 			return pids, true
 		}
 	}
 
-	out, err = lsofOutput("-nP", "-iTCP:"+port, "-sTCP:LISTEN")
+	out, err = lsofOutputWithTimeout(timeout, "-w", "-nP", "-iTCP:"+port, "-sTCP:LISTEN")
+	if errors.Is(err, context.DeadlineExceeded) {
+		return nil, false
+	}
 	if err != nil {
-		// lsof exits non-zero when nothing matches, which is a checked empty
-		// listing, not a failed probe; only a missing binary above is unknown.
-		return nil, true
+		if lsofExitIsNoMatch(err) {
+			return nil, true
+		}
+		return nil, false
 	}
 	return pidsFromPlainPortLsofOutput(string(out), port), true
+}
+
+// lsofExitIsNoMatch reports whether err is lsof's "no files matched" exit —
+// the one non-zero exit that is a checked, EMPTY listing rather than a failed
+// probe.
+//
+// lsof exits 1 in both cases, so the exit status alone cannot tell them apart.
+// What does is stderr: "nothing matched" is exit 1 with EMPTY stderr, while a
+// real failure (bad option, permission problem, unreadable /dev/kmem) is exit 1
+// with a message on stderr. cmd.Output() captures that into ExitError.Stderr,
+// so it is available here without another subprocess. A deadline hit never
+// arrives as an ExitError from lsofOutputWithTimeout at all; it is wrapped as
+// context.DeadlineExceeded upstream of this call.
+func lsofExitIsNoMatch(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	return lsofNoMatch(exitErr.ExitCode(), exitErr.Stderr)
+}
+
+// lsofNoMatch is the pure decision behind lsofExitIsNoMatch: only lsof's own
+// "no match" exit (status 1) with nothing on stderr is a checked empty
+// listing. Any other status with an empty stderr is not lsof reporting an
+// empty result but lsof failing to report at all: a process killed by a
+// signal outside our deadline (OOM killer, a sandbox reaping children) exits
+// with status -1 and an empty stderr, and an ExitError built without a
+// ProcessState reports -1 too. Those must read as unknown, not as "nobody
+// holds the port", or the port-ownership check disowns a live holder.
+func lsofNoMatch(exitCode int, stderr []byte) bool {
+	return exitCode == 1 && len(bytes.TrimSpace(stderr)) == 0
 }
 
 func pidsFromLsofPIDList(output string) []int {

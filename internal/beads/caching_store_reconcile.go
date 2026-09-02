@@ -253,10 +253,9 @@ func cadenceTransitionDriver(prevDriver, nextDriver string) string {
 }
 
 func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
-	// Breaker open with no recovery probe due: stay idle for a poll
-	// interval instead of burning a full bd scan against a store that is
-	// known unreachable. Probe-due cycles still run — the reconcile scan
-	// is the recovery probe.
+	// Breaker open with no recovery probe due: stay idle for a poll interval
+	// instead of burning a full bd scan against a store known unreachable.
+	// Probe-due cycles still run — the reconcile scan IS the recovery probe.
 	if g := c.availabilityGateRef(); g != nil && !g.Available() && !g.ProbeDue() {
 		return cacheReconcilePollInterval
 	}
@@ -295,9 +294,9 @@ func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
 }
 
 func (c *CachingStore) runReconciliation() {
-	// Breaker open: skip the cycle cheaply (one problem entry per
-	// episode) unless a recovery probe is due, in which case the scan
-	// below doubles as the probe.
+	// Breaker open: skip the cycle cheaply (one problem entry per episode)
+	// unless a recovery probe is due, in which case the scan below doubles
+	// as the probe.
 	if c.reconcileUnavailableSkip() {
 		return
 	}
@@ -319,6 +318,7 @@ func (c *CachingStore) runReconciliation() {
 				c.circuitTripped = true
 				c.problemf(fmt.Sprintf("circuit-breaker tripped rig=%s syncFailures=%d", c.idPrefix, c.syncFailures))
 			}
+			c.advanceObservationLocked()
 		}
 		c.recordProblemLocked("reconcile cache", err)
 		c.recordReconcileLatencyLocked(bdLatency)
@@ -331,13 +331,12 @@ func (c *CachingStore) runReconciliation() {
 		recordCacheScanLarge(context.Background(), c.idPrefix, len(fresh),
 			cacheReconcileScanWarnThreshold, time.Since(bdStart))
 	}
-	enriched, enrichErr := c.enrichReadyProjectionForCache(fresh)
+	// The reconcile pass never marked the snapshot partial on an enrichment
+	// failure — the rows it just listed are whole either way — so it discards
+	// the completeness verdict applyReadyProjection returns and keeps only the
+	// problem-log entry it already recorded.
+	fresh, _ = c.applyReadyProjection("reconcile ready projection", fresh)
 	bdLatency := time.Since(bdStart)
-	if enrichErr != nil {
-		c.recordProblem("reconcile ready projection", enrichErr)
-	} else {
-		fresh = enriched
-	}
 
 	freshByID := make(map[string]Bead, len(fresh))
 	for _, b := range fresh {
@@ -529,6 +528,25 @@ func (c *CachingStore) mergeSnapshotLocked(
 	for id, freshBead := range freshByID {
 		freshDeps := c.depsForReconcileLocked(id, freshBead, depMap, useFreshDeps)
 		cached, cachedExists := c.beads[id]
+		// Differ substitution: a nil'd (invalidated) verdict compares as the
+		// value the cache disowned, so the invalidation itself never reads as
+		// a store-side nil<->set transition (the ADR-0094 flood).
+		//
+		// Only when the FRESH row carries a verdict. When the projection is
+		// DEGRADED the fresh row is nil too; substituting then manufactures a
+		// value-vs-nil difference out of two nils, and because a verdict-less
+		// absorb keeps the mark, the same spurious bead.updated re-fires on
+		// every reconcile tick until the projection recovers — a sustained
+		// per-tick flood in exactly the degraded shape (round-4 review;
+		// reproduced at 1 event/tick before this guard). Fresh-nil vs
+		// cached-nil compares silently, which is what upstream's sentinel did
+		// in this shape all along.
+		if cachedExists && cached.IsBlocked == nil && freshBead.IsBlocked != nil {
+			if v, ok := c.readyProjectionInvalid[id]; ok {
+				vv := v
+				cached.IsBlocked = &vv
+			}
+		}
 		cachedDeps, hasCachedDeps := c.deps[id]
 		d := reconcileMergeDecision(mergeRowInput{
 			freshExists:   true,
@@ -566,9 +584,15 @@ func (c *CachingStore) mergeSnapshotLocked(
 			})
 		}
 		c.absorbFreshLocked(id, freshBead, now, absorbOpts{
-			depsMode:   depsExplicit,
-			deps:       freshDeps,
-			seqMode:    seqClearGuarded,
+			depsMode: depsExplicit,
+			deps:     freshDeps,
+			seqMode:  seqClearGuarded,
+			// preserveCachedReadyProjectionLocked above already decided, per
+			// row, which cached verdicts survive this cycle — on the blocking
+			// targets' fresh statuses, which no single-row absorb can see. Its
+			// refusals are the rows whose verdict really may have changed, so
+			// they must land as unanswerable rather than be re-preserved here.
+			readyMode:  readyFromFresh,
 			clearDirty: true,
 		})
 	}
@@ -637,6 +661,7 @@ func (c *CachingStore) mergeSnapshotLocked(
 	c.syncFailures = 0
 	c.depsComplete = nextDepsComplete
 	c.primePartialErr = nil
+	c.advanceObservationLocked()
 	c.promoteLiveLocked()
 	c.stats.LastReconcileAt = now
 	c.stats.Adds += res.adds
@@ -831,19 +856,10 @@ func (c *CachingStore) preserveCachedReadyProjectionLocked(items map[string]Bead
 		if !ok || cached.IsBlocked == nil {
 			continue
 		}
-		// Preservation is not observation. A row whose verdict this cache has
-		// invalidated is awaiting re-observation, so its retained value is
-		// exactly the one not to put back into service (ADR-0094 D1). The two
-		// guards below cannot stand in for this check: the local write that
-		// closes a blocker updates the blocker's cached status in the same
-		// critical section that raises the invalidation, so by reconcile time
-		// cached and fresh agree and neither deps nor target-status has moved.
-		// Under the old in-band sentinel this case was unreachable — the
-		// invalidation had already nil'd cached.IsBlocked, so the check above
-		// skipped it.
-		if c.readyProjectionInvalidLocked(id) {
-			continue
-		}
+		// D1 (preservation is not observation) is STRUCTURAL again: an
+		// invalidated row's cached.IsBlocked is nil, so the guard above already
+		// skips it — the same way upstream's in-band sentinel made this case
+		// unreachable. No separate mark-check needed.
 		freshDeps := c.depsForReconcileLocked(id, item, depMap, useFreshDeps)
 		if depsChanged(c.deps[id], freshDeps) {
 			continue

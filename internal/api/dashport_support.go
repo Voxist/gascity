@@ -141,13 +141,6 @@ func (r singleCityPathResolver) CityPath(name string) (string, bool) {
 	return "", false
 }
 
-func (r singleCityPathResolver) Cities() []dashboardbff.CityRef {
-	if r.name == "" || r.path == "" {
-		return nil
-	}
-	return []dashboardbff.CityRef{{Name: r.name, Path: r.path}}
-}
-
 // seededState is a minimal, read-only State implementation built from injected
 // stores and providers. It is the production analog of the _test.go-only
 // fakeState: an immutable snapshot with no controller loop, no hot-reload lock,
@@ -246,9 +239,9 @@ func (s *seededState) ScopedStoreLike(context.Context, beads.Store) (beads.Store
 	return nil, nil
 }
 
-// NudgesBeadStore, SessionsBeadStore, and GraphBeadStore all collapse to the
-// city store on a seeded single-store city, exactly as they do on a default
-// (non-relocated) controller city.
+// NudgesBeadStore, SessionsBeadStore, GraphBeadStore and OrdersBeadStore all
+// collapse to the city store on a seeded single-store city, exactly as they do
+// on a default (non-relocated) controller city.
 func (s *seededState) NudgesBeadStore() beads.NudgesStore {
 	return beads.NudgesStore{Store: s.cityStore}
 }
@@ -260,6 +253,15 @@ func (s *seededState) SessionsBeadStore() beads.SessionStore {
 func (s *seededState) GraphBeadStore() beads.GraphStore {
 	return beads.GraphStore{Store: s.cityStore}
 }
+
+func (s *seededState) OrdersBeadStore() beads.OrdersStore {
+	return beads.OrdersStore{Store: s.cityStore}
+}
+
+// ClassBindingHasLegacyResidents answers true for everything: a seeded city
+// relocates no class, so it contributes no binding and nothing consults this —
+// and a state that censused nothing has cleared nothing.
+func (s *seededState) ClassBindingHasLegacyResidents(beads.Store) bool { return true }
 
 func (s *seededState) Orders() []orders.Order    { return nil }
 func (s *seededState) OrdersAll() []orders.Order { return nil }

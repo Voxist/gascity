@@ -128,14 +128,14 @@ func bootDrainHeadBranch(dbDir string) (string, error) {
 		return "", errNoBootDrainRemote
 	}
 	if _, ok := state.Remotes["origin"]; !ok {
-		return "", fmt.Errorf("no 'origin' remote (has: %s)", strings.Join(sortedKeys(state.Remotes), ","))
+		return "", fmt.Errorf("no 'origin' remote (has: %s)", strings.Join(sortedRawMessageKeys(state.Remotes), ","))
 	}
 	return strings.TrimPrefix(state.Head, prefix), nil
 }
 
 var errNoBootDrainRemote = fmt.Errorf("no remotes configured")
 
-func sortedKeys(m map[string]json.RawMessage) []string {
+func sortedRawMessageKeys(m map[string]json.RawMessage) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)

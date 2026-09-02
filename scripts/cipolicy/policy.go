@@ -35,11 +35,22 @@ const (
 	// Re-derived for the fork-first bd repin (ga-zzcjs): BD_REPO joins
 	// BD_SOURCE_REF as a job-level env key at every pin site, so the shape
 	// moves again — deliberately.
-	// Re-derived for the ga-4h8bu scripts split (PR #141 round 2): the
-	// integration changes-filter widens to scripts/** so plain shell-script
-	// PRs trigger the shards that are the -tags integration tests' only CI
-	// home — a deliberate execution-shape change.
-	expectedCIExecutionHash     = "a5f644dc53ff7258763428b057982a562ba26c1458089bc87d55fdedda844115"
+	// Re-derived again at the 2026-08-31 resync: ci.yml auto-merged both sides,
+	// so the merged execution shape hashes to neither side's prior pin. Taken
+	// from the candidate digest this package printed for the merged workflow,
+	// not from either side. The trigger pins below did not move — triggers
+	// merged to a shape identical to both sides, so they were left alone.
+	// Re-derived once more for the ga-4h8bu scripts split (PR #141 round 2):
+	// the integration changes-filter widens to scripts/** so plain
+	// shell-script PRs trigger the shards that are the -tags integration
+	// tests' only CI home — a deliberate execution-shape change, pinned from
+	// the digest printed for the merged (resync + split) workflow.
+	// Re-derived for the static-checks split (ga-dejjh): the boundary guards
+	// and the native-DoltLite suite moved to preflight-guards so golangci-lint
+	// stops running in series behind them. Both jobs are required by
+	// ci-required and ci-preflight, so the gate is unchanged — only the shape
+	// is.
+	expectedCIExecutionHash     = "1429821f605d2a1118d46ed4b1937a8c277176c6aac00b1417db2b531b18e5ba"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
@@ -47,8 +58,13 @@ const (
 	// pin is an independent tripwire and must be re-derived on its own.
 	// Nightly re-derived with the same fork-first repin (BD_REPO env key at
 	// its two pin sites).
-	expectedNightlyExecutionHash = "efc14757064eb2e9201fc97e16601490faa2c35417864a1fbb867808fc701b53"
-	expectedSetupActionHash      = "b7864038195cd054aee7fccfa903cab335b375bcab1a35239c17c5da7d32c07e"
+	// Re-derived again at the 2026-08-31 resync: nightly.yml auto-merged both
+	// sides too, so this pin also lands on neither side's prior value.
+	expectedNightlyExecutionHash = "e3c1b410352a25fe4e808d3b8aeda25b91f3c35b38fced9943a830caccf11730"
+	// Re-derived at the 2026-08-31 resync: the composite setup actions under
+	// .github/actions/setup-gascity-* auto-merged both sides as well, moving
+	// this pin along with the two workflow execution pins above.
+	expectedSetupActionHash = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
 )
 
 var requiredFilterPaths = map[string][]string{
@@ -283,12 +299,21 @@ func validateChangesJob(workflow map[string]any) error {
 	return nil
 }
 
+// policyGuardJob is the job that runs the focused CI policy and the boundary
+// guards it validates. The pair was split out of preflight-static (ga-dejjh)
+// so golangci-lint — 13-15 minutes and the whole critical path — no longer
+// runs in series behind ~2 minutes of guards. What this validator pins is the
+// ORDER, not the job name: the policy check must run unconditionally right
+// after setup-go and before the guards, so a workflow edit that weakens a
+// guard cannot also disable the check that would have caught it.
+const policyGuardJob = "preflight-guards"
+
 func validatePolicyWiring(workflow map[string]any) error {
-	staticJob, err := workflowJob(workflow, "preflight-static")
+	guardJob, err := workflowJob(workflow, policyGuardJob)
 	if err != nil {
 		return err
 	}
-	steps, err := mappingSlice(staticJob["steps"], "preflight-static steps")
+	steps, err := mappingSlice(guardJob["steps"], policyGuardJob+" steps")
 	if err != nil {
 		return err
 	}
@@ -297,12 +322,13 @@ func validatePolicyWiring(workflow map[string]any) error {
 	firstGuardIndex := findStep(steps, "run", "make check-gomod-replace")
 	if setupIndex < 0 || policyIndex != setupIndex+1 || firstGuardIndex <= policyIndex {
 		return fmt.Errorf(
-			"preflight-static must run the focused CI policy immediately after setup-go and before other guards",
+			"%s must run the focused CI policy immediately after setup-go and before other guards",
+			policyGuardJob,
 		)
 	}
 	want := map[string]any{"run": "make test-ci-policy"}
 	if got := projectStep(steps[policyIndex]); !reflect.DeepEqual(got, want) {
-		return fmt.Errorf("preflight-static CI policy step must be unconditional and blocking")
+		return fmt.Errorf("%s CI policy step must be unconditional and blocking", policyGuardJob)
 	}
 	return nil
 }
