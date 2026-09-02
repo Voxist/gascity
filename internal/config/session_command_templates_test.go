@@ -1,6 +1,7 @@
 package config
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -13,6 +14,25 @@ func sampleSessionCommandContext() SessionCommandTemplateContext {
 	}
 }
 
+// The validation samples and the placeholder list are hand-written; keep
+// them complete against the context type.
+func TestSessionCommandTemplateSamplesCoverEveryField(t *testing.T) {
+	rt := reflect.TypeOf(SessionCommandTemplateContext{})
+	populated := reflect.ValueOf(sessionCommandTemplateSamples[0])
+	for i := 0; i < rt.NumField(); i++ {
+		f := rt.Field(i)
+		if f.Type.Kind() != reflect.String {
+			t.Errorf("field %s is %s; every placeholder must be a string", f.Name, f.Type)
+		}
+		if populated.Field(i).String() == "" {
+			t.Errorf("populated sample leaves %s empty", f.Name)
+		}
+		if !strings.Contains(sessionCommandTemplatePlaceholders, "{{."+f.Name+"}}") {
+			t.Errorf("placeholder list omits {{.%s}}", f.Name)
+		}
+	}
+}
+
 func TestExpandSessionCommandTemplates_AllVariables(t *testing.T) {
 	got, err := ExpandSessionCommandTemplates([]string{
 		"plain",
@@ -22,7 +42,7 @@ func TestExpandSessionCommandTemplates_AllVariables(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{"plain", "echo hw--polecat hw/polecat polecat hello-world /repos/hello-world /city bl /city/.gc/worktrees/polecat /city/packs/gastown"}
-	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
@@ -62,14 +82,30 @@ func TestExpandSessionCommandTemplates_FailsClosed(t *testing.T) {
 	}
 }
 
-func TestExpandSessionCommandTemplatesLenient_SkipsOnlyBadEntries(t *testing.T) {
-	cmds := []string{"tmux set -t {{.Session}} a", "tmux set -g x '{{.Nope}}'", "tmux set -t {{.Session}} b"}
-	got, skipped := ExpandSessionCommandTemplatesLenient(cmds, sampleSessionCommandContext(), "session_live")
-	if len(got) != 2 || got[0] != "tmux set -t hw--polecat a" || got[1] != "tmux set -t hw--polecat b" {
-		t.Errorf("got %q", got)
+func TestExpandAgentSessionCommands_PolicyPerField(t *testing.T) {
+	a := Agent{
+		Name:         "w",
+		SessionSetup: []string{"echo {{.Session}}"},
+		PreStart:     []string{"setup {{.WorkDir}}"},
+		SessionLive:  []string{"tmux set -t {{.Session}} a", "tmux set -g x '{{.Nope}}'", "tmux set -t {{.Session}} b"},
 	}
-	if len(skipped) != 1 || !strings.Contains(skipped[0].Error(), "session_live[1]") {
-		t.Errorf("skipped = %v", skipped)
+	out, err := ExpandAgentSessionCommands(a, sampleSessionCommandContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(out.SessionSetup, []string{"echo hw--polecat"}) || !reflect.DeepEqual(out.PreStart, []string{"setup /city/.gc/worktrees/polecat"}) {
+		t.Errorf("strict fields = %q / %q", out.SessionSetup, out.PreStart)
+	}
+	if !reflect.DeepEqual(out.SessionLive, []string{"tmux set -t hw--polecat a", "tmux set -t hw--polecat b"}) {
+		t.Errorf("SessionLive = %q, want only the good entries", out.SessionLive)
+	}
+	if len(out.Skipped) != 1 || !strings.Contains(out.Skipped[0].Error(), "session_live[1]") {
+		t.Errorf("Skipped = %v", out.Skipped)
+	}
+
+	a.PreStart = []string{"setup {{.Typo}}"}
+	if _, err := ExpandAgentSessionCommands(a, sampleSessionCommandContext()); err == nil || !strings.Contains(err.Error(), "pre_start[0]") {
+		t.Errorf("pre_start typo: err = %v, want fail closed", err)
 	}
 }
 
@@ -90,6 +126,9 @@ func TestValidateAgentsRejectsUnexpandableSessionTemplate(t *testing.T) {
 		{"typo in else arm", Agent{Name: "w", PreStart: []string{"x {{if .Rig}}{{.RigRoot}}{{else}}{{.Bogus}}{{end}}"}}, "Bogus"},
 		{"typo in if arm", Agent{Name: "w", PreStart: []string{"x {{if .Rig}}{{.Bogus}}{{else}}{{.CityRoot}}{{end}}"}}, "Bogus"},
 		{"docker format unescaped", Agent{Name: "w", SessionSetup: []string{"docker inspect -f '{{.State.Running}}' c"}}, "State"},
+		// Samples are one character long, so a slice that needs more is
+		// rejected: an agent named "qa" would fail it at session start.
+		{"slice longer than shortest legal value", Agent{Name: "w", PreStart: []string{"x {{slice .AgentBase 0 3}}"}}, "slice"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -116,9 +155,7 @@ func TestValidateAgentsAcceptsExpandableSessionTemplates(t *testing.T) {
 			"{{if .Rig}}echo rig{{else}}echo city{{end}}",
 			"{{with $r := .RigRoot}}cd {{$r}}{{end}}",
 			"{{$.AgentBase}} {{.Session | printf \"%s\"}}",
-			// Session/Agent/WorkDir/CityRoot are never empty at runtime, so
-			// operations that need a non-empty string must be accepted.
-			"echo {{slice .Session 0 2}} {{index .Agent 0}}",
+			"echo {{index .Agent 0}} {{slice .Session 0 1}}",
 		},
 		SessionSetup: []string{"plain command, no template"},
 		// Literal braces for another tool, escaped the documented way.
@@ -132,18 +169,18 @@ func TestValidateAgentsAcceptsExpandableSessionTemplates(t *testing.T) {
 // session_live is cosmetic: a bad template is a load-time warning, never a
 // hard error, so a pack-global theming typo cannot keep a city from starting.
 func TestSessionLiveTemplateTypoIsWarningNotError(t *testing.T) {
-	a := Agent{Name: "w", SessionLive: []string{"tmux set -g status-right '{{.AgentName}}'"}}
+	a := Agent{Name: "w", SessionLive: []string{"tmux set -g status-right '{{.AgentName}}'", "tmux set -g x '{{.Other}}'"}}
 	if err := ValidateAgents([]Agent{a}); err != nil {
 		t.Fatalf("ValidateAgents rejected a session_live typo: %v", err)
 	}
 	warnings := ValidateSemantics(&City{Agents: []Agent{a}}, "city.toml")
-	var hit bool
+	var hits int
 	for _, w := range warnings {
-		if strings.Contains(w, "session_live[0]") && strings.Contains(w, "AgentName") && strings.Contains(w, "skipped") {
-			hit = true
+		if IsSessionLiveTemplateWarning(w) && strings.Contains(w, "session_live[") && strings.Contains(w, "city.toml") {
+			hits++
 		}
 	}
-	if !hit {
-		t.Fatalf("ValidateSemantics warnings %q do not mention the session_live typo", warnings)
+	if hits != 2 {
+		t.Fatalf("want one marked warning per bad entry, got %d in %q", hits, warnings)
 	}
 }

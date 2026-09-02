@@ -30,7 +30,7 @@ func ValidateSemantics(cfg *City, source string) []string {
 	// session_live templates that will not expand are skipped at session
 	// start; say so here rather than failing the load.
 	for _, a := range cfg.Agents {
-		if w := warnSessionLiveTemplates(a); w != "" {
+		for _, w := range warnSessionLiveTemplates(a) {
 			warnings = append(warnings, source+": "+w)
 		}
 	}

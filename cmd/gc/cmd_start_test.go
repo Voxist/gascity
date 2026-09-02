@@ -2037,10 +2037,9 @@ func TestResolveTemplate_PreStartUnexpandablePlaceholderFailsClosed(t *testing.T
 }
 
 // A session_live entry that cannot be expanded is cosmetic: resolution must
-// succeed with only that entry skipped and a warning, never fail.
+// succeed with only that entry skipped, never fail.
 func TestResolveTemplate_SessionLiveUnexpandablePlaceholderIsSkipped(t *testing.T) {
 	cityDir := t.TempDir()
-	var stderr bytes.Buffer
 	cfgAgent := &config.Agent{
 		Name:        "worker",
 		Provider:    "claude",
@@ -2056,7 +2055,7 @@ func TestResolveTemplate_SessionLiveUnexpandablePlaceholderIsSkipped(t *testing.
 		rigs:       []config.Rig{},
 		beaconTime: time.Unix(0, 0),
 		beadNames:  make(map[string]string),
-		stderr:     &stderr,
+		stderr:     io.Discard,
 	}
 
 	tp, err := resolveTemplate(bp, cfgAgent, "worker", nil)
@@ -2066,9 +2065,23 @@ func TestResolveTemplate_SessionLiveUnexpandablePlaceholderIsSkipped(t *testing.
 	if len(tp.Hints.SessionLive) != 1 || tp.Hints.SessionLive[0] != "tmux set-option -t worker status-style bg=blue" {
 		t.Errorf("SessionLive = %q, want only the good entry", tp.Hints.SessionLive)
 	}
-	for _, want := range []string{"session_live[1]", "NoSuchField", "skipped"} {
-		if !strings.Contains(stderr.String(), want) {
-			t.Errorf("stderr %q does not mention %q", stderr.String(), want)
+}
+
+// The session_live load-time warning must stay a warning under strict mode
+// and must be shown by the ordinary config loaders, or the "cosmetic" policy
+// is fatal in one deployment mode and invisible in the other.
+func TestSessionLiveTemplateWarningIsNonFatalAndVisible(t *testing.T) {
+	warnings := config.ValidateSemantics(&config.City{Agents: []config.Agent{{Name: "w", SessionLive: []string{"tmux set -g x '{{.Nope}}'"}}}}, "city.toml")
+	if len(warnings) == 0 {
+		t.Fatal("no warning produced")
+	}
+	fatal, nonFatal := splitStrictConfigWarnings(warnings)
+	if len(fatal) != 0 || len(nonFatal) != len(warnings) {
+		t.Errorf("strict split: fatal=%q nonFatal=%q", fatal, nonFatal)
+	}
+	for _, w := range warnings {
+		if !isNonFatalLoadConfigWarning(w) {
+			t.Errorf("load-config filter would drop %q", w)
 		}
 	}
 }

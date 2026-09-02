@@ -516,39 +516,23 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 	// The launch command is assembled from provider command + args and cannot
 	// be validated at config load; braces in it are also the ones most
-	// likely meant for another tool. Keep the raw command on failure, as
-	// before, but say so once.
-	if strings.Contains(command, "{{") {
-		if expanded, err := config.ExpandSessionCommandTemplates([]string{command}, setupCtx, "command"); err == nil {
-			command = expanded[0]
-		} else {
-			warnSessionTemplateOnce("command|"+qualifiedName+"|"+command, func() {
-				if p.stderr != nil {
-					fmt.Fprintf(p.stderr, "agent %q: %v (using raw command)\n", qualifiedName, err) //nolint:errcheck
-				}
-			})
-		}
+	// likely meant for another tool. Keep the raw command on failure and say
+	// so, like the work_query/on_boot expander does.
+	if expanded, err := config.ExpandSessionCommandTemplate(command, setupCtx, "command", 0); err == nil {
+		command = expanded
+	} else if p.stderr != nil {
+		fmt.Fprintf(p.stderr, "agent %q: %v (using raw command)\n", qualifiedName, err) //nolint:errcheck
 	}
-	expandedSetup, err := config.ExpandSessionCommandTemplates(cfgAgent.SessionSetup, setupCtx, "session_setup")
+	// session_setup/pre_start fail closed; session_live entries that do not
+	// expand are skipped (config load already warned about them).
+	sessionCmds, err := config.ExpandAgentSessionCommands(*cfgAgent, setupCtx)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
+	expandedSetup := sessionCmds.SessionSetup
+	expandedPreStart := sessionCmds.PreStart
+	expandedLive := sessionCmds.SessionLive
 	resolvedScript := config.ResolveSessionSetupScriptPath(p.cityPath, cfgAgent.SourceDir, cfgAgent.SessionSetupScript)
-	expandedPreStart, err := config.ExpandSessionCommandTemplates(cfgAgent.PreStart, setupCtx, "pre_start")
-	if err != nil {
-		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
-	}
-	// session_live is cosmetic: skip the entries that do not expand so the
-	// agent stays resolvable and the good entries (pack-global theming
-	// included) still run.
-	expandedLive, skipped := config.ExpandSessionCommandTemplatesLenient(cfgAgent.SessionLive, setupCtx, "session_live")
-	for _, skipErr := range skipped {
-		warnSessionTemplateOnce("session_live|"+qualifiedName+"|"+skipErr.Error(), func() {
-			if p.stderr != nil {
-				fmt.Fprintf(p.stderr, "agent %q: %v (session_live entry skipped)\n", qualifiedName, skipErr) //nolint:errcheck
-			}
-		})
-	}
 
 	// Step 11b: Skill materialization integration (per engdocs
 	// skill-materialization.md § "When FingerprintExtra[\"skills:*\"]

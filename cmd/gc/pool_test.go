@@ -604,6 +604,61 @@ func TestFormatMaxSessions_ZeroValue(t *testing.T) {
 	}
 }
 
+func TestResolveSetupScript_Relative(t *testing.T) {
+	got := config.ResolveSessionSetupScriptPath("/home/user/city", "/home/user/city/packs/gastown", "scripts/setup.sh")
+	if got != "/home/user/city/packs/gastown/scripts/setup.sh" {
+		t.Errorf("got %q, want absolute path", got)
+	}
+}
+
+func TestResolveSetupScript_DoubleSlashUsesCityRoot(t *testing.T) {
+	got := config.ResolveSessionSetupScriptPath("/home/user/city", "/home/user/city/packs/gastown", "//scripts/setup.sh")
+	if got != "/home/user/city/scripts/setup.sh" {
+		t.Errorf("got %q, want city-root path", got)
+	}
+}
+
+func TestResolveSetupScript_LegacyCityRelativeStillWorks(t *testing.T) {
+	got := config.ResolveSessionSetupScriptPath("/home/user/city", "/home/user/city/packs/gastown", "packs/gastown/scripts/setup.sh")
+	if got != "/home/user/city/packs/gastown/scripts/setup.sh" {
+		t.Errorf("got %q, want legacy city-root-relative path to remain supported", got)
+	}
+}
+
+func TestResolveSetupScript_LegacySharedCityRelativeFallback(t *testing.T) {
+	cityPath := t.TempDir()
+	sourceDir := filepath.Join(cityPath, "packs", "feature")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityScript := filepath.Join(cityPath, "packs", "shared", "scripts", "setup.sh")
+	if err := os.MkdirAll(filepath.Dir(cityScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cityScript, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got := config.ResolveSessionSetupScriptPath(cityPath, sourceDir, "packs/shared/scripts/setup.sh")
+	if got != cityScript {
+		t.Errorf("got %q, want legacy shared city-root-relative path to remain supported", got)
+	}
+}
+
+func TestResolveSetupScript_Absolute(t *testing.T) {
+	got := config.ResolveSessionSetupScriptPath("/home/user/city", "/home/user/city/packs/gastown", "/usr/local/bin/setup.sh")
+	if got != "/usr/local/bin/setup.sh" {
+		t.Errorf("got %q, want unchanged absolute path", got)
+	}
+}
+
+func TestResolveSetupScript_Empty(t *testing.T) {
+	got := config.ResolveSessionSetupScriptPath("/home/user/city", "/home/user/city/packs/gastown", "")
+	if got != "" {
+		t.Errorf("got %q, want empty", got)
+	}
+}
+
 func TestCountRunningPoolInstancesUsesListRunning(t *testing.T) {
 	sp := runtime.NewFake()
 	// Start 3 out of 5 pool instances.

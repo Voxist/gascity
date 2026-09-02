@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
@@ -209,17 +208,6 @@ func parseScaleCheckCount(agentName, check, out string) (int, error) {
 // and session_live commands; config validation and runtime expansion share
 // the one type in internal/config.
 type SessionSetupContext = config.SessionCommandTemplateContext
-
-// sessionTemplateWarned dedupes session-template warnings that would
-// otherwise repeat on every reconcile tick and every session handle.
-var sessionTemplateWarned sync.Map
-
-// warnSessionTemplateOnce runs emit the first time key is seen.
-func warnSessionTemplateOnce(key string, emit func()) {
-	if _, seen := sessionTemplateWarned.LoadOrStore(key, struct{}{}); !seen {
-		emit()
-	}
-}
 
 // deepCopyAgent creates a deep copy of a config.Agent with a new name and dir.
 // Slice and map fields are independently allocated so mutations to the copy
