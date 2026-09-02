@@ -815,8 +815,11 @@ probe_schema_state_or_die() {
     local attempt=0
     local state
     while :; do
-        bd_runtime_schema_state "$db"
-        state=$?
+        # `|| state=$?` rather than a bare call followed by `$?`: the script
+        # runs under set -e, and a bare non-zero return aborts it unless the
+        # enclosing function happens to be called inside a condition.
+        state=0
+        bd_runtime_schema_state "$db" || state=$?
         if [ "$state" -ne 2 ]; then
             return "$state"
         fi
@@ -2763,10 +2766,14 @@ ensure_current_era_version_witness() {
     [ -e "$witness" ] && return 0
     [ -d "$dir/.beads" ] || return 0
 
-    # Positive evidence this is not the shape the guard protects. A populated
-    # legacy workspace has bd tables; if the schema is already present we must
-    # leave the guard to make its own decision.
-    if bd_runtime_schema_ready "$dolt_database" 2>/dev/null; then
+    # Stamp only on a DEFINITE "no bd schema" answer. A populated legacy
+    # workspace has bd tables, so a present schema leaves the guard to make
+    # its own decision; and an unanswered probe (server not responding,
+    # database not selectable) proves nothing either way, so it must not
+    # stamp past the guard on a workspace whose shape was never established.
+    local schema_state=0
+    bd_runtime_schema_state "$dolt_database" 2>/dev/null || schema_state=$?
+    if [ "$schema_state" -ne 1 ]; then
         return 0
     fi
 
@@ -2825,16 +2832,11 @@ run_bd_init_pinned() {
     local dolt_database="$3"
     local host="$4"
     local force_init="${5:-false}"
+    set -- init
     if [ "$force_init" = "true" ]; then
-        run_bd_pinned "$dir" init --force --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
-            --server-host "$host" --server-port "$DOLT_PORT" "$dir" || {
-                dump_bd_init_forensics "$dolt_database"
-                die "bd init failed for $dir"
-            }
-        return 0
+        set -- "$@" --force
     fi
-
-    run_bd_pinned "$dir" init --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
+    run_bd_pinned "$dir" "$@" --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
         --server-host "$host" --server-port "$DOLT_PORT" "$dir" || {
             dump_bd_init_forensics "$dolt_database"
             die "bd init failed for $dir"

@@ -54,7 +54,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# The latest published gh and Dolt binaries predate grpc-go 1.83.0 and
+# The latest published gh and Dolt binaries predate grpc-go 1.83.1 and
 # golang.org/x/text 0.39.0 (CVE-2026-56852, norm.Iter infinite loop). At these
 # refs the selected x/text is 0.38.0 for gh and 0.36.0 for Dolt — Dolt's require
 # line reads 0.35.0, but MVS resolves it to 0.36.0, which is what the scanner
