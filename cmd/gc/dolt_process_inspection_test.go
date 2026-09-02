@@ -300,13 +300,29 @@ func TestPortHolderPIDsFromLsofTimeoutIsUnknownNotEmpty(t *testing.T) {
 // to the resource census ratchet (internal/testpolicy/resourcecensus), which
 // forbids raising its baseline to absorb growth.
 func TestLsofExitIsNoMatchDistinguishesEmptyFromError(t *testing.T) {
-	quiet := &exec.ExitError{Stderr: nil}
-	if !lsofExitIsNoMatch(quiet) {
-		t.Fatal("exit with empty stderr must read as a checked empty listing")
+	// An ExitError built without a ProcessState reports exit status -1, the
+	// same shape a signal-killed lsof has: empty stderr, no status 1. That is
+	// lsof failing to report, not reporting an empty listing.
+	killed := &exec.ExitError{Stderr: nil}
+	if lsofExitIsNoMatch(killed) {
+		t.Fatal("an ExitError without lsof's own exit status 1 must read as unknown, not as a checked empty listing")
 	}
-	blank := &exec.ExitError{Stderr: []byte("  \n")}
-	if !lsofExitIsNoMatch(blank) {
-		t.Fatal("exit with whitespace-only stderr must read as a checked empty listing")
+	// The pure decision carries the exit status explicitly, so the status-1
+	// cases are covered without a ProcessState (which only a real process
+	// can produce, and spawning one is what the census forbids).
+	if !lsofNoMatch(1, nil) {
+		t.Fatal("exit 1 with empty stderr must read as a checked empty listing")
+	}
+	if !lsofNoMatch(1, []byte("  \n")) {
+		t.Fatal("exit 1 with whitespace-only stderr must read as a checked empty listing")
+	}
+	if lsofNoMatch(1, []byte("lsof: unknown option\n")) {
+		t.Fatal("exit 1 with a message on stderr is a failed probe, not an empty listing")
+	}
+	for _, code := range []int{-1, 0, 2, 137} {
+		if lsofNoMatch(code, nil) {
+			t.Fatalf("exit %d with empty stderr must read as unknown, not as a checked empty listing", code)
+		}
 	}
 	noisy := &exec.ExitError{Stderr: []byte("lsof: unknown option\n")}
 	if lsofExitIsNoMatch(noisy) {

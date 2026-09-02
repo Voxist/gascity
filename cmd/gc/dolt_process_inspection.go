@@ -245,7 +245,19 @@ func lsofExitIsNoMatch(err error) bool {
 	if !errors.As(err, &exitErr) {
 		return false
 	}
-	return len(bytes.TrimSpace(exitErr.Stderr)) == 0
+	return lsofNoMatch(exitErr.ExitCode(), exitErr.Stderr)
+}
+
+// lsofNoMatch is the pure decision behind lsofExitIsNoMatch: only lsof's own
+// "no match" exit (status 1) with nothing on stderr is a checked empty
+// listing. Any other status with an empty stderr is not lsof reporting an
+// empty result but lsof failing to report at all: a process killed by a
+// signal outside our deadline (OOM killer, a sandbox reaping children) exits
+// with status -1 and an empty stderr, and an ExitError built without a
+// ProcessState reports -1 too. Those must read as unknown, not as "nobody
+// holds the port", or the port-ownership check disowns a live holder.
+func lsofNoMatch(exitCode int, stderr []byte) bool {
+	return exitCode == 1 && len(bytes.TrimSpace(stderr)) == 0
 }
 
 func pidsFromLsofPIDList(output string) []int {
