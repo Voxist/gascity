@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -284,6 +286,41 @@ func TestPortHolderPIDsFromLsofTimeoutIsUnknownNotEmpty(t *testing.T) {
 	pids, known = portHolderPIDsFromLsofWithTimeout(lsofCommandTimeout, strconv.Itoa(port))
 	if !known || !slices.Contains(pids, os.Getpid()) {
 		t.Fatalf("portHolderPIDsFromLsofWithTimeout(real) = (pids=%v, known=%v), want self among holders with known=true", pids, known)
+	}
+}
+
+// TestLsofExitIsNoMatchDistinguishesEmptyFromError pins the only signal that
+// separates lsof's two exit-1 cases: "nothing matched" has empty stderr, a real
+// failure does not.
+//
+// The errors are constructed, not produced by spawning processes: the
+// classifier's whole contract is ExitError.Stderr, which cmd.Output() fills
+// from the child's stderr, and constructing the value exercises exactly that
+// field. Spawning `sh` here would also add two unregistered subprocess sites
+// to the resource census ratchet (internal/testpolicy/resourcecensus), which
+// forbids raising its baseline to absorb growth.
+func TestLsofExitIsNoMatchDistinguishesEmptyFromError(t *testing.T) {
+	quiet := &exec.ExitError{Stderr: nil}
+	if !lsofExitIsNoMatch(quiet) {
+		t.Fatal("exit with empty stderr must read as a checked empty listing")
+	}
+	blank := &exec.ExitError{Stderr: []byte("  \n")}
+	if !lsofExitIsNoMatch(blank) {
+		t.Fatal("exit with whitespace-only stderr must read as a checked empty listing")
+	}
+	noisy := &exec.ExitError{Stderr: []byte("lsof: unknown option\n")}
+	if lsofExitIsNoMatch(noisy) {
+		t.Fatal("exit with a message on stderr is a failed probe, not an empty listing")
+	}
+	wrapped := fmt.Errorf("lsof: %w", noisy)
+	if lsofExitIsNoMatch(wrapped) {
+		t.Fatal("a wrapped noisy ExitError must still read as a failed probe")
+	}
+	if lsofExitIsNoMatch(errors.New("not an exit error")) {
+		t.Fatal("a non-ExitError must never read as a checked empty listing")
+	}
+	if lsofExitIsNoMatch(fmt.Errorf("lsof: %w", context.DeadlineExceeded)) {
+		t.Fatal("a deadline hit must never read as a checked empty listing")
 	}
 }
 

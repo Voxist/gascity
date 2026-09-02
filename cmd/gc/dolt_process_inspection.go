@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -214,16 +215,31 @@ func portHolderPIDsFromLsofWithTimeout(timeout time.Duration, port string) ([]in
 		return nil, false
 	}
 	if err != nil {
-		var exitErr *exec.ExitError
-		if !errors.As(err, &exitErr) {
-			// Could not run lsof at all: no answer, not an empty one.
-			return nil, false
+		if lsofExitIsNoMatch(err) {
+			return nil, true
 		}
-		// A non-zero exit with the process having run to completion is lsof's
-		// "no files matched" — a checked empty listing.
-		return nil, true
+		return nil, false
 	}
 	return pidsFromPlainPortLsofOutput(string(out), port), true
+}
+
+// lsofExitIsNoMatch reports whether err is lsof's "no files matched" exit —
+// the one non-zero exit that is a checked, EMPTY listing rather than a failed
+// probe.
+//
+// lsof exits 1 in both cases, so the exit status alone cannot tell them apart.
+// What does is stderr: "nothing matched" is exit 1 with EMPTY stderr, while a
+// real failure (bad option, permission problem, unreadable /dev/kmem) is exit 1
+// with a message on stderr. cmd.Output() captures that into ExitError.Stderr,
+// so it is available here without another subprocess. A deadline hit never
+// arrives as an ExitError from lsofOutputWithTimeout at all; it is wrapped as
+// context.DeadlineExceeded upstream of this call.
+func lsofExitIsNoMatch(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	return len(bytes.TrimSpace(exitErr.Stderr)) == 0
 }
 
 func pidsFromLsofPIDList(output string) []int {
