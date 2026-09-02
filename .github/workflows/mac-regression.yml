@@ -198,14 +198,30 @@ jobs:
 
   # Fast quality gates that Linux runs on every PR. Keep these cheap so a
   # Mac-parity loop stays interactive.
+  #
+  # No golangci-lint here. Lint is platform-independent apart from
+  # darwin-tagged files, and a full-repo lint on a 3-core hosted macOS runner
+  # ran past the 35-minute job cap cold (~10 min even warm on Linux); a
+  # cancelled job never saves the lint cache, so it stayed cold forever and
+  # the Mac lane could never go green (ga-w9jdf). The darwin-specific
+  # coverage moves to a GOOS=darwin pass in the Linux static checks
+  # (ga-fhih9).
   mac-quality:
-    name: Mac / quality (lint, fmt, vet, docs)
+    name: Mac / quality (fmt, vet, docs)
     needs:
       - runner-policy
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    timeout-minutes: 35
+    # 60, not 35: on a COLD golangci-lint cache a whole-repo lint on the macOS
+    # runner needs more than 30 minutes, and the cache is cold until this job
+    # succeeds once (actions/cache saves at post-job, which a timeout skips —
+    # so the 35-minute budget kept the cache empty and guaranteed the next run
+    # was cold too). Before the ICU fix (ga-mac-icu) the job died in ~2 minutes
+    # on a compiler error and never reached lint, which is why the budget
+    # looked sufficient. The other CGO-compiling jobs run 20-25 and passed at
+    # 16/16 on this branch; integration jobs already use 60-90.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -219,32 +235,6 @@ jobs:
           install-claude-cli: "false"
       - name: Install tools
         run: make install-tools
-      - name: Get golangci-lint + Go toolchain versions for cache key
-        id: glint-version
-        run: |
-          version=$(grep -m1 '^GOLANGCI_LINT_VERSION := ' Makefile | awk '{print $3}')
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          # staticcheck (bundled in golangci-lint) caches type/CFG facts whose
-          # validity depends on the Go toolchain it was built with. Keying the
-          # cache on GOVERSION prevents a cache populated under one Go toolchain
-          # from being replayed under another, which produced a stale-fact
-          # SA5011 false-positive flood on main (ga-v7x9vk).
-          echo "goversion=$(go env GOVERSION)" >> "$GITHUB_OUTPUT"
-      - name: Restore golangci-lint cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: .cache/golangci-lint
-          # Exact-key-only restore (no restore-keys fallback): a broad prefix
-          # let a partial/incompatible cache (missing testing.T.Fatal no-return
-          # facts) be inherited across differing keys and re-saved forward,
-          # repeatedly re-poisoning the cache with a SA5011 false-positive
-          # storm (ga-35qn7i, ga-v7x9vk, ga-l14mnf, ga-ndx34y). A miss now
-          # forces a fully fresh, never-poisoned recompute.
-          key: ${{ runner.os }}-golangci-lint-${{ steps.glint-version.outputs.version }}-${{ steps.glint-version.outputs.goversion }}-${{ hashFiles('go.sum', '.golangci.yml') }}
-      - name: Lint
-        env:
-          GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
-        run: make lint
       - name: Format
         run: make fmt-check
       - name: Vet
