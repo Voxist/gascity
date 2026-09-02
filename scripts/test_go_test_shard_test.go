@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -759,5 +760,106 @@ func TestGoTestShardRunsWithoutPreservedProviderEnv(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("test-go-test-shard failed without preserved provider env: %v\n%s", err, out)
+	}
+}
+
+// noncmdgcShardCommand runs the noncmdgc package-list slicer.
+//
+// It reuses shardTestCommand deliberately: the resource census is a shrink-only
+// ratchet on untagged subprocess call sites (census.go: "untagged subprocess
+// call/file totals cannot grow"), so a new exec.Command here would fail the
+// build rather than merely add a test.
+func noncmdgcShardCommand(t *testing.T, pkgs, index, total string) (int, []byte) {
+	t.Helper()
+	cmd := shardTestCommand(filepath.Join(repoRoot(t), "scripts", "noncmdgc-shard-packages"), index, total)
+	cmd.Stdin = strings.NewReader(pkgs)
+	return runShardCommand(t, cmd)
+}
+
+// TestNoncmdgcShardPartitionsThePackageList is the load-bearing guard on the
+// noncmdgc unit-cover matrix: the shards must together cover EVERY package
+// exactly once.
+//
+// A slicer that silently drops a package does not fail — it deletes that
+// package's tests and its coverage from CI while every shard still reports
+// success. Union and disjointness are what make "the matrix ran" mean "the
+// suite ran".
+func TestNoncmdgcShardPartitionsThePackageList(t *testing.T) {
+	var input []string
+	for _, n := range []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"} {
+		input = append(input, "github.com/example/"+n)
+	}
+	pkgs := strings.Join(input, "\n")
+
+	// Totals stay at or below the package count: a total larger than the input
+	// leaves a shard empty, which the slicer rejects (see the empty-slice test).
+	for _, total := range []int{1, 2, 3, 4, 11} {
+		seen := map[string]int{}
+		for i := 1; i <= total; i++ {
+			code, out := noncmdgcShardCommand(t, pkgs, strconv.Itoa(i), strconv.Itoa(total))
+			if code != 0 {
+				t.Fatalf("shard %d of %d exited %d: %s", i, total, code, out)
+			}
+			for _, line := range strings.Split(string(out), "\n") {
+				if line = strings.TrimSpace(line); line != "" {
+					seen[line]++
+				}
+			}
+		}
+		if len(seen) != len(input) {
+			t.Errorf("total=%d covered %d packages, want %d", total, len(seen), len(input))
+		}
+		for pkg, n := range seen {
+			if n != 1 {
+				t.Errorf("total=%d: package %q appeared in %d shards, want exactly 1", total, pkg, n)
+			}
+		}
+	}
+}
+
+// TestNoncmdgcShardRejectsInvalidBounds keeps a typo in the workflow matrix
+// from silently running a partial suite.
+func TestNoncmdgcShardRejectsInvalidBounds(t *testing.T) {
+	for _, tc := range []struct{ index, total string }{
+		{"0", "3"},
+		{"4", "3"},
+		{"1", "0"},
+		{"x", "3"},
+		{"1", "y"},
+		{"-1", "3"},
+	} {
+		if code, out := noncmdgcShardCommand(t, "github.com/example/a", tc.index, tc.total); code == 0 {
+			t.Errorf("shard %q of %q was accepted (output %q); want a rejection", tc.index, tc.total, out)
+		}
+	}
+}
+
+// TestNoncmdgcShardRejectsEmptySlice pins the guard that keeps an empty shard
+// from reporting success.
+//
+// The Makefile feeds this script's stdout to `go test`. With no package
+// arguments `go test` tests the current directory, prints "no test files" and
+// exits 0, so an empty slice would upload a coverage profile holding only its
+// header while the shard reports green. More shards than packages, or an empty
+// package list from a failed `go list`, must fail the shard instead.
+func TestNoncmdgcShardRejectsEmptySlice(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		pkgs         string
+		index, total string
+	}{
+		{"more shards than packages", "github.com/example/a\ngithub.com/example/b", "3", "3"},
+		{"empty package list", "", "1", "3"},
+		{"blank lines only", "\n\n", "1", "1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, out := noncmdgcShardCommand(t, tc.pkgs, tc.index, tc.total)
+			if code == 0 {
+				t.Errorf("empty slice for shard %q of %q was accepted (output %q); want a rejection", tc.index, tc.total, out)
+			}
+			if !strings.Contains(string(out), "no packages selected") {
+				t.Errorf("error message = %q, want it to mention no packages selected", out)
+			}
+		})
 	}
 }

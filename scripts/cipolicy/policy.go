@@ -47,13 +47,15 @@ const (
 	// the digest printed for the merged (resync + split) workflow.
 	// Re-derived for the static-checks split (ga-dejjh): the boundary guards
 	// and the native-DoltLite suite moved to preflight-guards so golangci-lint
-	// stops running in series behind them. Both jobs are required by
-	// ci-required and ci-preflight, so the gate is unchanged — only the shape
-	// is.
+	// stops running in series behind them. Both jobs are listed in the needs of
+	// check and ci-preflight (ci-required reaches them through ci-preflight),
+	// so the gate is unchanged — only the shape is.
 	// Re-derived on the merge with #152 (static-checks split): both sides moved
-	// ci.yml (this branch: the cmd/gc shard timeout), so the merged file hashes
-	// to neither side. Taken from the digest printed for the merged workflow.
-	expectedCIExecutionHash     = "26a661b2d24348a7e8e691903d04aa1ed3c107167f997d41e3320874f77d2291"
+	// ci.yml, so the merged file hashes to neither side.
+	// Re-derived again for the noncmdgc unit-cover shard matrix (ga-gmhbf): the
+	// job that set the run's wall time became a 3-way matrix. Same jobs, same
+	// needs; only the matrix expansion and the job name changed.
+	expectedCIExecutionHash     = "ae5f7712f9b086bcec8acfe160cabac65c9a56f89e5184754b8dd4a0cdbde2fc"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
