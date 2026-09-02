@@ -888,6 +888,22 @@ test-cover-mac: test-fsys-darwin-compile
 test-cover-noncmdgc: test-fsys-darwin-compile
 	$(TEST_ENV) GC_FAST_UNIT=1 go test -timeout 10m -coverprofile=coverage.noncmdgc.txt $(UNIT_COVER_PKGS_NONCMDGC)
 
+## test-cover-noncmdgc-shard: run unit coverage for one non-cmd/gc shard
+## (NONCMDGC_COVER_SHARD of NONCMDGC_COVER_TOTAL).
+##
+## The job this shards was the CI critical path: every preflight and integration
+## job starts in parallel, and the run's wall time was set by this one job alone
+## (14m, against 11m for the next longest). Its ~4.1m of fixed setup is paid per
+## shard, so the shard count is deliberately small — the wall cannot drop below
+## the ~11m band the other jobs occupy, and more shards past that buy runner
+## minutes, not wall time.
+NONCMDGC_COVER_SHARD ?= 1
+NONCMDGC_COVER_TOTAL ?= 3
+test-cover-noncmdgc-shard: test-fsys-darwin-compile
+	$(TEST_ENV) GC_FAST_UNIT=1 go test -timeout 10m \
+		-coverprofile=coverage.noncmdgc.$(NONCMDGC_COVER_SHARD).txt \
+		$$(printf '%s\n' $(UNIT_COVER_PKGS_NONCMDGC) | ./scripts/noncmdgc-shard-packages $(NONCMDGC_COVER_SHARD) $(NONCMDGC_COVER_TOTAL))
+
 ## test-cover-cmdgc-shard: run unit coverage for one cmd/gc shard (CMD_GC_COVER_SHARD of CMD_GC_COVER_TOTAL).
 test-cover-cmdgc-shard:
 	$(TEST_ENV) GO_TEST_COVERPROFILE=coverage.cmdgc.$(CMD_GC_COVER_SHARD).txt GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=10m ./scripts/test-go-test-shard ./cmd/gc $(CMD_GC_COVER_SHARD) $(CMD_GC_COVER_TOTAL)

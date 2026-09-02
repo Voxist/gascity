@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -759,5 +760,74 @@ func TestGoTestShardRunsWithoutPreservedProviderEnv(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("test-go-test-shard failed without preserved provider env: %v\n%s", err, out)
+	}
+}
+
+// noncmdgcShardCommand runs the noncmdgc package-list slicer.
+//
+// It reuses shardTestCommand deliberately: the resource census is a shrink-only
+// ratchet on untagged subprocess call sites (census.go: "untagged subprocess
+// call/file totals cannot grow"), so a new exec.Command here would fail the
+// build rather than merely add a test.
+func noncmdgcShardCommand(t *testing.T, pkgs, index, total string) (int, []byte) {
+	t.Helper()
+	cmd := shardTestCommand(filepath.Join(repoRoot(t), "scripts", "noncmdgc-shard-packages"), index, total)
+	cmd.Stdin = strings.NewReader(pkgs)
+	return runShardCommand(t, cmd)
+}
+
+// TestNoncmdgcShardPartitionsThePackageList is the load-bearing guard on the
+// noncmdgc unit-cover matrix: the shards must together cover EVERY package
+// exactly once.
+//
+// A slicer that silently drops a package does not fail — it deletes that
+// package's tests and its coverage from CI while every shard still reports
+// success. Union and disjointness are what make "the matrix ran" mean "the
+// suite ran".
+func TestNoncmdgcShardPartitionsThePackageList(t *testing.T) {
+	var input []string
+	for _, n := range []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"} {
+		input = append(input, "github.com/example/"+n)
+	}
+	pkgs := strings.Join(input, "\n")
+
+	for _, total := range []int{1, 2, 3, 4, 11, 12} {
+		seen := map[string]int{}
+		for i := 1; i <= total; i++ {
+			code, out := noncmdgcShardCommand(t, pkgs, strconv.Itoa(i), strconv.Itoa(total))
+			if code != 0 {
+				t.Fatalf("shard %d of %d exited %d: %s", i, total, code, out)
+			}
+			for _, line := range strings.Split(string(out), "\n") {
+				if line = strings.TrimSpace(line); line != "" {
+					seen[line]++
+				}
+			}
+		}
+		if len(seen) != len(input) {
+			t.Errorf("total=%d covered %d packages, want %d", total, len(seen), len(input))
+		}
+		for pkg, n := range seen {
+			if n != 1 {
+				t.Errorf("total=%d: package %q appeared in %d shards, want exactly 1", total, pkg, n)
+			}
+		}
+	}
+}
+
+// TestNoncmdgcShardRejectsInvalidBounds keeps a typo in the workflow matrix
+// from silently running a partial suite.
+func TestNoncmdgcShardRejectsInvalidBounds(t *testing.T) {
+	for _, tc := range []struct{ index, total string }{
+		{"0", "3"},
+		{"4", "3"},
+		{"1", "0"},
+		{"x", "3"},
+		{"1", "y"},
+		{"-1", "3"},
+	} {
+		if code, out := noncmdgcShardCommand(t, "github.com/example/a", tc.index, tc.total); code == 0 {
+			t.Errorf("shard %q of %q was accepted (output %q); want a rejection", tc.index, tc.total, out)
+		}
 	}
 }

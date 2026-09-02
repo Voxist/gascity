@@ -286,11 +286,15 @@ jobs:
   # Split into two parallel push-only jobs to take the serial cmd/gc loop off
   # the critical path (ga-29jlpr); Codecov merges uploads server-side.
   preflight-unit-cover-noncmdgc:
-    name: Preflight / unit cover (noncmdgc)
+    name: Preflight / unit cover (noncmdgc ${{ matrix.shard }} of 3)
     needs:
       - runner-policy
     if: github.event_name == 'push'
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     env:
       DOLT_VERSION: "2.1.7"
       BD_VERSION: "v1.1.0" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
@@ -305,13 +309,13 @@ jobs:
           install-claude-cli: "false"
       - name: Install tools
         run: make install-tools
-      - name: Unit cover (non-cmd/gc)
-        run: make test-cover-noncmdgc
+      - name: Unit cover (non-cmd/gc shard ${{ matrix.shard }} of 3)
+        run: make test-cover-noncmdgc-shard NONCMDGC_COVER_SHARD=${{ matrix.shard }} NONCMDGC_COVER_TOTAL=3
       - name: Upload coverage to Codecov
-        if: hashFiles('coverage.noncmdgc.txt') != ''
+        if: hashFiles(format('coverage.noncmdgc.{0}.txt', matrix.shard)) != ''
         uses: codecov/codecov-action@75cd11691c0faa626561e295848008c8a7dddffe # v5
         with:
-          files: coverage.noncmdgc.txt
+          files: coverage.noncmdgc.${{ matrix.shard }}.txt
           flags: unit-cover-noncmdgc
           token: ${{ secrets.CODECOV_TOKEN }}
           verbose: true

@@ -50,7 +50,7 @@ const (
 	// stops running in series behind them. Both jobs are required by
 	// ci-required and ci-preflight, so the gate is unchanged — only the shape
 	// is.
-	expectedCIExecutionHash     = "1429821f605d2a1118d46ed4b1937a8c277176c6aac00b1417db2b531b18e5ba"
+	expectedCIExecutionHash     = "454a0e9922d566f274347a4a3e3aed71b6a8029dc1bff2b946d2606e05263e7b"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
