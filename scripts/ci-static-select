@@ -382,6 +382,40 @@ def lint_affected(
     return run_static_checks(lint_tool, go_tool, lint_flags, packages)
 
 
+def full_affected_tests(go_tool: str, go_flags: list[str], reason: Exception) -> int:
+    print(f"test-affected: selecting full repository: {reason}", file=sys.stderr)
+    return run_tool([go_tool, "test", *go_flags, "./..."])
+
+
+def test_affected(go_tool: str, go_flags: list[str]) -> int:
+    """Run `go test` over only the packages this change can affect.
+
+    Shares diff_records()/affected_package_args() with lint-affected, so the
+    selection rules — embedded files, native consumers, and the fall-back-to-
+    everything cases — stay identical instead of drifting into a second,
+    weaker implementation. Selection is a SPEED aid for the local iteration
+    loop; it deliberately falls back to ./... on any uncertainty, and the
+    pre-push hook and CI still run the whole suite, so a miss here costs time
+    and never correctness.
+    """
+    try:
+        records = diff_records()
+    except SelectionError as error:
+        return full_affected_tests(go_tool, go_flags, error)
+    if not records:
+        print("test-affected: no changed paths")
+        return 0
+    try:
+        packages = affected_package_args(records, go_tool)
+    except SelectionError as error:
+        return full_affected_tests(go_tool, go_flags, error)
+    if not packages:
+        print("test-affected: no changed Go build inputs, embedded files, or native consumers")
+        return 0
+    print(f"test-affected: {' '.join(packages)}")
+    return run_tool([go_tool, "test", *go_flags, *packages])
+
+
 def fmt_check_changed(tool: str) -> int:
     try:
         records = diff_records()
@@ -410,9 +444,11 @@ def is_regular_file(path: str) -> bool:
 
 
 def main(argv: list[str]) -> int:
+    if len(argv) >= 3 and argv[1] == "test-affected":
+        return test_affected(argv[2], list(argv[3:]))
     if len(argv) < 3 or argv[1] not in {"lint-affected", "fmt-check-changed"}:
         print(
-            "usage: ci-static-select {lint-affected|fmt-check-changed} "
+            "usage: ci-static-select {lint-affected|fmt-check-changed|test-affected} "
             "GOLANGCI_LINT [GO [LINT_FLAG ...]]",
             file=sys.stderr,
         )

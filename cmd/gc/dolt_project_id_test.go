@@ -689,12 +689,13 @@ func TestEnsureProjectIDRestoresFromCityIdentityMap(t *testing.T) {
 		}
 	})
 
-	t.Run("case7_stale_identity_map_with_consistent_layers_opens_the_store", func(t *testing.T) {
-		// The map disagrees with the database, but L1==L2==L3 already agree:
-		// this is a STALE [identity_map] entry (a re-mint, or a rig re-added
-		// under a new id), and reconcile has nothing to write. Failing here
-		// would strand a healthy rig with no operator override, so the drift is
-		// reported as an event and the store opens.
+	t.Run("case7_fully_propagated_canonical_mismatch_refuses_and_names_the_remedy", func(t *testing.T) {
+		// L1 == L2 == L3, all disagreeing with the canonical [identity_map].
+		// This is indistinguishable from a stale map entry, and it is also the
+		// state a rig reaches one run after a wrong mint — so it refuses, and
+		// the message must name the one-line city.toml edit that clears it
+		// (that edit IS the operator override; opening on the non-canonical id
+		// would key this rig's beads to an identity its backups do not carry).
 		scopeRoot := t.TempDir()
 		cityDir := t.TempDir()
 		writeCityTOMLForRig(t, cityDir, "my-rig", scopeRoot, canonicalID)
@@ -706,21 +707,23 @@ func TestEnsureProjectIDRestoresFromCityIdentityMap(t *testing.T) {
 		defer cleanup()
 		rec := &projectIdentityRecordingRecorder{}
 		report, err := ensureManagedDoltProjectIDWithRecorder(metadataPath, "127.0.0.1", port, "root", "hq", cityDir, rec)
-		if err != nil {
-			t.Fatalf("ensureManagedDoltProjectIDWithRecorder refused a consistent scope over a stale identity_map entry: %v", err)
+		if err == nil {
+			t.Fatalf("ensureManagedDoltProjectIDWithRecorder succeeded with report %+v, want a canonical mismatch refusal", report)
 		}
-		if report.ProjectID != differentID {
-			t.Fatalf("report = %+v, want the scope's own consistent id %q", report, differentID)
+		for _, want := range []string{canonicalID, differentID, "human triage", "[identity_map]"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error = %q, want it to mention %q", err, want)
+			}
 		}
-		if report.IdentityFileUpdated || report.MetadataUpdated {
-			t.Fatalf("report = %+v, want no writes when nothing is pending", report)
+		if report != (managedDoltProjectIDReport{}) {
+			t.Fatalf("report = %+v, want zero report on refusal", report)
 		}
+		// Nothing may be rewritten by the refusal.
 		assertProjectIdentityFile(t, scopeRoot, differentID)
 		assertMetadataProjectID(t, metadataPath, differentID)
-		assertDatabaseProjectID(t, port, differentID)
 		payloads := decodeProjectIdentityStampedPayloads(t, rec.records)
 		if len(payloads) != 1 || payloads[0].Source != "canonical_l3_mismatch" {
-			t.Fatalf("events = %+v, want exactly one canonical_l3_mismatch so the drift stays visible", payloads)
+			t.Fatalf("events = %+v, want exactly one canonical_l3_mismatch", payloads)
 		}
 	})
 

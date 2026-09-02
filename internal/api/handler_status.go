@@ -194,10 +194,18 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	// cache (nothing ever built) has nothing to serve here and falls through
 	// to the synchronous build below.
 	//
-	// This sits at top level rather than inside the warm branch: nested there
-	// it was unreachable whenever no warm entry existed, which is exactly the
-	// cold-ish case it exists to cover. It is reached only when NO warm entry
-	// exists (a warm entry, whatever its age, is served above).
+	// Reachability, stated plainly: today NOTHING produces a response-cache
+	// entry without a warm entry — buildAndStoreStatus is the only writer of
+	// these keys and it calls setWarmStatusBody first — and the warm branch
+	// above serves at any age, so this branch and the TTL floor before it are
+	// unreachable in production. They are kept as upstream's code, made inert
+	// rather than deleted: the refresher below goes through buildAndStoreStatus
+	// like every other path, so if a future change ever does clear a warm entry
+	// (an invalidation path, a variant added without one) this branch seeds
+	// both caches and returns the handler to the warm path instead of stranding
+	// it. TestHandleStatusSWRRefreshReseedsWarmEntry documents that contract by
+	// constructing the state deliberately; it is a guard on the branch, not
+	// evidence the branch fires.
 	//
 	// CacheAgeS reports the GREATER of the two staleness signals: how long ago
 	// this response entry was built, and cacheAgeSeconds(store) — the age of the

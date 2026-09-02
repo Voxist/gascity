@@ -647,3 +647,38 @@ func TestLegacyCycleRepairMatchesBodyByScopeRefAlone(t *testing.T) {
 		t.Fatalf("legacy self-edge not removed: %v", deps)
 	}
 }
+
+// TestLegacyCycleRepairRequiresANonEmptySharedRoot pins that a shared
+// gc.root_bead_id of "" is not a match. gc.scope_ref names a step within a
+// workflow ("body", "review") and repeats across workflows, so without the
+// non-empty requirement two pre-#5202 beads that both lack a root would match
+// on the name alone — and the repair would DepRemove a genuine cross-workflow
+// blocking edge and let a still-blocked close through.
+func TestLegacyCycleRepairRequiresANonEmptySharedRoot(t *testing.T) {
+	t.Parallel()
+
+	store := newStrictCloseStore()
+	// A body with no root, blocked by a scope-check from a DIFFERENT workflow
+	// that also has no root and happens to name the same scope ref.
+	body := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":       "scope",
+			"gc.scope_role": "body",
+			"gc.scope_ref":  "body",
+		},
+	})
+	foreign := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "scope-check of another workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":       "scope-check",
+			"gc.scope_role": "control",
+			"gc.scope_ref":  "body",
+		},
+	})
+	if isLegacySelfClosingBlocker(mustGetBead(t, store, foreign.ID), mustGetBead(t, store, body.ID), "some-other-closer") {
+		t.Fatal("a scope-check sharing only an empty root and a step-ref name was accepted as this body's own closer; the repair would remove a genuine cross-workflow edge")
+	}
+}

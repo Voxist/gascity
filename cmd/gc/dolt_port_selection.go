@@ -86,23 +86,40 @@ func repairedManagedDoltRuntimeState(_ string, layout managedDoltRuntimeLayout, 
 		return doltRuntimeState{}, false
 	}
 	port := strconv.Itoa(state.Port)
-	holderPID := findPortHolderPID(port)
-	if holderPID <= 0 {
-		return doltRuntimeState{}, false
-	}
 	stateDir := strings.TrimSpace(state.DataDir)
 	if stateDir == "" {
 		stateDir = layout.DataDir
 	}
-	if !managedDoltProcessOwnedWithStateDir(holderPID, layout, stateDir) {
+	// Find the holder that actually passes the ownership check rather than
+	// whichever pid sorts first. A port number can be held by several
+	// processes at once (127.0.0.1 and ::1 are distinct binds), so the old
+	// arbitrary-first pick failed the ownership test whenever a stranger sorted
+	// ahead of the real server — and this repair path then bailed, which is
+	// exactly the "silently fall back to a stale port" symptom being fixed.
+	holderPID := 0
+	for _, pid := range portHolderPIDs(port) {
+		if managedDoltProcessOwnedWithStateDir(pid, layout, stateDir) {
+			holderPID = pid
+			break
+		}
+	}
+	if holderPID <= 0 {
 		return doltRuntimeState{}, false
 	}
 	if processHasDeletedDataInodes(holderPID, layout.DataDir) {
 		return doltRuntimeState{}, false
 	}
+	// Compare against membership too: findManagedDoltPID can itself resolve
+	// through the port holders, so an equality test between two independent
+	// arbitrary-first picks could disagree about the same healthy server.
 	managedPID, _ := findManagedDoltPID(layout, port)
-	if managedPID <= 0 || managedPID != holderPID {
+	if managedPID <= 0 {
 		return doltRuntimeState{}, false
+	}
+	if managedPID != holderPID {
+		if held, known := portHeldByPID(port, managedPID); !known || !held {
+			return doltRuntimeState{}, false
+		}
 	}
 	if !managedDoltTCPReachable("127.0.0.1", port) {
 		return doltRuntimeState{}, false

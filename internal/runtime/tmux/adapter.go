@@ -353,7 +353,7 @@ func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, er
 		// closes), because the survivor bug is silent and corrupts work state
 		// while a wrongful kill is loud and self-heals on the next reconcile.
 		// Two mitigations bound the blast radius: (1) KillByPID confirms death
-		// by PID + /proc start-time identity (pidutil.AliveWithStartTime), so a
+		// by PID + start-time identity (pidutil.AliveWithStartTime), so a
 		// genuinely-live root is never misreported as dead — if it resists the
 		// kill it surfaces a real "not confirmed dead" error; and (2) that
 		// error propagates through killExistingOrphans to every gated Start,

@@ -54,13 +54,14 @@ const (
 )
 
 // writesIdentity reports whether acting on this decision would WRITE an
-// identity somewhere (repair, seed, migrate, adopt or mint). The L0 canonical
-// guards below refuse only when it does: a stale [identity_map] entry, or a
-// city.toml that momentarily cannot be read, is not a reason to fail a store
-// whose own layers already agree — that would turn a config-file hiccup into
-// a fleet-wide outage (city-config-reload pulls city.toml every 120s). When a
-// write IS pending, the same disagreement means the write could be wrong, and
-// refusing is the only safe answer.
+// identity somewhere (repair, seed, migrate, adopt or mint). It gates the
+// UNREADABLE-city.toml guard only: a torn read (city-config-reload pulls
+// city.toml every 120s) must not fail a scope whose own layers already agree,
+// or one transient parse error takes every managed store down at once —
+// including scopes the map never mentioned. That condition clears itself on
+// the next read, and once the file parses again the canonical guards apply
+// normally. A canonical mismatch we CAN read is a different matter and
+// refuses unconditionally; see the L0 pre-heal.
 func (d reconcileDecision) writesIdentity() bool {
 	switch d.Action {
 	case actionNoOp, actionRefuseL1L3Mismatch, actionRefuseLegacyMismatch:
@@ -205,16 +206,17 @@ func ensureManagedDoltProjectIDWithRecorder(metadataPath, host, port, user, data
 				return managedDoltProjectIDReport{}, fmt.Errorf("reading city identity map for %s: %w", scopeRoot, l0err)
 			}
 		case l0ok && ok && databaseProjectID != l0:
-			// The map disagrees with the database. Refuse only while a write is
-			// pending (reconcile would adopt or seed the non-canonical id);
-			// once L1/L2/L3 agree with each other this is a STALE map entry —
-			// after a re-mint or a rig re-add — and failing the store would
-			// strand a healthy rig with no operator override. The event is
-			// emitted either way so the drift is visible.
+			// The map disagrees with the database: refuse, whether or not a
+			// write is pending. A fully propagated disagreement (L1==L2==L3,
+			// all differing from the map) is indistinguishable from a stale
+			// map entry, and the two failures are not symmetric — opening on a
+			// non-canonical id keys this rig's beads to an identity its
+			// refs/dolt/data backups do not carry (the vp-cz7o.21 recovery
+			// path), silently and durably, while refusing is loud, immediate,
+			// and cleared by a one-line city.toml edit that the message names.
+			// Loud and fixable beats silent and durable.
 			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "canonical_l3_mismatch", "L0", l0, databaseProjectID)
-			if pending := decideReconcile(identityProjectID, identityOK, metadataProjectID, metadataOK, databaseProjectID, ok); pending.writesIdentity() {
-				return managedDoltProjectIDReport{}, formatCanonicalMismatchError(scopeRoot, l0, "database", databaseProjectID)
-			}
+			return managedDoltProjectIDReport{}, formatCanonicalMismatchError(scopeRoot, l0, "database", databaseProjectID)
 		case l0ok && ok && (!identityOK || identityProjectID != l0):
 			// DB confirms the canonical ID; L1 is absent or stale. Auto-repair.
 			preHeal, err = restoreIdentityFromCanonical(fs, scopeRoot, metadataPath, l0)
@@ -601,7 +603,11 @@ func formatL1L3MismatchError(l1, l3 string) error {
 }
 
 func formatCanonicalMismatchError(scopeRoot, l0, otherLayer, otherID string) error {
-	return fmt.Errorf("canonical identity mismatch for %s: city.toml identity_map says %s, %s says %s; needs human triage", scopeRoot, l0, otherLayer, otherID)
+	return fmt.Errorf(
+		"canonical identity mismatch for %s: city.toml identity_map says %s, %s says %s; needs human triage. "+
+			"If the rig was deliberately re-minted or re-added, update its city.toml [identity_map] entry to %s; "+
+			"if the identity was lost, restore the database that carries %s before opening this scope",
+		scopeRoot, l0, otherLayer, otherID, otherID, l0)
 }
 
 func formatLegacyL2L3MismatchError(l2, l3 string) error {

@@ -263,13 +263,18 @@ func TestChildPIDsFindsLiveChild(t *testing.T) {
 	t.Fatalf("ChildPIDs(%d) = %v, want to contain live child pid %d", os.Getpid(), pids, cmd.Process.Pid)
 }
 
-// TestChildPIDsReturnsErrorWhenPSHangs is a RED test for ga-gxmz9n's binding
-// constraint: when enumeration cannot complete, ChildPIDs must report an
-// error rather than silently returning an empty (falsely "no children")
-// result — otherwise a leak-detection caller cannot tell "checked, found
-// none" apart from "never actually checked". Mirrors
-// TestPSReportsZombieReturnsWhenPSHangs's PATH-shadowing technique.
-func TestChildPIDsReturnsErrorWhenPSHangs(t *testing.T) {
+// TestPSChildPIDsReturnsErrorWhenPSHangs is a RED test for ga-gxmz9n's binding
+// constraint: when enumeration cannot complete, it must report an error rather
+// than silently returning an empty (falsely "no children") result — otherwise
+// a leak-detection caller cannot tell "checked, found none" apart from "never
+// actually checked". Mirrors TestPSReportsZombieReturnsWhenPSHangs's
+// PATH-shadowing technique.
+//
+// It drives psChildPIDs rather than ChildPIDs because ChildPIDs reads the
+// kernel process table directly on darwin, where no PATH stub can reach it.
+// Testing the front door there would assert nothing while appearing to pass;
+// testing the fallback directly keeps the contract covered on every platform.
+func TestPSChildPIDsReturnsErrorWhenPSHangs(t *testing.T) {
 	binDir := t.TempDir()
 	psPath := filepath.Join(binDir, "ps")
 	if err := os.WriteFile(psPath, []byte("#!/bin/sh\nexec sleep 10\n"), 0o755); err != nil {
@@ -282,28 +287,32 @@ func TestChildPIDsReturnsErrorWhenPSHangs(t *testing.T) {
 	// answer" and the ps fallback — the path under test — actually runs.
 	// A live pid would be answered from /proc and never reach ps.
 	start := time.Now()
-	pids, err := ChildPIDs(1 << 30)
+	pids, err := psChildPIDs(os.Getpid())
 	if err == nil {
-		t.Fatalf("ChildPIDs with a hanging ps: got pids=%v err=nil, want a non-nil error", pids)
+		t.Fatalf("psChildPIDs with a hanging ps: got pids=%v err=nil, want a non-nil error", pids)
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Fatalf("ChildPIDs took %s, want bounded timeout", elapsed)
+		t.Fatalf("psChildPIDs took %s, want bounded timeout", elapsed)
 	}
 }
 
-// TestChildPIDsExcludesItsOwnEnumerationHelper is a regression test: ps is
+// TestPSChildPIDsExcludesItsOwnEnumerationHelper is a regression test: ps is
 // itself alive, and a child of the caller, at the instant it captures the
-// process table, so an unfiltered ChildPIDs(os.Getpid()) always reports at
-// least one phantom "child" — the transient ps invocation itself — even
-// when no real child exists. This is exactly the self-monitoring pattern
+// process table, so an unfiltered enumeration of os.Getpid()'s children always
+// reports at least one phantom "child" — the transient ps invocation itself —
+// even when no real child exists. This is exactly the self-monitoring pattern
 // this package's callers use for leak checks (ChildPIDs(os.Getpid())), and
 // it produced a false-positive "leaked child" on every run of
 // internal/workspacesvc's TestMain regardless of any real leak (ga-gxmz9n).
 //
 // The fake ps here reports a single row for itself ($$, the real parent),
 // mirroring the one spurious row a genuine ps produces in the self-check
-// case; ChildPIDs must recognize that row as its own helper and exclude it.
-func TestChildPIDsExcludesItsOwnEnumerationHelper(t *testing.T) {
+// case; the enumeration must recognize that row as its own helper and exclude
+// it. It drives psChildPIDs for the reason given on
+// TestPSChildPIDsReturnsErrorWhenPSHangs: on darwin the front door never
+// reaches ps, so asserting there would pass without testing anything. The
+// sysctl path has no helper to exclude — it spawns nothing.
+func TestPSChildPIDsExcludesItsOwnEnumerationHelper(t *testing.T) {
 	binDir := t.TempDir()
 	psPath := filepath.Join(binDir, "ps")
 	script := fmt.Sprintf("#!/bin/sh\necho \"$$ %d\"\n", os.Getpid())
@@ -312,12 +321,12 @@ func TestChildPIDsExcludesItsOwnEnumerationHelper(t *testing.T) {
 	}
 	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
 
-	pids, err := ChildPIDs(os.Getpid())
+	pids, err := psChildPIDs(os.Getpid())
 	if err != nil {
-		t.Fatalf("ChildPIDs(%d): %v", os.Getpid(), err)
+		t.Fatalf("psChildPIDs(%d): %v", os.Getpid(), err)
 	}
 	if len(pids) != 0 {
-		t.Fatalf("ChildPIDs(%d) = %v, want empty — the only ps row was the enumeration helper's own (self, parent) pair and must be excluded, not reported as a leaked child", os.Getpid(), pids)
+		t.Fatalf("psChildPIDs(%d) = %v, want empty — the only ps row was the enumeration helper's own (self, parent) pair and must be excluded, not reported as a leaked child", os.Getpid(), pids)
 	}
 }
 

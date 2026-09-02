@@ -78,11 +78,18 @@ func itoa(n int) string {
 
 func listenOnRandomPort(t *testing.T) net.Listener {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := listenOnAddr("127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	return ln
+}
+
+// listenOnAddr is the package's single TCP listen site. Callers that must
+// tolerate an address the host cannot provide — an IPv6 loopback, say — take
+// the error and skip; listenOnRandomPort fails the test instead.
+func listenOnAddr(addr string) (net.Listener, error) {
+	return net.Listen("tcp", addr)
 }
 
 func reserveRandomTCPPort(t *testing.T) int {

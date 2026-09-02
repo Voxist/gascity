@@ -16,6 +16,12 @@ import (
 // handler back on the warm path, so the NEXT poll is served from the warm
 // entry without another rebuild. With a refresher that seeds only the
 // response cache, every later poll re-enters the SWR branch and rebuilds.
+// The SWR branch is unreachable in production (buildAndStoreStatus seeds the
+// warm entry and the response cache together, and the warm branch serves at
+// any age), so this test constructs the state by hand. It is a guard on what
+// the branch DOES if a future change ever makes it reachable — one refresh
+// must seed both caches and hand the handler back to the warm path — not
+// evidence that the branch fires today.
 func TestHandleStatusSWRRefreshReseedsWarmEntry(t *testing.T) {
 	oldTTL := timeBucketResponseCacheTTL
 	timeBucketResponseCacheTTL = time.Nanosecond // bucket cache misses every request

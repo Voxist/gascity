@@ -2133,7 +2133,15 @@ func isLegacySelfClosingBlocker(blocker, subject beads.Bead, closerID string) bo
 			subject.Metadata[beadmeta.ScopeRoleMetadataKey] != beadmeta.ScopeRoleBody {
 			return false
 		}
-		if blocker.Metadata[beadmeta.RootBeadIDMetadataKey] != subject.Metadata[beadmeta.RootBeadIDMetadataKey] {
+		// The shared root must be NON-EMPTY. gc.scope_ref names a step within
+		// a workflow ("body", "review") and is not unique across workflows, so
+		// two beads that both lack gc.root_bead_id would otherwise compare
+		// equal and match on the name alone — and this repair removes the
+		// matched edge. These are pre-#5202 beads minted by an older binary,
+		// which is exactly the population whose metadata cannot be assumed
+		// complete (TestLegacyCycleRepairRequiresANonEmptySharedRoot).
+		root := subject.Metadata[beadmeta.RootBeadIDMetadataKey]
+		if root == "" || blocker.Metadata[beadmeta.RootBeadIDMetadataKey] != root {
 			return false
 		}
 		return matchesScopeRef(subject, blocker.Metadata[beadmeta.ScopeRefMetadataKey])
