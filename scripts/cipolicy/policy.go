@@ -53,7 +53,7 @@ const (
 	// Re-derived on the merge with #152 (static-checks split): both sides moved
 	// ci.yml (this branch: the cmd/gc shard timeout), so the merged file hashes
 	// to neither side. Taken from the digest printed for the merged workflow.
-	expectedCIExecutionHash     = "4bbba130a57590ccd96acfe457e01675ad1d4bb77ff83fcd779813e29a73e5f5"
+	expectedCIExecutionHash     = "26a661b2d24348a7e8e691903d04aa1ed3c107167f997d41e3320874f77d2291"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
