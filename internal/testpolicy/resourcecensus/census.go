@@ -125,8 +125,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   657,
-			BaselineFiles:   188,
+			BaselineCalls:   662,
+			BaselineFiles:   191,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",
@@ -138,7 +138,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   477,
+			BaselineCalls:   478,
 			BaselineFiles:   172,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
@@ -166,7 +166,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   444,
+			BaselineCalls:   442,
 			BaselineFiles:   126,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
@@ -179,7 +179,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   321,
+			BaselineCalls:   322,
 			BaselineFiles:   121,
 			ReportedCalls:   295,
 			ReportedFiles:   114,
@@ -218,7 +218,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceSlowProcessGate,
-			BaselineCalls:   58,
+			BaselineCalls:   59,
 			BaselineFiles:   24,
 			ReportedCalls:   78,
 			ReportedFiles:   27,
@@ -231,8 +231,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceHTTPTestServer,
-			BaselineCalls:   318,
-			BaselineFiles:   66,
+			BaselineCalls:   333,
+			BaselineFiles:   70,
 			ReportedCalls:   255,
 			ReportedFiles:   56,
 			OwnerBead:       "ga-80po0c.2.2",
@@ -466,8 +466,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   437,
-			BaselineFiles:   122,
+			BaselineCalls:   436,
+			BaselineFiles:   123,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
 			OwnerBead:       "ga-80po0c.2.1",
@@ -479,7 +479,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   321,
+			BaselineCalls:   322,
 			BaselineFiles:   121,
 			ReportedCalls:   287,
 			ReportedFiles:   113,
@@ -518,7 +518,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceSlowProcessGate,
-			BaselineCalls:   58,
+			BaselineCalls:   59,
 			BaselineFiles:   24,
 			ReportedCalls:   75,
 			ReportedFiles:   25,
@@ -531,8 +531,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceHTTPTestServer,
-			BaselineCalls:   318,
-			BaselineFiles:   66,
+			BaselineCalls:   333,
+			BaselineFiles:   70,
 			ReportedCalls:   300,
 			ReportedFiles:   66,
 			OwnerBead:       "ga-80po0c.2.2",
