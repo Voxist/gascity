@@ -754,12 +754,27 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 // consumer gating on the code must be able to tell a dead store from no-work on
 // this path too.
 func reportClaimWorkQueryFailure(err error, stderr io.Writer) int {
+	return reportWorkQueryFailure("gc hook --claim", err, stderr)
+}
+
+// workQueryStoreUnavailable reports whether err is a transport-class failure
+// (an unreachable store, not an empty queue) after classification.
+func workQueryStoreUnavailable(err error) bool {
+	return errors.Is(classifyWorkQueryStoreUnavailable(err), beads.ErrStoreUnavailable)
+}
+
+// reportWorkQueryFailure is the ONE place the token <=> exit-2 contract is
+// rendered: a transport-class failure prints "<prefix>: <token>: <err>" and
+// exits 2; anything else prints "<prefix>: <err>" and exits 1. The read path
+// (doHook) and the claim path share it so the published contract cannot
+// drift between them.
+func reportWorkQueryFailure(prefix string, err error, stderr io.Writer) int {
 	classified := classifyWorkQueryStoreUnavailable(err)
 	if errors.Is(classified, beads.ErrStoreUnavailable) {
-		fmt.Fprintf(stderr, "gc hook --claim: %s: %v\n", hookStoreUnavailableToken, classified) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: %s: %v\n", prefix, hookStoreUnavailableToken, classified) //nolint:errcheck // best-effort stderr
 		return 2
 	}
-	fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "%s: %v\n", prefix, err) //nolint:errcheck // best-effort stderr
 	return 1
 }
 
@@ -1009,17 +1024,15 @@ func doHook(workQuery, dir string, inject bool, runner WorkQueryRunner, stdout, 
 	output, err := runner(workQuery, dir)
 	if err != nil {
 		// A transport-class failure is an unreachable store, not an empty
-		// queue. Reporting it as exit-1 no-work is the dead-drop this token
-		// exists to prevent, so it exits 2 with a token consumers can match.
-		if classified := classifyWorkQueryStoreUnavailable(err); errors.Is(classified, beads.ErrStoreUnavailable) {
-			fmt.Fprintf(stderr, "gc hook: %s: %v\n", hookStoreUnavailableToken, classified) //nolint:errcheck // best-effort stderr
-			return 2
+		// queue: no partial stdout, token + exit 2 (reportWorkQueryFailure).
+		// Any other failure first surfaces whatever partial output the query
+		// produced, then reports exit 1.
+		if !workQueryStoreUnavailable(err) {
+			if normalized := normalizeWorkQueryOutput(strings.TrimSpace(output)); normalized != "" {
+				fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
+			}
 		}
-		if normalized := normalizeWorkQueryOutput(strings.TrimSpace(output)); normalized != "" {
-			fmt.Fprint(stdout, normalized) //nolint:errcheck // best-effort stdout
-		}
-		fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		return reportWorkQueryFailure("gc hook", err, stderr)
 	}
 
 	trimmed := strings.TrimSpace(output)

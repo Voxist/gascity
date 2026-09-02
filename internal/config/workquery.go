@@ -686,47 +686,33 @@ func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) stri
 		`fi; `
 }
 
-// poolDemandOriginGateScript sets pool_gate_skipped rather than `exit 0`
-// (vc-ozanp5). Exiting silently made a non-ephemeral session look like a
-// session with no work: the pool tier was never probed and nothing said so, and
-// an operator could not tell "no routed work" from "routed work was not even
-// considered". Silent failure is this fleet's dominant failure mode
-// (ADR-0043), so the refusal is made audible by the gated tail below.
-func poolDemandOriginGateScript() string {
-	return `pool_gate_skipped=0; ` +
-		`case "$GC_SESSION_ORIGIN" in ` +
-		`ephemeral|"") ;; ` +
-		`*) pool_gate_skipped=1 ;; ` +
-		`esac; `
-}
-
-// poolDemandProbeCallScript emits ONE gated probe_pool_demand call.
-func poolDemandProbeCallScript(arg string) string {
-	return `[ "$pool_gate_skipped" = "0" ] && probe_pool_demand ` + arg + `; `
-}
-
 // PoolDemandOriginGateRefusalPrefix is the stable stderr prefix the generated
 // work_query script prints when the origin gate refuses to probe the pool tier
-// (vc-ozanp5). It is the one definition the emitter below, the agent-script
-// classifier in cmd/gc, and the guard tests all read, so the emitted line and
-// its consumers cannot drift apart.
+// (vc-ozanp5). It is the one definition the emitter below, the cmd/gc hook
+// runner's classification, and the guard tests all read, so the emitted line
+// and its consumers cannot drift apart.
 const PoolDemandOriginGateRefusalPrefix = "gc: work_query pool tier not probed:"
 
-// poolDemandGatedTailScript closes the pool tier: it reports a skipped probe on
-// stderr, then prints the empty fallthrough. It fires whenever the gate
-// refused, not only when the tier turned out empty.
-func poolDemandGatedTailScript() string {
-	return `[ "$pool_gate_skipped" = "1" ] && ` +
-		`printf "` + PoolDemandOriginGateRefusalPrefix + ` origin=%s is not ephemeral; routed pool work (if any) was NOT considered\n" "$GC_SESSION_ORIGIN" >&2; ` +
-		`printf "[]"`
+// poolDemandOriginGateScript refuses the pool tier for a non-ephemeral session
+// AUDIBLY (vc-ozanp5): it prints the refusal on stderr, the empty result on
+// stdout, and exits 0 — the same stdout/exit contract as an empty tier, so the
+// caller's no-work handling is unchanged, but an operator can tell "no routed
+// work" from "routed work was not even considered". Exiting silently was this
+// fleet's dominant failure mode (ADR-0043). One case arm, no shell state: every
+// probe that follows runs only because the gate did not exit.
+func poolDemandOriginGateScript() string {
+	return `case "$GC_SESSION_ORIGIN" in ` +
+		`ephemeral|"") ;; ` +
+		`*) printf "` + PoolDemandOriginGateRefusalPrefix + ` origin=%s is not ephemeral; routed pool work (if any) was NOT considered\n" "$GC_SESSION_ORIGIN" >&2; printf "[]"; exit 0 ;; ` +
+		`esac; `
 }
 
 func routedPoolWorkQueryProbeScript(topo QueryTopology, targetCount int) string {
 	script := poolDemandOriginGateScript() + poolDemandFirstRowFunctionScript(topo)
 	for i := 1; i <= targetCount; i++ {
-		script += poolDemandProbeCallScript(fmt.Sprintf(`"$%d"`, i))
+		script += fmt.Sprintf(`probe_pool_demand "$%d"; `, i)
 	}
-	return script + poolDemandGatedTailScript()
+	return script + `printf "[]"`
 }
 
 func routedPoolWorkQueryCommand(topo QueryTopology, targets ...string) string {

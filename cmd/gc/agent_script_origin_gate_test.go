@@ -3,9 +3,6 @@ package main
 import (
 	"bytes"
 	"io"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -25,12 +22,15 @@ const originGateRefusalSample = "gc: work_query pool tier not probed: origin=nam
 // classification changes.
 func TestAgentScriptTreatsOriginGateRefusalAsNoWork(t *testing.T) {
 	t.Parallel()
-	if !agentScriptHookExitIsNoWork("", originGateRefusalSample+"\n") {
+	// The refusal reaches script mode only through hookWorkQueryRunner, which
+	// stamps every exit-0 stderr line with hookWorkQueryDiagPrefix; that stamp
+	// is the classification signal, so the sample is fed in the stamped form.
+	if !agentScriptHookExitIsNoWork("", hookWorkQueryDiagPrefix+originGateRefusalSample+"\n") {
 		t.Fatal("origin-gate refusal classified as a hook FAILURE; every idle named script-mode agent exits 1 instead of the graceful no-work turn")
 	}
 	// The classifier must not become a blanket allowlist: a real error line
 	// alongside the refusal still fails.
-	if agentScriptHookExitIsNoWork("", originGateRefusalSample+"\ngc hook: running work query: exit status 1\n") {
+	if agentScriptHookExitIsNoWork("", hookWorkQueryDiagPrefix+originGateRefusalSample+"\ngc hook: running work query: exit status 1\n") {
 		t.Fatal("a genuine hook error was swallowed once the gate-refusal line became benign")
 	}
 }
@@ -40,21 +40,6 @@ func TestAgentScriptTreatsOriginGateRefusalAsNoWork(t *testing.T) {
 // (poolDemandGatedTailScript), in the repo's source-lock idiom: if the emitted
 // text changes shape, this fails here instead of silently re-breaking every
 // idle named script agent.
-func TestOriginGateRefusalPrefixMatchesEmitter(t *testing.T) {
-	t.Parallel()
-	_, currentFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	emitter := filepath.Join(filepath.Dir(currentFile), "..", "..", "internal", "config", "workquery.go")
-	data, err := os.ReadFile(emitter)
-	if err != nil {
-		t.Fatalf("ReadFile(%q): %v", emitter, err)
-	}
-	if !strings.Contains(string(data), originGateRefusalPrefix) {
-		t.Fatalf("internal/config/workquery.go no longer emits a line starting %q; update originGateRefusalPrefix (cmd_agent_script.go) to the emitter's new shape or idle named script agents will fail again", originGateRefusalPrefix)
-	}
-}
 
 // mysqlDriverChatterSample is the shape of benign stderr a federated city's bd
 // legs emit on a successful poll: go-sql-driver logging a dropped connection

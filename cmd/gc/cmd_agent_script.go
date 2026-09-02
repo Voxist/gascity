@@ -17,8 +17,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
-
-	"github.com/gastownhall/gascity/internal/config"
 )
 
 const agentScriptActionTimeout = 5 * time.Minute
@@ -801,11 +799,6 @@ func agentScriptHookBeadWithRunner(stderr io.Writer, runHook agentScriptHookRunn
 	return beads[0], true, nil
 }
 
-// originGateRefusalPrefix is config's single definition of the origin-gate
-// refusal line (vc-ozanp5), read here so the classifier and the emitter cannot
-// drift apart.
-const originGateRefusalPrefix = config.PoolDemandOriginGateRefusalPrefix
-
 // agentScriptHookExitIsNoWork decides whether a non-zero `gc hook` exit with
 // no ready work is the graceful empty turn or a hook failure. gc hook exits 1
 // for both, so the decision reads its stderr — but only lines the hook itself
@@ -825,14 +818,6 @@ func agentScriptHookExitIsNoWork(output, stderr string) bool {
 		}
 		if strings.HasPrefix(line, hookWorkQueryDiagPrefix) {
 			// Forwarded from a work query that exited 0: audible, not a failure.
-			continue
-		}
-		if strings.HasPrefix(line, originGateRefusalPrefix) {
-			// Benign-empty: the origin gate disclosing that it did not probe
-			// the routed pool tier for this non-ephemeral session. The line
-			// stays audible on stderr; only its CLASSIFICATION is no-work.
-			// (Kept for the raw form; through hookWorkQueryRunner it arrives
-			// under hookWorkQueryDiagPrefix and is handled above.)
 			continue
 		}
 		if !strings.Contains(strings.ToLower(line), "warning") {

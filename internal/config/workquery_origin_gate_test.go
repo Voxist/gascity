@@ -12,15 +12,15 @@ import (
 // origin (or an unset one) may probe pool demand, because a named session is a
 // reserved coordinator identity rather than a generic-demand worker.
 //
-// vc-ozanp5 changed the gate from `*) exit 0` to a flag plus an audible tail.
+// vc-ozanp5 changed the gate from a silent `*) exit 0` to an audible refusal.
 // The refusal itself is unchanged; what changed is that it is no longer
 // indistinguishable from a drained queue. These tests pin the part that
 // actually matters at runtime — what the emitted shell DOES — which neither
 // the parity oracle nor the goldens can show, since both only compare strings.
 
-// runGate composes the real gate, a stubbed probe, the real gated probe call
-// and the real tail, then executes it. probe_pool_demand is stubbed rather than built from
-// poolDemandFirstRowFunctionScript so the test needs no bd/jq and stays
+// runGate composes the real gate, a stubbed probe, one probe call and the
+// empty tail, then executes it. probe_pool_demand is stubbed rather than built
+// from poolDemandFirstRowFunctionScript so the test needs no bd/jq and stays
 // hermetic; the stub reports that it ran and then misses, which is the path
 // that reaches the tail.
 func runGate(t *testing.T, origin, shellPrefix string) (stdout, stderr string, err error) {
@@ -28,8 +28,8 @@ func runGate(t *testing.T, origin, shellPrefix string) (stdout, stderr string, e
 	script := shellPrefix +
 		poolDemandOriginGateScript() +
 		`probe_pool_demand() { printf "PROBED(%s)" "$1" >&2; return 1; }; ` +
-		poolDemandProbeCallScript(`"$1"`) +
-		poolDemandGatedTailScript()
+		`probe_pool_demand "$1"; ` +
+		`printf "[]"`
 	cmd := exec.Command("sh", "-c", script, "--", "worker-pool")
 	// An unset GC_SESSION_ORIGIN and an empty one are different inputs to the
 	// gate's case statement, so set it explicitly either way.
@@ -119,9 +119,12 @@ func TestPoolDemandOriginGateGatedPathSurvivesErrexit(t *testing.T) {
 	}
 }
 
-// Regression guard for the form the gate replaced. A bare `probe_pool_demand
-// "$N"` is exactly what would let a named origin silently re-acquire
-// pool-poaching behavior, and it is easy to reintroduce when adding a target.
+// Regression guard: every probe_pool_demand call in every generated query must
+// sit AFTER the audible origin gate, whose non-ephemeral arm exits the script
+// before any probe runs. A probe emitted ahead of the gate (easy to
+// reintroduce when adding a target) is exactly what would let a named origin
+// silently re-acquire pool-poaching behavior; a gate without the refusal line
+// would exit silently again, the defect vc-ozanp5 exists to remove.
 func TestGeneratedWorkQueriesHaveNoUngatedProbeCall(t *testing.T) {
 	agents := map[string]*Agent{
 		"plain":      {Name: "worker"},
@@ -134,23 +137,29 @@ func TestGeneratedWorkQueriesHaveNoUngatedProbeCall(t *testing.T) {
 		"RoutedPool": (*Agent).EffectiveRoutedPoolQuery,
 		"PoolDemand": (*Agent).EffectivePoolDemandQuery,
 	}
+	gateArm := gateSignalMarker
 	for agentName, agent := range agents {
 		for queryName, q := range queries {
 			got := q(agent)
-			if !strings.Contains(got, "probe_pool_demand") {
+			firstProbe := strings.Index(got, `probe_pool_demand "$`)
+			if firstProbe < 0 {
 				continue // this query has no pool tier
 			}
-			for _, arg := range []string{`"$1"`, `"$2"`} {
-				ungated := `; probe_pool_demand ` + arg
-				if strings.Contains(got, ungated) {
-					t.Errorf("%s/%s contains an UNGATED probe call %q — a named origin would poach the pool",
-						agentName, queryName, strings.TrimPrefix(ungated, "; "))
-				}
+			gate := strings.Index(got, gateArm)
+			if gate < 0 {
+				t.Errorf("%s/%s has a pool tier but no audible origin gate", agentName, queryName)
+				continue
 			}
-			// A gate with no tail would exit silently again, which is the
-			// defect vc-ozanp5 exists to remove.
-			if !strings.Contains(got, gateSignalMarker) {
-				t.Errorf("%s/%s has a pool tier but no gated-signal tail", agentName, queryName)
+			if gate > firstProbe {
+				t.Errorf("%s/%s emits a probe call before the origin gate — a named origin would poach the pool", agentName, queryName)
+			}
+			// The refusing arm must exit, or the probes after it would still run.
+			arm := got[gate:]
+			if end := strings.Index(arm, ";;"); end >= 0 {
+				arm = arm[:end]
+			}
+			if !strings.Contains(arm, "exit 0") {
+				t.Errorf("%s/%s: the origin gate's refusing arm does not exit before the probes:\n%s", agentName, queryName, arm)
 			}
 		}
 	}

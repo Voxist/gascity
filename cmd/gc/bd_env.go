@@ -82,19 +82,7 @@ func bdContextCommandRunnerForCity(cityPath string) beads.CommandRunner {
 		env["BEADS_DOLT_AUTO_START"] = "0"
 		env["BD_EXPORT_AUTO"] = "false"
 		hosted := hostedBeadsSelectionFor(cityPath)
-		selected, err := hosted.Selected()
-		if err != nil {
-			return nil, err
-		}
-		credentialsFile := strings.TrimSpace(env["BEADS_CREDENTIALS_FILE"])
-		if credentialsFile == "" && !selected {
-			credentialsFile = strings.TrimSpace(ambientNativeDoltOpenEnv("BEADS_CREDENTIALS_FILE"))
-		}
-		setExecProjectedBackendEnvEmpty(env)
-		if credentialsFile != "" {
-			env["BEADS_CREDENTIALS_FILE"] = credentialsFile
-		}
-		if err := applyHostedBeadsCredentialEnvFor(env, hosted); err != nil {
+		if err := applyNonDoltStorageCredentialEnv(env, hosted); err != nil {
 			return nil, err
 		}
 		// Route through the hosted-city chooser (upstream's contract): the
@@ -526,6 +514,28 @@ func applyCanonicalDoltAuthEnv(env map[string]string, cityPath, scopeRoot string
 	applyResolvedDoltAuthEnv(env, authScopeRoot, strings.TrimSpace(target.User))
 }
 
+// applyNonDoltStorageCredentialEnv projects the credential env for a
+// non-Dolt (external-binding) bd invocation: the ambient credentials file
+// applies only when the city does NOT select the hosted beads binding, the
+// exec-projected backend keys are cleared, and the hosted credential env is
+// layered on top. Shared by the external-binding runner and the complete
+// storage-binding projection so the two cannot drift.
+func applyNonDoltStorageCredentialEnv(env map[string]string, hosted *hostedBeadsSelection) error {
+	selected, err := hosted.Selected()
+	if err != nil {
+		return err
+	}
+	credentialsFile := strings.TrimSpace(env["BEADS_CREDENTIALS_FILE"])
+	if credentialsFile == "" && !selected {
+		credentialsFile = strings.TrimSpace(ambientNativeDoltOpenEnv("BEADS_CREDENTIALS_FILE"))
+	}
+	setExecProjectedBackendEnvEmpty(env)
+	if credentialsFile != "" {
+		env["BEADS_CREDENTIALS_FILE"] = credentialsFile
+	}
+	return applyHostedBeadsCredentialEnvFor(env, hosted)
+}
+
 // applyCompleteNonDoltStorageBindingEnv is the whole of gc's support for a
 // backend it does not implement, and the reason no other support is needed.
 //
@@ -542,19 +552,7 @@ func applyCompleteNonDoltStorageBindingEnv(env map[string]string, cityPath, scop
 	if err != nil || !completeBinding {
 		return completeBinding, err
 	}
-	selected, err := hosted.Selected()
-	if err != nil {
-		return true, err
-	}
-	credentialsFile := strings.TrimSpace(env["BEADS_CREDENTIALS_FILE"])
-	if credentialsFile == "" && !selected {
-		credentialsFile = strings.TrimSpace(ambientNativeDoltOpenEnv("BEADS_CREDENTIALS_FILE"))
-	}
-	setExecProjectedBackendEnvEmpty(env)
-	if credentialsFile != "" {
-		env["BEADS_CREDENTIALS_FILE"] = credentialsFile
-	}
-	if err := applyHostedBeadsCredentialEnvFor(env, hosted); err != nil {
+	if err := applyNonDoltStorageCredentialEnv(env, hosted); err != nil {
 		return true, err
 	}
 	bdBin, err := workspacePinnedBdBinary(cityPath)
