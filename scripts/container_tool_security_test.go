@@ -87,7 +87,16 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		bdBuild        = "3e03250ee"
 		bdBranch       = "HEAD"
 		grpcVersion    = "1.83.0"
-		xtextVersion   = "0.40.0"
+		// Floors, not exact pins: each must be >= what the pinned source
+		// resolves, because pinning BELOW that is a silent downgrade
+		// (ga-0emb8). x/text is 0.41.0 here and 0.39.0 for the base image
+		// because the x/crypto floor drags x/text up in bd's module graph only.
+		xtextVersion = "0.41.0"
+		// CVE-2026-56854 (CRITICAL, fixed 0.55.0) and CVE-2026-56864 (HIGH,
+		// fixed 0.40.0). The pinned source declares x/crypto 0.54.0 and x/mod
+		// 0.37.0, and the image scan gates HIGH+CRITICAL with --exit-code 1.
+		xcryptoVersion = "0.55.0"
+		xmodVersion    = "0.40.0"
 	)
 
 	root := repoRoot(t)
@@ -105,12 +114,18 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		"ARG BD_BRANCH=" + bdBranch,
 		"ARG GRPC_VERSION=" + grpcVersion,
 		"ARG XTEXT_VERSION=" + xtextVersion,
+		"ARG XCRYPTO_VERSION=" + xcryptoVersion,
+		"ARG XMOD_VERSION=" + xmodVersion,
 		"ARG BD_REPO=Voxist/beads",
 		`https://github.com/${BD_REPO}/archive/${BD_SOURCE_REF}.tar.gz`,
 		`echo "${BD_SOURCE_SHA256}  /tmp/bd-source.tar.gz" | sha256sum --check --strict`,
 		`grep -Fq "Version = \"${bd_version}\"" cmd/bd/version.go`,
 		`go get "google.golang.org/grpc@v${GRPC_VERSION}"`,
 		`go get "golang.org/x/text@v${XTEXT_VERSION}"`,
+		`go get "golang.org/x/crypto@v${XCRYPTO_VERSION}"`,
+		`go get "golang.org/x/mod@v${XMOD_VERSION}"`,
+		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/crypto v${XCRYPTO_VERSION} "`,
+		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/mod v${XMOD_VERSION} "`,
 		`CGO_ENABLED=1 go build`,
 		`-tags="gms_pure_go"`,
 		`-X main.Version=${bd_version}`,
@@ -131,6 +146,14 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	if got := strings.Count(dockerfile, `go get "golang.org/x/text@v${XTEXT_VERSION}"`); got != 1 {
 		t.Errorf("contrib/k8s/Dockerfile.agent applies the bd x/text override %d times, want exactly 1", got)
 	}
+	for _, override := range []string{
+		`go get "golang.org/x/crypto@v${XCRYPTO_VERSION}"`,
+		`go get "golang.org/x/mod@v${XMOD_VERSION}"`,
+	} {
+		if got := strings.Count(dockerfile, override); got != 1 {
+			t.Errorf("contrib/k8s/Dockerfile.agent applies %s %d times, want exactly 1", override, got)
+		}
+	}
 	if strings.Contains(dockerfile, "COPY bd /usr/local/bin/bd") {
 		t.Error("contrib/k8s/Dockerfile.agent still copies the vulnerable prebuilt bd binary")
 	}
@@ -147,8 +170,35 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	}
 	// bd resolves x/text through its own module graph, not gc's, so the gc binary
 	// and the bd binary each need their own floor. This is the gc side.
-	if got := goModVersion(t, goMod, "golang.org/x/text"); !semverAtLeast(got, parseModuleSemver(t, "v"+xtextVersion)) {
-		t.Errorf("go.mod pins golang.org/x/text %v, want >= v%s so the gc binary clears CVE-2026-56852", got, xtextVersion)
+	//
+	// The FLOOR is the security requirement; the image ARGs above are the
+	// versions bd's graph actually resolves to, and those must be >= the floor,
+	// not equal to it (the Dockerfile asserts its ARGs by exact `go version -m`
+	// match, so an ARG has to track the resolved value). Conflating the two is
+	// how the x/text override silently became a downgrade: see ga-0emb8.
+	const (
+		xtextFloor   = "0.40.0" // CVE-2026-56852
+		xcryptoFloor = "0.55.0" // CVE-2026-56854 (CRITICAL)
+		xmodFloor    = "0.40.0" // CVE-2026-56864 (HIGH)
+	)
+	for _, f := range []struct{ module, floor, cve string }{
+		{"golang.org/x/text", xtextFloor, "CVE-2026-56852"},
+		{"golang.org/x/crypto", xcryptoFloor, "CVE-2026-56854"},
+		{"golang.org/x/mod", xmodFloor, "CVE-2026-56864"},
+	} {
+		if got := goModVersion(t, goMod, f.module); !semverAtLeast(got, parseModuleSemver(t, "v"+f.floor)) {
+			t.Errorf("go.mod pins %s %v, want >= v%s so the gc binary clears %s", f.module, got, f.floor, f.cve)
+		}
+	}
+	// And the image ARGs must not sit BELOW the same floors.
+	for _, f := range []struct{ name, arg, floor string }{
+		{"XTEXT_VERSION", xtextVersion, xtextFloor},
+		{"XCRYPTO_VERSION", xcryptoVersion, xcryptoFloor},
+		{"XMOD_VERSION", xmodVersion, xmodFloor},
+	} {
+		if !semverAtLeast(parseModuleSemver(t, "v"+f.arg), parseModuleSemver(t, "v"+f.floor)) {
+			t.Errorf("Dockerfile.agent %s=%s is below the security floor v%s — an override that pins below what the source resolves is a downgrade", f.name, f.arg, f.floor)
+		}
 	}
 
 	workflow := readFile(t, root, ".github/workflows/container-scan.yml")

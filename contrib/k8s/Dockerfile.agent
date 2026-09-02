@@ -34,7 +34,17 @@ ARG BD_SOURCE_SHA256=587ad18b765d90e75b64ca4bb57c12520befd8bece96545d48e98add26b
 ARG BD_BUILD=3e03250ee
 ARG BD_BRANCH=HEAD
 ARG GRPC_VERSION=1.83.0
-ARG XTEXT_VERSION=0.40.0
+# x/text 0.41.0, not 0.40.0: the x/crypto floor below drags x/text to 0.41.0,
+# and pinning BELOW what the module graph then selects is a silent downgrade
+# (ga-0emb8). Every override here must be >= what the pinned source resolves.
+ARG XTEXT_VERSION=0.41.0
+# The pinned beads source declares x/crypto 0.54.0 (CVE-2026-56854, CRITICAL,
+# fixed 0.55.0) and x/mod 0.37.0 (CVE-2026-56864, HIGH, fixed 0.40.0). The
+# image scan gates HIGH+CRITICAL with --exit-code 1, so both floors are needed
+# for a green scan; verified against the exact pinned source: all upgrades, no
+# downgrades, bd builds.
+ARG XCRYPTO_VERSION=0.55.0
+ARG XMOD_VERSION=0.40.0
 
 # bd resolves grpc and x/text through the beads module graph, not this repo's,
 # so gc's own go.mod bumps do not reach this image and the overrides below are
@@ -59,6 +69,8 @@ RUN bd_version="${BD_VERSION#v}" \
     && grep -Fq "Version = \"${bd_version}\"" cmd/bd/version.go \
     && go get "google.golang.org/grpc@v${GRPC_VERSION}" \
     && go get "golang.org/x/text@v${XTEXT_VERSION}" \
+    && go get "golang.org/x/crypto@v${XCRYPTO_VERSION}" \
+    && go get "golang.org/x/mod@v${XMOD_VERSION}" \
     && CGO_ENABLED=1 go build \
        -tags="gms_pure_go" \
        -trimpath \
@@ -67,7 +79,9 @@ RUN bd_version="${BD_VERSION#v}" \
        ./cmd/bd \
     && /out/bd --version | grep -Fq "bd version ${bd_version} (${BD_BUILD})" \
     && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep google.golang.org/grpc v${GRPC_VERSION} " \
-    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/text v${XTEXT_VERSION} "
+    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/text v${XTEXT_VERSION} " \
+    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/crypto v${XCRYPTO_VERSION} " \
+    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/mod v${XMOD_VERSION} "
 
 FROM ${BASE_IMAGE}
 
