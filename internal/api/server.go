@@ -120,6 +120,14 @@ type Server struct {
 	statusWarmLite *statusWarmEntry
 	statusBuildSF  singleflight.Group
 
+	// statusRefreshing tracks which /status variants (lite / full) already
+	// have a background refresh in flight, taken synchronously by
+	// refreshStatusBodyAsync so a burst of misses cannot start more than one
+	// build per variant. statusBuildSF coalesces overlapping builds; this
+	// guard covers the window between spawn and singleflight entry.
+	statusRefreshMu  sync.Mutex
+	statusRefreshing map[bool]bool
+
 	// componentVersions caches the dolt engine and bd CLI versions the
 	// supervisor drives for /v0/status. Binary versions are immutable for
 	// the process lifetime, so they are resolved once on first read.

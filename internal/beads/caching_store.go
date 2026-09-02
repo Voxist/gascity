@@ -37,22 +37,68 @@ type CachingStore struct {
 	beadSeq      map[string]uint64
 	localBeadAt  map[string]time.Time
 	deletedSeq   map[string]uint64
+	// readyProjectionInvalid holds, per bead id, the is_blocked verdict this
+	// cache has invalidated and not yet re-observed (ADR-0094, vc-493m3j).
+	//
+	// KEY membership = "the verdict is disowned". The row's own IsBlocked is
+	// nil'd at invalidation time — upstream's sentinel contract — so every
+	// reader, present or future, is safe by DEFAULT: there is nothing in the
+	// row to leak. Three review rounds proved the inverse design (keep the
+	// value in the row, scrub at each exit) cannot be audited by reading; ten
+	// of eleven escape surfaces leaked.
+	//
+	// VALUE = the verdict that was nil'd out, consulted ONLY by the reconcile
+	// differ's comparison so the nil does not read as a store-side nil<->set
+	// transition — which is the ADR-0094 bead.updated flood. Key set and value
+	// set share one lifecycle by construction: clearReadyProjectionLocked only
+	// fires when a verdict exists, so every mark carries its disowned value.
+	//
+	// This is deliberately a fork-owned map BESIDE upstream's
+	// readyProjectionLost rather than a change to that field's type: widening
+	// an upstream-owned field to carry the verdict would conflict on every
+	// resync, while a parallel map keeps the divergence additive. The cost —
+	// every lifecycle site (newCachingStore, absorbFreshLocked, evictLocked,
+	// both prime carry-over branches) must maintain both maps — is guarded by
+	// TestNoReadSurfaceServesADisownedVerdict and
+	// TestInvalidationNilsTheRowAcrossMutationFamilies, which fail if a
+	// lifecycle site drops the mark or leaks a disowned verdict.
+	readyProjectionInvalid map[string]bool
+	state                  cacheState
+	lastFreshAt            time.Time
+	mutationSeq            uint64
+	observationRevision    uint64
+	primePartialErr        error
 
-	// readyProjectionInvalid holds the ids whose cached is_blocked verdict this
-	// cache has invalidated and not yet re-observed. It exists because
-	// invalidation is not a value: writing a nil sentinel into the row's
-	// IsBlocked to mean "re-ask" is indistinguishable, to the reconcile differ,
-	// from the backing store reporting a genuine nil↔set transition — which is
-	// what made a whole-cache invalidation re-emit bead.updated for every row on
-	// every tick (ADR-0094). The verdict stays in c.beads as what the backing
-	// last reported; only the readiness readers consult this set, exactly where
-	// they used to observe the sentinel.
-	readyProjectionInvalid map[string]struct{}
+	// availabilityGate, when set, reports backing-store transport
+	// availability (the per-scope circuit breaker). See
+	// SetAvailabilityGate. Guarded by mu.
+	// Atomic, NOT mu-guarded: read on every List/Count/Get, so putting it
+	// under c.mu made a canceled caller block on a contended cache lock
+	// just to learn whether the breaker is open
+	// (TestCachingStoreCountContextCancelsWhileWaitingForLock). This also
+	// matches the rule stated on Degraded(): foreign breaker code must
+	// never execute under this lock.
+	availabilityGate atomic.Pointer[AvailabilityGate]
+	// unavailableSkipLogged dedupes the reconcile-skip problem log to one
+	// entry per unavailable episode. Guarded by mu.
+	unavailableSkipLogged bool
+	// degradedReads counts reads served from last-good cache while the
+	// availability gate reported the store unavailable.
+	degradedReads atomic.Int64
 
-	state           cacheState
-	lastFreshAt     time.Time
-	mutationSeq     uint64
-	primePartialErr error
+	// readyProjectionDegraded latches when the backing store reported it cannot
+	// serve the ready projection at all. It is deliberately NOT primePartialErr:
+	// see readyReadsMustGoLive for what each flag costs which reads. Atomic
+	// rather than mu-guarded because it is set from the prime/reconcile paths
+	// and read under mu by the readiness readers.
+	readyProjectionDegraded atomic.Bool
+
+	// readyProjectionLost holds the rows whose is_blocked verdict this cache
+	// HELD and then lost to a payload that could not carry it. Readiness reads
+	// consult it through readyProjectionUnknownLocked, which explains why the
+	// store-wide degrade latch is not enough and why "IsBlocked == nil" is not
+	// the same question (ga-cfhgr).
+	readyProjectionLost map[string]struct{}
 
 	reconciling    atomic.Bool
 	syncFailures   int
@@ -90,18 +136,14 @@ type CachingStore struct {
 	// once the rolling window has drained — see recomputeCadenceLocked.
 	latencyDriverActive bool
 
-	// availabilityGate, when set, reports backing-store transport
-	// availability (the per-scope circuit breaker). See
-	// SetAvailabilityGate. Guarded by mu.
-	availabilityGate AvailabilityGate
-	// unavailableSkipLogged dedupes the reconcile-skip problem log to one
-	// entry per unavailable episode. Guarded by mu.
-	unavailableSkipLogged bool
-	// degradedReads counts reads served from last-good cache while the
-	// availability gate reported the store unavailable.
-	degradedReads atomic.Int64
-
 	applyEventBeforeCommitForTest func()
+}
+
+// CacheObservation is an opaque, process-local stamp returned with a cached
+// active-bead census. It is valid only with its originating CachingStore.
+type CacheObservation struct {
+	owner    *CachingStore
+	revision uint64
 }
 
 var (
@@ -140,11 +182,14 @@ type CacheStats struct {
 	Updates                 int64
 	ReconcileRecoveries     int64
 	ReconcileCloseDeferrals int64
-	SyncFailures            int
-	ProblemCount            int64
-	LastProblemAt           time.Time
-	LastProblem             string
-	State                   string
+	// DegradedReads counts reads served from last-good cache while the
+	// backing store was unavailable (fork availability gate).
+	DegradedReads int64
+	SyncFailures  int
+	ProblemCount  int64
+	LastProblemAt time.Time
+	LastProblem   string
+	State         string
 	// StaggerOffsetMs is the one-shot startup delay applied between Prime
 	// and the first reconciler tick, in milliseconds. Set once when
 	// StartReconciler runs; zero if stagger is disabled.
@@ -162,9 +207,6 @@ type CacheStats struct {
 	// "latency" (P95 above the high-water mark), or "both" (bead count
 	// and latency both push to MEDIUM).
 	CadenceDriver string
-	// DegradedReads counts reads served from last-good cache while the
-	// availability gate reported the backing store unavailable.
-	DegradedReads int64
 }
 
 const (
@@ -327,8 +369,9 @@ func newCachingStore(backing Store, idPrefix string, onChange func(eventType, be
 		beadSeq:                make(map[string]uint64),
 		localBeadAt:            make(map[string]time.Time),
 		deletedSeq:             make(map[string]uint64),
+		readyProjectionInvalid: make(map[string]bool),
+		readyProjectionLost:    make(map[string]struct{}),
 		problemLog:             make(map[string]cacheProblemLogState),
-		readyProjectionInvalid: make(map[string]struct{}),
 		onChange:               onChange,
 		problemf: func(msg string) {
 			log.Printf("beads cache: %s", msg)
@@ -373,6 +416,7 @@ func (c *CachingStore) WaitForParentProjection(ctx context.Context, id, oldParen
 }
 
 func (c *CachingStore) noteMutationLocked(ids ...string) uint64 {
+	c.advanceObservationLocked()
 	c.mutationSeq++
 	seq := c.mutationSeq
 	for _, id := range ids {
@@ -382,6 +426,23 @@ func (c *CachingStore) noteMutationLocked(ids ...string) uint64 {
 		c.beadSeq[id] = seq
 	}
 	return seq
+}
+
+// advanceObservationLocked invalidates cache observations without changing the
+// mutation-sequence fences used by reconciliation. Caller must hold c.mu.
+func (c *CachingStore) advanceObservationLocked() {
+	if c.observationRevision == ^uint64(0) {
+		c.observationRevision = 1
+		return
+	}
+	c.observationRevision++
+}
+
+// markReadyProjectionInvalidLocked records that id's verdict — value — has been
+// nil'd out of the row and must not be trusted until the next observation.
+// Caller must hold c.mu in write mode.
+func (c *CachingStore) markReadyProjectionInvalidLocked(id string, value bool) {
+	c.readyProjectionInvalid[id] = value
 }
 
 func (c *CachingStore) noteLocalMutationLocked(ids ...string) uint64 {
@@ -432,15 +493,41 @@ const (
 	seqClearBeadSeqOnly
 )
 
-// absorbOpts describes the two axes of variation observed across the cache's
-// absorb sites: how the deps row is sourced and how the staleness fences are
-// treated. clearDirty is separate because a small number of sites (prime's
+// absorbReadyMode selects how absorbFreshLocked treats a fresh row that carries
+// no is_blocked verdict over a cached row that has one.
+type absorbReadyMode int
+
+const (
+	// readyPreserveWhenDepsUnchanged is the default because it matches every
+	// absorb site that installs a row from a beadslib-sourced payload — a
+	// backing.Get refresh, an event patch, a locally applied write. None of
+	// those payloads can carry is_blocked: the column has no JSON tag anywhere
+	// in beads, and beadFromNativeIssue cannot set it either. Installing them
+	// verbatim silently reverted the row to the weaker dependency-derived
+	// predicate (ga-cfhgr). The verdict is kept only when the row's dependency
+	// set is unchanged, which is the same evidence
+	// preserveCachedReadyProjectionLocked requires; otherwise the row is marked
+	// unanswerable and readiness declines to the live backing.
+	readyPreserveWhenDepsUnchanged absorbReadyMode = iota
+	// readyFromFresh takes the fresh row's verdict as authoritative, including
+	// its absence. Reconciliation uses it: it has already decided, per row and
+	// on richer evidence than the deps set alone, which cached verdicts survive
+	// the cycle (preserveCachedReadyProjectionLocked), so re-deciding here would
+	// override a considered refusal.
+	readyFromFresh
+)
+
+// absorbOpts describes the three axes of variation observed across the cache's
+// absorb sites: how the deps row is sourced, how the staleness fences are
+// treated, and whether a fresh row without a ready projection may keep the
+// cached one. clearDirty is separate because a small number of sites (prime's
 // slow path, PrimeActive) deliberately leave a dirty mark in place across an
 // absorb.
 type absorbOpts struct {
 	depsMode   absorbDepsMode
 	deps       []Dep // consulted only for depsExplicit
 	seqMode    absorbSeqMode
+	readyMode  absorbReadyMode
 	clearDirty bool
 }
 
@@ -449,12 +536,24 @@ type absorbOpts struct {
 // state. now is the caller's clock read for the whole pass; it is consulted
 // only by seqClearGuarded. Caller must hold c.mu in write mode.
 func (c *CachingStore) absorbFreshLocked(id string, bead Bead, now time.Time, opts absorbOpts) {
+	c.advanceObservationLocked()
+	// Whether the INCOMING row carried its own verdict, read before
+	// absorbReadyProjectionLocked runs — that helper may copy the cache's own
+	// cached verdict forward under readyPreserveWhenDepsUnchanged, after which
+	// bead.IsBlocked is no longer evidence of an observation. An invalidated
+	// row is nil'd, so a merge seeded from the cache can never masquerade as
+	// an observation here; only a row that genuinely carried is_blocked
+	// (a backing read, a graph apply, an event with the field) discharges.
+	observedVerdict := bead.IsBlocked != nil
+	bead = c.absorbReadyProjectionLocked(id, bead, opts)
 	c.beads[id] = cloneBead(bead)
-	// An absorb is an observation: whatever the backing (or an event payload
-	// carrying the field) just reported supersedes this cache's own request to
-	// re-ask, so the invalidation is discharged here rather than at each of the
-	// ~20 call sites that raise it.
-	delete(c.readyProjectionInvalid, id)
+	// An absorb discharges the ADR-0094 invalidation only when it actually
+	// OBSERVED a verdict; a verdict-less absorb leaves the mark (and the
+	// disowned value the differ substitutes) in place until something real
+	// answers.
+	if observedVerdict {
+		delete(c.readyProjectionInvalid, id)
+	}
 	switch opts.depsMode {
 	case depsExplicit:
 		c.deps[id] = cloneDeps(opts.deps)
@@ -484,55 +583,153 @@ func (c *CachingStore) absorbFreshLocked(id string, bead Bead, now time.Time, op
 	}
 }
 
-// evictLocked removes every trace of id from the six per-row maps. It does not
-// touch mutationSeq, depsComplete, state, or stats. Caller must hold c.mu in
-// write mode.
+// absorbReadyProjectionLocked decides what happens to a row's is_blocked
+// verdict when a fresh payload replaces the cached row, and is the single choke
+// point for that decision — every absorb site in the package goes through
+// absorbFreshLocked, so there is no site to miss.
+//
+// A fresh row that CARRIES a verdict is authoritative: it answers the row and
+// clears any outstanding unknown mark. A fresh row that carries none is the
+// interesting case, because that is what `bd show --json` and every
+// beadslib-sourced payload look like — beads has no `is_blocked` JSON tag at
+// all. Installing such a row over a projected one is what silently reverted
+// readiness to the weaker direct-dependency predicate.
+//
+// The verdict is kept when the row's dependency set is unchanged. That is
+// sound because is_blocked can only change through the row's own edges or
+// through a blocking target's status, and a target status change already
+// invalidates its dependents (clearDependentReadyProjectionsLocked). When the
+// deps DID change the cache cannot prove anything about the old verdict, so the
+// row becomes unanswerable and readiness declines to the live backing rather
+// than guessing.
+//
+// Caller must hold c.mu in write mode.
+func (c *CachingStore) absorbReadyProjectionLocked(id string, bead Bead, opts absorbOpts) Bead {
+	if bead.IsBlocked != nil {
+		delete(c.readyProjectionLost, id)
+		return bead
+	}
+	cached, ok := c.beads[id]
+	if !ok || cached.IsBlocked == nil {
+		// Nothing was lost: a row that never carried a verdict keeps answering
+		// from the dependency-derived predicate, which is all the cache ever
+		// had for it. Marking these would decline readiness for every store
+		// with no projection at all (MemStore, DoltLite) and for the rows the
+		// projection skips by design (message and gc:nudge rows).
+		return bead
+	}
+	freshDeps := effectiveAbsorbDeps(c.deps[id], bead, opts)
+	if opts.readyMode == readyPreserveWhenDepsUnchanged && !depsChanged(c.deps[id], freshDeps) {
+		bead.IsBlocked = cloneBoolPtr(cached.IsBlocked)
+		delete(c.readyProjectionLost, id)
+		return bead
+	}
+	c.markReadyProjectionLostLocked(id)
+	return bead
+}
+
+// readyPredicateCanAnswerLocked reports whether cachedBeadReady's
+// dependency-derived fallback can reproduce the backing's is_blocked for a row
+// with these edges, using only what this cache holds.
+//
+// It can, exactly, when every edge is a ready-blocking type whose target is
+// resident. Those are the edges the predicate models: it walks the row's own
+// blocks/waits-for/conditional-blocks deps and calls one blocking when the
+// target's cached status is not closed. Both of the predicate's documented gaps
+// are the negation of that test:
+//
+//   - a parent-child edge is a channel bd's column propagates blocked-ness down
+//     (issueops.markBlockedTemplateForIssues joins `d.type = 'parent-child' AND
+//     p.is_blocked = 1`) and the predicate does not walk at all;
+//   - an edge onto a row this scope's cache does not hold — a relocated `gcg-`
+//     graph bead — is invisible to the predicate, which treats a missing target
+//     as closed.
+//
+// An ordinary close does not cost a row its exactness: the close paths absorb
+// the target with status closed rather than evicting it, so it stays resident
+// and the predicate can still see that it is no longer blocking. (Reconciliation
+// does drop closed rows, but it refills the column in the same pass, so a row
+// that reaches this test no longer depends on them.) Caller must hold c.mu.
+func (c *CachingStore) readyPredicateCanAnswerLocked(deps []Dep) bool {
+	for _, dep := range deps {
+		if !isReadyBlockingDependencyType(dep.Type) {
+			return false
+		}
+		if _, resident := c.beads[dep.DependsOnID]; !resident {
+			return false
+		}
+	}
+	return true
+}
+
+// markReadyProjectionLostLocked records that this row's projected verdict is
+// gone. Whether that costs the row its readiness answer is decided at read time
+// by readyProjectionUnknownLocked, so the mark itself stays a pure function of
+// the write that dropped the column — never of the order rows were absorbed in.
+// Caller must hold c.mu in write mode.
+func (c *CachingStore) markReadyProjectionLostLocked(id string) {
+	if c.readyProjectionLost == nil {
+		c.readyProjectionLost = make(map[string]struct{})
+	}
+	c.readyProjectionLost[id] = struct{}{}
+}
+
+// effectiveAbsorbDeps returns the dependency set the absorb is about to
+// install, so the preservation check compares against what the cache will
+// actually hold rather than against the bead's fields alone.
+func effectiveAbsorbDeps(cached []Dep, bead Bead, opts absorbOpts) []Dep {
+	switch opts.depsMode {
+	case depsExplicit:
+		return opts.deps
+	case depsFromFields:
+		return depsFromBeadFields(bead)
+	case depsFromFieldsIfCarried:
+		if beadCarriesDependencyFields(bead) {
+			return depsFromBeadFields(bead)
+		}
+		return cached
+	case depsDrop:
+		return nil
+	default: // depsKeepCached
+		return cached
+	}
+}
+
+// readyProjectionUnknownLocked reports whether readiness reads must decline
+// this row rather than answer it.
+//
+// Two conditions, and both are needed. The row must have LOST a verdict this
+// cache held — deliberately narrower than "IsBlocked == nil", which is the
+// NORMAL state for a backing with no projection at all (MemStore, DoltLite) and
+// for the rows every projection skips (closed, message, gc:nudge); declining
+// those would send every readiness read to a live backing scan, the
+// multi-second stall the projection exists to remove. And the row's own edges
+// must be unable to reproduce the verdict, which is the ordinary case's escape
+// hatch: a bead blocked only by resident blocks edges is answered exactly by
+// the dependency-derived predicate, so a close that unblocks it keeps serving
+// from cache with no live read at all.
+//
+// Caller must hold c.mu.
+func (c *CachingStore) readyProjectionUnknownLocked(id string) bool {
+	if _, lost := c.readyProjectionLost[id]; !lost {
+		return false
+	}
+	return !c.readyPredicateCanAnswerLocked(c.deps[id])
+}
+
+// evictLocked removes every trace of id from the seven per-row maps. It does
+// not touch mutationSeq, depsComplete, state, or stats. Caller must hold c.mu
+// in write mode.
 func (c *CachingStore) evictLocked(id string) {
+	c.advanceObservationLocked()
 	delete(c.beads, id)
 	delete(c.deps, id)
 	delete(c.dirty, id)
 	delete(c.deletedSeq, id)
 	delete(c.beadSeq, id)
 	delete(c.localBeadAt, id)
+	delete(c.readyProjectionLost, id)
 	delete(c.readyProjectionInvalid, id)
-}
-
-// markReadyProjectionInvalidLocked records that id's cached is_blocked verdict
-// must not be trusted until the next observation. It deliberately does not
-// touch c.beads: the row keeps what the backing last reported so the reconcile
-// differ still compares like with like. Caller must hold c.mu in write mode.
-func (c *CachingStore) markReadyProjectionInvalidLocked(id string) {
-	if c.readyProjectionInvalid == nil {
-		c.readyProjectionInvalid = make(map[string]struct{})
-	}
-	c.readyProjectionInvalid[id] = struct{}{}
-}
-
-// readyProjectionInvalidLocked reports whether id's cached verdict is awaiting
-// re-observation. Caller must hold c.mu.
-func (c *CachingStore) readyProjectionInvalidLocked(id string) bool {
-	_, invalid := c.readyProjectionInvalid[id]
-	return invalid
-}
-
-// readyProjectionInvalidSnapshotLocked copies the marks covering candidates so
-// readiness can be evaluated after the cache lock is released, the way
-// statusByID and depsByID already are. Returns nil when nothing is invalid,
-// which the readers treat the same as an empty set. Caller must hold c.mu.
-func (c *CachingStore) readyProjectionInvalidSnapshotLocked(candidates []Bead) map[string]struct{} {
-	if len(c.readyProjectionInvalid) == 0 {
-		return nil
-	}
-	var out map[string]struct{}
-	for _, b := range candidates {
-		if _, invalid := c.readyProjectionInvalid[b.ID]; invalid {
-			if out == nil {
-				out = make(map[string]struct{})
-			}
-			out[b.ID] = struct{}{}
-		}
-	}
-	return out
 }
 
 // tombstoneLocked evicts id and installs a deletion fence at seq. seq must be a
@@ -546,6 +743,7 @@ func (c *CachingStore) tombstoneLocked(id string, seq uint64) {
 // markDirtyLocked flags id as known-stale so reads bypass the cache until a
 // refresh clears the mark. Caller must hold c.mu in write mode.
 func (c *CachingStore) markDirtyLocked(id string) {
+	c.advanceObservationLocked()
 	c.dirty[id] = struct{}{}
 }
 
@@ -798,11 +996,10 @@ func (c *CachingStore) PrimeActive() error {
 		}
 		all = append(all, beads...)
 	}
-	if enriched, err := c.enrichReadyProjectionForCache(all); err != nil {
-		partialErr = errors.Join(partialErr, err)
-		c.recordProblem("prime active ready projection", err)
-	} else {
-		all = enriched
+	enriched, enrichErr := c.applyReadyProjection("prime active ready projection", all)
+	all = enriched
+	if enrichErr != nil {
+		partialErr = errors.Join(partialErr, enrichErr)
 	}
 
 	beadMap := make(map[string]Bead, len(all))
@@ -843,6 +1040,7 @@ func (c *CachingStore) PrimeActive() error {
 		c.state = cachePartial
 	}
 	c.primePartialErr = partialErr
+	c.advanceObservationLocked()
 	c.markFreshLocked(now)
 	c.updateStatsLocked()
 	return nil
@@ -914,11 +1112,10 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("prime list: %w", err)
 	}
-	if enriched, enrichErr := c.enrichReadyProjectionForCache(all); enrichErr != nil {
-		c.recordProblem("prime ready projection", enrichErr)
+	enriched, enrichErr := c.applyReadyProjection("prime ready projection", all)
+	all = enriched
+	if enrichErr != nil {
 		partialErr = errors.Join(partialErr, enrichErr)
-	} else {
-		all = enriched
 	}
 	if err := c.cacheContextErr(ctx); err != nil {
 		return err
@@ -946,11 +1143,15 @@ func (c *CachingStore) prime(ctx context.Context) error {
 		nextDirty := make(map[string]struct{})
 		nextBeadSeq := make(map[string]uint64)
 		nextLocalBeadAt := make(map[string]time.Time)
-		// The prime snapshot ran the ready projection over every row it carries,
-		// so those rows are freshly observed and their invalidation is
-		// discharged. Only rows kept from the old cache can still be awaiting
-		// re-observation.
-		nextReadyInvalid := make(map[string]struct{})
+		// The projection ran over the whole snapshot, so every row the prime
+		// replaces gets a fresh verdict and its unknown mark drops. Only rows
+		// carried over from the old cache keep theirs.
+		nextReadyLost := make(map[string]struct{})
+		// Same reasoning for the ADR-0094 invalidation marks: the prime
+		// snapshot ran the ready projection over every row it carries, so those
+		// rows are freshly observed and their invalidation is discharged. Only
+		// rows kept from the old cache can still be awaiting re-observation.
+		nextReadyInvalid := make(map[string]bool)
 		for id, current := range c.beads {
 			if fresh, exists := beadMap[id]; exists {
 				if _, keep := c.recentLocalBeadConflictLocked(id, fresh, now, true); keep {
@@ -958,8 +1159,11 @@ func (c *CachingStore) prime(ctx context.Context) error {
 					if deps, ok := c.deps[id]; ok {
 						nextDeps[id] = cloneDeps(deps)
 					}
-					if c.readyProjectionInvalidLocked(id) {
-						nextReadyInvalid[id] = struct{}{}
+					if _, lost := c.readyProjectionLost[id]; lost {
+						nextReadyLost[id] = struct{}{}
+					}
+					if v, ok := c.readyProjectionInvalid[id]; ok {
+						nextReadyInvalid[id] = v
 					}
 					c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
 				}
@@ -970,8 +1174,11 @@ func (c *CachingStore) prime(ctx context.Context) error {
 				if deps, ok := c.deps[id]; ok {
 					nextDeps[id] = cloneDeps(deps)
 				}
-				if c.readyProjectionInvalidLocked(id) {
-					nextReadyInvalid[id] = struct{}{}
+				if _, lost := c.readyProjectionLost[id]; lost {
+					nextReadyLost[id] = struct{}{}
+				}
+				if v, ok := c.readyProjectionInvalid[id]; ok {
+					nextReadyInvalid[id] = v
 				}
 				c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
 			}
@@ -982,6 +1189,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 		c.dirty = nextDirty
 		c.beadSeq = nextBeadSeq
 		c.localBeadAt = nextLocalBeadAt
+		c.readyProjectionLost = nextReadyLost
 		c.readyProjectionInvalid = nextReadyInvalid
 		c.deletedSeq = make(map[string]uint64)
 	} else {
@@ -1008,6 +1216,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	c.circuitTripped = false
 	c.stats.SyncFailures = 0
 	c.primePartialErr = partialErr
+	c.advanceObservationLocked()
 	c.markFreshLocked(now)
 	c.updateStatsLocked()
 	return nil
@@ -1217,6 +1426,7 @@ func (c *CachingStore) Stats() CacheStats {
 	defer c.mu.RUnlock()
 
 	s := c.stats
+	s.DegradedReads = c.degradedReads.Load()
 	switch c.state {
 	case cachePartial:
 		s.State = "partial"
@@ -1227,7 +1437,6 @@ func (c *CachingStore) Stats() CacheStats {
 	default:
 		s.State = "uninitialized"
 	}
-	s.DegradedReads = c.degradedReads.Load()
 	return s
 }
 
@@ -1326,6 +1535,56 @@ func (c *CachingStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, erro
 		return backing.enrichReadyProjectionForCache(items)
 	}
 	return items, nil
+}
+
+// applyReadyProjection enriches items with the backing store's ready projection
+// and returns the failure that leaves the snapshot INCOMPLETE, having already
+// recorded every failure on the problem log.
+//
+// A projection the backing store cannot serve AT ALL costs the snapshot one
+// column, not rows: the cache latches readyProjectionDegraded, its readiness
+// reads decline to the live backing, and every other cached read keeps serving.
+// Folding that into primePartialErr — which nothing but a clean prime clears —
+// declined every cache-only read for the life of the process and sent each one
+// to a live 5-6s bd subprocess, which is the shape maintainer-city was stuck in.
+//
+// A projection that merely failed THIS cycle is a different verdict: the store
+// can answer, so the rows really are missing an answer they should have, and the
+// snapshot stays partial.
+func (c *CachingStore) applyReadyProjection(op string, items []Bead) ([]Bead, error) {
+	enriched, err := c.enrichReadyProjectionForCache(items)
+	if err == nil {
+		return enriched, nil
+	}
+	c.recordProblem(op, err)
+	if errors.Is(err, ErrReadyProjectionUnsupported) {
+		c.readyProjectionDegraded.Store(true)
+		return items, nil
+	}
+	return items, err
+}
+
+// readyReadsMustGoLive reports whether readiness reads must decline the cache
+// and take their live-backing fallback.
+//
+// It latches when the backing store reported ErrReadyProjectionUnsupported,
+// which leaves every bead's IsBlocked nil. cachedBeadReady then derives
+// readiness from each bead's OWN direct blocks/waits-for/conditional-blocks
+// deps, and that predicate is WEAKER than bd's is_blocked: bd propagates
+// blocked-ness transitively down parent-child edges, so a child of a blocked
+// parent is blocked to bd and ready to the cache. Serving it would offer work
+// whose molecule gate has not opened to the control dispatcher — the exact
+// regression #3218 closed by mirroring bd's projection in the first place.
+//
+// Only readiness declines. List/Get/DepList keep serving from cache, because
+// the rows themselves are whole; that separation is the whole point of not
+// folding this verdict into primePartialErr.
+//
+// The latch is one-way to match the backing store's own: once a scope's ledger
+// is known not to serve the projection, later primes are told so without
+// spending a subprocess, so a cleared flag could never be re-derived.
+func (c *CachingStore) readyReadsMustGoLive() bool {
+	return c.readyProjectionDegraded.Load()
 }
 
 func (c *CachingStore) fetchDepsForBeads(beadMap map[string]Bead) (map[string][]Dep, bool, error) {

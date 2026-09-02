@@ -3,7 +3,6 @@
 package pidutil
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"syscall"
@@ -65,10 +64,14 @@ func procStartTime(pid int) (string, bool) {
 	return fmt.Sprintf("%d.%06d", kp.Proc.P_starttime.Sec, kp.Proc.P_starttime.Usec), true
 }
 
-// procChildPIDs returns the live direct children of parent from the kernel
+// sysctlChildPIDs returns the live direct children of parent from the kernel
 // process table via sysctl(kern.proc.all), replacing a `ps -axo pid=,ppid=`
 // fork/exec. ok is false when the table cannot be read, which leaves the caller
 // on its portable ps fallback.
+//
+// Named for its mechanism because ChildPIDs now has two kernel readers ahead of
+// ps: procChildPIDs reads /proc/<pid>/task/<tid>/children (#5427) and answers on
+// linux, this one answers on darwin where there is no /proc to read.
 //
 // kern.proc.ppid would answer this more narrowly, but darwin's
 // sysctlnametomib does not resolve that subname, so this filters the full
@@ -78,7 +81,7 @@ func procStartTime(pid int) (string, bool) {
 // Unlike the ps path there is no enumeration helper of our own in the result:
 // the syscall does not create a process, so a caller checking its own children
 // never has to exclude a probe that masqueraded as a leaked child.
-func procChildPIDs(parent int) ([]int, bool) {
+func sysctlChildPIDs(parent int) ([]int, bool) {
 	all, err := unix.SysctlKinfoProcSlice("kern.proc.all")
 	if err != nil {
 		return nil, false
@@ -101,56 +104,33 @@ func procChildPIDs(parent int) ([]int, bool) {
 // space is split in two and silently fails the match. This returns the
 // kernel's own NUL-separated argv, so spaces inside an argument survive.
 //
-// The buffer layout is: a native-endian int32 argc, the NUL-terminated
-// executable path, a run of NUL padding, then exactly argc NUL-terminated
-// argument strings (the environment follows, and is ignored). ok is false when
-// the buffer cannot be read or does not hold argc complete arguments — the
-// caller then falls back to ps rather than returning a truncated argv, because
-// a short argv fails the identity match and callers read a failed match as
-// "not my process".
+// Both sides of this merge grew a kern.procargs2 reader independently — the
+// fork's procCmdline (ga-4l4me) and upstream's platformCmdline/parseProcArgs2
+// (#5216, "preserve Darwin argv boundaries"). One buffer parser is kept,
+// upstream's, because it is build-tag free and therefore unit-testable on the
+// linux runners too (procargs2_test.go); this wrapper keeps the fork's
+// (argv, ok) contract, which is what lets Cmdline fall back to ps instead of
+// surfacing a sysctl failure as an error. parseProcArgs2 carries the same
+// allocation guard the fork's parser had — it bounds argc by the buffer length
+// before sizing the slice, so a malformed record claiming 0x7FFFFFFF arguments
+// cannot allocate a multi-GB header.
+//
+// ok is false when the buffer cannot be read or does not hold argc complete
+// arguments — the caller then falls back to ps rather than returning a
+// truncated argv, because a short argv fails the identity match and callers
+// read a failed match as "not my process".
 func procCmdline(pid int) ([]string, bool) {
 	buf, err := unix.SysctlRaw("kern.procargs2", pid)
-	if err != nil || len(buf) < 4 {
+	if err != nil {
 		return nil, false
 	}
-	argc := int(binary.NativeEndian.Uint32(buf[:4]))
-	if argc <= 0 {
+	argv, err := parseProcArgs2(buf)
+	if err != nil {
 		return nil, false
 	}
-	rest := buf[4:]
-
-	// Skip the executable path and the NUL padding that follows it.
-	end := 0
-	for end < len(rest) && rest[end] != 0 {
-		end++
-	}
-	for end < len(rest) && rest[end] == 0 {
-		end++
-	}
-	rest = rest[end:]
-
-	// Bound argc by what is actually left before trusting it as a capacity.
-	// Every argument occupies at least its NUL terminator, so a well-formed
-	// buffer can never claim more arguments than remaining bytes; a short or
-	// malformed buffer with a large argc (0x7FFFFFFF) would otherwise allocate a
-	// multi-GB slice header before the parse loop ever got a chance to bail.
-	if argc > len(rest) {
+	argv = NormalizeArgv(argv)
+	if len(argv) == 0 {
 		return nil, false
 	}
-
-	argv := make([]string, 0, argc)
-	for len(argv) < argc {
-		i := 0
-		for i < len(rest) && rest[i] != 0 {
-			i++
-		}
-		if i == len(rest) {
-			// Ran off the end without a terminator: argc arguments are not all
-			// present, so this read cannot be trusted as a complete argv.
-			return nil, false
-		}
-		argv = append(argv, string(rest[:i]))
-		rest = rest[i+1:]
-	}
-	return NormalizeArgv(argv), true
+	return argv, true
 }

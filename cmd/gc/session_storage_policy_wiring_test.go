@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/events"
+
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
@@ -77,7 +79,7 @@ func controllerCityStore(t *testing.T, backing beads.Store) beads.Store {
 	t.Helper()
 	cfg := &config.City{}
 	cityStore := wrapWithCachingStore(context.Background(), wrapStoreWithBeadPolicies(backing, cfg), nil, false)
-	return beads.SessionStore{Store: resolveSessionStore(cityStore, cfg, t.TempDir(), nil)}.Store
+	return beads.SessionStore{Store: resolveSessionStore(nil, cityStore, cfg, t.TempDir(), events.Discard)}.Store
 }
 
 // TestSessionCreateRoutesToNoHistoryOnCapableBackend pins the behavior that

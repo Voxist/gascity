@@ -9,6 +9,6 @@ func procStateDead(int) (dead, known bool) { return false, false }
 
 func procStartTime(int) (string, bool) { return "", false }
 
-func procChildPIDs(int) ([]int, bool) { return nil, false }
+func sysctlChildPIDs(int) ([]int, bool) { return nil, false }
 
 func procCmdline(int) ([]string, bool) { return nil, false }

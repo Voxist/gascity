@@ -20,13 +20,9 @@ func TestResolveEvaluateStep_DefaultPath(t *testing.T) {
 	if step.Name != EvaluateStepName {
 		t.Errorf("Name = %q, want %q", step.Name, EvaluateStepName)
 	}
-	// Compared via testutil.AssertSamePath, not ==, because upstream migrated
-	// ResolveEvaluateStep to pathutil.NormalizePathForCompare (ga-iawy13.4):
-	// canonCity now resolves symlinks, so on a host where /home is a symlink
-	// (macOS firmlink -> /System/Volumes/Data/home) a raw string compare fails
-	// on a correct result. Upstream's newer tests in this file already use the
-	// tolerant helper; these two predate it.
-	testutil.AssertCanonicalPathEquals(t, step.PromptPath, filepath.Join("/home/user/city", DefaultEvaluatePromptPath))
+	// production paths are NormalizePathForCompare form; compare firmlink-aware (#4934)
+	want := filepath.Join("/home/user/city", DefaultEvaluatePromptPath)
+	testutil.AssertSamePath(t, step.PromptPath, want)
 }
 
 func TestResolveEvaluateStep_CustomPath(t *testing.T) {
@@ -42,7 +38,8 @@ func TestResolveEvaluateStep_CustomPath(t *testing.T) {
 	if step.Name != EvaluateStepName {
 		t.Errorf("Name = %q, want %q", step.Name, EvaluateStepName)
 	}
-	testutil.AssertCanonicalPathEquals(t, step.PromptPath, filepath.Join("/home/user/city", "custom/my-evaluate.md"))
+	want := filepath.Join("/home/user/city", "custom/my-evaluate.md")
+	testutil.AssertSamePath(t, step.PromptPath, want)
 }
 
 func TestResolveEvaluateStep_PathTraversal(t *testing.T) {
@@ -138,9 +135,7 @@ func TestResolveEvaluateStep_RelativeCityPathReturnsAbsolutePromptPath(t *testin
 		t.Fatalf("PromptPath = %q, want an absolute path — cityPath must be canonicalized to absolute before joining, not left relative", step.PromptPath)
 	}
 	want := filepath.Join(dir, DefaultEvaluatePromptPath)
-	if step.PromptPath != want {
-		t.Errorf("PromptPath = %q, want %q", step.PromptPath, want)
-	}
+	testutil.AssertSamePath(t, step.PromptPath, want)
 }
 
 // Pins the symlink-presence rejection itself, which the comparison above sits
@@ -211,5 +206,5 @@ func TestResolveEvaluateStep_DarwinPrivateTempAliasWithExistingPrompt(t *testing
 	if err != nil {
 		t.Fatalf("unexpected error: %v — the symlink-presence check must normalize realResolved before comparing it against a path built on the alias-collapsed canonCity", err)
 	}
-	testutil.AssertCanonicalPathEquals(t, step.PromptPath, prompt)
+	testutil.AssertSamePath(t, step.PromptPath, prompt)
 }

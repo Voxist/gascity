@@ -18,6 +18,33 @@ import (
 // with the full bead JSON payload. This keeps the cache fresh without
 // waiting for reconciliation.
 func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
+	c.applyEvent(eventType, payload, false)
+}
+
+// ApplyEventSnapshot applies an event whose payload is a complete bead snapshot
+// with authoritative dependency coverage, rather than a bd hook patch.
+//
+// A CachingStore emits exactly such a snapshot after reconciliation absorbs a
+// row: notifyChange marshals the whole absorbed bead, dependencies included.
+// Bead.Dependencies and Bead.Needs are omitempty, so a bead with no
+// dependencies marshals with neither key, leaving that snapshot indistinguishable
+// on the wire from a bd on_update payload — which legitimately omits
+// dependencies after a removal and must be treated as coverage-unknown.
+//
+// Guessing wrong in that direction is not a lost optimization, it is a loop: the
+// coverage-unknown path drops the dep set, clears the is_blocked verdict
+// reconciliation just installed, clears depsComplete store-wide, and stamps a
+// mutation sequence that fences the row out of the next pass' absorb. The
+// cleared verdict is therefore never repaired, every later pass sees cached nil
+// against fresh &false, calls that a change, and emits again — thousands of
+// events per minute against a completely idle backing store (ga-yoix1).
+//
+// Callers that know the payload's provenance use this entry point to say so.
+func (c *CachingStore) ApplyEventSnapshot(eventType string, payload json.RawMessage) {
+	c.applyEvent(eventType, payload, true)
+}
+
+func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, depsAuthoritative bool) {
 	if len(payload) == 0 {
 		return
 	}
@@ -226,7 +253,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 				seqMode:    seqKeep,
 				clearDirty: true,
 			})
-			c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking)
+			c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking || depsAuthoritative)
 		}
 		c.updateStatsLocked()
 		mutated = true
@@ -235,6 +262,9 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		}
 	case "bead.updated":
 		existing, cached := c.beads[b.ID]
+		// Read before absorb: dependents' readiness turns on this row's status,
+		// so only a real transition may invalidate their projection.
+		statusChanged := !cached || existing.Status != b.Status
 		if !cached || beadChanged(existing, b, false) {
 			c.noteMutationLocked(b.ID)
 			c.absorbFreshLocked(b.ID, b, time.Now(), absorbOpts{
@@ -244,11 +274,14 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 			})
 			mutated = true
 		}
-		if depsMutated := c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking); depsMutated && !mutated {
+		if depsMutated := c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking || depsAuthoritative); depsMutated && !mutated {
 			c.noteMutationLocked(b.ID)
 			mutated = true
 		}
-		if hasCacheEventField(fields, "status") && c.clearDependentReadyProjectionsLocked(b.ID) {
+		// Gating on the field's PRESENCE re-entered the reconcile loop: the
+		// emitter always carries status, and clearing nils is_blocked (ga-fnmb5).
+		if statusChanged && hasCacheEventField(fields, "status") &&
+			c.clearDependentReadyProjectionsLocked(b.ID) {
 			mutated = true
 		}
 	case "bead.closed":
@@ -262,7 +295,7 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 			seqMode:    seqKeep,
 			clearDirty: true,
 		})
-		c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking)
+		c.updateEventDepsLocked(eventType, b, fields, refreshedFromBacking || depsAuthoritative)
 		mutated = true
 		if c.clearDependentReadyProjectionsLocked(b.ID) {
 			mutated = true
@@ -362,18 +395,29 @@ func (c *CachingStore) ApplyDepEvent(beadID string, deps []Dep) {
 	c.updateStatsLocked()
 }
 
-// clearReadyProjectionLocked marks a row's is_blocked verdict as awaiting
-// re-observation, because the row's own edges or a blocking target's status
-// just moved.
+// clearReadyProjectionLocked drops a row's is_blocked so the next read
+// recomputes it, and records the row as unanswerable when dropping the column
+// would change the answer.
 //
-// It records that out of band and leaves c.beads[id] alone. Writing a nil
-// sentinel into the row was the defect ADR-0094 names: the reconcile differ
-// reads IsBlocked as "what the backing store reported", so a cache-internal
-// "I don't know" written into that slot is indistinguishable from bd flipping
-// the projection — and the next enrichment, restoring the very value the wipe
-// removed, registered as a change for every row it touched. Readiness reads
-// consult readyProjectionInvalid instead, exactly where the sentinel used to
-// send them to the dependency-derived fallback.
+// Invalidation is right — the row's own edges or a blocking target's status
+// just moved — but the dependency-derived predicate that takes over is weaker
+// than the column wherever the row has an edge the predicate does not model
+// (readyPredicateCanAnswerLocked names both gaps). A row that was BLOCKED and
+// whose remaining resident edges now read ready is the case that flips from
+// hidden to offered on the strength of that predicate alone, so its verdict is
+// recorded as lost; readiness then declines for it unless its own edges can
+// reproduce the verdict exactly (ga-cfhgr). A row that is still blocked by a
+// resident open edge loses nothing: the predicate reaches the same verdict the
+// column held.
+//
+// The contract (ADR-0094): the row's IsBlocked is nil'd — the sentinel every
+// reader already treats as "fall back to the dependency-derived verdict" — and
+// the disowned verdict is recorded in readyProjectionInvalid, which only the
+// reconcile differ consults: when the next enrichment restores that same
+// value, the differ substitutes the recorded verdict for the nil so the
+// restoration is not reported as a store-side transition (the bead.updated
+// flood). No read surface consults the map; the invariant "marked implies
+// row nil" is test-enforced.
 //
 // Returns whether this call changed anything, so a second clear on an already
 // invalid row is not reported as a mutation. Caller must hold c.mu in write
@@ -383,28 +427,64 @@ func (c *CachingStore) clearReadyProjectionLocked(id string) bool {
 	if !ok || b.IsBlocked == nil {
 		return false
 	}
-	if c.readyProjectionInvalidLocked(id) {
-		return false
+	if *b.IsBlocked && !c.residentEdgesStillBlockLocked(id) {
+		c.markReadyProjectionLostLocked(id)
 	}
-	c.markReadyProjectionInvalidLocked(id)
+	// Nil the row — upstream's sentinel contract, safe-by-default for every
+	// reader — and retain the disowned value in readyProjectionInvalid,
+	// consulted ONLY by the reconcile differ so the nil does not read as a
+	// store-side transition (the ADR-0094 bead.updated flood).
+	c.markReadyProjectionInvalidLocked(id, *b.IsBlocked)
+	b.IsBlocked = nil
+	c.beads[id] = b
 	return true
 }
 
-// clearAllReadyProjectionsLocked invalidates every resident row's verdict. It
-// deliberately does NOT noteMutationLocked the rows (ADR-0094 D3): a
-// cache-internal invalidation is not a local write, and stamping localBeadAt
-// for the whole store made every row look recently locally mutated, which
-// latched depsComplete false through mergeSkipRecentLocal → degradeDepsComplete
-// and kept clearDependentReadyProjectionsLocked selecting this whole-cache
-// branch. That latch is what turned a transient into a sustained flood.
-func (c *CachingStore) clearAllReadyProjectionsLocked() bool {
-	cleared := false
-	for id := range c.beads {
-		if c.clearReadyProjectionLocked(id) {
-			cleared = true
+// residentEdgesStillBlockLocked reports whether the row's own edges still prove
+// it blocked without the column. It is cachedBeadReady's fallback branch,
+// evaluated against live cache state instead of a snapshot index: a dep blocks
+// only when its type is ready-blocking AND the target is resident AND the
+// target is not closed. Caller must hold c.mu.
+func (c *CachingStore) residentEdgesStillBlockLocked(id string) bool {
+	for _, dep := range c.deps[id] {
+		if !isReadyBlockingDependencyType(dep.Type) {
+			continue
+		}
+		if target, resident := c.beads[dep.DependsOnID]; resident && target.Status != "closed" {
+			return true
 		}
 	}
-	return cleared
+	return false
+}
+
+func (c *CachingStore) clearAllReadyProjectionsLocked() bool {
+	cleared := make([]string, 0)
+	for id := range c.beads {
+		if c.clearReadyProjectionLocked(id) {
+			cleared = append(cleared, id)
+		}
+	}
+	if len(cleared) == 0 {
+		return false
+	}
+	// ADR-0094 D3 (vc-493m3j) + upstream's observation fence, reconciled.
+	//
+	// noteMutationLocked(cleared...) does TWO things: it advances the
+	// observation revision AND bumps the mutation-sequence fences. D3 removed
+	// the whole call because the fence half made every cleared row look
+	// recently locally mutated, driving mergeSkipRecentLocal ->
+	// degradeDepsComplete -> depsComplete latched false, which kept
+	// clearDependentReadyProjectionsLocked on its whole-cache branch — the
+	// latch that turned the 13:00Z event storm from a transient into a
+	// SUSTAINED step.
+	//
+	// But invalidating a cached verdict MUST still invalidate any in-flight
+	// observation, or a reader can commit against a projection this call just
+	// wiped (TestCachingStoreObservationInvalidatedByMutationPaths).
+	// advanceObservationLocked is precisely the observation-only half, so it
+	// satisfies the fence without reintroducing the storm.
+	c.advanceObservationLocked()
+	return true
 }
 
 func (c *CachingStore) clearDependentReadyProjectionsLocked(dependsOnID string) bool {
@@ -414,7 +494,7 @@ func (c *CachingStore) clearDependentReadyProjectionsLocked(dependsOnID string) 
 	if !c.depsComplete {
 		return c.clearAllReadyProjectionsLocked()
 	}
-	cleared := false
+	cleared := make([]string, 0)
 	for id, deps := range c.deps {
 		if _, ok := c.beads[id]; !ok {
 			continue
@@ -424,12 +504,16 @@ func (c *CachingStore) clearDependentReadyProjectionsLocked(dependsOnID string) 
 				continue
 			}
 			if c.clearReadyProjectionLocked(id) {
-				cleared = true
+				cleared = append(cleared, id)
 			}
 			break
 		}
 	}
-	return cleared
+	if len(cleared) == 0 {
+		return false
+	}
+	c.noteMutationLocked(cleared...)
+	return true
 }
 
 func mergeCacheEventPatch(base, patch Bead, fields map[string]json.RawMessage) Bead {
@@ -688,13 +772,13 @@ func (c *CachingStore) notifyChange(eventType string, b Bead) {
 	// step_id is the semantic native execution step carried explicitly by the
 	// lifecycle bead. Non-work beads (sessions, mail, …) carry none → omitted.
 	stepID := b.Metadata[beadmeta.StepIDMetadataKey]
-	c.onChange(eventType, b.ID, runID, sessionID, stepID, nativeStepDependencies(b.Metadata, stepID), payload)
+	c.onChange(eventType, b.ID, runID, sessionID, stepID, NativeStepDependencies(b.Metadata, stepID), payload)
 }
 
-// nativeStepDependencies returns the explicit, canonical native topology fact.
+// NativeStepDependencies returns the explicit, canonical native topology fact.
 // It never derives edges from physical bead dependencies or other mutable state:
 // absent/malformed metadata is UNKNOWN (nil), while a canonical [] is a known root.
-func nativeStepDependencies(metadata map[string]string, stepID string) *[]string {
+func NativeStepDependencies(metadata map[string]string, stepID string) *[]string {
 	if !validTopologyStepID(stepID) {
 		return nil
 	}

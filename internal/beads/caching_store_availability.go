@@ -28,16 +28,19 @@ type AvailabilityGate interface {
 // and the reconciler skips cycles except when a recovery probe is due.
 // A nil gate (the default) disables gating.
 func (c *CachingStore) SetAvailabilityGate(g AvailabilityGate) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.availabilityGate = g
+	if g == nil {
+		c.availabilityGate.Store(nil)
+		return
+	}
+	c.availabilityGate.Store(&g)
 }
 
 // availabilityGateRef returns the configured gate (nil when unset).
 func (c *CachingStore) availabilityGateRef() AvailabilityGate {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.availabilityGate
+	if p := c.availabilityGate.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 // servingDegraded reports whether reads must avoid the backing store
@@ -58,8 +61,8 @@ func (c *CachingStore) servingDegraded() bool {
 // is an observability indicator, not a synchronization primitive — do not
 // build invariants on consecutive Degraded() readings agreeing.
 func (c *CachingStore) Degraded() bool {
+	gate := c.availabilityGateRef()
 	c.mu.RLock()
-	gate := c.availabilityGate
 	degraded := c.state == cacheDegraded
 	c.mu.RUnlock()
 	if degraded {

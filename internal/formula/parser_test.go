@@ -3630,15 +3630,14 @@ func TestDescriptionFileBaseDirResolvesSymlinkedParentWithMissingLeaf(t *testing
 	missing := filepath.Join(aliasDir, "not-yet-created.toml")
 	got := descriptionFileBaseDir(missing)
 
-	want, err := filepath.EvalSymlinks(aliasDir)
-	if err != nil {
-		t.Fatalf("EvalSymlinks(aliasDir): %v", err)
+	// Canonicalize the expectation the same way the code under test does.
+	// Bare EvalSymlinks is a different canonical form than the production
+	// normalizer on macOS, where it reports /private/var/... while
+	// pathutil collapses the equivalent /var alias — see pathutil's
+	// TestNormalizePathForCompareCollapsesDarwinPrivateVarAlias. The
+	// assertion stays exact, so failing to resolve the alias still fails.
+	want := testutil.CanonicalPath(aliasDir)
+	if got != want {
+		t.Errorf("descriptionFileBaseDir(%q) = %q, want %q (resolved through symlinked parent)", missing, got, want)
 	}
-	// Compared via testutil.AssertSamePath rather than ==: the expectation is
-	// built with bare filepath.EvalSymlinks, but the function under test
-	// normalizes through pathutil, which on darwin collapses the /private/var
-	// and /private/tmp host aliases back to /var and /tmp — the reverse
-	// direction from EvalSymlinks. The two spellings denote the same file, so
-	// a raw compare fails on a correct result (macOS only; CI is Linux).
-	testutil.AssertCanonicalPathEquals(t, got, want)
 }

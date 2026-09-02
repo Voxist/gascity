@@ -45,6 +45,11 @@ module="github.com/gastownhall/gascity"
 # everything.
 unit_core_excludes=(
   "${module}/cmd/gc"
+  # internal/runtime/herdr fails whenever the herdr binary is absent, so it is
+  # excluded from the pre-push gate (upstream #5702); its live journeys run in
+  # the opt-in herdr lane (#5809). Documented exclude: the tier-coverage guard
+  # counts it here so the fast-tier union still equals go list ./... .
+  "${module}/internal/runtime/herdr"
   "${module}/examples/bd/dolt"
   "${module}/examples/gastown"
 )

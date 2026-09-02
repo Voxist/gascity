@@ -976,10 +976,11 @@ func TestCanonicalScopeRefResolvesSymlinkedParentWithMissingLeaf(t *testing.T) {
 	missing := filepath.Join(aliasDir, "missing-leaf")
 	got := canonicalScopeRef(missing)
 
-	resolvedAlias, err := filepath.EvalSymlinks(aliasDir)
-	if err != nil {
-		t.Fatalf("EvalSymlinks(aliasDir): %v", err)
-	}
+	// Canonicalize the expectation through the production normalizer rather
+	// than bare EvalSymlinks: the two pick different spellings of the macOS
+	// temp root (/var/... vs /private/var/...). The comparison stays exact,
+	// so an unresolved alias still fails.
+	resolvedAlias := testutil.CanonicalPath(aliasDir)
 	want := filepath.Join(resolvedAlias, "missing-leaf")
 	// testutil.AssertSamePath, not ==: the expectation comes from bare
 	// filepath.EvalSymlinks while the function under test normalizes through
@@ -1024,10 +1025,8 @@ func TestCanonicalCityPathResolvesSymlinkedParentWithMissingLeaf(t *testing.T) {
 		t.Fatalf("canonicalCityPath(%q): %v", missing, err)
 	}
 
-	resolvedAlias, evalErr := filepath.EvalSymlinks(aliasDir)
-	if evalErr != nil {
-		t.Fatalf("EvalSymlinks(aliasDir): %v", evalErr)
-	}
+	// Same canonical-form alignment as canonicalScopeRef above.
+	resolvedAlias := testutil.CanonicalPath(aliasDir)
 	want := filepath.Join(resolvedAlias, "missing-leaf")
 	// testutil.AssertSamePath, not ==: the expectation comes from bare
 	// filepath.EvalSymlinks while the function under test normalizes through

@@ -71,6 +71,8 @@ func (s *beadPolicyStore) AppliesBeadStoragePolicy() {}
 var (
 	_ beads.BatchDeleter = (*beadPolicyStore)(nil)
 	_ beads.BatchDeleter = (*beadPolicyGraphStore)(nil)
+	_ beads.CtxLister    = (*beadPolicyStore)(nil)
+	_ beads.CtxLister    = (*beadPolicyGraphStore)(nil)
 )
 
 func wrapStoreWithBeadPolicies(store beads.Store, cfg *config.City) beads.Store {
@@ -108,6 +110,27 @@ func (s *beadPolicyStore) Create(b beads.Bead) (beads.Bead, error) {
 
 func (s *beadPolicyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	query = expandPolicyReadTier(query)
+	return s.Store.List(query)
+}
+
+// ListCtx implements beads.CtxLister with the same read-tier expansion as
+// List. Like Count and ReadyContext, the delegation must be explicit: the
+// embedded Store interface hides the optional capability, and State.BeadStore()
+// always hands the status handlers this wrapper, so without it their
+// `store.(beads.CtxLister)` assertion fails on the wrapper and a wedged backing
+// read keeps its connection past the handler's deadline. Unlike Count there is
+// no capability sentinel to return: the handler cannot fall back on an error,
+// so an inner store without CtxLister is read through the plain List after a
+// pre-flight ctx check — the same shape as CachingStore.backingListCtx, and
+// never worse than the ctx-less path the caller would otherwise take.
+func (s *beadPolicyStore) ListCtx(ctx context.Context, query beads.ListQuery) ([]beads.Bead, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	query = expandPolicyReadTier(query)
+	if lister, ok := s.Store.(beads.CtxLister); ok {
+		return lister.ListCtx(ctx, query)
+	}
 	return s.Store.List(query)
 }
 

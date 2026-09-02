@@ -9,11 +9,13 @@ import (
 )
 
 // TestFileRecorderListTailSpansArchivesAfterRotation is the T-003 contract:
-// FileRecorder.ListTail must return the trailing matches across the active log
-// AND sibling archives, so the event-list handler's fast path stays
-// authoritative after a rotation leaves fewer than `limit` matches in the
-// active file. Before vp-x7x8w, ListTail read the active file only and silently
-// returned a short page, forcing the handler's full-scan fall-through.
+// FileRecorder.ListTail with Filter.SpanArchives must return the trailing
+// matches across the active log AND sibling archives, so the event-list
+// handler's fast path stays authoritative after a rotation leaves fewer than
+// `limit` matches in the active file. Before vp-x7x8w there was no way to ask
+// for this: ListTail read the active file only and silently returned a short
+// page, forcing the handler's full-scan fall-through. The active-only read is
+// still the default (TestFileRecorderListTailActiveOnlyByDefault).
 func TestFileRecorderListTailSpansArchivesAfterRotation(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "events.jsonl")
@@ -38,7 +40,7 @@ func TestFileRecorderListTailSpansArchivesAfterRotation(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = recorder.Close() })
 
-	got, err := recorder.ListTail(Filter{}, 5)
+	got, err := recorder.ListTail(Filter{SpanArchives: true}, 5)
 	if err != nil {
 		t.Fatalf("ListTail: %v", err)
 	}
