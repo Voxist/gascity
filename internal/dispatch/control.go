@@ -513,7 +513,7 @@ var transientNeedles = []transientNeedle{
 	// as the blocker, so no sibling was ever going to close it. The premise
 	// holds for a genuine sibling race, which is why the classification stays;
 	// what it must never imply again is UNBOUNDED, which is why it is Tier B.
-	{needle: "cannot close blocked issue", tier: TierSemantic},
+	{needle: blockedCloseRefusalNeedle, tier: TierSemantic},
 	// bd's client-side Dolt breaker fails fast while the server is down.
 	// These errors are recoverable, so a long-running control dispatcher
 	// must keep sweeping rather than exit permanently during the outage.
@@ -1976,6 +1976,157 @@ func updateMetadataAndClose(store beads.Store, beadID string, metadata map[strin
 		return nil
 	}
 	return store.Close(beadID)
+}
+
+// blockedCloseRefusalNeedle is bd's refusal to close a bead that an open bead
+// still blocks. It is both a Tier-B needle in transientNeedles and the trigger
+// for the legacy self-closing-edge repair below.
+const blockedCloseRefusalNeedle = "cannot close blocked issue"
+
+// legacyReadinessBlockingDepTypes are the dep types under which an open blocker
+// stops a close. This mirrors formula.isReadinessBlockingDepType (measured
+// against bd 1.1.0): "" is bd's default and normalizes to "blocks"; "tracks"
+// and "parent-child" never stop a close and so are never repaired.
+var legacyReadinessBlockingDepTypes = map[string]bool{
+	"":                   true,
+	"blocks":             true,
+	"waits-for":          true,
+	"conditional-blocks": true,
+}
+
+func isBlockedCloseRefusal(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), blockedCloseRefusalNeedle)
+}
+
+// closeSubjectForControl closes the graph node a control is responsible for
+// (a scope body, a workflow root) with the given outcome, repairing the one
+// dependency shape that can make that close impossible by construction.
+//
+// MIGRATION REPAIR for graphs materialized before #5202 (ga-a6zy9). Until
+// that fix the compiler minted `body --blocks--> scope-check` and
+// `root --blocks--> workflow-finalize`: the node was blocked by the very
+// control whose job is to close it, so bd refuses the close
+// ("cannot close blocked issue") and the only bead that could clear the
+// blocker is the one being refused. #5202 stopped minting the edge for new
+// graphs; #5199 bounds the refusal with a semantic budget and then
+// quarantines the control. Neither touches beads already on disk, so every
+// in-flight workflow compiled by an older binary would, on the first
+// dispatcher sweep after an upgrade, burn the full semantic budget and end
+// in quarantine with its body/root left open and no gc.outcome — an
+// order.failed per in-flight order-run root, fleet-wide, for a graph that
+// is otherwise complete and correct.
+//
+// The repair is deliberately narrow. On a blocked-close refusal it inspects
+// the subject's readiness-blocking deps and removes an edge ONLY when the
+// blocker is a legacy self-closing control per isLegacySelfClosingBlocker.
+// If ANY open blocker is anything else, no edge is removed (not even the
+// legacy one) and the original refusal is returned unchanged, so upstream's
+// semantic-refusal tier keeps owning every genuine block. After a repair the
+// close is retried exactly once; a second refusal is returned as-is.
+//
+// This can be retired once no graph.v2 workflow materialized before #5202 is
+// still live: at that point the repair path is unreachable and
+// TestLegacyCycleRepairIsANoOpOnPostFixGraphs is the only thing it costs.
+func closeSubjectForControl(store beads.Store, subjectID, outcome, closerID string, opts ProcessOptions) error {
+	err := setOutcomeAndClose(store, subjectID, outcome)
+	if err == nil || !isBlockedCloseRefusal(err) {
+		return err
+	}
+	repaired, repairErr := repairLegacySelfClosingEdges(store, subjectID, closerID, opts)
+	if repairErr != nil {
+		// Keep the refusal in the chain so ClassifyControllerError still sees
+		// it; an availability failure during the repair joins it and, per the
+		// tier rules, wins.
+		return errors.Join(err, fmt.Errorf("repairing legacy self-closing edges on %s: %w", subjectID, repairErr))
+	}
+	if !repaired {
+		return err
+	}
+	return setOutcomeAndClose(store, subjectID, outcome)
+}
+
+// repairLegacySelfClosingEdges removes every readiness-blocking edge from
+// subject onto a legacy self-closing control (see closeSubjectForControl) and
+// reports whether it removed any. It removes nothing when any open blocker of
+// the subject fails the predicate.
+func repairLegacySelfClosingEdges(store beads.Store, subjectID, closerID string, opts ProcessOptions) (bool, error) {
+	subject, err := store.Get(subjectID)
+	if err != nil {
+		return false, err
+	}
+	deps, err := store.DepList(subjectID, "down")
+	if err != nil {
+		return false, err
+	}
+	var legacy []string
+	for _, dep := range deps {
+		if !legacyReadinessBlockingDepTypes[dep.Type] {
+			continue
+		}
+		blocker, err := store.Get(dep.DependsOnID)
+		if err != nil {
+			return false, err
+		}
+		// Pinned and closed blockers do not stop a close in bd; they are
+		// neither a reason for the refusal nor ours to remove.
+		if blocker.Status == "closed" || blocker.Status == "pinned" {
+			continue
+		}
+		if !isLegacySelfClosingBlocker(blocker, subject, closerID) {
+			opts.tracef("legacy-cycle-repair subject=%s closer=%s skip reason=foreign_blocker blocker=%s", subjectID, closerID, blocker.ID)
+			return false, nil
+		}
+		legacy = append(legacy, blocker.ID)
+	}
+	if len(legacy) == 0 {
+		return false, nil
+	}
+	for _, blockerID := range legacy {
+		if err := store.DepRemove(subjectID, blockerID); err != nil {
+			return false, fmt.Errorf("removing dep %s -> %s: %w", subjectID, blockerID, err)
+		}
+		opts.tracef("legacy-cycle-repair subject=%s closer=%s removed blocker=%s", subjectID, closerID, blockerID)
+	}
+	return true, nil
+}
+
+// isLegacySelfClosingBlocker is the predicate that makes the repair safe. A
+// blocker qualifies only if it is a control of a self-closing kind
+// (beadmeta.SelfClosingControlKinds) AND either
+//
+//   - it is the control performing this close (blocker.ID == closerID), or
+//   - it belongs to the same workflow as subject and its declared target is
+//     subject: a scope-check whose gc.scope_ref names this scope body, or a
+//     workflow-finalize whose gc.root_bead_id is this root.
+//
+// The second arm is what lets reconcileTerminalScopedMember — which closes a
+// body on behalf of a scope-check that has not run yet — repair the same
+// edge. Anything else (another workflow's control, a retry-eval, an ordinary
+// task) is a real blocker and is left alone.
+func isLegacySelfClosingBlocker(blocker, subject beads.Bead, closerID string) bool {
+	kind := blocker.Metadata[beadmeta.KindMetadataKey]
+	if !beadmeta.IsSelfClosingControlKind(kind) {
+		return false
+	}
+	if blocker.ID == closerID {
+		return true
+	}
+	switch kind {
+	case beadmeta.KindScopeCheck:
+		if subject.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindScope ||
+			subject.Metadata[beadmeta.ScopeRoleMetadataKey] != beadmeta.ScopeRoleBody {
+			return false
+		}
+		if blocker.Metadata[beadmeta.RootBeadIDMetadataKey] != subject.Metadata[beadmeta.RootBeadIDMetadataKey] {
+			return false
+		}
+		return matchesScopeRef(subject, blocker.Metadata[beadmeta.ScopeRefMetadataKey])
+	case beadmeta.KindWorkflowFinalize:
+		return subject.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow &&
+			blocker.Metadata[beadmeta.RootBeadIDMetadataKey] == subject.ID
+	default:
+		return false
+	}
 }
 
 // Note: setOutcomeAndClose, propagateRetrySubjectMetadata,

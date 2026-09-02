@@ -4,15 +4,18 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// TestHandleStatusReseedsWarmEntryAfterLongIdle pins the regime the
-// 2026-08-31 resync broke: once the warm StatusView entry ages past
-// statusWarmServeMaxAge (a >5m idle), the next poll must re-seed the warm
+// TestHandleStatusReseedsWarmEntryAfterLongIdle pins the warm path's
+// long-idle contract: once the warm StatusView entry ages past
+// statusWarmServeMaxAge (a >5m idle), the next poll serves it immediately
+// (stale, flagged by CacheAgeS) without blocking, and its background refresh
+// must re-seed the warm
 // entry and every subsequent poll must be served from the warm path again.
 //
 // Before the fix the expired warm entry was skipped, the TTL floor missed, and
@@ -28,9 +31,15 @@ func TestHandleStatusReseedsWarmEntryAfterLongIdle(t *testing.T) {
 	timeBucketResponseCacheTTL = time.Nanosecond // bucket cache misses every request
 	oldRefresh := statusWarmRefreshAfter
 	statusWarmRefreshAfter = time.Hour // a re-seeded warm body must serve without refreshing
+	// The background refresh runs synchronously so the assertions are on
+	// state, never on goroutine timing (the package's other warm tests pin
+	// the hook the same way).
+	oldHook := statusBuildAsyncHook
+	statusBuildAsyncHook = func(build func()) { build() }
 	t.Cleanup(func() {
 		timeBucketResponseCacheTTL = oldTTL
 		statusWarmRefreshAfter = oldRefresh
+		statusBuildAsyncHook = oldHook
 	})
 
 	state := newFakeState(t)
@@ -68,26 +77,53 @@ func TestHandleStatusReseedsWarmEntryAfterLongIdle(t *testing.T) {
 		return body
 	}
 
-	// The first poll after the idle must pay the one synchronous rebuild and
-	// re-seed the warm entry — not answer with a stale body off the SWR path.
-	first := poll(0)
-	if first.Name == "expired-response-body" || first.Name == "expired-warm-body" {
-		t.Fatalf("first poll after a %s idle served the stale %q body via the response cache, want a fresh synchronous build", idle, first.Name)
+	// The first poll after the idle serves the stale warm body IMMEDIATELY —
+	// it never blocks on the rebuild (vp-e0hv) — flagged with its real age,
+	// and kicks exactly one background refresh through buildAndStoreStatus.
+	// It must not answer off the stale-while-revalidate response entry either:
+	// that entry has no age bound and its path is a detour, not a regime.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(state, "/status"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first poll status = %d, want 200", rec.Code)
+	}
+	firstBody := StatusBody{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &firstBody); err != nil {
+		t.Fatalf("first poll decode: %v", err)
+	}
+	if firstBody.Name != "expired-warm-body" {
+		t.Fatalf("first poll after a %s idle served %q, want the warm body served immediately (stale, flagged) rather than a blocking rebuild or the SWR entry", idle, firstBody.Name)
+	}
+	// The stale body must be FLAGGED: the age header carries the warm age,
+	// not ~0 off the fresh store, so the CLI's staleness banner fires.
+	age, err := strconv.ParseFloat(rec.Header().Get("X-GC-Cache-Age-S"), 64)
+	if err != nil {
+		t.Fatalf("X-GC-Cache-Age-S = %q, want a float: %v", rec.Header().Get("X-GC-Cache-Age-S"), err)
+	}
+	if age < idle.Seconds()-1 {
+		t.Fatalf("X-GC-Cache-Age-S = %v for a %s-old warm body served stale, want >= %v", age, idle, idle.Seconds()-1)
+	}
+	// (With the refresh hook pinned synchronous, the one build the poll kicked
+	// has already run by the time the response is returned; the served BODY
+	// above proves the request did not wait for it.)
+	if store.listCalls != 1 {
+		t.Fatalf("List calls after the first poll = %d, want exactly 1 (one singleflighted background rebuild)", store.listCalls)
 	}
 	entry, ok := srv.warmStatusBody(false)
 	if !ok {
 		t.Fatal("warm entry missing after the first poll following a long idle")
 	}
 	if !entry.builtAt.After(seededAt) {
-		t.Fatalf("warm entry builtAt = %v after the first poll, want re-seeded later than %v; an expired warm entry is never re-seeded, so every later poll runs on the SWR pipeline", entry.builtAt, seededAt)
+		t.Fatalf("warm entry builtAt = %v after the first poll's refresh, want re-seeded later than %v; an expired warm entry that is never re-seeded leaves every later poll stale", entry.builtAt, seededAt)
 	}
-	if store.listCalls != 1 {
-		t.Fatalf("List calls after the first poll = %d, want exactly 1 (one singleflighted rebuild)", store.listCalls)
+	// The NEXT poll is fresh, served from the re-seeded warm entry.
+	if second := poll(1); second.Name == "expired-warm-body" || second.Name == "expired-response-body" {
+		t.Fatalf("second poll served the stale %q body; the refresh did not re-seed the warm path", second.Name)
 	}
 
 	// Subsequent polls are served from the re-seeded warm entry: no rebuild,
 	// warm body untouched.
-	for i := 1; i < 4; i++ {
+	for i := 2; i < 5; i++ {
 		poll(i)
 	}
 	if store.listCalls != 1 {

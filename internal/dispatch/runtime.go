@@ -565,7 +565,7 @@ func closeScopeAsPassed(store beads.Store, snapshot scopeSnapshot, subject beads
 	}
 	if bodyAfter.Status != "closed" {
 		if err := tracePhaseErr(opts, traceID, "close-body", func() error {
-			return setOutcomeAndClose(store, bodyID, beadmeta.OutcomePass)
+			return closeSubjectForControl(store, bodyID, beadmeta.OutcomePass, traceID, opts)
 		}); err != nil {
 			return fmt.Errorf("%s: completing scope body: %w", bodyID, err)
 		}
@@ -595,7 +595,7 @@ func abortScope(store beads.Store, snapshot scopeSnapshot, opts ProcessOptions, 
 		return 0, fmt.Errorf("%s: propagating scope metadata: %w", traceID, err)
 	}
 	if err := tracePhaseErr(opts, traceID, "close-body-fail", func() error {
-		return setOutcomeAndClose(store, bodyID, beadmeta.OutcomeFail)
+		return closeSubjectForControl(store, bodyID, beadmeta.OutcomeFail, traceID, opts)
 	}); err != nil {
 		return 0, fmt.Errorf("%s: completing scope body: %w", bodyID, err)
 	}
@@ -974,7 +974,7 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	// next serve cycle will retry. Source-chain propagation is preflighted first
 	// so retryable scan failures keep the root live for singleton scans, but
 	// source beads are not mutated until the root is durably closed.
-	if err := setOutcomeAndClose(store, rootID, outcome); err != nil {
+	if err := closeSubjectForControl(store, rootID, outcome, bead.ID, opts); err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
 			if closeErr := setOutcomeAndClose(store, bead.ID, beadmeta.OutcomeMissingRoot); closeErr != nil {
 				return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: closing orphaned finalizer (root %s missing): %w", bead.ID, rootID, closeErr))

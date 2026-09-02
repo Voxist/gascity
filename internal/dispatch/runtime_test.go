@@ -799,64 +799,6 @@ func TestReconcileTerminalScopedMemberSkipsSiblingBlockedOnPreservedControl(t *t
 	}
 }
 
-// TestProcessScopeCheckAbortRefusesLegacyBodyBlockedOnControl pins the original
-// ga-a6zy9 deadlock: the pre-Slice-4 topology where the scope body carries a
-// blocks edge to the very scope-check that closes it. Slice 4 stopped minting
-// this shape, so no live store should contain it, but nothing prevents a formula
-// or a hand-built fixture from reintroducing it — and under real bd it is
-// unrecoverable, because the control can never close the body it is blocked by.
-func TestProcessScopeCheckAbortRefusesLegacyBodyBlockedOnControl(t *testing.T) {
-	t.Parallel()
-
-	store := newStrictCloseStore()
-	body := mustCreateWorkflowBead(t, store, beads.Bead{
-		Title: "body",
-		Type:  "task",
-		Metadata: map[string]string{
-			"gc.kind":         "scope",
-			"gc.scope_role":   "body",
-			"gc.root_bead_id": "wf-1",
-			"gc.step_ref":     "demo.body",
-		},
-	})
-	failed := mustCreateWorkflowBead(t, store, beads.Bead{
-		Title:  "preflight",
-		Type:   "task",
-		Status: "closed",
-		Metadata: map[string]string{
-			"gc.root_bead_id": "wf-1",
-			"gc.scope_ref":    "body",
-			"gc.scope_role":   "member",
-			"gc.outcome":      "fail",
-		},
-	})
-	control := mustCreateWorkflowBead(t, store, beads.Bead{
-		Title: "Finalize scope for preflight",
-		Type:  "task",
-		Metadata: map[string]string{
-			"gc.kind":         "scope-check",
-			"gc.root_bead_id": "wf-1",
-			"gc.scope_ref":    "body",
-			"gc.scope_role":   "control",
-		},
-	})
-	control = mustGetBead(t, store, control.ID)
-
-	mustDepAdd(t, store, control.ID, failed.ID, "blocks")
-	mustDepAdd(t, store, body.ID, control.ID, "blocks")
-
-	_, err := ProcessControl(store, control, ProcessOptions{})
-	if err == nil {
-		t.Fatalf("ProcessControl(legacy body self-edge) succeeded; expected the ga-a6zy9 deadlock refusal")
-	}
-	if !strings.Contains(err.Error(), "cannot close blocked issue") {
-		t.Fatalf("ProcessControl error = %v, want a blocked-close refusal naming body %s", err, body.ID)
-	}
-	if bodyAfter := mustGetBead(t, store, body.ID); bodyAfter.Status != "open" {
-		t.Fatalf("body status = %q, want open — bd refuses to close a bead blocked by the closing control", bodyAfter.Status)
-	}
-}
-
 func TestProcessScopeCheckHardFailureOverridesClosedPassBody(t *testing.T) {
 	t.Parallel()
 

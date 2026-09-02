@@ -47,10 +47,11 @@ With --claim: runs the standard startup claim protocol for one work item.
 				DrainAck:   drainAck,
 				JSON:       jsonOut,
 			}
-			if cmdHookWithOptions(args, opts, stdout, stderr) != 0 {
-				return errExit
-			}
-			return nil
+			// exitForCode, not `!= 0 → errExit`: the store-unavailable
+			// contract is exit 2 (reportWorkQueryFailure), and folding it
+			// into errExit renders it as the no-work exit 1 at the process
+			// boundary — the idle-agents-with-work-waiting dead-drop.
+			return exitForCode(cmdHookWithOptions(args, opts, stdout, stderr))
 		},
 	}
 	cmd.Flags().BoolVar(&inject, "inject", false, "silent legacy Stop-hook compatibility; skip work query and exit 0")
@@ -1003,6 +1004,15 @@ const hookStoreUnavailableToken = "GC_HOOK_STORE_UNAVAILABLE"
 func classifyWorkQueryStoreUnavailable(err error) error {
 	if err == nil || errors.Is(err, beads.ErrStoreUnavailable) {
 		return err
+	}
+	// Typed signals first. hookWorkQueryRunner wraps its deadline as
+	// context.DeadlineExceeded precisely so callers classify the timeout as a
+	// transient store error: a wedged-but-listening Dolt (hung connections,
+	// context-deadline floods — the fleet's dominant outage shape, not
+	// "connection refused") surfaces here, and reading it as no-work is the
+	// dead-drop the token exists to close.
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%w: %w", beads.ErrStoreUnavailable, err)
 	}
 	// isTransportClassMessage is the single pinned marker table shared with
 	// the storehealth patrol; a marker added there must classify here too.

@@ -316,3 +316,66 @@ func TestSessionNudgeStorelessFallbackOnStoreMiss(t *testing.T) {
 		t.Fatalf("JSON path = %q; want storeless-fallback", out.Path)
 	}
 }
+
+// TestResolveNudgeTargetStorelessResolvesAgentFromRuntimeIdentityMeta pins
+// the storeless analog of the store path's session-bead identity read: when
+// the caller's identifier is the raw runtime session name (or an alias that
+// is not a config identity), the resolved agent — and with it the provider
+// and session transport delivery branches on — must come from the live
+// session's GC_AGENT / GC_TEMPLATE metadata, not from the workspace default.
+func TestResolveNudgeTargetStorelessResolvesAgentFromRuntimeIdentityMeta(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Provider: "workspace-default"},
+		Agents: []config.Agent{{
+			Dir:      "rig",
+			Name:     "worker",
+			Provider: "custom-provider",
+			Session:  "acp",
+		}},
+	}
+	for _, tc := range []struct {
+		name       string
+		identifier string
+		meta       map[string]string
+	}{
+		{
+			name:       "raw session name with GC_AGENT",
+			identifier: "gc-city-rig-worker",
+			meta:       map[string]string{"GC_AGENT": "rig/worker"},
+		},
+		{
+			name:       "named-session alias with GC_TEMPLATE",
+			identifier: "planner-a",
+			meta:       map[string]string{"GC_ALIAS": "planner-a", "GC_AGENT": "planner-a", "GC_TEMPLATE": "rig/worker"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := runtime.NewFake()
+			if err := fake.Start(context.Background(), tc.identifier, runtime.Config{}); err != nil {
+				t.Fatalf("fake.Start: %v", err)
+			}
+			for k, v := range tc.meta {
+				if err := fake.SetMeta(tc.identifier, k, v); err != nil {
+					t.Fatalf("fake.SetMeta(%s): %v", k, err)
+				}
+			}
+
+			target, err := resolveNudgeTargetStoreless(t.TempDir(), cfg, fake, tc.identifier)
+			if err != nil {
+				t.Fatalf("resolveNudgeTargetStoreless: %v", err)
+			}
+			if got := target.providerName(); got != "custom-provider" {
+				t.Fatalf("providerName() = %q; want the agent's configured provider %q", got, "custom-provider")
+			}
+			if got := target.sessionTransport(); got != "acp" {
+				t.Fatalf("sessionTransport() = %q; want the agent's configured session transport %q", got, "acp")
+			}
+			if target.agent.QualifiedName() != "rig/worker" {
+				t.Fatalf("target.agent = %q; want rig/worker", target.agent.QualifiedName())
+			}
+			if target.alias != tc.identifier {
+				t.Fatalf("target.alias = %q; want the caller's identifier %q (queue matching)", target.alias, tc.identifier)
+			}
+		})
+	}
+}

@@ -13,10 +13,10 @@ import (
 // the last-built body (stale-while-revalidate) and rebuild off the request
 // path; only the first build after a (re)start or long idle is synchronous.
 var (
-	// statusWarmServeMaxAge bounds how stale a warm body may be and still be
-	// served without forcing a synchronous rebuild. Generous: a status overview
-	// minutes old beats a ~28s block, and a refresh is kicked the moment it
-	// ages past statusWarmRefreshAfter.
+	// statusWarmServeMaxAge is the HARD refresh bound: a warm body older than
+	// this is still served (the request never blocks on the rebuild), but a
+	// background refresh is kicked regardless of statusWarmRefreshAfter, so
+	// the body is stale for at most one more poll.
 	statusWarmServeMaxAge = 5 * time.Minute
 	// statusWarmRefreshAfter is the age past which serving a warm body also
 	// triggers a background rebuild, so the served body tracks reality closely

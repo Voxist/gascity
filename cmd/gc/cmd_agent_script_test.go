@@ -1064,3 +1064,77 @@ func TestAgentScriptHookBeadReportsArrayAndObjectDecodeErrors(t *testing.T) {
 		t.Fatalf("error = %q, want decode context", joined.Error())
 	}
 }
+
+// bdWarningStderrSample is bd's own stderr preface on a wedged managed store:
+// the auto-import fallback warning precedes the transport error, and gc hook's
+// token line then embeds that stderr verbatim. Every line contains "warning",
+// which is the word the exit-1 stderr filter treats as benign.
+const bdWarningStderrSample = "warning: auto-import from .beads/issues.jsonl failed: dial tcp 127.0.0.1:3307: connection refused\n" +
+	"gc hook: " + hookStoreUnavailableToken + ": bead store unavailable: running work query \"bd ready --json\": exit status 1: warning: auto-import failed\n"
+
+// TestAgentScriptHookExitTwoIsFailureRegardlessOfStderr pins that the exit
+// code is the primary classifier signal: exit 2 is the store-unavailable
+// contract and is a hook failure whatever stderr says — including stderr where
+// every line carries bd's own "warning" text. Reading stderr text first let a
+// store outage fall through to the graceful empty turn: the classifier-side
+// idle-agents-with-work-waiting dead-drop.
+func TestAgentScriptHookExitTwoIsFailureRegardlessOfStderr(t *testing.T) {
+	t.Parallel()
+	if agentScriptHookExitIsNoWork(2, "", "warning: auto-import from .beads/issues.jsonl failed\nwarning: retrying\n") {
+		t.Fatal("exit 2 (store unavailable) with all-warning stderr classified as no-work")
+	}
+	if agentScriptHookExitIsNoWork(2, "", "") {
+		t.Fatal("exit 2 (store unavailable) with empty stderr classified as no-work")
+	}
+
+	var stderr bytes.Buffer
+	_, hasWork, err := agentScriptHookBeadWithRunner(&stderr,
+		func(_ []string, _ bool, _ string, _ io.Writer, hookStderr io.Writer) int {
+			_, _ = hookStderr.Write([]byte(bdWarningStderrSample))
+			return 2
+		})
+	if err == nil {
+		t.Fatal("agentScriptHookBeadWithRunner took the empty turn on exit 2, want hook failure")
+	}
+	if hasWork {
+		t.Fatal("agentScriptHookBeadWithRunner reported work on exit 2")
+	}
+	if got := stderr.String(); got != bdWarningStderrSample {
+		t.Fatalf("stderr = %q, want forwarded hook stderr", got)
+	}
+}
+
+// TestAgentScriptHookTokenLineIsFailureDespiteWarningText pins the second
+// signal: a stderr line carrying hookStoreUnavailableToken is a failure even
+// when the exit code reads 1 and the line itself contains "warning" (the token
+// line embeds bd's stderr, which routinely does).
+func TestAgentScriptHookTokenLineIsFailureDespiteWarningText(t *testing.T) {
+	t.Parallel()
+	if agentScriptHookExitIsNoWork(1, "", bdWarningStderrSample) {
+		t.Fatal("a stderr line carrying the store-unavailable token was classified as no-work because it also says \"warning\"")
+	}
+	if agentScriptHookExitIsNoWork(1, "", hookWorkQueryDiagPrefix+"warning: "+hookStoreUnavailableToken+"\n") {
+		t.Fatal("a stamped diagnostic carrying the store-unavailable token was classified as no-work")
+	}
+}
+
+// TestAgentScriptHookExitOneWarningStderrStaysNoWork keeps the benign
+// exit-1 classification intact once the code and token checks come first.
+func TestAgentScriptHookExitOneWarningStderrStaysNoWork(t *testing.T) {
+	t.Parallel()
+	if !agentScriptHookExitIsNoWork(1, "", "warning: deprecated config\n") {
+		t.Fatal("exit 1 with warning-only stderr classified as failure")
+	}
+	if !agentScriptHookExitIsNoWork(1, "", "") {
+		t.Fatal("exit 1 with empty stderr classified as failure")
+	}
+	if !agentScriptHookExitIsNoWork(1, "", hookWorkQueryDiagPrefix+"Error: some exit-0 chatter\n") {
+		t.Fatal("exit 1 with a stamped exit-0 diagnostic classified as failure")
+	}
+	if agentScriptHookExitIsNoWork(1, "", "gc hook: config failed\n") {
+		t.Fatal("exit 1 with a genuine error line classified as no-work")
+	}
+	if agentScriptHookExitIsNoWork(1, `[{"id":"hw-1","title":"work"}]`, "") {
+		t.Fatal("ready work in output classified as no-work")
+	}
+}

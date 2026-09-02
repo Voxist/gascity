@@ -25,12 +25,12 @@ func TestAgentScriptTreatsOriginGateRefusalAsNoWork(t *testing.T) {
 	// The refusal reaches script mode only through hookWorkQueryRunner, which
 	// stamps every exit-0 stderr line with hookWorkQueryDiagPrefix; that stamp
 	// is the classification signal, so the sample is fed in the stamped form.
-	if !agentScriptHookExitIsNoWork("", hookWorkQueryDiagPrefix+originGateRefusalSample+"\n") {
+	if !agentScriptHookExitIsNoWork(1, "", hookWorkQueryDiagPrefix+originGateRefusalSample+"\n") {
 		t.Fatal("origin-gate refusal classified as a hook FAILURE; every idle named script-mode agent exits 1 instead of the graceful no-work turn")
 	}
 	// The classifier must not become a blanket allowlist: a real error line
 	// alongside the refusal still fails.
-	if agentScriptHookExitIsNoWork("", hookWorkQueryDiagPrefix+originGateRefusalSample+"\ngc hook: running work query: exit status 1\n") {
+	if agentScriptHookExitIsNoWork(1, "", hookWorkQueryDiagPrefix+originGateRefusalSample+"\ngc hook: running work query: exit status 1\n") {
 		t.Fatal("a genuine hook error was swallowed once the gate-refusal line became benign")
 	}
 }
@@ -71,7 +71,7 @@ func TestAgentScriptTreatsStderrOfSuccessfulWorkQueryAsBenign(t *testing.T) {
 	if !strings.Contains(hookStderr.String(), mysqlDriverChatterSample) {
 		t.Fatalf("runner dropped the query's stderr: %q", hookStderr.String())
 	}
-	if !agentScriptHookExitIsNoWork(out, hookStderr.String()) {
+	if !agentScriptHookExitIsNoWork(1, out, hookStderr.String()) {
 		t.Fatalf("stderr from a work query that exited 0 was classified as a hook FAILURE; every idle poll on a federated city exits 1 with \"gc hook failed\":\nstderr=%q", hookStderr.String())
 	}
 
@@ -116,7 +116,7 @@ func TestAgentScriptStillFailsWhenWorkQueryExitsNonZero(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("doHook = %d, want 1", code)
 	}
-	if agentScriptHookExitIsNoWork(stdout.String(), stderr.String()) {
+	if agentScriptHookExitIsNoWork(code, stdout.String(), stderr.String()) {
 		t.Fatalf("a failed work query was classified as no-work:\nstderr=%q", stderr.String())
 	}
 }
