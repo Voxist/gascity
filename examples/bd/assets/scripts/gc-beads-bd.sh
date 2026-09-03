@@ -752,13 +752,22 @@ bd_runtime_schema_state() {
     return 2
 }
 
-# server_sql_scalar runs a single-column, single-row query and prints the
-# cell, whatever dolt prints around the table (the old-version notice goes to
+# sql_scalar_from_output extracts the single cell from a dolt table-format
+# result, whatever dolt prints around the table (the old-version notice goes to
 # stdout on some builds, so "line 4 of the output" is not the value).
+sql_scalar_from_output() {
+    printf '%s\n' "$1" | grep -E '^\| ' | grep -vE '^\| *[A-Za-z_(*)]+ *\|$' | tail -1 | sed -E 's/^\| *//; s/ *\|$//'
+}
+
+# server_sql_scalar runs a single-column, single-row query and prints the cell.
+# Callers that must distinguish "answered" from "the probe never ran" cannot
+# use this — a failed query prints nothing, which is indistinguishable from an
+# empty cell in a command substitution. Those callers run server_sql themselves
+# and pass its output to sql_scalar_from_output.
 server_sql_scalar() {
     local out
     out=$(server_sql "$1" 2>/dev/null) || return 1
-    printf '%s\n' "$out" | grep -E '^\| ' | grep -vE '^\| *[A-Za-z_(*)]+ *\|$' | tail -1 | sed -E 's/^\| *//; s/ *\|$//'
+    sql_scalar_from_output "$out"
 }
 
 # bd_bootstrap_interrupted reports whether the pinned database looks like a
@@ -776,32 +785,88 @@ server_sql_scalar() {
 # probe (config table present) even reported the half-migrated database as
 # ready. The zero-issues check is the whole safety argument: a database with
 # user rows is never reset here, whatever its working set holds.
+#
+# EVERY probe below fails CLOSED. This function's answer authorizes
+# DOLT_RESET('--hard'), so "yes" must rest on positive evidence from a server
+# that actually answered; silence is not evidence. That matters most exactly
+# where it is hardest: the post-init call site runs after `bd init` has just
+# failed, i.e. when the server has already proven it is struggling and a probe
+# is most likely to be the thing that fails. A probe cancelled mid-flight
+# ("Error 1105 (HY000): context canceled", seen here at load ~100) must never
+# read as "this database has no user data".
+#
+# BD_BOOTSTRAP_INTERRUPTED_REASON carries why a refusal happened, so a caller
+# that expected a heal can say what stopped it instead of reporting nothing.
+BD_BOOTSTRAP_INTERRUPTED_REASON=""
 bd_bootstrap_interrupted() {
-    local db="$1" dirty issues
-    valid_sql_name "$db" || return 1
+    local db="$1" dirty issues out
+    BD_BOOTSTRAP_INTERRUPTED_REASON=""
+    if ! valid_sql_name "$db"; then
+        BD_BOOTSTRAP_INTERRUPTED_REASON="invalid database name"
+        return 1
+    fi
+
+    # Probe 1: is the working set dirty at all? server_sql_scalar prints
+    # nothing when the query fails, and the emptiness test below refuses on
+    # that, so this one is already closed.
     dirty=$(server_sql_scalar "USE \`$db\`; SELECT COUNT(*) FROM dolt_status" | tr -dc '0-9')
-    [ -n "$dirty" ] && [ "$dirty" -gt 0 ] || return 1
-    # bd's SetConfig/SetMetadata land in the working set and are only
+    if [ -z "$dirty" ]; then
+        BD_BOOTSTRAP_INTERRUPTED_REASON="could not read dolt_status"
+        return 1
+    fi
+    [ "$dirty" -gt 0 ] || return 1
+
+    # Probe 2: bd's SetConfig/SetMetadata land in the working set and are only
     # committed by a later write's DOLT_COMMIT; a user's `bd config set` on a
     # scope that has no issues yet is therefore uncommitted but NOT a
     # bootstrap remnant. A dirty config or metadata table disqualifies the
     # reset: this script's own runtime-config writes are committed
     # (record_bd_runtime_config), so on a genuinely interrupted bootstrap
-    # neither table is dirty.
-    if server_sql "USE \`$db\`; SELECT table_name FROM dolt_status" 2>/dev/null | grep -qE '^\| *(config|metadata) *\|'; then
+    # neither table is dirty: bd's schema pass commits each migration step, and
+    # config is created and committed by migration 0006, while bd's own
+    # SetConfig/SetMetadata run only after the pass has succeeded. Both
+    # observed interruptions left dolt_status holding schema tables alone
+    # (child_counters; child_counters and dependencies), never config or
+    # metadata — so this disqualification does not stop the heal arming for the
+    # case it was written for. An unanswered listing disqualifies it too: a
+    # failed query prints nothing, and "no output" must not be read as "no
+    # dirty config table".
+    if ! out=$(server_sql "USE \`$db\`; SELECT table_name FROM dolt_status" 2>&1); then
+        BD_BOOTSTRAP_INTERRUPTED_REASON="could not list dirty tables: $out"
         return 1
     fi
-    if server_sql "USE \`$db\`; SELECT 1 FROM issues LIMIT 1" >/dev/null 2>&1; then
-        issues=$(server_sql_scalar "USE \`$db\`; SELECT COUNT(*) FROM issues" | tr -dc '0-9')
-        [ "${issues:-1}" = "0" ] || return 1
+    if printf '%s\n' "$out" | grep -qE '^\| *(config|metadata) *\|'; then
+        return 1
+    fi
+
+    # Probe 3: the whole safety argument. A database that holds user rows is
+    # never reset here, whatever its working set looks like — so "holds no
+    # rows" needs positive proof, in exactly two shapes:
+    #   * the count answered, and it is zero; or
+    #   * dolt says the issues table does not exist, which is only true before
+    #     the schema is created, when no user data can exist yet.
+    # The match on dolt's wording is deliberately exact. If a future dolt
+    # rephrases it, this refuses to reset rather than guessing — the safe
+    # direction for a destructive step.
+    if out=$(server_sql "USE \`$db\`; SELECT COUNT(*) FROM issues" 2>&1); then
+        issues=$(sql_scalar_from_output "$out" | tr -dc '0-9')
+        if [ -z "$issues" ]; then
+            BD_BOOTSTRAP_INTERRUPTED_REASON="could not read the issue count"
+            return 1
+        fi
+        [ "$issues" = "0" ] || return 1
+    else
+        case "$out" in
+            *"table not found: issues"*) : ;;
+            *)
+                BD_BOOTSTRAP_INTERRUPTED_REASON="could not count issues: $out"
+                return 1
+                ;;
+        esac
     fi
     return 0
 }
 
-# heal_interrupted_bootstrap discards the working set of a database that
-# bd_bootstrap_interrupted matched, so the following bd open can re-run the
-# interrupted migration step instead of refusing. Prints what it did: this
-# is a destructive step, gated on the database holding no issues.
 # working_set_clean reports whether the database's working set holds no
 # uncommitted changes. Fails CLOSED: an unanswered probe reports "not clean",
 # so a caller confirming a destructive step never reads a failed probe as
@@ -813,6 +878,15 @@ working_set_clean() {
     [ "${dirty:-1}" = "0" ]
 }
 
+# heal_interrupted_bootstrap discards the working set of a database that
+# bd_bootstrap_interrupted matched, so the following bd open can re-run the
+# interrupted migration step instead of refusing. Prints what it did: this
+# is a destructive step, gated on the database holding no issues.
+#
+# Reports failure by return status rather than calling die: the caller decides
+# what a failed heal means, and the post-init caller has a forensics dump to
+# print first. A heal that dies in place is the hardest failure to diagnose
+# producing the least evidence.
 heal_interrupted_bootstrap() {
     local db="$1" attempt out backoff_ms
     echo "warning: database '$db' holds an interrupted bd bootstrap (uncommitted schema changes, no issues); discarding its working set and re-running migrations" >&2
@@ -846,7 +920,8 @@ heal_interrupted_bootstrap() {
             backoff_ms=$((backoff_ms * 2))
         fi
     done
-    die "failed to reset the interrupted bootstrap working set of database '$db': ${out:-no output}"
+    echo "warning: failed to reset the interrupted bootstrap working set of database '$db': ${out:-no output}" >&2
+    return 1
 }
 
 # finish_bd_schema_migrations completes a schema that is clean but behind
@@ -2994,10 +3069,15 @@ run_bd_init_pinned() {
     # store is never reset here. One retry only — a second interruption is a
     # different problem, and the caller's own retry still applies.
     if bd_bootstrap_interrupted "$dolt_database"; then
-        heal_interrupted_bootstrap "$dolt_database"
-        if bd_init_pinned_attempt "$dir" "$prefix" "$dolt_database" "$host" "$@"; then
+        if heal_interrupted_bootstrap "$dolt_database" &&
+            bd_init_pinned_attempt "$dir" "$prefix" "$dolt_database" "$host" "$@"; then
             return 0
         fi
+    elif [ -n "$BD_BOOTSTRAP_INTERRUPTED_REASON" ]; then
+        # Refused rather than "not an interrupted bootstrap": say which, so a
+        # database that could not be inspected is never mistaken for one that
+        # was inspected and found healthy.
+        echo "warning: not attempting the interrupted-bootstrap heal for '$dolt_database': $BD_BOOTSTRAP_INTERRUPTED_REASON" >&2
     fi
 
     dump_bd_init_forensics "$dolt_database"
@@ -3314,7 +3394,8 @@ op_init() {
         if ensure_database_registered "$dolt_database"; then
             if probe_schema_state_or_die "$dolt_database"; then
                 if bd_bootstrap_interrupted "$dolt_database"; then
-                    heal_interrupted_bootstrap "$dolt_database"
+                    heal_interrupted_bootstrap "$dolt_database" \
+                        || die "cannot heal the interrupted bd bootstrap of database '$dolt_database'; refusing to continue over a half-migrated store"
                 fi
                 # Witness before the first bd command (see the fresh-scope
                 # path below): a scope whose metadata was written by hand or
@@ -3344,7 +3425,8 @@ op_init() {
             fi
             echo "warning: database '$dolt_database' missing bd schema; re-initializing" >&2
             if bd_bootstrap_interrupted "$dolt_database"; then
-                heal_interrupted_bootstrap "$dolt_database"
+                heal_interrupted_bootstrap "$dolt_database" \
+                    || die "cannot heal the interrupted bd bootstrap of database '$dolt_database'; refusing to continue over a half-migrated store"
             fi
             bd_init_force="--force"
         else
@@ -3396,7 +3478,8 @@ op_init() {
     # FORCE-seed a missing one. Only a database with no bd schema reaches
     # bd init at all.
     if bd_bootstrap_interrupted "$dolt_database"; then
-        heal_interrupted_bootstrap "$dolt_database"
+        heal_interrupted_bootstrap "$dolt_database" \
+            || die "cannot heal the interrupted bd bootstrap of database '$dolt_database'; refusing to continue over a half-migrated store"
     fi
     if [ "$GC_SCOPE_METADATA_PRESEEDED" = "1" ] && [ -z "$bd_init_force" ]; then
         if probe_schema_state_or_die "$dolt_database"; then

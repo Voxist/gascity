@@ -103,6 +103,16 @@ func TestE2E_SuspendResume_Agent(t *testing.T) {
 	// Wait for initial report.
 	waitForReport(t, cityDir, "suspendee", e2eDefaultTimeout())
 
+	// Assert the session is visible as active before suspending it. This is
+	// the premise of everything below, and it is also the only place the
+	// POSITIVE direction of agentSessionActive is exercised for this agent:
+	// without it, a listing this helper could not parse would make
+	// waitForAgentNotRunning return instantly and pass, silently restoring the
+	// race it exists to close. A failure HERE is ga-qggkq — the session was
+	// never running to begin with — reported one step earlier and more
+	// accurately than the report timeout below.
+	waitForAgentRunning(t, cityDir, "suspendee", e2eDefaultTimeout())
+
 	// Suspend the agent.
 	out, err := gc(cityDir, "agent", "suspend", "suspendee")
 	if err != nil {
@@ -113,9 +123,7 @@ func TestE2E_SuspendResume_Agent(t *testing.T) {
 	// be checked and waited on: while the session is still up the reconciler
 	// sees a live agent and has nothing to restart, so the resume below would
 	// be a no-op and the report would never be rewritten.
-	if out, err := gc(cityDir, "session", "kill", "suspendee"); err != nil {
-		t.Fatalf("gc session kill failed: %v\noutput: %s", err, out)
-	}
+	killAgentSession(t, cityDir, "suspendee")
 	waitForAgentNotRunning(t, cityDir, "suspendee", e2eDefaultTimeout())
 
 	// Remove old report.
@@ -138,10 +146,11 @@ func TestE2E_SuspendResume_Agent(t *testing.T) {
 	}
 
 	// The controller is already running, so resume alone should let it wake
-	// the agent again. A timeout here with the agent proven down above is the
-	// startup phantom-reap defect, not this test's race: see ga-qggkq, and read
-	// the isolated supervisor log this failure attaches for the
-	// "reaped phantom session bead" line.
+	// the agent again. A timeout here with the agent proven down above is
+	// ga-qggkq, not this test's race: a named session whose first start did
+	// not take at city startup is never started again. Read the isolated
+	// supervisor log this failure attaches for "reaped phantom session bead"
+	// or an op=start with outcome=provider_error and no later start.
 	report := waitForReport(t, cityDir, "suspendee", e2eDefaultTimeout())
 	if report.get("STATUS") != "complete" {
 		t.Error("resumed agent did not restart")
@@ -161,6 +170,16 @@ func TestE2E_SuspendResume_City(t *testing.T) {
 	// Wait for initial report.
 	waitForReport(t, cityDir, "citysus", e2eDefaultTimeout())
 
+	// Assert the session is visible as active before suspending the city. This
+	// is the premise of everything below, and it is also the only place the
+	// POSITIVE direction of agentSessionActive is exercised for this agent:
+	// without it, a listing this helper could not parse would make
+	// waitForAgentNotRunning return instantly and pass, silently restoring the
+	// race it exists to close. A failure HERE is ga-qggkq — the session was
+	// never running to begin with — reported one step earlier and more
+	// accurately than the report timeout below.
+	waitForAgentRunning(t, cityDir, "citysus", e2eDefaultTimeout())
+
 	// Suspend the entire city.
 	out, err := gc("", "suspend", cityDir)
 	if err != nil {
@@ -171,9 +190,7 @@ func TestE2E_SuspendResume_City(t *testing.T) {
 	// session is still up the reconciler sees a live agent and has nothing to
 	// restart, so the resume below would be a no-op and the report would never
 	// be rewritten.
-	if out, err := gc(cityDir, "session", "kill", "citysus"); err != nil {
-		t.Fatalf("gc session kill failed: %v\noutput: %s", err, out)
-	}
+	killAgentSession(t, cityDir, "citysus")
 	waitForAgentNotRunning(t, cityDir, "citysus", e2eDefaultTimeout())
 
 	// Remove old report.
@@ -196,10 +213,11 @@ func TestE2E_SuspendResume_City(t *testing.T) {
 	}
 
 	// Resume should allow the running controller to restart the agent. A
-	// timeout here with the agent proven down above is the startup
-	// phantom-reap defect, not this test's race: see ga-qggkq, and read the
-	// isolated supervisor log this failure attaches for the
-	// "reaped phantom session bead" line.
+	// timeout here with the agent proven down above is ga-qggkq, not this
+	// test's race: a named session whose first start did not take at city
+	// startup is never started again. Read the isolated supervisor log this
+	// failure attaches for "reaped phantom session bead" or an op=start with
+	// outcome=provider_error and no later start.
 	report := waitForReport(t, cityDir, "citysus", e2eDefaultTimeout())
 	if report.get("STATUS") != "complete" {
 		t.Error("agent did not restart after city resume")

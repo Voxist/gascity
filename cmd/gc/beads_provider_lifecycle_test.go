@@ -8149,6 +8149,61 @@ func TestGcBeadsBdInitNeverResetsADatabaseWithIssues(t *testing.T) {
 	}
 }
 
+// gcBeadsBdHealProbes describes how the dolt stub answers the probes
+// bd_bootstrap_interrupted makes before it will authorize a
+// DOLT_RESET('--hard'). Each probe can answer, report the object genuinely
+// missing, or fail the way a loaded server fails — which is the distinction
+// the guard has to get right, because only the first two are evidence.
+type gcBeadsBdHealProbes struct {
+	// issueCount answers SELECT COUNT(*) FROM issues when issuesProbe is "ok".
+	issueCount int
+	// issuesProbe is "ok" (default), "absent" (dolt's table-not-found, which
+	// is real evidence there is no user data yet), or "canceled" (the
+	// mid-flight cancellation a loaded shared server produces, which is no
+	// evidence at all).
+	issuesProbe string
+	// dirtyTables is what SELECT table_name FROM dolt_status lists. Empty
+	// means one ordinary migration table, i.e. nothing disqualifying.
+	dirtyTables []string
+	// dirtyTablesProbe is "ok" (default) or "canceled".
+	dirtyTablesProbe string
+}
+
+// cancelledProbeSQLError is the shape Dolt returns when it cancels a statement
+// mid-flight on a loaded server. Observed on 2026-09-03 at load ~100 against a
+// real managed server, which is what makes it the right thing for the stub to
+// reproduce: it carries no "table not found", so a guard that treats any
+// failure as "no such table" reads it as "this database holds no user data".
+const cancelledProbeSQLError = "Error 1105 (HY000): context canceled"
+
+func (p gcBeadsBdHealProbes) issuesCase() string {
+	switch p.issuesProbe {
+	case "absent":
+		return "    echo \"error on line 1 for query SELECT COUNT(*) FROM issues: Error 1146 (HY000): table not found: issues\" >&2\n    exit 1"
+	case "canceled":
+		return fmt.Sprintf("    echo \"error on line 1 for query SELECT COUNT(*) FROM issues: %s\" >&2\n    exit 1", cancelledProbeSQLError)
+	default:
+		return fmt.Sprintf("    table %d\n    exit 0", p.issueCount)
+	}
+}
+
+func (p gcBeadsBdHealProbes) dirtyTablesCase() string {
+	if p.dirtyTablesProbe == "canceled" {
+		return fmt.Sprintf("    echo \"error on line 1 for query SELECT table_name FROM dolt_status: %s\" >&2\n    exit 1", cancelledProbeSQLError)
+	}
+	names := p.dirtyTables
+	if len(names) == 0 {
+		names = []string{"child_counters"}
+	}
+	var b strings.Builder
+	b.WriteString("    printf '+------------+\\n| table_name |\\n+------------+\\n'\n")
+	for _, n := range names {
+		fmt.Fprintf(&b, "    printf '| %s |\\n'\n", n)
+	}
+	b.WriteString("    printf '+------------+\\n'\n    exit 0")
+	return b.String()
+}
+
 // gcBeadsBdInitInterruptedByItsOwnRunStubs writes bd and dolt stubs that model
 // the failure measured on CI and locally on 2026-09-03: the pinned database is
 // EMPTY and CLEAN when `bd init` starts (config probe answers "table not
@@ -8157,8 +8212,9 @@ func TestGcBeadsBdInitNeverResetsADatabaseWithIssues(t *testing.T) {
 // (dolt_status dirty, zero issues). The second `bd init` succeeds, and the
 // DOLT_RESET marker is what flips dolt_status back to clean.
 //
-// issueRows lets the safety half of the pair put user rows in the database.
-func gcBeadsBdInitInterruptedByItsOwnRunStubs(t *testing.T, binDir, sqlLog, bdLog string, issueRows int) {
+// probes steers the three guard probes so the safety half of the contract —
+// refuse unless the database PROVES it holds no user data — can be exercised.
+func gcBeadsBdInitInterruptedByItsOwnRunStubs(t *testing.T, binDir, sqlLog, bdLog string, probes gcBeadsBdHealProbes) {
 	t.Helper()
 	writeExecutable(t, filepath.Join(binDir, "sleep"), "#!/bin/sh\nexit 0\n")
 	stateDir := filepath.Dir(sqlLog)
@@ -8208,12 +8264,11 @@ case "$query" in
     if [ -f %q ]; then table 0; elif [ -f %q ]; then table 1; else table 0; fi
     exit 0
     ;;
-  'USE `+"`hq`"+`; SELECT 1 FROM issues LIMIT 1')
-    exit 0
+  'USE `+"`hq`"+`; SELECT table_name FROM dolt_status')
+%s
     ;;
   'USE `+"`hq`"+`; SELECT COUNT(*) FROM issues')
-    table %d
-    exit 0
+%s
     ;;
   *DOLT_RESET*)
     : > %q
@@ -8223,7 +8278,41 @@ case "$query" in
     exit 0
     ;;
 esac
-`, sqlLog, initRanMarker, resetMarker, initRanMarker, issueRows, resetMarker))
+`, sqlLog, initRanMarker, resetMarker, initRanMarker, probes.dirtyTablesCase(), probes.issuesCase(), resetMarker))
+}
+
+// gcBeadsBdHealCity stages a city whose metadata points at database "hq" and
+// returns the provider script path plus the bin dir and the two log paths the
+// stubs write.
+func gcBeadsBdHealCity(t *testing.T) (script, binDir, sqlLog, bdLog string) {
+	t.Helper()
+	cityPath := t.TempDir()
+	for _, d := range []string{".gc", ".beads"} {
+		if err := os.MkdirAll(filepath.Join(cityPath, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	materializeBuiltinPacksForTest(t, cityPath)
+	binDir = filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logDir := t.TempDir()
+	return gcBeadsBdScriptPath(cityPath), binDir, filepath.Join(logDir, "dolt-sql.log"), filepath.Join(logDir, "bd-args.log")
+}
+
+// forcedInitCount counts forced bd init invocations in the bd stub's arg log.
+func forcedInitCount(t *testing.T, bdLog string) int {
+	t.Helper()
+	args, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("bd never ran: %v", err)
+	}
+	return strings.Count(string(args), "init --force --quiet --server -p gc --database hq")
 }
 
 // TestGcBeadsBdInitHealsAnInterruptionLeftByItsOwnInit pins the other half of
@@ -8243,26 +8332,9 @@ esac
 // child_counters" and forensics reporting "interrupted-bootstrap signature:
 // yes" — the script's own predicate, matched one call too late.
 func TestGcBeadsBdInitHealsAnInterruptionLeftByItsOwnInit(t *testing.T) {
-	cityPath := t.TempDir()
-	for _, d := range []string{".gc", ".beads"} {
-		if err := os.MkdirAll(filepath.Join(cityPath, d), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
-		[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	materializeBuiltinPacksForTest(t, cityPath)
-	script := gcBeadsBdScriptPath(cityPath)
-	binDir := filepath.Join(t.TempDir(), "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	logDir := t.TempDir()
-	sqlLog := filepath.Join(logDir, "dolt-sql.log")
-	bdLog := filepath.Join(logDir, "bd-args.log")
-	gcBeadsBdInitInterruptedByItsOwnRunStubs(t, binDir, sqlLog, bdLog, 0)
+	script, binDir, sqlLog, bdLog := gcBeadsBdHealCity(t)
+	cityPath := filepath.Dir(filepath.Dir(filepath.Dir(script)))
+	gcBeadsBdInitInterruptedByItsOwnRunStubs(t, binDir, sqlLog, bdLog, gcBeadsBdHealProbes{})
 
 	out, err := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
 	if err != nil {
@@ -8278,13 +8350,8 @@ func TestGcBeadsBdInitHealsAnInterruptionLeftByItsOwnInit(t *testing.T) {
 	if !strings.Contains(string(sql), "CALL DOLT_RESET('--hard')") {
 		t.Fatalf("expected DOLT_RESET('--hard') after the failed init, got:\n%s", sql)
 	}
-	bdArgs, err := os.ReadFile(bdLog)
-	if err != nil {
-		t.Fatalf("bd never ran: %v", err)
-	}
-	inits := strings.Count(string(bdArgs), "init --force --quiet --server -p gc --database hq")
-	if inits != 2 {
-		t.Fatalf("forced inits = %d, want 2 (the failed one and the retry after the reset):\n%s", inits, bdArgs)
+	if inits := forcedInitCount(t, bdLog); inits != 2 {
+		t.Fatalf("forced inits = %d, want 2 (the failed one and the retry after the reset)", inits)
 	}
 }
 
@@ -8293,26 +8360,9 @@ func TestGcBeadsBdInitHealsAnInterruptionLeftByItsOwnInit(t *testing.T) {
 // rows is not an interrupted bootstrap, so the script must not reset it, must
 // not re-run the init, and must fail with the forensics dump.
 func TestGcBeadsBdInitNeverRetriesOverADatabaseWithIssues(t *testing.T) {
-	cityPath := t.TempDir()
-	for _, d := range []string{".gc", ".beads"} {
-		if err := os.MkdirAll(filepath.Join(cityPath, d), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
-		[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	materializeBuiltinPacksForTest(t, cityPath)
-	script := gcBeadsBdScriptPath(cityPath)
-	binDir := filepath.Join(t.TempDir(), "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	logDir := t.TempDir()
-	sqlLog := filepath.Join(logDir, "dolt-sql.log")
-	bdLog := filepath.Join(logDir, "bd-args.log")
-	gcBeadsBdInitInterruptedByItsOwnRunStubs(t, binDir, sqlLog, bdLog, 3)
+	script, binDir, sqlLog, bdLog := gcBeadsBdHealCity(t)
+	cityPath := filepath.Dir(filepath.Dir(filepath.Dir(script)))
+	gcBeadsBdInitInterruptedByItsOwnRunStubs(t, binDir, sqlLog, bdLog, gcBeadsBdHealProbes{issueCount: 3})
 
 	out, err := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
 	if err == nil {
@@ -8325,15 +8375,143 @@ func TestGcBeadsBdInitNeverRetriesOverADatabaseWithIssues(t *testing.T) {
 	if strings.Contains(string(sql), "DOLT_RESET") {
 		t.Fatalf("a database with issues must never be reset, got:\n%s\noutput:\n%s", sql, out)
 	}
-	bdArgs, err := os.ReadFile(bdLog)
-	if err != nil {
-		t.Fatalf("bd never ran: %v", err)
-	}
-	if inits := strings.Count(string(bdArgs), "init --force --quiet --server -p gc --database hq"); inits != 1 {
-		t.Fatalf("forced inits = %d, want exactly 1 (no retry over user data):\n%s", inits, bdArgs)
+	if inits := forcedInitCount(t, bdLog); inits != 1 {
+		t.Fatalf("forced inits = %d, want exactly 1 (no retry over user data)", inits)
 	}
 	if !strings.Contains(string(out), "bd init forensics") {
 		t.Fatalf("expected the forensics dump on the unhealable failure, got:\n%s", out)
+	}
+}
+
+// TestGcBeadsBdInitPostInitHealResetsOnlyOnPositiveProofOfNoUserData is the
+// data-safety contract for the post-init heal, and it is the reason that heal
+// can exist at all.
+//
+// The heal ends in DOLT_RESET('--hard'), which destroys the working set. It is
+// authorized by bd_bootstrap_interrupted, whose "this database holds no user
+// data" finding must therefore rest on an answer from a server that actually
+// answered. Silence is not evidence — and the post-init call site is reached
+// PRECISELY when the server has just proven it is struggling (the `bd init` it
+// follows has failed), which is exactly when a probe is most likely to be the
+// thing that fails. A guard that reads a canceled probe as "no such table" is
+// a path to hard-resetting a live rig store holding thousands of issues.
+//
+// So every probe fails CLOSED, and the two shapes that DO authorize a reset are
+// pinned here alongside the ones that must not:
+//
+//   - the issue count answered zero                     -> reset
+//   - dolt reports the issues table absent (pre-schema) -> reset
+//   - the issue count probe was canceled               -> REFUSE
+//   - the dirty-table listing was canceled             -> REFUSE
+//   - config is dirty (an uncommitted user write)       -> REFUSE
+//
+// A refusal must also leave the forensics dump behind: an unhealable failure is
+// the hardest one to diagnose and must not produce the least evidence.
+func TestGcBeadsBdInitPostInitHealResetsOnlyOnPositiveProofOfNoUserData(t *testing.T) {
+	cases := []struct {
+		name      string
+		probes    gcBeadsBdHealProbes
+		wantReset bool
+		// wantInits is 2 when the heal ran and the init was retried, 1 when the
+		// guard refused and the script stopped at its first init.
+		wantInits int
+	}{
+		{
+			name:      "issue count answers zero",
+			probes:    gcBeadsBdHealProbes{},
+			wantReset: true,
+			wantInits: 2,
+		},
+		{
+			name:      "issues table absent is real evidence of a pre-schema database",
+			probes:    gcBeadsBdHealProbes{issuesProbe: "absent"},
+			wantReset: true,
+			wantInits: 2,
+		},
+		{
+			name:      "issue count probe canceled proves nothing",
+			probes:    gcBeadsBdHealProbes{issuesProbe: "canceled"},
+			wantReset: false,
+			wantInits: 1,
+		},
+		{
+			name:      "dirty table listing canceled proves nothing",
+			probes:    gcBeadsBdHealProbes{dirtyTablesProbe: "canceled"},
+			wantReset: false,
+			wantInits: 1,
+		},
+		{
+			name:      "dirty config table is an uncommitted user write",
+			probes:    gcBeadsBdHealProbes{dirtyTables: []string{"config", "child_counters"}},
+			wantReset: false,
+			wantInits: 1,
+		},
+		{
+			name:      "dirty metadata table is an uncommitted user write",
+			probes:    gcBeadsBdHealProbes{dirtyTables: []string{"metadata"}},
+			wantReset: false,
+			wantInits: 1,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			script, binDir, sqlLog, bdLog := gcBeadsBdHealCity(t)
+			cityPath := filepath.Dir(filepath.Dir(filepath.Dir(script)))
+			gcBeadsBdInitInterruptedByItsOwnRunStubs(t, binDir, sqlLog, bdLog, tc.probes)
+
+			out, err := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
+
+			sql, readErr := os.ReadFile(sqlLog)
+			if readErr != nil {
+				t.Fatalf("read sql log: %v", readErr)
+			}
+			gotReset := strings.Contains(string(sql), "DOLT_RESET")
+			if gotReset != tc.wantReset {
+				t.Fatalf("DOLT_RESET issued = %v, want %v\nsql:\n%s\noutput:\n%s", gotReset, tc.wantReset, sql, out)
+			}
+			if inits := forcedInitCount(t, bdLog); inits != tc.wantInits {
+				t.Fatalf("forced inits = %d, want %d\noutput:\n%s", inits, tc.wantInits, out)
+			}
+			if tc.wantReset {
+				if err != nil {
+					t.Fatalf("init failed although the heal was authorized: %v\n%s", err, out)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("init must fail when the heal is refused:\n%s", out)
+			}
+			if !strings.Contains(string(out), "bd init forensics") {
+				t.Fatalf("a refused heal must still dump forensics, got:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestGcBeadsBdInitSaysWhyItRefusedToHeal pins the diagnostic half of the
+// fail-closed guard: a database the script could not INSPECT must never be
+// reported the same way as one it inspected and found healthy. Without the
+// reason, an operator reading the forensics of a failed init sees
+// "interrupted-bootstrap signature: no" and concludes the store was fine.
+func TestGcBeadsBdInitSaysWhyItRefusedToHeal(t *testing.T) {
+	script, binDir, sqlLog, bdLog := gcBeadsBdHealCity(t)
+	cityPath := filepath.Dir(filepath.Dir(filepath.Dir(script)))
+	gcBeadsBdInitInterruptedByItsOwnRunStubs(t, binDir, sqlLog, bdLog,
+		gcBeadsBdHealProbes{issuesProbe: "canceled"})
+
+	out, err := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
+	if err == nil {
+		t.Fatalf("init must fail when the issue-count probe never answered:\n%s", out)
+	}
+	if !strings.Contains(string(out), "not attempting the interrupted-bootstrap heal") {
+		t.Fatalf("expected the refusal to name itself, got:\n%s", out)
+	}
+	if !strings.Contains(string(out), "could not count issues") {
+		t.Fatalf("expected the refusal to carry the probe's own failure, got:\n%s", out)
+	}
+	if !strings.Contains(string(out), cancelledProbeSQLError) {
+		t.Fatalf("expected the refusal to quote the server's error, got:\n%s", out)
 	}
 }
 
