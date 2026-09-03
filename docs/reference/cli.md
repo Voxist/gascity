@@ -3437,43 +3437,36 @@ gc provider
 
 | Subcommand | Description |
 |------------|-------------|
-| [gc provider credentials](#gc-provider-credentials) | Show which environment variable backs a provider's credentials, and optionally set it |
+| [gc provider credentials](#gc-provider-credentials) | Show which environment variable holds a provider's credentials |
 | [gc provider quota](#gc-provider-quota) | Show Claude account quota states and per-tier provider decisions |
 
 ## gc provider credentials
 
-Report which environment variable actually holds each of a provider's
-credentials, and optionally write a new value to the machine-local source the
-supervisor reads.
+Report which environment variable holds each of a provider's credentials, and
+what stands between changing it and the fleet using it.
 
 Which variable that is, is not obvious. A provider declares its credential
 env-var names through its upstream_env binding (api_key and auth_token; never
-base_url), those names are resolved through the provider's inheritance chain,
-and each one's value may interpolate a different variable again. This command
-performs that resolution and refuses, naming the reason, wherever no single
+base_url), those names resolve through the provider's inheritance chain, and
+each one's value may interpolate a different variable again. This command
+performs that resolution and reports, naming the reason, wherever no single
 variable holds the credential.
 
-With --set-stdin or --set-from-file it writes the new value into the
-machine-local secrets file under GC_HOME (secrets.env) —
-atomically, mode 0600, preserving every other line. The credential is never
-taken from the command line, so it cannot reach the process argument vector or
-the shell history.
+It also reports what would stop a change from taking effect: a variable the
+supervisor does not forward into its service environment, a later config layer
+that overrides the credential for particular agents, and whether this city's
+supervisor reads the machine-local secrets file at all.
 
-Setting a value does NOT apply it. A credential change moves no config
-fingerprint, so no agent restarts on its own, and the supervisor resolves
-session environment from its own environment, which is fixed at exec. Run
-"gc restart" afterwards to re-exec the supervisor and cycle the agents; until
-then every session keeps the old credential.
+Changing a credential does not apply itself. A credential change moves no
+config fingerprint, so no agent restarts on its own, and the supervisor
+resolves session environment from its own environment, fixed when it exec'd.
+Applying a new value means: write it where the supervisor reads it, regenerate
+the service file so the supervisor re-execs with it, then cycle the agents.
+Until the supervisor re-execs, every running session keeps the old credential.
 
 ```
-gc provider credentials <provider> [flags]
+gc provider credentials <provider>
 ```
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--role` | string |  | restrict --set to one credential role (api_key or auth_token) |
-| `--set-from-file` | string |  | read the new credential from this file and write it to the machine-local secrets file |
-| `--set-stdin` | bool |  | read the new credential from stdin and write it to the machine-local secrets file |
 
 ## gc provider quota
 

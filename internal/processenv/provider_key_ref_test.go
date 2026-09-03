@@ -1,21 +1,22 @@
 package processenv_test
 
 import (
-	"os"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/processenv"
 )
 
-// TestSoleEnvRef pins the grammar SoleEnvRef must share with session start.
+// TestSoleReferencedEnvVar pins the grammar this resolver shares with session
+// start, which expands config-authored env values with
+// [processenv.ExpandSessionEnvValue] — os.Expand, so both ${VAR} and bare
+// $VAR count. A resolver reading values any other way silently disagrees with
+// the process it describes.
 //
-// Session start expands config-authored env values with
-// [processenv.ExpandSessionEnvValue], which is os.Expand — so it honors BOTH
-// ${VAR} and bare $VAR, and it substitutes a reference in place, keeping any
-// literal text around it. Any resolver that decides which variable backs a
-// provider's credential has to read the value the same way, or it silently
-// disagrees with the process it is describing.
-func TestSoleEnvRef(t *testing.T) {
+// Literal text around a reference is accepted on purpose. A caller changes the
+// REFERENCED variable, not the value, so "Bearer ${GW_KEY}" is rotatable: the
+// prefix survives expansion and only the secret moves.
+func TestSoleReferencedEnvVar(t *testing.T) {
 	tests := []struct {
 		name  string
 		value string
@@ -24,72 +25,89 @@ func TestSoleEnvRef(t *testing.T) {
 	}{
 		{name: "braced ref", value: "${ACME_KEY}", want: "ACME_KEY", ok: true},
 		{name: "bare ref", value: "$ACME_KEY", want: "ACME_KEY", ok: true},
+		{name: "literal prefix", value: "Bearer ${ACME_KEY}", want: "ACME_KEY", ok: true},
+		{name: "literal suffix", value: "${ACME_KEY}-suffix", want: "ACME_KEY", ok: true},
+		{name: "same ref twice", value: "${ACME_KEY}:${ACME_KEY}", want: "ACME_KEY", ok: true},
+
+		// No variable to change.
 		{name: "static literal", value: "sk-ant-literal", ok: false},
 		{name: "empty", value: "", ok: false},
 
-		// A reference wrapped in literal text is NOT a sole reference. The
-		// variable behind it holds "sk-...", not "Bearer sk-...", so writing
-		// the credential to it would drop the literal — and writing the whole
-		// value to it would corrupt the header on every other consumer.
-		{name: "ref with literal prefix", value: "Bearer ${ACME_KEY}", ok: false},
-		{name: "ref with literal suffix", value: "${ACME_KEY}-suffix", ok: false},
+		// Two distinct variables: no single one determines the credential.
 		{name: "two refs", value: "${ACME_ID}:${ACME_KEY}", ok: false},
-		{name: "same ref twice", value: "${ACME_KEY}${ACME_KEY}", ok: false},
 
-		// $$ parses as a reference named "$" under os.Expand. It is not a
-		// legal environment variable name, so it is not a source var.
+		// $$ parses as a reference named "$" under os.Expand, which is not a
+		// legal environment variable name.
 		{name: "dollar dollar", value: "$$", ok: false},
 		{name: "digit-leading name", value: "${9BAD}", ok: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, ok := processenv.SoleEnvRef(tt.value)
+			got, ok := processenv.SoleReferencedEnvVar(tt.value)
 			if ok != tt.ok {
-				t.Fatalf("SoleEnvRef(%q) ok = %v; want %v (name %q)", tt.value, ok, tt.ok, got)
+				t.Fatalf("SoleReferencedEnvVar(%q) ok = %v; want %v (name %q)", tt.value, ok, tt.ok, got)
 			}
 			if got != tt.want {
-				t.Errorf("SoleEnvRef(%q) = %q; want %q", tt.value, got, tt.want)
+				t.Errorf("SoleReferencedEnvVar(%q) = %q; want %q", tt.value, got, tt.want)
 			}
 		})
 	}
 }
 
-// TestSoleEnvRefAgreesWithSessionExpansion is the anti-vacuity guard for the
-// case above: for every value SoleEnvRef claims is a sole reference to VAR,
-// setting VAR must make session-start expansion produce exactly that value —
-// and for every value it rejects, it must be because expansion would NOT.
-// This is the property that matters, checked against the real expander rather
-// than against a second copy of the same regex.
-func TestSoleEnvRefAgreesWithSessionExpansion(t *testing.T) {
-	const secret = "sk-ant-rotated"
+// TestSoleReferencedEnvVarControlsExpansion is the anti-vacuity guard, and it
+// pins the property that actually matters rather than a proxy for it: when
+// this function names a variable, changing THAT variable must change what
+// session start hands the harness, and every other byte of the value must
+// survive. When it refuses, changing one variable must not be presentable as
+// rotating the credential.
+//
+// Checked against the real expander, not a second copy of the grammar.
+func TestSoleReferencedEnvVarControlsExpansion(t *testing.T) {
+	const before = "sk-ant-old"
+	const after = "sk-ant-new"
+
 	for _, value := range []string{
 		"${ACME_KEY}",
 		"$ACME_KEY",
 		"Bearer ${ACME_KEY}",
 		"${ACME_KEY}-suffix",
+		"${ACME_KEY}:${ACME_KEY}",
+		"${ACME_ID}:${ACME_KEY}",
 		"sk-ant-literal",
 		"",
 	} {
 		t.Run(value, func(t *testing.T) {
-			t.Setenv("ACME_KEY", secret)
-			name, ok := processenv.SoleEnvRef(value)
-			expanded := processenv.ExpandSessionEnvValue(value)
+			name, ok := processenv.SoleReferencedEnvVar(value)
+
+			t.Setenv("ACME_ID", "acct-1")
+			t.Setenv("ACME_KEY", before)
+			expandedBefore := processenv.ExpandSessionEnvValue(value)
+			t.Setenv("ACME_KEY", after)
+			expandedAfter := processenv.ExpandSessionEnvValue(value)
+
 			if !ok {
-				if expanded == secret {
-					t.Fatalf("SoleEnvRef(%q) rejected the value, but session expansion yields exactly the secret — a rotation would have been possible and was refused", value)
+				// Refused. Either the value references nothing, or a second
+				// variable also feeds it — and then naming ACME_KEY as "the"
+				// credential variable would be wrong even though changing it
+				// does move the expansion.
+				if !processenv.HasEnvRef(value) && expandedBefore != expandedAfter {
+					t.Fatalf("refused %q as referencing nothing, yet changing ACME_KEY moved expansion %q -> %q",
+						value, expandedBefore, expandedAfter)
 				}
 				return
 			}
+
 			if name != "ACME_KEY" {
-				t.Fatalf("SoleEnvRef(%q) = %q; want ACME_KEY", value, name)
+				t.Fatalf("SoleReferencedEnvVar(%q) = %q; want ACME_KEY", value, name)
 			}
-			if expanded != secret {
-				t.Fatalf("SoleEnvRef(%q) claims the value is exactly $%s, but session expansion yields %q, not %q — writing the credential to %s would corrupt this entry",
-					value, name, expanded, secret, name)
+			if expandedBefore == expandedAfter {
+				t.Fatalf("SoleReferencedEnvVar(%q) names %s, but changing %s left expansion at %q — writing it would rotate nothing",
+					value, name, name, expandedAfter)
 			}
-			if os.Getenv(name) != secret {
-				t.Fatalf("test setup: %s = %q", name, os.Getenv(name))
+			if want := strings.ReplaceAll(expandedBefore, before, after); expandedAfter != want {
+				t.Fatalf("expansion of %q went %q -> %q; want %q — literal text around the reference was not preserved",
+					value, expandedBefore, expandedAfter, want)
 			}
 		})
 	}

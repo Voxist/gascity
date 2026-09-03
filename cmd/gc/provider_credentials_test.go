@@ -7,17 +7,15 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
-// TestProviderCredentialSourcesRotatesOnlyCredentialRoles is the direct guard
-// on the defect that made `gc provider rotate-key` unsafe (ga-i86nb): the
-// shipped code collected every ${VAR} referenced anywhere in the provider env
-// and assigned the API key to all of them, so a base URL written as
-// "${ZAI_BASE_URL}" was overwritten with the credential and provider routing
-// broke fleet-wide.
+// TestProviderCredentialSourcesResolvesOnlyCredentialRoles pins the contract
+// that only the api_key and auth_token bindings name credentials. base_url
+// names an endpoint, and offering the variable behind it as a credential
+// points the operator at a live routing value.
 //
-// The provider spec here is the shape our own city runs — a zai harness whose
-// base URL and credential are BOTH env refs. That is the shape that triggers
-// the bug; a static-literal base URL is the one shape that cannot.
-func TestProviderCredentialSourcesRotatesOnlyCredentialRoles(t *testing.T) {
+// The provider here is the shape a real city runs: base URL AND credential
+// both env refs. A static-literal base URL cannot distinguish a resolver that
+// honors the roles from one that walks every reference, so it is not used.
+func TestProviderCredentialSourcesResolvesOnlyCredentialRoles(t *testing.T) {
 	resolved := &config.ResolvedProvider{
 		Name: "zai",
 		UpstreamEnv: config.UpstreamEnvBinding{
@@ -27,8 +25,8 @@ func TestProviderCredentialSourcesRotatesOnlyCredentialRoles(t *testing.T) {
 		},
 		Env: map[string]string{
 			"ANTHROPIC_BASE_URL":   "${ZAI_BASE_URL}",
-			"ANTHROPIC_API_KEY":    "${ANTHROPIC_AUTH_TOKEN_ZAI}",
-			"ANTHROPIC_AUTH_TOKEN": "${ANTHROPIC_AUTH_TOKEN_ZAI}",
+			"ANTHROPIC_API_KEY":    "${ACME_KEY}",
+			"ANTHROPIC_AUTH_TOKEN": "${ACME_KEY}",
 		},
 	}
 
@@ -40,22 +38,38 @@ func TestProviderCredentialSourcesRotatesOnlyCredentialRoles(t *testing.T) {
 			sources[b.SourceVar] = true
 		}
 	}
-
-	if !sources["ANTHROPIC_AUTH_TOKEN_ZAI"] {
-		t.Errorf("credential source ANTHROPIC_AUTH_TOKEN_ZAI not resolved; got %+v", got)
+	if !sources["ACME_KEY"] {
+		t.Errorf("credential source ACME_KEY not resolved; got %+v", got)
 	}
-	// The whole point. The base URL's source var is not a credential and must
-	// never be offered for rotation.
 	if sources["ZAI_BASE_URL"] {
-		t.Errorf("ZAI_BASE_URL was resolved as a credential source; it backs upstream_env.base_url — writing the API key to it destroys provider routing (got %+v)", got)
+		t.Errorf("ZAI_BASE_URL was resolved as a credential source; it backs upstream_env.base_url, which names an endpoint (got %+v)", got)
 	}
 	for _, b := range got {
-		if b.Role == "base_url" {
+		if b.Role == "base_url" || b.EnvKey == "ANTHROPIC_BASE_URL" {
 			t.Errorf("base_url appeared as a credential role: %+v", b)
 		}
-		if b.EnvKey == "ANTHROPIC_BASE_URL" {
-			t.Errorf("the base URL env key appeared as a rotation target: %+v", b)
-		}
+	}
+}
+
+// TestProviderCredentialSourcesAcceptsLiteralAroundReference: the operator
+// changes the REFERENCED variable, not the value, so a reference wrapped in
+// literal text is resolvable — changing GW_KEY moves the secret and leaves
+// "Bearer " intact through expansion.
+func TestProviderCredentialSourcesAcceptsLiteralAroundReference(t *testing.T) {
+	resolved := &config.ResolvedProvider{
+		Name:        "gw",
+		UpstreamEnv: config.UpstreamEnvBinding{AuthToken: "ANTHROPIC_AUTH_TOKEN"},
+		Env:         map[string]string{"ANTHROPIC_AUTH_TOKEN": "Bearer ${GW_KEY}"},
+	}
+	got := providerCredentialSources(resolved)
+	if len(got) != 1 {
+		t.Fatalf("providerCredentialSources = %+v; want one entry", got)
+	}
+	if got[0].Refusal != "" {
+		t.Fatalf("refused (%q); changing GW_KEY rotates this credential correctly", got[0].Refusal)
+	}
+	if got[0].SourceVar != "GW_KEY" {
+		t.Errorf("SourceVar = %q; want GW_KEY", got[0].SourceVar)
 	}
 }
 
@@ -63,42 +77,34 @@ func TestProviderCredentialSourcesRefusals(t *testing.T) {
 	tests := []struct {
 		name        string
 		resolved    *config.ResolvedProvider
-		wantRefusal string // substring the refusal must name
-		wantRole    string
+		wantRefusal string
 	}{
 		{
-			name: "static literal credential is refused, not rewritten",
+			name: "credential written into the config itself",
 			resolved: &config.ResolvedProvider{
 				Name:        "inline",
 				UpstreamEnv: config.UpstreamEnvBinding{APIKey: "ANTHROPIC_API_KEY"},
 				Env:         map[string]string{"ANTHROPIC_API_KEY": "sk-ant-inlined"},
 			},
-			wantRefusal: "literal",
-			wantRole:    "api_key",
+			wantRefusal: "literal value",
 		},
 		{
-			// The shipped code assigned the key VERBATIM to any value merely
-			// containing "${", so "Bearer ${K}" became the bare key.
-			name: "reference wrapped in literal text is refused",
+			name: "two distinct variables feed one credential",
 			resolved: &config.ResolvedProvider{
-				Name:        "hdr",
-				UpstreamEnv: config.UpstreamEnvBinding{AuthToken: "ANTHROPIC_AUTH_TOKEN"},
-				Env:         map[string]string{"ANTHROPIC_AUTH_TOKEN": "Bearer ${ACME_KEY}"},
+				Name:        "split",
+				UpstreamEnv: config.UpstreamEnvBinding{APIKey: "ANTHROPIC_API_KEY"},
+				Env:         map[string]string{"ANTHROPIC_API_KEY": "${ACME_ID}:${ACME_KEY}"},
 			},
-			wantRefusal: "literal text",
-			wantRole:    "auth_token",
+			wantRefusal: "more than one variable",
 		},
 		{
-			// An undeclared key that the supervisor does NOT forward reaches
-			// the harness from nowhere, so there is no variable to rotate.
-			name: "undeclared, non-forwarded binding is refused",
+			name: "explicitly withheld",
 			resolved: &config.ResolvedProvider{
-				Name:        "unset",
-				UpstreamEnv: config.UpstreamEnvBinding{APIKey: "MY_HARNESS_TOKEN"},
-				Env:         map[string]string{"ANTHROPIC_BASE_URL": "https://example.test"},
+				Name:        "withheld",
+				UpstreamEnv: config.UpstreamEnvBinding{APIKey: "ANTHROPIC_API_KEY"},
+				Env:         map[string]string{"ANTHROPIC_API_KEY": ""},
 			},
-			wantRefusal: "sets no such key",
-			wantRole:    "api_key",
+			wantRefusal: "withholds the variable",
 		},
 	}
 
@@ -108,56 +114,44 @@ func TestProviderCredentialSourcesRefusals(t *testing.T) {
 			if len(got) != 1 {
 				t.Fatalf("providerCredentialSources = %+v; want exactly one entry", got)
 			}
-			if got[0].Role != tt.wantRole {
-				t.Errorf("role = %q; want %q", got[0].Role, tt.wantRole)
-			}
 			if got[0].Refusal == "" {
-				t.Fatalf("entry was accepted with source %q; want a refusal", got[0].SourceVar)
+				t.Fatalf("entry accepted with source %q; want a stated reason", got[0].SourceVar)
 			}
 			if !strings.Contains(got[0].Refusal, tt.wantRefusal) {
 				t.Errorf("refusal = %q; want it to name %q", got[0].Refusal, tt.wantRefusal)
 			}
 			if got[0].SourceVar != "" {
-				t.Errorf("refused entry still carries SourceVar %q; a refusal must offer no rotation target", got[0].SourceVar)
+				t.Errorf("unresolvable entry still names SourceVar %q", got[0].SourceVar)
 			}
 		})
 	}
 }
 
-// TestProviderCredentialSourcesHonoursBareDollarRef pins the grammar gap that
-// made the shipped command exit 0 having rotated nothing: its regex matched
-// only ${VAR}, while session start expands with os.Expand, which also honors
-// bare $VAR — the form expandEnvMap's own doc comment uses as its example
-// (cmd/gc/cmd_start.go:1552).
-func TestProviderCredentialSourcesHonoursBareDollarRef(t *testing.T) {
+// TestProviderCredentialSourcesHonorsBareDollarRef: session start expands with
+// os.Expand, so the bare form is a real reference — the form expandEnvMap's
+// own doc comment uses as its example.
+func TestProviderCredentialSourcesHonorsBareDollarRef(t *testing.T) {
 	resolved := &config.ResolvedProvider{
 		Name:        "bare",
 		UpstreamEnv: config.UpstreamEnvBinding{APIKey: "ANTHROPIC_API_KEY"},
 		Env:         map[string]string{"ANTHROPIC_API_KEY": "$ACME_KEY"},
 	}
 	got := providerCredentialSources(resolved)
-	if len(got) != 1 {
-		t.Fatalf("providerCredentialSources = %+v; want one entry", got)
-	}
-	if got[0].Refusal != "" {
-		t.Fatalf("bare $VAR refused (%q); session start expands it, so it is rotatable", got[0].Refusal)
+	if len(got) != 1 || got[0].Refusal != "" {
+		t.Fatalf("providerCredentialSources = %+v; want one resolved entry", got)
 	}
 	if got[0].SourceVar != "ACME_KEY" {
 		t.Errorf("SourceVar = %q; want ACME_KEY", got[0].SourceVar)
 	}
 }
 
-// TestProviderCredentialSourcesInheritsForwardedKey covers the commonest
-// shape: a provider that declares no env entry for its credential at all. The
-// harness still receives the variable, because
-// processenv.ProviderProcessPassthroughEnv forwards every provider-credential
-// key from the supervisor environment under its own name
-// (internal/processenv/provider.go:219-226). So the rotation target is that
-// key itself, and reporting "nothing to rotate" here would be wrong.
-func TestProviderCredentialSourcesInheritsForwardedKey(t *testing.T) {
+// TestProviderCredentialSourcesInheritsUndeclaredKey: a provider that declares
+// no env entry still has the harness read the bound name out of the session
+// environment, so the variable to change is that name itself.
+func TestProviderCredentialSourcesInheritsUndeclaredKey(t *testing.T) {
 	resolved := &config.ResolvedProvider{
 		Name:        "claude",
-		UpstreamEnv: config.UpstreamEnvBinding{APIKey: "ANTHROPIC_API_KEY"},
+		UpstreamEnv: config.UpstreamEnvBinding{APIKey: "KIMI_API_KEY"},
 		Env:         map[string]string{},
 	}
 	got := providerCredentialSources(resolved)
@@ -165,21 +159,17 @@ func TestProviderCredentialSourcesInheritsForwardedKey(t *testing.T) {
 		t.Fatalf("providerCredentialSources = %+v; want one entry", got)
 	}
 	if got[0].Refusal != "" {
-		t.Fatalf("refused (%q); ANTHROPIC_API_KEY is forwarded from the supervisor env, so it is rotatable", got[0].Refusal)
+		t.Fatalf("refused (%q); the harness reads this name from the session environment", got[0].Refusal)
 	}
-	if got[0].SourceVar != "ANTHROPIC_API_KEY" {
-		t.Errorf("SourceVar = %q; want ANTHROPIC_API_KEY", got[0].SourceVar)
-	}
-	if !got[0].Inherited {
-		t.Error("Inherited = false; the operator needs to see that this comes from the ambient environment, not from provider config")
+	if got[0].SourceVar != "KIMI_API_KEY" || !got[0].Inherited {
+		t.Errorf("got SourceVar=%q Inherited=%v; want KIMI_API_KEY / true", got[0].SourceVar, got[0].Inherited)
 	}
 }
 
-// TestProviderCredentialSourcesNoBindingDeclared covers the case the command
-// must refuse outright rather than guess at: a provider that declares no
-// credential role at all. Guessing here is what the envArgvSafe allow-list
-// would do, and it errs toward "assume credential" — the wrong direction when
-// the cost of a false positive is overwriting a live value.
+// TestProviderCredentialSourcesNoBindingDeclared: with no declared credential
+// role, which env key holds a secret is stated nowhere. Inferring it from a
+// key's name is what a matcher would do, and a wrong inference points the
+// operator at the wrong variable.
 func TestProviderCredentialSourcesNoBindingDeclared(t *testing.T) {
 	resolved := &config.ResolvedProvider{
 		Name:        "nobinding",
@@ -190,6 +180,66 @@ func TestProviderCredentialSourcesNoBindingDeclared(t *testing.T) {
 		},
 	}
 	if got := providerCredentialSources(resolved); len(got) != 0 {
-		t.Fatalf("providerCredentialSources = %+v; want none — the provider declares no api_key or auth_token binding, and ACME_KEY must not be inferred from the key's name", got)
+		t.Fatalf("providerCredentialSources = %+v; want none — no api_key or auth_token binding is declared, and ACME_KEY must not be inferred from the key's name", got)
+	}
+}
+
+// TestCredentialOverridesFindsAgentScopedLayers guards the divergence that
+// makes a provider-scoped answer incomplete: session start merges workspace <
+// provider < agent env and injects the selected upstream's serving env LAST,
+// so any of those wins over the provider's own entry. An agent affected by one
+// authenticates with a different variable than the provider names.
+func TestCredentialOverridesFindsAgentScopedLayers(t *testing.T) {
+	bindings := []credentialBinding{
+		{Role: "api_key", EnvKey: "ANTHROPIC_API_KEY", SourceVar: "ACME_KEY"},
+		{Role: "auth_token", EnvKey: "ANTHROPIC_AUTH_TOKEN", SourceVar: "ACME_KEY"},
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{
+			Provider: "zai",
+			Env:      map[string]string{"ANTHROPIC_AUTH_TOKEN": "${WS_KEY}"},
+		},
+		Upstreams: map[string]config.UpstreamSpec{
+			"alt": {APIKey: "${ZAI_KEY}"},
+		},
+		Agents: []config.Agent{
+			{Name: "picks-upstream", Provider: "zai", Upstream: "alt"},
+			{Name: "overrides-env", Provider: "zai", Env: map[string]string{"ANTHROPIC_API_KEY": "${AGENT_KEY}"}},
+			{Name: "other-provider", Provider: "claude", Upstream: "alt"},
+		},
+	}
+
+	got := credentialOverrides(cfg, "zai", bindings)
+
+	byLayer := map[string]string{}
+	for _, o := range got {
+		byLayer[o.Layer] = o.Detail
+	}
+	for _, want := range []string{"workspace.env", "agent.env", "upstreams"} {
+		if _, ok := byLayer[want]; !ok {
+			t.Errorf("override layer %q not reported; got %+v", want, got)
+		}
+	}
+	if detail := byLayer["upstreams"]; !strings.Contains(detail, "picks-upstream") {
+		t.Errorf("upstream override detail = %q; want it to name the agent", detail)
+	}
+	for _, o := range got {
+		if strings.Contains(o.Detail, "other-provider") {
+			t.Errorf("reported an override for an agent on a different provider: %+v", o)
+		}
+	}
+}
+
+// TestCredentialOverridesQuietWhenNothingOverrides: the section must not
+// appear for the ordinary single-provider city, or it becomes noise the
+// operator learns to skip.
+func TestCredentialOverridesQuietWhenNothingOverrides(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Provider: "zai"},
+		Agents:    []config.Agent{{Name: "plain", Provider: "zai"}},
+	}
+	bindings := []credentialBinding{{Role: "api_key", EnvKey: "ANTHROPIC_API_KEY", SourceVar: "ACME_KEY"}}
+	if got := credentialOverrides(cfg, "zai", bindings); len(got) != 0 {
+		t.Errorf("credentialOverrides = %+v; want none", got)
 	}
 }
