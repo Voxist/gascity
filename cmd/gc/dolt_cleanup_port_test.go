@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -270,5 +272,74 @@ func TestResolveDoltPort_FlagZeroRejected(t *testing.T) {
 	}
 	if got.Source != "city config dolt.port" {
 		t.Errorf("Source = %q, want city-config fallback after zero flag", got.Source)
+	}
+}
+
+// TestResolveDoltPort_StalePortFileCannotOverrideLiveState is the behavioral
+// pin for the property this resolver exists to guarantee, asserted against a
+// REAL on-disk .beads/dolt-server.port rather than by sniffing attempt names
+// (TestResolveDoltPort_NeverReadsPortFile). The file records a port that is
+// wrong — the clobber this chain was written for wrote a proxy's ephemeral
+// port here — and live state reports the real listener. Resolution must return
+// live state's answer, and the file's port must appear nowhere in the trail.
+func TestResolveDoltPort_StalePortFileCannotOverrideLiveState(t *testing.T) {
+	const stalePort = "31364"
+	cityPath := t.TempDir()
+	beadsDir := filepath.Join(cityPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte(stalePort+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := ResolveDoltPort(PortResolverInput{
+		CityPath:    cityPath,
+		LiveResolve: fakeLiveResolve(), // the real listener: 28231
+	})
+
+	if got.Port != 28231 {
+		t.Fatalf("Port = %d, want the live-resolved 28231; a stale port file must not win", got.Port)
+	}
+	if got.Source != liveDoltHandleSource {
+		t.Errorf("Source = %q, want %q", got.Source, liveDoltHandleSource)
+	}
+	if got.Fallback {
+		t.Error("Fallback = true, want false when live state resolved")
+	}
+	for _, attempt := range got.Tried {
+		if strings.Contains(attempt.Detail, stalePort) {
+			t.Fatalf("stale port %s leaked into the resolution trail: %+v", stalePort, got.Tried)
+		}
+	}
+}
+
+// TestResolveDoltPort_PortFileCannotResurrectADeadEndpoint is the other half:
+// the file names a plausible, parseable port but nothing is listening for the
+// city. The chain must NOT adopt the recorded port — it falls through to the
+// legacy default and flags Fallback, so destructive callers can refuse (see
+// TestControllerDropManagedDoltDatabase_RefusesOnLegacyFallback) instead of
+// connecting to whatever now owns the recorded port.
+func TestResolveDoltPort_PortFileCannotResurrectADeadEndpoint(t *testing.T) {
+	const recordedPort = "31364"
+	cityPath := t.TempDir()
+	beadsDir := filepath.Join(cityPath, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte(recordedPort+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := ResolveDoltPort(PortResolverInput{
+		CityPath:    cityPath,
+		LiveResolve: fakeLiveResolveMiss(),
+	})
+
+	if got.Port == 31364 {
+		t.Fatalf("resolver adopted the recorded port %d from the status file; it must never be an endpoint source", got.Port)
+	}
+	if got.Port != LegacyDefaultDoltPort || !got.Fallback {
+		t.Fatalf("got (port %d, fallback %v), want (%d, true) — a clean live miss falls through to the legacy default", got.Port, got.Fallback, LegacyDefaultDoltPort)
 	}
 }

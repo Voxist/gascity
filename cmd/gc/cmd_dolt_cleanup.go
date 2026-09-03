@@ -490,10 +490,13 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 // protectedDoltPortsForReap builds the reaper's protected port set from live
 // state (city-scale plan P1.7): the managed city dolt resolved via the live
 // chain, the ports of every discovered dolt process whose --config/--data-dir
-// argv sits under a registered rig root, and the resolved cleanup port. It
-// deliberately does NOT read <rigRoot>/.beads/dolt-server.port: that status
-// file has lied in production, and a lying file fails to protect the REAL
-// listener — live state cannot.
+// argv sits under a registered rig root, and the resolved cleanup port.
+//
+// <rigRoot>/.beads/dolt-server.port is never used for TARGET SELECTION: that
+// status file has lied in production, and a lying file fails to protect the
+// REAL listener — live state cannot. It is read PROTECT-ONLY, and only when
+// live resolution is unavailable, so a degraded host still fences the
+// recorded port (see the else branch below).
 func protectedDoltPortsForReap(opts cleanupOptions, procs []DoltProcInfo) map[int]string {
 	ports := map[int]string{}
 	liveResolve := opts.LiveResolve
@@ -913,7 +916,9 @@ func newDoltCleanupCmd(stdout, stderr io.Writer) *cobra.Command {
 cleanup tool. It resolves the Dolt server port via the AD-04 chain
 (--port > city dolt.port > live managed dolt [runtime handle, then
 process table] > 3307); .beads/dolt-server.port is a bd compatibility
-status file and is never consulted. It drops stale test/agent
+status file and is never consulted for endpoint selection (it is read
+protect-only, to fence a recorded port, when live resolution is
+unavailable). It drops stale test/agent
 databases, calls DOLT_PURGE_DROPPED_DATABASES to reclaim disk, and
 reaps orphaned dolt sql-server processes left over from leaked test
 harnesses. Invalid explicit ports, invalid city port settings, and

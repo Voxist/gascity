@@ -67,7 +67,7 @@ type PortResolutionAttempt struct {
 //
 // <rigRoot>/.beads/dolt-server.port is deliberately NOT in the chain: it is
 // a bd compatibility status file whose surviving writer has clobbered it in
-// production (vp-w7tc, incident class 4); see dolt_port_live.go.
+// production (incident class 4); see dolt_port_live.go.
 //
 // Returns a PortResolution; Fallback is true only when the legacy default
 // is selected. Never returns an error — caller decides whether the warn
