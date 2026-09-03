@@ -77,7 +77,7 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 		"GC_DOLT_PORT="+port,
 	)
 
-	runBDInitCompat(t, env, wsDir, "dc", port)
+	runBDInitCompat(t, env, wsDir, doltConfigIssuePrefix, doltConfigSharedDatabase, port)
 
 	bdCreate := exec.Command(bdBinary, "create", "config-wired-bead", "--json",
 		"--description=Integration test for issue 011", "-t", "task", "-p", "3")
@@ -117,9 +117,9 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
 
-	// Init with same prefix and server — simulates a second machine's
-	// agent sharing the same bead store.
-	runBDInitCompat(t, env, wsDir2, "dc", port)
+	// Init against the same server and the same database — simulates a
+	// second machine's agent sharing the same bead store.
+	runBDInitCompat(t, env, wsDir2, doltConfigIssuePrefix, doltConfigSharedDatabase, port)
 
 	bdList2 := exec.Command(bdBinary, "list", "--json")
 	bdList2.Dir = wsDir2
@@ -136,15 +136,45 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 	t.Logf("SUCCESS: all phases passed — hostname reachable, config port wired, cross-workspace sharing works")
 }
 
-// runBDInitCompat initializes beads against a shared server, compatible
-// with bd v0.60.0 (which lacks --skip-agents).
-func runBDInitCompat(t *testing.T, env []string, dir, prefix, port string) {
+// doltConfigIssuePrefix and doltConfigSharedDatabase are deliberately
+// DIFFERENT strings.
+//
+// Naming the database is what makes the store shared: `bd init` adopts an
+// existing database's project identity (`metadata._project_id`) only when the
+// target database is named on the command line — bd's
+// shouldConsultInitProjectID gates the adopting read on `--database` being
+// set. Without it bd mints a fresh identity per workspace, and a second
+// workspace that still lands on the same database aborts every later read with
+// "PROJECT IDENTITY MISMATCH: store project identity mismatch — refusing to
+// connect". That is the failure this test caught.
+//
+// Had the database simply been named after the prefix, the test could not tell
+// that apart from the prefix-derived default happening to collide, which is
+// the very mechanism it exists to pin. With the two distinct, `--database` is
+// load-bearing: dropping it sends a workspace to the prefix-derived database
+// "dc" instead, a different store whose listing is empty (verified against a
+// real Dolt server, 2026-09-03).
+//
+// This is also exactly how Gas City's own bd provider invokes init
+// (examples/bd/assets/scripts/gc-beads-bd.sh, run_bd_init_pinned), so the test
+// exercises the production invocation shape rather than one bd never supported
+// for adoption.
+const (
+	doltConfigIssuePrefix    = "dc"
+	doltConfigSharedDatabase = "dcshared"
+)
+
+// runBDInitCompat initializes beads against a shared server, naming the target
+// database so a second workspace adopts the first's project identity. It omits
+// --skip-agents, which the oldest supported bd lacks; --database is present in
+// every bd this repo supports (deps.env BD_PREV_VERSION).
+func runBDInitCompat(t *testing.T, env []string, dir, prefix, database, port string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), bdInitTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bdBinary, "init", "--server",
 		"--server-host", "127.0.0.1", "--server-port", port,
-		"-p", prefix, "--skip-hooks")
+		"-p", prefix, "--database", database, "--skip-hooks")
 	cmd.Dir = dir
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()

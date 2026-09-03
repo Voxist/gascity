@@ -1908,6 +1908,18 @@ func startIsolatedSupervisor(t *testing.T, env []string, gcHome string) {
 				cancel()
 				waitForIntegrationSupervisorDone(cmd, done, integrationSupervisorWaitDelay)
 				_ = logFile.Close()
+				// An E2E failure is nearly always a controller decision, and
+				// the supervisor log is the only place the reconciler says
+				// what it decided. Without this a CI failure leaves nothing
+				// but the test's own assertion, which is what made the
+				// suspend/resume flakes diagnosable only by reproducing them
+				// locally.
+				if t.Failed() {
+					if data, err := os.ReadFile(logPath); err == nil {
+						t.Logf("isolated supervisor log (%s), last %d lines:\n%s",
+							logPath, isolatedSupervisorLogTailLines, lastLines(string(data), isolatedSupervisorLogTailLines))
+					}
+				}
 			})
 			return
 		}
@@ -1929,6 +1941,20 @@ func startIsolatedSupervisor(t *testing.T, env []string, gcHome string) {
 	_ = logFile.Close()
 	logData, _ := os.ReadFile(logPath)
 	t.Fatalf("isolated supervisor did not become ready:\n%s", string(logData))
+}
+
+// isolatedSupervisorLogTailLines bounds the supervisor log a failing E2E
+// attaches to its output: enough to cover a controller startup plus the
+// reconciler ticks around the failure, without pasting a whole run.
+const isolatedSupervisorLogTailLines = 200
+
+// lastLines returns the final n lines of s, or all of s when it is shorter.
+func lastLines(s string, n int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func waitForIntegrationSupervisorDone(cmd *exec.Cmd, done <-chan error, timeout time.Duration) {

@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
@@ -702,31 +703,162 @@ func haveAllSlots(found map[string]string, slots []string) bool {
 	return true
 }
 
+// agentSessionActive reports whether `gc session list` shows ANY session
+// targeting agentName in the active state. The listing includes closed
+// sessions, so a single agent can own several rows; "active" is a property of
+// the set, not of whichever row happens to come first.
+//
+// It reads --json rather than the human table. The table renders through a
+// tabwriter and its TEMPLATE, TITLE and WORKDIR columns are not defaulted
+// (only REASON is), so an empty TEMPLATE — or any future column — shifts every
+// strings.Fields index and silently changes which cell is read as the state.
+// That is a fail-open hazard for waitForAgentNotRunning in particular, which
+// would then return instantly and restore the very race it exists to close.
+// The JSON is the typed wire shape (api.SessionView), so the fields are named.
+//
+// The listing error is returned rather than folded into "not active": a caller
+// waiting for a session to GO AWAY must not read a transient CLI failure as
+// proof that it did.
+func agentSessionActive(cityDir, agentName string) (bool, error) {
+	// runCommandStdout, not gc(): gc() returns CombinedOutput, and any
+	// deprecation warning the CLI writes to stderr would land in front of the
+	// document and fail the decode.
+	args := []string{"session", "list", "--state", "all", "--json"}
+	envList := commandEnvForDir(commandCityDirForArgs(cityDir, args), false)
+	out, err := runCommandStdout(cityDir, envList, gcCommandTimeout(args), gcBinary, args...)
+	if err != nil {
+		return false, fmt.Errorf("gc session list --json: %w (output: %s)", err, out)
+	}
+	// Two emitters produce this document and they do not agree on every field
+	// name: the API path renders api.SessionView ("session_name"), the
+	// fallback path renders sessionListJSONRow ("name"). Both carry "sessions",
+	// "state" and "alias". Accepting all three name fields keeps the helper
+	// correct whichever path served the call.
+	var env struct {
+		Sessions *[]struct {
+			State       string `json:"state"`
+			Alias       string `json:"alias"`
+			SessionName string `json:"session_name"`
+			Name        string `json:"name"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal([]byte(out), &env); err != nil {
+		return false, fmt.Errorf("gc session list --json: %w (output: %s)", err, out)
+	}
+	if env.Sessions == nil {
+		// A document with no "sessions" key is a shape this helper does not
+		// understand, not an empty list. Saying so keeps the negative waiter
+		// closed: silently reading it as "no sessions" is how a schema change
+		// would restore the race waitForAgentNotRunning exists to close.
+		return false, fmt.Errorf("gc session list --json: no \"sessions\" key (output: %s)", out)
+	}
+	for _, sess := range *env.Sessions {
+		// The human table's TARGET column, computed the same way
+		// (cmd/gc/cmd_session.go sessionViewTarget): alias first, then the
+		// runtime session name.
+		target := sess.Alias
+		if target == "" {
+			target = sess.SessionName
+		}
+		if target == "" {
+			target = sess.Name
+		}
+		if target == agentName && sess.State == "active" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// agentSessionDiagnostics renders the session listing for a failure message,
+// carrying the listing's own error when it has one. Without this a
+// persistently failing `gc session list` reports the opposite of what was
+// observed — "still active" when nothing could be read at all.
+func agentSessionDiagnostics(cityDir string, lastErr error) string {
+	out, err := gc(cityDir, "session", "list", "--state", "all")
+	if err != nil {
+		return fmt.Sprintf("listing failed: %v\noutput:\n%s", err, out)
+	}
+	if lastErr != nil {
+		return fmt.Sprintf("last listing error while waiting: %v\nfinal listing:\n%s", lastErr, out)
+	}
+	return out
+}
+
 func waitForAgentRunning(t *testing.T, cityDir, agentName string, timeout time.Duration) {
 	t.Helper()
+	var lastErr error
 	if pollUntil(timeout, 500*time.Millisecond, func() bool {
-		out, err := gc(cityDir, "session", "list", "--state", "all")
-		if err != nil {
-			return false
-		}
-		for _, line := range strings.Split(out, "\n") {
-			fields := strings.Fields(line)
-			if len(fields) < 6 {
-				continue
-			}
-			state := fields[2]
-			target := fields[4]
-			if target == agentName && state == "active" {
-				return true
-			}
-		}
-		return false
+		active, err := agentSessionActive(cityDir, agentName)
+		lastErr = err
+		return err == nil && active
 	}) {
 		return
 	}
-	out, _ := gc(cityDir, "session", "list", "--state", "all")
-	t.Fatalf("agent %q not active within %s\nsessions:\n%s", agentName, timeout, out)
+	t.Fatalf("agent %q not active within %s\nsessions:\n%s",
+		agentName, timeout, agentSessionDiagnostics(cityDir, lastErr))
 }
+
+// waitForAgentNotRunning is the negative twin of waitForAgentRunning: it waits
+// until `gc session list` no longer reports agentName's session as active.
+//
+// Killing a session is asynchronous, and the reconciler's only notion of
+// "alive" for a provider with no process-name hints is that the session box
+// still exists (runtime.ObserveLiveness). A test that kills an agent and moves
+// on while the box is still up leaves the reconciler with nothing to do, so a
+// later resume restarts nothing and the agent — which writes its report once,
+// at startup — never produces another one. Waiting on the fact makes the
+// premise of such a test true instead of likely.
+func waitForAgentNotRunning(t *testing.T, cityDir, agentName string, timeout time.Duration) {
+	t.Helper()
+	var lastErr error
+	if pollUntil(timeout, 500*time.Millisecond, func() bool {
+		active, err := agentSessionActive(cityDir, agentName)
+		lastErr = err
+		return err == nil && !active
+	}) {
+		return
+	}
+	t.Fatalf("agent %q still active within %s\nsessions:\n%s",
+		agentName, timeout, agentSessionDiagnostics(cityDir, lastErr))
+}
+
+// killAgentSession stops an agent's session, failing only on an error that
+// leaves the session's state unknown.
+//
+// A "session not found" refusal is tolerated and logged. It means there is no
+// session bead to resolve, which is already the state the caller wants — and
+// it is the observable shape of ga-qggkq, where the bead is reaped while its
+// start is still in flight. Hard-failing on it would abort the test before the
+// ga-qggkq pointer and the supervisor-log capture that diagnose it, turning a
+// known defect into a misdiagnosed one. That the session is really down is
+// proven by waitForAgentNotRunning, not by this call's exit status.
+func killAgentSession(t *testing.T, cityDir, agentName string) {
+	t.Helper()
+	out, err := gc(cityDir, "session", "kill", agentName)
+	if err == nil {
+		return
+	}
+	if strings.Contains(out, session.ErrSessionNotFound.Error()) {
+		t.Logf("gc session kill %s: %v (tolerated, no session bead to resolve; see ga-qggkq)\noutput: %s",
+			agentName, err, out)
+		return
+	}
+	t.Fatalf("gc session kill %s failed: %v\noutput: %s", agentName, err, out)
+}
+
+// e2eSuspendedQuietWindow bounds the negative assertion "a suspended city or
+// agent is not restarted". Nothing signals the completion of an event that
+// must NOT happen, so the callers hand this to pollUntil as an invariant
+// watch — it returns true only on a violation — rather than sleeping and
+// sampling once at the end. Sized at several reconciler ticks:
+// e2eDaemonSection pins patrol_interval to 1s.
+//
+// The violation watched for is the agent's report reappearing, which is what
+// a restart produces: e2e-report.sh writes the report at startup. The premise
+// that the agent was actually stopped is established by waitForAgentNotRunning
+// before the window opens, not by this assertion.
+const e2eSuspendedQuietWindow = 3 * time.Second
 
 // waitForControllerReady waits until the standalone controller both holds the
 // controller lock and responds on its control socket. gc start rejects a
