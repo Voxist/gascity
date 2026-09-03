@@ -5123,6 +5123,25 @@ func TestIsTimeoutError(t *testing.T) {
 		{"context canceled is NOT a timeout", fmt.Errorf("gate: %w", context.Canceled), false},
 		{"genuine store read failure", errors.New("dolt: read failed"), false},
 		{"connection reset is NOT a timeout", errors.New("connection reset by peer"), false},
+
+		// A chain mixing a timeout leaf with a hard-failure leaf reports TRUE.
+		// This is a deliberate, reviewed decision, not an accident of substring
+		// matching, and it is pinned here so a later "tightening" to
+		// all-leaves-must-be-timeout cannot silently reintroduce the vp-gprv
+		// starvation. The only join that reaches the gate carrying a timeout leaf
+		// is mergeListTierResults, which fires ONLY when both list tiers fail —
+		// i.e. worse store contention than the single-tier failure that starved
+		// code-review-gate in the first place. Failing CLOSED there would starve
+		// an idempotent order at exactly the moment relaxing it matters most, and
+		// would make this classifier stricter than isBdAmbiguousWriteError, which
+		// already groups "timed out after" and "connection reset" as one transient
+		// family. Both leaf orderings are pinned because errors.Join flattens to
+		// newline-joined text and the guarantee must not depend on leaf order.
+		{"join of timeout and hard failure is a contention timeout", errors.Join(errors.New("timed out after 30s"), errors.New("dolt: read failed")), true},
+		{"join with the hard failure first is still a contention timeout", errors.Join(errors.New("dolt: read failed"), errors.New("timed out after 30s")), true},
+		// Negative control: a join carrying NO timeout leaf must stay false, so
+		// the two cases above pin "a timeout leaf is present", not "any join".
+		{"join of two hard failures is NOT a timeout", errors.Join(errors.New("dolt: read failed"), errors.New("connection reset by peer")), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
