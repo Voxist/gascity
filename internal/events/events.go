@@ -413,7 +413,9 @@ var KnownEventTypes = []string{
 	StoreMaintenanceDone, StoreMaintenanceFailed,
 	StoreDiskWarn, StoreDiskCritical,
 	StoreDegraded, StoreRecovered, StoreProbeFailed,
-	ProxyReaped, BreakerStateChanged,
+	BreakerStateChanged,
+	// Fork-owned (proxied-mode store subsystem); defined in proxy_payloads.go.
+	ProxyReaped,
 	ControllerTickCompleted, DoctorAlert,
 	BackendCredentialResolved,
 	EmergencySignaled, EmergencyAcked,

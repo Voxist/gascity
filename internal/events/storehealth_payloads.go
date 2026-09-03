@@ -1,11 +1,14 @@
 package events
 
-// Store-health, breaker, controller-heartbeat, proxy-reap, and doctor
-// event types and their typed payloads (city-scale architecture plan
-// items 1.5 and 1.9). These are emitted by the controller-internal store
-// health patrol (internal/storehealth), the resilience breaker registry
+// Store-health, breaker, controller-heartbeat, and doctor event types and
+// their typed payloads (city-scale architecture plan items 1.5 and 1.9).
+// These are emitted by the controller-internal store health patrol
+// (internal/storehealth), the resilience breaker registry
 // (internal/resilience, wired through the patrol/runner), the controller
 // reconcile loop, and the supervisor-cadence doctor.
+//
+// The proxy.reaped event lives in proxy_payloads.go: it belongs to the
+// proxied-mode subsystem rather than to the generic store-health surface.
 //
 // Every constant below is added to KnownEventTypes (events.go) so the
 // Principle-7 coverage test (TestEveryKnownEventTypeHasRegisteredPayload)
@@ -42,10 +45,6 @@ const (
 	// consecutive-failure threshold is reached. It is the per-cycle
 	// forensic breadcrumb, not the degradation decision.
 	StoreProbeFailed = "store.probe_failed"
-	// ProxyReaped fires when the patrol reaps a scope's db-proxy child
-	// after capturing forensics. Carries the quarantine artifact path so
-	// the reap can never be evidence-free.
-	ProxyReaped = "proxy.reaped"
 	// BreakerStateChanged fires on every resilience breaker state
 	// transition (closed/open/half-open), wired from the breaker
 	// registry's state-change callback.
@@ -94,19 +93,6 @@ type StoreProbeFailedPayload struct {
 // IsEventPayload marks StoreProbeFailedPayload as an events.Payload variant.
 func (StoreProbeFailedPayload) IsEventPayload() {}
 
-// ProxyReapedPayload is the typed payload for proxy.reaped events. The
-// QuarantineDir path is always populated when a reap fires: the patrol
-// captures forensics before signaling, so a reap is never evidence-free.
-type ProxyReapedPayload struct {
-	Scope         string `json:"scope" doc:"Canonical scope root path whose db-proxy child was reaped."`
-	QuarantineDir string `json:"quarantine_dir" doc:"Directory holding the pre-reap forensic artifacts."`
-	PIDsSignaled  int    `json:"pids_signaled" doc:"Number of db-proxy-child PIDs signaled."`
-	RateLimited   bool   `json:"rate_limited,omitempty" doc:"True when a second poison inside the window suppressed the reap (forensics kept, alert-only)."`
-}
-
-// IsEventPayload marks ProxyReapedPayload as an events.Payload variant.
-func (ProxyReapedPayload) IsEventPayload() {}
-
 // BreakerStateChangedPayload is the typed payload for
 // breaker.state_changed events. Mirrors resilience.Transition without
 // importing the resilience package into events (Layer-0 keeps no upward
@@ -154,7 +140,6 @@ func init() {
 	RegisterPayload(StoreDegraded, StoreDegradedPayload{})
 	RegisterPayload(StoreRecovered, StoreRecoveredPayload{})
 	RegisterPayload(StoreProbeFailed, StoreProbeFailedPayload{})
-	RegisterPayload(ProxyReaped, ProxyReapedPayload{})
 	RegisterPayload(BreakerStateChanged, BreakerStateChangedPayload{})
 	RegisterPayload(ControllerTickCompleted, ControllerTickCompletedPayload{})
 	RegisterPayload(DoctorAlert, DoctorAlertPayload{})
