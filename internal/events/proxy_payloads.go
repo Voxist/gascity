@@ -2,9 +2,13 @@ package events
 
 // Proxy-lifecycle event types and their typed payloads. These belong to the
 // proxied-mode store subsystem rather than to the generic store-health
-// surface in storehealth_payloads.go, so they are kept in their own file:
-// the generic payloads travel with the store-health patrol, this one travels
-// with the proxy.
+// surface in storehealth_payloads.go, so they are kept in their own file.
+//
+// The event is emitted through the store-health patrol's injected
+// EmitProxyReaped hook (internal/storehealth.Hooks), whose signature uses only
+// primitives, so the patrol package itself never imports this constant. The
+// wiring that binds the hook to this event lives in cmd/gc/storehealth_patrol.go
+// and is fork-owned alongside proxied mode; upstream carries neither.
 //
 // The constant below is in KnownEventTypes (events.go) like every other, so
 // TestEveryKnownEventTypeHasRegisteredPayload holds the registration below
