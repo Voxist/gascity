@@ -46,6 +46,10 @@ ARG XTEXT_VERSION=0.41.0
 # downgrades, bd builds.
 ARG XCRYPTO_VERSION=0.55.0
 ARG XMOD_VERSION=0.40.0
+# bd embeds dolt as a library, so it reaches github.com/apache/thrift through
+# the parquet writer. The pinned source resolves thrift 0.23.0, which carries
+# CVE-2026-43871 (HIGH, TCompactProtocol varint byte-count DoS, fixed 0.24.0).
+ARG THRIFT_VERSION=0.24.0
 
 # bd resolves grpc and x/text through the beads module graph, not this repo's,
 # so gc's own go.mod bumps do not reach this image and the overrides below are
@@ -74,6 +78,7 @@ RUN bd_version="${BD_VERSION#v}" \
     && go get "golang.org/x/text@v${XTEXT_VERSION}" \
     && go get "golang.org/x/crypto@v${XCRYPTO_VERSION}" \
     && go get "golang.org/x/mod@v${XMOD_VERSION}" \
+    && go get "github.com/apache/thrift@v${THRIFT_VERSION}" \
     && CGO_ENABLED=1 go build \
        -tags="gms_pure_go" \
        -trimpath \
@@ -84,7 +89,8 @@ RUN bd_version="${BD_VERSION#v}" \
     && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep google.golang.org/grpc v${GRPC_VERSION} " \
     && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/text v${XTEXT_VERSION} " \
     && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/crypto v${XCRYPTO_VERSION} " \
-    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/mod v${XMOD_VERSION} "
+    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/mod v${XMOD_VERSION} " \
+    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/apache/thrift v${THRIFT_VERSION} "
 
 FROM ${BASE_IMAGE}
 

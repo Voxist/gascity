@@ -34,6 +34,16 @@ ARG XTEXT_VERSION=0.41.0
 # (ga-0emb8), verified against the pinned gh and dolt sources.
 ARG XCRYPTO_VERSION=0.55.0
 ARG XMOD_VERSION=0.40.0
+# dolt reaches github.com/apache/thrift through go.opentelemetry.io/otel/
+# exporters/jaeger v1.17.0, which pins the v0.13.1-0.20201008052519 pseudo-
+# version; the parquet writer reaches it too. That copy carries CVE-2026-43871
+# (HIGH, TCompactProtocol varint byte-count, fixed 0.24.0) and CVE-2026-41602
+# (TFramedTransport uint32 overflow, fixed 0.23.0). Floor applied to the dolt
+# build only — gh links no thrift package, so a `go get` there would raise a
+# go.mod line no `go version -m` assertion could confirm. Dolt v2.3.2 ships
+# thrift 0.23.0 against the same jaeger exporter, so the bump is upstream-
+# sanctioned; 0.24.0 is what clears both CVEs.
+ARG THRIFT_VERSION=0.24.0
 ARG DOLT_TOOLCHAIN_RELEASE=20260611_0.0.5_trixie
 ARG DOLT_OPTCROSS_X86_64_SHA256=caf703fb1cbc0c9ff9a5b506f73da6c6f5233c04a455e638cdc50267a4d0c0c0
 ARG DOLT_OPTCROSS_AARCH64_SHA256=5635d0b38343fefb0c2b600d61c49ad9ceeaa1107bccdec8a60b1789100dc0ce
@@ -122,6 +132,7 @@ RUN case "${TARGETARCH}" in \
     && go get "golang.org/x/text@v${XTEXT_VERSION}" \
     && go get "golang.org/x/crypto@v${XCRYPTO_VERSION}" \
     && go get "golang.org/x/mod@v${XMOD_VERSION}" \
+    && go get "github.com/apache/thrift@v${THRIFT_VERSION}" \
     && CGO_ENABLED=1 GOOS=linux GOARCH="${TARGETARCH}" \
        CC="${dolt_cc}" CXX="${dolt_cxx}" AS="${dolt_as}" \
        CGO_LDFLAGS="-static -s" go build \
@@ -134,6 +145,7 @@ RUN case "${TARGETARCH}" in \
     && go version -m /out/dolt | tr '\t' ' ' | grep -Fq "dep google.golang.org/grpc v${GRPC_VERSION} " \
     && go version -m /out/dolt | tr '\t' ' ' | grep -Fq "dep golang.org/x/text v${XTEXT_VERSION} " \
     && go version -m /out/dolt | tr '\t' ' ' | grep -Fq "dep golang.org/x/crypto v${XCRYPTO_VERSION} " \
+    && go version -m /out/dolt | tr '\t' ' ' | grep -Fq "dep github.com/apache/thrift v${THRIFT_VERSION} " \
     && ! go version -m /out/dolt | tr '\t' ' ' | grep -q "dep golang.org/x/mod "
 
 FROM ubuntu:24.04@sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b
