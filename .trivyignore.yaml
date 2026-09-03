@@ -9,9 +9,16 @@ vulnerabilities:
   # scan must fail so the regression is visible, not silently waived. Only the
   # still-external prebuilt binaries (br, kubectl) keep Go-stdlib waivers.
   #
-  # The x/net, x/crypto, and thrift waivers further below are unaffected by the
-  # rebuild: it bumped only google.golang.org/grpc, so bd/dolt/gc still pin the
-  # vulnerable x/net/x/crypto module versions and keep those entries.
+  # The x/net and x/crypto waivers further below are unaffected by the grpc
+  # rebuild, so bd/dolt/gc still pin the vulnerable x/net/x/crypto module
+  # versions and keep those entries.
+  #
+  # github.com/apache/thrift is NO LONGER waived on any path. The dolt and bd
+  # source rebuilds now apply a `go get github.com/apache/thrift@v0.24.0`
+  # floor (THRIFT_VERSION in Dockerfile.base and Dockerfile.agent) and assert
+  # it on the produced binary, which clears both CVE-2026-43871 (fixed 0.24.0)
+  # and CVE-2026-41602 (fixed 0.23.0). Do not re-add a thrift waiver: if a
+  # rebuild ever regresses the floor the scan must go red (ga-rx7nw).
   #
   # Go stdlib CVEs disclosed 2026-05-12. Fixed in Go 1.25.10 / 1.26.3 for the
   # first batch (33811–42499); Go 1.26.4 / 1.25.11 for CVE-2026-42504 and
@@ -96,11 +103,6 @@ vulnerabilities:
       - "usr/local/bin/kubectl"
     expired_at: 2026-09-07
     statement: golang.org/x/text norm.Iter infinite loop (fixed in 0.39.0). kubectl is external prebuilt; no published kubectl release carries the fix (k8s.io/kubernetes pins x/text v0.33.0 through v1.36.3). Rebuilt gh/dolt/bd and gc are patched and are NOT waived. Remove once Kubernetes releases against x/text >= 0.39.0.
-  - id: CVE-2026-41602
-    paths:
-      - "usr/local/bin/dolt"
-    expired_at: 2026-09-07
-    statement: Latest Dolt 1.88.0 still embeds github.com/apache/thrift v0.13.1; remove after a Dolt release includes thrift 0.23.0 or later.
   - id: CVE-2026-25680
     paths:
       - "usr/local/bin/dolt"

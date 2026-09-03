@@ -18,6 +18,7 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 		// Floors for the gh and dolt builds; see Dockerfile.base.
 		xcryptoVersion            = "0.55.0"
 		xmodVersion               = "0.40.0"
+		thriftVersion             = "0.24.0"
 		ghSourceSHA256            = "a0c18c98c73f7333f73e19b3a0bf5bd18673f3dc226193ab6478b3ea1ea18f03"
 		doltSourceSHA256          = "0b0c9bce8baef26baa7e0e5825cd2d7d6101daf6fc9673f38dac9670afb66847"
 		doltToolchainRelease      = "20260611_0.0.5_trixie"
@@ -37,6 +38,7 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 		"ARG XTEXT_VERSION=" + xtextVersion,
 		"ARG XCRYPTO_VERSION=" + xcryptoVersion,
 		"ARG XMOD_VERSION=" + xmodVersion,
+		"ARG THRIFT_VERSION=" + thriftVersion,
 		"ARG DOLT_TOOLCHAIN_RELEASE=" + doltToolchainRelease,
 		"ARG DOLT_OPTCROSS_X86_64_SHA256=" + doltOptcrossX8664SHA256,
 		"ARG DOLT_OPTCROSS_AARCH64_SHA256=" + doltOptcrossAarch64SHA256,
@@ -67,6 +69,11 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 	}
 	if got := strings.Count(dockerfile, `go get "golang.org/x/text@v${XTEXT_VERSION}"`); got != 2 {
 		t.Errorf("contrib/k8s/Dockerfile.base applies the x/text override %d times, want exactly 2 (gh and Dolt)", got)
+	}
+	// Only dolt: gh links no thrift package, so a `go get` there would raise a
+	// go.mod line no `go version -m` assertion could confirm.
+	if got := strings.Count(dockerfile, `go get "github.com/apache/thrift@v${THRIFT_VERSION}"`); got != 1 {
+		t.Errorf("contrib/k8s/Dockerfile.base applies the thrift override %d times, want exactly 1 (Dolt only)", got)
 	}
 
 	for _, forbidden := range []string{
@@ -110,6 +117,10 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		// 0.37.0, and the image scan gates HIGH+CRITICAL with --exit-code 1.
 		xcryptoVersion = "0.55.0"
 		xmodVersion    = "0.40.0"
+		// CVE-2026-43871 (HIGH, TCompactProtocol varint byte-count DoS, fixed
+		// 0.24.0). bd embeds dolt as a library and reaches thrift through the
+		// parquet writer; the pinned source resolves 0.23.0.
+		thriftVersion = "0.24.0"
 	)
 
 	root := repoRoot(t)
@@ -129,6 +140,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		"ARG XTEXT_VERSION=" + xtextVersion,
 		"ARG XCRYPTO_VERSION=" + xcryptoVersion,
 		"ARG XMOD_VERSION=" + xmodVersion,
+		"ARG THRIFT_VERSION=" + thriftVersion,
 		"ARG BD_REPO=Voxist/beads",
 		`https://github.com/${BD_REPO}/archive/${BD_SOURCE_REF}.tar.gz`,
 		`echo "${BD_SOURCE_SHA256}  /tmp/bd-source.tar.gz" | sha256sum --check --strict`,
@@ -137,6 +149,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		`go get "golang.org/x/text@v${XTEXT_VERSION}"`,
 		`go get "golang.org/x/crypto@v${XCRYPTO_VERSION}"`,
 		`go get "golang.org/x/mod@v${XMOD_VERSION}"`,
+		`go get "github.com/apache/thrift@v${THRIFT_VERSION}"`,
 		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/crypto v${XCRYPTO_VERSION} "`,
 		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/mod v${XMOD_VERSION} "`,
 		`CGO_ENABLED=1 go build`,
@@ -162,6 +175,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	for _, override := range []string{
 		`go get "golang.org/x/crypto@v${XCRYPTO_VERSION}"`,
 		`go get "golang.org/x/mod@v${XMOD_VERSION}"`,
+		`go get "github.com/apache/thrift@v${THRIFT_VERSION}"`,
 	} {
 		if got := strings.Count(dockerfile, override); got != 1 {
 			t.Errorf("contrib/k8s/Dockerfile.agent applies %s %d times, want exactly 1", override, got)
@@ -193,6 +207,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		xtextFloor   = "0.40.0" // CVE-2026-56852
 		xcryptoFloor = "0.55.0" // CVE-2026-56854 (CRITICAL)
 		xmodFloor    = "0.40.0" // CVE-2026-56864 (HIGH)
+		thriftFloor  = "0.24.0" // CVE-2026-43871 (HIGH)
 	)
 	for _, f := range []struct{ module, floor, cve string }{
 		{"golang.org/x/text", xtextFloor, "CVE-2026-56852"},
@@ -208,6 +223,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		{"XTEXT_VERSION", xtextVersion, xtextFloor},
 		{"XCRYPTO_VERSION", xcryptoVersion, xcryptoFloor},
 		{"XMOD_VERSION", xmodVersion, xmodFloor},
+		{"THRIFT_VERSION", thriftVersion, thriftFloor},
 	} {
 		if !semverAtLeast(parseModuleSemver(t, "v"+f.arg), parseModuleSemver(t, "v"+f.floor)) {
 			t.Errorf("Dockerfile.agent %s=%s is below the security floor v%s — an override that pins below what the source resolves is a downgrade", f.name, f.arg, f.floor)
@@ -341,6 +357,67 @@ func TestRebuiltToolsAssertPatchedXCryptoAndXModArtifacts(t *testing.T) {
 		if !strings.Contains(agent, want) {
 			t.Errorf("contrib/k8s/Dockerfile.agent must assert /out/bd embeds patched %s; missing %q", mod.name, want)
 		}
+	}
+}
+
+// TestRebuiltToolsAssertPatchedThriftArtifact mirrors the grpc, x/text,
+// x/crypto and x/mod artifact guards for github.com/apache/thrift
+// (CVE-2026-43871, TCompactProtocol varint byte-count DoS, fixed in 0.24.0;
+// CVE-2026-41602, TFramedTransport uint32 overflow, fixed in 0.23.0).
+//
+// dolt reaches thrift through go.opentelemetry.io/otel/exporters/jaeger v1.17.0
+// (which pins the v0.13.1-0.20201008052519 pseudo-version) and through the
+// parquet writer; bd embeds dolt as a library and reaches it through the same
+// parquet writer, resolving 0.23.0. Neither is reachable from this repo's
+// go.mod -- the gc binary is built CGO_ENABLED=0 and links no thrift package --
+// so the floor has to be applied inside each source rebuild. These
+// `go version -m` assertions are the only evidence the produced binaries link
+// the patched module, so they must not be silently removable. gh links no
+// thrift package and therefore carries no assertion (ga-rx7nw).
+func TestRebuiltToolsAssertPatchedThriftArtifact(t *testing.T) {
+	root := repoRoot(t)
+
+	base := readFile(t, root, "contrib/k8s/Dockerfile.base")
+	want := `go version -m /out/dolt | tr '\t' ' ' | grep -Fq "dep github.com/apache/thrift v${THRIFT_VERSION} "`
+	if !strings.Contains(base, want) {
+		t.Errorf("contrib/k8s/Dockerfile.base must assert /out/dolt embeds patched thrift; missing %q", want)
+	}
+
+	agent := readFile(t, root, "contrib/k8s/Dockerfile.agent")
+	want = `go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/apache/thrift v${THRIFT_VERSION} "`
+	if !strings.Contains(agent, want) {
+		t.Errorf("contrib/k8s/Dockerfile.agent must assert /out/bd embeds patched thrift; missing %q", want)
+	}
+}
+
+// TestTrivyIgnoreCarriesNoThriftWaiver enforces that no path is waived for the
+// apache/thrift CVEs the source-rebuild floor now clears. Both carriers (dolt
+// and bd) are rebuilt from pinned source with THRIFT_VERSION applied and
+// asserted, so a waiver here would let the scan gate mask a regressed rebuild
+// instead of proving the floor holds -- the same rule the stdlib guard below
+// enforces for the Go-toolchain CVEs (ga-rx7nw).
+func TestTrivyIgnoreCarriesNoThriftWaiver(t *testing.T) {
+	root := repoRoot(t)
+
+	var doc struct {
+		Vulnerabilities []struct {
+			ID    string   `yaml:"id"`
+			Paths []string `yaml:"paths"`
+		} `yaml:"vulnerabilities"`
+	}
+	if err := yaml.Unmarshal([]byte(readFile(t, root, ".trivyignore.yaml")), &doc); err != nil {
+		t.Fatalf("parsing .trivyignore.yaml: %v", err)
+	}
+
+	thriftCVEs := map[string]bool{
+		"CVE-2026-41602": true, // fixed in thrift 0.23.0
+		"CVE-2026-43871": true, // fixed in thrift 0.24.0
+	}
+	for _, v := range doc.Vulnerabilities {
+		if !thriftCVEs[v.ID] {
+			continue
+		}
+		t.Errorf("%s is waived for %v, but the dolt and bd rebuilds apply and assert THRIFT_VERSION >= 0.24.0; drop the waiver so the scan proves the floor stays effective", v.ID, v.Paths)
 	}
 }
 
