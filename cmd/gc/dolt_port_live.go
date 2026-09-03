@@ -14,7 +14,7 @@ import (
 // status files. gc never trusts them for endpoint resolution: the port file
 // is a compatibility mirror for raw bd (bd owns the writes), and it has lied
 // in production — a surviving writer clobbered it with a proxy's ephemeral
-// port (vp-w7tc) even after the pooling fix. The resolution order here is
+// port, even after the pooling fix. The resolution order here is
 // live state only:
 //
 //  1. managed-server live handle — published/provider Dolt runtime state,
