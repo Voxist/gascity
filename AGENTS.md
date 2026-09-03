@@ -127,6 +127,16 @@ touches code.
 `go build` + `go vet`. The 2026-07-15 resync passed build and vet cleanly and
 still shipped four runtime regressions.
 
+**5. Rule 1's "take upstream wholesale" applies ONLY to the generated-artifact
+list above.** A shared `_test.go` file is never on that list and is never
+taken wholesale — it is merged, the same as any other hand-authored file. The
+2026-08-31 resync applied rule 1's instinct to shared test files anyway and
+silently dropped 234 fork-added declarations (ga-d32bn): `go build`, `go vet`,
+and rule 4's real-suite run are all blind to this class, because deleting a
+test never fails a build — the suite passes precisely because the tests that
+would have failed are the ones that got deleted. Every resync runs
+`scripts/check-resync-loss.sh` on the merge commit before push to catch it.
+
 ## Development approach
 
 **TDD.** Write the test first, watch it fail, make it pass. Every package
