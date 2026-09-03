@@ -3438,7 +3438,7 @@ gc provider
 | Subcommand | Description |
 |------------|-------------|
 | [gc provider quota](#gc-provider-quota) | Show Claude account quota states and per-tier provider decisions |
-| [gc provider rotate-key](#gc-provider-rotate-key) | Rotate a provider API key across tmux global env and live sessions |
+| [gc provider rotate-key](#gc-provider-rotate-key) | DISABLED pending redesign (ga-i86nb): rotate a provider API key across tmux global env and live sessions |
 
 ## gc provider quota
 
@@ -3461,12 +3461,16 @@ gc provider quota [flags]
 
 ## gc provider rotate-key
 
-Propagate a new API key into the tmux server global env and every live session
-that uses the named provider, without requiring a tmux kill-server.
+DISABLED pending redesign. This command refuses to run and writes nothing.
 
-Running agent processes that already hold the old key in-process will pick up
-the new key on their next natural restart (drain/respawn), not immediately.
-Use --dry-run to preview what would change before writing.
+Tracked as bead ga-i86nb. It corrupted provider config — it assigned the API
+key to every variable the provider env interpolated, base URLs included — it
+wrote the new key to the tmux server global env, which session start never
+reads, and it carried the key in argv. Running it broke provider routing
+fleet-wide while reporting success.
+
+Until the redesign lands, rotate a provider key by updating the credential at
+its source and restarting the affected agents.
 
 ```
 gc provider rotate-key <provider> <newkey> [flags]

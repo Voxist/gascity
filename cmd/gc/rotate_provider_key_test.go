@@ -15,6 +15,9 @@ type fakeRotateTmux struct {
 	globalEnv map[string]string
 	// callsSet records (key, value) calls to SetGlobalEnvironment
 	callsSet []string
+	// writes counts every mutating call, global or per-session. A disabled
+	// rotate-key must leave this at zero.
+	writes int
 	// errListSessions, if non-nil, is returned by ListSessions.
 	errListSessions error
 }
@@ -29,6 +32,7 @@ func newFakeRotateTmux(sessions map[string]map[string]string) *fakeRotateTmux {
 func (f *fakeRotateTmux) SetGlobalEnvironment(key, value string) error {
 	f.globalEnv[key] = value
 	f.callsSet = append(f.callsSet, key)
+	f.writes++
 	return nil
 }
 
@@ -56,6 +60,7 @@ func (f *fakeRotateTmux) SetEnvironment(session, key, value string) error {
 		f.sessions[session] = make(map[string]string)
 	}
 	f.sessions[session][key] = value
+	f.writes++
 	return nil
 }
 

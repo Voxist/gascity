@@ -219,7 +219,16 @@ func TestProviderQuotaReportJSONShape(t *testing.T) {
 	}
 }
 
-func TestProviderRotateKeyCLI(t *testing.T) {
+// TestProviderRotateKeyRefusesAndWritesNothing pins the disable guard on
+// `gc provider rotate-key` (bead ga-i86nb). Every invocation shape must exit
+// non-zero, name the reason and the bead on stderr, and reach tmux not at all:
+// the fake is installed with a live matching session and a provider spec whose
+// base URL is a ${VAR} ref — the exact shape the enabled command corrupts — so
+// a guard that stopped biting would show up as a non-zero write count here,
+// not merely as a changed message.
+//
+// Delete this test when the redesign re-enables the command.
+func TestProviderRotateKeyRefusesAndWritesNothing(t *testing.T) {
 	testCity := writeProviderTestCity(t, `
 [workspace]
 name = "test"
@@ -228,77 +237,67 @@ name = "test"
 provider = "file"
 
 [providers.zai]
-env = {ANTHROPIC_API_KEY = "${ANTHROPIC_AUTH_TOKEN_ZAI}", ANTHROPIC_AUTH_TOKEN = "${ANTHROPIC_AUTH_TOKEN_ZAI}"}
+env = {ANTHROPIC_API_KEY = "${ANTHROPIC_AUTH_TOKEN_ZAI}", ANTHROPIC_BASE_URL = "${ZAI_BASE_URL}"}
 `)
 
-	// Inject a fake so no real tmux is required.
-	fake := newFakeRotateTmux(map[string]map[string]string{})
-	orig := rotateTmuxFactory
-	rotateTmuxFactory = func() RotateTmux { return fake }
-	t.Cleanup(func() { rotateTmuxFactory = orig })
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"plain", []string{"provider", "rotate-key", "--city", testCity, "zai", "sk-ant-new"}},
+		{"dry-run", []string{"provider", "rotate-key", "--city", testCity, "--dry-run", "zai", "sk-ant-new"}},
+		{"unknown provider", []string{"provider", "rotate-key", "--city", testCity, "no-such-provider", "sk-ant-new"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := newFakeRotateTmux(map[string]map[string]string{
+				"session-zai": {"GC_PROVIDER": "zai", "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic"},
+			})
+			factoryCalls := 0
+			orig := rotateTmuxFactory
+			rotateTmuxFactory = func() RotateTmux {
+				factoryCalls++
+				return spy
+			}
+			t.Cleanup(func() { rotateTmuxFactory = orig })
 
-	t.Run("rotate zai exits 0 and names source var", func(t *testing.T) {
-		var stdout, stderr bytes.Buffer
-		code := run([]string{"provider", "rotate-key", "--city", testCity, "zai", "sk-ant-new"}, &stdout, &stderr)
-		if code != 0 {
-			t.Fatalf("run() = %d; want 0\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
-		}
-		if !strings.Contains(stdout.String(), "ANTHROPIC_AUTH_TOKEN_ZAI") {
-			t.Errorf("stdout = %q; want to contain ANTHROPIC_AUTH_TOKEN_ZAI", stdout.String())
+			var stdout, stderr bytes.Buffer
+			if code := run(tc.args, &stdout, &stderr); code == 0 {
+				t.Fatalf("run(%v) = 0; want non-zero\nstdout: %s\nstderr: %s", tc.args, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "disabled") {
+				t.Errorf("stderr = %q; want to name the command as disabled", stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "ga-i86nb") {
+				t.Errorf("stderr = %q; want to name bead ga-i86nb", stderr.String())
+			}
+			if stdout.String() != "" {
+				t.Errorf("stdout = %q; want empty — a refusal must not look like a rotation report", stdout.String())
+			}
+			if factoryCalls != 0 {
+				t.Errorf("rotateTmuxFactory called %d times; want 0 — the refusal must precede any tmux client", factoryCalls)
+			}
+			if spy.writes != 0 {
+				t.Errorf("tmux writes = %d; want 0 (callsSet=%v)", spy.writes, spy.callsSet)
+			}
+			if got := spy.sessions["session-zai"]["ANTHROPIC_BASE_URL"]; got != "https://api.z.ai/api/anthropic" {
+				t.Errorf("session ANTHROPIC_BASE_URL = %q; want unchanged", got)
+			}
+		})
+	}
+
+	t.Run("help marks the command disabled", func(t *testing.T) {
+		for _, args := range [][]string{
+			{"provider", "--help"},
+			{"provider", "rotate-key", "--help"},
+		} {
+			var stdout, stderr bytes.Buffer
+			if code := run(args, &stdout, &stderr); code != 0 {
+				t.Fatalf("run(%v) = %d; want 0\nstderr: %s", args, code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "DISABLED") {
+				t.Errorf("run(%v) stdout = %q; want to advertise the command as DISABLED", args, stdout.String())
+			}
 		}
 	})
-
-	t.Run("unknown provider exits non-zero", func(t *testing.T) {
-		var stdout, stderr bytes.Buffer
-		code := run([]string{"provider", "rotate-key", "--city", testCity, "unknown-provider", "sk-ant-new"}, &stdout, &stderr)
-		if code == 0 {
-			t.Fatalf("run() = 0; want non-zero for unknown provider")
-		}
-		if !strings.Contains(stderr.String(), "provider not found") {
-			t.Errorf("stderr = %q; want to contain 'provider not found'", stderr.String())
-		}
-	})
-
-	t.Run("provider --help exits 0", func(t *testing.T) {
-		var stdout, stderr bytes.Buffer
-		code := run([]string{"provider", "--help"}, &stdout, &stderr)
-		if code != 0 {
-			t.Fatalf("run(provider --help) = %d; want 0\nstderr: %s", code, stderr.String())
-		}
-	})
-}
-
-func TestProviderRotateKeyDryRunFlag(t *testing.T) {
-	testCity := writeProviderTestCity(t, `
-[workspace]
-name = "test"
-
-[beads]
-provider = "file"
-
-[providers.zai]
-env = {ANTHROPIC_API_KEY = "${ANTHROPIC_AUTH_TOKEN_ZAI}", ANTHROPIC_AUTH_TOKEN = "${ANTHROPIC_AUTH_TOKEN_ZAI}"}
-`)
-
-	spy := newFakeRotateTmux(map[string]map[string]string{
-		"session-zai": {"GC_PROVIDER": "zai"},
-	})
-	orig := rotateTmuxFactory
-	rotateTmuxFactory = func() RotateTmux { return spy }
-	t.Cleanup(func() { rotateTmuxFactory = orig })
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"provider", "rotate-key", "--city", testCity, "--dry-run", "zai", "sk-ant-new"}, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("run(--dry-run) = %d; want 0\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "would update") {
-		t.Errorf("stdout = %q; want to contain 'would update'", stdout.String())
-	}
-	if len(spy.callsSet) != 0 {
-		t.Errorf("dry-run: SetGlobalEnvironment called %d times; want 0 (spy.callsSet=%v)", len(spy.callsSet), spy.callsSet)
-	}
-	if spy.sessions["session-zai"]["ANTHROPIC_API_KEY"] != "" {
-		t.Errorf("dry-run: session env modified; want untouched")
-	}
 }

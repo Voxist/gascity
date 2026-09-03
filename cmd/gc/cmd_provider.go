@@ -305,22 +305,58 @@ func utilOrDash(v *float64) string {
 	return fmt.Sprintf("%.1f", *v)
 }
 
+// rotateKeyDisabledReason is the operator-facing refusal text for
+// `gc provider rotate-key`. It is non-empty exactly while the command is
+// disabled; emptying it re-enables the command. The switch is a variable
+// rather than an unconditional return so the implementation below stays
+// reachable for `go vet`'s unreachable analyzer and the disable stays a
+// small, obvious revert.
+//
+// Disabled for bead ga-i86nb. Three defects, all present in the code below:
+// it assigns the API key to every ${VAR} the provider env references —
+// credential-bearing or not — so a base URL declared as "${ACME_BASE_URL}"
+// is overwritten with the key and provider routing breaks fleet-wide while
+// the command reports success; it writes the tmux server global env, which
+// session start never reads (template_resolve.go resolves env against the
+// controller process's own environment and passes values as explicit
+// `-e KEY=VALUE`), so a respawned agent gets the old key back; and the key
+// travels in argv twice, against the invariant in internal/runtime/envsecret.go.
+var rotateKeyDisabledReason = "provider rotate-key is disabled pending redesign (bead ga-i86nb): " +
+	"it overwrites non-credential provider env vars with the API key, writes the new key where " +
+	"session start never reads it, and carries the key in argv. Nothing was rotated and nothing " +
+	"was written. Rotate a provider key by updating the credential at its source and restarting " +
+	"the affected agents."
+
 // newProviderRotateKeyCmd builds `gc provider rotate-key <provider> <newkey>`:
 // propagate a new API key into the tmux server global env and every live
 // session that uses the named provider, without requiring a tmux kill-server.
+//
+// The command is disabled; see rotateKeyDisabledReason.
 func newProviderRotateKeyCmd(stdout, stderr io.Writer) *cobra.Command {
 	var dryRun bool
 	cmd := &cobra.Command{
 		Use:   "rotate-key <provider> <newkey>",
-		Short: "Rotate a provider API key across tmux global env and live sessions",
-		Long: `Propagate a new API key into the tmux server global env and every live session
-that uses the named provider, without requiring a tmux kill-server.
+		Short: "DISABLED pending redesign (ga-i86nb): rotate a provider API key across tmux global env and live sessions",
+		Long: `DISABLED pending redesign. This command refuses to run and writes nothing.
 
-Running agent processes that already hold the old key in-process will pick up
-the new key on their next natural restart (drain/respawn), not immediately.
-Use --dry-run to preview what would change before writing.`,
+Tracked as bead ga-i86nb. It corrupted provider config — it assigned the API
+key to every variable the provider env interpolated, base URLs included — it
+wrote the new key to the tmux server global env, which session start never
+reads, and it carried the key in argv. Running it broke provider routing
+fleet-wide while reporting success.
+
+Until the redesign lands, rotate a provider key by updating the credential at
+its source and restarting the affected agents.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Refuse before loading config or constructing a tmux client, so
+			// no invocation can write anything. This fails loudly — non-zero
+			// exit and an explicit reason — and is never a silent no-op.
+			if rotateKeyDisabledReason != "" {
+				fmt.Fprintf(stderr, "gc: %s\n", rotateKeyDisabledReason) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+
 			providerName, newKey := args[0], args[1]
 
 			cityPath, err := resolveCity()
