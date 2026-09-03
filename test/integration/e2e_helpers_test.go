@@ -702,31 +702,77 @@ func haveAllSlots(found map[string]string, slots []string) bool {
 	return true
 }
 
+// agentSessionActive reports whether `gc session list --state all` shows ANY
+// session targeting agentName in the active state. The listing lists closed
+// sessions too, so a single agent can own several rows; "active" is a property
+// of the set, not of whichever row happens to come first.
+//
+// The listing error is returned rather than folded into "not active": a caller
+// waiting for a session to GO AWAY must not read a transient CLI failure as
+// proof that it did.
+func agentSessionActive(cityDir, agentName string) (bool, error) {
+	out, err := gc(cityDir, "session", "list", "--state", "all")
+	if err != nil {
+		return false, fmt.Errorf("gc session list: %w (output: %s)", err, out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 6 {
+			continue
+		}
+		if fields[4] == agentName && fields[2] == "active" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func waitForAgentRunning(t *testing.T, cityDir, agentName string, timeout time.Duration) {
 	t.Helper()
 	if pollUntil(timeout, 500*time.Millisecond, func() bool {
-		out, err := gc(cityDir, "session", "list", "--state", "all")
-		if err != nil {
-			return false
-		}
-		for _, line := range strings.Split(out, "\n") {
-			fields := strings.Fields(line)
-			if len(fields) < 6 {
-				continue
-			}
-			state := fields[2]
-			target := fields[4]
-			if target == agentName && state == "active" {
-				return true
-			}
-		}
-		return false
+		active, err := agentSessionActive(cityDir, agentName)
+		return err == nil && active
 	}) {
 		return
 	}
 	out, _ := gc(cityDir, "session", "list", "--state", "all")
 	t.Fatalf("agent %q not active within %s\nsessions:\n%s", agentName, timeout, out)
 }
+
+// waitForAgentNotRunning is the negative twin of waitForAgentRunning: it waits
+// until `gc session list` no longer reports agentName's session as active.
+//
+// Killing a session is asynchronous, and the reconciler's only notion of
+// "alive" for a provider with no process-name hints is that the session box
+// still exists (runtime.ObserveLiveness). A test that kills an agent and moves
+// on while the box is still up leaves the reconciler with nothing to do, so a
+// later resume restarts nothing and the agent — which writes its report once,
+// at startup — never produces another one. Waiting on the fact makes the
+// premise of such a test true instead of likely.
+func waitForAgentNotRunning(t *testing.T, cityDir, agentName string, timeout time.Duration) {
+	t.Helper()
+	if pollUntil(timeout, 500*time.Millisecond, func() bool {
+		active, err := agentSessionActive(cityDir, agentName)
+		return err == nil && !active
+	}) {
+		return
+	}
+	out, _ := gc(cityDir, "session", "list", "--state", "all")
+	t.Fatalf("agent %q still active within %s\nsessions:\n%s", agentName, timeout, out)
+}
+
+// e2eSuspendedQuietWindow bounds the negative assertion "a suspended city or
+// agent is not restarted". Nothing signals the completion of an event that
+// must NOT happen, so the callers hand this to pollUntil as an invariant
+// watch — it returns true only on a violation — rather than sleeping and
+// sampling once at the end. Sized at several reconciler ticks:
+// e2eDaemonSection pins patrol_interval to 1s.
+//
+// The violation watched for is the agent's report reappearing, which is what
+// a restart produces: e2e-report.sh writes the report at startup. The premise
+// that the agent was actually stopped is established by waitForAgentNotRunning
+// before the window opens, not by this assertion.
+const e2eSuspendedQuietWindow = 3 * time.Second
 
 // waitForControllerReady waits until the standalone controller both holds the
 // controller lock and responds on its control socket. gc start rejects a

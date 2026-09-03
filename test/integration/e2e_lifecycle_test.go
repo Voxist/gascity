@@ -109,19 +109,25 @@ func TestE2E_SuspendResume_Agent(t *testing.T) {
 		t.Fatalf("gc agent suspend failed: %v\noutput: %s", err, out)
 	}
 
-	// Kill it to simulate controller stopping suspended agent.
-	gc(cityDir, "session", "kill", "suspendee") //nolint:errcheck
-	time.Sleep(500 * time.Millisecond)
+	// Kill it to simulate controller stopping suspended agent. The kill must
+	// be checked and waited on: while the session is still up the reconciler
+	// sees a live agent and has nothing to restart, so the resume below would
+	// be a no-op and the report would never be rewritten.
+	if out, err := gc(cityDir, "session", "kill", "suspendee"); err != nil {
+		t.Fatalf("gc session kill failed: %v\noutput: %s", err, out)
+	}
+	waitForAgentNotRunning(t, cityDir, "suspendee", e2eDefaultTimeout())
 
 	// Remove old report.
 	safeName := strings.ReplaceAll("suspendee", "/", "__")
 	_ = removeFile(cityDir + "/.gc-reports/" + safeName + ".report")
 
-	// The controller is already running. Brief wait — no report should appear
-	// while the agent remains suspended.
-	time.Sleep(1 * time.Second)
+	// The controller is already running and the agent is proven down, so any
+	// restart inside the window is the suspension failing to hold.
 	reportPath := cityDir + "/.gc-reports/" + safeName + ".report"
-	if fileExists(reportPath) {
+	if pollUntil(e2eSuspendedQuietWindow, 250*time.Millisecond, func() bool {
+		return fileExists(reportPath)
+	}) {
 		t.Error("suspended agent should not have restarted")
 	}
 
@@ -132,7 +138,10 @@ func TestE2E_SuspendResume_Agent(t *testing.T) {
 	}
 
 	// The controller is already running, so resume alone should let it wake
-	// the agent again.
+	// the agent again. A timeout here with the agent proven down above is the
+	// startup phantom-reap defect, not this test's race: see ga-qggkq, and read
+	// the isolated supervisor log this failure attaches for the
+	// "reaped phantom session bead" line.
 	report := waitForReport(t, cityDir, "suspendee", e2eDefaultTimeout())
 	if report.get("STATUS") != "complete" {
 		t.Error("resumed agent did not restart")
@@ -158,19 +167,25 @@ func TestE2E_SuspendResume_City(t *testing.T) {
 		t.Fatalf("gc suspend failed: %v\noutput: %s", err, out)
 	}
 
-	// Kill existing agent.
-	gc(cityDir, "session", "kill", "citysus") //nolint:errcheck
-	time.Sleep(500 * time.Millisecond)
+	// Kill existing agent. The kill must be checked and waited on: while the
+	// session is still up the reconciler sees a live agent and has nothing to
+	// restart, so the resume below would be a no-op and the report would never
+	// be rewritten.
+	if out, err := gc(cityDir, "session", "kill", "citysus"); err != nil {
+		t.Fatalf("gc session kill failed: %v\noutput: %s", err, out)
+	}
+	waitForAgentNotRunning(t, cityDir, "citysus", e2eDefaultTimeout())
 
 	// Remove old report.
 	safeName := strings.ReplaceAll("citysus", "/", "__")
 	_ = removeFile(cityDir + "/.gc-reports/" + safeName + ".report")
 
-	// The controller is already running. While the city is suspended it
-	// should not restart agents on its own.
-	time.Sleep(1 * time.Second)
+	// The controller is already running and the agent is proven down, so any
+	// restart inside the window is the suspension failing to hold.
 	reportPath := cityDir + "/.gc-reports/" + safeName + ".report"
-	if fileExists(reportPath) {
+	if pollUntil(e2eSuspendedQuietWindow, 250*time.Millisecond, func() bool {
+		return fileExists(reportPath)
+	}) {
 		t.Error("agents should not start while city is suspended")
 	}
 
@@ -180,7 +195,11 @@ func TestE2E_SuspendResume_City(t *testing.T) {
 		t.Fatalf("gc resume failed: %v\noutput: %s", err, out)
 	}
 
-	// Resume should allow the running controller to restart the agent.
+	// Resume should allow the running controller to restart the agent. A
+	// timeout here with the agent proven down above is the startup
+	// phantom-reap defect, not this test's race: see ga-qggkq, and read the
+	// isolated supervisor log this failure attaches for the
+	// "reaped phantom session bead" line.
 	report := waitForReport(t, cityDir, "citysus", e2eDefaultTimeout())
 	if report.get("STATUS") != "complete" {
 		t.Error("agent did not restart after city resume")

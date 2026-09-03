@@ -802,11 +802,51 @@ bd_bootstrap_interrupted() {
 # bd_bootstrap_interrupted matched, so the following bd open can re-run the
 # interrupted migration step instead of refusing. Prints what it did: this
 # is a destructive step, gated on the database holding no issues.
+# working_set_clean reports whether the database's working set holds no
+# uncommitted changes. Fails CLOSED: an unanswered probe reports "not clean",
+# so a caller confirming a destructive step never reads a failed probe as
+# proof the step landed.
+working_set_clean() {
+    local db="$1" dirty
+    valid_sql_name "$db" || return 1
+    dirty=$(server_sql_scalar "USE \`$db\`; SELECT COUNT(*) FROM dolt_status" | tr -dc '0-9')
+    [ "${dirty:-1}" = "0" ]
+}
+
 heal_interrupted_bootstrap() {
-    local db="$1"
+    local db="$1" attempt out backoff_ms
     echo "warning: database '$db' holds an interrupted bd bootstrap (uncommitted schema changes, no issues); discarding its working set and re-running migrations" >&2
-    server_sql "USE \`$db\`; CALL DOLT_RESET('--hard')" >/dev/null 2>&1 \
-        || die "failed to reset the interrupted bootstrap working set of database '$db'"
+    # The heal is a WRITE against the same loaded shared server whose load
+    # interrupted the bootstrap in the first place, so it meets the same
+    # transient failures as any other write here. server_sql_retry is not
+    # enough on its own: its classifier is bd's seven-pattern
+    # isDoltRetryableError list, and the failure actually observed on
+    # 2026-09-03 at load ~100 was Dolt cancelling the statement itself
+    # ("Error 1105 (HY000): context canceled"), which that list does not
+    # match. One unretried reset turned a healable bootstrap back into a
+    # fatal init.
+    #
+    # DOLT_RESET('--hard') is idempotent, so retrying it is safe whatever the
+    # failure was, and a client-side cancellation says nothing about whether
+    # the server applied it — hence the confirmation is the working set, not
+    # the call's exit status. Three attempts: the caller's provider-op budget
+    # is 120s and each attempt can sit for the server's read deadline before
+    # being cancelled, so a longer ladder would spend the init's whole budget
+    # on the heal.
+    backoff_ms=500
+    for attempt in 1 2 3; do
+        if out=$(server_sql "USE \`$db\`; CALL DOLT_RESET('--hard')" 2>&1); then
+            return 0
+        fi
+        if working_set_clean "$db"; then
+            return 0
+        fi
+        if [ "$attempt" -lt 3 ]; then
+            sleep_ms "$backoff_ms" 2>/dev/null || sleep 1
+            backoff_ms=$((backoff_ms * 2))
+        fi
+    done
+    die "failed to reset the interrupted bootstrap working set of database '$db': ${out:-no output}"
 }
 
 # finish_bd_schema_migrations completes a schema that is clean but behind
@@ -2898,6 +2938,20 @@ dump_bd_init_forensics() {
     fi
 }
 
+# bd_init_pinned_attempt runs one `bd init` against the pinned server database.
+# The init flags ("init", optionally "--force") arrive as the trailing
+# positional arguments so run_bd_init_pinned can make the same attempt twice
+# without restating the invocation.
+bd_init_pinned_attempt() {
+    local dir="$1"
+    local prefix="$2"
+    local dolt_database="$3"
+    local host="$4"
+    shift 4
+    run_bd_pinned "$dir" "$@" --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
+        --server-host "$host" --server-port "$DOLT_PORT" "$dir"
+}
+
 run_bd_init_pinned() {
     local dir="$1"
     local prefix="$2"
@@ -2908,11 +2962,46 @@ run_bd_init_pinned() {
     if [ "$force_init" = "true" ]; then
         set -- "$@" --force
     fi
-    run_bd_pinned "$dir" "$@" --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
-        --server-host "$host" --server-port "$DOLT_PORT" "$dir" || {
-            dump_bd_init_forensics "$dolt_database"
-            die "bd init failed for $dir"
-        }
+    if bd_init_pinned_attempt "$dir" "$prefix" "$dolt_database" "$host" "$@"; then
+        return 0
+    fi
+
+    # The bootstrap this script has to heal can be interrupted by the very
+    # init this function just ran, not only by an earlier one. bd retries its
+    # own migration pass internally (uow's bootstrapPreparer carries state
+    # across the backoff attempts of a single initSchema call), so a pass that
+    # dies between a step's SQL and its per-step Dolt commit leaves that step's
+    # tables dirty and the next attempt refuses over its own debris. bd heals
+    # exactly that with a one-shot DOLT_RESET('--hard') — but only in the
+    # process whose own bare CREATE DATABASE made the database
+    # (gastownhall/beads#5012, #5042), and this script always creates the
+    # database first, so that authority never arms for a gc-managed one. The
+    # pre-init heal above therefore cannot be the whole rule: the same rule has
+    # to close over the init's own failure.
+    #
+    # Measured 2026-09-03: with the database one commit old and dolt_status
+    # empty immediately before the call, `bd init --force` failed 7s later with
+    # "failed to initialize schema: schema migration: pending ignored schema
+    # migrations alter pre-existing dirty tables: child_counters", leaving the
+    # database holding precisely the interrupted-bootstrap signature. The
+    # ignored-lane guard is also a plain untyped error in bd, so bd's heal
+    # would not match it even where the capability had armed. A reset plus the
+    # same init converges (main cursor 66, ignored cursor 25, clean working
+    # set, store usable).
+    #
+    # Safety is unchanged and explicit: bd_bootstrap_interrupted refuses any
+    # database that holds issues or whose config/metadata is dirty, so a live
+    # store is never reset here. One retry only — a second interruption is a
+    # different problem, and the caller's own retry still applies.
+    if bd_bootstrap_interrupted "$dolt_database"; then
+        heal_interrupted_bootstrap "$dolt_database"
+        if bd_init_pinned_attempt "$dir" "$prefix" "$dolt_database" "$host" "$@"; then
+            return 0
+        fi
+    fi
+
+    dump_bd_init_forensics "$dolt_database"
+    die "bd init failed for $dir"
 }
 
 run_bd_doltlite() {

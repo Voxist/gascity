@@ -8149,6 +8149,194 @@ func TestGcBeadsBdInitNeverResetsADatabaseWithIssues(t *testing.T) {
 	}
 }
 
+// gcBeadsBdInitInterruptedByItsOwnRunStubs writes bd and dolt stubs that model
+// the failure measured on CI and locally on 2026-09-03: the pinned database is
+// EMPTY and CLEAN when `bd init` starts (config probe answers "table not
+// found", dolt_status empty), the init dies partway through its own migration
+// pass, and the database is left holding the interrupted-bootstrap signature
+// (dolt_status dirty, zero issues). The second `bd init` succeeds, and the
+// DOLT_RESET marker is what flips dolt_status back to clean.
+//
+// issueRows lets the safety half of the pair put user rows in the database.
+func gcBeadsBdInitInterruptedByItsOwnRunStubs(t *testing.T, binDir, sqlLog, bdLog string, issueRows int) {
+	t.Helper()
+	writeExecutable(t, filepath.Join(binDir, "sleep"), "#!/bin/sh\nexit 0\n")
+	stateDir := filepath.Dir(sqlLog)
+	initRanMarker := filepath.Join(stateDir, "init-ran")
+	resetMarker := filepath.Join(stateDir, "reset-done")
+	writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
+set -eu
+printf '%%s\n' "$*" >> %q
+case "${1:-}" in
+  init)
+    if [ -f %q ]; then
+      # Second attempt: the working set was discarded, so the pass converges.
+      exit 0
+    fi
+    # First attempt: bd's own internal retry refuses over the debris its
+    # earlier attempt left, and bd's one-shot heal cannot arm because gc, not
+    # bd, created the database.
+    : > %q
+    echo "Error: failed to open Dolt store: failed to initialize schema: schema migration: pending ignored schema migrations alter pre-existing dirty tables: child_counters" >&2
+    exit 1
+    ;;
+esac
+exit 0
+`, bdLog, resetMarker, initRanMarker))
+	writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf(`#!/bin/sh
+set -eu
+query=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-q" ]; then
+    query="$arg"
+    break
+  fi
+  prev="$arg"
+done
+printf '%%s\n' "$query" >> %q
+table() { printf '+---+\n| c |\n+---+\n| %%s |\n+---+\n' "$1"; }
+case "$query" in
+  'USE `+"`hq`"+`; SELECT 1 FROM config LIMIT 1')
+    if [ -f %q ]; then exit 0; fi
+    echo "error on line 1 for query SELECT 1 FROM config LIMIT 1: Error 1146 (HY000): table not found: config" >&2
+    exit 1
+    ;;
+  'USE `+"`hq`"+`; SELECT COUNT(*) FROM dolt_status')
+    # Clean until the init has run, dirty afterwards, clean again once the
+    # working set has been discarded.
+    if [ -f %q ]; then table 0; elif [ -f %q ]; then table 1; else table 0; fi
+    exit 0
+    ;;
+  'USE `+"`hq`"+`; SELECT 1 FROM issues LIMIT 1')
+    exit 0
+    ;;
+  'USE `+"`hq`"+`; SELECT COUNT(*) FROM issues')
+    table %d
+    exit 0
+    ;;
+  *DOLT_RESET*)
+    : > %q
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, sqlLog, initRanMarker, resetMarker, initRanMarker, issueRows, resetMarker))
+}
+
+// TestGcBeadsBdInitHealsAnInterruptionLeftByItsOwnInit pins the other half of
+// the interrupted-bootstrap rule. The pre-init heal only covers a bootstrap
+// some EARLIER process left behind; the interruption can just as easily happen
+// inside the `bd init` this script itself runs, because bd retries its own
+// migration pass internally and a pass that dies between a step's SQL and its
+// per-step Dolt commit leaves that step's tables dirty. bd would discard that
+// debris itself, but only in the process whose own bare CREATE DATABASE made
+// the database (gastownhall/beads#5012), and this script always creates the
+// database first — so the script must recognize the signature after its own
+// failed init, discard the working set, and run the init once more.
+//
+// Without this, TestGCLiveContract_BeadsAndEvents fails whenever the shared
+// Dolt server is loaded enough to interrupt a pass: the rig's POST returns 500
+// with "pending ignored schema migrations alter pre-existing dirty tables:
+// child_counters" and forensics reporting "interrupted-bootstrap signature:
+// yes" — the script's own predicate, matched one call too late.
+func TestGcBeadsBdInitHealsAnInterruptionLeftByItsOwnInit(t *testing.T) {
+	cityPath := t.TempDir()
+	for _, d := range []string{".gc", ".beads"} {
+		if err := os.MkdirAll(filepath.Join(cityPath, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	materializeBuiltinPacksForTest(t, cityPath)
+	script := gcBeadsBdScriptPath(cityPath)
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logDir := t.TempDir()
+	sqlLog := filepath.Join(logDir, "dolt-sql.log")
+	bdLog := filepath.Join(logDir, "bd-args.log")
+	gcBeadsBdInitInterruptedByItsOwnRunStubs(t, binDir, sqlLog, bdLog, 0)
+
+	out, err := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
+	if err != nil {
+		t.Fatalf("gc-beads-bd init failed although the interruption was healable: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "interrupted bd bootstrap") {
+		t.Fatalf("expected the heal to announce itself after the failed init, got:\n%s", out)
+	}
+	sql, err := os.ReadFile(sqlLog)
+	if err != nil {
+		t.Fatalf("read sql log: %v", err)
+	}
+	if !strings.Contains(string(sql), "CALL DOLT_RESET('--hard')") {
+		t.Fatalf("expected DOLT_RESET('--hard') after the failed init, got:\n%s", sql)
+	}
+	bdArgs, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("bd never ran: %v", err)
+	}
+	inits := strings.Count(string(bdArgs), "init --force --quiet --server -p gc --database hq")
+	if inits != 2 {
+		t.Fatalf("forced inits = %d, want 2 (the failed one and the retry after the reset):\n%s", inits, bdArgs)
+	}
+}
+
+// TestGcBeadsBdInitNeverRetriesOverADatabaseWithIssues is the safety half of
+// the post-init heal: the same failed init against a database that holds user
+// rows is not an interrupted bootstrap, so the script must not reset it, must
+// not re-run the init, and must fail with the forensics dump.
+func TestGcBeadsBdInitNeverRetriesOverADatabaseWithIssues(t *testing.T) {
+	cityPath := t.TempDir()
+	for _, d := range []string{".gc", ".beads"} {
+		if err := os.MkdirAll(filepath.Join(cityPath, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	materializeBuiltinPacksForTest(t, cityPath)
+	script := gcBeadsBdScriptPath(cityPath)
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logDir := t.TempDir()
+	sqlLog := filepath.Join(logDir, "dolt-sql.log")
+	bdLog := filepath.Join(logDir, "bd-args.log")
+	gcBeadsBdInitInterruptedByItsOwnRunStubs(t, binDir, sqlLog, bdLog, 3)
+
+	out, err := runGcBeadsBdHQInitForTest(t, script, cityPath, binDir)
+	if err == nil {
+		t.Fatalf("gc-beads-bd init must fail on a database with issues:\n%s", out)
+	}
+	sql, err := os.ReadFile(sqlLog)
+	if err != nil {
+		t.Fatalf("read sql log: %v", err)
+	}
+	if strings.Contains(string(sql), "DOLT_RESET") {
+		t.Fatalf("a database with issues must never be reset, got:\n%s\noutput:\n%s", sql, out)
+	}
+	bdArgs, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("bd never ran: %v", err)
+	}
+	if inits := strings.Count(string(bdArgs), "init --force --quiet --server -p gc --database hq"); inits != 1 {
+		t.Fatalf("forced inits = %d, want exactly 1 (no retry over user data):\n%s", inits, bdArgs)
+	}
+	if !strings.Contains(string(out), "bd init forensics") {
+		t.Fatalf("expected the forensics dump on the unhealable failure, got:\n%s", out)
+	}
+}
+
 // TestGcBeadsBdInitAdoptsAnExistingSchemaFromAFreshScope pins the fresh-scope
 // for a scope whose database is already initialized but which carries no
 // version witness: a re-cloned rig, or a second scope directory pointed at
