@@ -505,6 +505,10 @@ gc beads show ga-abc
 gc beads show ga-abc --format=json
 ```
 
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--format` | string | `text` | output format: text or json |
+
 ## gc beads state
 
 Classify every bead into one of 16 effective states and display
@@ -521,9 +525,9 @@ gc beads state [flags]
 
 ```
 gc beads state
-  gc beads state --json
-  gc beads state --state routed-waiting
-  gc beads state --ids
+gc beads state --json
+gc beads state --state routed-waiting
+gc beads state --ids
 ```
 
 | Flag | Type | Default | Description |
