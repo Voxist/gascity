@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -2139,5 +2140,22 @@ func TestDoltliteDependencySnapshotCompletenessIsGuarded(t *testing.T) {
 	}
 	if len(cached) != 1 || cached[0].DependsOnID != "gc-parent" {
 		t.Fatalf("cached DepList = %#v, want the snapshot's gc-child -> gc-parent", cached)
+	}
+}
+
+// TestDoltliteReadStoreListCtxHonorsCancelledContext asserts ListCtx honors a
+// pre-cancelled context by returning immediately without running the query,
+// instead of the abandoning-goroutine pattern statusListStoreWithTimeout uses
+// around ctx-less Store.List.
+func TestDoltliteReadStoreListCtxHonorsCancelledContext(t *testing.T) {
+	store, cleanup := newTestDoltliteReadStore(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := store.ListCtx(ctx, ListQuery{AllowScan: true})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ListCtx(cancelled ctx) error = %v, want context.Canceled", err)
 	}
 }

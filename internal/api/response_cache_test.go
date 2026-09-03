@@ -719,3 +719,66 @@ func joinableStatusBuildHook(t *testing.T) func() {
 	t.Cleanup(func() { statusBuildAsyncHook = old })
 	return wg.Wait
 }
+
+// TestHandleStatusWarmCacheServesAcrossBucketExpiry pins the vp-e0hv warm-cache
+// behavior: once a body is built, a non-blocking /status served from the warm
+// entry must NOT re-run the ~28s O(store) build even when the time bucket has
+// rolled over on every request. (This deliberately inverts the pre-warm-cache
+// behavior, where each bucket rollover forced a rebuild.) The single background
+// refresh is run inline via statusBuildAsyncHook so the test stays deterministic.
+func TestHandleStatusWarmCacheServesAcrossBucketExpiry(t *testing.T) {
+	oldTTL := timeBucketResponseCacheTTL
+	timeBucketResponseCacheTTL = time.Nanosecond // every request lands in a new bucket
+	oldFloor := statusResponseTTLFloor
+	// Floor off, like the sibling bucket-expiry tests: with it on, the recent-
+	// response floor alone serves every request and the assertion below cannot
+	// distinguish a working warm cache from a broken one. statusResponseTTLFloor
+	// postdates the fork's version of this test, which is why it went unpinned.
+	statusResponseTTLFloor = 0
+	oldRefresh := statusWarmRefreshAfter
+	// Leave the real refresh window in place (5s): the whole test runs inside
+	// it, so no warm serve kicks a background refresh and the List count
+	// measures COLD BUILDS only. Zeroing it here (as the pre-resync version
+	// did) made every warm serve rebuild too, which made the bound below
+	// unfalsifiable — a fully broken warm path produced the same count.
+	statusWarmRefreshAfter = time.Minute
+	oldHook := statusBuildAsyncHook
+	statusBuildAsyncHook = func(build func()) { build() } // run refresh inline
+	t.Cleanup(func() {
+		timeBucketResponseCacheTTL = oldTTL
+		statusResponseTTLFloor = oldFloor
+		statusWarmRefreshAfter = oldRefresh
+		statusBuildAsyncHook = oldHook
+	})
+
+	state := newFakeState(t)
+	store := &countingStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	h := newTestCityHandler(t, state)
+
+	const requests = 4
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/status"), nil)
+	coldListCalls := 0
+	for i := 0; i < requests; i++ {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status #%d = %d, want 200", i, rec.Code)
+		}
+		if i == 0 {
+			// Whatever one cold build costs is the budget for all of them.
+			coldListCalls = store.listCalls
+		}
+	}
+	// Exactly ONE cold build (request 0); requests 1..3 are served warm. The
+	// bound is per-build, not per-request: if the warm entry stopped being
+	// served, each bucket rollover would force its own build and the count
+	// would be 4x this.
+	if store.listCalls == 0 {
+		t.Fatalf("List calls = %d, want >= 1 (cold build must run once)", store.listCalls)
+	}
+	if store.listCalls > coldListCalls {
+		t.Fatalf("List calls = %d, want <= %d (one cold build; the warm cache must serve the other %d requests, not rebuild per bucket rollover)",
+			store.listCalls, coldListCalls, requests-1)
+	}
+}
