@@ -361,8 +361,16 @@ func TestInjectedImmutableCommandCatalogRoundTripsWithoutExpandingProduction(t *
 	// 198-205, which the fork-only commands had held; the allocation ledger is
 	// append-only, so the four were reallocated to 206-209 (next_id 210) — a
 	// fork-local id remap only, since none of the four exists upstream.
-	if generatedCount != 205 {
-		t.Fatalf("generated production catalog has %d entries, want 205", generatedCount)
+	//
+	// 205 -> 206 at ga-i86nb, and the extra entry is a RETIRED one, not a new
+	// command: "gc provider rotate-key" was withdrawn and replaced by
+	// "gc provider credentials", so the live count is unchanged (209 left the
+	// set, 210 joined it). The census tombstones the retired wire id, and
+	// commandcensus/generate.go emits a catalog identity for every tombstone
+	// so an event recorded by an older binary still decodes. Hence 205 live +
+	// 1 retired. Re-derived the same way: by regenerating.
+	if generatedCount != 206 {
+		t.Fatalf("generated production catalog has %d entries, want 206", generatedCount)
 	}
 
 	injected := func(yield func(commandIDEntry)) {

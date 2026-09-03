@@ -219,7 +219,8 @@
               "beads-state",
               "config-lint",
               "provider-quota",
-              "provider-rotate-key"
+              "provider-rotate-key",
+              "provider-credentials"
             ]
           },
           "event_id": {

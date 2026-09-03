@@ -399,6 +399,47 @@ Apply the change by regenerating the service file:
 gc service restart     # restarts the launchd/systemd service
 ```
 
+## Rotating a Provider API Key
+
+Symptom: an upstream key was rotated and you need the fleet on the new one,
+but it is not obvious which variable to change — a provider's credential is
+usually reached through two indirections.
+
+Use `gc provider credentials <provider>` to resolve it. The command reads the
+provider's `upstream_env` binding to find which env var carries the credential
+(`api_key` and `auth_token`; never `base_url`), resolves that name through the
+provider's inheritance chain, and follows the value's `$VAR` reference to the
+variable that actually holds the secret:
+
+```bash
+gc provider credentials zai
+```
+
+It refuses, naming the reason, where no single variable holds the credential —
+for example when the value is a literal in config, or a reference wrapped in
+literal text such as `"Bearer ${ACME_KEY}"`.
+
+To set a new value, pipe it in rather than passing it as an argument, so it
+never reaches the process argument vector or your shell history:
+
+```bash
+pass show acme/api-key | gc provider credentials zai --set-stdin
+gc restart
+```
+
+<Warning>
+Setting the value does not apply it. A credential change moves no config
+fingerprint, so no agent restarts on its own, and the supervisor resolves
+session environment from its own environment, which is fixed when it exec'd.
+Until `gc restart` re-execs the supervisor and cycles the agents, every
+running session keeps the old credential.
+</Warning>
+
+One hazard the command warns about: because a value exported in the calling
+shell takes precedence over the secrets file, editing the file from a shell
+that still exports the old value has no effect and reports no error. Unset the
+variable in that shell before running `gc restart`.
+
 ## Supervisor Log Written Twice (journald + supervisor.log)
 
 `gc supervisor run` tees its output into `${GC_HOME}/supervisor.log`

@@ -3437,8 +3437,43 @@ gc provider
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc provider credentials](#gc-provider-credentials) | Show which environment variable backs a provider's credentials, and optionally set it |
 | [gc provider quota](#gc-provider-quota) | Show Claude account quota states and per-tier provider decisions |
-| [gc provider rotate-key](#gc-provider-rotate-key) | Rotate a provider API key across tmux global env and live sessions |
+
+## gc provider credentials
+
+Report which environment variable actually holds each of a provider's
+credentials, and optionally write a new value to the machine-local source the
+supervisor reads.
+
+Which variable that is, is not obvious. A provider declares its credential
+env-var names through its upstream_env binding (api_key and auth_token; never
+base_url), those names are resolved through the provider's inheritance chain,
+and each one's value may interpolate a different variable again. This command
+performs that resolution and refuses, naming the reason, wherever no single
+variable holds the credential.
+
+With --set-stdin or --set-from-file it writes the new value into the
+machine-local secrets file under GC_HOME (secrets.env) —
+atomically, mode 0600, preserving every other line. The credential is never
+taken from the command line, so it cannot reach the process argument vector or
+the shell history.
+
+Setting a value does NOT apply it. A credential change moves no config
+fingerprint, so no agent restarts on its own, and the supervisor resolves
+session environment from its own environment, which is fixed at exec. Run
+"gc restart" afterwards to re-exec the supervisor and cycle the agents; until
+then every session keeps the old credential.
+
+```
+gc provider credentials <provider> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--role` | string |  | restrict --set to one credential role (api_key or auth_token) |
+| `--set-from-file` | string |  | read the new credential from this file and write it to the machine-local secrets file |
+| `--set-stdin` | bool |  | read the new credential from stdin and write it to the machine-local secrets file |
 
 ## gc provider quota
 
@@ -3458,23 +3493,6 @@ gc provider quota [flags]
 | `--overflow` | stringSlice |  | overflow vendor pool in priority order (e.g. zai,openrouter) |
 | `--poll` | bool |  | keep polling on an interval, recording provider.* events to the city event log |
 | `--timeout` | duration | `10s` | per-account usage request timeout |
-
-## gc provider rotate-key
-
-Propagate a new API key into the tmux server global env and every live session
-that uses the named provider, without requiring a tmux kill-server.
-
-Running agent processes that already hold the old key in-process will pick up
-the new key on their next natural restart (drain/respawn), not immediately.
-Use --dry-run to preview what would change before writing.
-
-```
-gc provider rotate-key <provider> <newkey> [flags]
-```
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--dry-run` | bool |  | Print what would change without writing to tmux |
 
 ## gc ready
 
