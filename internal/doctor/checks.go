@@ -715,6 +715,15 @@ func (c *BeadsStoreCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf(
 			"beads store running on BdStore fallback (fork-per-op; gate=%s): %s",
 			result.Diagnostic.PreflightGate, result.Diagnostic.PreflightReason)
+		// A proxied-server city is on BdStore BY DESIGN, not by fault: the
+		// native open path misroutes to a fresh typeless embedded DB for that
+		// mode (see checkDoltModeSafe's proxied-server arm). "Repair the named
+		// gate" would read as "move to dolt_mode=server", which is the
+		// a74fefde8 zero-session outage, so say the opposite explicitly.
+		if strings.Contains(result.Diagnostic.PreflightReason, "proxied-server") {
+			r.FixHint = "expected for dolt_mode=proxied-server: bd still pools through the db-proxy, so this is not a fault and needs no repair. Do NOT switch to dolt_mode=server to clear this gate"
+			return r
+		}
 		r.FixHint = "native store unavailable; repair the named preflight gate, then restart the process to pick up native store eligibility"
 		return r
 	}

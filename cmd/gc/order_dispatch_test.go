@@ -10641,3 +10641,151 @@ func TestOrderDispatchPrioritizesOverdueShortIntervalUnderBudget(t *testing.T) {
 		t.Fatalf("long-a (1.1x overdue) should NOT dispatch under budget 1; runs=%d", got)
 	}
 }
+
+// TestHasOpenWorkStrictPropagatesGraphDepListError pins fail-closed for the
+// THIRD leg of the descendant walk, which had no coverage at all.
+// storeHasOpenDescendants reads a subtree three ways: the gc.root_bead_id
+// membership index, the ParentID walk, and — for any root that
+// orderWispMayHaveGraphDependents accepts — orderWispGraphDependentChildren,
+// which does Get(parent) -> DepList(parent,"up") -> Get(each dependent)
+// (order_dispatch.go:2688,2696,2711). Each has its own error path; a swallowed
+// error on any of them reads as "no open work" and re-dispatches an order whose
+// molecule is still running.
+//
+// This replaces the fork's TestHasOpenWorkStrictPropagatesAncestorGetError,
+// whose Get override was DEAD CODE: the walk reached its List{ParentID}
+// override first and never called Get, making it a one-level-deeper duplicate
+// of TestHasOpenWorkStrictPropagatesWispChildListError. Verified by mutation —
+// deleting that test's Get override left it passing.
+func TestHasOpenWorkStrictPropagatesGraphDepListError(t *testing.T) {
+	base := beads.NewMemStore()
+
+	wispRoot, err := base.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store := depListFailStore{Store: base, failID: wispRoot.ID}
+	ad := &memoryOrderDispatcher{}
+	has, err := ad.hasOpenWorkStrict(store, "digest")
+	if err == nil {
+		t.Fatal("hasOpenWorkStrict err = nil, want graph dep-list error")
+	}
+	if has {
+		t.Fatal("hasOpenWorkStrict returned true with dep-list error; caller must fail closed on the error")
+	}
+	if !strings.Contains(err.Error(), "checking open descendants of wisp") {
+		t.Fatalf("hasOpenWorkStrict err = %q, want wisp descendant context", err)
+	}
+}
+
+type membershipListFailStore struct {
+	beads.Store
+	failRootID string
+	err        error
+}
+
+func (s membershipListFailStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Metadata[beadmeta.RootBeadIDMetadataKey] == s.failRootID {
+		return nil, s.err
+	}
+	return s.Store.List(q)
+}
+
+// TestHasOpenWorkStrictPropagatesMembershipListError pins fail-closed for the
+// OTHER half of the descendant walk: the gc.root_bead_id membership index.
+// storeHasOpenDescendants reads the subtree as the union of that index and the
+// ParentID walk, so each read has its own error path. The ParentID half is
+// covered by TestHasOpenWorkStrictPropagatesWispChildListError; this covers the
+// membership half, which nothing else exercises.
+//
+// The fork carried this assertion under the ParentID test's name; upstream grew
+// a same-named test for the ParentID read, so the restored guard is named for
+// the read it actually covers.
+func TestHasOpenWorkStrictPropagatesMembershipListError(t *testing.T) {
+	base := beads.NewMemStore()
+
+	wispRoot, err := base.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store := membershipListFailStore{
+		Store:      base,
+		failRootID: wispRoot.ID,
+		err:        fmt.Errorf("membership tier unavailable"),
+	}
+	ad := &memoryOrderDispatcher{}
+	has, err := ad.hasOpenWorkStrict(store, "digest")
+	if err == nil {
+		t.Fatal("hasOpenWorkStrict err = nil, want membership-list error")
+	}
+	if has {
+		t.Fatal("hasOpenWorkStrict returned true with membership-list error; caller must fail closed on the error")
+	}
+	if !strings.Contains(err.Error(), "checking open descendants of wisp") {
+		t.Fatalf("hasOpenWorkStrict err = %q, want wisp descendant context", err)
+	}
+}
+
+func TestOrderDispatchBudgetDefaultRaised(t *testing.T) {
+	// The old default of 4 starved short-interval orders on cities with
+	// large order rings (one fire per full rotation regardless of interval).
+	// Guard only that floor: the default must stay above the old starvation
+	// value. Do NOT pin a high number here — the fork's 32 was voxist-city's
+	// ~122-order-ring sizing (Σ over cooldown orders of 1/interval_min +
+	// headroom), not a gascity-core invariant, and a conservative down-tune
+	// or upstream contribution must not fail CI (vc-wz5.4). Starvation
+	// resistance itself is pinned by
+	// TestOrderDispatchPrioritizesOverdueShortIntervalUnderBudget (budget=1).
+	//
+	// order_dispatch.go's defaultMaxOrderDispatchesPerTick comment names this
+	// test as the guard for that floor; the 2026-08-31 merge dropped the test
+	// and kept the comment.
+	if defaultMaxOrderDispatchesPerTick <= 4 {
+		t.Fatalf("defaultMaxOrderDispatchesPerTick = %d, want > 4 (the old starvation default)", defaultMaxOrderDispatchesPerTick)
+	}
+}
+
+// TestHasOpenWorkStrictPropagatesOpenScanError pins the gate's fail-closed
+// contract for its open-work read: a store error listing the order-run beads
+// must surface to the caller (gateFailClosed blocks on non-timeout errors),
+// never silently read as "no open work".
+//
+// It reuses the pre-existing openWorkFailListStore rather than a private
+// fixture: that store already fails BOTH spellings of the open-work read (the
+// order-run label and the per-tick gate index, ga-l7jdg), so it cannot go stale
+// when the live spelling changes. The fork's own scanListFailStore pinned only
+// the label spelling, and its AllowScan branch was unreachable on this path.
+func TestHasOpenWorkStrictPropagatesOpenScanError(t *testing.T) {
+	base := beads.NewMemStore()
+
+	if _, err := base.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	store := openWorkFailListStore{Store: base}
+	ad := &memoryOrderDispatcher{}
+	has, err := ad.hasOpenWorkStrict(store, "digest")
+	if err == nil {
+		t.Fatal("hasOpenWorkStrict err = nil, want open-scan error")
+	}
+	if has {
+		t.Fatal("hasOpenWorkStrict returned true with open-scan error; caller must fail closed on the error")
+	}
+	if !strings.Contains(err.Error(), "listing order work beads") {
+		t.Fatalf("hasOpenWorkStrict err = %q, want open-scan context", err)
+	}
+}

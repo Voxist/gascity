@@ -3,6 +3,7 @@ package storehealth
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -270,6 +271,11 @@ type recordingProvider struct {
 	*events.Fake
 	listCalls     int
 	listTailCalls int
+	// lastTailLimit and lastScanBytes capture the BOUND LastMaintenance asked
+	// for, not just which method it called. Counting calls alone cannot tell a
+	// bounded tail from an unbounded one.
+	lastTailLimit int
+	lastScanBytes int64
 }
 
 func (r *recordingProvider) List(filter events.Filter) ([]events.Event, error) {
@@ -279,6 +285,8 @@ func (r *recordingProvider) List(filter events.Filter) ([]events.Event, error) {
 
 func (r *recordingProvider) ListTail(filter events.Filter, limit int) ([]events.Event, error) {
 	r.listTailCalls++
+	r.lastTailLimit = limit
+	r.lastScanBytes = filter.MaxScanBytes
 	return r.Fake.ListTail(filter, limit)
 }
 
@@ -313,6 +321,17 @@ func TestLastMaintenanceUsesTailProviderFastPath(t *testing.T) {
 	}
 	if rp.listCalls != 0 {
 		t.Fatalf("listCalls = %d, want 0 (fast path should not also fall back to List)", rp.listCalls)
+	}
+	// The fork's lastMaintenanceTailLimit constant was superseded by a PAIR of
+	// bounds, and both are asserted exactly rather than as a range: only the
+	// most recent matching event is wanted, and the backward file walk is
+	// capped. A loose range here (the dropped fork test used "(0,32]") lets a
+	// regression to 16 pass while still reading 16x the intended tail.
+	if rp.lastTailLimit != 1 {
+		t.Fatalf("ListTail limit = %d, want exactly 1 (only the latest matching event is used)", rp.lastTailLimit)
+	}
+	if rp.lastScanBytes != lastMaintenanceScanWindowBytes {
+		t.Fatalf("ListTail scan window = %d bytes, want lastMaintenanceScanWindowBytes (%d) — an unbounded backward walk costs the same as the full forward scan this path exists to remove", rp.lastScanBytes, lastMaintenanceScanWindowBytes)
 	}
 }
 
@@ -409,5 +428,60 @@ func TestLastMaintenanceDoesNotReadRotatedArchives(t *testing.T) {
 	gotTs, gotStatus := LastMaintenance(rec)
 	if !gotTs.IsZero() || gotStatus != "" {
 		t.Fatalf("LastMaintenance = (%v,%q), want (zero,\"\") — the tail fast path reads the active file only", gotTs, gotStatus)
+	}
+}
+
+// listOnlyProvider implements events.Provider but deliberately not
+// events.TailProvider, exercising LastMaintenance's fallback path for
+// backings that cannot do a bounded tail read (e.g. events.Multiplexer
+// today).
+//
+// It holds its Fake in a NAMED FIELD rather than embedding it, and that is the
+// whole point. providerWithoutTail above EMBEDS *events.Fake, which promotes
+// Fake.ListTail onto it — so it satisfies events.TailProvider after all, and
+// TestLastMaintenanceFallsBackWithoutTailProvider takes the tail fast path and
+// never reaches the List branch it claims to guard. This type is the only
+// coverage of that fallback.
+type listOnlyProvider struct {
+	fake      *events.Fake
+	listCalls int
+}
+
+func (p *listOnlyProvider) Record(e events.Event) { p.fake.Record(e) }
+
+func (p *listOnlyProvider) List(filter events.Filter) ([]events.Event, error) {
+	p.listCalls++
+	return p.fake.List(filter)
+}
+
+func (p *listOnlyProvider) LatestSeq() (uint64, error) { return p.fake.LatestSeq() }
+
+func (p *listOnlyProvider) Watch(ctx context.Context, afterSeq uint64) (events.Watcher, error) {
+	return p.fake.Watch(ctx, afterSeq)
+}
+
+func (p *listOnlyProvider) Close() error { return p.fake.Close() }
+
+func TestLastMaintenanceFallsBackToListForNonTailProvider(t *testing.T) {
+	provider := &listOnlyProvider{fake: events.NewFake()}
+	older := time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 4, 8, 3, 0, 0, 0, time.UTC)
+
+	payloadDone, _ := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 1})
+	payloadFail, _ := json.Marshal(events.StoreMaintenanceFailedPayload{Stage: "gc"})
+
+	provider.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: older, Payload: payloadDone})
+	provider.Record(events.Event{Type: events.StoreMaintenanceFailed, Ts: newer, Payload: payloadFail})
+
+	ts, status := LastMaintenance(provider)
+
+	if provider.listCalls == 0 {
+		t.Fatalf("LastMaintenance did not fall back to List for a non-TailProvider backing")
+	}
+	if !ts.Equal(newer) {
+		t.Fatalf("ts = %v, want %v", ts, newer)
+	}
+	if status != "failed" {
+		t.Fatalf("status = %q, want failed", status)
 	}
 }

@@ -8390,3 +8390,206 @@ func TestDefaultDoltReadTimeoutMillisPreservesOuterDeadlineHeadroom(t *testing.T
 			DefaultDoltReadTimeoutMillis, DefaultDoltWriteTimeoutMillis)
 	}
 }
+
+func TestBeadsProxiedGateAccessors(t *testing.T) {
+	// Default (nil) => gate off, pool size default 4 (byte-identical legacy).
+	var zero BeadsConfig
+	if zero.ProxiedEnabled() {
+		t.Error("ProxiedEnabled() = true for nil, want false")
+	}
+	if got := zero.ProxyPoolSizeOrDefault(); got != defaultBeadsProxyPoolSize {
+		t.Errorf("ProxyPoolSizeOrDefault() = %d, want %d", got, defaultBeadsProxyPoolSize)
+	}
+
+	tru, fls := true, false
+	if !(BeadsConfig{Proxied: &tru}).ProxiedEnabled() {
+		t.Error("ProxiedEnabled() = false for proxied=true")
+	}
+	if (BeadsConfig{Proxied: &fls}).ProxiedEnabled() {
+		t.Error("ProxiedEnabled() = true for proxied=false")
+	}
+
+	n6, n0, neg := 6, 0, -3
+	if got := (BeadsConfig{ProxyPoolSize: &n6}).ProxyPoolSizeOrDefault(); got != 6 {
+		t.Errorf("ProxyPoolSizeOrDefault(6) = %d, want 6", got)
+	}
+	// Non-positive sizes fall back to the default rather than producing an
+	// unusable pool.
+	if got := (BeadsConfig{ProxyPoolSize: &n0}).ProxyPoolSizeOrDefault(); got != defaultBeadsProxyPoolSize {
+		t.Errorf("ProxyPoolSizeOrDefault(0) = %d, want %d", got, defaultBeadsProxyPoolSize)
+	}
+	if got := (BeadsConfig{ProxyPoolSize: &neg}).ProxyPoolSizeOrDefault(); got != defaultBeadsProxyPoolSize {
+		t.Errorf("ProxyPoolSizeOrDefault(-3) = %d, want %d", got, defaultBeadsProxyPoolSize)
+	}
+}
+
+func TestBeadsProxyIdleTimeoutAccessor(t *testing.T) {
+	if got := (BeadsConfig{}).ProxyIdleTimeoutOrDefault(); got != defaultBeadsProxyIdleTimeout {
+		t.Errorf("default = %q, want %q", got, defaultBeadsProxyIdleTimeout)
+	}
+	blank := "  "
+	if got := (BeadsConfig{ProxyIdleTimeout: &blank}).ProxyIdleTimeoutOrDefault(); got != defaultBeadsProxyIdleTimeout {
+		t.Errorf("blank = %q, want default %q", got, defaultBeadsProxyIdleTimeout)
+	}
+	v := "5m"
+	if got := (BeadsConfig{ProxyIdleTimeout: &v}).ProxyIdleTimeoutOrDefault(); got != "5m" {
+		t.Errorf("set = %q, want 5m", got)
+	}
+}
+
+func TestParseBeadsExpectedBuild(t *testing.T) {
+	cfg, err := Parse([]byte("[workspace]\nname = \"t\"\n\n[beads]\nexpected_build = \"1.0.5-pooling\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.Beads.ExpectedBuild; got != "1.0.5-pooling" {
+		t.Errorf("expected_build = %q, want %q", got, "1.0.5-pooling")
+	}
+}
+
+func TestParseBeadsExpectedBuildAbsent(t *testing.T) {
+	cfg, err := Parse([]byte("[workspace]\nname = \"t\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Beads.ExpectedBuild != "" {
+		t.Errorf("expected_build = %q, want empty when unset", cfg.Beads.ExpectedBuild)
+	}
+}
+
+func TestParseBeadsProxiedSection(t *testing.T) {
+	cfg, err := Parse([]byte("[workspace]\nname = \"t\"\n\n[beads]\nproxied = true\nproxy_pool_size = 8\nproxy_idle_timeout = \"15m\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !cfg.Beads.ProxiedEnabled() {
+		t.Error("proxied not parsed as true")
+	}
+	if got := cfg.Beads.ProxyPoolSizeOrDefault(); got != 8 {
+		t.Errorf("proxy_pool_size = %d, want 8", got)
+	}
+	if got := cfg.Beads.ProxyIdleTimeoutOrDefault(); got != "15m" {
+		t.Errorf("proxy_idle_timeout = %q, want 15m", got)
+	}
+}
+
+func TestParseSessionPendingCreateTTL(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test-city"
+
+[session]
+pending_create_ttl = "1h"
+
+[[agent]]
+name = "mayor"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.Session.PendingCreateTTLDuration(); got != time.Hour {
+		t.Errorf("PendingCreateTTLDuration() = %v, want 1h", got)
+	}
+}
+
+func TestSessionPendingCreateTTLCustom(t *testing.T) {
+	s := SessionConfig{PendingCreateTTL: "45m"}
+	got := s.PendingCreateTTLDuration()
+	if got != 45*time.Minute {
+		t.Errorf("PendingCreateTTLDuration() = %v, want 45m", got)
+	}
+}
+
+func TestSessionPendingCreateTTLDefault(t *testing.T) {
+	s := SessionConfig{}
+	got := s.PendingCreateTTLDuration()
+	if got != 30*time.Minute {
+		t.Errorf("PendingCreateTTLDuration() = %v, want 30m", got)
+	}
+}
+
+func TestSessionPendingCreateTTLInvalid(t *testing.T) {
+	s := SessionConfig{PendingCreateTTL: "not-a-duration"}
+	got := s.PendingCreateTTLDuration()
+	if got != 30*time.Minute {
+		t.Errorf("PendingCreateTTLDuration() = %v, want 30m (default for invalid)", got)
+	}
+}
+
+func TestValidateAgentsTier(t *testing.T) {
+	for _, tier := range []string{"", "claude-required", "overflow-ok"} {
+		t.Run("valid_"+tier, func(t *testing.T) {
+			if err := ValidateAgents([]Agent{{Name: "worker", Tier: tier}}); err != nil {
+				t.Fatalf("ValidateAgents tier %q: %v", tier, err)
+			}
+		})
+	}
+
+	err := ValidateAgents([]Agent{{Name: "worker", Tier: "platinum"}})
+	if err == nil {
+		t.Fatal("ValidateAgents invalid tier: got nil error")
+	}
+	if !strings.Contains(err.Error(), "tier") {
+		t.Fatalf("ValidateAgents error = %v, want tier context", err)
+	}
+}
+
+// TestFailoverChainConfig verifies that failover_chain in [daemon] is parsed
+// into DaemonConfig.FailoverChain.
+func TestFailoverChainConfig(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[daemon]
+failover_chain = ["claude", "zai"]
+
+[[agent]]
+name = "worker"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	want := []string{"claude", "zai"}
+	if !reflect.DeepEqual(cfg.Daemon.FailoverChain, want) {
+		t.Fatalf("Daemon.FailoverChain = %v, want %v", cfg.Daemon.FailoverChain, want)
+	}
+}
+
+func TestEffectiveWorkQueryRoutedQueueUsesHybridSortHonoringPriority(t *testing.T) {
+	// ADR-0035 (vc-zv4y): the canonical Tier-3 routed predicate selects bd's
+	// `hybrid` sort so fresh work (<48h) is ordered by priority — a P1 created
+	// "now" ranks ahead of an older P2/P3 — while aged work (>=48h) still drains
+	// oldest-first (anti-starvation preserved). gascity's contract is SELECTING
+	// hybrid on the routed tier; bd owns the ORDER BY, and the end-to-end rank
+	// (P1 49 -> 1) is re-measured live post-deploy (ADR-0035 AC 3), which a mock
+	// bd cannot reproduce.
+	mayor := Agent{Name: "mayor"}
+	cases := []struct {
+		name string
+		got  string
+	}{
+		{"bd104", mayor.EffectiveWorkQuery()},
+		// EffectiveWorkQueryForBeads was folded into EffectiveWorkQueryFor(QueryTopology).
+		{"bd105", mayor.EffectiveWorkQueryFor(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}})},
+	}
+	for _, tc := range cases {
+		// Canonical routed tier honors priority for fresh work via hybrid.
+		if !strings.Contains(tc.got, `--unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort hybrid --limit=20`) {
+			t.Errorf("%s: routed tier must select bd --sort hybrid: %q", tc.name, tc.got)
+		}
+		// ...and must NOT revert to the priority-blind FIFO on the routed tier.
+		// (The negative probe searched for `hybrid` rather than `oldest` before
+		// the v1.4.0 resync, so it could never fire; corrected here.)
+		if strings.Contains(tc.got, `gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest`) {
+			t.Errorf("%s: routed tier still uses priority-blind --sort oldest: %q", tc.name, tc.got)
+		}
+		// The retiring migration probe (ga-dhf44) deliberately stays --sort
+		// oldest; the fix does not touch the migration builder.
+		if !strings.Contains(tc.got, `gc.run_target=$target" --metadata-field "gc.kind=workflow" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest --limit=20`) {
+			t.Errorf("%s: migration probe must remain --sort oldest (unchanged): %q", tc.name, tc.got)
+		}
+	}
+}

@@ -698,3 +698,49 @@ func TestPoolRuntimeSessionNameBoundsPoolSuffix(t *testing.T) {
 		t.Fatalf("poolRuntimeSessionName is not deterministic: %q vs %q", got, again)
 	}
 }
+
+// The two tests below are the restorable half of the fork's six
+// TestCreatePoolSessionBead_* guards. They assert properties that hold under
+// BOTH the fork's reuse model and upstream's refuse-and-reap model, so they
+// are model-independent: a fresh slot never collides with another slot, and a
+// CLOSED pending bead is never resurrected. The other four assert reuse of an
+// open start-pending bead for the same identity, which upstream deliberately
+// refuses (errPoolSessionNameUnavailable); see the PR for that decision.
+func TestCreatePoolSessionBead_DifferentSlotCreatesFresh(t *testing.T) {
+	store := beads.NewMemStore()
+	now := time.Date(2026, 5, 1, 9, 15, 0, 0, time.UTC)
+
+	first, err := createPoolSessionBead(sessionFrontDoor(store), "gascity/claude", now, poolSessionCreateIdentity{AgentName: "gascity/claude-1", Slot: 1})
+	if err != nil {
+		t.Fatalf("createPoolSessionBead (slot 1): %v", err)
+	}
+	second, err := createPoolSessionBead(sessionFrontDoor(store), "gascity/claude", now, poolSessionCreateIdentity{AgentName: "gascity/claude-2", Slot: 2})
+	if err != nil {
+		t.Fatalf("createPoolSessionBead (slot 2): %v", err)
+	}
+	if second.ID == first.ID {
+		t.Fatalf("slot 2 reused slot 1 bead %s, want fresh bead", first.ID)
+	}
+}
+
+func TestCreatePoolSessionBead_ClosedPendingBeadNotReused(t *testing.T) {
+	store := beads.NewMemStore()
+	now := time.Date(2026, 5, 1, 9, 15, 0, 0, time.UTC)
+	identity := poolSessionCreateIdentity{AgentName: "gascity/claude-1", Slot: 1}
+
+	first, err := createPoolSessionBead(sessionFrontDoor(store), "gascity/claude", now, identity)
+	if err != nil {
+		t.Fatalf("createPoolSessionBead (first): %v", err)
+	}
+	if err := store.Close(first.ID); err != nil {
+		t.Fatalf("store.Close(%s): %v", first.ID, err)
+	}
+
+	second, err := createPoolSessionBead(sessionFrontDoor(store), "gascity/claude", now, identity)
+	if err != nil {
+		t.Fatalf("createPoolSessionBead (second): %v", err)
+	}
+	if second.ID == first.ID {
+		t.Fatalf("closed bead %s was reused, want fresh bead", first.ID)
+	}
+}

@@ -629,8 +629,16 @@ func TestCatalogBindsACPWithDirAndDefersDefaultConstructor(t *testing.T) {
 	if defaultProof == nil {
 		t.Fatal("acp.NewSeamBacked proof is missing")
 	}
-	if defaultProof.File != "internal/runtime/acp/conformance_test.go" {
-		t.Errorf("ACP default proof = %s, want the ACP conformance file", defaultProof.File)
+	// The entrypoint and its allowed-call set are half the proof: a claim that
+	// names the right FILE but a different test, or that quietly grows a call
+	// the conformance harness never made, is not the proof this claim asserts.
+	// The 2026-08-31 merge kept the file check and dropped both of these
+	// (they lived in the fork's TestCatalogBindsACPConstructors).
+	if defaultProof.File != "internal/runtime/acp/conformance_test.go" || defaultProof.Test != "TestACPConformanceSharedDir" {
+		t.Errorf("ACP default proof = %s#%s, want ACP shared-dir conformance entrypoint", defaultProof.File, defaultProof.Test)
+	}
+	if got, want := renderSymbolRefs(defaultProof.AllowedCalls), "fmt.Sprintf, internal/runtime/acp.acpConformanceCommand, sync/atomic.AddInt64"; got != want {
+		t.Errorf("ACP default allowed calls = %q, want %q", got, want)
 	}
 }
 

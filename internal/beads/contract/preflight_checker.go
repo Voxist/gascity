@@ -200,6 +200,35 @@ func (c PreflightChecker) checkDoltModeSafe(metadata preflightMetadata, ctx Pref
 	switch ctx.DoltMode {
 	case "server":
 		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckPass, "bd context reports dolt server mode", details)
+	case "proxied-server":
+		// Proxied-server keeps the in-process native store OFF on purpose, and
+		// the reason is an OPEN-PATH MISROUTE, not the type system.
+		//
+		// Do not "fix" this by flipping it to Pass because every custom type
+		// looks registered. They are: gc unions doctor.RequiredCustomTypes
+		// (which includes "session") into types.custom for every scope
+		// (cmd/gc/beads_provider_lifecycle.go), and a custom_types_registered
+		// preflight reports green. That green is real and still not sufficient.
+		//
+		// The verified mechanism: IsDoltServerMode() is FALSE for
+		// proxied-server, so the native open path falls through
+		// OpenBestAvailable to the embedded-Dolt opener, which CREATES A FRESH,
+		// TYPELESS DATABASE beside the real one. The resulting store rejects
+		// the first session bead with "invalid issue type: session" — every
+		// pool is skipped and the city spawns zero sessions. That is the
+		// a74fefde8 outage; the type registration above is not consulted
+		// because the store being written to is not the configured database.
+		// See engdocs/contributors/city-scale-architecture-plan.md row 2.2 for
+		// the verification, and row 2.4 for the real precondition this branch
+		// may be relaxed under: Pass iff native_store="auto" AND
+		// custom_types_registered AND the endpoint resolves — else today's Fail.
+		//
+		// bd itself still routes through the pooling db-proxy, so connection
+		// churn is collapsed regardless of this verdict. Failing here (→ bd
+		// subprocess fallback) rather than falling through to the default arm
+		// keeps the diagnostic accurate: the mode is supported, the native
+		// store just is not used for it.
+		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckFail, "dolt_mode=proxied-server routes through the bd-subprocess store (native store not used)", details)
 	case "embedded":
 		return NewPreflightCheckResult(PreflightCheckDoltModeSafe, PreflightCheckFail, "dolt_mode=embedded; native store requires Dolt server mode (bd context must report dolt_mode=server) — falling back to per-call bd. See troubleshooting.", details)
 	default:
