@@ -25,6 +25,7 @@ REPO_ROOT="$(cd "$TEST_DIR/.." && pwd)"
 
 pass=0
 fail=0
+skip=0
 record_pass() {
 	echo "  ok   $1"
 	pass=$((pass + 1))
@@ -33,10 +34,19 @@ record_fail() {
 	echo "  FAIL $1 — $2"
 	fail=$((fail + 1))
 }
+record_skip() {
+	echo "  skip $1 — $2"
+	skip=$((skip + 1))
+}
 
 export GIT_AUTHOR_NAME="Test Author" GIT_AUTHOR_EMAIL="author@example.com"
 export GIT_COMMITTER_NAME="Test Committer" GIT_COMMITTER_EMAIL="committer@example.com"
 export GIT_CONFIG_NOSYSTEM=1
+# Neutralize the operator's global git config too (merge.ff=only, a merge
+# driver, an alias) — NOSYSTEM alone leaves ~/.gitconfig in play, and a
+# real `git merge` in the negative-control fixture below is not hermetic
+# against it.
+export GIT_CONFIG_GLOBAL=/dev/null
 unset GIT_DIR GIT_WORK_TREE 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
@@ -46,7 +56,12 @@ echo "== historical: 2026-08-31 resync merge (15913af6a) =="
 
 HIST_MERGE="15913af6aed2dae965d0fd6706bbf3e66458afca"
 if ! git -C "$REPO_ROOT" cat-file -e "${HIST_MERGE}^{commit}" 2>/dev/null; then
-	record_fail "historical fixture reachable" "commit $HIST_MERGE not found in this checkout; fetch fork/main history first"
+	# A shallow clone (e.g. CI's fetch-depth: 2 checkout of a PR branch) will
+	# not have this commit's history at all. That is an environment limit,
+	# not a regression in the script under test — skip, don't fail, so this
+	# suite stays runnable (and meaningful for the other cases) on shallow
+	# checkouts. A full local clone with fork/main history always has it.
+	record_skip "historical fixture reachable" "commit $HIST_MERGE not found in this checkout (shallow clone?); fetch fork/main history to run this case"
 else
 	hist_out=$(mktemp "${TMPDIR:-/tmp}/crl-test-hist.XXXXXX")
 	(cd "$REPO_ROOT" && bash "$SCRIPT" "$HIST_MERGE") >"$hist_out" 2>&1
@@ -155,5 +170,5 @@ rm -rf "$neg_repo"
 
 # ---------------------------------------------------------------------------
 echo
-echo "== summary: $pass passed, $fail failed =="
+echo "== summary: $pass passed, $fail failed, $skip skipped =="
 [ "$fail" -eq 0 ]

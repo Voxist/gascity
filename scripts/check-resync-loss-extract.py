@@ -103,8 +103,37 @@ def blob_or_none(repo, ref, path):
         return None
 
 
+# git merge-file's conflict markers: "<<<<<<< <ours-label>", "=======",
+# ">>>>>>> <theirs-label>". Matched with DOTALL+MULTILINE so a conflict
+# block spanning many lines is removed as one unit.
+_CONFLICT_HUNK_RE = re.compile(
+    r"^<<<<<<<[^\n]*\n.*?^=======\n.*?^>>>>>>>[^\n]*\n?",
+    re.DOTALL | re.MULTILINE,
+)
+
+
+def strip_conflict_hunks(text):
+    """Remove every conflict-marked block (both sides) from merge-file output.
+
+    A name that appears only inside a conflict marker never reached the
+    merge result on its own: a human had to make a judgment call for that
+    hunk, and content on EITHER side of the conflict — ours' addition
+    included — could have been discarded as part of resolving it. Content
+    that survives stripping is content a plain, unattended 3-way merge
+    would have delivered with no conflict at all.
+    """
+    return _CONFLICT_HUNK_RE.sub("", text)
+
+
 def three_way_merge_text(repo, base, ours, theirs, path, cache):
-    """git merge-file -p over the three blobs at `path`; memoized per path."""
+    """git merge-file -p over the three blobs at `path`; memoized per path.
+
+    Returns (raw_text, clean_text, had_conflict). clean_text has every
+    conflict-marked hunk stripped (see strip_conflict_hunks); had_conflict
+    is True iff `git merge-file` reported at least one conflict (non-zero
+    exit — its exit code is the conflict count, not a boolean, so any
+    non-zero value counts).
+    """
     if path in cache:
         return cache[path]
     with tempfile.TemporaryDirectory() as td:
@@ -119,9 +148,12 @@ def three_way_merge_text(repo, base, ours, theirs, path, cache):
             capture_output=True,
             check=False,
         )
-        text = proc.stdout.decode("utf-8", "replace")
-    cache[path] = text
-    return text
+        raw_text = proc.stdout.decode("utf-8", "replace")
+        had_conflict = proc.returncode != 0
+        clean_text = strip_conflict_hunks(raw_text) if had_conflict else raw_text
+    result = (raw_text, clean_text, had_conflict)
+    cache[path] = result
+    return result
 
 
 def main():
@@ -142,29 +174,49 @@ def main():
     d_merge = decls(repo, args.merge)
 
     forkadded = sorted(set(d_ours) - set(d_base) - set(d_theirs))
-    missing = [n for n in forkadded if n not in d_merge]
+
+    # Keyed by (name, file), not by bare name: a helper duplicated in two
+    # packages (same name, two files) that survives in ONE of them must
+    # still be reported missing from the other. Checking "is this name
+    # present anywhere in d_merge" made that loss invisible — the bare name
+    # existing in the surviving file was enough to call the dropped one
+    # "not missing" too.
+    missing_pairs = []
+    for name in forkadded:
+        merge_files_for_name = set(d_merge.get(name, []))
+        for fname in d_ours[name]:
+            if fname not in merge_files_for_name:
+                missing_pairs.append((name, fname))
 
     print(f"# fork-added top-level decls (ours - base - theirs): {len(forkadded)}", file=sys.stderr)
-    print(f"# fork-added decls still missing from merge: {len(missing)}", file=sys.stderr)
+    print(f"# fork-added (decl, file) pairs still missing from merge: {len(missing_pairs)}", file=sys.stderr)
 
     cache = {}
     bug = 0
     outcome = 0
-    for name in missing:
-        for fname in d_ours[name]:
-            merged_text = three_way_merge_text(repo, args.base, args.ours, args.theirs, fname, cache)
-            if re.search(r"\b" + re.escape(name) + r"\b", merged_text):
-                verdict = "RESOLUTION-BUG"
-                bug += 1
-            else:
-                verdict = "MERGE-OUTCOME"
-                outcome += 1
-            print(f"  {verdict:16s} {name}  ({fname})")
+    for name, fname in missing_pairs:
+        _raw, clean_text, had_conflict = three_way_merge_text(repo, args.base, args.ours, args.theirs, fname, cache)
+        pat = re.compile(r"\b" + re.escape(name) + r"\b")
+        if pat.search(clean_text):
+            # Survives outside every conflict-marked hunk (or there was no
+            # conflict at all): a plain, unattended 3-way merge would have
+            # delivered it. Losing it was a defect in how THIS merge was
+            # hand-resolved, not an unavoidable conflict.
+            verdict = "RESOLUTION-BUG"
+            bug += 1
+        else:
+            # Either absent outright, or present only inside a conflict
+            # marker a human had to resolve by hand (had_conflict is True
+            # in that case) — even git's own automatic merge would not
+            # have delivered it standalone.
+            verdict = "MERGE-OUTCOME"
+            outcome += 1
+        print(f"  {verdict:16s} {name}  ({fname})")
 
     with open(args.summary_out, "w", encoding="utf-8") as fh:
         fh.write(f"RESOLUTION_BUGS={bug}\n")
         fh.write(f"MERGE_OUTCOMES={outcome}\n")
-        fh.write(f"MISSING={len(missing)}\n")
+        fh.write(f"MISSING={len(missing_pairs)}\n")
 
 
 if __name__ == "__main__":

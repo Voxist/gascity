@@ -156,7 +156,8 @@ EXEMPT_GLOBS=(
 	'docs/reference/config.md'
 	'cmd/gc/productmetrics_command_census.json'
 	'cmd/gc/metrics_census_gen.go'
-	'internal/api/dashboardspa/*'
+	'internal/api/dashboardspa/dist/*'
+	'internal/api/dashboardspa/web/shared/src/generated/*'
 	'internal/testpolicy/resourcecensus/census.go'
 	'internal/testenv/testdata/*.golden'
 	'scripts/*baseline*'
@@ -228,12 +229,21 @@ gate1_hits=0
 gate1_exempt=0
 while IFS= read -r f; do
 	[ -n "$f" ] || continue
-	oh=$(git rev-parse "${OURS}:${f}" 2>/dev/null || true)
+	oh=$(git rev-parse -q --verify "${OURS}:${f}" 2>/dev/null || true)
 	[ -n "$oh" ] || continue # fork deleted the file; not this gate's concern
 
-	mh=$(git rev-parse "${MERGE}:${f}" 2>/dev/null || true)
-	th=$(git rev-parse "${THEIRS}:${f}" 2>/dev/null || true)
-	bh=$(git rev-parse "${BASE}:${f}" 2>/dev/null || true)
+	mh=$(git rev-parse -q --verify "${MERGE}:${f}" 2>/dev/null || true)
+	th=$(git rev-parse -q --verify "${THEIRS}:${f}" 2>/dev/null || true)
+	bh=$(git rev-parse -q --verify "${BASE}:${f}" 2>/dev/null || true)
+
+	# Both sides made the identical change (fork upstreamed a patch, or both
+	# independently converged on the same fix). merge == theirs is then the
+	# ONLY correct 3-way result — theirs and ours are the same content, so
+	# nothing was discarded. Not a loss; skip before the verdict logic below
+	# ever gets a chance to call it TOOK-THEIRS.
+	if [ -n "$th" ] && [ "$oh" = "$th" ]; then
+		continue
+	fi
 
 	verdict=""
 	detail=""
