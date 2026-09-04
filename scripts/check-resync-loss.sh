@@ -33,13 +33,17 @@
 #                 a trivial, near-identical patch of it — see
 #                 GATE1_NEAR_THEIRS_MAX_DELTA below), discarding the fork's
 #                 side entirely.
-# Every hit is reported and fails the gate UNLESS the path matches the
-# EXEMPT_GLOBS list below, which is — and must stay — an exact mirror of
-# the generated-artifact list in AGENTS.md's "Resync conventions" rule 1
-# ("Generated artifacts are regenerated, never merged"). That rule licenses
-# taking upstream wholesale ONLY for that list. A shared `_test.go` file (or
-# any other hand-authored file) is never exempt: expanding this list without
-# also updating AGENTS.md rule 1 defeats the point of the gate.
+# Every hit is reported and fails the gate UNLESS the path carries the
+# `linguist-generated` .gitattributes attribute (see is_exempt below), which
+# is — and must stay — the single source of truth for the generated-artifact
+# list in AGENTS.md's "Resync conventions" rule 1 ("Generated artifacts are
+# regenerated, never merged"). That rule licenses taking upstream wholesale
+# ONLY for attributed paths; the docs-drift check
+# (scripts/check-generated-docs-drift.sh) and GitHub's own diff collapsing
+# read the same .gitattributes, so there is exactly one place to add a path
+# to this list, not three that can drift apart. A shared `_test.go` file (or
+# any other hand-authored file) is never exempt: adding the attribute to one
+# without updating AGENTS.md rule 1's prose defeats the point of the gate.
 #
 # GATE 2 — declaration-level: fork-added top-level Go declarations (present
 # in OURS, absent from both BASE and THEIRS — upstream never had an opinion
@@ -145,34 +149,19 @@ note "BASE=$BASE OURS=$OURS THEIRS=$THEIRS MERGE=$MERGE"
 failed=0
 
 # ---------------------------------------------------------------------------
-# GATE 1 exemptions — EXACT mirror of AGENTS.md "Resync conventions" rule 1's
-# generated-artifact list. Do not add a path here without adding it there.
+# GATE 1 exemptions — driven by the `linguist-generated` .gitattributes
+# attribute (see .gitattributes), the single source of truth for AGENTS.md
+# "Resync conventions" rule 1's generated-artifact list, also read by
+# scripts/check-generated-docs-drift.sh and GitHub's diff collapsing. Do not
+# add a bespoke glob here — add the path to .gitattributes instead, and to
+# AGENTS.md rule 1's prose so a human reading the rule sees the same list.
+# `git check-attr` reads .gitattributes from the checked-out working tree,
+# which is exactly the merge commit's content on the normal path (this
+# script runs right after `git merge`, before push).
 # ---------------------------------------------------------------------------
-EXEMPT_GLOBS=(
-	'internal/api/openapi.json'
-	'docs/reference/schema/openapi.*'
-	'docs/reference/schema/city-schema.*'
-	'docs/reference/cli.md'
-	'docs/reference/config.md'
-	'cmd/gc/productmetrics_command_census.json'
-	'cmd/gc/metrics_census_gen.go'
-	'internal/api/dashboardspa/dist/*'
-	'internal/api/dashboardspa/web/shared/src/generated/*'
-	'internal/testpolicy/resourcecensus/census.go'
-	'internal/testenv/testdata/*.golden'
-	'scripts/*baseline*'
-	'scripts/*manifest*'
-)
-
 is_exempt() {
-	local f="$1" pat
-	for pat in "${EXEMPT_GLOBS[@]}"; do
-		# shellcheck disable=SC2254 # deliberate glob match, not literal
-		case "$f" in
-		$pat) return 0 ;;
-		esac
-	done
-	return 1
+	local f="$1"
+	git check-attr linguist-generated -- "$f" 2>/dev/null | grep -q ': linguist-generated: set$'
 }
 
 # A merge-vs-theirs diff at or under this many changed lines (insertions +
@@ -195,13 +184,14 @@ GATE1_NEAR_THEIRS_MAX_DELTA=20
 # ---------------------------------------------------------------------------
 gate2_summary=$(mktemp "${TMPDIR:-/tmp}/crl-gate2-summary.XXXXXX") || exit 1
 gate2_report=$(mktemp "${TMPDIR:-/tmp}/crl-gate2-report.XXXXXX") || exit 1
+gate2_detail=$(mktemp "${TMPDIR:-/tmp}/crl-gate2-detail.XXXXXX") || exit 1
 gate2_bug_files=$(mktemp "${TMPDIR:-/tmp}/crl-gate2-bugfiles.XXXXXX") || exit 1
-trap 'rm -f "$gate2_summary" "$gate2_report" "$gate2_bug_files"' EXIT
+trap 'rm -f "$gate2_summary" "$gate2_report" "$gate2_detail" "$gate2_bug_files"' EXIT
 
-if ! python3 "$EXTRACTOR" "$BASE" "$OURS" "$THEIRS" "$MERGE" --summary-out "$gate2_summary" >"$gate2_report" 2>&2; then
+if ! python3 "$EXTRACTOR" "$BASE" "$OURS" "$THEIRS" "$MERGE" --summary-out "$gate2_summary" --detail-out "$gate2_detail" >"$gate2_report"; then
 	note "BLOCKED — check-resync-loss-extract.py failed (fail-closed)"
 	failed=1
-	resolution_bugs=1
+	resolution_bugs=0
 	merge_outcomes=0
 	missing=0
 else
@@ -216,7 +206,12 @@ else
 		esac
 	done <"$gate2_summary"
 fi
-awk '$1 == "RESOLUTION-BUG" { print $NF }' "$gate2_report" | tr -d '()' | sort -u >"$gate2_bug_files"
+# Derived from $gate2_detail (machine-parseable VERDICT\tNAME\tFILE, one
+# entry per missing declaration), not by re-parsing $gate2_report's
+# human-formatted text: a file name containing a space or paren there would
+# silently corrupt the split and empty this file, silently disabling both
+# this heuristic and the dangling-ref add-on below.
+awk -F'\t' '$1 == "RESOLUTION-BUG" { print $3 }' "$gate2_detail" | sort -u >"$gate2_bug_files"
 
 near_theirs_corroborated() {
 	# True iff Gate 2 already proved a lost declaration in $1.
@@ -256,7 +251,9 @@ while IFS= read -r f; do
 		else
 			verdict="TOOK-THEIRS"
 		fi
-	elif [ -n "$th" ] && [ "$mh" != "$th" ] && near_theirs_corroborated "$f"; then
+	elif [ -n "$th" ] && near_theirs_corroborated "$f"; then
+		# mh != th is guaranteed here: the preceding elif already matched
+		# and handled every case where mh == th.
 		dt=$(git diff --numstat "$THEIRS" "$MERGE" -- "$f" 2>/dev/null | awk '{s+=$1+$2} END{print s+0}')
 		do_=$(git diff --numstat "$OURS" "$MERGE" -- "$f" 2>/dev/null | awk '{s+=$1+$2} END{print s+0}')
 		if [ "$dt" -gt 0 ] && [ "$dt" -le "$GATE1_NEAR_THEIRS_MAX_DELTA" ] && [ "$dt" -lt "$do_" ]; then
@@ -297,8 +294,8 @@ fi
 echo
 echo "=== ADD-ON: dangling references to a missing symbol (informational) ==="
 dangling=0
-if [ -s "$gate2_report" ]; then
-	while read -r _verdict name _rest; do
+if [ -s "$gate2_detail" ]; then
+	while read -r _verdict name; do
 		[ -n "$name" ] || continue
 		hits=$(git grep -wI -n "$name" "$MERGE" -- '*.go' 2>/dev/null | grep -v "^${MERGE}:.*:.*\b${name}\b(" || true)
 		if [ -n "$hits" ]; then
@@ -308,7 +305,7 @@ if [ -s "$gate2_report" ]; then
 				echo "    $hit"
 			done <<<"$hits"
 		fi
-	done < <(awk '{print $1, $2}' "$gate2_report" | sort -u)
+	done < <(cut -f1,2 "$gate2_detail" | sort -u)
 fi
 echo "Add-on: $dangling dangling reference(s) found (does not affect exit status)."
 
@@ -319,37 +316,37 @@ echo "Add-on: $dangling dangling reference(s) found (does not affect exit status
 echo
 echo "=== ADD-ON: dead config knobs (informational) ==="
 dead_knobs=0
-config_files=$(git ls-tree -r --name-only "$MERGE" -- internal/config | grep -v '_test\.go$' || true)
-if [ -n "$config_files" ]; then
-	accessors=$(git show "$MERGE:$(echo "$config_files" | head -1)" >/dev/null 2>&1 && \
-		for f in $config_files; do git show "$MERGE:$f" 2>/dev/null; done | \
-		grep -oE '^func \([^)]*\) [A-Z][A-Za-z0-9_]*\(' | \
-		sed -E 's/^func \([^)]*\) ([A-Za-z0-9_]+)\(.*/\1/' | sort -u)
-	for acc in $accessors; do
-		# git grep -c on an explicit rev prints "rev:path:count" — the count is
-		# always the LAST field ($NF), never $2 (a path can itself contain a
-		# colon-free component but the rev prefix always adds one extra field).
-		# No -w here: the pattern is already anchored by a leading literal "."
-		# and a trailing "(", and -w additionally requires the match's own
-		# first/last characters to be word constituents, which a leading "."
-		# can never satisfy — it silently zeroes every match.
-		#
-		# Call-site count only — no subtraction of the declaration count. The
-		# call-site pattern ("\.<name>(") and the declaration pattern
-		# ("func (recv) <name>(") match disjoint line shapes (a method
-		# declaration line is never preceded by a literal dot), so the
-		# call-site count already excludes the definition by construction;
-		# subtracting the declaration count double-counted definitions living
-		# in a DIFFERENT file than their first caller and zeroed out real
-		# external readers (e.g. Agent.AttachEnabled(), defined in config.go,
-		# called from internal/config/session_sleep.go).
-		readers=$(git grep -c "\.${acc}(" "$MERGE" -- '*.go' 2>/dev/null | awk -F: '{s+=$NF} END{print s+0}')
-		if [ "$readers" -le 0 ]; then
-			dead_knobs=$((dead_knobs + 1))
-			echo "  DEAD-KNOB	$acc	(0 non-definition readers)"
-		fi
-	done
-fi
+# `git grep` directly against the MERGE tree, not a file list built with
+# `git ls-tree` + per-file `git show`: the old form's `git show "$MERGE:$f" &&
+# ...` guard silently fell through to "0 dead knobs" (a false clean result)
+# whenever it failed instead of blocking, and this is equivalent (186
+# accessors either way against this repo).
+accessors=$(git grep -hoE '^func \([^)]*\) [A-Z][A-Za-z0-9_]*\(' "$MERGE" -- 'internal/config/*.go' ':(exclude)internal/config/*_test.go' 2>/dev/null |
+	sed -E 's/^func \([^)]*\) ([A-Za-z0-9_]+)\(.*/\1/' | sort -u)
+for acc in $accessors; do
+	# git grep -c on an explicit rev prints "rev:path:count" — the count is
+	# always the LAST field ($NF), never $2 (a path can itself contain a
+	# colon-free component but the rev prefix always adds one extra field).
+	# No -w here: the pattern is already anchored by a leading literal "."
+	# and a trailing "(", and -w additionally requires the match's own
+	# first/last characters to be word constituents, which a leading "."
+	# can never satisfy — it silently zeroes every match.
+	#
+	# Call-site count only — no subtraction of the declaration count. The
+	# call-site pattern ("\.<name>(") and the declaration pattern
+	# ("func (recv) <name>(") match disjoint line shapes (a method
+	# declaration line is never preceded by a literal dot), so the
+	# call-site count already excludes the definition by construction;
+	# subtracting the declaration count double-counted definitions living
+	# in a DIFFERENT file than their first caller and zeroed out real
+	# external readers (e.g. Agent.AttachEnabled(), defined in config.go,
+	# called from internal/config/session_sleep.go).
+	readers=$(git grep -c "\.${acc}(" "$MERGE" -- '*.go' 2>/dev/null | awk -F: '{s+=$NF} END{print s+0}')
+	if [ "$readers" -le 0 ]; then
+		dead_knobs=$((dead_knobs + 1))
+		echo "  DEAD-KNOB	$acc	(0 non-definition readers)"
+	fi
+done
 echo "Add-on: $dead_knobs dead config knob(s) found (does not affect exit status)."
 
 # ---------------------------------------------------------------------------

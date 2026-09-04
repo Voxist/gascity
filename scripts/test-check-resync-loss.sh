@@ -116,7 +116,6 @@ neg_repo="$(mktemp -d "${TMPDIR:-/tmp}/crl-test-neg.XXXXXX")"
 	set -e
 	cd "$neg_repo"
 	git init -q -b main
-	git config commit.gpgsign false
 
 	cat >a.go <<'EOF'
 package fixture
@@ -189,7 +188,6 @@ drop_repo="$(mktemp -d "${TMPDIR:-/tmp}/crl-test-drop.XXXXXX")"
 	set -e
 	cd "$drop_repo"
 	git init -q -b main
-	git config commit.gpgsign false
 
 	cat >a.go <<'EOF'
 package fixture
@@ -263,7 +261,6 @@ ident_repo="$(mktemp -d "${TMPDIR:-/tmp}/crl-test-ident.XXXXXX")"
 	set -e
 	cd "$ident_repo"
 	git init -q -b main
-	git config commit.gpgsign false
 
 	cat >a.go <<'EOF'
 package fixture
@@ -325,7 +322,6 @@ conflict_repo="$(mktemp -d "${TMPDIR:-/tmp}/crl-test-conflict.XXXXXX")"
 	set -e
 	cd "$conflict_repo"
 	git init -q -b main
-	git config commit.gpgsign false
 
 	# base's Common() body is left unclosed (no trailing "}") on purpose: it
 	# leaves no shared trailing context after the point of divergence, so
@@ -407,7 +403,6 @@ dup_repo="$(mktemp -d "${TMPDIR:-/tmp}/crl-test-dup.XXXXXX")"
 	set -e
 	cd "$dup_repo"
 	git init -q -b main
-	git config commit.gpgsign false
 
 	mkdir -p a b
 	cat >a/a.go <<'EOF'
@@ -477,7 +472,139 @@ fi
 rm -rf "$dup_repo"
 
 # ---------------------------------------------------------------------------
-# 7. Hook wiring: a real .githooks/pre-push, installed into a real temp repo
+# 7. Gate 2 recognizes grouped `type ( ... )` blocks: a fork-added type
+#    declared inside one is a declaration like any other and must not be
+#    invisible to the extractor just because it sits in a `type (` group
+#    instead of a bare top-level `type Foo ...` line.
+# ---------------------------------------------------------------------------
+echo "== gate 2: fork-added declaration inside a grouped type ( ... ) block =="
+
+typegrp_repo="$(mktemp -d "${TMPDIR:-/tmp}/crl-test-typegrp.XXXXXX")"
+(
+	set -e
+	cd "$typegrp_repo"
+	git init -q -b main
+
+	cat >a.go <<'EOF'
+package fixture
+
+type (
+	Base int
+)
+EOF
+	echo base >other.go
+	git add -A
+	git commit -qm base
+
+	git checkout -q -b ours
+	cat >a.go <<'EOF'
+package fixture
+
+type (
+	Base int
+	ForkType struct {
+		X int
+	}
+)
+EOF
+	git add -A
+	git commit -qm "fork: add ForkType inside the grouped type ( ... ) block"
+
+	git checkout -q -b theirs main
+	echo "upstream touch" >>other.go
+	git add -A
+	git commit -qm "upstream: unrelated change to other.go"
+
+	git checkout -q ours
+	git merge -q --no-edit theirs >/dev/null
+
+	# Simulate a hand-resolved merge that drops the fork's addition to the
+	# type group entirely (reverts a.go to base's content) — same shape as
+	# the (name, file) fixture above, now for a grouped type member instead
+	# of a func.
+	ours_sha=$(git rev-parse ours)
+	theirs_sha=$(git rev-parse theirs)
+	git show main:a.go >a.go
+	git add -A
+	bad_tree=$(git write-tree)
+	git commit-tree "$bad_tree" -p "$ours_sha" -p "$theirs_sha" -m "resync: (simulated) drop ForkType from the type group" >BAD_MERGE_SHA
+)
+typegrp_rc_setup=$?
+
+if [ "$typegrp_rc_setup" -ne 0 ]; then
+	record_fail "grouped-type fixture builds" "setup failed, rc=$typegrp_rc_setup"
+else
+	bad_merge=$(cat "$typegrp_repo/BAD_MERGE_SHA")
+	typegrp_out=$(mktemp "${TMPDIR:-/tmp}/crl-test-typegrp-out.XXXXXX")
+	(cd "$typegrp_repo" && bash "$SCRIPT" "$bad_merge") >"$typegrp_out" 2>&1
+	typegrp_rc=$?
+	if [ "$typegrp_rc" -ne 0 ] && grep -q "RESOLUTION-BUG.*ForkType" "$typegrp_out"; then
+		record_pass "reports ForkType dropped from a grouped type ( ... ) block"
+	else
+		record_fail "reports ForkType dropped from a grouped type ( ... ) block" "exit=$typegrp_rc:"
+		sed 's/^/    /' "$typegrp_out"
+	fi
+	rm -f "$typegrp_out"
+fi
+rm -rf "$typegrp_repo"
+
+# ---------------------------------------------------------------------------
+# 8. Gate 1 exemption is driven by the `linguist-generated` .gitattributes
+#    attribute (ga-d32bn review): a file so marked and taken wholesale from
+#    upstream in a real conflict must be exempt, not reported TOOK-THEIRS —
+#    this is what licenses AGENTS.md "Resync conventions" rule 1's "take
+#    upstream wholesale" instruction for the paths in .gitattributes.
+# ---------------------------------------------------------------------------
+echo "== gate 1: a linguist-generated file taken wholesale is exempt =="
+
+genattr_repo="$(mktemp -d "${TMPDIR:-/tmp}/crl-test-genattr.XXXXXX")"
+(
+	set -e
+	cd "$genattr_repo"
+	git init -q -b main
+	echo "gen.txt -diff linguist-generated" >.gitattributes
+	echo base >gen.txt
+	git add -A
+	git commit -qm base
+
+	git checkout -q -b ours
+	echo "fork version" >gen.txt
+	git add -A
+	git commit -qm "fork: regenerate gen.txt (fork side)"
+
+	git checkout -q -b theirs main
+	echo "upstream version" >gen.txt
+	git add -A
+	git commit -qm "upstream: regenerate gen.txt (upstream side)"
+
+	git checkout -q ours
+	# Real conflict (both sides changed the same line); resolve by taking
+	# upstream's regenerated content wholesale, per AGENTS.md rule 1.
+	git merge --no-edit theirs >/dev/null 2>&1 || true
+	git checkout --theirs -- gen.txt
+	git add -A
+	git commit -qm "resync: take upstream's regenerated gen.txt wholesale"
+)
+genattr_rc_setup=$?
+
+if [ "$genattr_rc_setup" -ne 0 ]; then
+	record_fail "linguist-generated fixture builds" "setup failed, rc=$genattr_rc_setup"
+else
+	genattr_out=$(mktemp "${TMPDIR:-/tmp}/crl-test-genattr-out.XXXXXX")
+	(cd "$genattr_repo" && bash "$SCRIPT") >"$genattr_out" 2>&1
+	genattr_rc=$?
+	if [ "$genattr_rc" -eq 0 ] && grep -q "EXEMPT (generated, AGENTS.md rule 1) TOOK-THEIRS gen.txt" "$genattr_out"; then
+		record_pass "exempts a linguist-generated file taken wholesale"
+	else
+		record_fail "exempts a linguist-generated file taken wholesale" "exit=$genattr_rc:"
+		sed 's/^/    /' "$genattr_out"
+	fi
+	rm -f "$genattr_out"
+fi
+rm -rf "$genattr_repo"
+
+# ---------------------------------------------------------------------------
+# 9. Hook wiring: a real .githooks/pre-push, installed into a real temp repo
 #    with a real bare remote. Before this, `make check-resync-loss` existed
 #    but nothing called it — the gate only ran when an operator remembered
 #    the AGENTS.md sentence. These prove the hook actually enforces it.
@@ -546,7 +673,6 @@ hook_setup_repo() {
 	(
 		set -e
 		cd "$work"
-		git config commit.gpgsign false
 		if [ "$which" = "real" ]; then
 			install_resync_hook "$work" "$REPO_ROOT/scripts/check-resync-loss.sh"
 		else

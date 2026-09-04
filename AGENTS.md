@@ -96,13 +96,22 @@ Two rules keep that wave from forming.
 of these, take upstream wholesale and re-run the generator:
 
 - `internal/api/openapi.json`, `docs/reference/schema/openapi.*`
-- `docs/reference/schema/city-schema.*`, `docs/reference/cli.md`,
-  `docs/reference/config.md`
+- `docs/reference/schema/city-schema.*`, `docs/reference/schema/pack-schema.*`,
+  `docs/reference/cli.md`, `docs/reference/config.md`
 - `cmd/gc/productmetrics_command_census.json`, `cmd/gc/metrics_census_gen.go`
 - `internal/api/dashboardspa/**` generated TS and `dist/`
+- `internal/api/genclient/client_gen.go`
 - test ratchets and baselines: `internal/testpolicy/resourcecensus/census.go`,
   `internal/testenv/testdata/*.golden`, `scripts/*baseline*`,
   `scripts/*manifest*`
+
+Every path above carries the `linguist-generated` attribute in
+`.gitattributes`, which is the single enforced source of truth this list
+mirrors: `scripts/check-resync-loss.sh`'s Gate 1 exemption
+(`git check-attr linguist-generated`), `scripts/check-generated-docs-drift.sh`,
+and GitHub's diff collapsing all read the same file. Add a path to
+`.gitattributes` first, then update this list — a path exempted in one but
+not the other is the bug this section exists to prevent (ga-d32bn).
 
 Hand-merging these is what produces `chore(regen)` and `test: unbreak CI`
 commits. The generator output is a *function of the merged source*; resolving

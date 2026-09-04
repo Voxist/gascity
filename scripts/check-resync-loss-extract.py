@@ -22,16 +22,21 @@ name still appears in that output:
 
 The declaration extraction is a lightweight line-oriented scanner, not a Go
 parser: it recognizes `func`, `func (recv)`, `type`, top-level `const`/`var`,
-and names inside a grouped `const ( ... )` / `var ( ... )` block. That is
+and names inside a grouped `const ( ... )` / `var ( ... )` / `type ( ... )`
+block. That is
 sufficient to reproduce the counts in the ga-d32bn bead and the
 resync-loss-mechanism bd memory; it is not a substitute for `go vet`.
 
 Usage:
-  check-resync-loss-extract.py BASE OURS THEIRS MERGE --summary-out FILE
+  check-resync-loss-extract.py BASE OURS THEIRS MERGE \
+      --summary-out FILE --detail-out FILE
 
-Prints one report line per missing declaration to stdout, decl-count
-bookkeeping to stderr, and a tiny `KEY=N` summary (no JSON, no `tail`
-needed to read it) to --summary-out for the caller to gate on.
+Prints one human-formatted report line per missing declaration to stdout,
+decl-count bookkeeping to stderr, a tiny `KEY=N` summary (no JSON, no `tail`
+needed to read it) to --summary-out for the caller to gate on, and the same
+per-declaration data as tab-separated `VERDICT\tNAME\tFILE` lines to
+--detail-out for the caller to `cut -f`/`awk -F'\t'` instead of re-parsing
+the human-formatted stdout report.
 """
 import argparse
 import os
@@ -44,9 +49,9 @@ RE_FUNC = re.compile(r"^func\s+([A-Za-z_][A-Za-z_0-9]*)\s*[\(\[]")
 RE_METH = re.compile(r"^func\s+\([^)]*\)\s*([A-Za-z_][A-Za-z_0-9]*)\s*[\(\[]")
 RE_TYPE = re.compile(r"^type\s+([A-Za-z_][A-Za-z_0-9]*)")
 RE_CV = re.compile(r"^(?:const|var)\s+([A-Za-z_][A-Za-z_0-9]*)")
-RE_OPEN = re.compile(r"^(?:const|var)\s*\($")
-RE_GRP = re.compile(r"^\t([A-Za-z_][A-Za-z_0-9]*)(?:\s*,\s*[A-Za-z_][A-Za-z_0-9]*)*\s*(?:[A-Za-z_\[\*].*)?=")
-RE_GRP2 = re.compile(r"^\t([A-Za-z_][A-Za-z_0-9]*)\s+[A-Za-z_\[\*][^=]*$")
+RE_OPEN = re.compile(r"^(?:const|var|type)\s*\($")
+RE_GRP = re.compile(r"^\s+([A-Za-z_][A-Za-z_0-9]*)(?:\s*,\s*[A-Za-z_][A-Za-z_0-9]*)*\s*(?:[A-Za-z_\[\*].*)?=")
+RE_GRP2 = re.compile(r"^\s+([A-Za-z_][A-Za-z_0-9]*)\s+[A-Za-z_\[\*][^=]*$")
 
 
 def run(args, **kw):
@@ -128,11 +133,10 @@ def strip_conflict_hunks(text):
 def three_way_merge_text(repo, base, ours, theirs, path, cache):
     """git merge-file -p over the three blobs at `path`; memoized per path.
 
-    Returns (raw_text, clean_text, had_conflict). clean_text has every
-    conflict-marked hunk stripped (see strip_conflict_hunks); had_conflict
-    is True iff `git merge-file` reported at least one conflict (non-zero
-    exit — its exit code is the conflict count, not a boolean, so any
-    non-zero value counts).
+    Returns the text a plain, unattended 3-way merge would produce, with
+    every conflict-marked hunk stripped (see strip_conflict_hunks) when
+    `git merge-file` reported a conflict (non-zero exit — its exit code is
+    the conflict count, not a boolean, so any non-zero value counts).
     """
     if path in cache:
         return cache[path]
@@ -149,11 +153,9 @@ def three_way_merge_text(repo, base, ours, theirs, path, cache):
             check=False,
         )
         raw_text = proc.stdout.decode("utf-8", "replace")
-        had_conflict = proc.returncode != 0
-        clean_text = strip_conflict_hunks(raw_text) if had_conflict else raw_text
-    result = (raw_text, clean_text, had_conflict)
-    cache[path] = result
-    return result
+        clean_text = strip_conflict_hunks(raw_text) if proc.returncode != 0 else raw_text
+    cache[path] = clean_text
+    return clean_text
 
 
 def main():
@@ -164,6 +166,11 @@ def main():
     ap.add_argument("merge")
     ap.add_argument("--repo", default=None, help="repo root (default: discover via git rev-parse)")
     ap.add_argument("--summary-out", required=True)
+    ap.add_argument(
+        "--detail-out",
+        required=True,
+        help="machine-parseable VERDICT\\tNAME\\tFILE, one line per missing declaration",
+    )
     args = ap.parse_args()
 
     repo = args.repo or run(["git", "rev-parse", "--show-toplevel"]).stdout.decode().strip()
@@ -194,24 +201,29 @@ def main():
     cache = {}
     bug = 0
     outcome = 0
-    for name, fname in missing_pairs:
-        _raw, clean_text, had_conflict = three_way_merge_text(repo, args.base, args.ours, args.theirs, fname, cache)
-        pat = re.compile(r"\b" + re.escape(name) + r"\b")
-        if pat.search(clean_text):
-            # Survives outside every conflict-marked hunk (or there was no
-            # conflict at all): a plain, unattended 3-way merge would have
-            # delivered it. Losing it was a defect in how THIS merge was
-            # hand-resolved, not an unavoidable conflict.
-            verdict = "RESOLUTION-BUG"
-            bug += 1
-        else:
-            # Either absent outright, or present only inside a conflict
-            # marker a human had to resolve by hand (had_conflict is True
-            # in that case) — even git's own automatic merge would not
-            # have delivered it standalone.
-            verdict = "MERGE-OUTCOME"
-            outcome += 1
-        print(f"  {verdict:16s} {name}  ({fname})")
+    with open(args.detail_out, "w", encoding="utf-8") as detail_fh:
+        for name, fname in missing_pairs:
+            clean_text = three_way_merge_text(repo, args.base, args.ours, args.theirs, fname, cache)
+            pat = re.compile(r"\b" + re.escape(name) + r"\b")
+            if pat.search(clean_text):
+                # Survives outside every conflict-marked hunk (or there was
+                # no conflict at all): a plain, unattended 3-way merge would
+                # have delivered it. Losing it was a defect in how THIS
+                # merge was hand-resolved, not an unavoidable conflict.
+                verdict = "RESOLUTION-BUG"
+                bug += 1
+            else:
+                # Either absent outright, or present only inside a conflict
+                # marker a human had to resolve by hand — even git's own
+                # automatic merge would not have delivered it standalone.
+                verdict = "MERGE-OUTCOME"
+                outcome += 1
+            print(f"  {verdict:16s} {name}  ({fname})")
+            # Tab-separated for the shell caller to `cut -f`/`awk -F'\t'`
+            # instead of re-parsing the human-formatted line above — a name
+            # or file containing a space or paren would otherwise silently
+            # corrupt that split.
+            detail_fh.write(f"{verdict}\t{name}\t{fname}\n")
 
     with open(args.summary_out, "w", encoding="utf-8") as fh:
         fh.write(f"RESOLUTION_BUGS={bug}\n")
