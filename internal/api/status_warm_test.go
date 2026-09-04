@@ -53,22 +53,28 @@ func TestHandleStatusServesWarmWithoutRebuild(t *testing.T) {
 	statusResponseTTLFloor = 0 // recent-response floor misses too
 	oldRefresh := statusWarmRefreshAfter
 	statusWarmRefreshAfter = time.Hour // never background-refresh during the test
+	oldHook := statusBuildAsyncHook
+	// Run background refreshes INLINE, in the request's own goroutine. This is
+	// what makes the List count below falsifiable rather than merely true.
+	// The handler has four serve paths ahead of the synchronous build: the
+	// time-bucket cache, the warm entry, the TTL floor, and
+	// stale-while-revalidate. The three lines above disable the first and
+	// third, but SWR still serves the same stale body from the response-cache
+	// entry buildAndStoreStatus seeds alongside the warm one — so with a real
+	// goroutine hook, deleting the warm branch outright leaves this test
+	// GREEN (its refresh lands after the assertion, if at all). Inline, every
+	// fall-through past the warm entry pays its rebuild before the next
+	// request is counted, so the bound holds only while the warm branch is
+	// the one serving. Verified by mutation in both directions: dropping
+	// setWarmStatusBody from buildAndStoreStatus, or removing the handler's
+	// warm branch, each takes List calls from 1 to 5.
+	statusBuildAsyncHook = func(build func()) { build() }
 	t.Cleanup(func() {
 		timeBucketResponseCacheTTL = oldTTL
 		statusResponseTTLFloor = oldFloor
 		statusWarmRefreshAfter = oldRefresh
+		statusBuildAsyncHook = oldHook
 	})
-
-	// NOTE on what this can and cannot pin. The handler has FOUR serve paths in
-	// front of the synchronous build: the time-bucket cache, the warm entry, the
-	// TTL floor, and stale-while-revalidate. The two lines above disable the
-	// first and third so the measurement is about the warm entry — but SWR
-	// remains, and it legitimately serves the same stale body. So removing the
-	// warm branch alone does NOT make this test fail, and that is correct
-	// rather than vacuous: the guarded contract is "one cold build, then no
-	// rebuild on the request path", and SWR upholds it. What DOES break the
-	// contract is losing the seeding in buildAndStoreStatus, which is the
-	// regression this fails on (verified by mutation).
 
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}
