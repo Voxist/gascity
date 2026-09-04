@@ -409,8 +409,13 @@ func TestBinaryDivergenceCheck_UnsupportedPlatform(t *testing.T) {
 
 	r := c.Run(&CheckContext{})
 
-	if r.Status != StatusOK {
-		t.Fatalf("Status = %v, want StatusOK", r.Status)
+	// Not StatusOK: a green check for a comparison that never ran is the
+	// failure mode this check exists to surface one level up.
+	if r.Status != StatusWarning {
+		t.Fatalf("Status = %v, want StatusWarning; message=%q", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "unverified") {
+		t.Errorf("Message = %q, want the same unverified wording every other did-not-compare outcome uses", r.Message)
 	}
 	if !strings.Contains(r.Message, "NOT checked") || !strings.Contains(r.Message, "plan9") {
 		t.Errorf("Message = %q, want it to name the platform and say the check did not run", r.Message)
@@ -595,11 +600,94 @@ func TestSelectRunningImage_MissingIdentityIsAnError(t *testing.T) {
 	}
 }
 
-func TestSelectRunningImage_NoExecutable(t *testing.T) {
-	entries := []lsofEntry{{name: "/usr/lib/dyld", dev: "0x1", ino: "1"}}
+// TestSelectRunningImage_DeletedImageIsReportedNotSkipped is the guard for an
+// image that is gone from disk — the state a fleet enters the moment someone
+// prunes a dated artifact while a supervisor is executing it. The executable
+// test reads the file at the reported path, and that read fails when the file
+// has been deleted; skipping the entry on that basis would turn the sharpest
+// finding available (the fleet is running bytes that exist nowhere on disk)
+// into "unverified", pointing the operator at a permissions problem instead.
+func TestSelectRunningImage_DeletedImageIsReportedNotSkipped(t *testing.T) {
+	// The real predicate against paths that do not exist: nothing here can be
+	// read, let alone parsed as Mach-O.
+	entries := []lsofEntry{
+		{name: filepath.Join(t.TempDir(), "gc-main-20260904-deadbeef"), dev: "0x100000f", ino: "1386167869"},
+		{name: "/usr/lib/dyld", dev: "0x100000f", ino: "1152921500312573255"},
+	}
 
-	if _, err := selectRunningImage(entries, func(string) bool { return false }); err == nil {
-		t.Fatal("selectRunningImage with no executable entry = nil error, want an error")
+	got, err := selectRunningImage(entries, machOIsExecutable)
+	if err != nil {
+		t.Fatalf("selectRunningImage on a deleted image = %v, want the entry reported", err)
+	}
+	if got.path != entries[0].name {
+		t.Errorf("path = %q, want the executed image %q", got.path, entries[0].name)
+	}
+	if got.id.ino != 1386167869 {
+		t.Errorf("id.ino = %d, want 1386167869 — the identity is what survives the file", got.id.ino)
+	}
+}
+
+// TestSelectRunningImage_UnreadableExecutableFallsBackToFirstEntry covers the
+// same fallback with the predicate stubbed, including the shell-wrapper shape:
+// a path replaced by something that is readable but is not a Mach-O image.
+func TestSelectRunningImage_UnreadableExecutableFallsBackToFirstEntry(t *testing.T) {
+	entries := []lsofEntry{
+		{name: "/opt/gc/bin/gc", dev: "0x1", ino: "7"},
+		{name: "/usr/lib/dyld", dev: "0x1", ino: "8"},
+	}
+
+	got, err := selectRunningImage(entries, func(string) bool { return false })
+	if err != nil {
+		t.Fatalf("selectRunningImage = %v, want the first entry reported", err)
+	}
+	if got.path != "/opt/gc/bin/gc" {
+		t.Errorf("path = %q, want the first mapped-text entry", got.path)
+	}
+	if got.id.ino != 7 {
+		t.Errorf("id.ino = %d, want 7", got.id.ino)
+	}
+}
+
+// TestBinaryDivergenceCheck_ExecutedImageDeletedEndToEnd walks the deleted
+// image all the way through Run, because the selection fallback is only
+// worth having if the check then reports it as a divergence.
+func TestBinaryDivergenceCheck_ExecutedImageDeletedEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	artifact := writeFakeBinary(t, filepath.Join(dir, "gc-main-20260904-deadbeef"), "the bytes the fleet runs")
+	executing := imageAt(t, artifact)
+	entries := []lsofEntry{
+		{name: artifact, dev: fmt.Sprintf("%#x", executing.id.dev), ino: fmt.Sprint(executing.id.ino)},
+		{name: "/usr/lib/dyld", dev: "0x1", ino: "2"},
+	}
+	if err := os.Remove(artifact); err != nil {
+		t.Fatalf("pruning %s: %v", artifact, err)
+	}
+	verified := writeFakeBinary(t, filepath.Join(dir, "gc"), "the build on PATH")
+
+	c := divergenceCheck(4242, runningImage{}, verified)
+	c.resolveRunningImage = func(int) (runningImage, error) {
+		return selectRunningImage(entries, machOIsExecutable)
+	}
+
+	r := c.Run(&CheckContext{})
+
+	if r.Status != StatusWarning {
+		t.Fatalf("Status = %v, want StatusWarning; message=%q", r.Status, r.Message)
+	}
+	if strings.Contains(r.Message, "unverified") {
+		t.Errorf("Message = %q, must report the divergence rather than withhold it", r.Message)
+	}
+	if !strings.Contains(r.Message, "no longer the file at") {
+		t.Errorf("Message = %q, want it to say the image is gone from its path", r.Message)
+	}
+	if !strings.Contains(r.FixHint, "restart the supervisor") {
+		t.Errorf("FixHint = %q, want the restart advice, not a permissions hint", r.FixHint)
+	}
+}
+
+func TestSelectRunningImage_NoEntries(t *testing.T) {
+	if _, err := selectRunningImage(nil, func(string) bool { return true }); err == nil {
+		t.Fatal("selectRunningImage with no entries = nil error, want an error")
 	}
 }
 
@@ -769,4 +857,99 @@ func mustStat(t *testing.T, path string) os.FileInfo {
 		t.Fatalf("stat %s: %v", path, err)
 	}
 	return info
+}
+
+// TestStatFieldToUint64 pins the contract that an unrecognized field type is
+// reported as unavailable rather than as zero. A zero device on the disk side
+// against a real one from lsof would read as a divergence on a healthy host.
+func TestStatFieldToUint64(t *testing.T) {
+	for name, tc := range map[string]struct {
+		in     any
+		want   uint64
+		wantOK bool
+	}{
+		"uint64":            {uint64(42), 42, true},
+		"int64":             {int64(42), 42, true},
+		"uint32":            {uint32(42), 42, true},
+		"int32":             {int32(42), 42, true},
+		"negative int32":    {int32(-1), 0xffffffff, true},
+		"unknown type":      {"not a number", 0, false},
+		"unknown int width": {int16(42), 0, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, ok := statFieldToUint64(tc.in)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if got != tc.want {
+				t.Errorf("value = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSameContent covers the three gates, including the tail-only difference
+// the bounded edge probe exists to settle without reading either file whole.
+func TestSameContent(t *testing.T) {
+	dir := t.TempDir()
+	body := strings.Repeat("gc", contentChunkSize)
+
+	facts := func(name, content string) binaryFacts {
+		return statBinary(writeFakeBinary(t, filepath.Join(dir, name), content))
+	}
+
+	identicalA := facts("identical-a", body)
+	identicalB := facts("identical-b", body)
+	if same, reason := sameContent(identicalA, identicalB); !same {
+		t.Error("sameContent = false for two files with identical bytes, want true")
+	} else if !strings.Contains(reason, "sha256") {
+		t.Errorf("reason = %q, want it to carry a digest", reason)
+	}
+
+	if same, _ := sameContent(identicalA, facts("shorter", body[:len(body)-2])); same {
+		t.Error("sameContent = true for files of different size, want false")
+	}
+
+	headDiff := facts("head-diff", "X"+body[1:])
+	if same, _ := sameContent(identicalA, headDiff); same {
+		t.Error("sameContent = true for files differing at the head, want false")
+	}
+
+	tailDiff := facts("tail-diff", body[:len(body)-1]+"X")
+	if same, _ := sameContent(identicalA, tailDiff); same {
+		t.Error("sameContent = true for files differing at the tail, want false")
+	}
+
+	// A difference only in the middle survives the edge probe and has to be
+	// caught by the streaming pass.
+	mid := len(body) / 2
+	middleDiff := facts("middle-diff", body[:mid]+"X"+body[mid+1:])
+	if same, _ := sameContent(identicalA, middleDiff); same {
+		t.Error("sameContent = true for files differing only in the middle, want false")
+	}
+}
+
+// TestSameContentTailProbeSettlesTailDifference pins where the answer comes
+// from, not just what it is. sameTail is what bounds the cost of the one shape
+// the streaming pass would otherwise read two whole binaries to settle — same
+// size, identical until the very end. Called directly, because through
+// sameContent the streaming pass would return the same answer and hide whether
+// the probe did anything at all.
+func TestSameContentTailProbeSettlesTailDifference(t *testing.T) {
+	dir := t.TempDir()
+	body := strings.Repeat("gc", contentChunkSize) // twice the sample size
+	a := writeFakeBinary(t, filepath.Join(dir, "a"), body)
+	b := writeFakeBinary(t, filepath.Join(dir, "b"), body[:len(body)-1]+"X")
+
+	same, err := sameTail(a, b, int64(len(body)))
+	if err != nil {
+		t.Fatalf("sameTail: %v", err)
+	}
+	if same {
+		t.Error("sameTail = true for files differing only in their last byte; the probe is not sampling the end")
+	}
+
+	if same, err := sameTail(a, a, int64(len(body))); err != nil || !same {
+		t.Errorf("sameTail(a, a) = %v, %v; a file must match itself", same, err)
+	}
 }

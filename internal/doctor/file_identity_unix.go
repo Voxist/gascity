@@ -15,30 +15,35 @@ func fileIdentityOf(info fs.FileInfo) (fileIdentity, bool) {
 	if !ok {
 		return fileIdentity{}, false
 	}
-	return fileIdentity{
-		dev: statFieldToUint64(stat.Dev),
-		ino: statFieldToUint64(stat.Ino),
-	}, true
+	dev, devOK := statFieldToUint64(stat.Dev)
+	ino, inoOK := statFieldToUint64(stat.Ino)
+	if !devOK || !inoOK {
+		return fileIdentity{}, false
+	}
+	return fileIdentity{dev: dev, ino: ino}, true
 }
 
 // statFieldToUint64 normalizes a syscall.Stat_t number to the unsigned width
-// lsof prints. The concrete types differ per platform (Dev is int32 on darwin
-// and uint64 on linux), so widening a negative int32 directly would
-// sign-extend into a value no device number ever takes; the 32-bit signed
-// cases are converted through their unsigned counterpart first. Going through
-// one helper for both fields also keeps this compiling on platforms where
-// either field is narrower.
-func statFieldToUint64(v any) uint64 {
+// lsof prints, reporting false for a field type it does not know.
+//
+// The concrete types differ per platform (Dev is int32 on darwin and uint64 on
+// linux), so widening a negative int32 directly would sign-extend into a value
+// no device number ever takes; the 32-bit signed case is converted through its
+// unsigned counterpart first. An unrecognized type must not degrade to zero:
+// a zero device on the disk side against a real one from lsof reads as a
+// divergence on a perfectly healthy host, which is the opposite of this
+// package's contract that what cannot be established is reported as unverified.
+func statFieldToUint64(v any) (uint64, bool) {
 	switch n := v.(type) {
 	case int32:
-		return uint64(uint32(n))
+		return uint64(uint32(n)), true
 	case uint32:
-		return uint64(n)
+		return uint64(n), true
 	case int64:
-		return uint64(n)
+		return uint64(n), true
 	case uint64:
-		return n
+		return n, true
 	default:
-		return 0
+		return 0, false
 	}
 }

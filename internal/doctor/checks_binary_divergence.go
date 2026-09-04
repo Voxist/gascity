@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"debug/macho"
@@ -142,9 +143,12 @@ func (c *BinaryDivergenceCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 	if c.resolveRunningImage == nil {
-		r.Status = StatusOK
-		r.Message = fmt.Sprintf("cannot read a process's executed image on %s — binary divergence NOT checked on this platform", c.goos)
-		return r
+		// Reported as unverified, not OK. "The comparison did not happen" is
+		// the same epistemic state whether the cause is a missing platform
+		// route or a failed stat, and a green check for a comparison that
+		// never ran is the exact failure this check exists to surface one
+		// level up.
+		return unverified(r, "no way to read a process's executed image on %s — NOT checked on this platform", c.goos)
 	}
 
 	running, err := c.resolveRunningImage(c.supervisorPID)
@@ -392,33 +396,112 @@ func skewLine(running, verified binaryFacts) string {
 	}
 }
 
+// contentChunkSize bounds both the tail sample and the streaming read buffer.
+const contentChunkSize = 64 << 10
+
 // sameContent reports whether two distinct files hold identical bytes, and
-// why. Size gates the hash so the common case costs one stat, not two full
-// reads of a large binary.
+// why.
+//
+// Three gates, cheapest first. Size rules out most pairs for a stat. A bounded
+// tail sample then rules out the one shape the streaming pass below would
+// otherwise read two whole binaries to settle: same size, identical for most
+// of their length, differing only near the end — which is where a Go build ID
+// lives. What survives both is read in a single streaming pass that compares
+// as it goes, stops at the first differing byte, and digests one side for the
+// report.
+//
+// Proving two files identical does require reading both, so that cost is
+// inherent to a positive answer; what it no longer costs is a second pass to
+// hash the other side.
 func sameContent(a, b binaryFacts) (bool, string) {
 	if a.info == nil || b.info == nil || a.info.Size() != b.info.Size() {
 		return false, ""
 	}
-	sumA, errA := fileSHA256(a.realPath)
-	sumB, errB := fileSHA256(b.realPath)
-	if errA != nil || errB != nil || sumA != sumB {
+	if same, err := sameTail(a.realPath, b.realPath, a.info.Size()); err != nil || !same {
 		return false, ""
 	}
-	return true, fmt.Sprintf("%s and %s are different files with identical content (sha256 %s)", a.realPath, b.realPath, sumA[:12])
+	sum, err := compareAndDigest(a.realPath, b.realPath)
+	if err != nil || sum == "" {
+		return false, ""
+	}
+	return true, fmt.Sprintf("%s and %s are different files with identical content (sha256 %s)", a.realPath, b.realPath, sum[:12])
 }
 
-// fileSHA256 returns the hex-encoded SHA-256 of a file's contents.
-func fileSHA256(path string) (string, error) {
-	f, err := os.Open(path)
+// sameTail compares a bounded sample from the end of two equally-sized files.
+// Only the tail is sampled: a difference near the start is already settled by
+// the streaming pass's first chunk, so a head sample would re-read bytes that
+// comparison is about to read anyway.
+func sameTail(pathA, pathB string, size int64) (bool, error) {
+	n := int64(contentChunkSize)
+	if n > size {
+		n = size
+	}
+	if n == 0 {
+		return true, nil
+	}
+	a, err := os.Open(pathA)
+	if err != nil {
+		return false, err
+	}
+	defer a.Close() //nolint:errcheck // read-only handle
+	b, err := os.Open(pathB)
+	if err != nil {
+		return false, err
+	}
+	defer b.Close() //nolint:errcheck // read-only handle
+
+	off := size - n
+	bufA := make([]byte, n)
+	bufB := make([]byte, n)
+	if _, err := a.ReadAt(bufA, off); err != nil {
+		return false, err
+	}
+	if _, err := b.ReadAt(bufB, off); err != nil {
+		return false, err
+	}
+	return bytes.Equal(bufA, bufB), nil
+}
+
+// compareAndDigest streams both files once, comparing as it reads and
+// digesting the first. It returns the hex-encoded SHA-256 when the contents
+// match, and an empty string when they differ.
+func compareAndDigest(pathA, pathB string) (string, error) {
+	a, err := os.Open(pathA)
 	if err != nil {
 		return "", err
 	}
-	defer f.Close() //nolint:errcheck // read-only handle
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	defer a.Close() //nolint:errcheck // read-only handle
+	b, err := os.Open(pathB)
+	if err != nil {
 		return "", err
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	defer b.Close() //nolint:errcheck // read-only handle
+
+	h := sha256.New()
+	bufA := make([]byte, contentChunkSize)
+	bufB := make([]byte, contentChunkSize)
+	for {
+		nA, errA := io.ReadFull(a, bufA)
+		nB, errB := io.ReadFull(b, bufB)
+		if nA != nB || !bytes.Equal(bufA[:nA], bufB[:nB]) {
+			return "", nil
+		}
+		h.Write(bufA[:nA]) //nolint:errcheck // hash.Write never errors
+		atEndA := errA == io.EOF || errA == io.ErrUnexpectedEOF
+		atEndB := errB == io.EOF || errB == io.ErrUnexpectedEOF
+		if atEndA != atEndB {
+			return "", nil
+		}
+		if atEndA {
+			return hex.EncodeToString(h.Sum(nil)), nil
+		}
+		if errA != nil {
+			return "", errA
+		}
+		if errB != nil {
+			return "", errB
+		}
+	}
 }
 
 // runningImageResolverFor returns the resolver for the host platform, or nil
@@ -435,10 +518,18 @@ func runningImageResolverFor(goos string) func(pid int) (runningImage, error) {
 }
 
 // runningImageFromProc reads the executed image from /proc/<pid>/exe, the
-// kernel's own record. The link is stat'd rather than its target: that
-// resolves to the executing inode even after the file has been unlinked or
-// replaced, which is the whole point. procRoot is a parameter so the read is
-// testable on hosts without procfs.
+// kernel's own record.
+//
+// os.Stat on the link — not os.Lstat, and not a stat of the path the link
+// names — is required and load-bearing. /proc/<pid>/exe is a magic link:
+// following it lands on the executing inode itself, even after that inode has
+// been unlinked or the path re-pointed at a different file. os.Lstat would
+// instead return the procfs pseudo-entry, whose device and inode belong to
+// procfs and match no file on disk, turning every Linux run into a false
+// divergence. Stat'ing the link's textual target would defeat the check the
+// other way, by describing whatever now sits at that path.
+//
+// procRoot is a parameter so the read is testable on hosts without procfs.
 func runningImageFromProc(procRoot string, pid int) (runningImage, error) {
 	link := filepath.Join(procRoot, strconv.Itoa(pid), "exe")
 	target, err := os.Readlink(link)
@@ -534,18 +625,43 @@ func parseLsofFileEntries(out []byte) []lsofEntry {
 // why this asks the file format rather than denylisting suffixes: a data file
 // ordered ahead of the image would otherwise be named as the executed binary.
 func selectRunningImage(entries []lsofEntry, isExecutable func(string) bool) (runningImage, error) {
+	if len(entries) == 0 {
+		return runningImage{}, fmt.Errorf("lsof reported no mapped-text entries")
+	}
 	for _, e := range entries {
-		path, unlinked := strings.CutSuffix(e.name, deletedImageSuffix)
+		path, _ := strings.CutSuffix(e.name, deletedImageSuffix)
 		if path == "" || !isExecutable(path) {
 			continue
 		}
-		id, err := parseLsofIdentity(e)
-		if err != nil {
-			return runningImage{}, fmt.Errorf("executed image %s: %w", path, err)
-		}
-		return runningImage{path: path, id: id, unlinked: unlinked}, nil
+		return imageFromLsofEntry(e)
 	}
-	return runningImage{}, fmt.Errorf("no executable image among %d mapped-text entries", len(entries))
+	// No entry is a readable Mach-O executable. That is not a reason to give
+	// up: the commonest way to reach it is that the executed image was
+	// deleted, so the read that asks "is this an executable?" fails on a file
+	// that is no longer there. Skipping it would turn the sharpest finding
+	// this check can make — the fleet is running bytes that exist nowhere on
+	// disk — into "unverified", and send the operator looking for a
+	// permissions problem. A path replaced by a non-Mach-O (a shell wrapper,
+	// say) lands here too, and is equally a finding.
+	//
+	// Fall back to the entry the process was loaded from. macOS lists the
+	// executable first in the mapped-text set, and classifyImagePath decides
+	// what the entry means: gone from disk, or a different file than the one
+	// running. Either way the answer is reported rather than withheld.
+	return imageFromLsofEntry(entries[0])
+}
+
+// imageFromLsofEntry converts one mapped-text record into a runningImage.
+func imageFromLsofEntry(e lsofEntry) (runningImage, error) {
+	path, unlinked := strings.CutSuffix(e.name, deletedImageSuffix)
+	if path == "" {
+		return runningImage{}, fmt.Errorf("lsof reported a mapped-text entry with no name")
+	}
+	id, err := parseLsofIdentity(e)
+	if err != nil {
+		return runningImage{}, fmt.Errorf("executed image %s: %w", path, err)
+	}
+	return runningImage{path: path, id: id, unlinked: unlinked}, nil
 }
 
 // parseLsofIdentity converts one record's device (0x-prefixed hex) and inode
