@@ -1,9 +1,9 @@
 package doctor
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
+	"debug/macho"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -20,13 +21,49 @@ import (
 // supervisor's executed image against.
 const gcCommandName = "gc"
 
-// binaryDivergenceVersionTimeout bounds each `<binary> version` invocation so
-// a wedged or non-gc binary on either side cannot stall the check.
-const binaryDivergenceVersionTimeout = 5 * time.Second
+// binaryDivergenceProbeTimeout bounds every subprocess this check runs — the
+// lsof image probe and each `<binary> version` invocation — so a wedged binary
+// or a stale network mount cannot stall the check. The doctor's own
+// CheckTimeout only abandons the goroutine; it does not reap the process, so
+// each subprocess has to bound itself.
+const binaryDivergenceProbeTimeout = 5 * time.Second
 
-// deletedImageSuffix is the marker the kernel appends to /proc/<pid>/exe (and
-// lsof reports) when the executed image has been unlinked or replaced on disk.
+// binaryDivergenceWaitDelay bounds how long a killed subprocess's inherited
+// output pipes stay open. Without it, killing the child does not close stdout
+// when a descendant inherited it, and Output() blocks past the deadline.
+const binaryDivergenceWaitDelay = time.Second
+
+// deletedImageSuffix is the marker Linux appends to /proc/<pid>/exe when the
+// executed image has been unlinked or replaced on disk.
+//
+// macOS does NOT do this: lsof reports the original path with no marker after
+// the file at that path has been replaced. That asymmetry is why this check
+// compares file identity rather than the reported path — see
+// BinaryDivergenceCheck.
 const deletedImageSuffix = " (deleted)"
+
+// fileIdentity is a file's kernel identity: the device/inode pair that stays
+// with the bytes when the path is re-pointed or the file replaced underneath
+// it. Comparing identities is what distinguishes "the same binary reached by
+// two names" from "two different binaries that happen to share a name".
+type fileIdentity struct {
+	dev uint64
+	ino uint64
+}
+
+// runningImage describes the image a process is executing.
+type runningImage struct {
+	// path is where the image was loaded from. It is a stale label, not an
+	// identity: the file at that path may since have been replaced, which is
+	// exactly the case this check exists to catch.
+	path string
+	// id identifies the executing inode itself.
+	id fileIdentity
+	// unlinked records that the platform reported the image as deleted. Only
+	// Linux reports this; it is a display detail, not the signal — the
+	// identity comparison catches the macOS case where nothing is reported.
+	unlinked bool
+}
 
 // BinaryDivergenceCheck detects the case where the gc binary a probe verifies
 // is not the gc binary the supervisor is executing.
@@ -41,11 +78,20 @@ const deletedImageSuffix = " (deleted)"
 // fleet, so a divergent result names both paths, both versions and both
 // modification times.
 //
-// The executed image is read from the process, not from the service unit's
-// path string. That distinction is the point: re-pointing a symlink does not
-// re-exec a running process, so resolving the unit's path would report the
-// artifact the symlink names *now* rather than the inode the supervisor is
-// actually executing.
+// Two things make this check work where the obvious implementation does not.
+//
+// First, the executed image is read from the process, not from the path its
+// service unit names. Re-pointing a symlink does not re-exec a running
+// process, so resolving the unit's path string would report the artifact the
+// symlink names *now* rather than the inode the supervisor is executing.
+//
+// Second, the comparison is on file identity, never on the path string. When
+// an installer replaces the binary in place — the "last writer wins silently"
+// case — the process keeps executing the old inode while its reported path is
+// unchanged. Linux marks that image "(deleted)"; macOS does not mark it at
+// all, so on macOS both path strings are identical while the bytes differ. A
+// path-equality shortcut would report "same binary" for the very incident this
+// check exists to catch, on the platform the incident happened on.
 type BinaryDivergenceCheck struct {
 	// supervisorPID is the PID of the running supervisor, or 0 when none is
 	// running. Sourced from the same control-socket probe the rest of the
@@ -53,9 +99,9 @@ type BinaryDivergenceCheck struct {
 	supervisorPID int
 	// goos names the host platform, reported when no resolver exists for it.
 	goos string
-	// resolveRunningImage returns the on-disk path of the image a process is
-	// executing. Nil when the host platform offers no route to it.
-	resolveRunningImage func(pid int) (string, error)
+	// resolveRunningImage returns the image a process is executing. Nil when
+	// the host platform offers no route to it.
+	resolveRunningImage func(pid int) (runningImage, error)
 	// lookPath resolves a command name against PATH.
 	lookPath func(string) (string, error)
 	// versionOf reports a binary's self-declared version, or "" when it
@@ -103,53 +149,156 @@ func (c *BinaryDivergenceCheck) Run(_ *CheckContext) *CheckResult {
 
 	running, err := c.resolveRunningImage(c.supervisorPID)
 	if err != nil {
-		r.Status = StatusWarning
-		r.Message = fmt.Sprintf("cannot resolve the image supervisor pid %d is executing: %v", c.supervisorPID, err)
-		r.FixHint = "binary divergence stays unverified until the executed image can be read; confirm the supervisor process is alive and readable by this user"
-		return r
-	}
-	if unlinked, deleted := strings.CutSuffix(running, deletedImageSuffix); deleted {
-		r.Status = StatusWarning
-		r.Message = fmt.Sprintf("supervisor pid %d is executing a deleted image (%s)", c.supervisorPID, unlinked)
-		r.FixHint = "the artifact the supervisor is executing was replaced or removed on disk, so nothing on disk describes the running bytes; restart the supervisor so it re-executes the artifact now in place"
-		return r
+		return unverified(r, "cannot resolve the image supervisor pid %d is executing: %v", c.supervisorPID, err)
 	}
 
-	verified, err := c.resolvePathBinary()
+	verifiedPath, err := c.resolvePathBinary()
 	if err != nil {
 		r.Status = StatusOK
-		r.Message = fmt.Sprintf("%s is not on PATH — nothing verifies against it (supervisor is executing %s)", gcCommandName, running)
+		r.Message = fmt.Sprintf("%s is not on PATH — nothing verifies against it (supervisor is executing %s)", gcCommandName, running.path)
 		return r
 	}
 
-	runningFacts := statBinary(running)
-	verifiedFacts := statBinary(verified)
+	verified := statBinary(verifiedPath)
+	if verified.info == nil {
+		return unverified(r, "cannot stat the PATH %s at %s", gcCommandName, verified.realPath)
+	}
+	verifiedID, ok := fileIdentityOf(verified.info)
+	if !ok {
+		return unverified(r, "this filesystem exposes no file identity for %s, so the executed image cannot be compared to it", verified.realPath)
+	}
 
-	if same, reason := sameArtifact(runningFacts, verifiedFacts); same {
-		r.Status = StatusOK
-		r.Message = fmt.Sprintf("supervisor and PATH %s are the same binary (%s)", gcCommandName, reason)
+	// Whether any file on disk is still the running image is settled before
+	// identity is compared. A platform that reports the image unlinked has said
+	// outright that none is, and an inode number that matches after that is
+	// inode reuse, not identity — the one way an identity comparison can still
+	// produce a false agreement.
+	switch classifyImagePath(running) {
+	case imagePathUnknown:
+		return unverified(r, "cannot tell whether %s is still the image supervisor pid %d is executing", running.path, c.supervisorPID)
+	case imagePathReplaced:
+		verified.version = c.version(verifiedPath)
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf(
+			"binary divergence: supervisor pid %d is executing an image that is no longer the file at %s — that path was replaced or removed under it, and PATH %s resolves to %s",
+			c.supervisorPID, running.path, gcCommandName, verified.realPath)
 		r.Details = []string{
-			fmt.Sprintf("executed by supervisor pid %d: %s", c.supervisorPID, runningFacts.describe()),
-			fmt.Sprintf("resolved on PATH: %s", verifiedFacts.describe()),
+			fmt.Sprintf("executed (what the fleet runs): inode %d — the running bytes now exist only in the running process, so nothing on disk describes them", running.id.ino),
+			fmt.Sprintf("verified (what probes hit): %s", verified.describeVerbose()),
+		}
+		r.FixHint = fmt.Sprintf("the artifact the supervisor is executing was replaced under it, so no capability probe can describe the running bytes; restart the supervisor so it re-executes the artifact now on disk, then re-run %s doctor", gcCommandName)
+		return r
+	}
+
+	// The path names the running inode, so identity settles the comparison and
+	// the on-disk reads below describe the running binary, not a successor.
+	if running.id == verifiedID {
+		r.Status = StatusOK
+		r.Message = fmt.Sprintf("supervisor and PATH %s are the same binary (%s)",
+			gcCommandName, sameBinaryReason(running, verified))
+		r.Details = []string{
+			fmt.Sprintf("executed by supervisor pid %d: %s (inode %d)", c.supervisorPID, running.path, running.id.ino),
+			fmt.Sprintf("resolved on PATH: %s", verified.describe()),
 		}
 		return r
 	}
 
-	runningFacts.version = c.version(running)
-	verifiedFacts.version = c.version(verified)
+	executed := statBinary(running.path)
 
-	r.Status = StatusWarning
+	// Two distinct files with identical bytes are healthy: the fleet runs what
+	// the probe verified. Only reachable now that the path is confirmed to
+	// still name the running inode.
+	if same, reason := sameContent(executed, verified); same {
+		r.Status = StatusOK
+		r.Message = fmt.Sprintf("supervisor and PATH %s are the same binary (%s)", gcCommandName, reason)
+		r.Details = []string{
+			fmt.Sprintf("executed by supervisor pid %d: %s", c.supervisorPID, executed.describe()),
+			fmt.Sprintf("resolved on PATH: %s", verified.describe()),
+		}
+		return r
+	}
+
+	executed.version = c.version(running.path)
+	verified.version = c.version(verifiedPath)
+
 	// The skew belongs in the message, not the details: which side is newer is
 	// what an operator acts on, and details print only under --verbose.
+	r.Status = StatusWarning
 	r.Message = fmt.Sprintf("binary divergence: supervisor pid %d is executing %s but PATH %s resolves to %s; %s",
-		c.supervisorPID, runningFacts.realPath, gcCommandName, verifiedFacts.realPath,
-		skewLine(runningFacts, verifiedFacts))
+		c.supervisorPID, executed.realPath, gcCommandName, verified.realPath,
+		skewLine(executed, verified))
 	r.Details = []string{
-		fmt.Sprintf("executed (what the fleet runs): %s", runningFacts.describeVerbose()),
-		fmt.Sprintf("verified (what probes hit): %s", verifiedFacts.describeVerbose()),
+		fmt.Sprintf("executed (what the fleet runs): %s", executed.describeVerbose()),
+		fmt.Sprintf("verified (what probes hit): %s", verified.describeVerbose()),
 	}
 	r.FixHint = fmt.Sprintf("any capability probe run through PATH %s describes a build the supervisor is not executing; converge the two on one artifact by re-pointing whichever path is stale, then restart the supervisor so it re-executes it — re-pointing a symlink alone does not change a running process's image", gcCommandName)
 	return r
+}
+
+// unverified reports that the check could not establish whether the two
+// binaries agree. It is deliberately distinct from a divergence finding: a
+// stat that failed is not evidence of a difference, and must not be dressed up
+// as one.
+func unverified(r *CheckResult, format string, args ...any) *CheckResult {
+	r.Status = StatusWarning
+	r.Message = "binary divergence unverified: " + fmt.Sprintf(format, args...)
+	r.FixHint = "the executed and verified binaries could not be compared, so neither agreement nor divergence is established; re-run once the supervisor process and both binaries are readable by this user"
+	return r
+}
+
+// sameBinaryReason describes why the two sides are the same binary, naming
+// both routes when they are reached by different paths.
+func sameBinaryReason(running runningImage, verified binaryFacts) string {
+	if running.path == verified.realPath {
+		return running.path
+	}
+	return fmt.Sprintf("%s and %s are one file, inode %d", running.path, verified.realPath, running.id.ino)
+}
+
+// imagePathState classifies whether the path a process was loaded from still
+// refers to the inode it is executing.
+type imagePathState int
+
+const (
+	// imagePathIntact means the path still names the running inode, so the
+	// bytes on disk at that path are the bytes the process is running.
+	imagePathIntact imagePathState = iota
+	// imagePathReplaced means the artifact was replaced or removed underneath
+	// the running process, so nothing readable on disk describes the running
+	// bytes.
+	imagePathReplaced
+	// imagePathUnknown means the question could not be answered — a stat that
+	// failed for a reason other than the file being gone. Distinct from
+	// imagePathReplaced because a permission error is not evidence of a
+	// replacement.
+	imagePathUnknown
+)
+
+// classifyImagePath answers whether an executed image is still on disk where
+// the process loaded it from.
+func classifyImagePath(img runningImage) imagePathState {
+	// An image the platform reports as unlinked is gone regardless of what
+	// stands at its path now. Checking this first is what stops inode reuse —
+	// the kernel handing a new file the number the old one had — from reading
+	// as the running image.
+	if img.unlinked {
+		return imagePathReplaced
+	}
+	info, err := os.Stat(img.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return imagePathReplaced
+		}
+		return imagePathUnknown
+	}
+	id, ok := fileIdentityOf(info)
+	if !ok {
+		return imagePathUnknown
+	}
+	if id == img.id {
+		return imagePathIntact
+	}
+	return imagePathReplaced
 }
 
 // version returns the binary's self-declared version, or "" when versionOf is
@@ -177,7 +326,7 @@ func (c *BinaryDivergenceCheck) resolvePathBinary() (string, error) {
 	return abs, nil
 }
 
-// binaryFacts holds everything the check reports about one binary.
+// binaryFacts holds everything the check reports about one binary on disk.
 type binaryFacts struct {
 	// path is the path as named by its discovery route: a PATH entry, or a
 	// process's executed image.
@@ -243,17 +392,10 @@ func skewLine(running, verified binaryFacts) string {
 	}
 }
 
-// sameArtifact reports whether two binaries are the same bytes, and why. Paths
-// are compared first (the cheap, common case), then file identity, then
-// content — two distinct paths that are symlinks to one artifact, or copies of
-// identical bytes, are healthy and must not warn.
-func sameArtifact(a, b binaryFacts) (bool, string) {
-	if a.realPath == b.realPath {
-		return true, a.realPath
-	}
-	if a.info != nil && b.info != nil && os.SameFile(a.info, b.info) {
-		return true, fmt.Sprintf("%s and %s are the same file", a.realPath, b.realPath)
-	}
+// sameContent reports whether two distinct files hold identical bytes, and
+// why. Size gates the hash so the common case costs one stat, not two full
+// reads of a large binary.
+func sameContent(a, b binaryFacts) (bool, string) {
 	if a.info == nil || b.info == nil || a.info.Size() != b.info.Size() {
 		return false, ""
 	}
@@ -262,7 +404,7 @@ func sameArtifact(a, b binaryFacts) (bool, string) {
 	if errA != nil || errB != nil || sumA != sumB {
 		return false, ""
 	}
-	return true, fmt.Sprintf("%s and %s are different paths with identical content (sha256 %s)", a.realPath, b.realPath, sumA[:12])
+	return true, fmt.Sprintf("%s and %s are different files with identical content (sha256 %s)", a.realPath, b.realPath, sumA[:12])
 }
 
 // fileSHA256 returns the hex-encoded SHA-256 of a file's contents.
@@ -281,10 +423,10 @@ func fileSHA256(path string) (string, error) {
 
 // runningImageResolverFor returns the resolver for the host platform, or nil
 // when the platform offers no route to a process's executed image.
-func runningImageResolverFor(goos string) func(pid int) (string, error) {
+func runningImageResolverFor(goos string) func(pid int) (runningImage, error) {
 	switch goos {
 	case "linux":
-		return func(pid int) (string, error) { return runningImageFromProc("/proc", pid) }
+		return func(pid int) (runningImage, error) { return runningImageFromProc("/proc", pid) }
 	case "darwin":
 		return runningImageFromLsof
 	default:
@@ -292,65 +434,175 @@ func runningImageResolverFor(goos string) func(pid int) (string, error) {
 	}
 }
 
-// runningImageFromProc reads /proc/<pid>/exe, the kernel's own record of the
-// image a process is executing. procRoot is a parameter so the read is
+// runningImageFromProc reads the executed image from /proc/<pid>/exe, the
+// kernel's own record. The link is stat'd rather than its target: that
+// resolves to the executing inode even after the file has been unlinked or
+// replaced, which is the whole point. procRoot is a parameter so the read is
 // testable on hosts without procfs.
-func runningImageFromProc(procRoot string, pid int) (string, error) {
-	link := filepath.Join(procRoot, fmt.Sprint(pid), "exe")
+func runningImageFromProc(procRoot string, pid int) (runningImage, error) {
+	link := filepath.Join(procRoot, strconv.Itoa(pid), "exe")
 	target, err := os.Readlink(link)
 	if err != nil {
-		return "", fmt.Errorf("reading %s: %w", link, err)
+		return runningImage{}, fmt.Errorf("reading %s: %w", link, err)
 	}
-	if strings.TrimSpace(target) == "" {
-		return "", fmt.Errorf("reading %s: empty target", link)
+	img := runningImage{}
+	img.path, img.unlinked = strings.CutSuffix(strings.TrimSpace(target), deletedImageSuffix)
+	if img.path == "" {
+		return runningImage{}, fmt.Errorf("reading %s: empty target", link)
 	}
-	return target, nil
+	info, err := os.Stat(link)
+	if err != nil {
+		return runningImage{}, fmt.Errorf("stat %s: %w", link, err)
+	}
+	id, ok := fileIdentityOf(info)
+	if !ok {
+		return runningImage{}, fmt.Errorf("stat %s: no file identity available", link)
+	}
+	img.id = id
+	return img, nil
 }
 
 // runningImageFromLsof reads the executed image from lsof's txt (mapped text)
-// entries, which macOS offers in place of procfs.
-func runningImageFromLsof(pid int) (string, error) {
-	out, err := exec.Command("lsof", "-p", fmt.Sprint(pid), "-a", "-d", "txt", "-Fn").Output()
+// entries, which macOS offers in place of procfs. -b -w keep lsof off blocking
+// kernel calls (and silence the warnings that mode emits) so a stale network
+// mount cannot wedge the probe.
+func runningImageFromLsof(pid int) (runningImage, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), binaryDivergenceProbeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "lsof", "-p", strconv.Itoa(pid), "-a", "-d", "txt", "-b", "-w", "-FnDi")
+	cmd.WaitDelay = binaryDivergenceWaitDelay
+	out, err := cmd.Output()
 	if err != nil && len(out) == 0 {
-		return "", fmt.Errorf("running lsof for pid %d: %w", pid, err)
+		return runningImage{}, fmt.Errorf("running lsof for pid %d: %w", pid, err)
 	}
-	return parseLsofTxtImage(out)
+	return selectRunningImage(parseLsofFileEntries(out), machOIsExecutable)
 }
 
-// parseLsofTxtImage extracts the executable from lsof -Fn -d txt output. The
-// txt set holds the executable followed by the dynamic loader and every mapped
-// library, so the first entry that is not a library is the image.
-func parseLsofTxtImage(out []byte) (string, error) {
-	for _, line := range strings.Split(string(bytes.TrimRight(out, "\n")), "\n") {
-		name, ok := strings.CutPrefix(strings.TrimRight(line, "\r"), "n")
-		if !ok || name == "" {
-			continue
-		}
-		if isSharedLibraryPath(name) {
-			continue
-		}
-		return name, nil
-	}
-	return "", fmt.Errorf("no executable image in lsof txt entries")
+// lsofEntry is one file record from lsof -F output.
+type lsofEntry struct {
+	name string
+	dev  string
+	ino  string
 }
 
-// isSharedLibraryPath reports whether a mapped txt entry is a library or the
-// dynamic loader rather than the process's own executable.
-func isSharedLibraryPath(path string) bool {
-	base := filepath.Base(path)
-	if base == "dyld" {
-		return true
+// parseLsofFileEntries splits lsof -F output into per-file records. Fields
+// accumulate into the current record until the next file ('f') or process
+// ('p') marker.
+func parseLsofFileEntries(out []byte) []lsofEntry {
+	var entries []lsofEntry
+	var cur *lsofEntry
+	flush := func() {
+		if cur != nil && cur.name != "" {
+			entries = append(entries, *cur)
+		}
+		cur = nil
 	}
-	return strings.HasSuffix(base, ".dylib") || strings.HasSuffix(base, ".so") || strings.Contains(base, ".so.")
+	for _, raw := range strings.Split(string(out), "\n") {
+		line := strings.TrimRight(raw, "\r")
+		if line == "" {
+			continue
+		}
+		field, value := line[0], line[1:]
+		switch field {
+		case 'p':
+			flush()
+		case 'f':
+			flush()
+			cur = &lsofEntry{}
+		case 'n':
+			if cur != nil {
+				cur.name = value
+			}
+		case 'D':
+			if cur != nil {
+				cur.dev = value
+			}
+		case 'i':
+			if cur != nil {
+				cur.ino = value
+			}
+		}
+	}
+	flush()
+	return entries
+}
+
+// selectRunningImage picks the executable out of a process's mapped-text set.
+// The set holds the dynamic loader, every mapped library, and — for a binary
+// that links ICU, as gc does — mapped data files such as locale tables and
+// icudt*.dat. Only the file that is itself an executable qualifies, which is
+// why this asks the file format rather than denylisting suffixes: a data file
+// ordered ahead of the image would otherwise be named as the executed binary.
+func selectRunningImage(entries []lsofEntry, isExecutable func(string) bool) (runningImage, error) {
+	for _, e := range entries {
+		path, unlinked := strings.CutSuffix(e.name, deletedImageSuffix)
+		if path == "" || !isExecutable(path) {
+			continue
+		}
+		id, err := parseLsofIdentity(e)
+		if err != nil {
+			return runningImage{}, fmt.Errorf("executed image %s: %w", path, err)
+		}
+		return runningImage{path: path, id: id, unlinked: unlinked}, nil
+	}
+	return runningImage{}, fmt.Errorf("no executable image among %d mapped-text entries", len(entries))
+}
+
+// parseLsofIdentity converts one record's device (0x-prefixed hex) and inode
+// (decimal) fields into a comparable identity. A missing or unparseable field
+// is an error, never a silently dropped comparison.
+func parseLsofIdentity(e lsofEntry) (fileIdentity, error) {
+	rawDev := strings.TrimPrefix(strings.TrimSpace(e.dev), "0x")
+	if rawDev == "" {
+		return fileIdentity{}, fmt.Errorf("lsof reported no device number")
+	}
+	dev, err := strconv.ParseUint(rawDev, 16, 64)
+	if err != nil {
+		return fileIdentity{}, fmt.Errorf("parsing device number %q: %w", e.dev, err)
+	}
+	rawIno := strings.TrimSpace(e.ino)
+	if rawIno == "" {
+		return fileIdentity{}, fmt.Errorf("lsof reported no inode number")
+	}
+	ino, err := strconv.ParseUint(rawIno, 10, 64)
+	if err != nil {
+		return fileIdentity{}, fmt.Errorf("parsing inode number %q: %w", e.ino, err)
+	}
+	return fileIdentity{dev: dev, ino: ino}, nil
+}
+
+// machOIsExecutable reports whether a file is a Mach-O executable — not a
+// dylib, not the dynamic loader, and not a mapped data file. Universal
+// binaries qualify when any slice is an executable.
+func machOIsExecutable(path string) bool {
+	if f, err := macho.Open(path); err == nil {
+		defer f.Close() //nolint:errcheck // read-only handle
+		return f.Type == macho.TypeExec
+	}
+	fat, err := macho.OpenFat(path)
+	if err != nil {
+		return false
+	}
+	defer fat.Close() //nolint:errcheck // read-only handle
+	for _, arch := range fat.Arches {
+		if arch.Type == macho.TypeExec {
+			return true
+		}
+	}
+	return false
 }
 
 // binaryVersion runs `<path> version` under a timeout and returns its first
 // output line. It returns "" when the binary does not answer, so a divergent
 // result still reports the paths and modification times it does know.
 func binaryVersion(path string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), binaryDivergenceVersionTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), binaryDivergenceProbeTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, path, "version").Output()
+	cmd := exec.CommandContext(ctx, path, "version")
+	// Without WaitDelay, killing the child does not close stdout when a
+	// descendant inherited it, and Output() blocks past the deadline.
+	cmd.WaitDelay = binaryDivergenceWaitDelay
+	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}

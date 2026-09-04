@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -24,6 +25,23 @@ func doctorCityDir(t *testing.T) string {
 		t.Fatalf("write city.toml: %v", err)
 	}
 	return cityDir
+}
+
+// assertCarriesSupervisorPID checks that a binary-divergence message reflects
+// the PID it was constructed with. On a host with no route to a process's
+// executed image the check reports that instead of probing, so either shape
+// proves the wiring; a check handed 0 reports "supervisor not running" and
+// matches neither.
+func assertCarriesSupervisorPID(t *testing.T, what, msg string) {
+	t.Helper()
+	if strings.Contains(msg, strconv.Itoa(unresolvablePID)) {
+		return
+	}
+	if strings.Contains(msg, "NOT checked on this platform") {
+		return
+	}
+	t.Errorf("%s = %q, want it to name the supervisor pid %d it was handed (or report the platform as unchecked)",
+		what, msg, unresolvablePID)
 }
 
 // TestBuildDoctorChecks_BinaryDivergenceRegisteredAfterSupervisorHTTP pins the
@@ -84,11 +102,7 @@ func TestBuildDoctorChecks_BinaryDivergenceReceivesSupervisorPID(t *testing.T) {
 		t.Fatal("binary-divergence check not registered")
 	}
 
-	msg := found.Run(&doctor.CheckContext{}).Message
-	if !strings.Contains(msg, strconv.Itoa(unresolvablePID)) {
-		t.Errorf("binary-divergence message = %q, want it to name the supervisor pid %d it was handed",
-			msg, unresolvablePID)
-	}
+	assertCarriesSupervisorPID(t, "binary-divergence message", found.Run(&doctor.CheckContext{}).Message)
 }
 
 // TestDoDoctorPassesSupervisorPIDToBinaryDivergence closes the last gap: that
@@ -106,10 +120,19 @@ func TestDoDoctorPassesSupervisorPIDToBinaryDivergence(t *testing.T) {
 	_ = doDoctor(false, false, false, 0, &stdout, &stderr)
 
 	out := stdout.String()
-	if !strings.Contains(out, "binary-divergence") {
+	line, ok := doctorCheckLine(out, "binary-divergence")
+	if !ok {
 		t.Fatalf("doctor output missing the binary-divergence check:\n%s", out)
 	}
-	if !strings.Contains(out, strconv.Itoa(unresolvablePID)) {
-		t.Errorf("doctor output does not carry the probed supervisor pid %d:\n%s", unresolvablePID, out)
+	assertCarriesSupervisorPID(t, "binary-divergence doctor line", line)
+}
+
+// doctorCheckLine returns the streamed result line for one check.
+func doctorCheckLine(out, name string) (string, bool) {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, fmt.Sprintf(" %s — ", name)) {
+			return line, true
+		}
 	}
+	return "", false
 }
