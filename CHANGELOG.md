@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`gc doctor` now checks for binary divergence** — the case where the `gc`
+  a probe verifies is not the `gc` the supervisor is executing. The new
+  `binary-divergence` check reads the running supervisor's executed image from
+  the process itself (`/proc/<pid>/exe` on Linux, `lsof` txt entries on macOS)
+  rather than from the path its service unit names, and compares it by content
+  against what `gc` resolves to on PATH. Several paths symlinked or hardlinked
+  to one artifact pass; genuinely different bytes warn, naming both paths, both
+  versions, both modification times and which side is newer — so an operator
+  can tell whether they are verifying ahead of or behind the running fleet.
+  Without it, a capability probe run from a shell can report a feature present
+  while the fleet runs a build that lacks it, or the reverse.
+
 ### Changed
 
 - **`gc pack registry publish` now refuses an unscoped pack name unless you

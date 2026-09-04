@@ -30,6 +30,10 @@ func (c *BinaryCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
 // `gc start` warm-up scan.
+func (c *BinaryDivergenceCheck) WarmupEligible() bool { return false }
+
+// WarmupEligible returns false; this check is not part of the
+// `gc start` warm-up scan.
 func (c *BuiltinPackFamilyCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
