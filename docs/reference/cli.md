@@ -3437,8 +3437,36 @@ gc provider
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc provider credentials](#gc-provider-credentials) | Show which environment variable holds a provider's credentials |
 | [gc provider quota](#gc-provider-quota) | Show Claude account quota states and per-tier provider decisions |
-| [gc provider rotate-key](#gc-provider-rotate-key) | Rotate a provider API key across tmux global env and live sessions |
+
+## gc provider credentials
+
+Report which environment variable holds each of a provider's credentials, and
+what stands between changing it and the fleet using it.
+
+Which variable that is, is not obvious. A provider declares its credential
+env-var names through its upstream_env binding (api_key and auth_token; never
+base_url), those names resolve through the provider's inheritance chain, and
+each one's value may interpolate a different variable again. This command
+performs that resolution and reports, naming the reason, wherever no single
+variable holds the credential.
+
+It also reports what would stop a change from taking effect: a variable the
+supervisor does not forward into its service environment, a later config layer
+that overrides the credential for particular agents, and whether this city's
+supervisor reads the machine-local secrets file at all.
+
+Changing a credential does not apply itself. A credential change moves no
+config fingerprint, so no agent restarts on its own, and the supervisor
+resolves session environment from its own environment, fixed when it exec'd.
+Applying a new value means: write it where the supervisor reads it, regenerate
+the service file so the supervisor re-execs with it, then cycle the agents.
+Until the supervisor re-execs, every running session keeps the old credential.
+
+```
+gc provider credentials <provider>
+```
 
 ## gc provider quota
 
@@ -3458,23 +3486,6 @@ gc provider quota [flags]
 | `--overflow` | stringSlice |  | overflow vendor pool in priority order (e.g. zai,openrouter) |
 | `--poll` | bool |  | keep polling on an interval, recording provider.* events to the city event log |
 | `--timeout` | duration | `10s` | per-account usage request timeout |
-
-## gc provider rotate-key
-
-Propagate a new API key into the tmux server global env and every live session
-that uses the named provider, without requiring a tmux kill-server.
-
-Running agent processes that already hold the old key in-process will pick up
-the new key on their next natural restart (drain/respawn), not immediately.
-Use --dry-run to preview what would change before writing.
-
-```
-gc provider rotate-key <provider> <newkey> [flags]
-```
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--dry-run` | bool |  | Print what would change without writing to tmux |
 
 ## gc ready
 

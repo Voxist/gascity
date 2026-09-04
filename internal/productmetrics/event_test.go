@@ -351,7 +351,7 @@ func TestInjectedImmutableCommandCatalogRoundTripsWithoutExpandingProduction(t *
 	generatedCount := 0
 	generatedCommandIDCatalog(func(commandIDEntry) { generatedCount++ })
 	// 201 upstream + 4 fork-only runnable commands (gc beads state, gc config
-	// lint, gc provider quota, gc provider rotate-key). The fifth fork-only
+	// lint, gc provider quota, gc provider credentials). The fifth fork-only
 	// census path, "gc provider", is a command group and carries the shared
 	// group id rather than a catalog entry, so it does not count here.
 	//
@@ -361,8 +361,14 @@ func TestInjectedImmutableCommandCatalogRoundTripsWithoutExpandingProduction(t *
 	// 198-205, which the fork-only commands had held; the allocation ledger is
 	// append-only, so the four were reallocated to 206-209 (next_id 210) — a
 	// fork-local id remap only, since none of the four exists upstream.
-	if generatedCount != 205 {
-		t.Fatalf("generated production catalog has %d entries, want 205", generatedCount)
+	//
+	// 206 rather than 205 because the id ledger is append-only: one id in the
+	// range was allocated and then retired, and the census tombstones it so an
+	// event recorded by an older binary still decodes. generate.go emits a
+	// catalog identity for every tombstone, so the total is 205 live plus 1
+	// retired. Re-derived by regenerating, as above.
+	if generatedCount != 206 {
+		t.Fatalf("generated production catalog has %d entries, want 206", generatedCount)
 	}
 
 	injected := func(yield func(commandIDEntry)) {

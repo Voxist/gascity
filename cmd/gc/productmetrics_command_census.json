@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 210,
+  "next_id": 211,
   "permanent_ids": [
     {
       "name": "help",
@@ -3185,6 +3185,21 @@
       "id": 1
     },
     {
+      "path": "gc provider credentials",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "provider-credentials",
+      "owner": "immediate",
+      "id": 210
+    },
+    {
       "path": "gc provider quota",
       "aliases": [],
       "conditional_modes": [],
@@ -3198,21 +3213,6 @@
       "classification": "provider-quota",
       "owner": "immediate",
       "id": 208
-    },
-    {
-      "path": "gc provider rotate-key",
-      "aliases": [],
-      "conditional_modes": [],
-      "hidden": false,
-      "effective_hidden": false,
-      "disable_flag_parsing": false,
-      "shape": "runnable",
-      "recording_policy": "recordable",
-      "mode": "standard",
-      "notice_policy": "eligible",
-      "classification": "provider-rotate-key",
-      "owner": "immediate",
-      "id": 209
     },
     {
       "path": "gc ready",
@@ -4753,5 +4753,11 @@
       "exclusion": "private-completion"
     }
   ],
-  "tombstones": []
+  "tombstones": [
+    {
+      "name": "provider-rotate-key",
+      "id": 209,
+      "wire": "provider-rotate-key"
+    }
+  ]
 }
