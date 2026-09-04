@@ -393,18 +393,34 @@ other key in the file is ignored. A value exported in the calling shell still
 takes precedence over the file, and `GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1`
 suppresses provider credentials from both sources.
 
-Apply the change by regenerating the service file and re-execing the
-supervisor:
+Apply the change by regenerating the service file:
 
 ```bash
-gc supervisor install    # regenerate the service file from the current sources
-gc supervisor stop
-gc supervisor start      # re-exec so the new environment takes
+gc supervisor install    # regenerate the service file and re-exec with it
 ```
 
-The stop is not optional. `gc supervisor start` regenerates the service file
-but returns without replacing a supervisor that is already alive, so the
-running process keeps its old environment.
+That is the whole apply step. When the rendered service file differs, install
+rewrites it, unloads the service and loads it again, which re-execs the
+supervisor under the service manager with the merged environment. `gc start`
+reaches the same path.
+
+<Warning>
+Do not reach for `gc supervisor stop` followed by `gc supervisor start`.
+`gc supervisor start` does not regenerate the service file and does not merge
+the secrets file: it launches a supervisor detached from the service manager
+carrying the calling shell's environment, and it refuses outright when one is
+already running. Using it here is how a rotation ends up serving the old value
+or a blank one.
+</Warning>
+
+One case to watch on macOS: when the rendered plist is byte-identical to the
+installed one and a supervisor is already alive, install reports
+`Installed launchd service` and exits 0 **without** re-execing. Nothing
+changed, so nothing was applied.
+
+The other way an install declines is not silent: a service file naming a
+different `gc` binary makes install exit 1 and tell you to pass `--force`, so
+it cannot be mistaken for a change that took.
 
 ## Rotating a Provider API Key
 
@@ -443,7 +459,8 @@ Changing a credential does not apply itself. A credential change moves no
 config fingerprint, so no agent restarts on its own, and the supervisor
 resolves session environment from its own environment, fixed when it exec'd.
 Until the supervisor re-execs, every running session keeps the old credential.
-`gc restart` cycles agents only — it does not re-exec the supervisor.
+`gc restart` cycles agents only — `gc supervisor install` is what re-execs the
+supervisor.
 </Warning>
 
 One hazard the command cannot check for you: a value exported in the shell

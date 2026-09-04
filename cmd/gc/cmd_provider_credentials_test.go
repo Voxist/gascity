@@ -252,3 +252,37 @@ func TestProviderCredentialsOffersNoWritePath(t *testing.T) {
 		}
 	}
 }
+
+// TestProviderCredentialsHonorsSupervisorEnvOptIn guards against warning about
+// a variable the supervisor DOES forward. supervisorServiceExtraEnv gates on
+// the persist allow-list OR an explicit GC_SUPERVISOR_ENV opt-in; a report
+// that checks only the allow-list tells the operator their rotation will come
+// up blank when it will not. A warning that fires when it should not is worn
+// down to noise, which is how the real one gets skipped.
+func TestProviderCredentialsHonorsSupervisorEnvOptIn(t *testing.T) {
+	newCredentialsTestEnv(t)
+	t.Setenv("GC_SUPERVISOR_ENV", "ACME_KEY")
+	cityPath := writeProviderTestCity(t, `
+[workspace]
+name = "test"
+
+[beads]
+provider = "file"
+
+[providers.zai]
+base = "builtin:claude"
+env = {ANTHROPIC_API_KEY = "${ACME_KEY}"}
+`)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"provider", "credentials", "--city", cityPath, "zai"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run() = %d; want 0\nstderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "ACME_KEY") {
+		t.Fatalf("output does not name the source variable at all:\n%s", out)
+	}
+	if strings.Contains(out, "does NOT forward") {
+		t.Errorf("warned that ACME_KEY is not forwarded, but GC_SUPERVISOR_ENV opts it in and supervisorServiceExtraEnv honors that:\n%s", out)
+	}
+}

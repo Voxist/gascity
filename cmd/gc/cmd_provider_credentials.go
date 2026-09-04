@@ -1,15 +1,14 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/spf13/cobra"
 )
 
@@ -74,7 +73,7 @@ func runProviderCredentials(providerName string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc provider credentials: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cfg, _, err := loadCityConfigWithBuiltinPacks(cityPath)
+	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc provider credentials: loading city config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -93,7 +92,7 @@ func runProviderCredentials(providerName string, stdout, stderr io.Writer) int {
 	}
 
 	secretsPath := supervisorSecretsEnvFilePath()
-	fileEntries, fileErr := readSecretsEnvForReport(secretsPath)
+	fileEntries, fileErr := readSecretsEnvForReport()
 
 	renderCredentialBindings(stdout, providerName, resolved, bindings, secretsPath, fileEntries, fileErr)
 	renderCredentialOverrides(stdout, credentialOverrides(cfg, providerName, bindings))
@@ -107,50 +106,39 @@ func runProviderCredentials(providerName string, stdout, stderr io.Writer) int {
 // Session start goes through [config.ResolveProvider] -> lookupProvider, which
 // layers a city entry over a same-named built-in even when the entry declares
 // no `base` (the Phase A legacy shape). The eager ResolvedProviders cache does
-// NOT do that merge — chain.go's walkFromLeaf returns a base-less spec as-is —
+// NOT do that merge - chain.go's walkFromLeaf returns a base-less spec as-is -
 // so reading the cache would report no upstream_env binding for
 // `[providers.claude]` written without a `base` line, and refuse to resolve a
-// credential the fleet demonstrably uses. resolved_cache.go's own validation
-// path does the same-name merge; this sides with validation and session start.
+// credential the fleet demonstrably uses.
+//
+// The lookPath is a no-op on purpose. ResolveProvider verifies the harness
+// binary is on PATH and fails with ErrProviderNotInPATH otherwise, which is
+// the normal case when auditing a city from another host or from CI. This
+// report is about environment variable NAMES and needs no binary.
 func resolveProviderForCredentials(cfg *config.City, providerName string) (*config.ResolvedProvider, error) {
-	if _, declared := cfg.Providers[providerName]; !declared {
-		if _, isBuiltin := config.BuiltinProviders()[providerName]; !isBuiltin {
-			return nil, fmt.Errorf("no provider %q in this city's config", providerName)
-		}
-	}
 	resolved, err := config.ResolveProvider(
 		&config.Agent{Provider: providerName},
 		&cfg.Workspace,
 		cfg.Providers,
-		exec.LookPath,
+		func(command string) (string, error) { return command, nil },
 	)
 	if err != nil {
+		if errors.Is(err, config.ErrProviderNotFound) {
+			return nil, fmt.Errorf("no provider %q in this city's config", providerName)
+		}
 		return nil, fmt.Errorf("resolving provider %q: %w", providerName, err)
 	}
 	return resolved, nil
 }
 
-// readSecretsEnvForReport reads the machine-local secrets file. A missing file
-// is the normal case and yields no entries and no error. Any other failure —
-// an unreadable root-owned file, a malformed line — is returned, because
-// reporting "not set here" for a file that names the variable but cannot be
-// parsed sends the operator to change a value that is already there.
-func readSecretsEnvForReport(path string) (map[string]string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("reading %s: %w", path, err)
-	}
-	entries, err := processenv.ParseEnvFile(string(data))
-	if err != nil {
-		// The supervisor's own reader gives up on the whole file when it does
-		// not parse, dropping every entry rather than the bad line, so this is
-		// a fleet-wide condition and not a cosmetic one.
-		return nil, fmt.Errorf("%s does not parse as dotenv, so the supervisor drops every entry in it: %w", path, err)
-	}
-	return entries, nil
+// readSecretsEnvForReport reads the machine-local secrets file through the
+// same core the supervisor uses, so the report cannot disagree with what
+// install will actually load. Install logs a read or parse failure and
+// proceeds with nothing; here it is surfaced, because reporting "not set" for
+// a file that names the variable but cannot be parsed sends the operator to
+// change a value that is already there.
+func readSecretsEnvForReport() (map[string]string, error) {
+	return readSupervisorSecretsEnvFile()
 }
 
 // renderCredentialBindings prints one line per declared credential role.
@@ -175,7 +163,7 @@ func renderCredentialBindings(w io.Writer, providerName string, resolved *config
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "ROLE\tHARNESS VAR\tHELD BY\tNOTES") //nolint:errcheck // best-effort stdout
 	for _, b := range bindings {
-		if b.Refusal != "" {
+		if !b.Resolved() {
 			fmt.Fprintf(tw, "%s\t%s\t-\t%s\n", b.Role, b.EnvKey, b.Refusal) //nolint:errcheck // best-effort stdout
 			continue
 		}
@@ -189,7 +177,7 @@ func renderCredentialBindings(w io.Writer, providerName string, resolved *config
 // and what would stop a change to it from reaching the fleet.
 func credentialSourceNotes(b credentialBinding, secretsPath string, fileEntries map[string]string, fileErr error) []string {
 	var notes []string
-	if b.Inherited {
+	if b.Kind == credentialInherited {
 		notes = append(notes, "not set by provider config; taken from the supervisor environment under its own name")
 	}
 
@@ -197,7 +185,7 @@ func credentialSourceNotes(b credentialBinding, secretsPath string, fileEntries 
 	// gate. A variable that does not is dropped when the service file is
 	// regenerated, and session expansion of "${VAR}" then yields "" — so the
 	// fleet comes up with a BLANK credential, not the old one.
-	if !shouldPersistSupervisorEnv(b.SourceVar) {
+	if !supervisorForwardsEnvKey(b.SourceVar, supervisorExplicitEnvKeySet()) {
 		notes = append(notes, fmt.Sprintf(
 			"the supervisor does NOT forward %s into its service environment, so a value placed there is dropped and sessions start with a BLANK credential; opt it in via GC_SUPERVISOR_ENV=%s, or bind the credential to a name the supervisor recognizes",
 			b.SourceVar, b.SourceVar))
@@ -246,7 +234,7 @@ func renderCredentialApplyHint(w io.Writer, secretsPath string) {
 		fmt.Fprintf(w, delegatedSupervisorNote, delegation.Unit, delegation.Scope, secretsPath) //nolint:errcheck // best-effort stdout
 		return
 	}
-	fmt.Fprintf(w, managedSupervisorNote, secretsPath) //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(w, managedSupervisorNote, secretsPath, secretsPath) //nolint:errcheck // best-effort stdout
 }
 
 // delegatedSupervisorNote explains that a delegated supervisor never reads the
@@ -263,24 +251,34 @@ const managedSupervisorNote = `
 For a gc-managed supervisor, %s is the machine-local source it merges when the
 service file is regenerated:
 
-  gc supervisor install    # regenerate the service file with the new value
-  gc supervisor stop
-  gc supervisor start      # re-exec so the new environment takes
-  gc restart               # cycle the agents onto it
+  gc supervisor install    # regenerate the service file and re-exec with it
+  gc restart               # cycle the agents onto the new value
 
-The stop is not optional: "gc supervisor start" regenerates the service file
-but returns without replacing a supervisor that is already alive, so the
-running process keeps its old environment. "gc restart" cycles agents only.
+"gc supervisor install" is the whole apply step: when the rendered service file
+differs it rewrites it, unloads the service and loads it again, which re-execs
+the supervisor under the service manager with the merged environment. "gc start"
+reaches the same path. "gc restart" only cycles agents.
 
-Two caveats this command cannot check for you:
+Do NOT reach for "gc supervisor stop" and "gc supervisor start" here.
+"gc supervisor start" does not regenerate the service file and does not merge
+%s; it launches a supervisor detached from the service manager carrying the
+CALLING SHELL's environment, which is how a rotation ends up serving the old
+value or a blank one.
+
+Two conditions this command cannot check for you:
 
   - A value exported in the shell that regenerates the service file WINS over
     the file, which fills only names that shell left unset. If that shell
     exports the variable, the file entry is ignored and nothing changes.
-  - A refused install (a service unit referencing a different gc binary needs
-    --force) and a --foreground city both leave the old environment in place
-    while still exiting 0.
+  - On macOS, when the rendered plist is byte-identical to the installed one
+    and a supervisor is already alive, install reports "Installed launchd
+    service" and exits 0 WITHOUT re-execing. Nothing changed, so nothing was
+    applied.
+
+The other way an install declines is not silent: a service file naming a
+different gc binary makes install exit 1 and say to pass --force, so it cannot
+be mistaken for a change that took.
 
 Confirm the supervisor came up with the new value rather than assuming the
-restart carried it.
+install carried it.
 `
