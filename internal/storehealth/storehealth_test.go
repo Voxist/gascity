@@ -271,6 +271,11 @@ type recordingProvider struct {
 	*events.Fake
 	listCalls     int
 	listTailCalls int
+	// lastTailLimit and lastScanBytes capture the BOUND LastMaintenance asked
+	// for, not just which method it called. Counting calls alone cannot tell a
+	// bounded tail from an unbounded one.
+	lastTailLimit int
+	lastScanBytes int64
 }
 
 func (r *recordingProvider) List(filter events.Filter) ([]events.Event, error) {
@@ -280,6 +285,8 @@ func (r *recordingProvider) List(filter events.Filter) ([]events.Event, error) {
 
 func (r *recordingProvider) ListTail(filter events.Filter, limit int) ([]events.Event, error) {
 	r.listTailCalls++
+	r.lastTailLimit = limit
+	r.lastScanBytes = filter.MaxScanBytes
 	return r.Fake.ListTail(filter, limit)
 }
 
@@ -314,6 +321,17 @@ func TestLastMaintenanceUsesTailProviderFastPath(t *testing.T) {
 	}
 	if rp.listCalls != 0 {
 		t.Fatalf("listCalls = %d, want 0 (fast path should not also fall back to List)", rp.listCalls)
+	}
+	// The fork's lastMaintenanceTailLimit constant was superseded by a PAIR of
+	// bounds, and both are asserted exactly rather than as a range: only the
+	// most recent matching event is wanted, and the backward file walk is
+	// capped. A loose range here (the dropped fork test used "(0,32]") lets a
+	// regression to 16 pass while still reading 16x the intended tail.
+	if rp.lastTailLimit != 1 {
+		t.Fatalf("ListTail limit = %d, want exactly 1 (only the latest matching event is used)", rp.lastTailLimit)
+	}
+	if rp.lastScanBytes != lastMaintenanceScanWindowBytes {
+		t.Fatalf("ListTail scan window = %d bytes, want lastMaintenanceScanWindowBytes (%d) — an unbounded backward walk costs the same as the full forward scan this path exists to remove", rp.lastScanBytes, lastMaintenanceScanWindowBytes)
 	}
 }
 
@@ -413,61 +431,17 @@ func TestLastMaintenanceDoesNotReadRotatedArchives(t *testing.T) {
 	}
 }
 
-// tailCallRecorder wraps a *events.Fake and records whether List or
-// ListTail was invoked, so tests can assert LastMaintenance prefers the
-// bounded ListTail path when the provider implements events.TailProvider.
-type tailCallRecorder struct {
-	*events.Fake
-	listCalls     int
-	listTailCalls int
-	lastTailLimit int
-}
-
-func (r *tailCallRecorder) List(filter events.Filter) ([]events.Event, error) {
-	r.listCalls++
-	return r.Fake.List(filter)
-}
-
-func (r *tailCallRecorder) ListTail(filter events.Filter, limit int) ([]events.Event, error) {
-	r.listTailCalls++
-	r.lastTailLimit = limit
-	return r.Fake.ListTail(filter, limit)
-}
-
-func TestLastMaintenanceUsesListTailWhenAvailable(t *testing.T) {
-	recorder := &tailCallRecorder{Fake: events.NewFake()}
-	older := time.Date(2026, 4, 1, 3, 0, 0, 0, time.UTC)
-	newer := time.Date(2026, 4, 8, 3, 0, 0, 0, time.UTC)
-
-	payloadDone, _ := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 1})
-	payloadFail, _ := json.Marshal(events.StoreMaintenanceFailedPayload{Stage: "gc"})
-
-	recorder.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: older, Payload: payloadDone})
-	recorder.Record(events.Event{Type: events.StoreMaintenanceFailed, Ts: newer, Payload: payloadFail})
-
-	ts, status := LastMaintenance(recorder)
-
-	if recorder.listTailCalls == 0 {
-		t.Fatalf("LastMaintenance did not call ListTail when provider implements TailProvider")
-	}
-	if recorder.listCalls != 0 {
-		t.Fatalf("LastMaintenance called List %d time(s), want 0 when ListTail is available", recorder.listCalls)
-	}
-	if recorder.lastTailLimit <= 0 || recorder.lastTailLimit > 32 {
-		t.Fatalf("ListTail called with limit = %d, want a small bounded N in (0,32]", recorder.lastTailLimit)
-	}
-	if !ts.Equal(newer) {
-		t.Fatalf("ts = %v, want %v", ts, newer)
-	}
-	if status != "failed" {
-		t.Fatalf("status = %q, want failed", status)
-	}
-}
-
 // listOnlyProvider implements events.Provider but deliberately not
 // events.TailProvider, exercising LastMaintenance's fallback path for
 // backings that cannot do a bounded tail read (e.g. events.Multiplexer
 // today).
+//
+// It holds its Fake in a NAMED FIELD rather than embedding it, and that is the
+// whole point. providerWithoutTail above EMBEDS *events.Fake, which promotes
+// Fake.ListTail onto it — so it satisfies events.TailProvider after all, and
+// TestLastMaintenanceFallsBackWithoutTailProvider takes the tail fast path and
+// never reaches the List branch it claims to guard. This type is the only
+// coverage of that fallback.
 type listOnlyProvider struct {
 	fake      *events.Fake
 	listCalls int
@@ -509,69 +483,5 @@ func TestLastMaintenanceFallsBackToListForNonTailProvider(t *testing.T) {
 	}
 	if status != "failed" {
 		t.Fatalf("status = %q, want failed", status)
-	}
-}
-
-// boundedCallRecorder wraps a *events.Fake and records the number of
-// events returned by each List/ListTail call, plus the tail bound
-// LastMaintenance asked for, so tests can assert LastMaintenance's read is
-// bounded independent of total log size.
-type boundedCallRecorder struct {
-	*events.Fake
-	listCalls      int
-	listTailCalls  int
-	maxListTailLen int
-	lastScanBytes  int64
-}
-
-func (r *boundedCallRecorder) List(filter events.Filter) ([]events.Event, error) {
-	r.listCalls++
-	return r.Fake.List(filter)
-}
-
-func (r *boundedCallRecorder) ListTail(filter events.Filter, limit int) ([]events.Event, error) {
-	r.listTailCalls++
-	r.lastScanBytes = filter.MaxScanBytes
-	evts, err := r.Fake.ListTail(filter, limit)
-	if len(evts) > r.maxListTailLen {
-		r.maxListTailLen = len(evts)
-	}
-	return evts, err
-}
-
-func TestLastMaintenanceBoundedTailRead(t *testing.T) {
-	const totalEvents = 10_000
-
-	recorder := &boundedCallRecorder{Fake: events.NewFake()}
-	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	payload, _ := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 1})
-
-	var latest time.Time
-	for i := 0; i < totalEvents; i++ {
-		ts := base.Add(time.Duration(i) * time.Minute)
-		recorder.Record(events.Event{Type: events.StoreMaintenanceDone, Ts: ts, Payload: payload})
-		latest = ts
-	}
-
-	ts, status := LastMaintenance(recorder)
-
-	if recorder.listCalls != 0 {
-		t.Fatalf("LastMaintenance called List %d time(s) against a %d-event backing, want 0 — List materializes the full matching history", recorder.listCalls, totalEvents)
-	}
-	// The fork's single lastMaintenanceTailLimit constant was superseded by a
-	// pair: ListTail(..., 1) bounds the events returned and MaxScanBytes =
-	// lastMaintenanceScanWindowBytes bounds the backward file walk. Both halves
-	// have to hold, so both are asserted.
-	if recorder.maxListTailLen == 0 || recorder.maxListTailLen > 32 {
-		t.Fatalf("ListTail returned %d events, want a small bounded N in (0,32] regardless of the %d-event backing size", recorder.maxListTailLen, totalEvents)
-	}
-	if recorder.lastScanBytes != lastMaintenanceScanWindowBytes {
-		t.Fatalf("ListTail scan window = %d bytes, want lastMaintenanceScanWindowBytes (%d) — an unbounded backward walk costs the same as the full forward scan this path exists to remove", recorder.lastScanBytes, lastMaintenanceScanWindowBytes)
-	}
-	if !ts.Equal(latest) {
-		t.Fatalf("ts = %v, want %v (the most recently recorded maintenance event)", ts, latest)
-	}
-	if status != "success" {
-		t.Fatalf("status = %q, want success", status)
 	}
 }

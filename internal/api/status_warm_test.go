@@ -49,12 +49,26 @@ func TestStatusWarmEntryRoundTrip(t *testing.T) {
 func TestHandleStatusServesWarmWithoutRebuild(t *testing.T) {
 	oldTTL := timeBucketResponseCacheTTL
 	timeBucketResponseCacheTTL = time.Nanosecond // bucket cache misses every request
+	oldFloor := statusResponseTTLFloor
+	statusResponseTTLFloor = 0 // recent-response floor misses too
 	oldRefresh := statusWarmRefreshAfter
 	statusWarmRefreshAfter = time.Hour // never background-refresh during the test
 	t.Cleanup(func() {
 		timeBucketResponseCacheTTL = oldTTL
+		statusResponseTTLFloor = oldFloor
 		statusWarmRefreshAfter = oldRefresh
 	})
+
+	// NOTE on what this can and cannot pin. The handler has FOUR serve paths in
+	// front of the synchronous build: the time-bucket cache, the warm entry, the
+	// TTL floor, and stale-while-revalidate. The two lines above disable the
+	// first and third so the measurement is about the warm entry — but SWR
+	// remains, and it legitimately serves the same stale body. So removing the
+	// warm branch alone does NOT make this test fail, and that is correct
+	// rather than vacuous: the guarded contract is "one cold build, then no
+	// rebuild on the request path", and SWR upholds it. What DOES break the
+	// contract is losing the seeding in buildAndStoreStatus, which is the
+	// regression this fails on (verified by mutation).
 
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}

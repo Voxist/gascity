@@ -2409,7 +2409,7 @@ type OrdersConfig struct {
 	// interval — raise this cap there (voxist vp-cixi.6: 122 orders × ~94s
 	// ticks × budget 4 ⇒ 30s orders fired every 33–90 min). Pointer so the
 	// zero value stays out of marshaled default configs.
-	MaxDispatchesPerTick *int `toml:"max_dispatches_per_tick,omitempty" jsonschema:"default=32"`
+	MaxDispatchesPerTick *int `toml:"max_dispatches_per_tick,omitempty" jsonschema:"default=5"`
 	// Overrides apply per-order field overrides after scanning.
 	// Each override targets an order by name and optionally by rig.
 	Overrides []OrderOverride `toml:"overrides,omitempty"`

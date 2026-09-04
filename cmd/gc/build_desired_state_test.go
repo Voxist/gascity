@@ -13529,24 +13529,30 @@ func TestBuildDesiredStateRecordsDemandSubPhases(t *testing.T) {
 	}
 }
 
-// TestDefaultScaleCheckCountsCountsTypelessRoutedRigPoolBacklog reproduces the
+// TestDefaultScaleCheckCountsCountsRoutedRigPoolBacklog reproduces the
 // Platform-team "4 ready → scaler sees 1" report against the live voxist-city
 // shape: a rig-scoped executor pool with no custom scale_check and a BACKLOG of
-// N unclaimed, routed-to-the-rig-template beads in the rig store. Two details
-// match production exactly and are what the other TestDefaultScaleCheckCounts
-// tests do NOT cover: (a) the beads are TYPE-UNSET (the live vw store shows
-// type=None), so readyExcludeTypes must not drop them; (b) there are MULTIPLE
-// of them. The default demand probe is authoritative + unclamped for a
-// no-scale_check pool, so it must size to the WHOLE backlog (N) — if it returns
-// < N, the pool sizes to a fraction of its queue and trickles (the 4→1).
-func TestDefaultScaleCheckCountsCountsTypelessRoutedRigPoolBacklog(t *testing.T) {
+// N unclaimed, routed-to-the-rig-template beads in the rig store. What the
+// other TestDefaultScaleCheckCounts tests do not cover is the MULTIPLICITY:
+// the default demand probe is authoritative + unclamped for a no-scale_check
+// pool, so it must size to the WHOLE backlog (N) — if it returns < N, the pool
+// sizes to a fraction of its queue and trickles (the 4→1).
+//
+// SCOPE NOTE: the fork named this test "Typeless" and its fixture claimed to
+// feed TYPE-UNSET beads (the live vw store shows type=None). It does not, and
+// cannot as written: MemStore.Create coerces an empty Type to "task"
+// (internal/beads/memstore.go:138-140), so these beads are "task" before the
+// code under test ever sees them. Only the BdStore path passes an empty
+// IssueType through (internal/beads/bdstore.go:1028), and this test does not
+// drive it. The type-unset dimension is therefore NOT covered here; the name
+// and comment now claim only the multiplicity that is.
+func TestDefaultScaleCheckCountsCountsRoutedRigPoolBacklog(t *testing.T) {
 	const template = "voxist-web/voxist.executor"
 	const backlog = 4
 	backing := beads.NewMemStore()
 	for i := 0; i < backlog; i++ {
 		if _, err := backing.Create(beads.Bead{
-			Title: "routed executor work",
-			// Type intentionally UNSET — matches the live vw store (type=None).
+			Title:  "routed executor work",
 			Status: "open",
 			Metadata: map[string]string{
 				"gc.routed_to": template,
