@@ -169,6 +169,308 @@ fi
 rm -rf "$neg_repo"
 
 # ---------------------------------------------------------------------------
+# 3. Gate 1 DROPPED-FILE: a hand-resolved merge that drops fork-added files
+#    entirely must be caught. Without `-q --verify` on the per-file
+#    `git rev-parse REV:path` lookups, a missing path made rev-parse ECHO the
+#    argument to stdout on a nonzero exit instead of resolving to empty — the
+#    `[ -z "$mh" ]` emptiness check that detects DROPPED-FILE could then
+#    never fire.
+# ---------------------------------------------------------------------------
+echo "== gate 1: DROPPED-FILE (fork-added files missing from merge) =="
+
+drop_repo="$(mktemp -d "${TMPDIR:-/tmp}/crl-test-drop.XXXXXX")"
+(
+	set -e
+	cd "$drop_repo"
+	git init -q -b main
+	git config commit.gpgsign false
+
+	cat >a.go <<'EOF'
+package fixture
+
+func A() {}
+EOF
+	git add -A
+	git commit -qm base
+
+	git checkout -q -b ours
+	mkdir -p .github/workflows
+	echo "# fork notes" >docs-notes.md
+	echo "name: fork-ci" >.github/workflows/fork-ci.yml
+	git add -A
+	git commit -qm "fork: add docs-notes.md and fork-ci.yml"
+
+	git checkout -q -b theirs main
+	cat >a.go <<'EOF'
+package fixture
+
+func Theirs() {}
+
+func A() {}
+EOF
+	git add -A
+	git commit -qm "upstream: add Theirs()"
+
+	git checkout -q ours
+	git merge -q --no-edit theirs >/dev/null
+
+	# Simulate a hand-resolved merge that dropped both fork-added files
+	# entirely (the real ga-d32bn incident's shape) by rebuilding the merge
+	# tree without them and committing it with the same two parents.
+	ours_sha=$(git rev-parse ours)
+	theirs_sha=$(git rev-parse theirs)
+	git rm -q docs-notes.md .github/workflows/fork-ci.yml
+	bad_tree=$(git write-tree)
+	git commit-tree "$bad_tree" -p "$ours_sha" -p "$theirs_sha" -m "resync: (simulated) drop fork-added files" >BAD_MERGE_SHA
+)
+drop_rc_setup=$?
+
+if [ "$drop_rc_setup" -ne 0 ]; then
+	record_fail "DROPPED-FILE fixture builds" "setup failed, rc=$drop_rc_setup"
+else
+	bad_merge=$(cat "$drop_repo/BAD_MERGE_SHA")
+	drop_out=$(mktemp "${TMPDIR:-/tmp}/crl-test-drop-out.XXXXXX")
+	(cd "$drop_repo" && bash "$SCRIPT" "$bad_merge") >"$drop_out" 2>&1
+	drop_rc=$?
+
+	drop_hits=$(grep -c '^  DROPPED-FILE' "$drop_out" || true)
+	if [ "$drop_rc" -ne 0 ] && [ "$drop_hits" -eq 2 ]; then
+		record_pass "flags both dropped fork-added files as DROPPED-FILE"
+	else
+		record_fail "flags both dropped fork-added files as DROPPED-FILE" "exit=$drop_rc DROPPED-FILE count=$drop_hits:"
+		sed 's/^/    /' "$drop_out"
+	fi
+	rm -f "$drop_out"
+fi
+rm -rf "$drop_repo"
+
+# ---------------------------------------------------------------------------
+# 4. Gate 1 identical-change skip: OURS and THEIRS independently add the
+#    exact same declaration. merge == theirs is then the ONLY correct 3-way
+#    result (theirs' content equals ours'), not a loss — must not be
+#    reported TOOK-THEIRS.
+# ---------------------------------------------------------------------------
+echo "== gate 1: identical fork/upstream change is not a false TOOK-THEIRS =="
+
+ident_repo="$(mktemp -d "${TMPDIR:-/tmp}/crl-test-ident.XXXXXX")"
+(
+	set -e
+	cd "$ident_repo"
+	git init -q -b main
+	git config commit.gpgsign false
+
+	cat >a.go <<'EOF'
+package fixture
+
+func A() {}
+EOF
+	git add -A
+	git commit -qm base
+
+	git checkout -q -b ours
+	cat >>a.go <<'EOF'
+
+func Fix() {}
+EOF
+	git add -A
+	git commit -qm "fork: add Fix()"
+
+	git checkout -q -b theirs main
+	cat >>a.go <<'EOF'
+
+func Fix() {}
+EOF
+	git add -A
+	git commit -qm "upstream: independently add identical Fix()"
+
+	git checkout -q ours
+	git merge -q --no-edit theirs >/dev/null
+)
+ident_rc_setup=$?
+
+if [ "$ident_rc_setup" -ne 0 ]; then
+	record_fail "identical-change fixture builds and merges cleanly" "setup/merge failed, rc=$ident_rc_setup"
+else
+	ident_out=$(mktemp "${TMPDIR:-/tmp}/crl-test-ident-out.XXXXXX")
+	(cd "$ident_repo" && bash "$SCRIPT") >"$ident_out" 2>&1
+	ident_rc=$?
+	if [ "$ident_rc" -eq 0 ] && ! grep -q "TOOK-THEIRS.*a.go" "$ident_out"; then
+		record_pass "exits zero, does not misreport an identical add as TOOK-THEIRS"
+	else
+		record_fail "exits zero, does not misreport an identical add as TOOK-THEIRS" "exit code was $ident_rc:"
+		sed 's/^/    /' "$ident_out"
+	fi
+	rm -f "$ident_out"
+fi
+rm -rf "$ident_repo"
+
+# ---------------------------------------------------------------------------
+# 5. Gate 2 conflict-hunk stripping: a real both-sides conflict resolved
+#    toward upstream drops a fork-added declaration that survives ONLY
+#    inside the `git merge-file` oracle's conflict markers. That is a
+#    judgment call the human resolver made, not proof a plain 3-way merge
+#    would have kept it — must be MERGE-OUTCOME, not RESOLUTION-BUG, and
+#    must not fail the gate.
+# ---------------------------------------------------------------------------
+echo "== gate 2: conflict resolved toward upstream is MERGE-OUTCOME, not RESOLUTION-BUG =="
+
+conflict_repo="$(mktemp -d "${TMPDIR:-/tmp}/crl-test-conflict.XXXXXX")"
+(
+	set -e
+	cd "$conflict_repo"
+	git init -q -b main
+	git config commit.gpgsign false
+
+	# base's Common() body is left unclosed (no trailing "}") on purpose: it
+	# leaves no shared trailing context after the point of divergence, so
+	# the 3-way merge's conflict block runs to EOF and swallows ForkOnly()
+	# along with the differing Common() body — the shape needed to prove
+	# ForkOnly only ever exists inside a conflict marker, never as free
+	# text a plain merge would deliver on its own.
+	cat >a.go <<'EOF'
+package fixture
+
+func Common() {
+	// base
+EOF
+	git add -A
+	git commit -qm base
+
+	git checkout -q -b ours
+	cat >a.go <<'EOF'
+package fixture
+
+func Common() {
+	// fork tweak
+}
+
+func ForkOnly() {}
+EOF
+	git add -A
+	git commit -qm "fork: tweak Common() and add ForkOnly()"
+
+	git checkout -q -b theirs main
+	cat >a.go <<'EOF'
+package fixture
+
+func Common() {
+	// upstream tweak
+}
+EOF
+	git add -A
+	git commit -qm "upstream: tweak Common() differently"
+
+	git checkout -q ours
+	# Expect a real conflict; resolve it by hand toward upstream, discarding
+	# ForkOnly() along with the fork's tweak — the shape of the real
+	# ga-d32bn incident.
+	git merge --no-edit theirs >/dev/null 2>&1 || true
+	git show theirs:a.go >a.go
+	git add -A
+	git commit -qm "resync: resolve toward upstream (drops ForkOnly)"
+)
+conflict_rc_setup=$?
+
+if [ "$conflict_rc_setup" -ne 0 ]; then
+	record_fail "conflict fixture builds" "setup failed, rc=$conflict_rc_setup"
+else
+	conflict_out=$(mktemp "${TMPDIR:-/tmp}/crl-test-conflict-out.XXXXXX")
+	(cd "$conflict_repo" && bash "$SCRIPT") >"$conflict_out" 2>&1
+	conflict_rc=$?
+	if grep -q "MERGE-OUTCOME.*ForkOnly" "$conflict_out" && ! grep -q "RESOLUTION-BUG.*ForkOnly" "$conflict_out"; then
+		record_pass "classifies ForkOnly (lost only inside a conflict marker) as MERGE-OUTCOME"
+	else
+		record_fail "classifies ForkOnly (lost only inside a conflict marker) as MERGE-OUTCOME" "exit=$conflict_rc:"
+		sed 's/^/    /' "$conflict_out"
+	fi
+	rm -f "$conflict_out"
+fi
+rm -rf "$conflict_repo"
+
+# ---------------------------------------------------------------------------
+# 6. Gate 2 keyed by (name, file): a fork-added declaration duplicated across
+#    two files that is dropped from only one of them must still be reported
+#    — checking "is this name present anywhere in the merge" hides the loss
+#    because the surviving copy in the other file satisfies a bare-name
+#    check.
+# ---------------------------------------------------------------------------
+echo "== gate 2: (name, file)-keyed declarations catch a partial drop =="
+
+dup_repo="$(mktemp -d "${TMPDIR:-/tmp}/crl-test-dup.XXXXXX")"
+(
+	set -e
+	cd "$dup_repo"
+	git init -q -b main
+	git config commit.gpgsign false
+
+	mkdir -p a b
+	cat >a/a.go <<'EOF'
+package a
+
+func A() {}
+EOF
+	cat >b/b.go <<'EOF'
+package b
+
+func B() {}
+EOF
+	git add -A
+	git commit -qm base
+
+	git checkout -q -b ours
+	cat >>a/a.go <<'EOF'
+
+func newHelper() {}
+EOF
+	cat >>b/b.go <<'EOF'
+
+func newHelper() {}
+EOF
+	git add -A
+	git commit -qm "fork: add newHelper() to both a/a.go and b/b.go"
+
+	git checkout -q -b theirs main
+	cat >c.go <<'EOF'
+package fixture
+
+func C() {}
+EOF
+	git add -A
+	git commit -qm "upstream: unrelated addition"
+
+	git checkout -q ours
+	git merge -q --no-edit theirs >/dev/null
+
+	# Simulate a hand-resolved merge that dropped newHelper() from a/a.go
+	# ONLY (b/b.go keeps its copy) — the exact shape a bare-name Gate 2 check
+	# cannot see.
+	ours_sha=$(git rev-parse ours)
+	theirs_sha=$(git rev-parse theirs)
+	git show main:a/a.go >a/a.go
+	git add -A
+	bad_tree=$(git write-tree)
+	git commit-tree "$bad_tree" -p "$ours_sha" -p "$theirs_sha" -m "resync: (simulated) drop newHelper from a/a.go only" >BAD_MERGE_SHA
+)
+dup_rc_setup=$?
+
+if [ "$dup_rc_setup" -ne 0 ]; then
+	record_fail "(name, file)-keyed fixture builds" "setup failed, rc=$dup_rc_setup"
+else
+	bad_merge=$(cat "$dup_repo/BAD_MERGE_SHA")
+	dup_out=$(mktemp "${TMPDIR:-/tmp}/crl-test-dup-out.XXXXXX")
+	(cd "$dup_repo" && bash "$SCRIPT" "$bad_merge") >"$dup_out" 2>&1
+	dup_rc=$?
+	if grep -q "newHelper.*(a/a.go)" "$dup_out"; then
+		record_pass "reports newHelper missing from a/a.go even though it survives in b/b.go"
+	else
+		record_fail "reports newHelper missing from a/a.go even though it survives in b/b.go" "exit=$dup_rc:"
+		sed 's/^/    /' "$dup_out"
+	fi
+	rm -f "$dup_out"
+fi
+rm -rf "$dup_repo"
+
+# ---------------------------------------------------------------------------
 echo
 echo "== summary: $pass passed, $fail failed, $skip skipped =="
 [ "$fail" -eq 0 ]
