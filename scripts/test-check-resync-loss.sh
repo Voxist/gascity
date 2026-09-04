@@ -604,7 +604,219 @@ fi
 rm -rf "$genattr_repo"
 
 # ---------------------------------------------------------------------------
-# 9. Hook wiring: a real .githooks/pre-push, installed into a real temp repo
+# 9. Gate 2 must be keyed by (name, file) pairs from the start, not by bare
+#    name filtered down to pairs afterward: computing forkadded as
+#    `set(d_ours) - set(d_base) - set(d_theirs)` (bare names) hides a real
+#    fork-added declaration whenever its NAME collides with an unrelated
+#    declaration of the same name anywhere else in BASE or THEIRS — exactly
+#    the shared-`_test.go`-helper shape ga-d32bn exists to catch. Fork adds
+#    writeFile() to cfg/a_test.go; upstream independently adds an unrelated
+#    writeFile() to other/o_test.go; a hand-resolved merge drops the fork's
+#    copy. The bare-name computation would exclude "writeFile" entirely
+#    (it exists in d_theirs) and the loss would be invisible.
+# ---------------------------------------------------------------------------
+echo "== gate 2: fork-added decl name collides with an unrelated upstream decl =="
+
+collide_repo="$(mktemp -d "${TMPDIR:-/tmp}/crl-test-collide.XXXXXX")"
+(
+	set -e
+	cd "$collide_repo"
+	git init -q -b main
+	mkdir -p cfg other
+	cat >cfg/a_test.go <<'EOF'
+package cfg
+
+func TestA(t *testing.T) {}
+EOF
+	cat >other/o_test.go <<'EOF'
+package other
+
+func TestO(t *testing.T) {}
+EOF
+	git add -A
+	git commit -qm base
+
+	git checkout -q -b ours
+	cat >>cfg/a_test.go <<'EOF'
+
+func writeFile() {}
+EOF
+	git add -A
+	git commit -qm "fork: add writeFile() helper to cfg/a_test.go"
+
+	git checkout -q -b theirs main
+	cat >>other/o_test.go <<'EOF'
+
+func writeFile() {}
+EOF
+	git add -A
+	git commit -qm "upstream: independently add an unrelated writeFile() to other/o_test.go"
+
+	git checkout -q ours
+	git merge -q --no-edit theirs >/dev/null
+
+	# Simulate a hand-resolved merge that drops the fork's writeFile() from
+	# cfg/a_test.go only — other/o_test.go's unrelated writeFile() (upstream's)
+	# survives untouched.
+	ours_sha=$(git rev-parse ours)
+	theirs_sha=$(git rev-parse theirs)
+	git show main:cfg/a_test.go >cfg/a_test.go
+	git add -A
+	bad_tree=$(git write-tree)
+	git commit-tree "$bad_tree" -p "$ours_sha" -p "$theirs_sha" -m "resync: (simulated) drop writeFile from cfg/a_test.go only" >BAD_MERGE_SHA
+)
+collide_rc_setup=$?
+
+if [ "$collide_rc_setup" -ne 0 ]; then
+	record_fail "name-collision fixture builds" "setup failed, rc=$collide_rc_setup"
+else
+	bad_merge=$(cat "$collide_repo/BAD_MERGE_SHA")
+	collide_out=$(mktemp "${TMPDIR:-/tmp}/crl-test-collide-out.XXXXXX")
+	(cd "$collide_repo" && bash "$SCRIPT" "$bad_merge") >"$collide_out" 2>&1
+	collide_rc=$?
+	if [ "$collide_rc" -ne 0 ] && grep -q "RESOLUTION-BUG.*writeFile.*cfg/a_test.go" "$collide_out"; then
+		record_pass "reports writeFile dropped from cfg/a_test.go despite an unrelated writeFile surviving in other/o_test.go"
+	else
+		record_fail "reports writeFile dropped from cfg/a_test.go despite an unrelated writeFile surviving in other/o_test.go" "exit=$collide_rc:"
+		sed 's/^/    /' "$collide_out"
+	fi
+	rm -f "$collide_out"
+fi
+rm -rf "$collide_repo"
+
+# ---------------------------------------------------------------------------
+# 10. Gate 2 exemption: a fork-added declaration "lost" from a
+#     linguist-generated file is the licensed AGENTS.md rule 1 outcome
+#     (take upstream wholesale), not a resolution defect — must report
+#     EXEMPT and never fail the gate, the same as Gate 1's file-level
+#     exemption for the same path.
+# ---------------------------------------------------------------------------
+echo "== gate 2: fork-added decl dropped from a linguist-generated file is EXEMPT =="
+
+gen2_repo="$(mktemp -d "${TMPDIR:-/tmp}/crl-test-gen2.XXXXXX")"
+(
+	set -e
+	cd "$gen2_repo"
+	git init -q -b main
+	echo "gen.go -diff linguist-generated" >.gitattributes
+	cat >gen.go <<'EOF'
+package fixture
+
+func Base() {}
+EOF
+	git add -A
+	git commit -qm base
+
+	git checkout -q -b ours
+	cat >gen.go <<'EOF'
+package fixture
+
+func Base() {}
+
+func ForkFunc() {}
+EOF
+	git add -A
+	git commit -qm "fork: regenerate gen.go with ForkFunc (fork side)"
+
+	git checkout -q -b theirs main
+	cat >gen.go <<'EOF'
+package fixture
+
+func Base() {}
+
+func UpstreamFunc() {}
+EOF
+	git add -A
+	git commit -qm "upstream: regenerate gen.go with UpstreamFunc (upstream side)"
+
+	git checkout -q ours
+	# Real conflict; resolve by taking upstream's regenerated content
+	# wholesale, per AGENTS.md rule 1 — this drops ForkFunc.
+	git merge --no-edit theirs >/dev/null 2>&1 || true
+	git checkout --theirs -- gen.go
+	git add -A
+	git commit -qm "resync: take upstream's regenerated gen.go wholesale"
+)
+gen2_rc_setup=$?
+
+if [ "$gen2_rc_setup" -ne 0 ]; then
+	record_fail "generated-file Gate 2 fixture builds" "setup failed, rc=$gen2_rc_setup"
+else
+	gen2_out=$(mktemp "${TMPDIR:-/tmp}/crl-test-gen2-out.XXXXXX")
+	(cd "$gen2_repo" && bash "$SCRIPT") >"$gen2_out" 2>&1
+	gen2_rc=$?
+	if [ "$gen2_rc" -eq 0 ] && grep -q "EXEMPT.*ForkFunc.*gen.go" "$gen2_out" && ! grep -qE "(RESOLUTION-BUG|MERGE-OUTCOME).*ForkFunc" "$gen2_out"; then
+		record_pass "reports ForkFunc dropped from a linguist-generated file as EXEMPT, not a failure"
+	else
+		record_fail "reports ForkFunc dropped from a linguist-generated file as EXEMPT, not a failure" "exit=$gen2_rc:"
+		sed 's/^/    /' "$gen2_out"
+	fi
+	rm -f "$gen2_out"
+fi
+rm -rf "$gen2_repo"
+
+# ---------------------------------------------------------------------------
+# 11. Gate 1 DROPPED-FILE must not fire when UPSTREAM deleted a file the
+#     fork had merely modified — a correct, routine merge outcome, not a
+#     resync mishandling. Base has old.go; fork tweaks it; upstream deletes
+#     it; the merge accepts the deletion. Must exit 0, not report
+#     DROPPED-FILE.
+# ---------------------------------------------------------------------------
+echo "== gate 1: DROPPED-FILE does not fire on a legitimate upstream deletion =="
+
+updel_repo="$(mktemp -d "${TMPDIR:-/tmp}/crl-test-updel.XXXXXX")"
+(
+	set -e
+	cd "$updel_repo"
+	git init -q -b main
+	cat >old.go <<'EOF'
+package fixture
+
+func Old() {}
+EOF
+	git add -A
+	git commit -qm base
+
+	git checkout -q -b ours
+	cat >>old.go <<'EOF'
+
+func ForkTweak() {}
+EOF
+	git add -A
+	git commit -qm "fork: tweak old.go"
+
+	git checkout -q -b theirs main
+	git rm -q old.go
+	git commit -qm "upstream: delete old.go"
+
+	git checkout -q ours
+	# Real conflict (modify/delete); resolve by accepting the deletion, the
+	# only sane outcome once upstream has removed the file.
+	git merge --no-edit theirs >/dev/null 2>&1 || true
+	git rm -qf old.go 2>/dev/null || rm -f old.go
+	git add -A
+	git commit -qm "resync: accept upstream's deletion of old.go"
+)
+updel_rc_setup=$?
+
+if [ "$updel_rc_setup" -ne 0 ]; then
+	record_fail "upstream-deletion fixture builds" "setup failed, rc=$updel_rc_setup"
+else
+	updel_out=$(mktemp "${TMPDIR:-/tmp}/crl-test-updel-out.XXXXXX")
+	(cd "$updel_repo" && bash "$SCRIPT") >"$updel_out" 2>&1
+	updel_rc=$?
+	if [ "$updel_rc" -eq 0 ] && ! grep -q "DROPPED-FILE" "$updel_out"; then
+		record_pass "does not report DROPPED-FILE for a legitimate upstream deletion"
+	else
+		record_fail "does not report DROPPED-FILE for a legitimate upstream deletion" "exit=$updel_rc:"
+		sed 's/^/    /' "$updel_out"
+	fi
+	rm -f "$updel_out"
+fi
+rm -rf "$updel_repo"
+
+# ---------------------------------------------------------------------------
+# 12. Hook wiring: a real .githooks/pre-push, installed into a real temp repo
 #    with a real bare remote. Before this, `make check-resync-loss` existed
 #    but nothing called it — the gate only ran when an operator remembered
 #    the AGENTS.md sentence. These prove the hook actually enforces it.
@@ -834,6 +1046,112 @@ else
 	rm -f "$hookD_out"
 fi
 rm -rf "$hookD_remote" "$hookD_work"
+
+echo "-- RESYNC_LOSS_ACK=1 bypasses the resync-loss gate without --no-verify --"
+read -r hookE_remote hookE_work <<<"$(hook_setup_repo real)"
+(
+	set -e
+	cd "$hookE_work"
+	git checkout -q -b ours
+	echo "# fork notes" >docs-notes.md
+	git add -A
+	git commit -qm "fork: add docs-notes.md"
+
+	git checkout -q -b theirs main
+	echo theirs >>f.txt
+	git add -A
+	git commit -qm "upstream: touch f.txt"
+
+	git checkout -q ours
+	git merge -q --no-edit theirs >/dev/null
+
+	ours_sha=$(git rev-parse ours)
+	theirs_sha=$(git rev-parse theirs)
+	git rm -q docs-notes.md
+	bad_tree=$(git write-tree)
+	bad_merge=$(git commit-tree "$bad_tree" -p "$ours_sha" -p "$theirs_sha" -m "resync: (simulated) drop docs-notes.md")
+	git reset -q --hard "$bad_merge"
+)
+hookE_setup_rc=$?
+if [ "$hookE_setup_rc" -ne 0 ]; then
+	record_fail "hook/resync-loss-ack-bypasses-gate" "fixture setup failed, rc=$hookE_setup_rc"
+else
+	hookE_out=$(mktemp "${TMPDIR:-/tmp}/crl-hook-outE.XXXXXX")
+	(cd "$hookE_work" && GIT_TERMINAL_PROMPT=0 RESYNC_LOSS_ACK=1 git push origin ours) >"$hookE_out" 2>&1
+	hookE_rc=$?
+	if [ "$hookE_rc" -eq 0 ] && [ -n "$(hook_remote_sha "$hookE_remote" "refs/heads/ours")" ]; then
+		record_pass "hook/resync-loss-ack-bypasses-gate (push succeeded despite real loss)"
+	else
+		record_fail "hook/resync-loss-ack-bypasses-gate" "rc=$hookE_rc:"
+		sed 's/^/    /' "$hookE_out"
+	fi
+	rm -f "$hookE_out"
+fi
+rm -rf "$hookE_remote" "$hookE_work"
+
+echo "-- blocks a push whose tip is a normal commit stacked on top of a lossy merge --"
+read -r hookF_remote hookF_work <<<"$(hook_setup_repo real)"
+(
+	set -e
+	cd "$hookF_work"
+	git checkout -q -b ours
+	# A baseline commit, pushed FIRST, so the merge below lands via a
+	# fast-forward update with a non-zero remote_sha — a brand-new branch's
+	# first-ever push only checks whether its tip is a merge (see the "new
+	# remote branch" comment in .githooks/pre-push); this test targets the
+	# bounded `git rev-list "$remote_sha..$local_sha" --merges` scan an
+	# UPDATE to an already-pushed branch goes through instead.
+	echo "baseline" >baseline.txt
+	git add -A
+	git commit -qm "ours: baseline commit (no merge yet)"
+	git push -q origin ours
+
+	echo "# fork notes" >docs-notes.md
+	git add -A
+	git commit -qm "fork: add docs-notes.md"
+
+	git checkout -q -b theirs main
+	echo theirs >>f.txt
+	git add -A
+	git commit -qm "upstream: touch f.txt"
+
+	git checkout -q ours
+	git merge -q --no-edit theirs >/dev/null
+
+	# Simulate a hand-resolved merge that dropped the fork-added file, THEN
+	# a routine follow-up commit on top — the AGENTS.md-documented
+	# `fix(resync)`/`chore(regen)` shape. The pushed TIP is not a merge;
+	# only a range scan (git rev-list --merges) finds the loss underneath.
+	ours_sha=$(git rev-parse ours)
+	theirs_sha=$(git rev-parse theirs)
+	git rm -q docs-notes.md
+	bad_tree=$(git write-tree)
+	bad_merge=$(git commit-tree "$bad_tree" -p "$ours_sha" -p "$theirs_sha" -m "resync: (simulated) drop docs-notes.md")
+	git reset -q --hard "$bad_merge"
+	echo "cleanup" >>f.txt
+	git add -A
+	git commit -qm "fix(resync): unrelated follow-up commit on top of the merge"
+)
+hookF_setup_rc=$?
+hookF_baseline_sha=$(hook_remote_sha "$hookF_remote" "refs/heads/ours")
+if [ "$hookF_setup_rc" -ne 0 ]; then
+	record_fail "hook/blocks-follow-up-commit-on-lossy-merge" "fixture setup failed, rc=$hookF_setup_rc"
+else
+	hookF_out=$(mktemp "${TMPDIR:-/tmp}/crl-hook-outF.XXXXXX")
+	(cd "$hookF_work" && GIT_TERMINAL_PROMPT=0 git push origin ours) >"$hookF_out" 2>&1
+	hookF_rc=$?
+	# Remote must stay at the pre-existing baseline commit pushed during
+	# fixture setup, above — not empty (this branch already had one
+	# legitimate push before the lossy update was attempted).
+	if [ "$hookF_rc" -ne 0 ] && [ "$(hook_remote_sha "$hookF_remote" "refs/heads/ours")" = "$hookF_baseline_sha" ]; then
+		record_pass "hook/blocks-follow-up-commit-on-lossy-merge (rejected, remote stayed at baseline)"
+	else
+		record_fail "hook/blocks-follow-up-commit-on-lossy-merge" "rc=$hookF_rc remote_sha=$(hook_remote_sha "$hookF_remote" "refs/heads/ours") baseline=$hookF_baseline_sha:"
+		sed 's/^/    /' "$hookF_out"
+	fi
+	rm -f "$hookF_out"
+fi
+rm -rf "$hookF_remote" "$hookF_work"
 rm -f "$poison_resync_script"
 
 # ---------------------------------------------------------------------------

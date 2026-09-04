@@ -5,12 +5,15 @@ Ported from the ga-d32bn forensics prototype (validated against the real
 2026-08-31 resync merge, 15913af6a). See that script's header for the full
 mechanism this guards against.
 
-Gate 2 asks: which top-level Go declarations did the fork add that upstream
-never had an opinion on (present in OURS, absent from both BASE and THEIRS),
-and which of those are missing from the MERGE result? For each missing
-declaration this script runs a plain `git merge-file -p` over the three
-versions of the file that declared it and checks whether the declaration's
-name still appears in that output:
+Gate 2 asks: which (declaration, file) pairs did the fork add that upstream
+never had an opinion on (present in OURS, absent from that exact file in
+both BASE and THEIRS), and which of those are missing from the MERGE
+result? Keyed by the (name, file) pair throughout, never by bare name alone
+— a name that also exists somewhere unrelated in BASE or THEIRS must not
+hide a real fork-added declaration of the same name in a different file.
+For each missing pair this script runs a plain `git merge-file -p` over the
+three versions of the file that declared it and checks whether the
+declaration's name still appears in that output:
 
   - present  -> RESOLUTION-BUG: a naive 3-way merge would have kept it: the
                 loss was introduced by how THIS merge was hand-resolved, not
@@ -20,12 +23,17 @@ name still appears in that output:
                 the loss (if real) needs human triage rather than a
                 mechanical fix.
 
+A pair whose file carries the `linguist-generated` .gitattributes attribute
+(AGENTS.md "Resync conventions" rule 1) is reported EXEMPT instead: that
+file is licensed to be taken wholesale from upstream, so a "missing"
+declaration there is the intended outcome, not a defect, and never fails
+the gate.
+
 The declaration extraction is a lightweight line-oriented scanner, not a Go
 parser: it recognizes `func`, `func (recv)`, `type`, top-level `const`/`var`,
 and names inside a grouped `const ( ... )` / `var ( ... )` / `type ( ... )`
-block. That is
-sufficient to reproduce the counts in the ga-d32bn bead and the
-resync-loss-mechanism bd memory; it is not a substitute for `go vet`.
+block. That is sufficient to reproduce the counts in the ga-d32bn bead and
+the resync-loss-mechanism bd memory; it is not a substitute for `go vet`.
 
 Usage:
   check-resync-loss-extract.py BASE OURS THEIRS MERGE \
@@ -108,6 +116,26 @@ def blob_or_none(repo, ref, path):
         return None
 
 
+def decl_pairs(d):
+    """Flatten a name -> [files] map (as returned by decls()) into a set of
+    (name, file) pairs."""
+    return {(name, f) for name, files in d.items() for f in files}
+
+
+def is_generated(repo, path):
+    """True iff `path` carries the `linguist-generated` .gitattributes
+    attribute — the same check scripts/check-resync-loss.sh's Gate 1
+    is_exempt() makes, applied here so Gate 2 stops failing on declarations
+    "lost" from a file AGENTS.md rule 1 already licenses taking wholesale
+    from upstream (e.g. internal/api/genclient/client_gen.go)."""
+    proc = subprocess.run(
+        ["git", "-C", repo, "check-attr", "linguist-generated", "--", path],
+        capture_output=True,
+        check=False,
+    )
+    return proc.stdout.decode("utf-8", "replace").rstrip("\n").endswith(": linguist-generated: set")
+
+
 # git merge-file's conflict markers: "<<<<<<< <ours-label>", "=======",
 # ">>>>>>> <theirs-label>". Matched with DOTALL+MULTILINE so a conflict
 # block spanning many lines is removed as one unit.
@@ -180,29 +208,44 @@ def main():
     d_theirs = decls(repo, args.theirs)
     d_merge = decls(repo, args.merge)
 
-    forkadded = sorted(set(d_ours) - set(d_base) - set(d_theirs))
+    # Keyed by (name, file) pairs throughout, not by bare name: computing
+    # "fork-added" as a set of bare names (set(d_ours) - set(d_base) -
+    # set(d_theirs)) silently dropped any pair whose NAME exists anywhere
+    # upstream, even in a wholly unrelated package/file — e.g. a fork-added
+    # `sortedKeys` in cmd/gc/dolt_boot_drain.go was invisible merely because
+    # some other, unrelated `sortedKeys` existed elsewhere in BASE or
+    # THEIRS. Measured against the 2026-08-31 resync (15913af6a), that
+    # bare-name exclusion hid 8 real losses the pair-keyed set below
+    # catches, including the shared-`_test.go`-helper shape ga-d32bn exists
+    # to catch in the first place.
+    ours_pairs = decl_pairs(d_ours)
+    base_pairs = decl_pairs(d_base)
+    theirs_pairs = decl_pairs(d_theirs)
+    merge_pairs = decl_pairs(d_merge)
 
-    # Keyed by (name, file), not by bare name: a helper duplicated in two
-    # packages (same name, two files) that survives in ONE of them must
-    # still be reported missing from the other. Checking "is this name
-    # present anywhere in d_merge" made that loss invisible — the bare name
-    # existing in the surviving file was enough to call the dropped one
-    # "not missing" too.
-    missing_pairs = []
-    for name in forkadded:
-        merge_files_for_name = set(d_merge.get(name, []))
-        for fname in d_ours[name]:
-            if fname not in merge_files_for_name:
-                missing_pairs.append((name, fname))
+    forkadded_pairs = ours_pairs - base_pairs - theirs_pairs
+    missing_pairs = sorted(forkadded_pairs - merge_pairs)
 
-    print(f"# fork-added top-level decls (ours - base - theirs): {len(forkadded)}", file=sys.stderr)
+    print(f"# fork-added (decl, file) pairs (ours - base - theirs): {len(forkadded_pairs)}", file=sys.stderr)
     print(f"# fork-added (decl, file) pairs still missing from merge: {len(missing_pairs)}", file=sys.stderr)
 
     cache = {}
     bug = 0
     outcome = 0
+    exempt = 0
     with open(args.detail_out, "w", encoding="utf-8") as detail_fh:
         for name, fname in missing_pairs:
+            if is_generated(repo, fname):
+                # AGENTS.md rule 1 licenses taking this file wholesale from
+                # upstream; Gate 1 already exempts the file itself, and a
+                # declaration "lost" from it is that same licensed outcome,
+                # not a resync-resolution defect. Reported for visibility,
+                # not counted toward RESOLUTION-BUG/MERGE-OUTCOME, and never
+                # fails the gate.
+                exempt += 1
+                print(f"  {'EXEMPT':16s} {name}  ({fname})  (generated, AGENTS.md rule 1)")
+                detail_fh.write(f"EXEMPT\t{name}\t{fname}\n")
+                continue
             clean_text = three_way_merge_text(repo, args.base, args.ours, args.theirs, fname, cache)
             pat = re.compile(r"\b" + re.escape(name) + r"\b")
             if pat.search(clean_text):
@@ -228,6 +271,7 @@ def main():
     with open(args.summary_out, "w", encoding="utf-8") as fh:
         fh.write(f"RESOLUTION_BUGS={bug}\n")
         fh.write(f"MERGE_OUTCOMES={outcome}\n")
+        fh.write(f"EXEMPT={exempt}\n")
         fh.write(f"MISSING={len(missing_pairs)}\n")
 
 

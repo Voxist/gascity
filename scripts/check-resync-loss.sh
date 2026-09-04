@@ -24,7 +24,11 @@
 #
 # GATE 1 — file-level: for every file the fork touched (ours != base),
 # classify what the merge kept:
-#   DROPPED-FILE  merge is missing the file entirely (fork added/kept it).
+#   DROPPED-FILE  merge is missing the file entirely (fork added/kept it),
+#                 UNLESS upstream itself deleted the file (theirs has no
+#                 opinion because it's gone, but base did have it) — that is
+#                 a correct, routine merge outcome of upstream's own
+#                 deletion, not a resync mishandling.
 #   PURE-LOSS     merge == theirs AND theirs == base: upstream never had an
 #                 opinion on this file, so the fork's changes were purely
 #                 discarded.
@@ -193,15 +197,18 @@ if ! python3 "$EXTRACTOR" "$BASE" "$OURS" "$THEIRS" "$MERGE" --summary-out "$gat
 	failed=1
 	resolution_bugs=0
 	merge_outcomes=0
+	gate2_exempt=0
 	missing=0
 else
 	resolution_bugs=0
 	merge_outcomes=0
+	gate2_exempt=0
 	missing=0
 	while IFS='=' read -r key val; do
 		case "$key" in
 		RESOLUTION_BUGS) resolution_bugs="$val" ;;
 		MERGE_OUTCOMES) merge_outcomes="$val" ;;
+		EXEMPT) gate2_exempt="$val" ;;
 		MISSING) missing="$val" ;;
 		esac
 	done <"$gate2_summary"
@@ -243,7 +250,17 @@ while IFS= read -r f; do
 	verdict=""
 	detail=""
 	if [ -z "$mh" ]; then
-		verdict="DROPPED-FILE"
+		if [ -z "$th" ] && [ -n "$bh" ]; then
+			# Upstream deleted a file the fork had merely modified (theirs
+			# has no opinion because it's gone, but base did have it — a
+			# real deletion, not "upstream never had an opinion"). The
+			# merge accepting that deletion is a correct, routine outcome
+			# of upstream's own change, not a resync mishandling. Not a
+			# loss; skip.
+			:
+		else
+			verdict="DROPPED-FILE"
+		fi
 	elif [ -n "$th" ] && [ "$mh" = "$th" ]; then
 		if [ "$th" = "$bh" ]; then
 			verdict="PURE-LOSS"
@@ -283,7 +300,7 @@ echo "Gate 1: $gate1_hits unexempted hit(s), $gate1_exempt exempted (generated-a
 echo
 echo "=== GATE 2: fork-added top-level decls absent from the merge result ==="
 cat "$gate2_report"
-echo "Gate 2: $missing missing decl(s) — $resolution_bugs RESOLUTION-BUG, $merge_outcomes MERGE-OUTCOME."
+echo "Gate 2: $missing missing (decl, file) pair(s) — $resolution_bugs RESOLUTION-BUG, $merge_outcomes MERGE-OUTCOME, $gate2_exempt EXEMPT."
 if [ "$resolution_bugs" -gt 0 ]; then
 	failed=1
 fi
@@ -355,7 +372,7 @@ echo "Add-on: $dead_knobs dead config knob(s) found (does not affect exit status
 echo
 echo "=== SUMMARY ==="
 printf '%-14s %s\n' "Gate 1:" "$gate1_hits unexempted hit(s) ($gate1_exempt exempted)"
-printf '%-14s %s\n' "Gate 2:" "$resolution_bugs RESOLUTION-BUG, $merge_outcomes MERGE-OUTCOME (of $missing missing)"
+printf '%-14s %s\n' "Gate 2:" "$resolution_bugs RESOLUTION-BUG, $merge_outcomes MERGE-OUTCOME, $gate2_exempt EXEMPT (of $missing missing)"
 printf '%-14s %s\n' "Dangling refs:" "$dangling"
 printf '%-14s %s\n' "Dead knobs:" "$dead_knobs"
 

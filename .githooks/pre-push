@@ -15,7 +15,7 @@ zero="0000000000000000000000000000000000000000"
 
 go_changed=0
 any_non_deletion=0
-resync_loss_merge=""
+resync_loss_merges=()
 while read -r _local_ref local_sha _remote_ref remote_sha; do
   # Branch deletion — nothing to test, nothing to guard.
   if [ "$local_sha" = "$zero" ]; then
@@ -25,30 +25,57 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
   # New remote branch: no cheap base to diff against — run the suite.
   if [ "$remote_sha" = "$zero" ]; then
     go_changed=1
-  elif git diff --name-only "$remote_sha" "$local_sha" -- '*.go' 2>/dev/null | grep -q .; then
-    go_changed=1
-  fi
-
-  # Category-A resync-loss gate (ga-d32bn; AGENTS.md "Resync conventions"
-  # rule 5): a merge commit landing at the tip of a pushed ref is exactly
-  # the shape a resync produces. Detecting it is one cheap `rev-parse`
-  # per ref — `^2` only resolves when local_sha has a second parent — so
-  # an ordinary non-merge push never invokes check-resync-loss.sh at all.
-  if git rev-parse -q --verify "${local_sha}^2" >/dev/null 2>&1; then
-    resync_loss_merge="$local_sha"
+    # No bounded range to scan either. The cheapest check available for a
+    # brand-new branch is whether its pushed tip itself is a merge commit
+    # (`^2` only resolves when local_sha has a second parent) — walking the
+    # branch's entire history here would re-check commits that already
+    # passed this gate when they first entered fork/main.
+    if git rev-parse -q --verify "${local_sha}^2" >/dev/null 2>&1; then
+      resync_loss_merges+=("$local_sha")
+    fi
+  else
+    if git diff --name-only "$remote_sha" "$local_sha" -- '*.go' 2>/dev/null | grep -q .; then
+      go_changed=1
+    fi
+    # Category-A resync-loss gate (ga-d32bn; AGENTS.md "Resync conventions"
+    # rule 5): every merge commit this push introduces, not just the pushed
+    # tip. AGENTS.md's own preamble records that a resync's merge commit is
+    # routinely followed by a `fix(resync)`/`chore(regen)` cleanup commit on
+    # top before push — checking only `local_sha^2` would miss the merge
+    # entirely the moment that happens. `git rev-list --merges` over the
+    # pushed range is one cheap git-native scan (no script invocation) per
+    # ref; an ordinary non-merge push finds nothing and never invokes
+    # check-resync-loss.sh at all.
+    while IFS= read -r merge_sha; do
+      [ -n "$merge_sha" ] || continue
+      resync_loss_merges+=("$merge_sha")
+    done < <(git rev-list "${remote_sha}..${local_sha}" --merges 2>/dev/null)
   fi
 done
 
-# check-resync-loss.sh runs once (not per ref) on the last merge-commit tip
-# seen above. Before this, the gate only ran when an operator remembered
-# the AGENTS.md sentence; wiring it here makes it unconditional. Bypass:
-# `git push --no-verify`.
-if [ -n "$resync_loss_merge" ]; then
+# check-resync-loss.sh runs once per distinct merge commit found above
+# (deduped: the same merge can reach this hook via more than one pushed
+# ref). Before this, the gate only ran when an operator remembered the
+# AGENTS.md sentence; wiring it here makes it unconditional.
+#
+# Escape hatch is a dedicated RESYNC_LOSS_ACK=1, not `git push --no-verify`:
+# --no-verify also disarms the unrelated ga-fip9ps.1 bead-ownership guard
+# below and the test-fast-parallel run at the bottom of this hook, which is
+# far more than an operator acknowledging a triaged resync-loss report
+# should have to give up.
+if [ "${#resync_loss_merges[@]}" -gt 0 ] && [ "${RESYNC_LOSS_ACK:-0}" != "1" ]; then
+  deduped=()
+  while IFS= read -r merge_sha; do
+    [ -n "$merge_sha" ] || continue
+    deduped+=("$merge_sha")
+  done < <(printf '%s\n' "${resync_loss_merges[@]}" | sort -u)
   repo_root="$(git rev-parse --show-toplevel)"
-  if ! (cd "$repo_root" && make check-resync-loss MERGE="$resync_loss_merge"); then
-    echo "pre-push: check-resync-loss failed for merge commit $resync_loss_merge (bead ga-d32bn) — see output above. Bypass: git push --no-verify" >&2
-    exit 1
-  fi
+  for merge_sha in "${deduped[@]}"; do
+    if ! (cd "$repo_root" && make check-resync-loss MERGE="$merge_sha"); then
+      echo "pre-push: check-resync-loss failed for merge commit $merge_sha (bead ga-d32bn) — see output above. Bypass (only after triage): RESYNC_LOSS_ACK=1 git push" >&2
+      exit 1
+    fi
+  done
 fi
 
 # Bead ownership/staleness guard (ga-fip9ps.1): re-checks bd claim state
