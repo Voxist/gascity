@@ -341,7 +341,7 @@ func (c *CachingStore) updateEventDepsLocked(eventType string, b Bead, fields ma
 			mutated = true
 		}
 		if c.depsComplete {
-			c.depsComplete = false
+			c.setDepsCompleteLocked(false, "event-updated-deps-unknown")
 			mutated = true
 		}
 		return mutated
@@ -350,14 +350,14 @@ func (c *CachingStore) updateEventDepsLocked(eventType string, b Bead, fields ma
 		return false
 	}
 	if eventType == "bead.updated" && c.depsComplete {
-		c.depsComplete = false
+		c.setDepsCompleteLocked(false, "event-updated-missing-deps")
 		c.recordProblemLocked("apply bead.updated event", fmt.Errorf("dependency cache marked complete but missing deps for %s", b.ID))
 		return true
 	}
 	if !c.depsComplete {
 		return false
 	}
-	c.depsComplete = false
+	c.setDepsCompleteLocked(false, "event-deps-coverage-lost")
 	return true
 }
 
@@ -492,6 +492,11 @@ func (c *CachingStore) clearDependentReadyProjectionsLocked(dependsOnID string) 
 		return false
 	}
 	if !c.depsComplete {
+		// The degenerate branch ADR-0094 D6 is about: with no complete dep
+		// projection the cache cannot tell which rows depend on dependsOnID,
+		// so it invalidates every row. Counted (not just taken) so the flag's
+		// blast radius is reportable alongside the flag itself.
+		c.depsWholeCacheWipes++
 		return c.clearAllReadyProjectionsLocked()
 	}
 	cleared := make([]string, 0)

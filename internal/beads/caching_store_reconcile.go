@@ -523,6 +523,14 @@ func (c *CachingStore) mergeSnapshotLocked(
 
 	res := mergeSectionResult{notifications: make([]cacheNotification, 0, len(freshByID))}
 	nextDepsComplete := useFreshDeps
+	// Which cause folded nextDepsComplete false, for the D6 gauge's driver
+	// field. Resolved up front: the dep fetch is the store-wide cause, so a
+	// per-row degradation is only the attributable one when the fetch itself
+	// came back whole. Unused when nextDepsComplete stays true.
+	depsDegradeDriver := "reconcile-dep-fetch-incomplete"
+	if useFreshDeps {
+		depsDegradeDriver = "reconcile-row-degraded"
+	}
 
 	// 1. Absorb loop — over freshByID. Classification reads pre-absorb state.
 	for id, freshBead := range freshByID {
@@ -659,7 +667,7 @@ func (c *CachingStore) mergeSnapshotLocked(
 
 	// 4. Shared tail (was duplicated per branch).
 	c.syncFailures = 0
-	c.depsComplete = nextDepsComplete
+	c.setDepsCompleteLocked(nextDepsComplete, depsDegradeDriver)
 	c.primePartialErr = nil
 	c.advanceObservationLocked()
 	c.promoteLiveLocked()
@@ -752,9 +760,26 @@ func (c *CachingStore) reconcileSuccessLogLocked(now time.Time, elapsed time.Dur
 	if cadence == "" {
 		cadence = "default"
 	}
+	// deps=... is the ADR-0094 D6 gauge on the operator's existing heartbeat.
+	// It rides this line rather than a new endpoint because the trigger
+	// condition is a DWELL ("latched false for > 1h"), and a dwell needs a
+	// series: this line is already emitted once a minute per store and is
+	// already the instrument operators grep. mergeSnapshotLocked has already
+	// run by the time this is composed, so the value reported is the
+	// post-reconcile one.
+	depsField := "deps=complete"
+	if !c.depsComplete {
+		depsField = "deps=incomplete"
+		if !c.depsIncompleteSince.IsZero() {
+			depsField += fmt.Sprintf(" deps_for=%s", now.Sub(c.depsIncompleteSince).Round(time.Second))
+		}
+		if c.depsIncompleteDriver != "" {
+			depsField += " deps_driver=" + c.depsIncompleteDriver
+		}
+	}
 	return fmt.Sprintf(
-		"beads cache: reconciled rig=%s beads=%d adds=%d updates=%d removes=%d took=%s cadence=%s",
-		rig, len(c.beads), adds, updates, removes, elapsed.Round(time.Millisecond), cadence,
+		"beads cache: reconciled rig=%s beads=%d adds=%d updates=%d removes=%d took=%s cadence=%s %s deps_wipes=%d",
+		rig, len(c.beads), adds, updates, removes, elapsed.Round(time.Millisecond), cadence, depsField, c.depsWholeCacheWipes,
 	), true
 }
 
