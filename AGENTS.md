@@ -96,13 +96,22 @@ Two rules keep that wave from forming.
 of these, take upstream wholesale and re-run the generator:
 
 - `internal/api/openapi.json`, `docs/reference/schema/openapi.*`
-- `docs/reference/schema/city-schema.*`, `docs/reference/cli.md`,
-  `docs/reference/config.md`
+- `docs/reference/schema/city-schema.*`, `docs/reference/schema/pack-schema.*`,
+  `docs/reference/cli.md`, `docs/reference/config.md`
 - `cmd/gc/productmetrics_command_census.json`, `cmd/gc/metrics_census_gen.go`
 - `internal/api/dashboardspa/**` generated TS and `dist/`
+- `internal/api/genclient/client_gen.go`
 - test ratchets and baselines: `internal/testpolicy/resourcecensus/census.go`,
   `internal/testenv/testdata/*.golden`, `scripts/*baseline*`,
   `scripts/*manifest*`
+
+Every path above carries the `linguist-generated` attribute in
+`.gitattributes`, which is the single enforced source of truth this list
+mirrors: `scripts/check-resync-loss.sh`'s Gate 1 exemption
+(`git check-attr linguist-generated`), `scripts/check-generated-docs-drift.sh`,
+and GitHub's diff collapsing all read the same file. Add a path to
+`.gitattributes` first, then update this list — a path exempted in one but
+not the other is the bug this section exists to prevent (ga-d32bn).
 
 Hand-merging these is what produces `chore(regen)` and `test: unbreak CI`
 commits. The generator output is a *function of the merged source*; resolving
@@ -126,6 +135,16 @@ touches code.
 **4. Verify with the real suite.** `make test-local-full-parallel`, not
 `go build` + `go vet`. The 2026-07-15 resync passed build and vet cleanly and
 still shipped four runtime regressions.
+
+**5. Rule 1's "take upstream wholesale" applies ONLY to the generated-artifact
+list above.** A shared `_test.go` file is never on that list and is never
+taken wholesale — it is merged, the same as any other hand-authored file. The
+2026-08-31 resync applied rule 1's instinct to shared test files anyway and
+silently dropped 234 fork-added declarations (ga-d32bn): `go build`, `go vet`,
+and rule 4's real-suite run are all blind to this class, because deleting a
+test never fails a build — the suite passes precisely because the tests that
+would have failed are the ones that got deleted. Every resync runs
+`scripts/check-resync-loss.sh` on the merge commit before push to catch it.
 
 ## Development approach
 
