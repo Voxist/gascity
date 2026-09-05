@@ -304,10 +304,25 @@ func (c *BinaryDivergenceCheck) Run(_ *CheckContext) *CheckResult {
 		// the running bytes" over the top of it would send an operator to
 		// restart a healthy supervisor.
 		//
-		// Not when the platform reported the image unlinked, though. The
-		// kernel has already dropped that inode, so a file now wearing its
-		// number is inode reuse, not identity — the same reason the OK gate
-		// above requires imagePathIntact.
+		// Comparing a STALE identity (captured when the image was resolved)
+		// against a current one is sound only because of a kernel invariant
+		// that is worth stating, since two platform differences have already
+		// decided this check's correctness: a live process's executing image
+		// is pinned for the lifetime of the process, so its inode number
+		// cannot be recycled while the supervisor runs. Measured on Linux
+		// 6.x — an unlinked-but-executing inode is not handed to any
+		// subsequently created file — and the same holds on macOS, where the
+		// mapped image holds its vnode. Without that pin this branch would
+		// read a recycled number as identity and report a fleet running
+		// different bytes as converged. The invariant lapses if the
+		// supervisor exits mid-check (ga-3159w).
+		//
+		// Not when the platform reported the image unlinked, though. That is
+		// a different hazard and needs its own guard: the platform has said
+		// outright that no name reaches the inode, so a file wearing its
+		// number is reuse rather than identity. Only Linux reports it (macOS
+		// lsof does not mark a replaced image at all — the original vc-lwif
+		// trap), so on macOS the pin above is the whole of the protection.
 		if !running.unlinked && running.id == verifiedID {
 			r.Status = StatusOK
 			r.Message = fmt.Sprintf(

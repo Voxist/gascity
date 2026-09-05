@@ -45,6 +45,35 @@ func symlink(t *testing.T, oldname, newname string) string {
 	return newname
 }
 
+// requireDistinctIdentity fails when the executed image and the PATH binary
+// share a file identity, which for two different files means the kernel handed
+// the second one the inode number the first just released.
+//
+// Fixtures here free the executed artifact and then create the PATH binary,
+// and on Linux (ext4, overlayfs) that number is reused IMMEDIATELY — measured:
+// remove-then-create and rename-then-create both return the same inode, while
+// APFS does not. Two genuinely different files then compare equal and the
+// check's identity branch reports them as one binary.
+//
+// That world state cannot occur in production. The kernel pins a live
+// process's executing image, so its inode number is not recycled while the
+// supervisor runs — measured on Linux 6.x: an unlinked-but-executing inode is
+// never handed out to the next eight files created, and /proc/<pid>/exe
+// additionally reports it "(deleted)". A fixture that recycles it is
+// describing a world the check will never see.
+//
+// So fixtures must create the PATH binary BEFORE freeing the executed one, and
+// this asserts they managed it rather than trusting the filesystem to be the
+// one that does not recycle.
+func requireDistinctIdentity(t *testing.T, executed runningImage, verifiedPath string) {
+	t.Helper()
+	if executed.id == identityOf(t, verifiedPath) {
+		t.Fatalf("fixture is describing an impossible world: the executed image and %s share inode %d, "+
+			"which only happens because the executed inode was freed and its number reused — "+
+			"create the PATH binary before freeing the executed one", verifiedPath, executed.id.ino)
+	}
+}
+
 // imageAt builds a runningImage for a path as it exists right now: the path
 // plus the identity of the inode currently behind it. Capturing the identity
 // separately from the path is what lets a test later replace the file and
@@ -141,10 +170,13 @@ func TestBinaryDivergenceCheck_ExecutedImageRemoved(t *testing.T) {
 	gone := filepath.Join(dir, "gc-old")
 	writeFakeBinary(t, gone, "the bytes the fleet is running")
 	executing := imageAt(t, gone)
+	// The PATH binary is created BEFORE the executed artifact is pruned, so
+	// the two cannot share an inode number. See requireDistinctIdentity.
+	verified := writeFakeBinary(t, filepath.Join(dir, "gc"), "the build on PATH")
 	if err := os.Remove(gone); err != nil {
 		t.Fatalf("removing %s: %v", gone, err)
 	}
-	verified := writeFakeBinary(t, filepath.Join(dir, "gc"), "the build on PATH")
+	requireDistinctIdentity(t, executing, verified)
 
 	r := divergenceCheck(31337, executing, verified).Run(&CheckContext{})
 
@@ -702,10 +734,12 @@ func TestBinaryDivergenceCheck_ExecutedImageDeletedEndToEnd(t *testing.T) {
 		{name: artifact, dev: fmt.Sprintf("%#x", executing.id.dev), ino: fmt.Sprint(executing.id.ino)},
 		{name: loader, dev: fmt.Sprintf("%#x", loaderID.dev), ino: fmt.Sprint(loaderID.ino)},
 	}
+	// Created before the prune so the pruned inode's number cannot land on it.
+	verified := writeFakeBinary(t, filepath.Join(dir, "gc"), "the build on PATH")
 	if err := os.Remove(artifact); err != nil {
 		t.Fatalf("pruning %s: %v", artifact, err)
 	}
-	verified := writeFakeBinary(t, filepath.Join(dir, "gc"), "the build on PATH")
+	requireDistinctIdentity(t, executing, verified)
 
 	c := divergenceCheck(4242, runningImage{}, verified)
 	c.resolveRunningImage = func(int) (runningImage, error) {
@@ -1333,13 +1367,16 @@ func TestBinaryDivergenceCheck_ContentHandleNamingAnotherFileIsNotTrusted(t *tes
 	executing.contentPath = symlink(t, path, filepath.Join(dir, "exe-link"))
 
 	// The in-place install: the replacement and the PATH binary hold the same
-	// bytes as each other, and different bytes from the running image.
+	// bytes as each other, and different bytes from the running image. The
+	// PATH binary is written BEFORE the rename frees the original inode, so
+	// it cannot inherit that inode's number.
 	installed := "the build that was installed over it"
+	verified := writeFakeBinary(t, filepath.Join(dir, "gc"), installed)
 	replacement := writeFakeBinary(t, filepath.Join(dir, "gc-artifact.new"), installed)
 	if err := os.Rename(replacement, path); err != nil {
 		t.Fatalf("replacing %s: %v", path, err)
 	}
-	verified := writeFakeBinary(t, filepath.Join(dir, "gc"), installed)
+	requireDistinctIdentity(t, executing, verified)
 
 	r := divergenceCheck(4242, executing, verified).Run(&CheckContext{})
 
@@ -1887,13 +1924,13 @@ func TestBinaryDivergenceCheck_AmbiguousMappedTextSetIsUnverifiedEndToEnd(t *tes
 		{name: lib, dev: fmt.Sprintf("%#x", identityOf(t, lib).dev), ino: fmt.Sprint(identityOf(t, lib).ino)},
 		{name: image, dev: fmt.Sprintf("%#x", identityOf(t, image).dev), ino: fmt.Sprint(identityOf(t, image).ino)},
 	}
+	verified := writeFakeBinary(t, filepath.Join(dir, "gc"), "the build on PATH")
 	for _, p := range []string{lib, image} {
 		replacement := writeFakeBinary(t, p+".new", "a different build")
 		if err := os.Rename(replacement, p); err != nil {
 			t.Fatalf("replacing %s: %v", p, err)
 		}
 	}
-	verified := writeFakeBinary(t, filepath.Join(dir, "gc"), "the build on PATH")
 
 	c := divergenceCheck(4242, runningImage{}, verified)
 	c.resolveRunningImage = func(int) (runningImage, error) {
