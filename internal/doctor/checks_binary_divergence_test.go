@@ -1363,7 +1363,7 @@ func TestExecutedFacts_ContentHandleMustReachTheRunningInode(t *testing.T) {
 	other := writeFakeBinary(t, filepath.Join(dir, "other"), "some other file entirely")
 
 	img.contentPath = other
-	if _, reachable := executedFacts(img, imagePathReplaced); reachable {
+	if _, _, reachable := executedFacts(img, imagePathReplaced); reachable {
 		t.Error("executedFacts trusted a handle that reaches a different inode; the bytes it returns are not the process's")
 	}
 
@@ -1375,7 +1375,7 @@ func TestExecutedFacts_ContentHandleMustReachTheRunningInode(t *testing.T) {
 		t.Skipf("hard links unsupported here: %v", err)
 	}
 	img.contentPath = linked
-	f, reachable := executedFacts(img, imagePathReplaced)
+	f, _, reachable := executedFacts(img, imagePathReplaced)
 	if !reachable {
 		t.Fatal("executedFacts rejected a handle that does reach the executing inode")
 	}
@@ -1655,7 +1655,7 @@ func TestExecutedFacts_IntactPathMustStillBeTheRunningInode(t *testing.T) {
 	writeFakeBinary(t, path, "the bytes the fleet is running")
 	running := imageAt(t, path)
 
-	f, reachable := executedFacts(running, imagePathIntact)
+	f, _, reachable := executedFacts(running, imagePathIntact)
 	if !reachable {
 		t.Fatal("executedFacts rejected an intact path that still names the running inode")
 	}
@@ -1668,38 +1668,209 @@ func TestExecutedFacts_IntactPathMustStillBeTheRunningInode(t *testing.T) {
 		t.Fatalf("replacing %s: %v", path, err)
 	}
 
-	if _, reachable := executedFacts(running, imagePathIntact); reachable {
+	if _, _, reachable := executedFacts(running, imagePathIntact); reachable {
 		t.Error("executedFacts returned bytes from a file that is no longer the running inode; the verdict formed from them would describe the wrong artifact")
 	}
 }
 
-// TestReportUnreachableImage_DetailsAgreeWithTheMessage pins the line that
-// drifted. The Details entry asserted the running bytes are "reachable only
-// from inside the running process" — true for a replaced image, false for one
-// whose path was observed intact and then could not be read, where the file is
-// right there. An unasserted string is how the Message and the Details came to
-// describe different states.
-func TestReportUnreachableImage_DetailsAgreeWithTheMessage(t *testing.T) {
+// TestReportUnreachableImage_EveryStringMatchesTheState pins all three
+// operator-facing fields on both routes.
+//
+// For `gc doctor` the strings ARE the product: an operator sees Status only as
+// a color, so a Message, Details entry or FixHint asserting a state the check
+// disproved is a verdict asserting something it did not establish, in the only
+// sense that reaches a human. Details drifted from Message because Details was
+// unasserted; FixHint then drifted from both because FixHint was unasserted.
+// Assert all three, on both routes, or the next one drifts too.
+func TestReportUnreachableImage_EveryStringMatchesTheState(t *testing.T) {
 	dir := t.TempDir()
 	path := writeFakeBinary(t, filepath.Join(dir, "gc-artifact"), "running")
 	verifiedPath := writeFakeBinary(t, filepath.Join(dir, "gc"), "on path")
 	c := divergenceCheck(4242, imageAt(t, path), verifiedPath)
 
-	intact := c.reportUnreachableImage(&CheckResult{Name: c.Name()}, imageAt(t, path), imagePathIntact,
-		statBinary(verifiedPath), verifiedPath)
-	intactDetails := strings.Join(intact.Details, "\n")
-	if strings.Contains(intactDetails, "reachable only from inside the running process") {
-		t.Errorf("Details = %q, must not claim the bytes have no name on disk for a path observed intact", intactDetails)
+	for name, tc := range map[string]struct {
+		state       imagePathState
+		wantAbsent  []string
+		wantPresent []string
+	}{
+		// The file is still there and was not read — a root-owned 0111
+		// artifact, say. Telling the operator to restart is advice that
+		// changes nothing, over a Message saying the file is right there.
+		"intact but unreadable": {
+			state:       imagePathIntact,
+			wantAbsent:  []string{"replaced or removed", "reachable only from inside the running process", "restart the supervisor"},
+			wantPresent: []string{path},
+		},
+		"replaced under the process": {
+			state:       imagePathReplaced,
+			wantAbsent:  []string{},
+			wantPresent: []string{"no longer the file at", "reachable only from inside the running process", "restart the supervisor"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := c.reportUnreachableImage(&CheckResult{Name: c.Name()}, imageAt(t, path), tc.state,
+				statBinary(verifiedPath), verifiedPath)
+			all := strings.Join(append(append([]string{r.Message}, r.Details...), r.FixHint), "\n")
+
+			for _, want := range tc.wantPresent {
+				if !strings.Contains(all, want) {
+					t.Errorf("Message/Details/FixHint = %q, want it to contain %q", all, want)
+				}
+			}
+			for _, absent := range tc.wantAbsent {
+				if strings.Contains(all, absent) {
+					t.Errorf("Message/Details/FixHint = %q, must not contain %q for this state", all, absent)
+				}
+			}
+			if r.FixHint == "" {
+				t.Error("FixHint is empty; every unreachable report owes the operator something to do")
+			}
+		})
 	}
-	if !strings.Contains(intactDetails, path) {
-		t.Errorf("Details = %q, want the path the image is still at", intactDetails)
+}
+
+// TestExecutedFacts_ReturnsTheStateItObserved is the fix for both wording
+// findings at their source.
+//
+// classifyImagePath's answer is stale by the time executedFacts takes its own
+// stat, and every string reportUnreachableImage prints is a claim about the
+// state of the world. Passing the stale state made the wording describe a
+// world the caller had just disproved: reaching the unreachable report at all
+// with imagePathIntact requires running.id != verifiedID, and on the
+// identity-mismatch route every clause of the intact wording is false.
+//
+// So executedFacts returns what it OBSERVED, and the wording is written from
+// that. This also composes the join that could not be reached through Run —
+// classifyImagePath returns imagePathIntact only when the identities agree, so
+// Run can never present intact-plus-mismatch, but executedFacts' own boundary
+// can.
+func TestExecutedFacts_ReturnsTheStateItObserved(t *testing.T) {
+	t.Run("intact and still the running inode", func(t *testing.T) {
+		dir := t.TempDir()
+		path := writeFakeBinary(t, filepath.Join(dir, "gc"), "running")
+
+		_, observed, reachable := executedFacts(imageAt(t, path), imagePathIntact)
+
+		if !reachable {
+			t.Fatal("reachable = false for a path that still names the running inode")
+		}
+		if observed != imagePathIntact {
+			t.Errorf("observed = %v, want imagePathIntact", observed)
+		}
+	})
+
+	t.Run("replaced between the two stats", func(t *testing.T) {
+		dir := t.TempDir()
+		path := writeFakeBinary(t, filepath.Join(dir, "gc"), "running")
+		running := imageAt(t, path)
+		replacement := writeFakeBinary(t, filepath.Join(dir, "gc.new"), "a different build")
+		if err := os.Rename(replacement, path); err != nil {
+			t.Fatalf("replacing %s: %v", path, err)
+		}
+
+		_, observed, reachable := executedFacts(running, imagePathIntact)
+
+		if reachable {
+			t.Fatal("reachable = true for a path that no longer names the running inode")
+		}
+		if observed != imagePathReplaced {
+			t.Errorf("observed = %v, want imagePathReplaced: the path was replaced, whatever classifyImagePath saw a moment earlier", observed)
+		}
+	})
+
+	t.Run("removed between the two stats", func(t *testing.T) {
+		dir := t.TempDir()
+		path := writeFakeBinary(t, filepath.Join(dir, "gc"), "running")
+		running := imageAt(t, path)
+		if err := os.Remove(path); err != nil {
+			t.Fatalf("removing %s: %v", path, err)
+		}
+
+		_, observed, reachable := executedFacts(running, imagePathIntact)
+
+		if reachable {
+			t.Fatal("reachable = true for a path that is gone")
+		}
+		if observed != imagePathReplaced {
+			t.Errorf("observed = %v, want imagePathReplaced", observed)
+		}
+	})
+
+	t.Run("still there but could not be looked at", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses directory permissions")
+		}
+		dir := t.TempDir()
+		locked := filepath.Join(dir, "locked")
+		if err := os.Mkdir(locked, 0o755); err != nil {
+			t.Fatalf("Mkdir: %v", err)
+		}
+		path := writeFakeBinary(t, filepath.Join(locked, "gc"), "running")
+		running := imageAt(t, path)
+		if err := os.Chmod(locked, 0o000); err != nil {
+			t.Fatalf("Chmod: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+		_, observed, reachable := executedFacts(running, imagePathIntact)
+
+		if reachable {
+			t.Fatal("reachable = true for a path that could not be stat'd")
+		}
+		if observed != imagePathIntact {
+			t.Errorf("observed = %v, want imagePathIntact: a stat that was refused is not evidence of a replacement", observed)
+		}
+	})
+
+	t.Run("replaced with no handle on the executing inode", func(t *testing.T) {
+		dir := t.TempDir()
+		path := writeFakeBinary(t, filepath.Join(dir, "gc"), "running")
+		running := imageAt(t, path) // contentPath deliberately empty: macOS
+
+		_, observed, reachable := executedFacts(running, imagePathReplaced)
+
+		if reachable {
+			t.Fatal("reachable = true with no handle on the executing inode")
+		}
+		if observed != imagePathReplaced {
+			t.Errorf("observed = %v, want imagePathReplaced", observed)
+		}
+	})
+}
+
+// TestReportUnreachableImage_WordsTheStateExecutedFactsObserved composes the
+// two halves: the seam that observes the state, and the strings written from
+// it. A replacement landing between classifyImagePath and executedFacts must
+// produce the REPLACED wording — "no longer the file at", the unreachable
+// Details, the restart hint — not the intact wording that says the file is
+// still there.
+func TestReportUnreachableImage_WordsTheStateExecutedFactsObserved(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFakeBinary(t, filepath.Join(dir, "gc-artifact"), "the bytes the fleet is running")
+	running := imageAt(t, path)
+	verifiedPath := writeFakeBinary(t, filepath.Join(dir, "gc"), "the build on PATH")
+	replacement := writeFakeBinary(t, filepath.Join(dir, "gc-artifact.new"), "a different build")
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatalf("replacing %s: %v", path, err)
 	}
 
-	replaced := c.reportUnreachableImage(&CheckResult{Name: c.Name()}, imageAt(t, path), imagePathReplaced,
-		statBinary(verifiedPath), verifiedPath)
-	replacedDetails := strings.Join(replaced.Details, "\n")
-	if !strings.Contains(replacedDetails, "reachable only from inside the running process") {
-		t.Errorf("Details = %q, want the unreachable wording when the artifact really is gone", replacedDetails)
+	c := divergenceCheck(4242, running, verifiedPath)
+	_, observed, reachable := executedFacts(running, imagePathIntact)
+	if reachable {
+		t.Fatal("precondition: executedFacts must refuse a path that no longer names the running inode")
+	}
+
+	r := c.reportUnreachableImage(&CheckResult{Name: c.Name()}, running, observed, statBinary(verifiedPath), verifiedPath)
+	all := strings.Join(append(append([]string{r.Message}, r.Details...), r.FixHint), "\n")
+
+	if !strings.Contains(r.Message, "no longer the file at") {
+		t.Errorf("Message = %q, want the replaced wording: the path really was replaced", r.Message)
+	}
+	if strings.Contains(all, "is still the file it was loaded from") {
+		t.Errorf("output = %q, must not say the file is still there about one that was replaced", all)
+	}
+	if !strings.Contains(r.FixHint, "restart the supervisor") {
+		t.Errorf("FixHint = %q, want the restart advice for an artifact that is gone", r.FixHint)
 	}
 }
 

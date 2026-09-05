@@ -110,11 +110,31 @@ type runningImage struct {
 // information-gathering step below therefore reports a tri-state. There are
 // many places a verdict is formed — roughly a dozen and a half exits across
 // Run and reportUnreachableImage — so the rule is a property every one of them
-// must hold rather than a bottleneck one of them enforces: no exit may assert
-// agreement, divergence, or the absence of a supervisor unless the observation
-// behind that claim was actually made. Three review rounds found exits that
-// broke it, and a fourth found fact-gathering steps that fed a sound exit a
-// fact they had not established, which is the same failure one layer down.
+// must hold rather than a bottleneck one of them enforces.
+//
+// The rule covers two kinds of claim, and review rounds have now found both
+// broken:
+//
+//   - claims about the COMPARISON: that the binaries agree, that they differ,
+//     that no supervisor is running. Three rounds found exits asserting one
+//     without the observation behind it, and a fourth found fact-gathering
+//     steps feeding a sound exit a fact they had not established.
+//   - claims about the STATE OF THE WORLD: that a file is still at its path,
+//     that it was replaced, that its bytes have no name on disk — carried
+//     almost entirely by Message, Details and FixHint. For a doctor check
+//     those strings ARE the result; an operator sees Status only as a color.
+//     A string asserting a state the check disproved is the same defect in the
+//     only layer a human reads, and a fifth round found two.
+//
+// One window is known to remain open and is not closed here: the identity of
+// the executed image is proved once, by stat, and compareContent then opens
+// that path again (twice in sameTail, twice in compareAndDigest) and c.version
+// execs it. A rename landing inside that window would let a contentSame
+// verdict describe bytes the process is not running. It is a race rather than
+// a class of world states — the bytes under a live executable cannot change in
+// place, only by a rename that changes the inode — and closing it means
+// opening the file once and stat'ing the descriptor rather than the path. See
+// ga-7bcb8.
 type BinaryDivergenceCheck struct {
 	// supervisorPID is the PID of the running supervisor, or 0 when none is
 	// running. Sourced from the same control-socket probe the rest of the
@@ -266,7 +286,15 @@ func (c *BinaryDivergenceCheck) Run(_ *CheckContext) *CheckResult {
 	// on their bytes, which means reading the running image — reachable at its
 	// own path while it is still there, and afterwards only through a platform
 	// handle on the executing inode.
-	executed, reachable := executedFacts(running, state)
+	// state is DELIBERATELY overwritten here rather than shadowed by a second
+	// name. Everything below it — the wording, the details, the remediation —
+	// is a claim about the state of the world, and the value classifyImagePath
+	// produced above is stale the moment executedFacts takes its own stat. No
+	// test can construct the disagreement (classifyImagePath returns intact
+	// only while the identities agree, so Run cannot present intact-plus-
+	// mismatch), which means no test can catch a line below that forwards the
+	// stale value. Leaving no stale value to forward is the guard.
+	executed, state, reachable := executedFacts(running, state)
 	if !reachable {
 		// The executed inode can outlive the name it was loaded from: a
 		// second hard link, or a rename of the artifact out from under the
@@ -348,10 +376,22 @@ func (c *BinaryDivergenceCheck) Run(_ *CheckContext) *CheckResult {
 // of what the bytes turn out to be. It deliberately does NOT claim the two
 // binaries differ, because that has not been observed.
 //
-// state is a parameter rather than a re-derivation because the wording asserts
-// one: an image whose path was observed intact and then failed to stat is a
-// read that lost a race, not a replacement, and saying "replaced or removed"
-// about it would assert a state this check never established.
+// state is a parameter rather than a re-derivation because every string below
+// asserts one, and only the caller knows which was observed. Three shapes
+// reach here, and they need different words and different remediation:
+//
+//   - the path is still the file the process loaded, and a read of it was
+//     refused (a root-owned 0111 artifact, an unreadable parent). Nothing is
+//     gone; a restart would re-execute the same file.
+//   - the path was replaced or removed under the process — including between
+//     classifyImagePath's stat and executedFacts' own, which is the dominant
+//     producer and the one a stale state gets wrong.
+//   - a platform handle that no longer reaches the executing inode, so the
+//     bytes have no name on disk at all.
+//
+// It must therefore be the state executedFacts OBSERVED. Passing the state
+// classifyImagePath returned makes these strings describe a world the caller
+// has already disproved.
 func (c *BinaryDivergenceCheck) reportUnreachableImage(r *CheckResult, running runningImage, state imagePathState, verified binaryFacts, verifiedPath string) *CheckResult {
 	verified.version = c.version(verifiedPath)
 	r.Status = StatusWarning
@@ -362,15 +402,35 @@ func (c *BinaryDivergenceCheck) reportUnreachableImage(r *CheckResult, running r
 		fmt.Sprintf("executed (what the fleet runs): %s", unreachableDetail(running, state)),
 		fmt.Sprintf("verified (what probes hit): %s", verified.describeVerbose()),
 	}
-	r.FixHint = fmt.Sprintf("no capability probe can describe the running bytes while the artifact behind them is gone; restart the supervisor so it re-executes the artifact now on disk, then re-run `%s doctor` to compare them", gcCommandName)
+	r.FixHint = unreachableFixHint(running, state)
 	return r
 }
 
-// unreachableReason states why the running bytes could not be read, in the
-// terms the observed image-path state actually supports.
+// unreachableFixHint is the remediation for an unreachable image, which
+// differs by state as sharply as the diagnosis does. Restarting the supervisor
+// converges a fleet whose artifact is gone; for an artifact that is still
+// exactly where it was loaded from and merely could not be read, a restart
+// changes nothing at all and the operator needs read access instead.
+func unreachableFixHint(running runningImage, state imagePathState) string {
+	if state == imagePathIntact {
+		return fmt.Sprintf("the artifact the supervisor is executing is still at %s, so there is nothing to converge and a restart would re-execute the same file; re-run `%s doctor` as a user that can read it (or under sudo) to compare the bytes",
+			running.path, gcCommandName)
+	}
+	return fmt.Sprintf("no capability probe can describe the running bytes while the artifact behind them is gone; restart the supervisor so it re-executes the artifact now on disk, then re-run `%s doctor` to compare them", gcCommandName)
+}
+
+// unreachableReason states why the running bytes could not be read.
+//
+// state must be the state executedFacts OBSERVED, not the one classifyImagePath
+// returned earlier. The two disagree exactly when the artifact moved between
+// the two stats, and that is the case whose wording matters most: the intact
+// text below asserts three things about the world — that the file is still the
+// one the process loaded, that it is still at that path, and that a read of it
+// was refused — and all three are false of a path that was replaced under the
+// process. Passing the stale state prints them anyway.
 func unreachableReason(path string, state imagePathState) string {
 	if state == imagePathIntact {
-		return fmt.Sprintf("%s is still the file it was loaded from, but it could not be read from there", path)
+		return fmt.Sprintf("%s is still the file it was loaded from, but its bytes could not be read from there", path)
 	}
 	return fmt.Sprintf("it is no longer the file at %s — that path was replaced or removed under it, so nothing on disk describes the running bytes", path)
 }
@@ -466,14 +526,33 @@ func classifyImagePath(img runningImage) imagePathState {
 }
 
 // executedFacts returns the on-disk facts describing the running image's
-// bytes, and whether those bytes are reachable at all. An intact image is read
-// at its own path; a replaced one only through a platform handle on the
-// executing inode, which not every platform has.
-func executedFacts(running runningImage, state imagePathState) (binaryFacts, bool) {
+// bytes, whether those bytes are reachable at all, and — the part every
+// operator-facing string downstream depends on — the image-path state it
+// OBSERVED rather than the one it was handed.
+//
+// The state it was handed came from classifyImagePath's stat, and is already
+// stale: the artifact can be replaced or removed between that stat and this
+// one. Reporting from the stale state makes reportUnreachableImage describe a
+// world this function has just disproved, which is the same defect as
+// asserting a comparison that never ran, in the layer an operator actually
+// reads.
+//
+// An intact image is read at its own path; a replaced one only through a
+// platform handle on the executing inode, which not every platform has.
+func executedFacts(running runningImage, state imagePathState) (binaryFacts, imagePathState, bool) {
 	if state == imagePathIntact {
-		f := statBinary(running.path)
-		if f.info == nil {
-			return binaryFacts{}, false
+		f, err := statBinaryErr(running.path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				// Gone since classifyImagePath looked. The path no longer
+				// names the running image, whatever it named a moment ago.
+				return binaryFacts{}, imagePathReplaced, false
+			}
+			// Could not look — an unreadable parent directory, an I/O
+			// error. The file may well still be there, so the intact
+			// observation stands and nothing downstream may claim a
+			// replacement.
+			return binaryFacts{}, imagePathIntact, false
 		}
 		// classifyImagePath established this identity at a DIFFERENT stat.
 		// Re-asserting it here is what stops a replacement that landed
@@ -482,13 +561,19 @@ func executedFacts(running runningImage, state imagePathState) (binaryFacts, boo
 		// reaches the executing inode, reached by a race instead of by a
 		// stale name. Bytes that match PATH would otherwise answer "the same
 		// binary" for a fleet still running the original.
-		if id, ok := fileIdentityOf(f.info); !ok || id != running.id {
-			return binaryFacts{}, false
+		id, ok := fileIdentityOf(f.info)
+		if !ok {
+			// The filesystem stopped exposing an identity it exposed a
+			// moment ago. Nothing was disproved, so nothing is claimed.
+			return binaryFacts{}, imagePathIntact, false
 		}
-		return f, true
+		if id != running.id {
+			return binaryFacts{}, imagePathReplaced, false
+		}
+		return f, imagePathIntact, true
 	}
 	if running.contentPath == "" {
-		return binaryFacts{}, false
+		return binaryFacts{}, imagePathReplaced, false
 	}
 	// Deliberately NOT statBinary: that resolves symlinks first, and resolving
 	// /proc/<pid>/exe is precisely the mistake the resolver's own comment
@@ -501,7 +586,7 @@ func executedFacts(running runningImage, state imagePathState) (binaryFacts, boo
 	f := binaryFacts{path: running.contentPath, realPath: running.contentPath}
 	info, err := os.Stat(f.realPath)
 	if err != nil {
-		return binaryFacts{}, false
+		return binaryFacts{}, imagePathReplaced, false
 	}
 	// The handle is only a handle if it still reaches the running inode. A
 	// handle that reaches some other file would hand the single verdict-former
@@ -509,13 +594,13 @@ func executedFacts(running runningImage, state imagePathState) (binaryFacts, boo
 	// matching PATH would read as a green "same binary" for a fleet running
 	// something else.
 	if id, ok := fileIdentityOf(info); !ok || id != running.id {
-		return binaryFacts{}, false
+		return binaryFacts{}, imagePathReplaced, false
 	}
 	f.info = info
 	// Report it under the path an operator recognizes, while reading it
 	// through the handle that still resolves to the running inode.
 	f.display = running.path
-	return f, true
+	return f, imagePathReplaced, true
 }
 
 // version returns the binary's self-declared version, or "" when versionOf is
@@ -582,14 +667,25 @@ func (f binaryFacts) readPath() string { return f.realPath }
 // statBinary resolves and stats one binary, tolerating failures so the check
 // still reports the paths it does know.
 func statBinary(path string) binaryFacts {
+	f, _ := statBinaryErr(path)
+	return f
+}
+
+// statBinaryErr is statBinary with the stat error kept. A caller that must
+// tell "the file is gone" from "the file could not be looked at" needs the
+// error itself: a nil info collapses those two into one, and they license
+// opposite claims about the state of the world.
+func statBinaryErr(path string) (binaryFacts, error) {
 	f := binaryFacts{path: path, realPath: path}
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		f.realPath = resolved
 	}
-	if info, err := os.Stat(f.realPath); err == nil {
-		f.info = info
+	info, err := os.Stat(f.realPath)
+	if err != nil {
+		return f, err
 	}
-	return f
+	f.info = info
+	return f, nil
 }
 
 // describePath is the single path to name in a one-line message.
