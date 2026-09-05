@@ -14,6 +14,20 @@
 
 set -euo pipefail
 
+# BSD `date -v-10d` is macOS-only; GNU date wants `-d '10 days ago'`. The trim
+# script targets the macOS host, but these assertions -- glob safety, depth
+# confinement, re-stat before unlink -- are worth running on the Linux CI
+# runner too, so the harness resolves the spelling once instead of the suite
+# being skipped there.
+if date -v-1d '+%Y' >/dev/null 2>&1; then
+	old_stamp() { date -v-"$1"d '+%Y%m%d%H%M'; }
+elif date -d '1 day ago' '+%Y' >/dev/null 2>&1; then
+	old_stamp() { date -d "$1 days ago" '+%Y%m%d%H%M'; }
+else
+	echo "FATAL: neither BSD nor GNU date accepted a relative offset" >&2
+	exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 TRIM="$SCRIPT_DIR/trim-go-build-cache.sh"
 
@@ -44,7 +58,7 @@ make_cache() {
 			hash="$(hex64 "$n$shard")"
 			printf 'stale' > "$root/$shard/${hash}-a"
 			printf 'stale-output' > "$root/$shard/${hash}-d"
-			touch -t "$(date -v-10d '+%Y%m%d%H%M')" \
+			touch -t "$(old_stamp 10)" \
 				"$root/$shard/${hash}-a" "$root/$shard/${hash}-d"
 		done
 	done
@@ -54,7 +68,7 @@ make_cache() {
 	hash="$(hex64 9)"
 	mkdir -p "$root/00/${hash}-d"
 	printf 'ELF' > "$root/00/${hash}-d/gc"
-	touch -t "$(date -v-10d '+%Y%m%d%H%M')" "$root/00/${hash}-d"
+	touch -t "$(old_stamp 10)" "$root/00/${hash}-d"
 }
 
 # ---------------------------------------------------------------- CASE 1
@@ -91,7 +105,7 @@ meta="$(/usr/bin/find "$root" -mindepth 1 -maxdepth 1 \
 # ever reached the list the validator would abort the run.
 depth1="$root/$(hex64 depth1)-d"
 printf 'x' > "$depth1"
-touch -t "$(date -v-10d '+%Y%m%d%H%M')" "$depth1"
+touch -t "$(old_stamp 10)" "$depth1"
 
 TRIM_DAYS=3 GO_BUILD_CACHE_DIR="$root" TRIM_LOG="$WORK/log1" "$TRIM" >/dev/null
 for f in trim.txt testexpire.txt README; do
@@ -153,7 +167,7 @@ pass "CASE 4: a find lacking -newermt is rejected loudly, before any deletion"
 root5="$WORK/case5/go-build"
 make_cache "$root5"
 printf 'x' > "$root5/00/not-a-real-hash-a"
-touch -t "$(date -v-10d '+%Y%m%d%H%M')" "$root5/00/not-a-real-hash-a"
+touch -t "$(old_stamp 10)" "$root5/00/not-a-real-hash-a"
 if TRIM_DAYS=3 GO_BUILD_CACHE_DIR="$root5" TRIM_LOG="$WORK/log5" "$TRIM" >/dev/null 2>&1; then
 	fail "script did not abort on an unexpected path"
 fi
@@ -273,7 +287,7 @@ EOF
 		|| fail "CASE 10 warm-up build failed"
 	/usr/bin/find "$cc_cache" -mindepth 2 -maxdepth 2 \
 		\( -name '*-a' -o -name '*-d' \) \
-		-exec touch -t "$(date -v-10d '+%Y%m%d%H%M')" {} + 2>/dev/null || true
+		-exec touch -t "$(old_stamp 10)" {} + 2>/dev/null || true
 
 	before10="$(/usr/bin/find "$cc_cache" -mindepth 2 -maxdepth 2 \
 		\( -name '*-a' -o -name '*-d' \) | wc -l | tr -d ' ')"
