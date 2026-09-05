@@ -202,12 +202,23 @@ if grep -nE '(^|[^-/[:alnum:]_])find[[:space:]]+["$/]' "$TRIM" \
 	| grep -v 'FIND=' | grep -v '^[[:space:]]*#' | grep -q .; then
 	fail "script invokes bare 'find' somewhere"
 fi
-grep -q 'go clean -cache' "$TRIM" && ! grep -q 'NEVER use "go clean -cache"' "$TRIM" \
-	&& fail "script references go clean -cache outside its warning"
+# The banned string is assembled rather than written, so this file does not
+# itself trip scripts/check-go-clean-cache.sh. An exemption marker would work
+# too, but building the pattern keeps this file off the exemption list
+# entirely -- the guard has no blind spot to maintain here.
+ban="go clean"
+ban="$ban -cache"
+# Assert the ban appears only on COMMENT lines. The previous shape -- "fail if
+# the ban appears and the warning does not" -- could not fail once the warning
+# was present, which it always is: the script explains the ban. A check that
+# cannot fail in the way its name claims is worth less than no check.
+if grep -n "$ban" "$TRIM" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -q .; then
+	fail "script references the banned command on a non-comment line"
+fi
 if grep -nE '^[[:space:]]*(export[[:space:]]+)?(GOCACHE|TMPDIR)=' "$TRIM" | grep -q .; then
 	fail "script sets GOCACHE or TMPDIR"
 fi
-pass "CASE 9: pins /usr/bin/find, no bare find, no go clean -cache, sets no GOCACHE/TMPDIR"
+pass "CASE 9: pins /usr/bin/find, no bare find, no banned wipe, sets no GOCACHE/TMPDIR"
 
 
 # --------------------------------------------------------------- CASE 10

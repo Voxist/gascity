@@ -149,11 +149,19 @@ CMD = re.compile(
 # Only // is absorbed -- the argv form is Go-specific.
 SEP = r"(?:\s|//[^\n]*)*"
 
+# Q matches either quote character. A TOML literal array and a YAML
+# single-quoted scalar are both ordinary spellings of a command array, and the
+# header and the design doc both claim that surface is covered -- it was not:
+# only the double-quoted form matched. Quote style is not required to be
+# consistent across tokens; mixed quoting does not occur in real code, and if it
+# did, flagging it is the fail-safe direction.
+Q = r"[" + chr(34) + chr(39) + r"]"
+
 ARGV = re.compile(
-    r"(?:\"go\"" + SEP + r"," + SEP + r")?"
-    r"\"clean\"" + SEP + r","
-    r"(?:" + SEP + r"\"[^\"]*\"" + SEP + r",)*"
-    + SEP + r"\"--?cache\""
+    r"(?:" + Q + r"go" + Q + SEP + r"," + SEP + r")?"
+    + Q + r"clean" + Q + SEP + r","
+    r"(?:" + SEP + Q + r"[^" + chr(34) + chr(39) + r"]*" + Q + SEP + r",)*"
+    + SEP + Q + r"--?cache" + Q
 )
 
 # Mirrors Go flag package bool parsing, so "-cache=false" is the no-op cmd/go
