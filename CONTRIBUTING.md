@@ -154,7 +154,8 @@ Run `make help` for the full list. The most useful targets are:
 |---|---|
 | `make setup` | Install local tools and git hooks |
 | `make build` | Build `gc` with version metadata |
-| `make install` | Install `gc` into `$(go env GOPATH)/bin` |
+| `make install` | Install `gc` into `$(go env GOPATH)/bin` (and nothing else) |
+| `make deploy-fleet` | Point every `gc` deploy channel at an installed build |
 | `make check` | Fast Go quality gates |
 | `make check-docs` | Docs sync tests (on-disk link checker; does not run `mint broken-links`) |
 | `make check-all` | Extended quality gates including integration tests |
@@ -167,16 +168,54 @@ Run `make help` for the full list. The most useful targets are:
 | `make dashboard-ci` | `dashboard-check` plus fail-on-drift for the generated API client and `dist/` — the gate for openapi.json/dashboard changes |
 | `make cover` | Coverage run |
 
-> **`make install` writes to the shared `$(go env GOPATH)/bin`.** It (and
-> `go install ./cmd/gc`) install `gc` there, and `make install` also re-points
-> an existing `~/.local/bin/gc` at the result — so when that path is the binary
-> a running deployment uses (commonly `~/.local/bin/gc` → `~/go/bin/gc`),
-> installing from any checkout silently replaces the live `gc`, and every later
-> `gc` exec runs the just-installed build. To redirect when that isn't
-> intended, run `make install INSTALL_DIR=<dir>` (the `install` target writes
+> **`make install` writes exactly one path: `$(go env GOPATH)/bin/gc`.** It no
+> longer re-points `~/.local/bin/gc` at the result. Installing from a checkout
+> does not move a running deployment; that is a separate, explicit step
+> (`make deploy-fleet`, below). To redirect the install, run
+> `make install INSTALL_DIR=<dir>` (the `install` target writes
 > `$(go env GOPATH)/bin` and ignores `GOBIN`), or for a plain
 > `go install ./cmd/gc` set `GOBIN=<dir>`. `make build` (→ `./bin/gc`) is
 > unaffected.
+>
+> One case still moves a deployment: if a channel is *already* a symlink at
+> `$(go env GOPATH)/bin/gc` (historically `~/.local/bin/gc` → `~/go/bin/gc`),
+> overwriting that path moves whatever resolves through it. `make install`
+> detects this and prints a `WARNING` naming the channel — it does not stay
+> silent about it.
+
+### Moving a deployment onto a dev build
+
+`gc` can be resolved through several paths that shadow each other on `PATH`,
+and which one wins differs per execution context — an interactive shell, an
+agent hook, and the supervisor's service unit can each pick a different one.
+They are only coherent while all of them name one binary, so the deploy step
+moves them together:
+
+```bash
+make install          # writes ~/go/bin/gc and nothing else
+make deploy-fleet     # points every channel at it
+```
+
+To deploy a provenance-named artifact instead of a bare dev build:
+
+```bash
+make artifact BASE_REF=Voxist/main ARTIFACT_DIR="$HOME/.gc/bin"
+make deploy-fleet GC_DEPLOY_BINARY="$HOME/.gc/bin/gc-main-<date>-<sha>"
+```
+
+The binary being deployed is itself one of the channels in the default flow;
+`deploy-fleet` reports it as `keep` and leaves it alone rather than linking it
+over itself.
+
+`deploy-fleet` symlinks; it never copies. On macOS `cp` strips the codesign and
+the copy dies with SIGKILL 137, and a link keeps the deployed build legible —
+`ls -l` on any channel names the artifact. It refuses to move anything until
+the binary has proved it runs, clears and restores a `uchg` immutable pin
+rather than letting a write fail silently, and skips channels whose directory
+does not exist on this machine. Override the set with `GC_DEPLOY_CHANNELS`.
+
+Restart the supervisor afterwards (`gc stop && gc start`) — a running process
+keeps executing the image it started with, however the symlinks now read.
 
 ## macOS Local Development
 

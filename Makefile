@@ -199,7 +199,22 @@ ifneq ($(_NIX_ICU_DEV),)
 		echo "OK: $$bin self-contained (RUNPATH present + clean-env boot passes)"
 endif
 
+# Deploy channels: the PATH entries a running deployment can resolve `gc`
+# through. They shadow each other -- which one wins differs per execution
+# context (interactive shell, agent hook, supervisor unit) -- so they are only
+# coherent while all of them name one binary. `make deploy-fleet` is the sole
+# Makefile writer of these paths; `install` reads them to warn, never writes.
+GC_DEPLOY_DIR ?= $(HOME)/.gc/bin
+GC_DEPLOY_BINARY ?= $(INSTALL_DIR)/$(BINARY)
+GC_DEPLOY_CHANNELS ?= $(HOME)/.local/bin/$(BINARY) $(BIN_DIR)/$(BINARY) $(GC_DEPLOY_DIR)/$(BINARY)
+
 ## install: build and install gc to GOPATH/bin (same location as go install)
+#
+# Writes exactly one path: $(INSTALL_DIR)/$(BINARY). It deliberately does NOT
+# relink any deploy channel -- two writers at one path, last one wins in
+# silence, is how this machine ran a stale supervisor image for an unknown
+# period (vc-lwif). To move a running deployment onto this build, run the
+# explicit second step: `make deploy-fleet`.
 install: check-self-contained
 	@mkdir -p $(INSTALL_DIR)
 	@set -e; \
@@ -211,17 +226,82 @@ install: check-self-contained
 		trap - EXIT INT TERM HUP
 	@# Deploy provenance: machine-derived build manifest next to the binary
 	@go run ./cmd/writebuildmanifest -binary "$(INSTALL_DIR)/$(BINARY)" -repo "$(CURDIR)"
-	@# Migrate from old install location: replace stale binary with symlink
-	@if [ "$(INSTALL_DIR)" != "$(HOME)/.local/bin" ]; then \
-		if [ -f "$(HOME)/.local/bin/$(BINARY)" ] || [ -L "$(HOME)/.local/bin/$(BINARY)" ]; then \
-			rm -f "$(HOME)/.local/bin/$(BINARY)"; \
-		fi; \
-		if [ -d "$(HOME)/.local/bin" ]; then \
-			ln -sf "$(INSTALL_DIR)/$(BINARY)" "$(HOME)/.local/bin/$(BINARY)"; \
-			echo "Symlinked $(HOME)/.local/bin/$(BINARY) -> $(INSTALL_DIR)/$(BINARY)"; \
-		fi; \
-	fi
+	@# Removing the relink is not enough on its own: a channel that is ALREADY
+	@# a link at $(INSTALL_DIR)/$(BINARY) moves with this write. Say so.
+	@set -e; \
+		for channel in $(GC_DEPLOY_CHANNELS); do \
+			[ "$$channel" != "$(INSTALL_DIR)/$(BINARY)" ] || continue; \
+			[ -e "$$channel" ] || continue; \
+			[ "$$channel" -ef "$(INSTALL_DIR)/$(BINARY)" ] || continue; \
+			echo "WARNING: $$channel resolves to $(INSTALL_DIR)/$(BINARY) -- this install moved it."; \
+			echo "         Anything running that binary is now on this build."; \
+		done
 	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY)"
+	@echo "Deploy channels were NOT touched. To move a deployment onto this build: make deploy-fleet"
+
+## deploy-fleet: point every gc deploy channel at an installed build
+#
+# The second step `make install` no longer performs implicitly.
+# GC_DEPLOY_BINARY defaults to what `make install` just wrote:
+#
+#   make install && make deploy-fleet
+#
+# To deploy a provenance-named artifact instead of a bare dev build:
+#
+#   make artifact BASE_REF=Voxist/main ARTIFACT_DIR=$$HOME/.gc/bin
+#   make deploy-fleet GC_DEPLOY_BINARY=$$HOME/.gc/bin/gc-main-<date>-<sha>
+#
+# Every channel is SYMLINKED at the resolved real file, never copied: cp
+# strips the macOS codesign and the result dies with SIGKILL 137. Linking
+# also keeps the deployed build legible -- `ls -l` on any channel names the
+# artifact. All channels move together; repointing only some re-splits them.
+.PHONY: deploy-fleet
+deploy-fleet:
+	@set -e; \
+		target="$(GC_DEPLOY_BINARY)"; \
+		if [ ! -e "$$target" ]; then \
+			echo "ERROR: GC_DEPLOY_BINARY $$target does not exist -- run 'make install' first, or name a binary built by 'make artifact'" >&2; \
+			exit 2; \
+		fi; \
+		case "$$target" in /*) ;; *) target="$$(pwd)/$$target";; esac; \
+		hops=0; \
+		while [ -L "$$target" ]; do \
+			hops=$$((hops + 1)); \
+			if [ "$$hops" -gt 40 ]; then \
+				echo "ERROR: symlink loop resolving $(GC_DEPLOY_BINARY)" >&2; exit 1; \
+			fi; \
+			link=$$(readlink "$$target"); \
+			case "$$link" in /*) target="$$link";; *) target="$$(dirname "$$target")/$$link";; esac; \
+		done; \
+		if [ ! -f "$$target" ] || [ ! -x "$$target" ]; then \
+			echo "ERROR: $$target is not an executable file" >&2; exit 1; \
+		fi; \
+		if ! "$$target" version >/dev/null 2>&1; then \
+			echo "ERROR: $$target does not run ('$$target version' failed) -- refusing to point a running deployment at it." >&2; \
+			echo "       On macOS this is usually a stripped codesign (SIGKILL 137): build in place, never cp a signed binary." >&2; \
+			exit 1; \
+		fi; \
+		echo "Deploying $$target"; \
+		for channel in $(GC_DEPLOY_CHANNELS); do \
+			dir=$$(dirname "$$channel"); \
+			if [ ! -d "$$dir" ]; then echo "  skip $$channel (no $$dir)"; continue; fi; \
+			if [ "$$channel" = "$$target" ]; then echo "  keep $$channel (the build itself)"; continue; fi; \
+			pinned=; \
+			if [ -e "$$channel" ] || [ -L "$$channel" ]; then \
+				if [ "$$(uname)" = "Darwin" ]; then \
+					case "$$(ls -ldO "$$channel" 2>/dev/null | awk '{print $$5}')" in \
+						*uchg*) pinned=1; chflags -h nouchg "$$channel";; \
+					esac; \
+				fi; \
+			fi; \
+			ln -sfn "$$target" "$$channel"; \
+			if [ "$$(readlink "$$channel")" != "$$target" ]; then \
+				echo "ERROR: $$channel did not take the link" >&2; exit 1; \
+			fi; \
+			if [ -n "$$pinned" ]; then chflags -h uchg "$$channel"; fi; \
+			echo "  $$channel -> $$target"; \
+		done; \
+		echo "Deploy channels now resolve to one binary. Restart the supervisor to adopt it: gc stop && gc start"
 
 ## generate: regenerate JSON schemas and reference docs
 generate:

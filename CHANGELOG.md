@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`make install` no longer writes `~/.local/bin/gc`.** Installing wrote the
+  binary to `$(go env GOPATH)/bin/gc` and then relinked `~/.local/bin/gc` at
+  it. A deployment writes a real binary to that same path — a release install,
+  or a provenance-named `make artifact` build. Two writers, producing
+  different *kinds* of file, neither recording that it ran nor warning that it
+  was clobbering the other — so a `make install` from any checkout silently
+  moved a running deployment onto a dev build, and the machine went on
+  executing a stale image for an unknown period with nothing saying so.
+  `install` now writes exactly one path and touches no other.
+
+  Moving a deployment onto a build is the new `make deploy-fleet`. It takes
+  `GC_DEPLOY_BINARY` (default: what `make install` just wrote) and repoints
+  every channel in `GC_DEPLOY_CHANNELS` — `~/.local/bin/gc`,
+  `$(go env GOPATH)/bin/gc`, and `~/.gc/bin/gc` — at one resolved artifact.
+  Those three shadow each other on `PATH` and the winner differs per execution
+  context, so repointing only some of them re-splits which build a shell, an
+  agent hook, and the supervisor each run. It symlinks rather than copies (on
+  macOS `cp` strips the codesign and the copy dies with SIGKILL 137), refuses
+  to move anything until the binary has proved it runs, clears and restores a
+  `uchg` immutable pin instead of letting the write fail silently, skips
+  channels whose directory is absent, and leaves the deployed binary itself
+  alone when it is also a channel.
+
+  Upgrading: `make install` alone no longer updates a running deployment. Add
+  `make deploy-fleet` (then restart the supervisor — a running process keeps
+  executing the image it started with). The one case installing can still move
+  a deployment is a channel that is *already* a symlink at
+  `$(go env GOPATH)/bin/gc`; `make install` now prints a `WARNING` naming it.
+
 - **`gc pack registry publish` now refuses an unscoped pack name unless you
   pass `--allow-unscoped-name`.** Registry pack names are scoped as
   `<github-owner>/<pack>`, and the registry has always reserved bare names for
