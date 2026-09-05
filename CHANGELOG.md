@@ -25,8 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `$(go env GOPATH)/bin/gc`, and `~/.gc/bin/gc` — at one resolved artifact.
   Those three shadow each other on `PATH` and the winner differs per execution
   context, so repointing only some of them re-splits which build a shell, an
-  agent hook, and the supervisor each run. It symlinks rather than copies (on
-  macOS `cp` strips the codesign and the copy dies with SIGKILL 137), refuses
+  agent hook, and the supervisor each run. On the fleet host the `PATH` winner
+  is `~/.gc/bin/gc`, not `~/.local/bin/gc` — this is the collapse voxist-city
+  ADR-0027 designed, made repeatable. It symlinks rather than copies, refuses
   to move anything until the binary has proved it runs, clears and restores a
   `uchg` immutable pin instead of letting the write fail silently, skips
   channels whose directory is absent, and leaves the deployed binary itself
@@ -37,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   executing the image it started with). The one case installing can still move
   a deployment is a channel that is *already* a symlink at
   `$(go env GOPATH)/bin/gc`; `make install` now prints a `WARNING` naming it.
+  Installing still replaces `$(go env GOPATH)/bin/gc` itself, so `make install`
+  re-splits the channels until `make deploy-fleet` runs — the two are a pair.
 
 - **`gc pack registry publish` now refuses an unscoped pack name unless you
   pass `--allow-unscoped-name`.** Registry pack names are scoped as

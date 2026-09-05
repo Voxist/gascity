@@ -316,9 +316,11 @@ func TestMakeDeployFleetResolvesSymlinkChains(t *testing.T) {
 	}
 }
 
-// TestMakeDeployFleetRefusesABinaryThatDoesNotRun is the codesign guard: on
-// macOS a cp-ed binary loses its signature and dies with SIGKILL 137. Proving
-// the binary runs must happen before any channel moves.
+// TestMakeDeployFleetRefusesABinaryThatDoesNotRun is the guard that makes the
+// no-copy rule enforceable rather than aspirational: whatever damages a build
+// -- a broken codesign giving SIGKILL 137, a truncated write, the wrong
+// architecture -- proving the binary runs must happen before any channel
+// moves, because a channel that has moved is a deployment that has moved.
 func TestMakeDeployFleetRefusesABinaryThatDoesNotRun(t *testing.T) {
 	_, binary, channels := deployFleetFixture(t)
 	writeExecutable(t, binary, "#!/usr/bin/env sh\nexit 137\n")

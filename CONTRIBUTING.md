@@ -188,8 +188,22 @@ Run `make help` for the full list. The most useful targets are:
 `gc` can be resolved through several paths that shadow each other on `PATH`,
 and which one wins differs per execution context — an interactive shell, an
 agent hook, and the supervisor's service unit can each pick a different one.
-They are only coherent while all of them name one binary, so the deploy step
-moves them together:
+
+The precedence is not the obvious one. On the fleet host `~/.gc/bin` precedes
+**both** `~/.local/bin` and `~/go/bin`, so `command -v gc` resolves
+`~/.gc/bin/gc` — not the path the supervisor's service unit names. Anyone
+diagnosing a `gc` version divergence who assumes `~/.local/bin` wins will reach
+the wrong conclusion.
+
+voxist-city **ADR-0027** ("gc CLI Split-Brain: Collapse the Three Install
+Channels onto the Deployed Artifact") collapsed these three onto one artifact
+for that reason, and named *"`go install` recreates `~/go/bin/gc` as a real
+file ⇒ the symlink was clobbered"* as its re-evaluation trigger. `make
+deploy-fleet` is that collapse as a repeatable target rather than a one-time
+manual swap.
+
+The channels are only coherent while all of them name one binary, so the deploy
+step moves them together:
 
 ```bash
 make install          # writes ~/go/bin/gc and nothing else
@@ -207,12 +221,22 @@ The binary being deployed is itself one of the channels in the default flow;
 `deploy-fleet` reports it as `keep` and leaves it alone rather than linking it
 over itself.
 
-`deploy-fleet` symlinks; it never copies. On macOS `cp` strips the codesign and
-the copy dies with SIGKILL 137, and a link keeps the deployed build legible —
-`ls -l` on any channel names the artifact. It refuses to move anything until
-the binary has proved it runs, clears and restores a `uchg` immutable pin
-rather than letting a write fail silently, and skips channels whose directory
-does not exist on this machine. Override the set with `GC_DEPLOY_CHANNELS`.
+`deploy-fleet` symlinks; it never copies. Copying a signed binary is how this
+fork previously produced one that died with SIGKILL 137 — that did not
+reproduce for a linker-signed adhoc build when this target was verified, but it
+does bite when a stable signing identity is configured. Linking sidesteps the
+question, and keeps the deployed build legible: `ls -l` on any channel names the
+artifact. The real guard is that `deploy-fleet` executes the binary and refuses
+to move a single channel until it has, so a build that cannot run never reaches
+a deployment whatever the cause. It also clears and restores a `uchg` immutable
+pin rather than letting a write fail silently, and skips channels whose
+directory does not exist on this machine. Override the set with
+`GC_DEPLOY_CHANNELS`.
+
+Installing still replaces `$(go env GOPATH)/bin/gc` itself — that is its job —
+so `make install` re-splits the channels until `make deploy-fleet` runs. The two
+are a pair; running the first without the second leaves this host's `PATH`
+winner (`~/.gc/bin/gc`) on the previous build.
 
 Restart the supervisor afterwards (`gc stop && gc start`) — a running process
 keeps executing the image it started with, however the symlinks now read.

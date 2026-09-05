@@ -202,8 +202,24 @@ endif
 # Deploy channels: the PATH entries a running deployment can resolve `gc`
 # through. They shadow each other -- which one wins differs per execution
 # context (interactive shell, agent hook, supervisor unit) -- so they are only
-# coherent while all of them name one binary. `make deploy-fleet` is the sole
-# Makefile writer of these paths; `install` reads them to warn, never writes.
+# coherent while all of them name one binary.
+#
+# The precedence is not the obvious one. On the fleet host $(HOME)/.gc/bin
+# precedes BOTH $(HOME)/.local/bin and $(BIN_DIR), so `command -v gc` resolves
+# $(HOME)/.gc/bin/$(BINARY) -- not the path the supervisor's service unit
+# names. Anyone diagnosing a `gc` version divergence who assumes .local/bin
+# wins will reach the wrong conclusion.
+#
+# voxist-city ADR-0027 collapsed these three onto one artifact for exactly
+# that reason, and named "go install recreates ~/go/bin/gc as a real file"
+# as its re-evaluation trigger. `make deploy-fleet` is that collapse as a
+# repeatable target; it is the sole Makefile writer of these paths.
+# `install` reads them to warn, and never writes them.
+#
+# Note that installing still replaces $(BIN_DIR)/$(BINARY) itself -- that is
+# its job. So `make install` re-splits the channels until `make deploy-fleet`
+# runs. The two are a pair; running the first without the second leaves this
+# host's PATH winner on the previous build.
 GC_DEPLOY_DIR ?= $(HOME)/.gc/bin
 GC_DEPLOY_BINARY ?= $(INSTALL_DIR)/$(BINARY)
 GC_DEPLOY_CHANNELS ?= $(HOME)/.local/bin/$(BINARY) $(BIN_DIR)/$(BINARY) $(GC_DEPLOY_DIR)/$(BINARY)
@@ -251,10 +267,19 @@ install: check-self-contained
 #   make artifact BASE_REF=Voxist/main ARTIFACT_DIR=$$HOME/.gc/bin
 #   make deploy-fleet GC_DEPLOY_BINARY=$$HOME/.gc/bin/gc-main-<date>-<sha>
 #
-# Every channel is SYMLINKED at the resolved real file, never copied: cp
-# strips the macOS codesign and the result dies with SIGKILL 137. Linking
-# also keeps the deployed build legible -- `ls -l` on any channel names the
-# artifact. All channels move together; repointing only some re-splits them.
+# Every channel is SYMLINKED at the resolved real file, never copied.
+# Copying a signed binary is how this fork previously produced one that died
+# with SIGKILL 137; that did not reproduce for a linker-signed adhoc build
+# when this target was verified, but it does bite when a stable signing
+# identity is configured (see scripts/sign-darwin-local.sh). Linking sidesteps
+# the question entirely, costs nothing for a 250MB binary, and keeps the
+# deployed build legible -- `ls -l` on any channel names the artifact.
+#
+# The actual guard is the run-proof below: deploy-fleet executes the binary
+# and refuses to move a single channel until it has, so a build that cannot
+# run never reaches a deployment whatever the cause.
+#
+# All channels move together; repointing only some re-splits them.
 .PHONY: deploy-fleet
 deploy-fleet:
 	@set -e; \
@@ -278,7 +303,7 @@ deploy-fleet:
 		fi; \
 		if ! "$$target" version >/dev/null 2>&1; then \
 			echo "ERROR: $$target does not run ('$$target version' failed) -- refusing to point a running deployment at it." >&2; \
-			echo "       On macOS this is usually a stripped codesign (SIGKILL 137): build in place, never cp a signed binary." >&2; \
+			echo "       On macOS a damaged codesign gives SIGKILL 137: build in place, and prefer linking over copying a signed binary." >&2; \
 			exit 1; \
 		fi; \
 		echo "Deploying $$target"; \
