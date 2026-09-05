@@ -496,8 +496,9 @@ arranged differs by host, so verify before reasoning from either description:**
   compile/link temp to disk (`GOTMPDIR=/var/tmp/gotmp`). *Inherited from the
   original authoring of this section; not re-verified from a macOS host.*
 - **macOS host** (`/Users/Shared/Github/gascity`): `GOTMPDIR` is **unset**, and
-  nothing routes `GOCACHE`. Sharing comes from configuration instead: 13
-  `GOCACHE` entries in `voxist-city/city.toml` all point every agent at
+  nothing routes `GOCACHE`. Sharing comes from configuration instead: every
+  `GOCACHE` entry in `voxist-city/city.toml` (14 as of this writing) points
+  every agent at
   `~/Library/Caches/go-build`. *Verified on this host, 2026-09-05.*
 
   There **is** a `go` shim at `~/bin/go`, but it does not touch `GOCACHE` — it
