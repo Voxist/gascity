@@ -87,12 +87,13 @@ type mergeEndState struct {
 	// can reproduce it (ga-cfhgr).
 	readyLost map[string]struct{}
 	// readyInvalid maps each invalidated row to the is_blocked verdict the
-	// cache nil'd out of it (ADR-0094). The merge writes it only by DISCHARGE
-	// (absorbFreshLocked and evictLocked delete entries; nothing in the seam
-	// adds one), so the end map is always a subset of the start map. Captured
-	// from both runs and compared VALUES INCLUDED: the disowned value feeds the
-	// differ's substitution, so two runs that agree on membership but disagree
-	// on a value would flood differently.
+	// cache nil'd out of it (ADR-0094). The merge both ADDS entries — every row
+	// whose verdict the absorb declines records what it disowned (vc-u2n6) —
+	// and discharges them (absorbFreshLocked on an observed verdict,
+	// evictLocked on removal). Captured from both runs, re-derived by
+	// expectedReadyInvalid, and compared VALUES INCLUDED: the disowned value
+	// feeds the differ's substitution, so two runs that agree on membership but
+	// disagree on a value would flood differently.
 	readyInvalid   map[string]bool
 	state          cacheState
 	lastFreshAt    time.Time
@@ -285,7 +286,16 @@ func ensureMaps(c *CachingStore) {
 	// a captured end state was produced by the merge under test — which is what
 	// lets buildExpectedNewEnd derive the expected set from the end beads map
 	// alone.
+	//
+	// BOTH ledgers, because newCachingStore makes both and this fixture claims
+	// to reproduce a freshly constructed store. readyProjectionInvalid was
+	// missing here while nothing in the seam wrote it: the captured end map
+	// stayed nil, the oracle re-derives an empty one, and nil != empty under
+	// reflect.DeepEqual — an end-state divergence with no field-level diff,
+	// which is what the differential fuzz reported the moment vc-u2n6 gave the
+	// seam a reason to write the map.
 	c.readyProjectionLost = make(map[string]struct{})
+	c.readyProjectionInvalid = make(map[string]bool)
 }
 
 func captureEndState(c *CachingStore) mergeEndState {
