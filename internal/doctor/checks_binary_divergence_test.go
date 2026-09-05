@@ -1734,13 +1734,22 @@ func TestReportUnreachableImage_EveryStringMatchesTheState(t *testing.T) {
 		// artifact, say. Telling the operator to restart is advice that
 		// changes nothing, over a Message saying the file is right there.
 		"intact but unreadable": {
-			state:       imagePathIntact,
-			wantAbsent:  []string{"replaced or removed", "reachable only from inside the running process", "restart the supervisor"},
+			state: imagePathIntact,
+			// "nothing to converge" is a claim about the RELATIONSHIP
+			// between the two artifacts, and reaching this report at all
+			// means the identities differ and the bytes were never
+			// compared — so whether they need converging is precisely the
+			// open question. The file uses that phrase once elsewhere, on
+			// the OK exit where the identities actually match.
+			wantAbsent:  []string{"replaced or removed", "reachable only from inside the running process", "restart the supervisor", "nothing to converge"},
 			wantPresent: []string{path},
 		},
 		"replaced under the process": {
-			state:       imagePathReplaced,
-			wantAbsent:  []string{},
+			state: imagePathReplaced,
+			// The intact route's own wording must never appear here. An
+			// empty list permits by default, which is how each round's
+			// newly written clause has arrived unchecked.
+			wantAbsent:  []string{"is still the file it was loaded from", "the file is still there", "nothing to converge"},
 			wantPresent: []string{"no longer the file at", "reachable only from inside the running process", "restart the supervisor"},
 		},
 	} {

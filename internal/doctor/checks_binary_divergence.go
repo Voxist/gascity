@@ -425,10 +425,16 @@ func (c *BinaryDivergenceCheck) reportUnreachableImage(r *CheckResult, running r
 // differs by state as sharply as the diagnosis does. Restarting the supervisor
 // converges a fleet whose artifact is gone; for an artifact that is still
 // exactly where it was loaded from and merely could not be read, a restart
-// changes nothing at all and the operator needs read access instead.
+// re-executes the same file and the operator needs read access instead.
+//
+// The intact hint deliberately stops there. Reaching this function at all
+// means the identities differ and the bytes were never compared, so whether
+// the two artifacts need converging is the open question — the very thing the
+// hint's tail asks the operator to go and settle. "Nothing to converge"
+// belongs only to the OK exit that observed running.id == verifiedID.
 func unreachableFixHint(running runningImage, state imagePathState) string {
 	if state == imagePathIntact {
-		return fmt.Sprintf("the artifact the supervisor is executing is still at %s, so there is nothing to converge and a restart would re-execute the same file; re-run `%s doctor` as a user that can read it (or under sudo) to compare the bytes",
+		return fmt.Sprintf("the artifact the supervisor is executing is still at %s, so a restart would re-execute the same file; re-run `%s doctor` as a user that can read it (or under sudo) to compare the bytes",
 			running.path, gcCommandName)
 	}
 	return fmt.Sprintf("no capability probe can describe the running bytes while the artifact behind them is gone; restart the supervisor so it re-executes the artifact now on disk, then re-run `%s doctor` to compare them", gcCommandName)
