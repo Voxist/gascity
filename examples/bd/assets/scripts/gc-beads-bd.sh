@@ -2838,7 +2838,7 @@ run_bd_pinned() {
         export GC_DOLT_PASSWORD="$DOLT_PASSWORD"
         export BEADS_DOLT_SERVER_USER="$DOLT_USER"
         export BEADS_DOLT_PASSWORD="$DOLT_PASSWORD"
-        bd "$@"
+        "${BD_BIN:-bd}" "$@"
     )
 }
 

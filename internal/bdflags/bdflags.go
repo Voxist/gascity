@@ -32,6 +32,20 @@ import (
 // with the bools; classifying it as a bool made the arg walker read the
 // filename as the verb. Its sibling --cpu-profile is a value-less bool and
 // lives in globalBoolFlags.
+//
+// Which side of the split a flag lands on matters as much as its presence:
+// filing a VALUE flag as a bool is the same bypass wearing a different hat —
+// the flag is skipped without its value and the value is read as the verb.
+// Both directions are pinned, by TestGlobalValueFlagsIsComplete and
+// TestGlobalBoolFlagsIsComplete.
+//
+// Upstream #5601 reclassified --profile into this table and added
+// --server-url. Both were rejected in the 2026-09-05 resync against
+// beads cmd/bd/main.go: --profile is `PersistentFlags().BoolVar` in v1.0.4
+// and in v1.1.0 (upstream's own BD_VERSION pin) and is absent from 3e03250ee
+// (renamed --cpu-profile), and --server-url is not a persistent flag in any
+// bd across the supported range. --format, which #5601 omits, is a real
+// hidden persistent String in all three.
 var globalValueFlags = map[string]bool{
 	"--actor": true, "--db": true, "-C": true, "--directory": true,
 	"--dolt-auto-commit": true, "--mem-profile": true,

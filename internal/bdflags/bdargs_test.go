@@ -64,6 +64,11 @@ func TestSplitGlobalFlagsSkipsGlobalFlagValues(t *testing.T) {
 // -q/--quiet, --readonly, --sandbox, -v/--verbose, plus the per-command
 // -h/--help) is boolean and consumes nothing. -V/--version is root-LOCAL, not
 // persistent, and is in neither table — see TestVersionFlagNeedsNoGlobalEntry.
+//
+// Upstream #5601 moved --profile here and added --server-url; the 2026-09-05
+// resync kept this table instead. See globalValueFlags in bdflags.go for the
+// beads-source evidence that both of those are wrong across the supported bd
+// range, and that --format (which #5601 drops) is real.
 func TestGlobalValueFlagsIsComplete(t *testing.T) {
 	want := map[string]bool{
 		"--actor": true, "--db": true, "-C": true, "--directory": true,

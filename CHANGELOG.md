@@ -29,7 +29,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   publish time: the registry byte-compares it with `[pack].name`, so it can
   only restate the name `pack.toml` already declares.
 
+- **`gc bd` now refuses a `--metadata` body it cannot validate before the
+  write, on `new` as well as `create` and `update`.** `gc bd` validates
+  rig-qualified metadata (`lease_owner`, `routed_to`) ahead of the write so a
+  create naming a rig this city does not configure is stopped before it mints a
+  stranded bead. That guard admitted `create` and `update` but not `new` — the
+  alias `bd` itself registers for `create` — so the same command spelled `gc bd
+  new` skipped validation entirely. It now normalizes the alias and applies the
+  identical check.
+
+  Upgrading: `gc bd new --metadata @file.json` now exits 1, on every city,
+  split or not. The `@file.json` spelling states its object in a file rather
+  than in argv, so `gc bd` cannot read the rig qualification before `bd`
+  resolves the file and mints from it — the one spelling where a refusal is the
+  only fail-closed answer. Pass the JSON inline (`--metadata '{"routed_to":
+  "rig/agent"}'`) instead. A malformed inline body is likewise refused by name
+  rather than forwarded. No in-repo caller uses the `@file.json` spelling.
+
 ### Fixed
+
+- **A control bead served by a relocated class binding is routed to the
+  dispatcher its own `gc.root_store_ref` names.** On a split city every rig's
+  control beads live in one class binding. The reconciler dropped rig-rooted
+  rows from control-dispatcher demand entirely, because a binding's ref reads
+  as city scope and the candidate filter required a rig match; and it
+  suppressed city-rooted rows from that same demand, because the route repair
+  read the binding's ref (`class:gmnos`) as a rig name, found no dispatcher
+  for that pseudo-scope, and logged `no configured control-dispatcher for its
+  store scope` once per tick. The binding is now collected for every row it
+  serves, and the repair keys the dispatcher on the row's root scope, so rig
+  rows keep (or are repaired toward) their rig dispatcher and city rows their
+  city dispatcher. The diagnostic names the binding and the owning scope.
+  Supersedes #5548 and #5588; fixes #5547 and #5587.
 
 - **Mail archive and delete now expand whitespace-joined message IDs.** Each
   positional argument is split into individual IDs before single-versus-batch

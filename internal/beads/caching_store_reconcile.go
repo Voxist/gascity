@@ -628,7 +628,7 @@ func (c *CachingStore) mergeSnapshotLocked(
 		res.removes++
 		if d.notification == "bead.closed" {
 			closed := cloneBead(cached)
-			closed.Status = "closed"
+			setBeadStatus(&closed, "closed")
 			if freshClosed, ok := confirmedClosed[id]; ok {
 				closed = cloneBead(freshClosed)
 			}
@@ -728,6 +728,10 @@ func (c *CachingStore) orphanFenceIDsLocked(freshByID map[string]Bead) []string 
 // hold c.mu (write lock).
 func (c *CachingStore) promoteLiveLocked() {
 	c.state = cacheLive
+	// The full scan that earned the promotion loaded the complete nonclosed
+	// set, so the snapshot's scope is now full and stays full even if a later
+	// failure pushes c.state to cacheDegraded.
+	c.fullScopeSnapshot = true
 	// Re-arm the one-shot circuit-breaker signal. promoteLiveLocked is the single
 	// live-promotion point — both prime() and the reconcile success paths route
 	// through it — so resetting here ensures a store that recovers via reconcile

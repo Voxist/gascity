@@ -1451,9 +1451,19 @@ func TestGeminiSettingsNeedsGCBinUpgrade(t *testing.T) {
 // hook file (the embedded template with the invocation token downgraded to
 // bare `gc`) is rewritten to the current template, with the original backed
 // up; a user-edited variant of the same file is preserved untouched.
+//
+// Cursor is deliberately NOT in this table. #5421 moved its managed prologue
+// off the canonical PATH-export prefix (inherited workspace PATH first, plus a
+// BD_BIN clause), so cursor no longer routes through the prefix-anchored
+// classifier this test exercises, and deriving a "stale" fixture from today's
+// cursor template produces a document no workspace has ever held. The same
+// three behaviors are pinned for cursor by
+// TestInstallCursorHookUpgradesHistoricalManagedFile (released stale form
+// upgrades, with a backup), TestInstallCursorHookPreservesUnreleasedIntermediateShapes
+// (never-released shapes are left alone), and
+// TestInstallCursorHookPreservesUserAuthoredFile.
 func TestInstallOverlayUpgradesBareGCShellHookFiles(t *testing.T) {
 	for provider, rel := range map[string]string{
-		"cursor":  ".cursor/hooks.json",
 		"copilot": ".github/hooks/gascity.json",
 		"kiro":    ".kiro/agents/gascity.json",
 	} {
@@ -2140,6 +2150,22 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 				t.Errorf("%s prompt hooks missing bounded command %q:\n%s", path, want, data)
 			}
 		}
+	}
+	cursorHooks := string(fs.Files["/work/.cursor/hooks.json"])
+	if !strings.Contains(cursorHooks, `\"${GC_BIN:-gc}\" prime --hook`) {
+		t.Errorf("Cursor sessionStart hook must use GC_BIN before PATH fallback:\n%s", cursorHooks)
+	}
+	if !strings.Contains(cursorHooks, `export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\"`) {
+		t.Errorf("Cursor hooks must preserve the inherited workspace PATH ahead of user tool fallbacks:\n%s", cursorHooks)
+	}
+	if strings.Contains(cursorHooks, `export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\"`) {
+		t.Errorf("Cursor hooks must not select ambient user tools ahead of the inherited workspace PATH:\n%s", cursorHooks)
+	}
+	if !strings.Contains(cursorHooks, `if [ -n \"${BD_BIN:-}\" ]; then export PATH=\"${BD_BIN%/*}:$PATH\"; fi`) {
+		t.Errorf("Cursor hooks must put the configured bd binary directory ahead of provider PATH entries:\n%s", cursorHooks)
+	}
+	if strings.Contains(cursorHooks, ` && gc `) {
+		t.Errorf("Cursor hooks must use GC_BIN so provider PATH changes cannot select another gc:\n%s", cursorHooks)
 	}
 	// Copilot CLI documents preCompact (camelCase). The hook fires before
 	// context compaction starts so handoff can capture state; without it,
@@ -2884,6 +2910,98 @@ func TestWriteEmbeddedManagedDoesNotClobberExistingBackup(t *testing.T) {
 	}
 }
 
+// TestInstallCursorHookUpgradesHistoricalManagedFile pins the released managed
+// .cursor/hooks.json shapes, both of which prepend provider tool paths with &&
+// rather than the BD_BIN clause: #3457's bare gc commands (upstream's last
+// released shape) and vp-7mjx's "${GC_BIN:-gc}" commands (this fork's, shipped
+// 2026-07-16). Documents released before #3457 differ in the command body, so
+// no transformation of today's document reproduces them; they are
+// intentionally left un-upgraded, which makes these two the only shapes
+// Install adopts today. Growing this count is a deliberate widening — each
+// variant enlarges the set of on-disk files Install silently overwrites — not
+// a bug fix.
+func TestInstallCursorHookUpgradesHistoricalManagedFile(t *testing.T) {
+	desired, err := core.PackFS.ReadFile("overlay/per-provider/cursor/.cursor/hooks.json")
+	if err != nil {
+		t.Fatalf("read embedded Cursor hooks: %v", err)
+	}
+	variants := cursorHookLegacyVariants(desired)
+	if len(variants) != 2 {
+		t.Fatalf("cursorHookLegacyVariants() = %d, want the two released shapes (#3457 bare gc, vp-7mjx GC_BIN-aware)", len(variants))
+	}
+	for i, legacy := range variants {
+		if bytes.Contains(legacy, []byte("BD_BIN")) {
+			t.Fatalf("legacy variant %d carries a BD_BIN clause no released managed hook contains:\n%s", i, legacy)
+		}
+		fs := fsys.NewFake()
+		const dst = "/work/.cursor/hooks.json"
+		fs.Files[dst] = legacy
+		if err := Install(fs, "/city", "/work", []string{"cursor"}); err != nil {
+			t.Fatalf("Install: %v", err)
+		}
+		if got := string(fs.Files[dst]); !strings.Contains(got, `\"${GC_BIN:-gc}\" prime --hook`) {
+			t.Fatalf("historical Cursor hook %d was not upgraded:\n%s", i, got)
+		}
+		if got := string(fs.Files[dst]); !strings.Contains(got, `if [ -n \"${BD_BIN:-}\" ]`) {
+			t.Fatalf("historical Cursor hook %d did not gain the BD_BIN prologue:\n%s", i, got)
+		}
+		if got := fs.Files[dst+".bak"]; !bytes.Equal(got, legacy) {
+			t.Fatalf("historical Cursor hook %d backup = %q, want original managed content", i, got)
+		}
+	}
+}
+
+// TestInstallCursorHookPreservesUnreleasedIntermediateShapes guards the
+// narrowing above: documents that only ever existed mid-development are not
+// managed content, so Install must leave them alone rather than silently
+// overwrite whatever a user has on disk.
+func TestInstallCursorHookPreservesUnreleasedIntermediateShapes(t *testing.T) {
+	desired, err := core.PackFS.ReadFile("overlay/per-provider/cursor/.cursor/hooks.json")
+	if err != nil {
+		t.Fatalf("read embedded Cursor hooks: %v", err)
+	}
+	const (
+		workspaceFirst = `export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\"`
+		ambientFirst   = `export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\"`
+	)
+	unreleased := map[string][]byte{
+		"bare sessionStart with the pin clause": bytes.Replace(desired,
+			[]byte(`\"${GC_BIN:-gc}\" prime --hook`), []byte(`gc prime --hook`), 1),
+		"ambient-first PATH with the pin clause": bytes.ReplaceAll(desired,
+			[]byte(workspaceFirst), []byte(ambientFirst)),
+	}
+	for name, existing := range unreleased {
+		t.Run(name, func(t *testing.T) {
+			if bytes.Equal(existing, desired) {
+				t.Fatal("embedded Cursor hook no longer differs from this intermediate shape")
+			}
+			fs := fsys.NewFake()
+			const dst = "/work/.cursor/hooks.json"
+			fs.Files[dst] = existing
+			if err := Install(fs, "/city", "/work", []string{"cursor"}); err != nil {
+				t.Fatalf("Install: %v", err)
+			}
+			if got := fs.Files[dst]; !bytes.Equal(got, existing) {
+				t.Fatalf("unreleased Cursor hook shape was overwritten:\n%s", got)
+			}
+		})
+	}
+}
+
+func TestInstallCursorHookPreservesUserAuthoredFile(t *testing.T) {
+	fs := fsys.NewFake()
+	const dst = "/work/.cursor/hooks.json"
+	custom := []byte(`{"version":1,"hooks":{"sessionStart":[{"command":"my-cursor-hook"}]}}`)
+	fs.Files[dst] = custom
+
+	if err := Install(fs, "/city", "/work", []string{"cursor"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if got := fs.Files[dst]; !bytes.Equal(got, custom) {
+		t.Fatalf("user-authored Cursor hook was overwritten:\n%s", got)
+	}
+}
+
 func TestInstallPiHookPreservesUserAuthoredFile(t *testing.T) {
 	fs := fsys.NewFake()
 	custom := []byte(`module.exports = function customPiExtension(pi) {
@@ -3026,5 +3144,94 @@ func TestInstallEmpty(t *testing.T) {
 	}
 	if len(fs.Files) != 0 {
 		t.Errorf("Install(nil) should not write files; got %v", fs.Files)
+	}
+}
+
+// forkReleasedCursorHooksJSON is the managed .cursor/hooks.json this FORK
+// shipped from vp-7mjx (97154823c, 2026-07-16) until the 2026-09-05 resync
+// adopted upstream's #5421 prologue: the pre-#5421 ambient-first PATH export
+// joined by "&&", already invoking "${GC_BIN:-gc}". It is written out
+// literally rather than derived from the embedded document so the pin cannot
+// drift with the generator it guards.
+const forkReleasedCursorHooksJSON = `{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && \"${GC_BIN:-gc}\" prime --hook"
+      }
+    ],
+    "preCompact": [
+      {
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && \"${GC_BIN:-gc}\" handoff --auto \"context cycle\""
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && \"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject"
+      },
+      {
+        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && \"${GC_BIN:-gc}\" hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject"
+      }
+    ]
+  }
+}
+`
+
+// TestInstallCursorHookUpgradesForkReleasedGCBinShape pins the shape upstream
+// has no reason to know about. Upstream's comment in cursorHookLegacyVariants
+// reasons that GC_BIN-aware commands are introduced by #5421 and so no
+// released document carries them; that is true of gastownhall/gascity and
+// false here, because vp-7mjx shipped GC_BIN to this fork's cursor workspaces
+// two months earlier. Without a variant for it, cursorHookNeedsUpgrade
+// returns false, installOverlayManaged classifies every fork-provisioned
+// cursor workspace as user-authored, and none of them ever gains the BD_BIN
+// prologue.
+func TestInstallCursorHookUpgradesForkReleasedGCBinShape(t *testing.T) {
+	existing := []byte(forkReleasedCursorHooksJSON)
+	desired, err := core.PackFS.ReadFile("overlay/per-provider/cursor/.cursor/hooks.json")
+	if err != nil {
+		t.Fatalf("read embedded Cursor hooks: %v", err)
+	}
+	if bytes.Equal(existing, desired) {
+		t.Fatal("embedded Cursor hook no longer differs from the fork-released shape")
+	}
+	if !bytes.Contains(existing, []byte(`\"${GC_BIN:-gc}\" prime --hook`)) {
+		t.Fatal("fork-released fixture lost its GC_BIN spelling")
+	}
+
+	fs := fsys.NewFake()
+	const dst = "/work/.cursor/hooks.json"
+	fs.Files[dst] = existing
+	if err := Install(fs, "/city", "/work", []string{"cursor"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if got := fs.Files[dst]; !bytes.Contains(got, []byte(`if [ -n \"${BD_BIN:-}\" ]`)) {
+		t.Fatalf("fork-released Cursor hook was not upgraded to the BD_BIN prologue:\n%s", got)
+	}
+	if got := fs.Files[dst+".bak"]; !bytes.Equal(got, existing) {
+		t.Fatalf("fork-released Cursor hook backup = %q, want the original managed content", got)
+	}
+}
+
+// TestInstallCursorHookPreservesEditedForkReleasedShape is the safety half of
+// the widening above: each added variant enlarges the set of on-disk files
+// Install silently overwrites, so a document that merely resembles the
+// fork-released one must still be left alone.
+func TestInstallCursorHookPreservesEditedForkReleasedShape(t *testing.T) {
+	edited := bytes.Replace([]byte(forkReleasedCursorHooksJSON),
+		[]byte(`prime --hook`), []byte(`prime --hook --my-flag`), 1)
+	if bytes.Equal(edited, []byte(forkReleasedCursorHooksJSON)) {
+		t.Fatal("edit produced an identical document")
+	}
+
+	fs := fsys.NewFake()
+	const dst = "/work/.cursor/hooks.json"
+	fs.Files[dst] = edited
+	if err := Install(fs, "/city", "/work", []string{"cursor"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if got := fs.Files[dst]; !bytes.Equal(got, edited) {
+		t.Fatalf("user-edited Cursor hook was overwritten:\n%s", got)
 	}
 }
