@@ -495,11 +495,25 @@ arranged differs by host, so verify before reasoning from either description:**
   default `GOCACHE` to a shared on-disk cache (`~/.cache/go-build`) and pins
   compile/link temp to disk (`GOTMPDIR=/var/tmp/gotmp`). *Inherited from the
   original authoring of this section; not re-verified from a macOS host.*
-- **macOS host** (`/Users/Shared/Github/gascity`): there is **no `go` shim**
-  (`/opt/homebrew/bin/go` is a plain binary) and `GOTMPDIR` is **unset**.
-  Sharing comes from configuration instead: 13 `GOCACHE` entries in
-  `voxist-city/city.toml` all point every agent at
+- **macOS host** (`/Users/Shared/Github/gascity`): `GOTMPDIR` is **unset**, and
+  nothing routes `GOCACHE`. Sharing comes from configuration instead: 13
+  `GOCACHE` entries in `voxist-city/city.toml` all point every agent at
   `~/Library/Caches/go-build`. *Verified on this host, 2026-09-05.*
+
+  There **is** a `go` shim at `~/bin/go`, but it does not touch `GOCACHE` — it
+  exists only to enforce the ban above. Installed 2026-09-05 after a second
+  `go clean -cache` incident, it sits ahead of `/opt/homebrew/bin` on both the
+  operator's PATH and the supervisor's, so it intercepts fleet agents as well as
+  interactive shells. It refuses `go clean -cache` / `--cache` — including
+  combined with other flags and behind `go -C dir` — and `exec`s everything else
+  through to `/opt/homebrew/bin/go` untouched. `go clean -testcache`,
+  `-modcache`, `-fuzzcache` and a bare `go clean` are explicitly **not**
+  blocked. Deliberate override: `GC_ALLOW_GO_CLEAN_CACHE=1 go clean -cache`,
+  which is never silent. Uninstall:
+  `scripts/install-go-clean-cache-shim.sh --dir ~/bin --uninstall`, or
+  `rm -f ~/bin/go`. It does **not** cover an absolute-path invocation
+  (`/opt/homebrew/bin/go clean -cache`), an IDE with a pinned SDK path, or root.
+  Source and rationale: `engdocs/contributors/go-clean-cache-guard.md`.
 
 The rules below hold on both, for the same underlying reason — one cache,
 many concurrent writers — regardless of which mechanism puts them there.
