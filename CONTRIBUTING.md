@@ -177,11 +177,22 @@ Run `make help` for the full list. The most useful targets are:
 > `go install ./cmd/gc` set `GOBIN=<dir>`. `make build` (→ `./bin/gc`) is
 > unaffected.
 >
-> One case still moves a deployment: if a channel is *already* a symlink at
-> `$(go env GOPATH)/bin/gc` (historically `~/.local/bin/gc` → `~/go/bin/gc`),
-> overwriting that path moves whatever resolves through it. `make install`
-> detects this and prints a `WARNING` naming the channel — it does not stay
-> silent about it.
+> `$(go env GOPATH)/bin/gc` is **itself a deploy channel**, so on a deployed
+> host it is often a symlink at an artifact elsewhere. Overwriting it would move
+> every context that resolves `gc` through it, so **`make install` fails closed**
+> rather than warning: a warning can only print once the channel has already
+> moved, and the failure this exists to prevent is precisely "nobody noticed".
+> The escape hatch is one flag wide:
+>
+> ```bash
+> make install GC_ALLOW_CHANNEL_OVERWRITE=1 && make deploy-fleet   # deliberate
+> make install INSTALL_DIR=<dir>                                   # elsewhere
+> ```
+>
+> A symlink pointing *inside* `$(go env GOPATH)/bin` is a local convenience, not
+> a deployment, and does not trip the gate. A *different* channel that resolves
+> to the install path still moves with the write; `make install` names it in a
+> `WARNING`, and names any dangling channel it finds.
 
 ### Moving a deployment onto a dev build
 
@@ -206,7 +217,7 @@ The channels are only coherent while all of them name one binary, so the deploy
 step moves them together:
 
 ```bash
-make install          # writes ~/go/bin/gc and nothing else
+make install          # writes $(go env GOPATH)/bin/gc and nothing else
 make deploy-fleet     # points every channel at it
 ```
 
@@ -220,6 +231,13 @@ make deploy-fleet GC_DEPLOY_BINARY="$HOME/.gc/bin/gc-main-<date>-<sha>"
 The binary being deployed is itself one of the channels in the default flow;
 `deploy-fleet` reports it as `keep` and leaves it alone rather than linking it
 over itself.
+
+Every channel swap is atomic — a temporary symlink renamed into place, the same
+discipline `install` uses for its own write — because `ln -sf` unlinks and then
+creates, leaving a window in which a live `gc` lookup gets ENOENT. After the
+swap, `deploy-fleet` **runs every channel**: `readlink` can only confirm the
+value just written, so execution is the only check that proves the channels
+work. A deploy that moved no channel at all is an error, not a success.
 
 `deploy-fleet` symlinks; it never copies. Copying a signed binary is how this
 fork previously produced one that died with SIGKILL 137 — that did not
@@ -238,8 +256,9 @@ so `make install` re-splits the channels until `make deploy-fleet` runs. The two
 are a pair; running the first without the second leaves this host's `PATH`
 winner (`~/.gc/bin/gc`) on the previous build.
 
-Restart the supervisor afterwards (`gc stop && gc start`) — a running process
-keeps executing the image it started with, however the symlinks now read.
+Restart the supervisor afterwards (`gc service restart`, or however your city is
+managed) — a running process keeps executing the image it started with, however
+the symlinks now read.
 
 ## macOS Local Development
 

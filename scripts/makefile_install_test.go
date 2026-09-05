@@ -130,6 +130,14 @@ exit 1
 
 // installFixture lays out a fake HOME with a .local/bin channel plus separate
 // build and install directories, and returns them.
+// homeDerivedChannels are the GC_DEPLOY_CHANNELS entries that follow $(HOME),
+// so a sandboxed HOME redirects them. $(BIN_DIR) does not follow HOME and is
+// overridden separately via INSTALL_DIR.
+var homeDerivedChannels = []string{
+	filepath.Join(".local", "bin"),
+	filepath.Join(".gc", "bin"),
+}
+
 func installFixture(t *testing.T) (home, buildDir, installDir, localBin string) {
 	t.Helper()
 	tmp := t.TempDir()
@@ -137,7 +145,11 @@ func installFixture(t *testing.T) (home, buildDir, installDir, localBin string) 
 	buildDir = filepath.Join(tmp, "build")
 	installDir = filepath.Join(tmp, "install")
 	localBin = filepath.Join(home, ".local", "bin")
-	for _, dir := range []string{buildDir, installDir, localBin} {
+	dirs := []string{buildDir, installDir}
+	for _, rel := range homeDerivedChannels {
+		dirs = append(dirs, filepath.Join(home, rel))
+	}
+	for _, dir := range dirs {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
@@ -148,16 +160,23 @@ func installFixture(t *testing.T) (home, buildDir, installDir, localBin string) 
 	return home, buildDir, installDir, localBin
 }
 
-func runInstall(t *testing.T, home, buildDir, installDir string) (string, error) {
+func runInstall(t *testing.T, home, buildDir, installDir string, extra ...string) (string, error) {
 	t.Helper()
 	repo := repoRoot(t)
-	return runTool(t, repo, append(os.Environ(), "HOME="+home),
-		"make", "--no-print-directory", "-f",
+	// GC_DEPLOY_CHANNELS is deliberately left at its default: under a
+	// sandboxed HOME it expands to the sandbox's own channels, so a
+	// reintroduced write by ANY spelling fails these tests rather than being
+	// masked by an explicit override. $(BIN_DIR) is the one entry that does
+	// not follow HOME, and INSTALL_DIR redirects the only write there is.
+	args := []string{
+		"--no-print-directory", "-f",
 		installTestMakefile(t, repo, filepath.Dir(home)), "install",
-		"BUILD_DIR="+buildDir,
-		"INSTALL_DIR="+installDir,
+		"BUILD_DIR=" + buildDir,
+		"INSTALL_DIR=" + installDir,
 		"BINARY=gc",
-	)
+	}
+	args = append(args, extra...)
+	return runTool(t, repo, append(os.Environ(), "HOME="+home), "make", args...)
 }
 
 // TestMakeInstallLeavesDeployChannelsUntouched is the behavioral half of the
@@ -170,6 +189,7 @@ func TestMakeInstallLeavesDeployChannelsUntouched(t *testing.T) {
 	if err := os.WriteFile(deployed, []byte("release binary"), 0o755); err != nil {
 		t.Fatalf("write deployed binary: %v", err)
 	}
+	gcBinChannel := filepath.Join(home, ".gc", "bin", "gc")
 
 	out, err := runInstall(t, home, buildDir, installDir)
 	if err != nil {
@@ -193,6 +213,12 @@ func TestMakeInstallLeavesDeployChannelsUntouched(t *testing.T) {
 	}
 	if got, readErr := os.ReadFile(filepath.Join(installDir, "gc")); readErr != nil || string(got) != "dev build" {
 		t.Fatalf("install dir binary = %q (err %v), want the dev build", got, readErr)
+	}
+	// $(GC_DEPLOY_DIR)/gc had no integration coverage at all, which is where a
+	// variable-driven write would have slipped both tiers.
+	if _, statErr := os.Lstat(gcBinChannel); !os.IsNotExist(statErr) {
+		t.Fatalf("make install created %s; it must touch no channel but the install path (%v)",
+			gcBinChannel, statErr)
 	}
 }
 
@@ -220,6 +246,101 @@ func TestMakeInstallWarnsWhenADeployChannelPointsAtTheInstallPath(t *testing.T) 
 	}
 	if !strings.Contains(out, "WARNING") {
 		t.Fatalf("make install must warn when it moves a deployment:\n%s", out)
+	}
+}
+
+// TestMakeInstallRefusesToOverwriteADeployedChannelAtTheInstallPath is the
+// state this host is actually in: $(INSTALL_DIR)/$(BINARY) is itself a deploy
+// channel, and on a deployed machine it is a symlink at an artifact elsewhere.
+// Overwriting it moves every context that resolves gc through it. A warning
+// cannot help -- it can only print once the channel has already moved -- so
+// install fails closed, the same standard deploy-fleet is held to.
+func TestMakeInstallRefusesToOverwriteADeployedChannelAtTheInstallPath(t *testing.T) {
+	home, buildDir, installDir, _ := installFixture(t)
+	artifact := filepath.Join(home, ".gc", "bin", "gc-main-20260904-deadbeef")
+	writeExecutable(t, artifact, "#!/usr/bin/env sh\nexit 0\n")
+	channel := filepath.Join(installDir, "gc")
+	if err := os.Symlink(artifact, channel); err != nil {
+		t.Fatalf("symlink deployed channel: %v", err)
+	}
+
+	out, err := runInstall(t, home, buildDir, installDir)
+	if err == nil {
+		t.Fatalf("make install overwrote a deployed channel and exited 0:\n%s", out)
+	}
+	if !strings.Contains(out, artifact) {
+		t.Errorf("the refusal must name the artifact the channel points at (%s):\n%s", artifact, out)
+	}
+	if !strings.Contains(out, "GC_ALLOW_CHANNEL_OVERWRITE=1") {
+		t.Errorf("the refusal must name the escape hatch:\n%s", out)
+	}
+	link, readErr := os.Readlink(channel)
+	if readErr != nil || link != artifact {
+		t.Fatalf("channel = %q (err %v), want it left as a symlink at %s\n%s",
+			link, readErr, artifact, out)
+	}
+}
+
+// The escape hatch must actually work, or the refusal is a wall rather than a
+// gate.
+func TestMakeInstallOverwritesADeployedChannelWhenExplicitlyAllowed(t *testing.T) {
+	home, buildDir, installDir, _ := installFixture(t)
+	artifact := filepath.Join(home, ".gc", "bin", "gc-main-20260904-deadbeef")
+	writeExecutable(t, artifact, "#!/usr/bin/env sh\nexit 0\n")
+	channel := filepath.Join(installDir, "gc")
+	if err := os.Symlink(artifact, channel); err != nil {
+		t.Fatalf("symlink deployed channel: %v", err)
+	}
+
+	out, err := runInstall(t, home, buildDir, installDir, "GC_ALLOW_CHANNEL_OVERWRITE=1")
+	if err != nil {
+		t.Fatalf("make install refused despite GC_ALLOW_CHANNEL_OVERWRITE=1: %v\n%s", err, out)
+	}
+	got, readErr := os.ReadFile(channel)
+	if readErr != nil || string(got) != "dev build" {
+		t.Fatalf("channel = %q (err %v), want the dev build\n%s", got, readErr, out)
+	}
+}
+
+// A symlink INSIDE the install directory is a local convenience, not a
+// deployment, and must not trip the gate.
+func TestMakeInstallAllowsALocalSymlinkInsideTheInstallDir(t *testing.T) {
+	home, buildDir, installDir, _ := installFixture(t)
+	sibling := filepath.Join(installDir, "gc.previous")
+	if err := os.WriteFile(sibling, []byte("previous"), 0o755); err != nil {
+		t.Fatalf("write sibling: %v", err)
+	}
+	if err := os.Symlink(sibling, filepath.Join(installDir, "gc")); err != nil {
+		t.Fatalf("symlink local: %v", err)
+	}
+
+	out, err := runInstall(t, home, buildDir, installDir)
+	if err != nil {
+		t.Fatalf("make install refused a purely local symlink: %v\n%s", err, out)
+	}
+	if got, readErr := os.ReadFile(filepath.Join(installDir, "gc")); readErr != nil || string(got) != "dev build" {
+		t.Fatalf("install path = %q (err %v), want the dev build\n%s", got, readErr, out)
+	}
+}
+
+// TestMakeInstallDoesNotClaimTheChannelsWereUntouched: $(INSTALL_DIR)/$(BINARY)
+// is a deploy channel and install writes it every run, so a blanket "channels
+// were NOT touched" is false by the Makefile's own definitions. Given the bead
+// is "the machine ran a stale image with nothing saying so", shipping a
+// definitionally wrong reassurance is its own defect.
+func TestMakeInstallDoesNotClaimTheChannelsWereUntouched(t *testing.T) {
+	home, buildDir, installDir, _ := installFixture(t)
+
+	out, err := runInstall(t, home, buildDir, installDir)
+	if err != nil {
+		t.Fatalf("make install: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "Deploy channels were NOT touched") {
+		t.Errorf("install claims no channel was touched, but it wrote %s, which is one:\n%s",
+			filepath.Join(installDir, "gc"), out)
+	}
+	if !strings.Contains(out, filepath.Join(installDir, "gc")) {
+		t.Errorf("install must name the channel it overwrote:\n%s", out)
 	}
 }
 

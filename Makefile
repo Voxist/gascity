@@ -233,6 +233,26 @@ GC_DEPLOY_CHANNELS ?= $(HOME)/.local/bin/$(BINARY) $(BIN_DIR)/$(BINARY) $(GC_DEP
 # explicit second step: `make deploy-fleet`.
 install: check-self-contained
 	@mkdir -p $(INSTALL_DIR)
+	@# Fail CLOSED, before writing anything. A symlink at the install path
+	@# pointing OUTSIDE $(INSTALL_DIR) is a deployed artifact, not a dev build,
+	@# and overwriting it is never what `make install` meant to do -- it moves
+	@# every context that resolves gc through that channel. A warning cannot
+	@# help here: it can only print after the channel has already moved, and
+	@# the failure this exists to prevent is precisely "nobody noticed".
+	@# deploy-fleet refuses to move a channel until the binary has proved it
+	@# runs; install is held to the same standard.
+	@set -e; \
+		if [ -z "$(GC_ALLOW_CHANNEL_OVERWRITE)" ] && [ -L "$(INSTALL_DIR)/$(BINARY)" ]; then \
+			prior=$$(readlink "$(INSTALL_DIR)/$(BINARY)"); \
+			case "$$prior" in \
+				"$(INSTALL_DIR)"/*) ;; \
+				*) echo "ERROR: $(INSTALL_DIR)/$(BINARY) is a deploy channel pointing at $$prior." >&2; \
+				   echo "       Installing would move every context that resolves gc through it onto this build." >&2; \
+				   echo "       Deliberate:  make install GC_ALLOW_CHANNEL_OVERWRITE=1 && make deploy-fleet" >&2; \
+				   echo "       Elsewhere:   make install INSTALL_DIR=<dir>" >&2; \
+				   exit 1;; \
+			esac; \
+		fi
 	@set -e; \
 		tmp="$(INSTALL_DIR)/.$(BINARY).tmp.$$$$"; \
 		trap 'rm -f "$$tmp"' EXIT INT TERM HUP; \
@@ -242,18 +262,28 @@ install: check-self-contained
 		trap - EXIT INT TERM HUP
 	@# Deploy provenance: machine-derived build manifest next to the binary
 	@go run ./cmd/writebuildmanifest -binary "$(INSTALL_DIR)/$(BINARY)" -repo "$(CURDIR)"
-	@# Removing the relink is not enough on its own: a channel that is ALREADY
-	@# a link at $(INSTALL_DIR)/$(BINARY) moves with this write. Say so.
+	@# A DIFFERENT channel that resolves to the install path also moved with
+	@# this write. The fail-closed gate above covers the install path itself;
+	@# this covers everything pointing at it. A dangling channel is reported
+	@# too -- a broken channel is exactly what an operator wants to be told.
 	@set -e; \
 		for channel in $(GC_DEPLOY_CHANNELS); do \
 			[ "$$channel" != "$(INSTALL_DIR)/$(BINARY)" ] || continue; \
+			if [ -L "$$channel" ] && [ ! -e "$$channel" ]; then \
+				echo "WARNING: $$channel is a dangling symlink -> $$(readlink "$$channel")"; \
+				continue; \
+			fi; \
 			[ -e "$$channel" ] || continue; \
 			[ "$$channel" -ef "$(INSTALL_DIR)/$(BINARY)" ] || continue; \
 			echo "WARNING: $$channel resolves to $(INSTALL_DIR)/$(BINARY) -- this install moved it."; \
 			echo "         Anything running that binary is now on this build."; \
 		done
 	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY)"
-	@echo "Deploy channels were NOT touched. To move a deployment onto this build: make deploy-fleet"
+	@# $(INSTALL_DIR)/$(BINARY) is itself a deploy channel, so claiming the
+	@# channels were untouched would be false by this Makefile's own
+	@# definitions. Name what was written instead (ga-lwif MEDIUM).
+	@echo "$(INSTALL_DIR)/$(BINARY) is a deploy channel and was overwritten. The other channels were not."
+	@echo "To move a deployment onto this build: make deploy-fleet"
 
 ## deploy-fleet: point every gc deploy channel at an installed build
 #
@@ -279,17 +309,22 @@ install: check-self-contained
 # and refuses to move a single channel until it has, so a build that cannot
 # run never reaches a deployment whatever the cause.
 #
-# A channel that IS the build is kept, not linked. That test compares file
-# IDENTITY (-ef: same device and inode), never path text: `ln -sfn x x`
-# unlinks the real binary and leaves a self-referential loop, and the readlink
-# verification below still passes -- the link holds exactly what it was asked
-# to hold -- so a textual compare exits 0 while reporting success over a
-# destroyed build. Any same-file/different-spelling pairing defeats a string
-# compare: an interior "/./" in GC_DEPLOY_BINARY, a channel directory that is
-# itself a symlink, a hard link. The `! -L` qualifier keeps the rule narrow --
-# a channel that merely POINTS at the build is safe to unlink and is rewritten
-# to a direct absolute link, which is the legibility property; only a channel
-# that is the file itself is kept.
+# A channel that already IS the build is kept, not linked. That test compares
+# file IDENTITY (-ef: same device and inode after resolving symlinks), never
+# path text: `ln -sfn x x` unlinks the real binary and leaves a
+# self-referential loop, and the readlink verification below still passes --
+# the link holds exactly what it was asked to hold -- so a textual compare
+# exits 0 while reporting success over a destroyed, unrecoverable build. Any
+# same-file/different-spelling pairing defeats a string compare: an interior
+# "/./" in GC_DEPLOY_BINARY, a channel directory that is itself a symlink, a
+# hard link, a relative path resolved against a different pwd, a symlinked
+# $$HOME. The `[ -e ]` conjunct is load-bearing, not decorative: it keeps a
+# DANGLING channel falling through to the link, which is what repairs it.
+#
+# Because readlink can only confirm what was just written, the loop is
+# followed by an execution readback: every channel is run. That is the
+# property this target owes its caller -- the pre-flight proves the ARTIFACT
+# runs, and only the readback proves the CHANNELS do.
 #
 # All channels move together; repointing only some re-splits them.
 .PHONY: deploy-fleet
@@ -319,28 +354,47 @@ deploy-fleet:
 			exit 1; \
 		fi; \
 		echo "Deploying $$target"; \
+		moved=0; \
 		for channel in $(GC_DEPLOY_CHANNELS); do \
 			dir=$$(dirname "$$channel"); \
 			if [ ! -d "$$dir" ]; then echo "  skip $$channel (no $$dir)"; continue; fi; \
-			if [ "$$channel" = "$$target" ] || { [ ! -L "$$channel" ] && [ "$$channel" -ef "$$target" ]; }; then \
-				echo "  keep $$channel (the build itself)"; continue; \
+			if [ -e "$$channel" ] && [ "$$channel" -ef "$$target" ]; then \
+				echo "  keep $$channel (already the build)"; moved=$$((moved + 1)); continue; \
 			fi; \
 			pinned=; \
 			if [ -e "$$channel" ] || [ -L "$$channel" ]; then \
 				if [ "$$(uname)" = "Darwin" ]; then \
 					case "$$(ls -ldO "$$channel" 2>/dev/null | awk '{print $$5}')" in \
-						*uchg*) pinned=1; chflags -h nouchg "$$channel";; \
+						*uchg*) pinned="$$channel"; \
+							trap 'chflags -h uchg "$$pinned" 2>/dev/null || true' EXIT INT TERM HUP; \
+							chflags -h nouchg "$$channel";; \
 					esac; \
 				fi; \
 			fi; \
-			ln -sfn "$$target" "$$channel"; \
+			swap="$$channel.deploytmp.$$$$"; \
+			ln -sfn "$$target" "$$swap"; \
+			mv -f "$$swap" "$$channel"; \
 			if [ "$$(readlink "$$channel")" != "$$target" ]; then \
 				echo "ERROR: $$channel did not take the link" >&2; exit 1; \
 			fi; \
-			if [ -n "$$pinned" ]; then chflags -h uchg "$$channel"; fi; \
+			if [ -n "$$pinned" ]; then chflags -h uchg "$$channel"; trap - EXIT INT TERM HUP; fi; \
+			moved=$$((moved + 1)); \
 			echo "  $$channel -> $$target"; \
 		done; \
-		echo "Deploy channels now resolve to one binary. Restart the supervisor to adopt it: gc stop && gc start"
+		if [ "$$moved" -eq 0 ]; then \
+			echo "ERROR: no deploy channel was written -- GC_DEPLOY_CHANNELS matched nothing on this machine." >&2; \
+			echo "       Reporting success having moved nothing is the failure this target exists to prevent." >&2; \
+			exit 1; \
+		fi; \
+		for channel in $(GC_DEPLOY_CHANNELS); do \
+			[ -e "$$channel" ] || continue; \
+			if ! "$$channel" version >/dev/null 2>&1; then \
+				echo "ERROR: $$channel does not run after deploy -- the fleet would be dead." >&2; \
+				exit 1; \
+			fi; \
+		done; \
+		echo "Deploy channels now resolve to one binary, and every one of them ran."; \
+		echo "Restart the supervisor so it execs the new image (e.g. gc service restart) -- a running process keeps the image it started with."
 
 ## generate: regenerate JSON schemas and reference docs
 generate:

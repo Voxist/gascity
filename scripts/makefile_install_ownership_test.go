@@ -52,6 +52,21 @@ func TestMakeInstallDoesNotWriteUserLocalBin(t *testing.T) {
 	if !strings.Contains(body, `mv -f "$$tmp" "$(INSTALL_DIR)/$(BINARY)"`) {
 		t.Fatalf("install target no longer places the binary at $(INSTALL_DIR)/$(BINARY):\n%s", body)
 	}
+	// $(INSTALL_DIR)/$(BINARY) is itself a deploy channel. On a deployed host
+	// it is a symlink at an artifact elsewhere, and overwriting it moves every
+	// context resolving gc through it. A warning cannot help -- it prints only
+	// after the channel has moved -- so install must refuse.
+	// Command syntax, not the substring the escape-hatch echo also contains.
+	if !strings.Contains(body, `[ -z "$(GC_ALLOW_CHANNEL_OVERWRITE)" ] && [ -L "$(INSTALL_DIR)/$(BINARY)" ]`) {
+		t.Errorf("install must fail closed when $(INSTALL_DIR)/$(BINARY) is a "+
+			"symlink pointing outside $(INSTALL_DIR), with an explicit escape "+
+			"hatch:\n%s", body)
+	}
+	if strings.Contains(body, "Deploy channels were NOT touched") {
+		t.Errorf("install writes $(INSTALL_DIR)/$(BINARY), which IS a deploy "+
+			"channel -- that reassurance is false by this Makefile's own "+
+			"definitions:\n%s", body)
+	}
 }
 
 // TestNoMakeTargetButDeployFleetTouchesDeployChannels keeps the invariant from
@@ -94,10 +109,23 @@ func TestDeployFleetTargetIsDeclaredAndDocumented(t *testing.T) {
 	}
 
 	body := makeTargetBody(t, makefile, "deploy-fleet")
+	// Narrow the haystack to the assignment: a channel merely NAMED in a
+	// nearby comment would otherwise satisfy this while being off the list.
+	var assignment string
+	for _, line := range strings.Split(makefile, "\n") {
+		if strings.HasPrefix(line, "GC_DEPLOY_CHANNELS") {
+			assignment = line
+			break
+		}
+	}
+	if assignment == "" {
+		t.Fatal("Makefile has no GC_DEPLOY_CHANNELS assignment")
+	}
 	for _, channel := range deployChannels {
-		if !strings.Contains(makefile, channel) {
+		if !strings.Contains(assignment, channel) {
 			t.Errorf("GC_DEPLOY_CHANNELS must cover %s -- all three shadow each "+
-				"other on PATH, and repointing only some re-splits them (ADR-0027)", channel)
+				"other on PATH, and repointing only some re-splits them (ADR-0027).\ngot: %s",
+				channel, assignment)
 		}
 	}
 	if !strings.Contains(body, "$(GC_DEPLOY_CHANNELS)") {
@@ -115,16 +143,34 @@ func TestDeployFleetTargetIsDeclaredAndDocumented(t *testing.T) {
 		t.Errorf("deploy-fleet must clear and restore the uchg immutable flag "+
 			"with chflags -h, rather than let a write fail silently:\n%s", body)
 	}
-	if !strings.Contains(body, "version") {
-		t.Errorf("deploy-fleet must prove the binary runs before repointing "+
-			"anything at it:\n%s", body)
-	}
-	// The keep-the-build-itself guard must compare file identity. A textual
-	// compare recognises only the default spelling, and every other spelling
-	// of the same file ends in `ln -sfn x x` -- which destroys the binary and
-	// still satisfies the readlink check, so it fails silently and open.
-	if !strings.Contains(body, `[ "$$channel" -ef "$$target" ]`) {
-		t.Errorf("deploy-fleet must decide `keep the build itself` by file "+
-			"identity (-ef), not by comparing path text:\n%s", body)
+	// Against the RAW body this passed on the error MESSAGE ("... '$$target
+	// version' failed ..."), so deleting the guard itself still satisfied it --
+	// the weakest assertion in the file, protecting the property most likely to
+	// cause an incident. Match the command, not prose about the command.
+	// These match COMMAND SYNTAX in the raw body, not a substring an error
+	// message can also contain, and not recipeCommands() -- which blanks
+	// double-quoted text and so erases the very arguments that make these
+	// commands identifiable.
+	for _, want := range []struct{ snippet, why string }{
+		{
+			`if ! "$$target" version >/dev/null 2>&1; then`,
+			"prove the ARTIFACT runs before repointing anything at it",
+		},
+		{
+			`if ! "$$channel" version >/dev/null 2>&1; then`,
+			"prove every CHANNEL runs after repointing it -- readlink only confirms what was just written",
+		},
+		{
+			`mv -f "$$swap" "$$channel"`,
+			"swap each channel atomically via rename; `ln -sfn` unlinks then creates, leaving a window where a live channel does not exist",
+		},
+		{
+			`[ -e "$$channel" ] && [ "$$channel" -ef "$$target" ]`,
+			"decide `keep the build itself` by file identity, not by comparing path text",
+		},
+	} {
+		if !strings.Contains(body, want.snippet) {
+			t.Errorf("deploy-fleet must %s.\nmissing: %s\ntarget body:\n%s", want.why, want.snippet, body)
+		}
 	}
 }
