@@ -66,6 +66,17 @@ are both caught. That gap was real until it was found in review: a guard defeate
 by ordinary formatting is worse than one defeated by evasion, because the miss
 correlates with routine maintenance rather than with somebody trying.
 
+A **physical-line pass is kept as a floor** alongside the joined pass, unioned
+and deduped. Joining alone let a comment ending in a backslash swallow the next,
+executing line into an exempt logical line — in sh/bash a comment ends at the
+newline and the next line runs regardless. In make the continuation is real, so
+the floor is a deliberate false positive there: a false positive is loud and
+annotatable, a false negative cannot be seen.
+
+For a command spanning several physical lines, `gocacheguard:allow` counts on
+**any** line the command spans, so the failure message's advice works wherever
+the reader puts it.
+
 Only a comment that *opens* its line is exempt. A trailing comment
 (`cmd  # go clean -cache`) and a C-style block comment are both still flagged —
 annotate those with `gocacheguard:allow`. This errs toward false positives on

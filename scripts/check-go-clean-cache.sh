@@ -39,7 +39,10 @@
 #     cannot execute, and warning about the command in a comment is exactly what
 #     scripts/trim-go-build-cache.sh's header does;
 #   * a line carrying `gocacheguard:allow` -- for a code line that must contain
-#     the string, such as another static guard searching for it;
+#     the string, such as another static guard searching for it. For a command
+#     spanning several physical lines (a backslash continuation, or a
+#     gofmt-wrapped `exec.Command`), the marker counts on ANY line the command
+#     spans;
 #   * a file carrying `gocacheguard:allow-file` in its first 40 lines -- for a
 #     file whose whole subject is the ban (this guard, the shim, their tests).
 #
@@ -127,8 +130,20 @@ CMD = re.compile(
 # The leading \"go\" is optional but consumed when present, so the reported line
 # is the one the CALL starts on rather than the orphaned \"clean\", line in the
 # middle of a gofmt-wrapped argument list.
+# SEP is whitespace that may also swallow a trailing // line comment. Without
+# it, annotating the line the guard REPORTS (the one carrying the opening
+# exec.Command) pushed the match start past the comment onto the next argument
+# line: the report moved and the call stayed blocked, which is the behaviour
+# that made the documented escape hatch look broken. Absorbing the comment puts
+# the annotated line inside the match span, where the exemption test sees it.
+# Only // is absorbed -- the argv form is Go-specific.
+SEP = r"(?:\s|//[^\n]*)*"
+
 ARGV = re.compile(
-    r"(?:\"go\"\s*,\s*)?\"clean\"\s*,(?:\s*\"[^\"]*\"\s*,)*\s*\"--?cache\""
+    r"(?:\"go\"" + SEP + r"," + SEP + r")?"
+    r"\"clean\"" + SEP + r","
+    r"(?:" + SEP + r"\"[^\"]*\"" + SEP + r",)*"
+    + SEP + r"\"--?cache\""
 )
 
 # Mirrors Go flag package bool parsing, so "-cache=false" is the no-op cmd/go
@@ -255,10 +270,20 @@ for path in listing():
     # converted back to the line the call STARTS on. Exemption is decided by
     # that starting line, the same rule a one-line match gets.
     for m in ARGV.finditer(text):
-        n = text.count("\n", 0, m.start()) + 1
-        if exempt(lines[n - 1]):
+        first = text.count("\n", 0, m.start()) + 1
+        last = text.count("\n", 0, m.end()) + 1
+        # Exemption is decided over EVERY physical line the match spans, the
+        # same breadth the CMD path gets from its joined logical line. Deciding
+        # it from the first line alone made the advice in the failure message
+        # ("annotate that line") not work for a gofmt-wrapped call: the marker
+        # took effect only on the middle argument line, and only by breaking
+        # the regex rather than by exempting -- undiscoverable, so the reader
+        # would give up and reach for allow-file or switch the guard off.
+        # NOTE: no apostrophes in this embedded python; it lives inside a
+        # single-quoted shell string and one would terminate it.
+        if any(exempt(lines[i - 1]) for i in range(first, last + 1)):
             continue
-        hits.append("%s:%d: %s" % (path, n, lines[n - 1].strip()))
+        hits.append("%s:%d: %s" % (path, first, lines[first - 1].strip()))
 
 for h in hits:
     print(h)

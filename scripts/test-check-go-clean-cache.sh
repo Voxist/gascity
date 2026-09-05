@@ -385,6 +385,36 @@ pass "CASE 16: a violation found by both passes is reported once"
 assert_blocks "CASE 16e: continuation catch still works alongside the floor" \
 	"scripts/x.sh" "$(printf 'go clean \\\n  -cache')"
 
+# ---------------------------------------------------------------- CASE 17
+# The documented escape hatch must work for the form the guard catches.
+#
+# The ARGV path decided exemption from a SINGLE physical line, while the CMD
+# path used the whole joined logical line. For a gofmt-wrapped exec.Command the
+# failure message's own instruction ("annotate that line") therefore did not
+# work: the marker was only effective on the middle `"clean",` line, and it
+# worked by breaking the regex rather than by exempting -- undiscoverable from
+# the message. Someone with a legitimate multi-line construction would follow
+# the instruction, stay blocked, watch the reported line move, and reach for
+# allow-file or switch the guard off.
+#
+# An exemption on ANY physical line the match spans now counts.
+assert_allows "CASE 17a: marker on the last line of a wrapped call" "internal/x/x.go" \
+	"$(printf 'exec.Command(\"go\",\n\t\"clean\",\n\t\"-cache\") // gocacheguard:allow')"
+assert_allows "CASE 17b: marker on the first line of a wrapped call" "internal/x/x.go" \
+	"$(printf 'exec.Command(\"go\", // gocacheguard:allow\n\t\"clean\",\n\t\"-cache\")')"
+assert_allows "CASE 17c: marker on the middle line of a wrapped call" "internal/x/x.go" \
+	"$(printf 'exec.Command(\"go\",\n\t\"clean\", // gocacheguard:allow\n\t\"-cache\")')"
+assert_allows "CASE 17d: marker still works on the single-line argv form" "internal/x/x.go" \
+	'exec.Command("go", "clean", "-cache") // gocacheguard:allow'
+
+# The hatch must not become a blanket: an unmarked wrapped call is still caught.
+assert_blocks "CASE 17e: an unmarked wrapped call is still blocked" "internal/x/x.go" \
+	"$(printf 'exec.Command(\"go\",\n\t\"clean\",\n\t\"-cache\")')"
+
+# A marker elsewhere in the file must not exempt an unrelated wrapped call.
+assert_blocks "CASE 17f: a marker on an unrelated line does not carry" "internal/x/x.go" \
+	"$(printf 'var a = 1 // gocacheguard:allow\nvar b = 2\nvar c = exec.Command(\"go\",\n\t\"clean\",\n\t\"-cache\")')"
+
 # ------------------------------------------------------------------ verdict
 if [ "$failures" -ne 0 ]; then
 	echo "FAILED: $failures case(s)" >&2
