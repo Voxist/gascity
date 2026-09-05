@@ -168,10 +168,20 @@ shim should not be described as making the operation impossible.
 
 ## Tests
 
-| Suite | Runs |
+`make check-go-clean-cache` runs both suites and then the scan itself:
+
+| Suite | Covers |
 | --- | --- |
-| `go test ./scripts/ -run TestCheckGoCleanCache` | `scripts/test-check-go-clean-cache.sh` |
-| `go test ./scripts/ -run TestGoCleanCacheShim` | `scripts/test-go-clean-cache-shim.sh` |
+| `scripts/test-check-go-clean-cache.sh` | layer 1 — the flag parse, the surface, both exemptions, `--staged`, the pre-commit wiring end to end, and this repository's own baseline |
+| `scripts/test-go-clean-cache-shim.sh` | layer 2 — refusal forms, every allowed form, argv/exit-status/stream/stdin fidelity, the exec, the override, and the installer |
+
+They run from the Makefile target rather than from Go wrappers on purpose. A
+`_test.go` wrapper per suite would add an `exec.Command` call site in a new
+test file, and the P0.4 resource census (`test/test-resources.toml`) ratchets
+untagged subprocess call and file totals as *anti-growth*: raising that ceiling
+is an explicit policy change requiring council review, not something a new
+guard should do as a side effect. `check-residency-boundary` runs its own
+self-test the same way.
 
 Both are hermetic. The shim suite drives a **fake** `go` on a temp `PATH`:
 `go clean -cache` is never executed anywhere in this repository's tests, which
