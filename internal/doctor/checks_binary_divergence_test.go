@@ -1634,3 +1634,116 @@ func TestSelectRunningImage_AmbiguousUnevaluatableEntriesAreAnError(t *testing.T
 		t.Errorf("error = %q, want it to say which entry is the image could not be determined", err)
 	}
 }
+
+// TestExecutedFacts_IntactPathMustStillBeTheRunningInode closes F1's class on
+// the branch the finding did not name.
+//
+// classifyImagePath establishes the path's identity at one stat; executedFacts
+// then reads the bytes after a SECOND stat. A replacement landing between the
+// two hands compareContent the replacement's bytes under the running image's
+// name, and when those bytes match PATH — which after an in-place install is
+// the normal case — the check answers "the same binary" for a fleet running
+// the original inode. Identical failure to F1, sibling branch.
+//
+// The race cannot be lost on purpose, so the state is injected at the seam
+// rather than timed: imagePathIntact is passed for a path that no longer names
+// running.id, which is exactly what losing the race produces. The assertion is
+// on the verdict, not on the window.
+func TestExecutedFacts_IntactPathMustStillBeTheRunningInode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gc-artifact")
+	writeFakeBinary(t, path, "the bytes the fleet is running")
+	running := imageAt(t, path)
+
+	f, reachable := executedFacts(running, imagePathIntact)
+	if !reachable {
+		t.Fatal("executedFacts rejected an intact path that still names the running inode")
+	}
+	if f.readPath() == "" {
+		t.Fatal("executedFacts returned no path to read the running bytes from")
+	}
+
+	replacement := writeFakeBinary(t, filepath.Join(dir, "gc-artifact.new"), "a different build")
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatalf("replacing %s: %v", path, err)
+	}
+
+	if _, reachable := executedFacts(running, imagePathIntact); reachable {
+		t.Error("executedFacts returned bytes from a file that is no longer the running inode; the verdict formed from them would describe the wrong artifact")
+	}
+}
+
+// TestReportUnreachableImage_DetailsAgreeWithTheMessage pins the line that
+// drifted. The Details entry asserted the running bytes are "reachable only
+// from inside the running process" — true for a replaced image, false for one
+// whose path was observed intact and then could not be read, where the file is
+// right there. An unasserted string is how the Message and the Details came to
+// describe different states.
+func TestReportUnreachableImage_DetailsAgreeWithTheMessage(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFakeBinary(t, filepath.Join(dir, "gc-artifact"), "running")
+	verifiedPath := writeFakeBinary(t, filepath.Join(dir, "gc"), "on path")
+	c := divergenceCheck(4242, imageAt(t, path), verifiedPath)
+
+	intact := c.reportUnreachableImage(&CheckResult{Name: c.Name()}, imageAt(t, path), imagePathIntact,
+		statBinary(verifiedPath), verifiedPath)
+	intactDetails := strings.Join(intact.Details, "\n")
+	if strings.Contains(intactDetails, "reachable only from inside the running process") {
+		t.Errorf("Details = %q, must not claim the bytes have no name on disk for a path observed intact", intactDetails)
+	}
+	if !strings.Contains(intactDetails, path) {
+		t.Errorf("Details = %q, want the path the image is still at", intactDetails)
+	}
+
+	replaced := c.reportUnreachableImage(&CheckResult{Name: c.Name()}, imageAt(t, path), imagePathReplaced,
+		statBinary(verifiedPath), verifiedPath)
+	replacedDetails := strings.Join(replaced.Details, "\n")
+	if !strings.Contains(replacedDetails, "reachable only from inside the running process") {
+		t.Errorf("Details = %q, want the unreachable wording when the artifact really is gone", replacedDetails)
+	}
+}
+
+// TestBinaryDivergenceCheck_AmbiguousMappedTextSetIsUnverifiedEndToEnd pins
+// the verdict an ambiguous lsof set produces through Run, not just the error
+// selectRunningImage returns. An installer that replaced the whole tree leaves
+// every entry unevaluatable; naming one of them would attach a
+// restart-the-supervisor hint to a shared library.
+func TestBinaryDivergenceCheck_AmbiguousMappedTextSetIsUnverifiedEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	lib := writeFakeBinary(t, filepath.Join(dir, "libicuuc.78.3.dylib"), "library")
+	image := writeFakeBinary(t, filepath.Join(dir, "gc-main-20260904"), "the running image")
+	entries := []lsofEntry{
+		{name: lib, dev: fmt.Sprintf("%#x", identityOf(t, lib).dev), ino: fmt.Sprint(identityOf(t, lib).ino)},
+		{name: image, dev: fmt.Sprintf("%#x", identityOf(t, image).dev), ino: fmt.Sprint(identityOf(t, image).ino)},
+	}
+	for _, p := range []string{lib, image} {
+		replacement := writeFakeBinary(t, p+".new", "a different build")
+		if err := os.Rename(replacement, p); err != nil {
+			t.Fatalf("replacing %s: %v", p, err)
+		}
+	}
+	verified := writeFakeBinary(t, filepath.Join(dir, "gc"), "the build on PATH")
+
+	c := divergenceCheck(4242, runningImage{}, verified)
+	c.resolveRunningImage = func(int) (runningImage, error) {
+		return selectRunningImage(entries, func(string) bool { return false })
+	}
+
+	r := c.Run(&CheckContext{})
+
+	if r.Status != StatusWarning {
+		t.Fatalf("Status = %v, want StatusWarning; message=%q", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "unverified") {
+		t.Errorf("Message = %q, want it reported as unverified", r.Message)
+	}
+	if strings.Contains(r.Message, "binary divergence: ") {
+		t.Errorf("Message = %q, must not assert a divergence about an image it could not identify", r.Message)
+	}
+	if strings.Contains(r.Message, "no longer the file at") {
+		t.Errorf("Message = %q, must not report an unreachable image it never picked out of the set", r.Message)
+	}
+	if strings.Contains(r.FixHint, "restart the supervisor") {
+		t.Errorf("FixHint = %q, must not tell the operator to restart over a library", r.FixHint)
+	}
+}

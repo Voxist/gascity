@@ -107,8 +107,14 @@ type runningImage struct {
 // platform with no route to a process image: none of those are evidence that
 // two binaries differ, and a check built to catch verification that describes
 // the wrong object must not itself assert what it did not observe. Every
-// information-gathering step below therefore reports a tri-state, and there is
-// exactly one place a verdict is formed from one.
+// information-gathering step below therefore reports a tri-state. There are
+// many places a verdict is formed — roughly a dozen and a half exits across
+// Run and reportUnreachableImage — so the rule is a property every one of them
+// must hold rather than a bottleneck one of them enforces: no exit may assert
+// agreement, divergence, or the absence of a supervisor unless the observation
+// behind that claim was actually made. Three review rounds found exits that
+// broke it, and a fourth found fact-gathering steps that fed a sound exit a
+// fact they had not established, which is the same failure one layer down.
 type BinaryDivergenceCheck struct {
 	// supervisorPID is the PID of the running supervisor, or 0 when none is
 	// running. Sourced from the same control-socket probe the rest of the
@@ -227,10 +233,19 @@ func (c *BinaryDivergenceCheck) Run(_ *CheckContext) *CheckResult {
 	}
 
 	// Whether any file on disk is still the running image is settled before
-	// identity is compared. A platform that reports the image unlinked has said
-	// outright that none is, and an inode number that matches after that is
-	// inode reuse, not identity — the one way an identity comparison can still
-	// produce a false agreement.
+	// identity is compared, because identity alone has one false agreement in
+	// it: inode reuse. A platform that reports the image unlinked has said
+	// outright that no file is the running image, so a matching inode number
+	// after that is the kernel handing the number on, not the artifact.
+	//
+	// That is what running.unlinked gates, and it is the whole of the gate.
+	// A merely REPLACED path is not disqualifying: the inode can survive the
+	// name it was loaded from — a second hard link, or a rename out from
+	// under the process — and identity still settles it correctly there. The
+	// OK exit below requires imagePathIntact only because a replaced path
+	// still has bytes worth comparing, so it takes the longer route; the
+	// unreachable branch further down trusts identity on a replaced path
+	// exactly when the platform did not report the image unlinked.
 	state := classifyImagePath(running)
 	if state == imagePathUnknown {
 		return unverified(r, "cannot tell whether %s is still the image supervisor pid %d is executing", running.path, c.supervisorPID)
@@ -344,7 +359,7 @@ func (c *BinaryDivergenceCheck) reportUnreachableImage(r *CheckResult, running r
 		"supervisor pid %d is executing an image whose bytes cannot be read: %s (PATH %s resolves to %s)",
 		c.supervisorPID, unreachableReason(running.path, state), gcCommandName, verified.realPath)
 	r.Details = []string{
-		fmt.Sprintf("executed (what the fleet runs): inode %d — reachable only from inside the running process, so whether it matches the binary on PATH cannot be established from here", running.id.ino),
+		fmt.Sprintf("executed (what the fleet runs): %s", unreachableDetail(running, state)),
 		fmt.Sprintf("verified (what probes hit): %s", verified.describeVerbose()),
 	}
 	r.FixHint = fmt.Sprintf("no capability probe can describe the running bytes while the artifact behind them is gone; restart the supervisor so it re-executes the artifact now on disk, then re-run `%s doctor` to compare them", gcCommandName)
@@ -358,6 +373,19 @@ func unreachableReason(path string, state imagePathState) string {
 		return fmt.Sprintf("%s is still the file it was loaded from, but it could not be read from there", path)
 	}
 	return fmt.Sprintf("it is no longer the file at %s — that path was replaced or removed under it, so nothing on disk describes the running bytes", path)
+}
+
+// unreachableDetail is unreachableReason's verbose half. It exists because the
+// two lines are read together: a Details entry saying the bytes have no name on
+// disk, under a Message saying the file is still at its path, asserts a state
+// the check did not establish — the same defect one line down.
+func unreachableDetail(running runningImage, state imagePathState) string {
+	if state == imagePathIntact {
+		return fmt.Sprintf("inode %d at %s — the file is still there, but it could not be read, so its bytes were never compared",
+			running.id.ino, running.path)
+	}
+	return fmt.Sprintf("inode %d — reachable only from inside the running process, so whether it matches the binary on PATH cannot be established from here",
+		running.id.ino)
 }
 
 // unverified reports that the check could not establish whether the two
@@ -444,7 +472,20 @@ func classifyImagePath(img runningImage) imagePathState {
 func executedFacts(running runningImage, state imagePathState) (binaryFacts, bool) {
 	if state == imagePathIntact {
 		f := statBinary(running.path)
-		return f, f.info != nil
+		if f.info == nil {
+			return binaryFacts{}, false
+		}
+		// classifyImagePath established this identity at a DIFFERENT stat.
+		// Re-asserting it here is what stops a replacement that landed
+		// between the two stats from being read as the running image's
+		// bytes — the same defect as trusting a /proc handle that no longer
+		// reaches the executing inode, reached by a race instead of by a
+		// stale name. Bytes that match PATH would otherwise answer "the same
+		// binary" for a fleet still running the original.
+		if id, ok := fileIdentityOf(f.info); !ok || id != running.id {
+			return binaryFacts{}, false
+		}
+		return f, true
 	}
 	if running.contentPath == "" {
 		return binaryFacts{}, false
@@ -902,6 +943,23 @@ func parseLsofFileEntries(out []byte) []lsofEntry {
 // installer that replaced the whole tree, libraries and executable together —
 // nothing distinguishes the image from the libraries beside it, and picking
 // the first is a guess dressed as an answer. Pass 2 refuses instead.
+//
+// Pass 2's inference is sound only under two assumptions, neither of which
+// this function can check, and both of which can still put a library in its
+// answer:
+//
+//   - lsof reported the COMPLETE mapped-text set. runningImageFromLsof accepts
+//     partial output from a probe killed at its deadline (ga-s5cyd), and a
+//     truncated set can omit the executable entirely — leaving a library as
+//     the sole unevaluatable entry and this pass confident about it.
+//   - machOIsExecutable has no false negatives on a readable, present image.
+//     Pass 1 concluding "no executable here" is read below as "the image is
+//     one of the ones I could not evaluate", which is false if the image was
+//     readable and merely unrecognized — a shell wrapper installed over the
+//     path, or a format the predicate does not know.
+//
+// Both were true of the reproduced defect this shape replaced, where lsof
+// ordering alone decided the answer. Neither is guaranteed.
 //
 // When neither pass finds anything the answer is that it could not be
 // determined. Naming a shared library as the executed image — with a restart

@@ -758,13 +758,33 @@ const (
 )
 
 // probeRunningSupervisor walks the candidate control sockets and reports the
-// first live one, along with what the walk established. When no socket
-// answered, the result is Absent only if every candidate refused outright;
-// one that connected and then went quiet leaves the answer Unknown.
+// first live one, along with what the walk established.
 func probeRunningSupervisor() (string, int, supervisorLiveness) {
+	return probeRunningSupervisorAt(supervisorSocketPathCandidates(), probeSupervisorAtPath)
+}
+
+// probeRunningSupervisorAt folds one answer per candidate socket into one
+// answer for the walk.
+//
+// Absent is earned only when EVERY candidate refused outright. A candidate
+// that accepted a connection and then went quiet may be a supervisor that is
+// up, executing a stale image and wedged on its socket, so folding it in as
+// "not running" would hand `gc doctor` the one pid value that licenses a green
+// verdict — the finding this tri-state exists for, reintroduced whole one
+// function above where it was fixed.
+//
+// paths and probe are parameters so the fold is testable: the real candidate
+// list comes from supervisorSocketPathCandidates, which panics in a test
+// binary rather than resolve the host's runtime dir, and opening a real socket
+// to answer it would grow a zero-growth resource-census ratchet.
+func probeRunningSupervisorAt(paths []string, probe func(string) (int, supervisorLiveness)) (string, int, supervisorLiveness) {
+	// Examining no candidate is not a negative result; it is no result.
+	if len(paths) == 0 {
+		return "", 0, supervisorLivenessUnknown
+	}
 	liveness := supervisorLivenessAbsent
-	for _, sockPath := range supervisorSocketPathCandidates() {
-		pid, got := probeSupervisorAtPath(sockPath)
+	for _, sockPath := range paths {
+		pid, got := probe(sockPath)
 		if got == supervisorLivenessAlive {
 			return sockPath, pid, got
 		}
@@ -776,10 +796,21 @@ func probeRunningSupervisor() (string, int, supervisorLiveness) {
 }
 
 // supervisorPIDForDoctor renders the probe as the pid `gc doctor` passes to
-// checks that reason about the executed image, using doctor's sentinel for the
-// state a bare pid cannot carry.
+// checks that reason about the executed image.
 func supervisorPIDForDoctor() int {
 	_, pid, liveness := probeRunningSupervisor()
+	return doctorPIDForLiveness(pid, liveness)
+}
+
+// doctorPIDForLiveness maps a probe result onto doctor's pid contract, using
+// doctor's sentinel for the state a bare pid cannot carry.
+//
+// 0 is the value that makes the binary-divergence check report StatusOK
+// "supervisor not running", so it is reserved for a probe that established
+// absence. Everything else — including a liveness value outside the enum —
+// resolves to the sentinel, because the fail-safe direction here is "we did
+// not establish this", never the green answer.
+func doctorPIDForLiveness(pid int, liveness supervisorLiveness) int {
 	switch liveness {
 	case supervisorLivenessAlive:
 		return pid
