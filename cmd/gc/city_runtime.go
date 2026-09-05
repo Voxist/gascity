@@ -16,6 +16,7 @@ import (
 	goruntime "runtime"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,6 +36,7 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/supervisor"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
@@ -281,6 +283,7 @@ type runtimeDemandSnapshot struct {
 	createdAt              time.Time
 	sessionFingerprint     string
 	readyDemandFingerprint string
+	suspensionFingerprint  string
 	result                 DesiredStateResult
 }
 
@@ -3820,8 +3823,9 @@ func (cr *CityRuntime) loadDemandSnapshot(
 	configChanged bool,
 ) runtimeDemandSnapshot {
 	sessionFingerprint := sessionBeadSnapshotFingerprint(sessionBeads)
+	suspensionFingerprint := cr.suspensionSnapshotFingerprint()
 	readyDemandFingerprint := ""
-	refresh := cr.shouldRefreshDemandSnapshot(trigger, configChanged, sessionFingerprint)
+	refresh := cr.shouldRefreshDemandSnapshot(trigger, configChanged, sessionFingerprint, suspensionFingerprint)
 	if !refresh && trigger == "patrol" && cr.demandSnapshotsEnabled() {
 		readyDemandFingerprint = cr.readyDemandSnapshotFingerprint()
 		refresh = cr.demandSnapshot.readyDemandFingerprint != readyDemandFingerprint
@@ -3855,6 +3859,7 @@ func (cr *CityRuntime) loadDemandSnapshot(
 			createdAt:              time.Now(),
 			sessionFingerprint:     sessionFingerprint,
 			readyDemandFingerprint: readyDemandFingerprint,
+			suspensionFingerprint:  suspensionFingerprint,
 			result:                 result,
 		}
 	}
@@ -3870,6 +3875,7 @@ func (cr *CityRuntime) shouldRefreshDemandSnapshot(
 	trigger string,
 	configChanged bool,
 	sessionFingerprint string,
+	suspensionFingerprint string,
 ) bool {
 	// Non-patrol triggers (config reloads and controller pokes — e.g. from
 	// sling-dispatched work) always rebuild immediately; only patrol-cadence
@@ -3881,6 +3887,20 @@ func (cr *CityRuntime) shouldRefreshDemandSnapshot(
 		return true
 	}
 	if cr.demandSnapshot.sessionFingerprint != sessionFingerprint {
+		return true
+	}
+	// Suspension is the third input to the desired state, and neither of the
+	// two fingerprints above can see it. `gc suspend` / `gc resume` write
+	// .gc/runtime/suspension-state.json, and on a supervisor-managed city
+	// (no standalone [api] port) apiClient returns nil, so the CLI mutates the
+	// file directly and never pokes the controller — the change arrives on a
+	// PATROL tick or not at all. A suspended city has no live sessions and no
+	// ready-set movement, so both fingerprints are stable across the resume and
+	// the cached (empty) snapshot was reused until the 5-minute backstop
+	// expired: `gc resume` took up to five minutes to restart the agents it
+	// just resumed. Reading the file is one small local JSON read per patrol
+	// tick — the same read buildDesiredState makes whenever it does run.
+	if cr.demandSnapshot.suspensionFingerprint != suspensionFingerprint {
 		return true
 	}
 	maxAge := cr.demandSnapshotPatrolMaxAge()
@@ -3913,6 +3933,42 @@ func (cr *CityRuntime) demandSnapshotPatrolMaxAge() time.Duration {
 	// bites sub-second patrol_intervals, where it stops the probe subprocess
 	// from running on every tick.
 	return scaleCheckDemandMinInterval
+}
+
+// suspensionSnapshotFingerprint hashes the city's runtime suspension overrides
+// so a `gc suspend` / `gc resume` invalidates the cached demand snapshot on the
+// next patrol tick instead of waiting out runtimeDemandSnapshotBackstopMaxAge.
+func (cr *CityRuntime) suspensionSnapshotFingerprint() string {
+	st, _ := loadSuspensionState(fsys.OSFS{}, cr.cityPath)
+	return suspensionStateFingerprint(st)
+}
+
+// suspensionStateFingerprint renders the explicit city and rig suspension
+// preferences as a stable hash. Only the explicit overrides are hashed:
+// State.UpdatedAt moves on rewrites that change no preference, and the
+// authored suspended_on_start defaults they merge with live in the config,
+// whose own change already forces a rebuild (configChanged).
+func suspensionStateFingerprint(st suspensionstate.State) string {
+	h := fnv.New64a()
+	writeOverride := func(key string, suspended, ok bool) {
+		if !ok {
+			fmt.Fprintf(h, "%s=unset;", key) //nolint:errcheck // hash writer never fails
+			return
+		}
+		fmt.Fprintf(h, "%s=%t;", key, suspended) //nolint:errcheck // hash writer never fails
+	}
+	citySuspended, cityOK := suspensionstate.ExplicitCity(st)
+	writeOverride("city", citySuspended, cityOK)
+	names := make([]string, 0, len(st.Rigs))
+	for name := range st.Rigs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		rigSuspended, rigOK := suspensionstate.ExplicitRig(st, name)
+		writeOverride("rig:"+name, rigSuspended, rigOK)
+	}
+	return strconv.FormatUint(h.Sum64(), 16)
 }
 
 // readyDemandSnapshotFingerprint hashes the ready sets of every store the
