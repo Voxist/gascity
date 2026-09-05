@@ -27,6 +27,10 @@ var (
 	newDoctorRigDoltServerCheck = doctor.NewRigDoltServerCheck
 	newDoctorDoltBackupCheck    = doctor.NewDoltBackupCheck
 	newDoctorDoltLocalOnlyCheck = doctor.NewDoltLocalOnlyRemoteCheck
+	// newDoctorBinaryDivergenceCheck is a seam so tests can assert the
+	// supervisor PID reaches the check without the real check probing the
+	// host for a process image.
+	newDoctorBinaryDivergenceCheck = doctor.NewBinaryDivergenceCheck
 )
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -285,7 +289,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	register(doctor.NewSupervisorHTTPCheck(opts.SupervisorRunning))
 	// Assert that the binary a probe verifies is the binary the supervisor
 	// executes. Nothing else in the system compares the two.
-	register(doctor.NewBinaryDivergenceCheck(opts.SupervisorPID))
+	register(newDoctorBinaryDivergenceCheck(opts.SupervisorPID))
 
 	if cfgErr == nil && cfg != nil && !controllerRunning {
 		cityName := loadedCityName(cfg, cityPath)

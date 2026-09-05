@@ -4,6 +4,7 @@ import (
 	"debug/macho"
 	"encoding/binary"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
@@ -516,6 +517,12 @@ func TestRunningImageFromProc(t *testing.T) {
 	if want := imageAt(t, target); got.id != want.id {
 		t.Errorf("id = %+v, want the identity of the executing inode %+v", got.id, want.id)
 	}
+	// The magic link is also a readable handle on the running bytes. Without
+	// it, a replaced image on Linux degrades from "here is the answer" to
+	// "the bytes are unreachable" — the whole reason procfs beats lsof here.
+	if got.contentPath != filepath.Join(procRoot, "1234", "exe") {
+		t.Errorf("contentPath = %q, want the /proc exe link so replaced images stay comparable", got.contentPath)
+	}
 }
 
 func TestRunningImageFromProc_MissingPID(t *testing.T) {
@@ -686,8 +693,14 @@ func TestBinaryDivergenceCheck_ExecutedImageDeletedEndToEnd(t *testing.T) {
 }
 
 func TestSelectRunningImage_NoEntries(t *testing.T) {
-	if _, err := selectRunningImage(nil, func(string) bool { return true }); err == nil {
+	_, err := selectRunningImage(nil, func(string) bool { return true })
+	if err == nil {
 		t.Fatal("selectRunningImage with no entries = nil error, want an error")
+	}
+	// "lsof told us nothing" is a different diagnosis from "nothing lsof told
+	// us was the image", and the operator-facing message says which.
+	if !strings.Contains(err.Error(), "no mapped-text entries") {
+		t.Errorf("error = %q, want it to say lsof reported nothing at all", err)
 	}
 }
 
@@ -888,9 +901,10 @@ func TestStatFieldToUint64(t *testing.T) {
 	}
 }
 
-// TestSameContent covers the three gates, including the tail-only difference
-// the bounded edge probe exists to settle without reading either file whole.
-func TestSameContent(t *testing.T) {
+// TestCompareContent covers the three gates, including the tail-only
+// difference the bounded probe exists to settle without reading either file
+// whole, and the unreadable case that must never read as "differs".
+func TestCompareContent(t *testing.T) {
 	dir := t.TempDir()
 	body := strings.Repeat("gc", contentChunkSize)
 
@@ -900,32 +914,124 @@ func TestSameContent(t *testing.T) {
 
 	identicalA := facts("identical-a", body)
 	identicalB := facts("identical-b", body)
-	if same, reason := sameContent(identicalA, identicalB); !same {
-		t.Error("sameContent = false for two files with identical bytes, want true")
-	} else if !strings.Contains(reason, "sha256") {
+	outcome, reason, err := compareContent(identicalA, identicalB)
+	if outcome != contentSame || err != nil {
+		t.Errorf("compareContent(identical) = %v, %v; want contentSame", outcome, err)
+	}
+	if !strings.Contains(reason, "sha256") {
 		t.Errorf("reason = %q, want it to carry a digest", reason)
 	}
 
-	if same, _ := sameContent(identicalA, facts("shorter", body[:len(body)-2])); same {
-		t.Error("sameContent = true for files of different size, want false")
+	for name, other := range map[string]binaryFacts{
+		"different size":    facts("shorter", body[:len(body)-2]),
+		"differs at head":   facts("head-diff", "X"+body[1:]),
+		"differs at tail":   facts("tail-diff", body[:len(body)-1]+"X"),
+		"differs in middle": facts("middle-diff", body[:len(body)/2]+"X"+body[len(body)/2+1:]),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if outcome, _, _ := compareContent(identicalA, other); outcome != contentDiffers {
+				t.Errorf("compareContent = %v, want contentDiffers", outcome)
+			}
+		})
 	}
 
-	headDiff := facts("head-diff", "X"+body[1:])
-	if same, _ := sameContent(identicalA, headDiff); same {
-		t.Error("sameContent = true for files differing at the head, want false")
+	t.Run("unstattable is unknown", func(t *testing.T) {
+		if outcome, _, err := compareContent(identicalA, binaryFacts{}); outcome != contentUnknown || err == nil {
+			t.Errorf("compareContent with an unstattable side = %v, %v; want contentUnknown and an error", outcome, err)
+		}
+	})
+}
+
+// TestCompareContent_UnreadableIsUnknown is the guard for the third time on
+// this check that "could not look" was rendered as "they differ". Two
+// byte-identical copies where the executed one is stattable but not readable
+// must report unknown: a permission error is not evidence of a difference.
+func TestCompareContent_UnreadableIsUnknown(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file permissions")
+	}
+	dir := t.TempDir()
+	body := strings.Repeat("gc", contentChunkSize)
+	readable := statBinary(writeFakeBinary(t, filepath.Join(dir, "readable"), body))
+	locked := writeFakeBinary(t, filepath.Join(dir, "locked"), body)
+	if err := os.Chmod(locked, 0o111); err != nil { // executable, not readable
+		t.Fatalf("Chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	lockedFacts := statBinary(locked)
+
+	outcome, _, err := compareContent(lockedFacts, readable)
+
+	if outcome != contentUnknown {
+		t.Fatalf("compareContent on an unreadable binary = %v, want contentUnknown", outcome)
+	}
+	if err == nil {
+		t.Error("error is nil; the caller needs it to explain why nothing was established")
+	}
+}
+
+// TestCompareContent_UnreadableStreamIsUnknown reaches the streaming pass's
+// error path, which the test above cannot: sameTail opens both files first and
+// fails there. Empty files skip the tail probe entirely (nothing to sample), so
+// an unreadable empty file is refused for the first time inside
+// compareAndDigest.
+func TestCompareContent_UnreadableStreamIsUnknown(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file permissions")
+	}
+	dir := t.TempDir()
+	readable := statBinary(writeFakeBinary(t, filepath.Join(dir, "empty-readable"), ""))
+	locked := writeFakeBinary(t, filepath.Join(dir, "empty-locked"), "")
+	if err := os.Chmod(locked, 0o111); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	lockedFacts := statBinary(locked)
+
+	// Precondition: the tail probe must not be what refuses this pair, or the
+	// test would prove nothing about the streaming pass.
+	if same, err := sameTail(lockedFacts.readPath(), readable.readPath(), 0); err != nil || !same {
+		t.Fatalf("precondition: sameTail on empty files = %v, %v; want true, nil", same, err)
 	}
 
-	tailDiff := facts("tail-diff", body[:len(body)-1]+"X")
-	if same, _ := sameContent(identicalA, tailDiff); same {
-		t.Error("sameContent = true for files differing at the tail, want false")
-	}
+	outcome, _, err := compareContent(lockedFacts, readable)
 
-	// A difference only in the middle survives the edge probe and has to be
-	// caught by the streaming pass.
-	mid := len(body) / 2
-	middleDiff := facts("middle-diff", body[:mid]+"X"+body[mid+1:])
-	if same, _ := sameContent(identicalA, middleDiff); same {
-		t.Error("sameContent = true for files differing only in the middle, want false")
+	if outcome != contentUnknown {
+		t.Fatalf("compareContent = %v, want contentUnknown when the stream cannot be read", outcome)
+	}
+	if err == nil {
+		t.Error("error is nil; the caller needs it to explain why nothing was established")
+	}
+}
+
+// TestBinaryDivergenceCheck_UnreadableExecutedImageIsUnverified walks the same
+// case through Run: identical copies, executed side unreadable. Reporting a
+// divergence here would tell an operator to converge two artifacts that are
+// already the same bytes.
+func TestBinaryDivergenceCheck_UnreadableExecutedImageIsUnverified(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file permissions")
+	}
+	dir := t.TempDir()
+	body := strings.Repeat("gc", 64)
+	executed := writeFakeBinary(t, filepath.Join(dir, "executed"), body)
+	verified := writeFakeBinary(t, filepath.Join(dir, "gc"), body)
+	img := imageAt(t, executed)
+	if err := os.Chmod(executed, 0o111); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(executed, 0o755) })
+
+	r := divergenceCheck(4242, img, verified).Run(&CheckContext{})
+
+	if r.Status != StatusWarning {
+		t.Fatalf("Status = %v, want StatusWarning; message=%q", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "unverified") {
+		t.Errorf("Message = %q, want it reported as unverified", r.Message)
+	}
+	if strings.Contains(r.Message, "binary divergence: ") {
+		t.Errorf("Message = %q, must not assert a divergence it never established", r.Message)
 	}
 }
 
@@ -933,7 +1039,7 @@ func TestSameContent(t *testing.T) {
 // from, not just what it is. sameTail is what bounds the cost of the one shape
 // the streaming pass would otherwise read two whole binaries to settle — same
 // size, identical until the very end. Called directly, because through
-// sameContent the streaming pass would return the same answer and hide whether
+// compareContent the streaming pass would return the same answer and hide whether
 // the probe did anything at all.
 func TestSameContentTailProbeSettlesTailDifference(t *testing.T) {
 	dir := t.TempDir()
@@ -951,5 +1057,215 @@ func TestSameContentTailProbeSettlesTailDifference(t *testing.T) {
 
 	if same, err := sameTail(a, a, int64(len(body))); err != nil || !same {
 		t.Errorf("sameTail(a, a) = %v, %v; a file must match itself", same, err)
+	}
+}
+
+// TestBinaryDivergenceCheck_ReplacedImageWithIdenticalBytesIsOK covers an
+// idempotent reinstall: `make install` re-run at the same commit while the
+// supervisor is up leaves a new inode holding identical bytes. The fleet is
+// running exactly what a probe verifies, so warning "replaced under it,
+// restart" would be a false alarm. Where the platform keeps a handle on the
+// executing inode (Linux's /proc/<pid>/exe), the question is answerable and
+// the check answers it instead of guessing.
+func TestBinaryDivergenceCheck_ReplacedImageWithIdenticalBytesIsOK(t *testing.T) {
+	dir := t.TempDir()
+	body := "the build both sides hold"
+	path := filepath.Join(dir, "gc-artifact")
+	writeFakeBinary(t, path, body)
+	executing := imageAt(t, path)
+	// A handle that still reads the original bytes, as /proc/<pid>/exe does.
+	executing.contentPath = writeFakeBinary(t, filepath.Join(dir, "exe-handle"), body)
+
+	// The reinstall: a new inode at the same path, same bytes.
+	replacement := writeFakeBinary(t, filepath.Join(dir, "gc-artifact.new"), body)
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatalf("reinstalling %s: %v", path, err)
+	}
+	verified := writeFakeBinary(t, filepath.Join(dir, "gc"), body)
+
+	r := divergenceCheck(4242, executing, verified).Run(&CheckContext{})
+
+	if r.Status != StatusOK {
+		t.Fatalf("Status = %v, want StatusOK for a reinstall of identical bytes; message=%q", r.Status, r.Message)
+	}
+	joined := strings.Join(r.Details, "\n")
+	if !strings.Contains(joined, "bytes are unchanged") {
+		t.Errorf("Details do not record that the artifact churned without changing: %v", r.Details)
+	}
+	// The handle path is an implementation detail; an operator should see the
+	// path they know.
+	if strings.Contains(r.Message, "exe-handle") || strings.Contains(joined, "exe-handle") {
+		t.Errorf("output names the platform handle rather than the operator-facing path: %q / %v", r.Message, r.Details)
+	}
+}
+
+// TestBinaryDivergenceCheck_ReplacedImageWithDifferentBytesDiverges is the
+// other half: a handle exists, the bytes really differ, so the check gives the
+// definite answer rather than the weaker "unreachable" one.
+func TestBinaryDivergenceCheck_ReplacedImageWithDifferentBytesDiverges(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gc-artifact")
+	writeFakeBinary(t, path, "the bytes the fleet runs")
+	executing := imageAt(t, path)
+	executing.contentPath = writeFakeBinary(t, filepath.Join(dir, "exe-handle"), "the bytes the fleet runs")
+
+	replacement := writeFakeBinary(t, filepath.Join(dir, "gc-artifact.new"), "a different build")
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatalf("replacing %s: %v", path, err)
+	}
+	verified := writeFakeBinary(t, filepath.Join(dir, "gc"), "a different build")
+
+	r := divergenceCheck(4242, executing, verified).Run(&CheckContext{})
+
+	if r.Status != StatusWarning {
+		t.Fatalf("Status = %v, want StatusWarning", r.Status)
+	}
+	if !strings.Contains(r.Message, "binary divergence: ") {
+		t.Errorf("Message = %q, want the definite divergence verdict the handle makes possible", r.Message)
+	}
+	if strings.Contains(r.Message, "exe-handle") {
+		t.Errorf("Message = %q, want the operator-facing path, not the handle", r.Message)
+	}
+}
+
+// TestBinaryDivergenceCheck_PermissionErrorHintIsActionable guards the hint,
+// not just the status. A supervisor running as another user produces this
+// every run; "re-run once it is readable" is advice the operator cannot act on.
+func TestBinaryDivergenceCheck_PermissionErrorHintIsActionable(t *testing.T) {
+	c := divergenceCheck(4242, runningImage{}, "")
+	c.resolveRunningImage = func(int) (runningImage, error) {
+		return runningImage{}, fmt.Errorf("reading /proc/4242/exe: %w", fs.ErrPermission)
+	}
+
+	r := c.Run(&CheckContext{})
+
+	if r.Status != StatusWarning {
+		t.Fatalf("Status = %v, want StatusWarning", r.Status)
+	}
+	if !strings.Contains(r.Message, "unverified") {
+		t.Errorf("Message = %q, want it reported as unverified", r.Message)
+	}
+	if !strings.Contains(r.FixHint, "another user") || !strings.Contains(r.FixHint, "sudo") {
+		t.Errorf("FixHint = %q, want it to name the cause and something the operator can do", r.FixHint)
+	}
+}
+
+// TestSelectRunningImage_NeverNamesALibrary guards the fallback's blind spot.
+// Naming a mapped library as the executed image — with a restart hint attached
+// — is worse than reporting that it could not be determined.
+func TestSelectRunningImage_NeverNamesALibrary(t *testing.T) {
+	dir := t.TempDir()
+	// Every entry is a real file that is still exactly what lsof recorded, so
+	// nothing here is the replaced-or-deleted image.
+	lib := writeFakeBinary(t, filepath.Join(dir, "libicuuc.78.3.dylib"), "library")
+	data := writeFakeBinary(t, filepath.Join(dir, "icudt78l.dat"), "locale table")
+	entries := []lsofEntry{
+		{name: lib, dev: fmt.Sprintf("%#x", identityOf(t, lib).dev), ino: fmt.Sprint(identityOf(t, lib).ino)},
+		{name: data, dev: fmt.Sprintf("%#x", identityOf(t, data).dev), ino: fmt.Sprint(identityOf(t, data).ino)},
+	}
+
+	_, err := selectRunningImage(entries, func(string) bool { return false })
+
+	if err == nil {
+		t.Fatal("selectRunningImage named one of the mapped libraries as the executed image; want an error")
+	}
+}
+
+func identityOf(t *testing.T, path string) fileIdentity {
+	t.Helper()
+	id, ok := fileIdentityOf(mustStat(t, path))
+	if !ok {
+		t.Skipf("no file identity available on %s", goruntime.GOOS)
+	}
+	return id
+}
+
+func TestDescribeSkew(t *testing.T) {
+	// "NEWER by 0s" is self-contradictory; sub-second skew is still skew.
+	if got := describeSkew(400 * time.Millisecond); got != "by under a second" {
+		t.Errorf("describeSkew(400ms) = %q, want %q", got, "by under a second")
+	}
+	if got := describeSkew(90 * time.Second); got != "by 1m30s" {
+		t.Errorf("describeSkew(90s) = %q, want %q", got, "by 1m30s")
+	}
+}
+
+// TestSkewLineNeverReportsZero walks the sub-second case through the line an
+// operator actually reads.
+func TestSkewLineNeverReportsZero(t *testing.T) {
+	dir := t.TempDir()
+	older := statBinary(writeFakeBinary(t, filepath.Join(dir, "older"), "a"))
+	newer := statBinary(writeFakeBinary(t, filepath.Join(dir, "newer"), "b"))
+	base := time.Now()
+	if err := os.Chtimes(older.realPath, base, base); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+	half := base.Add(500 * time.Millisecond)
+	if err := os.Chtimes(newer.realPath, half, half); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+
+	line := skewLine(statBinary(older.realPath), statBinary(newer.realPath))
+
+	if strings.Contains(line, "by 0s") {
+		t.Errorf("skewLine = %q, want no self-contradictory zero duration", line)
+	}
+	if !strings.Contains(line, "NEWER") {
+		t.Errorf("skewLine = %q, want it to still report a direction", line)
+	}
+}
+
+// TestSelectRunningImage_UnreadableImageIsIdentified covers a running image
+// that is present and unchanged but that this user cannot read — a release
+// installer's root-owned 0111 artifact, say. The executable test cannot
+// evaluate it, and treating that as "not the image" leaves the check reporting
+// only that it found nothing. Identifying it lets the comparison say what is
+// actually wrong: the image is right there, and unreadable.
+func TestSelectRunningImage_UnreadableImageIsIdentified(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file permissions")
+	}
+	dir := t.TempDir()
+	image := writeFakeBinary(t, filepath.Join(dir, "gc-main-20260904"), "the running image")
+	lib := writeFakeBinary(t, filepath.Join(dir, "libicuuc.78.3.dylib"), "a readable, unchanged library")
+	imageID, libID := identityOf(t, image), identityOf(t, lib)
+	if err := os.Chmod(image, 0o111); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(image, 0o755) })
+
+	entries := []lsofEntry{
+		{name: lib, dev: fmt.Sprintf("%#x", libID.dev), ino: fmt.Sprint(libID.ino)},
+		{name: image, dev: fmt.Sprintf("%#x", imageID.dev), ino: fmt.Sprint(imageID.ino)},
+	}
+
+	got, err := selectRunningImage(entries, machOIsExecutable)
+	if err != nil {
+		t.Fatalf("selectRunningImage on an unreadable image = %v, want it identified", err)
+	}
+	if got.path != image {
+		t.Errorf("path = %q, want the unreadable image %q rather than the readable library", got.path, image)
+	}
+}
+
+func TestFileIsReadable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file permissions")
+	}
+	dir := t.TempDir()
+	readable := writeFakeBinary(t, filepath.Join(dir, "readable"), "x")
+	if !fileIsReadable(readable) {
+		t.Error("fileIsReadable = false for a readable file")
+	}
+	locked := writeFakeBinary(t, filepath.Join(dir, "locked"), "x")
+	if err := os.Chmod(locked, 0o111); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	if fileIsReadable(locked) {
+		t.Error("fileIsReadable = true for an execute-only file")
+	}
+	if fileIsReadable(filepath.Join(dir, "absent")) {
+		t.Error("fileIsReadable = true for a path that does not exist")
 	}
 }

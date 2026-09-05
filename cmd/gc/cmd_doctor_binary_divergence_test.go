@@ -2,21 +2,18 @@ package main
 
 import (
 	"bytes"
-	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 )
 
-// unresolvablePID is above every platform's pid ceiling, so resolving a
-// process image for it always fails — which is what makes the check's output
-// name the pid it was handed.
-const unresolvablePID = 2147483646
+// probeSupervisorPID is a PID above every platform's ceiling. Nothing here
+// probes for it — the check is stubbed — but using an impossible value keeps
+// the assertion honest if the stub is ever removed.
+const probeSupervisorPID = 2147483646
 
 func doctorCityDir(t *testing.T) string {
 	t.Helper()
@@ -27,21 +24,23 @@ func doctorCityDir(t *testing.T) string {
 	return cityDir
 }
 
-// assertCarriesSupervisorPID checks that a binary-divergence message reflects
-// the PID it was constructed with. On a host with no route to a process's
-// executed image the check reports that instead of probing, so either shape
-// proves the wiring; a check handed 0 reports "supervisor not running" and
-// matches neither.
-func assertCarriesSupervisorPID(t *testing.T, what, msg string) {
+// captureBinaryDivergencePID stubs the check's constructor and returns a
+// pointer to the PID it was handed. Stubbing the constructor rather than
+// running the check keeps this a unit test: the real check would shell out to
+// lsof, which is invisible to the resource census and costs seconds in the
+// fast lane.
+func captureBinaryDivergencePID(t *testing.T) *int {
 	t.Helper()
-	if strings.Contains(msg, strconv.Itoa(unresolvablePID)) {
-		return
+	got := -1
+	old := newDoctorBinaryDivergenceCheck
+	newDoctorBinaryDivergenceCheck = func(pid int) *doctor.BinaryDivergenceCheck {
+		got = pid
+		// Constructed with 0 so that if anything does run it, it returns
+		// immediately without touching the host.
+		return doctor.NewBinaryDivergenceCheck(0)
 	}
-	if strings.Contains(msg, "NOT checked on this platform") {
-		return
-	}
-	t.Errorf("%s = %q, want it to name the supervisor pid %d it was handed (or report the platform as unchecked)",
-		what, msg, unresolvablePID)
+	t.Cleanup(func() { newDoctorBinaryDivergenceCheck = old })
+	return &got
 }
 
 // TestBuildDoctorChecks_BinaryDivergenceRegisteredAfterSupervisorHTTP pins the
@@ -49,6 +48,7 @@ func assertCarriesSupervisorPID(t *testing.T, what, msg string) {
 // checks, not scattered among the config checks.
 func TestBuildDoctorChecks_BinaryDivergenceRegisteredAfterSupervisorHTTP(t *testing.T) {
 	t.Setenv("GC_DOLT", "skip")
+	captureBinaryDivergencePID(t)
 	cfg := &config.City{Workspace: config.Workspace{Name: "demo"}}
 
 	checks := buildDoctorChecks(doctorCityDir(t), cfg, nil, buildDoctorChecksOpts{
@@ -83,56 +83,36 @@ func TestBuildDoctorChecks_BinaryDivergenceRegisteredAfterSupervisorHTTP(t *test
 // dropping the plumbing would silently disable it everywhere.
 func TestBuildDoctorChecks_BinaryDivergenceReceivesSupervisorPID(t *testing.T) {
 	t.Setenv("GC_DOLT", "skip")
+	got := captureBinaryDivergencePID(t)
 	cfg := &config.City{Workspace: config.Workspace{Name: "demo"}}
 
-	checks := buildDoctorChecks(doctorCityDir(t), cfg, nil, buildDoctorChecksOpts{
+	buildDoctorChecks(doctorCityDir(t), cfg, nil, buildDoctorChecksOpts{
 		SupervisorRunning:    true,
-		SupervisorPID:        unresolvablePID,
+		SupervisorPID:        probeSupervisorPID,
 		SkipCityDoltCheck:    true,
 		SkipManagedDoltCheck: true,
 	})
 
-	var found doctor.Check
-	for _, c := range checks {
-		if c.Name() == "binary-divergence" {
-			found = c
-		}
+	if *got != probeSupervisorPID {
+		t.Errorf("binary-divergence constructed with pid %d, want %d", *got, probeSupervisorPID)
 	}
-	if found == nil {
-		t.Fatal("binary-divergence check not registered")
-	}
-
-	assertCarriesSupervisorPID(t, "binary-divergence message", found.Run(&doctor.CheckContext{}).Message)
 }
 
 // TestDoDoctorPassesSupervisorPIDToBinaryDivergence closes the last gap: that
 // doDoctor forwards the liveness probe's PID, not just its boolean.
 func TestDoDoctorPassesSupervisorPIDToBinaryDivergence(t *testing.T) {
 	t.Setenv("GC_DOLT", "skip")
-	cityDir := doctorCityDir(t)
-	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_CITY_PATH", doctorCityDir(t))
+	got := captureBinaryDivergencePID(t)
 
 	old := supervisorAliveHook
-	supervisorAliveHook = func() int { return unresolvablePID }
+	supervisorAliveHook = func() int { return probeSupervisorPID }
 	t.Cleanup(func() { supervisorAliveHook = old })
 
 	var stdout, stderr bytes.Buffer
 	_ = doDoctor(false, false, false, 0, &stdout, &stderr)
 
-	out := stdout.String()
-	line, ok := doctorCheckLine(out, "binary-divergence")
-	if !ok {
-		t.Fatalf("doctor output missing the binary-divergence check:\n%s", out)
+	if *got != probeSupervisorPID {
+		t.Errorf("doDoctor built binary-divergence with pid %d, want the probed %d", *got, probeSupervisorPID)
 	}
-	assertCarriesSupervisorPID(t, "binary-divergence doctor line", line)
-}
-
-// doctorCheckLine returns the streamed result line for one check.
-func doctorCheckLine(out, name string) (string, bool) {
-	for _, line := range strings.Split(out, "\n") {
-		if strings.Contains(line, fmt.Sprintf(" %s — ", name)) {
-			return line, true
-		}
-	}
-	return "", false
 }
