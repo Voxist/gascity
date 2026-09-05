@@ -415,6 +415,50 @@ assert_blocks "CASE 17e: an unmarked wrapped call is still blocked" "internal/x/
 assert_blocks "CASE 17f: a marker on an unrelated line does not carry" "internal/x/x.go" \
 	"$(printf 'var a = 1 // gocacheguard:allow\nvar b = 2\nvar c = exec.Command(\"go\",\n\t\"clean\",\n\t\"-cache\")')"
 
+# ---------------------------------------------------------------- CASE 18
+# A flag that takes a SEPARATE value must not end the flag scan.
+#
+# The repetition group only tolerated tokens starting with "-", so the VALUE of
+# a value-taking flag looked like the first non-flag token and the scan stopped
+# there. `go clean -tags foo -cache` was therefore not flagged -- while cmd/go
+# consumes the value, keeps parsing, applies -cache, and wipes the cache.
+# Same hole the runtime shim had; the two arms must not drift apart.
+assert_blocks "CASE 18a: -cache behind -tags with a separate value" \
+	"scripts/v.sh" "$(printf 'go clean -tags foo -cache')"
+assert_blocks "CASE 18b: -cache behind -p with a separate value" \
+	"scripts/v.sh" "$(printf 'go clean -p 4 -cache')"
+assert_blocks "CASE 18c: -cache behind -gcflags with a separate value" \
+	"scripts/v.sh" "$(printf 'go clean -gcflags all=-N -cache')"
+# The =value spelling consumes no extra argument and must still be caught.
+assert_blocks "CASE 18d: -cache after an =value flag" \
+	"scripts/v.sh" "$(printf 'go clean -mod=vendor -cache')"
+# ... and a value-taking flag on its own is not the ban.
+assert_allows "CASE 18e: -tags with a value and no -cache is not the ban" \
+	"scripts/v.sh" "$(printf 'go clean -tags foo -testcache')"
+
+# ---------------------------------------------------------------- CASE 19
+# REGRESSION on the CASE 16 fix: a comment continuation whose COMMAND is itself
+# split across further lines.
+#
+# CASE 16 added a physical-line floor, which catches the case where the command
+# sits whole on one physical line. It cannot catch this one: no single physical
+# line carries the command, so the floor never sees it, and the joined line
+# still began with "#" and was exempted. All three lines execute in sh/bash.
+#
+# The fix is that a CONTINUED comment segment contributes only whitespace to the
+# joined line -- and does not lend its line number either, so the report opens
+# at the line that executes rather than at the comment above it.
+assert_blocks "CASE 19a: comment continuation with a split command" \
+	"scripts/s.sh" "$(printf '#!/bin/sh\n# note \\\ngo clean \\\n  -cache')"
+# The all-comment shape must STILL be exempt: here the second line is a comment
+# too, so nothing executes. This is the case CASE 15j pins, restated as the
+# negative of 19a so the pair distinguishes the behaviours.
+assert_allows "CASE 19b: an entirely commented split command stays exempt" \
+	"scripts/s.sh" "$(printf '# go clean \\\n#   -cache')"
+# An innocent comment continuation must not be dragged into a hit.
+assert_allows "CASE 19c: innocent comment continuation is not a hit" \
+	"scripts/s.sh" "$(printf '#!/bin/sh\n# harmless \\\necho hi')"
+
 # ------------------------------------------------------------------ verdict
 if [ "$failures" -ne 0 ]; then
 	echo "FAILED: $failures case(s)" >&2

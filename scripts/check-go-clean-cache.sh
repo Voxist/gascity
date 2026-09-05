@@ -116,11 +116,21 @@ QUOTE = "[" + chr(34) + chr(39) + "]?"
 # match: the repetition group lets other flags sit on either side, while
 # requiring the token to BE "-cache" keeps "-testcache", "-modcache" and
 # "-fuzzcache" from colliding with it. The leading boundary excludes "cargo".
+# Flags that take a SEPARATE value. The value is not a "-" token, so without
+# this the repetition below stops at it and `go clean -tags foo -cache` is not
+# flagged -- while cmd/go still applies -cache. Mirrors the runtime shim arm
+# of the same name; the two must not drift.
+VALUE_FLAG = (
+    r"-(?:p|covermode|coverpkg|asmflags|buildmode|buildvcs|compiler"
+    r"|gccgoflags|gcflags|installsuffix|ldflags|mod|modfile|overlay"
+    r"|pgo|pkgdir|tags|toolexec)(?![-A-Za-z0-9_=.])"
+)
+
 CMD = re.compile(
     r"(?:^|[^A-Za-z0-9_-])"
     r"(?:go|\$\(GO\)|\$\{GO\}|\$GO)"
     r"\s+clean"
-    r"(?:\s+-[A-Za-z0-9_=.,-]+)*"
+    r"(?:\s+" + VALUE_FLAG + r"\s+\S+|\s+-[A-Za-z0-9_=.,-]+)*"
     r"\s+" + QUOTE + r"--?cache(?:=(?P<v>[A-Za-z0-9]+))?" + QUOTE +
     r"(?![A-Za-z0-9_=.-])"
 )
@@ -218,12 +228,33 @@ for path in listing():
         if start is None:
             start = n
         if line.endswith("\\"):
-            pending += line[:-1] + " "
+            seg = line[:-1]
+            # A CONTINUED comment segment contributes only whitespace. In
+            # sh/bash a comment ends at the newline and the next line runs, so
+            # letting the "#" lead the joined line would exempt a live command:
+            #
+            #     # note \
+            #     go clean \
+            #       -cache        <- all three lines execute; was MISSED
+            #
+            # The physical-line floor below cannot catch that one, because no
+            # single physical line carries the whole command. In a Makefile the
+            # comment genuinely does continue, so this trades a silent false
+            # negative for a loud, annotatable false positive there -- the same
+            # direction the union below is chosen for.
+            if seg.lstrip().startswith("#") or seg.lstrip().startswith("//"):
+                seg = ""
+                # Re-anchor: a dropped leading comment must not lend its line
+                # number either. The report should open at the line that
+                # EXECUTES, not at the comment above it.
+                if not pending.strip():
+                    start = None
+            pending += seg + " "
             continue
-        logical.append((start, pending + line))
+        logical.append((start, n, pending + line))
         pending, start = "", None
     if pending:
-        logical.append((start, pending))
+        logical.append((start, len(lines), pending))
 
     def exempt(text_of_line):
         stripped = text_of_line.lstrip()
@@ -254,11 +285,19 @@ for path in listing():
     # case is a loud false positive (annotatable) instead of a silent false
     # negative. A false negative here cannot be seen; a false positive can.
     found = {}
+    spans = []
+    for start, end, line in logical:
+        if not exempt(line) and cmd_hit(line):
+            found.setdefault(start, line.strip())
+            spans.append((start, end))
     for n, line in enumerate(lines, 1):
         if not exempt(line) and cmd_hit(line):
-            found.setdefault(n, line.strip())
-    for n, line in logical:
-        if not exempt(line) and cmd_hit(line):
+            # One violation, not two: a physical hit inside a logical line the
+            # joined pass already reported is the same command seen twice.
+            # Reported at the logical start, which is where a reader opens the
+            # construct.
+            if any(a <= n <= b for a, b in spans):
+                continue
             found.setdefault(n, line.strip())
     for n in sorted(found):
         hits.append("%s:%d: %s" % (path, n, found[n]))

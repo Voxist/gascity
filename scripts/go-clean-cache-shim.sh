@@ -186,6 +186,25 @@ refuses_clean_cache() {
 		--) return 1 ;;
 		-cache | --cache) return 0 ;;
 		-cache=* | --cache=*) truthy "${a#*=}" && return 0 || return 1 ;;
+		# Flags that take a SEPARATE value argument. Without this arm the value
+		# is read as the first non-flag token, the scan stops at the `*` arm
+		# below, and `go clean -tags foo -cache` passes through while cmd/go
+		# still applies -cache and wipes the cache. Go's flag package consumes
+		# the value and keeps parsing, so this arm has to as well.
+		#
+		# Consuming the value is also correct when the value ITSELF looks like
+		# the ban: `go clean -tags -cache` means tags="-cache", and cmd/go does
+		# not wipe -- so skipping it here agrees with the runtime rather than
+		# over-refusing.
+		#
+		# The -flag=value spelling consumes no extra argument and falls to the
+		# -* arm. Sourced from `go help build`'s flag list; a flag missing here
+		# degrades to the old behaviour (pass-through), so keep it current.
+		-p | -covermode | -coverpkg | -asmflags | -buildmode | -buildvcs | \
+			-compiler | -gccgoflags | -gcflags | -installsuffix | -ldflags | \
+			-mod | -modfile | -overlay | -pgo | -pkgdir | -tags | -toolexec)
+			i=$((i + 2))
+			;;
 		-*) i=$((i + 1)) ;;
 		*) return 1 ;;
 		esac

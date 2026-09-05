@@ -380,8 +380,19 @@ fi
 # whether to wipe the shared cache; if the refusal logic were broken in exactly
 # the way the probe exists to detect, a probe wired to the real go would perform
 # the wipe ITSELF and cause the incident the shim exists to prevent.
-grep -q 'GC_GO_SHIM_REAL_GO=/usr/bin/true "\$TARGET" clean -cache' "$INSTALLER" \
+# Matched on the joined text so the assertion survives the line wrap, and stated
+# as "the probe carries the no-op pin" rather than as one exact spelling.
+tr '\n' ' ' <"$INSTALLER" \
+	| grep -qE 'GC_GO_SHIM_REAL_GO=/usr/bin/true[^"]{0,12}"\$TARGET" clean -cache' \
 	|| fail "CASE 19: installer's refusal probe is wired to the real toolchain"
+
+# The probe must also not inherit the documented escape hatch: exported (which
+# it may well be, in the shell someone used to wipe the cache before installing)
+# it makes a WORKING shim pass the ban through and the probe then condemns a
+# good install.
+tr '\n' ' ' <"$INSTALLER" \
+	| grep -qE 'env -u GC_ALLOW_GO_CLEAN_CACHE[^"]{0,60}"\$TARGET" clean -cache' \
+	|| fail "CASE 19b: installer's refusal probe inherits GC_ALLOW_GO_CLEAN_CACHE"
 
 # Demonstrated, not merely read. A sabotaged shim SOURCE is rendered by a copy
 # of the real installer; the installer must reject the result, and the fake go
@@ -483,6 +494,30 @@ GOFLAGS="-cache" assert_allowed "CASE 21g: GOFLAGS=-cache does not block a build
 GOFLAGS="-testcache" assert_allowed "CASE 21h: GOFLAGS=-testcache is not the ban" clean -testcache
 GOFLAGS="-modcache" assert_allowed "CASE 21i: GOFLAGS=-modcache is not the ban" clean
 GOFLAGS="-cache=false" assert_allowed "CASE 21j: GOFLAGS=-cache=false is a no-op" clean
+
+# ---------------------------------------------------------------- CASE 22
+# A flag that takes a SEPARATE value must not end the argv scan.
+#
+# The scan stopped at the first non-flag token, and a value-taking flag puts a
+# non-flag token in the middle of the flag list. So `go clean -tags foo -cache`
+# was passed straight through -- while Go's flag package consumes "foo" as the
+# value of -tags, keeps parsing, sees -cache, and cmd/go wipes the cache.
+# Measured against the installed shim before the fix: refused `clean -cache`,
+# passed `clean -tags foo -cache`.
+assert_refused "CASE 22a: -cache behind -tags with a separate value" clean -tags foo -cache
+assert_refused "CASE 22b: -cache behind -p with a separate value" clean -p 4 -cache
+assert_refused "CASE 22c: -cache behind -gcflags with a separate value" clean -gcflags all=-N -cache
+assert_refused "CASE 22d: -cache behind -toolexec" clean -toolexec /bin/echo -cache
+assert_refused "CASE 22e: -cache after an =value flag still caught" clean -mod=vendor -cache
+assert_refused "CASE 22f: value flag before -C-style global and the ban" -C / clean -tags x -cache
+
+# The value itself may LOOK like the ban. `go clean -tags -cache` means
+# tags="-cache": cmd/go does NOT wipe, so the shim must not refuse either.
+# Skipping the value is what makes the shim agree with the runtime instead of
+# over-refusing.
+assert_allowed "CASE 22g: -tags -cache is a tag named -cache, not the ban" clean -tags -cache
+assert_allowed "CASE 22h: a value flag with no -cache is not the ban" clean -tags foo -testcache
+assert_allowed "CASE 22i: a package path still ends the scan" clean ./pkg
 
 # ------------------------------------------------------------------ verdict
 if [ "$failures" -ne 0 ]; then

@@ -106,6 +106,10 @@ if [ "$UNINSTALL" -eq 1 ]; then
 Refusing to remove it — that is how you delete a real toolchain. If you are
 certain, remove it by hand."
 	fi
+	if [ "$DRY_RUN" -eq 1 ]; then
+		echo "would remove $TARGET (--dry-run; nothing was changed)"
+		exit 0
+	fi
 	rm -f "$TARGET" || die "could not remove $TARGET"
 	echo "removed $TARGET"
 	exit 0
@@ -205,6 +209,18 @@ grep -q "^REAL_GO_PINNED='$REAL_GO'\$" "$tmp" \
 	|| die "shim rendering did not substitute REAL_GO_PINNED (source changed shape?)"
 
 chmod 755 "$tmp" || die "could not chmod the rendered shim"
+
+# Keep the prior copy until the probes below have passed, so a failed
+# verification can put it back rather than leaving this host with a shim we
+# have just proved does not work. Only ever an older copy of this same shim --
+# anything else was refused above.
+prior_backup=""
+if [ -e "$TARGET" ]; then
+	prior_backup="$(mktemp "$TARGET.prior.XXXXXX")" \
+		|| die "could not create a backup slot in $DIR"
+	cp -f "$TARGET" "$prior_backup" || die "could not back up the existing $TARGET"
+fi
+
 mv -f "$tmp" "$TARGET" || die "could not install $TARGET"
 trap - EXIT
 
@@ -212,7 +228,21 @@ trap - EXIT
 #
 # Report success only after demonstrating both halves on the installed copy.
 # `go version` is chosen for the passthrough probe because it is read-only.
+# A failed probe must not leave a shim we have just proved untrustworthy ahead
+# of the real toolchain on every build on this host. Roll back to whatever was
+# at $TARGET before (usually nothing) and then die.
+rollback() {
+	if [ -n "${prior_backup:-}" ] && [ -f "$prior_backup" ]; then
+		mv -f "$prior_backup" "$TARGET" 2>/dev/null \
+			&& echo "rolled back: restored the previous $TARGET" >&2
+	else
+		rm -f "$TARGET" 2>/dev/null \
+			&& echo "rolled back: removed $TARGET" >&2
+	fi
+}
+
 if ! "$TARGET" version >/dev/null 2>&1; then
+	rollback
 	die "installed shim at $TARGET cannot run '$REAL_GO version' — install is broken"
 fi
 #
@@ -224,9 +254,18 @@ fi
 # no-op keeps the assertion (a broken shim execs /usr/bin/true, exits 0, and is
 # caught) while making the failure path harmless. The passthrough probe above
 # already proves the pinned toolchain is reachable, so nothing is lost.
-if GC_GO_SHIM_REAL_GO=/usr/bin/true "$TARGET" clean -cache >/dev/null 2>&1; then
+# GC_ALLOW_GO_CLEAN_CACHE is unset for the probe, not merely left alone: it is
+# the documented escape hatch, so it may well be exported in the very shell an
+# operator used to wipe the cache before installing this. Inherited, it makes a
+# WORKING shim pass the ban through, the probe then declares the install broken,
+# and (before the rollback above) left the shim in place anyway.
+if env -u GC_ALLOW_GO_CLEAN_CACHE GC_GO_SHIM_REAL_GO=/usr/bin/true \
+	"$TARGET" clean -cache >/dev/null 2>&1; then
+	rollback
 	die "installed shim at $TARGET did NOT refuse 'go clean -cache' — install is broken"
 fi
+
+[ -n "$prior_backup" ] && rm -f "$prior_backup"
 
 cat <<EOF
 installed $TARGET
