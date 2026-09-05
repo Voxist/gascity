@@ -119,4 +119,12 @@ func TestDeployFleetTargetIsDeclaredAndDocumented(t *testing.T) {
 		t.Errorf("deploy-fleet must prove the binary runs before repointing "+
 			"anything at it:\n%s", body)
 	}
+	// The keep-the-build-itself guard must compare file identity. A textual
+	// compare recognises only the default spelling, and every other spelling
+	// of the same file ends in `ln -sfn x x` -- which destroys the binary and
+	// still satisfies the readlink check, so it fails silently and open.
+	if !strings.Contains(body, `[ "$$channel" -ef "$$target" ]`) {
+		t.Errorf("deploy-fleet must decide `keep the build itself` by file "+
+			"identity (-ef), not by comparing path text:\n%s", body)
+	}
 }

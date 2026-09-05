@@ -279,6 +279,18 @@ install: check-self-contained
 # and refuses to move a single channel until it has, so a build that cannot
 # run never reaches a deployment whatever the cause.
 #
+# A channel that IS the build is kept, not linked. That test compares file
+# IDENTITY (-ef: same device and inode), never path text: `ln -sfn x x`
+# unlinks the real binary and leaves a self-referential loop, and the readlink
+# verification below still passes -- the link holds exactly what it was asked
+# to hold -- so a textual compare exits 0 while reporting success over a
+# destroyed build. Any same-file/different-spelling pairing defeats a string
+# compare: an interior "/./" in GC_DEPLOY_BINARY, a channel directory that is
+# itself a symlink, a hard link. The `! -L` qualifier keeps the rule narrow --
+# a channel that merely POINTS at the build is safe to unlink and is rewritten
+# to a direct absolute link, which is the legibility property; only a channel
+# that is the file itself is kept.
+#
 # All channels move together; repointing only some re-splits them.
 .PHONY: deploy-fleet
 deploy-fleet:
@@ -310,7 +322,9 @@ deploy-fleet:
 		for channel in $(GC_DEPLOY_CHANNELS); do \
 			dir=$$(dirname "$$channel"); \
 			if [ ! -d "$$dir" ]; then echo "  skip $$channel (no $$dir)"; continue; fi; \
-			if [ "$$channel" = "$$target" ]; then echo "  keep $$channel (the build itself)"; continue; fi; \
+			if [ "$$channel" = "$$target" ] || { [ ! -L "$$channel" ] && [ "$$channel" -ef "$$target" ]; }; then \
+				echo "  keep $$channel (the build itself)"; continue; \
+			fi; \
 			pinned=; \
 			if [ -e "$$channel" ] || [ -L "$$channel" ]; then \
 				if [ "$$(uname)" = "Darwin" ]; then \

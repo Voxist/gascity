@@ -395,6 +395,98 @@ func TestMakeDeployFleetNeverLinksTheBuildOverItself(t *testing.T) {
 	}
 }
 
+// The self-link guard must compare FILE IDENTITY, not path text. `ln -sfn x x`
+// unlinks the real binary and leaves a self-referential loop in its place, and
+// the readlink verification afterwards still PASSES -- the link holds exactly
+// what it was asked to hold -- so deploy-fleet would exit 0 and report success
+// over a destroyed, unrecoverable build. Every same-file/different-spelling
+// pairing below is a way to reach that, and a guard that only recognises the
+// default spelling lets each one through.
+
+// TestMakeDeployFleetKeepsABuildNamedByANonNormalizedPath covers a
+// GC_DEPLOY_BINARY that names a channel by a different spelling of the same
+// path (here an interior "/./"). Chain resolution does not normalize it,
+// because the final component is a regular file and the loop never runs.
+func TestMakeDeployFleetKeepsABuildNamedByANonNormalizedPath(t *testing.T) {
+	_, _, channels := deployFleetFixture(t)
+	build := channels[1] // <root>/go/bin/gc
+	writeExecutable(t, build, "#!/usr/bin/env sh\nexit 0\n")
+	spelling := filepath.Dir(build) + "/./" + filepath.Base(build)
+
+	out, err := runDeployFleet(t, spelling, channels)
+	if err != nil {
+		t.Fatalf("make deploy-fleet: %v\n%s", err, out)
+	}
+	assertBuildSurvived(t, build, out)
+}
+
+// TestMakeDeployFleetKeepsABuildReachedThroughASymlinkedChannelDirectory
+// covers a channel whose DIRECTORY is a symlink (~/.local/bin -> ~/go/bin), so
+// two channel paths are the same file while sharing no path text. The guard
+// firing correctly for the second channel does not help: the first has already
+// been linked over itself.
+func TestMakeDeployFleetKeepsABuildReachedThroughASymlinkedChannelDirectory(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "go", "bin")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", realDir, err)
+	}
+	linkedDir := filepath.Join(root, "localbin")
+	if err := os.Symlink(realDir, linkedDir); err != nil {
+		t.Fatalf("symlink channel dir: %v", err)
+	}
+	build := filepath.Join(realDir, "gc")
+	writeExecutable(t, build, "#!/usr/bin/env sh\nexit 0\n")
+
+	// The symlinked-directory channel is listed FIRST, as it is on a host
+	// whose PATH reaches the same binary by both spellings.
+	out, err := runDeployFleet(t, build, []string{filepath.Join(linkedDir, "gc"), build})
+	if err != nil {
+		t.Fatalf("make deploy-fleet: %v\n%s", err, out)
+	}
+	assertBuildSurvived(t, build, out)
+}
+
+// TestMakeDeployFleetKeepsABuildReachedThroughAHardLink covers the third
+// distinct filesystem mechanism for one file under two names: same inode, two
+// directory entries, no symlink anywhere. Unlinking such a channel drops a
+// link, and if it is the last one the build is gone.
+func TestMakeDeployFleetKeepsABuildReachedThroughAHardLink(t *testing.T) {
+	_, _, channels := deployFleetFixture(t)
+	build := channels[1] // <root>/go/bin/gc
+	writeExecutable(t, build, "#!/usr/bin/env sh\nexit 0\n")
+	hard := channels[0] // <root>/.local/bin/gc
+	if err := os.Link(build, hard); err != nil {
+		t.Skipf("hard links unavailable here: %v", err)
+	}
+
+	out, err := runDeployFleet(t, build, channels)
+	if err != nil {
+		t.Fatalf("make deploy-fleet: %v\n%s", err, out)
+	}
+	assertBuildSurvived(t, build, out)
+	assertBuildSurvived(t, hard, out)
+}
+
+// assertBuildSurvived fails if the binary was replaced by a link or is no
+// longer executable. A self-referential link satisfies `readlink`, so checking
+// the link text proves nothing -- run the file.
+func assertBuildSurvived(t *testing.T, build, out string) {
+	t.Helper()
+	info, err := os.Lstat(build)
+	if err != nil {
+		t.Fatalf("the build is gone after deploy-fleet: %v\n%s", err, out)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		link, _ := os.Readlink(build)
+		t.Fatalf("deploy-fleet linked the build over itself: %s -> %s\n%s", build, link, out)
+	}
+	if runOut, runErr := runTool(t, "", nil, build, "version"); runErr != nil {
+		t.Fatalf("the build no longer runs after deploy-fleet: %v\n%s\ndeploy output:\n%s",
+			runErr, runOut, out)
+	}
+}
+
 // TestMakeDeployFleetPreservesTheImmutableFlag: bd is pinned uchg on this
 // fleet, so a gc channel can be too. A write that silently fails against an
 // immutable file is the failure this guards.
