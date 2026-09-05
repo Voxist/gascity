@@ -223,7 +223,7 @@ for path in listing():
         logical.append((start, pending + line))
         pending, start = "", None
     if pending:
-        logical.append((start or len(lines), pending))
+        logical.append((start, pending))
 
     def exempt(text_of_line):
         stripped = text_of_line.lstrip()

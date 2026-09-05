@@ -69,6 +69,13 @@
 # Consequence: do not add executable statements after the closing brace, and do
 # not reformat the wrapper away.
 #
+# The body is deliberately NOT indented inside the group, and two tests depend
+# on that: CASE 13 anchors on `^exec "$REAL_GO" "$@"$` (zero leading
+# whitespace) and CASE 19 sabotages `^if refuses_clean_cache "$@"; then$` the
+# same way. There is no shfmt anywhere in this repo, so nothing will indent it
+# silently -- and if that changes, those two cases fail loudly rather than
+# leaving a hole. Stated here so the dependency is not implicit.
+#
 # WHAT IS DELIBERATELY NOT BLOCKED
 #
 #   go clean -testcache   explicitly allowed by AGENTS.md; clears only the
