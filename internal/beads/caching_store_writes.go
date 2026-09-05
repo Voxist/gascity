@@ -115,7 +115,7 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 			notifyClosed := false
 			if current, ok := c.beads[id]; ok && current.Status != "closed" {
 				closed = cloneBead(current)
-				closed.Status = "closed"
+				setBeadStatus(&closed, "closed")
 				notifyClosed = true
 			}
 			c.tombstoneLocked(id, seq)
@@ -196,7 +196,7 @@ func (c *CachingStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, erro
 		updated = cloneBead(fresh)
 		notify = true
 	} else if b, ok := c.beads[id]; ok {
-		b.Status = "open"
+		setBeadStatus(&b, "open")
 		b.Assignee = ""
 		b.UpdatedAt = time.Now()
 		c.absorbFreshLocked(id, b, time.Now(), absorbOpts{
@@ -246,7 +246,7 @@ func (c *CachingStore) Close(id string) error {
 	var refreshed bool
 	if fresh, err := c.backing.Get(id); err == nil {
 		closed = fresh
-		closed.Status = "closed"
+		setBeadStatus(&closed, "closed")
 		found = true
 		refreshed = true
 	} else if !errors.Is(err, ErrNotFound) {
@@ -262,7 +262,7 @@ func (c *CachingStore) Close(id string) error {
 			clearDirty: true,
 		})
 	} else if b, ok := c.beads[id]; ok {
-		b.Status = "closed"
+		setBeadStatus(&b, "closed")
 		c.absorbFreshLocked(id, b, time.Now(), absorbOpts{
 			depsMode:   depsKeepCached,
 			seqMode:    seqKeep,
@@ -297,7 +297,7 @@ func (c *CachingStore) Reopen(id string) error {
 	var refreshed bool
 	if fresh, err := c.backing.Get(id); err == nil {
 		reopened = fresh
-		reopened.Status = "open"
+		setBeadStatus(&reopened, "open")
 		found = true
 		refreshed = true
 	} else if !errors.Is(err, ErrNotFound) {
@@ -313,7 +313,7 @@ func (c *CachingStore) Reopen(id string) error {
 			clearDirty: true,
 		})
 	} else if b, ok := c.beads[id]; ok {
-		b.Status = "open"
+		setBeadStatus(&b, "open")
 		c.absorbFreshLocked(id, b, time.Now(), absorbOpts{
 			depsMode:   depsKeepCached,
 			seqMode:    seqKeep,
@@ -700,7 +700,7 @@ func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]str
 		}
 		if item.closed {
 			if b, ok := c.beads[item.id]; ok {
-				b.Status = "closed"
+				setBeadStatus(&b, "closed")
 				c.absorbFreshLocked(item.id, b, now, absorbOpts{
 					depsMode:   depsKeepCached,
 					seqMode:    seqKeep,
@@ -760,8 +760,16 @@ func (c *CachingStore) updateMatchesCached(id string, opts UpdateOpts) bool {
 	if opts.Title != nil && b.Title != *opts.Title {
 		return false
 	}
-	if opts.Status != nil && b.Status != *opts.Status {
-		return false
+	if opts.Status != nil {
+		if b.Status != *opts.Status {
+			return false
+		}
+		// bd's indefinite "deferred" status normalizes to open. An explicit
+		// open update is nevertheless the operation that removes the deferral,
+		// so it must reach the backing store.
+		if *opts.Status == "open" && b.IndefinitelyDeferred {
+			return false
+		}
 	}
 	if opts.Type != nil && b.Type != *opts.Type {
 		return false
@@ -1196,7 +1204,7 @@ func applyUpdateOptsToBead(bead Bead, opts UpdateOpts) Bead {
 		bead.Title = *opts.Title
 	}
 	if opts.Status != nil {
-		bead.Status = *opts.Status
+		setBeadStatus(&bead, *opts.Status)
 	}
 	if opts.Type != nil {
 		bead.Type = *opts.Type

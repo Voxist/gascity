@@ -205,7 +205,7 @@ func installOverlayManaged(fs fsys.FS, cityDir, workDir, provider string) error 
 				data = normalized
 			}
 		}
-		return writeEmbeddedManaged(fs, dst, data, overlayManagedNeedsUpgrade(provider, rel))
+		return writeEmbeddedManaged(fs, dst, data, overlayManagedNeedsUpgrade(provider, rel, data))
 	})
 }
 
@@ -228,7 +228,7 @@ func writeJSONOverlayManaged(fs fsys.FS, dst string, data []byte) error {
 	return writeManagedData(fs, dst, data)
 }
 
-func overlayManagedNeedsUpgrade(provider, rel string) func([]byte) bool {
+func overlayManagedNeedsUpgrade(provider, rel string, desired []byte) func([]byte) bool {
 	if provider == "pi" && rel == path.Join(".pi", "extensions", "gc-hooks.js") {
 		return piHookNeedsUpgrade
 	}
@@ -242,7 +242,14 @@ func overlayManagedNeedsUpgrade(provider, rel string) func([]byte) bool {
 		return ompHookNeedsUpgrade
 	}
 	if provider == "cursor" && rel == path.Join(".cursor", "hooks.json") {
-		return managedShellHookFileNeedsGCBinUpgrade
+		// Cursor no longer carries the canonical PATH-export prefix — its
+		// managed prologue puts the inherited workspace PATH first and adds a
+		// BD_BIN clause (#5421) — so the prefix-anchored classifier below
+		// cannot recognize it. Cursor is upgraded by exact match against the
+		// released document shapes instead.
+		return func(existing []byte) bool {
+			return cursorHookNeedsUpgrade(existing, desired)
+		}
 	}
 	if provider == "copilot" && rel == path.Join(".github", "hooks", "gascity.json") {
 		return managedShellHookFileNeedsGCBinUpgrade
@@ -263,7 +270,7 @@ func overlayManagedNeedsUpgrade(provider, rel string) func([]byte) bool {
 // overlay still carries the pre-GC_BIN spelling of a managed gc shell
 // command (canonical PATH-export prefix + bare `gc` invocation). It fires
 // the managed rewrite for the shell-shaped overlay providers whose hook
-// files are otherwise written once and preserved (cursor, copilot, kiro).
+// files are otherwise written once and preserved (copilot, kiro).
 //
 // The rewrite replaces the whole file with the current template (pi/omp
 // precedent for write-once overlays), so the gate is all-or-nothing tight:
@@ -325,7 +332,7 @@ func classifyGCManagedOverlayCommands(v any, isManaged func(command, token strin
 
 // isManagedOverlayCommand reports whether command is exactly one of the
 // managed shell hook commands gc emits for the write-once overlay providers
-// (cursor, copilot, kiro), spelled with the given invocation token and
+// that still carry it (copilot, kiro), spelled with the given invocation token and
 // carrying the exact canonical PATH-export prefix.
 func isManagedOverlayCommand(command, token string) bool {
 	body := commandBodyAfterCanonicalPrefix(command)
@@ -339,6 +346,20 @@ func isManagedOverlayCommand(command, token string) bool {
 		token + ` hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
 		token + ` hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`:
 		return true
+	}
+	return false
+}
+
+func cursorHookNeedsUpgrade(existing, desired []byte) bool {
+	existingCanonical, err := overlay.CanonicalJSON(existing)
+	if err != nil {
+		return false
+	}
+	for _, legacy := range cursorHookLegacyVariants(desired) {
+		legacyCanonical, err := overlay.CanonicalJSON(legacy)
+		if err == nil && bytes.Equal(existingCanonical, legacyCanonical) {
+			return true
+		}
 	}
 	return false
 }
@@ -376,6 +397,38 @@ func geminiSettingsNeedsGCBinUpgrade(existing []byte) bool {
 	}
 	stale, foreign := classifyGCManagedOverlayCommands(root, isManagedGeminiCommand)
 	return stale > 0 && !foreign
+}
+
+// cursorHookLegacyVariants regenerates the most recently released managed
+// .cursor/hooks.json (#3457), derived from today's desired document so the
+// match stays independent of JSON formatting. Documents released before #3457
+// differ in the command body, not just the PATH prologue, so no transformation
+// of today's document reproduces them; they are intentionally left
+// un-upgraded rather than nonexistent, and adopting one is a deliberate
+// widening decision rather than a correction. Only released shapes belong
+// here: each variant widens the set of on-disk files installOverlayManaged
+// silently overwrites as managed, so a variant no workspace can be holding
+// costs safety and buys nothing.
+func cursorHookLegacyVariants(desired []byte) [][]byte {
+	const (
+		gcAware       = `\"${GC_BIN:-gc}\"`
+		gcBare        = `gc`
+		workspacePath = `export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\"; if [ -n \"${BD_BIN:-}\" ]; then export PATH=\"${BD_BIN%/*}:$PATH\"; fi; `
+		oldPath       = `export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\"`
+	)
+	variants := make([][]byte, 0, 1)
+	// Every managed hooks.json released to date uses a bare gc command and
+	// prepends provider tool paths with &&. The BD_BIN clause and the
+	// GC_BIN-aware commands are introduced by this change, so no released
+	// document carries them and no unreleased intermediate shape needs its
+	// own variant. Pre-#3457 released documents are out of scope here by
+	// choice, not because they do not exist.
+	legacy := bytes.ReplaceAll(desired, []byte(workspacePath), []byte(oldPath+` && `))
+	legacy = bytes.ReplaceAll(legacy, []byte(gcAware), []byte(gcBare))
+	if !bytes.Equal(legacy, desired) {
+		variants = append(variants, legacy)
+	}
+	return variants
 }
 
 func piHookNeedsUpgrade(existing []byte) bool {

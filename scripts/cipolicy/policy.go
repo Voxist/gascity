@@ -55,7 +55,11 @@ const (
 	// Re-derived again for the noncmdgc unit-cover shard matrix (ga-gmhbf): the
 	// job that set the run's wall time became a 3-way matrix. Same jobs, same
 	// needs; only the matrix expansion and the job name changed.
-	expectedCIExecutionHash     = "ae5f7712f9b086bcec8acfe160cabac65c9a56f89e5184754b8dd4a0cdbde2fc"
+	// Re-derived again at the 2026-09-04 resync: ci.yml auto-merged both sides,
+	// so the merged execution shape hashes to neither the fork's prior pin nor
+	// upstream's. Taken from the candidate digest this package printed for the
+	// merged workflow, not from either side.
+	expectedCIExecutionHash     = "d48be5096369181ba3a91a6e897b10467fff06fae0f350fa9fc60815675091b8"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
