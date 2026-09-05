@@ -509,11 +509,20 @@ arranged differs by host, so verify before reasoning from either description:**
   combined with other flags and behind `go -C dir` — and `exec`s everything else
   through to `/opt/homebrew/bin/go` untouched. `go clean -testcache`,
   `-modcache`, `-fuzzcache` and a bare `go clean` are explicitly **not**
-  blocked. Deliberate override: `GC_ALLOW_GO_CLEAN_CACHE=1 go clean -cache`,
-  which is never silent. Uninstall:
-  `scripts/install-go-clean-cache-shim.sh --dir ~/bin --uninstall`, or
-  `rm -f ~/bin/go`. It does **not** cover an absolute-path invocation
-  (`/opt/homebrew/bin/go clean -cache`), an IDE with a pinned SDK path, or root.
+  blocked. It also refuses the flag when it arrives via the `GOFLAGS`
+  environment variable. Deliberate override:
+  `GC_ALLOW_GO_CLEAN_CACHE=1 go clean -cache`, which is never silent.
+  Uninstall: `scripts/install-go-clean-cache-shim.sh --dir ~/bin --uninstall`,
+  or `rm -f ~/bin/go`.
+
+  Known gaps, stated because a guard that overstates its reach is worse than
+  one that admits its edges: it does **not** cover an absolute-path invocation
+  (`/opt/homebrew/bin/go clean -cache`), an IDE with a pinned SDK path, root,
+  or `go env -w GOFLAGS=-cache` — which cmd/go reads from its own config file
+  rather than the environment, so the shim never sees it (bead `ga-mzx61`).
+  Layer 1, the repo scanner, catches the command entering the codebase and
+  would not have prevented either incident, since nothing was committed on
+  either occasion.
   Source and rationale: `engdocs/contributors/go-clean-cache-guard.md`.
 
 The rules below hold on both, for the same underlying reason — one cache,
