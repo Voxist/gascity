@@ -59,6 +59,18 @@ Markdown, plain text, goldens, `testdata/`, `vendor/`, `docs/`, `engdocs/`,
 | `gocacheguard:allow` on the line | a code line that must contain the string — another static guard searching for it |
 | `gocacheguard:allow-file` in the first 40 lines | a file whose whole subject is the ban (the guard, the shim, their tests) |
 
+A logical command split across physical lines is joined before matching, so a
+backslash continuation and the wrapped `exec.Command("go",` / `"clean",` /
+`"-cache")` form that **gofmt produces** once the call outgrows the line limit
+are both caught. That gap was real until it was found in review: a guard defeated
+by ordinary formatting is worse than one defeated by evasion, because the miss
+correlates with routine maintenance rather than with somebody trying.
+
+Only a comment that *opens* its line is exempt. A trailing comment
+(`cmd  # go clean -cache`) and a C-style block comment are both still flagged —
+annotate those with `gocacheguard:allow`. This errs toward false positives on
+purpose.
+
 The guard deliberately fires on the string in a *message* or a *CI step name*
 inside an executable file, not only on something that would execute. That is a
 known friction; the fix is normally a two-word reword ("the build-cache ban
@@ -85,6 +97,26 @@ and a guard that fires on legitimate work is a guard that gets deleted:
 The decision is a **parse of the argument list**, never a grep of the command
 line, so `go build ./cmd/go-clean-cache` and `go test -run 'go clean -cache'`
 pass through.
+
+`GOFLAGS` is consulted too, but only once the subcommand is known to be `clean`.
+`cmd/go` applies a `GOFLAGS` entry to any subcommand that *defines* that flag,
+and `go clean` defines `-cache` — so `GOFLAGS=-cache go clean -testcache` would
+otherwise present to an argv-only parse as an allowed invocation while `cmd/go`
+wiped the cache. Nobody sets that by accident, but the guard's proposition is
+that it cannot be bypassed *by* accident.
+
+**The whole file is one brace group**, opened on line 2 and closed on the last
+line. The worst state a PATH shim can reach is exiting 0 without `exec`ing —
+every build on the host then reports success while producing nothing. A script
+whose statements sit at top level reaches that state whenever it is *truncated
+at a statement boundary*, which is not a syntax error: measured on the original
+layout, a cut at line 100 landed among the function definitions and exited 0
+silently. Bash parses a compound command in full before running any of it, so
+every prefix of the file except the complete one is now an unterminated `{` —
+exit 2, loud. The common `main() { …; }; main "$@"` idiom is **not** enough: a
+cut between the closing brace and the invocation still parses and still exits 0.
+CASE 20 asserts the invariant for every truncation point in the file. Do not add
+statements after the closing brace.
 
 ### Blast radius
 

@@ -43,6 +43,13 @@
 #   * a file carrying `gocacheguard:allow-file` in its first 40 lines -- for a
 #     file whose whole subject is the ban (this guard, the shim, their tests).
 #
+# Only a comment that OPENS its line is exempt. A trailing comment
+# (`cmd  # go clean -cache`) and a C-style block comment (`/* ... */`) are both
+# still flagged -- annotate those with `gocacheguard:allow`. This errs toward
+# false positives on purpose: a false negative here is silent, and the multi-line
+# gap this scanner used to have was silent in exactly the shapes ordinary
+# formatting produces.
+#
 # Usage:
 #   check-go-clean-cache.sh            scan every tracked file
 #   check-go-clean-cache.sh --staged   scan the staged content only (pre-commit)
@@ -96,6 +103,12 @@ SKIP_SUFFIX = (
 SKIP_PREFIX = ("docs/", "engdocs/", "plans/", "specs/", "release-gates/", "vendor/")
 SKIP_COMPONENT = ("testdata", "vendor", "node_modules")
 
+# An optional surrounding quote on the flag token, so `go clean "-cache"` and
+# the single-quoted spelling are both caught. Assembled via chr(39) because this
+# scanner is embedded in a single-quoted shell string and a literal apostrophe
+# would terminate it.
+QUOTE = "[" + chr(34) + chr(39) + "]?"
+
 # The shell / Makefile / CI form. A parse of the flag list, not a substring
 # match: the repetition group lets other flags sit on either side, while
 # requiring the token to BE "-cache" keeps "-testcache", "-modcache" and
@@ -105,13 +118,18 @@ CMD = re.compile(
     r"(?:go|\$\(GO\)|\$\{GO\}|\$GO)"
     r"\s+clean"
     r"(?:\s+-[A-Za-z0-9_=.,-]+)*"
-    r"\s+--?cache(?:=(?P<v>[A-Za-z0-9]+))?"
+    r"\s+" + QUOTE + r"--?cache(?:=(?P<v>[A-Za-z0-9]+))?" + QUOTE +
     r"(?![A-Za-z0-9_=.-])"
 )
 
 # The exec-argv form, e.g. exec.Command("go", "clean", "-cache") in Go, or the
 # same shape in a JSON/TOML command array.
-ARGV = re.compile(r"\"clean\"\s*,(?:\s*\"[^\"]*\"\s*,)*\s*\"--?cache\"")
+# The leading \"go\" is optional but consumed when present, so the reported line
+# is the one the CALL starts on rather than the orphaned \"clean\", line in the
+# middle of a gofmt-wrapped argument list.
+ARGV = re.compile(
+    r"(?:\"go\"\s*,\s*)?\"clean\"\s*,(?:\s*\"[^\"]*\"\s*,)*\s*\"--?cache\""
+)
 
 # Mirrors Go flag package bool parsing, so "-cache=false" is the no-op cmd/go
 # would treat it as -- and so this guard agrees with the runtime shim.
@@ -160,13 +178,6 @@ def content(path):
         return None
 
 
-def violation(line):
-    m = CMD.search(line)
-    if m and (m.group("v") is None or m.group("v") not in FALSEY):
-        return True
-    return ARGV.search(line) is not None
-
-
 hits = []
 for path in listing():
     if not in_surface(path):
@@ -181,14 +192,48 @@ for path in listing():
     lines = text.split("\n")
     if any(ALLOW_FILE in ln for ln in lines[:40]):
         continue
+
+    # Backslash continuations are joined before matching, and each logical line
+    # keeps the line number of its FIRST physical line so the report points
+    # where a reader will actually find the command. Without this a shell or
+    # Makefile command split across lines was invisible to the scan.
+    logical = []
+    pending, start = "", None
     for n, line in enumerate(lines, 1):
-        stripped = line.lstrip()
+        if start is None:
+            start = n
+        if line.endswith("\\"):
+            pending += line[:-1] + " "
+            continue
+        logical.append((start, pending + line))
+        pending, start = "", None
+    if pending:
+        logical.append((start or len(lines), pending))
+
+    def exempt(text_of_line):
+        stripped = text_of_line.lstrip()
         if stripped.startswith("#") or stripped.startswith("//"):
+            return True
+        return ALLOW_LINE in text_of_line and ALLOW_FILE not in text_of_line
+
+    for n, line in logical:
+        if exempt(line):
             continue
-        if ALLOW_LINE in line and ALLOW_FILE not in line:
-            continue
-        if violation(line):
+        m = CMD.search(line)
+        if m and (m.group("v") is None or m.group("v") not in FALSEY):
             hits.append("%s:%d: %s" % (path, n, line.strip()))
+
+    # The argv form is matched against the WHOLE file: \s already spans
+    # newlines, so exec.Command("go",\n\t"clean",\n\t"-cache") -- which is
+    # exactly what gofmt produces once the call outgrows the line limit -- is a
+    # match the moment it is not confined to a single line. The offset is
+    # converted back to the line the call STARTS on. Exemption is decided by
+    # that starting line, the same rule a one-line match gets.
+    for m in ARGV.finditer(text):
+        n = text.count("\n", 0, m.start()) + 1
+        if exempt(lines[n - 1]):
+            continue
+        hits.append("%s:%d: %s" % (path, n, lines[n - 1].strip()))
 
 for h in hits:
     print(h)

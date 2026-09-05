@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+{ # <- BRACE GROUP OPENED HERE DELIBERATELY; closed on the last line. See below.
 #
 # go-clean-cache-shim -- a `go` wrapper that refuses `go clean -cache` and
 # passes every other invocation straight through to the real toolchain.
@@ -44,6 +45,29 @@
 #   3. Misconfiguration fails LOUD. A shim that cannot resolve the real go and
 #      exits 0 turns every build on the host into a silent no-op, which is a
 #      worse outage than the one being prevented (CASE 11).
+#
+# WHY THE WHOLE FILE IS ONE BRACE GROUP
+#
+# The worst state this file can reach is not refusing too much -- it is exiting
+# 0 without exec'ing, because then every build on the host reports success while
+# producing nothing. A script whose statements sit at top level reaches exactly
+# that state when it is TRUNCATED at a statement boundary: bash parses to EOF,
+# runs whatever definitions survived, and exits 0. Truncation at a statement
+# boundary is not a syntax error. Measured on the original layout, a cut at line
+# 100 landed among the function definitions and exited 0 silently.
+#
+# So the entire body is wrapped in a brace group opened on line 2 and closed on
+# the last line. Bash parses a compound command in full before running any of
+# it, so every prefix of this file except the complete one is an unterminated
+# `{` -- a parse error, exit 2, loud. CASE 20 asserts this for EVERY truncation
+# point in the file.
+#
+# The common `main() { ...; }; main "$@"` idiom is NOT enough here: a cut
+# landing between the closing brace and the invocation still parses and still
+# exits 0. Only wrapping from the top removes that window.
+#
+# Consequence: do not add executable statements after the closing brace, and do
+# not reformat the wrapper away.
 #
 # WHAT IS DELIBERATELY NOT BLOCKED
 #
@@ -107,7 +131,12 @@ truthy() {
 #     `-modcache` and `-fuzzcache` cannot collide with it;
 #   * scanning stops at the first non-flag argument, because from there on
 #     cmd/go is reading package paths -- `go clean ./... -cache` cleans a
-#     package named "-cache", it does not clear the build cache.
+#     package named "-cache", it does not clear the build cache;
+#   * GOFLAGS is consulted too, but only once the subcommand is known to be
+#     `clean`. cmd/go applies a GOFLAGS entry to any subcommand that DEFINES
+#     that flag, and `go clean` defines -cache -- so `GOFLAGS=-cache go clean
+#     -testcache` would otherwise present here as an allowed invocation while
+#     cmd/go wiped the cache. An argv-only parse has that hole by construction.
 refuses_clean_cache() {
 	local -a argv=("$@")
 	local n=$# i=0 a
@@ -131,6 +160,18 @@ refuses_clean_cache() {
 	[ "$i" -lt "$n" ] || return 1
 	[ "${argv[$i]}" = "clean" ] || return 1
 	i=$((i + 1))
+
+	# GOFLAGS, checked only now that the subcommand is known to be `clean`.
+	# Deliberately unquoted: GOFLAGS is a whitespace-separated list and word
+	# splitting is the parse.
+	# shellcheck disable=SC2086
+	local gf
+	for gf in ${GOFLAGS:-}; do
+		case "$gf" in
+		-cache | --cache) return 0 ;;
+		-cache=* | --cache=*) truthy "${gf#*=}" && return 0 ;;
+		esac
+	done
 
 	while [ "$i" -lt "$n" ]; do
 		a="${argv[$i]}"
@@ -202,3 +243,4 @@ recurse. Point GC_GO_SHIM_REAL_GO at the real toolchain."
 fi
 
 exec "$REAL_GO" "$@"
+} # <- closes the brace group opened on line 2; nothing may follow it.

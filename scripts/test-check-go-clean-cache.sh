@@ -284,6 +284,58 @@ rc="$( (cd "$repo" && bash "$REPO_ROOT/.githooks/pre-commit") >"$OUT" 2>&1; echo
 [ "$rc" -eq 0 ] || fail "CASE 14: pre-commit blocked a clean commit; got: $(cat "$OUT")"
 pass "CASE 14: a clean commit passes the hook"
 
+# ---------------------------------------------------------------- CASE 15
+# MULTI-LINE FORMS. The scanner originally matched within a single physical
+# line, so a logical command split across lines was invisible -- including the
+# form `gofmt` PRODUCES the moment an exec.Command call exceeds the line limit.
+# A guard defeated by ordinary formatting is worse than one defeated by
+# evasion: the miss correlates with routine maintenance rather than with
+# somebody trying, so it manufactures false confidence exactly when the
+# codebase is being looked after.
+assert_blocks "CASE 15a: gofmt-wrapped exec.Command" "internal/x/x.go" \
+	"$(printf 'exec.Command("go",\n\t"clean",\n\t"-cache")')"
+assert_blocks "CASE 15b: backslash continuation in a shell script" "scripts/x.sh" \
+	"$(printf 'go clean \\\n  -cache')"
+assert_blocks "CASE 15c: backslash continuation in a Makefile recipe" "Makefile" \
+	"$(printf '\tgo clean \\\n\t  -cache')"
+assert_blocks "CASE 15d: double-quoted flag" "scripts/x.sh" 'go clean "-cache"'
+assert_blocks "CASE 15e: single-quoted flag" "scripts/x.sh" "go clean '-cache'"
+assert_blocks "CASE 15f: continuation split before the flag" "scripts/x.sh" \
+	"$(printf 'go clean -r \\\n  -x \\\n  -cache')"
+
+# The same joining must not start blocking legitimate multi-line commands.
+assert_allows "CASE 15g: continuation ending in -testcache" "scripts/x.sh" \
+	"$(printf 'go clean \\\n  -testcache')"
+assert_allows "CASE 15h: gofmt-wrapped exec.Command for -testcache" "internal/x/x.go" \
+	"$(printf 'exec.Command("go",\n\t"clean",\n\t"-testcache")')"
+assert_allows "CASE 15i: a continuation that merely mentions a package path" "scripts/x.sh" \
+	"$(printf 'go build \\\n  ./cmd/go-clean-cache')"
+
+# A comment leading the logical line still exempts the whole of it, and the
+# marker may be placed on any physical line of it.
+assert_allows "CASE 15j: comment leading a continuation" "scripts/x.sh" \
+	"$(printf '# go clean \\\n#   -cache')"
+assert_allows "CASE 15k: marker on the last physical line" "scripts/x.sh" \
+	"$(printf 'go clean \\\n  -cache # gocacheguard:allow')"
+
+# Reporting must point at the FIRST physical line of the logical command, so
+# the file:line is where a reader actually finds it.
+repo="$(new_repo case15report)"
+commit_file "$repo" "scripts/a.sh" "$(printf '#!/bin/sh\ntrue\ngo clean \\\n  -cache\n')"
+rc="$(run_check "$repo")"
+[ "$rc" -ne 0 ] || fail "CASE 15: continuation not blocked in the reporting probe"
+grep -q 'scripts/a.sh:3' "$OUT" \
+	|| fail "CASE 15: continuation reported at the wrong line; got: $(cat "$OUT")"
+pass "CASE 15: a continuation is reported at its first physical line"
+
+repo="$(new_repo case15goreport)"
+commit_file "$repo" "internal/x/x.go" "$(printf 'package x\n\nvar _ = 1\nvar c = exec.Command("go",\n\t"clean",\n\t"-cache")\n')"
+rc="$(run_check "$repo")"
+[ "$rc" -ne 0 ] || fail "CASE 15: wrapped exec.Command not blocked in the reporting probe"
+grep -q 'internal/x/x.go:4' "$OUT" \
+	|| fail "CASE 15: wrapped exec.Command reported at the wrong line; got: $(cat "$OUT")"
+pass "CASE 15: a wrapped exec.Command is reported at its first physical line"
+
 # ------------------------------------------------------------------ verdict
 if [ "$failures" -ne 0 ]; then
 	echo "FAILED: $failures case(s)" >&2

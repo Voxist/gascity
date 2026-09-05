@@ -408,6 +408,82 @@ else
 	pass "CASE 19: a shim that fails to refuse is caught without the probe reaching the real go"
 fi
 
+# ---------------------------------------------------------------- CASE 20
+# TRUNCATION MUST NEVER PRODUCE SILENT SUCCESS.
+#
+# The catastrophic mode for a PATH shim is not refusing too much -- it is
+# exiting 0 without exec'ing, because then every build on the host reports
+# success while producing nothing. A shim whose executable statements sit at
+# top level reaches that state whenever the file is cut at a statement
+# boundary: bash parses to EOF, runs the function definitions, and exits 0.
+# Truncation at a statement boundary is NOT a syntax error, which is exactly
+# where the original reasoning for this file was wrong.
+#
+# The invariant asserted here is the only one that matters: for EVERY prefix of
+# the file, the shim either fails (any non-zero status) or reaches the real go.
+# "Exited 0 having done nothing" is never allowed.
+#
+# The `main() { ...; }; main "$@"` idiom is NOT sufficient on its own -- a cut
+# landing between the closing brace and the invocation still parses and exits 0.
+# This case is what forced the wrapper to be a brace group opened on line 2, so
+# that every cut after the shebang leaves it unterminated.
+total_lines="$(wc -l <"$SHIM_SRC" | tr -d ' ')"
+trunc_bad=0
+trunc_checked=0
+for n in $(seq 2 "$total_lines"); do
+	cut="$WORK/truncated-go"
+	head -n "$n" "$SHIM_SRC" >"$cut"
+	rm -f "$ARGV"
+	GC_GO_SHIM_REAL_GO="$FAKE_GO" FAKE_GO_ARGV="$ARGV" FAKE_GO_PID="$PIDFILE" \
+		bash "$cut" build ./... >/dev/null 2>&1
+	rc=$?
+	trunc_checked=$((trunc_checked + 1))
+	if [ "$rc" -eq 0 ] && [ ! -f "$ARGV" ]; then
+		fail "CASE 20: truncation at line $n exits 0 WITHOUT reaching the real go (silent success)"
+		trunc_bad=$((trunc_bad + 1))
+		[ "$trunc_bad" -lt 3 ] || break
+	fi
+done
+[ "$trunc_bad" -eq 0 ] \
+	&& pass "CASE 20: no truncation point ($trunc_checked checked) yields silent success"
+
+# ---------------------------------------------------------------- CASE 21
+# GOFLAGS carries flags into the subcommand that defines them, and `go clean`
+# defines -cache. A decision that parses argv alone therefore has a hole:
+# `GOFLAGS=-cache go clean -testcache` presents as an allowed invocation while
+# cmd/go wipes the cache. Nobody sets that by accident -- but the guard's whole
+# proposition is that it cannot be bypassed by accident, and a globally exported
+# GOFLAGS would turn every `go clean` on the host into a wipe.
+goflags_refused() {
+	local label="$1" gf="$2"
+	shift 2
+	rm -f "$ARGV"
+	GOFLAGS="$gf" GC_GO_SHIM_REAL_GO="$FAKE_GO" FAKE_GO_ARGV="$ARGV" \
+		FAKE_GO_PID="$PIDFILE" bash "$SHIM_SRC" "$@" >"$OUT" 2>"$ERR"
+	local rc=$?
+	if [ "$rc" -eq 0 ]; then
+		fail "$label: exited 0 (expected refusal)"
+	elif [ -f "$ARGV" ]; then
+		fail "$label: reached the real go with [$(argv_joined)]"
+	else
+		pass "$label"
+	fi
+}
+goflags_refused "CASE 21a: GOFLAGS=-cache with a bare clean" "-cache" clean
+goflags_refused "CASE 21b: GOFLAGS=-cache behind an allowed -testcache" "-cache" clean -testcache
+goflags_refused "CASE 21c: GOFLAGS=--cache" "--cache" clean
+goflags_refused "CASE 21d: GOFLAGS with -cache among other flags" "-mod=readonly -cache -x" clean
+goflags_refused "CASE 21e: GOFLAGS=-cache=true" "-cache=true" clean
+
+# GOFLAGS must not over-refuse: it only carries into the subcommand that defines
+# the flag, so it is irrelevant to anything but `clean`, and a falsey or
+# lookalike value is not the ban.
+assert_allowed "CASE 21f: GOFLAGS is irrelevant to a build" build ./...
+GOFLAGS="-cache" assert_allowed "CASE 21g: GOFLAGS=-cache does not block a build" build ./...
+GOFLAGS="-testcache" assert_allowed "CASE 21h: GOFLAGS=-testcache is not the ban" clean -testcache
+GOFLAGS="-modcache" assert_allowed "CASE 21i: GOFLAGS=-modcache is not the ban" clean
+GOFLAGS="-cache=false" assert_allowed "CASE 21j: GOFLAGS=-cache=false is a no-op" clean
+
 # ------------------------------------------------------------------ verdict
 if [ "$failures" -ne 0 ]; then
 	echo "FAILED: $failures case(s)" >&2
