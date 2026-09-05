@@ -2354,6 +2354,7 @@ func TestCityRuntimeDemandSnapshotReplaysACPRoutesOnCacheHit(t *testing.T) {
 		createdAt:              time.Now(),
 		sessionFingerprint:     sessionBeadSnapshotFingerprint(nil),
 		readyDemandFingerprint: cr.readyDemandSnapshotFingerprint(),
+		suspensionFingerprint:  cr.suspensionSnapshotFingerprint(),
 		result: DesiredStateResult{State: map[string]TemplateParams{
 			"headless-agent": {
 				SessionName: "headless-agent",
