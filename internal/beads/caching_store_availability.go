@@ -87,6 +87,14 @@ func (c *CachingStore) Degraded() bool {
 //     package's PartialResultError convention on every answer: the active
 //     set itself is known-incomplete (a partial prime can hold wisps only),
 //     and serving it as complete would present "no work" as fact.
+//   - A snapshot that has only ever held PrimeActive's open + in_progress
+//     subset is tagged the same way for any broader nonclosed shape. This is
+//     cacheServableForListQueryLocked's rule, which the healthy read paths
+//     apply by falling back to the backing store; with the breaker open
+//     there is nothing to fall back to, so the answer carries the tag
+//     instead. Without it a Status:"" query — which ListQuery.Matches reads
+//     as "every non-closed status" — drops blocked and deferred beads and
+//     reports nil error.
 //   - IncludeClosed answers are tagged the same way when tagIncompleteHistory
 //     is set. The new dial-first fallback sets it (its callers previously got
 //     a hard error, so a tagged answer is a strict improvement); the gated
@@ -121,6 +129,7 @@ func (c *CachingStore) listLastGood(query ListQuery, tagIncompleteHistory bool) 
 		return nil, fmt.Errorf("listing beads: %w", ErrStoreUnavailable)
 	}
 	partialPrime := c.primePartialErr
+	partialScope := c.lastGoodScopeIncompleteLocked(query)
 	cached := make([]Bead, 0, len(c.beads))
 	for _, b := range c.beads {
 		if !query.Matches(b) {
@@ -140,6 +149,12 @@ func (c *CachingStore) listLastGood(query ListQuery, tagIncompleteHistory bool) 
 			Err: fmt.Errorf("snapshot from partial prime: %w", partialPrime),
 		}
 	}
+	if partialScope {
+		return cached, &PartialResultError{
+			Op:  "cache list last-good",
+			Err: fmt.Errorf("snapshot holds active-prime statuses %v only: %w", partialPrimeStatuses, ErrStoreUnavailable),
+		}
+	}
 	if tagIncompleteHistory && query.IncludesClosed() {
 		return cached, &PartialResultError{
 			Op:  "cache list last-good",
@@ -152,8 +167,11 @@ func (c *CachingStore) listLastGood(query ListQuery, tagIncompleteHistory bool) 
 // lastGoodCount answers a Count from the in-memory snapshot while the
 // backing store is unavailable, under listLastGood's honesty boundary. A
 // count cannot carry a partial tag, so shapes that would need one (closed
-// history, partial prime) report ok=false and the caller surfaces the
-// backing failure instead. Lock acquisition observes ctx with the same
+// history, partial prime, a status shape wider than an active-only
+// snapshot) report ok=false and the caller surfaces the backing failure
+// instead — the same refusal cachedCountContext makes on the healthy path,
+// where the fallback is a real backing count rather than a confident
+// undercount. Lock acquisition observes ctx with the same
 // TryRLock guard cachedCountContext documents as mandatory for this verb,
 // so a cache writer cannot strand a deadline-bounded caller.
 func (c *CachingStore) lastGoodCount(ctx context.Context, query ListQuery, excludeTypes []string) (int, bool) {
@@ -178,7 +196,7 @@ func (c *CachingStore) lastGoodCount(ctx context.Context, query ListQuery, exclu
 		}
 	}
 	defer c.mu.RUnlock()
-	if c.state == cacheUninitialized || c.primePartialErr != nil {
+	if c.state == cacheUninitialized || c.primePartialErr != nil || c.lastGoodScopeIncompleteLocked(query) {
 		return 0, false
 	}
 	n := 0
@@ -189,6 +207,17 @@ func (c *CachingStore) lastGoodCount(ctx context.Context, query ListQuery, exclu
 	}
 	c.degradedReads.Add(1)
 	return n, true
+}
+
+// lastGoodScopeIncompleteLocked reports whether the last-good snapshot is too
+// narrow to answer this query's status shape completely. It is the degraded
+// counterpart of cacheServableForListQueryLocked: that helper asks whether the
+// cache may answer instead of the backing store, while this one asks whether
+// an answer the cache is forced to give is known-incomplete. It deliberately
+// keys on snapshot scope rather than c.state, so a store that partial-primed
+// and then self-degraded stays honest. Caller must hold c.mu.
+func (c *CachingStore) lastGoodScopeIncompleteLocked(query ListQuery) bool {
+	return !c.fullScopeSnapshot && !slices.Contains(partialPrimeStatuses, query.Status)
 }
 
 // getLastGood answers a Get purely from the in-memory cache while the

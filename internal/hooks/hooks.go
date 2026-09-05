@@ -399,9 +399,10 @@ func geminiSettingsNeedsGCBinUpgrade(existing []byte) bool {
 	return stale > 0 && !foreign
 }
 
-// cursorHookLegacyVariants regenerates the most recently released managed
-// .cursor/hooks.json (#3457), derived from today's desired document so the
-// match stays independent of JSON formatting. Documents released before #3457
+// cursorHookLegacyVariants regenerates the released managed .cursor/hooks.json
+// shapes still reachable from today's document — upstream's #3457 and this
+// fork's vp-7mjx — derived from that document so the match stays independent
+// of JSON formatting. Documents released before #3457
 // differ in the command body, not just the PATH prologue, so no transformation
 // of today's document reproduces them; they are intentionally left
 // un-upgraded rather than nonexistent, and adopting one is a deliberate
@@ -416,18 +417,33 @@ func cursorHookLegacyVariants(desired []byte) [][]byte {
 		workspacePath = `export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\"; if [ -n \"${BD_BIN:-}\" ]; then export PATH=\"${BD_BIN%/*}:$PATH\"; fi; `
 		oldPath       = `export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\"`
 	)
-	variants := make([][]byte, 0, 1)
-	// Every managed hooks.json released to date uses a bare gc command and
-	// prepends provider tool paths with &&. The BD_BIN clause and the
-	// GC_BIN-aware commands are introduced by this change, so no released
-	// document carries them and no unreleased intermediate shape needs its
-	// own variant. Pre-#3457 released documents are out of scope here by
-	// choice, not because they do not exist.
-	legacy := bytes.ReplaceAll(desired, []byte(workspacePath), []byte(oldPath+` && `))
-	legacy = bytes.ReplaceAll(legacy, []byte(gcAware), []byte(gcBare))
-	if !bytes.Equal(legacy, desired) {
-		variants = append(variants, legacy)
+	variants := make([][]byte, 0, 2)
+	// Both released shapes prepend provider tool paths with && rather than the
+	// BD_BIN clause #5421 introduced, so the prologue swap is common to them;
+	// they differ only in how gc is invoked.
+	//
+	// Upstream's version of this comment reasons that the GC_BIN-aware
+	// commands arrive with #5421, so no released document can carry them
+	// alongside the old prologue. That holds for gastownhall/gascity and is
+	// false for this fork: vp-7mjx (97154823c, 2026-07-16) shipped
+	// "${GC_BIN:-gc}" to fork cursor workspaces two months before the
+	// prologue changed, so the fork has TWO released shapes, not one. Omitting
+	// the second leaves every fork-provisioned workspace classified
+	// user-authored and permanently stuck on the pre-BD_BIN prologue.
+	//
+	// Pre-#3457 released documents differ in the command body, not just the
+	// prologue, so no transformation of today's document reproduces them; they
+	// stay out of scope by choice, not because they do not exist.
+	oldPrologue := bytes.ReplaceAll(desired, []byte(workspacePath), []byte(oldPath+` && `))
+	if bytes.Equal(oldPrologue, desired) {
+		return variants
 	}
+	// #3457: old prologue, bare gc (the last shape upstream released).
+	if bare := bytes.ReplaceAll(oldPrologue, []byte(gcAware), []byte(gcBare)); !bytes.Equal(bare, desired) {
+		variants = append(variants, bare)
+	}
+	// vp-7mjx: old prologue, GC_BIN-aware commands (fork-only).
+	variants = append(variants, oldPrologue)
 	return variants
 }
 

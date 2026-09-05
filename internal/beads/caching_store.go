@@ -93,6 +93,15 @@ type CachingStore struct {
 	observationRevision    uint64
 	primePartialErr        error
 
+	// fullScopeSnapshot reports whether c.beads has ever held the complete
+	// nonclosed set. PrimeActive loads partialPrimeStatuses only, so until a
+	// full prime or a clean full-scan reconcile promotes the cache live, the
+	// snapshot can answer those two status filters completely and nothing
+	// broader. The flag is monotone: a later self-degrade (cacheDegraded)
+	// keeps the rows the full scan produced, so scope does not lapse with
+	// liveness the way c.state does. Guarded by mu.
+	fullScopeSnapshot bool
+
 	// availabilityGate, when set, reports backing-store transport
 	// availability (the per-scope circuit breaker). See
 	// SetAvailabilityGate. Guarded by mu.
@@ -1263,6 +1272,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 		c.setDepsCompleteLocked(false, "prime-partial-no-dep-snapshot")
 	}
 	c.state = cacheLive
+	c.fullScopeSnapshot = true
 	c.syncFailures = 0
 	c.circuitTripped = false
 	c.stats.SyncFailures = 0

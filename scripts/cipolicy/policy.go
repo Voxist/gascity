@@ -55,10 +55,24 @@ const (
 	// Re-derived again for the noncmdgc unit-cover shard matrix (ga-gmhbf): the
 	// job that set the run's wall time became a 3-way matrix. Same jobs, same
 	// needs; only the matrix expansion and the job name changed.
-	// Re-derived again at the 2026-09-04 resync: ci.yml auto-merged both sides,
-	// so the merged execution shape hashes to neither the fork's prior pin nor
-	// upstream's. Taken from the candidate digest this package printed for the
-	// merged workflow, not from either side.
+	// Re-derived again at the 2026-09-05 resync (branch
+	// resync/origin-main-20260905): ci.yml auto-merged both sides, so the
+	// merged execution shape hashes to neither the fork's prior pin nor
+	// upstream's, and the digest is taken from the candidate this package
+	// printed for the merged workflow rather than adopted from a side. The
+	// execution-shape delta the new pin encodes, diffed against the fork's
+	// pre-merge ci.yml: upstream added two Cursor worker-core jobs —
+	// worker-core-cursor (PROFILE cursor/tmux-cli, make test-worker-core) and
+	// worker-core-phase2-cursor (make test-worker-core-phase2-all) — each
+	// gated on the same changes filter as its claude/codex/gemini peers, plus
+	// the cursor artifact download, --expected-profile argument, result/
+	// download variable and fan-in conditional in both worker-core-summary
+	// jobs. Nothing fork-side moved: the scripts/** integration filter, the
+	// preflight-guards/preflight-static split, the 3-way noncmdgc cover
+	// matrix, the BD_REPO/BD_SOURCE_REF repin and the 15-minute shard timeout
+	// all survive into the merged file unchanged. Cursor is a profile this
+	// fork already carries (internal/worker.ProfileCursorTmuxCLI), so the
+	// added jobs are new coverage, not a shape that needs reverting.
 	expectedCIExecutionHash     = "d48be5096369181ba3a91a6e897b10467fff06fae0f350fa9fc60815675091b8"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
