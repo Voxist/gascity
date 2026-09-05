@@ -215,7 +215,16 @@ trap - EXIT
 if ! "$TARGET" version >/dev/null 2>&1; then
 	die "installed shim at $TARGET cannot run '$REAL_GO version' — install is broken"
 fi
-if "$TARGET" clean -cache >/dev/null 2>&1; then
+#
+# The refusal probe is run with the real toolchain SWAPPED OUT for /usr/bin/true.
+# Without that, this line asks a just-installed, not-yet-trusted shim to decide
+# whether to wipe the shared build cache -- and if its refusal logic were broken
+# in exactly the way this probe exists to detect, the probe itself would perform
+# the wipe and cause the incident the shim exists to prevent. Pointing it at a
+# no-op keeps the assertion (a broken shim execs /usr/bin/true, exits 0, and is
+# caught) while making the failure path harmless. The passthrough probe above
+# already proves the pinned toolchain is reachable, so nothing is lost.
+if GC_GO_SHIM_REAL_GO=/usr/bin/true "$TARGET" clean -cache >/dev/null 2>&1; then
 	die "installed shim at $TARGET did NOT refuse 'go clean -cache' — install is broken"
 fi
 

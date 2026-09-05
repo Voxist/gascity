@@ -374,6 +374,40 @@ else
 	pass "CASE 18: installer resolves past an existing shim to the real go"
 fi
 
+# ---------------------------------------------------------------- CASE 19
+# The installer's own post-install refusal probe must not be able to reach the
+# real toolchain. It asks a just-installed, not-yet-trusted shim to decide
+# whether to wipe the shared cache; if the refusal logic were broken in exactly
+# the way the probe exists to detect, a probe wired to the real go would perform
+# the wipe ITSELF and cause the incident the shim exists to prevent.
+grep -q 'GC_GO_SHIM_REAL_GO=/usr/bin/true "\$TARGET" clean -cache' "$INSTALLER" \
+	|| fail "CASE 19: installer's refusal probe is wired to the real toolchain"
+
+# Demonstrated, not merely read. A sabotaged shim SOURCE is rendered by a copy
+# of the real installer; the installer must reject the result, and the fake go
+# must show that the last thing it saw was the harmless `version` probe -- never
+# `clean -cache`.
+src="$WORK/sabotage-src"
+mkdir -p "$src"
+cp -f "$INSTALLER" "$src/"
+sed 's/^if refuses_clean_cache "\$@"; then$/if false; then/' "$SHIM_SRC" >"$src/go-clean-cache-shim.sh"
+grep -q '^if false; then$' "$src/go-clean-cache-shim.sh" \
+	|| fail "CASE 19: could not sabotage the shim source for the test"
+
+sabbin="$WORK/sabotagebin"
+mkdir -p "$sabbin"
+rm -f "$ARGV"
+if FAKE_GO_ARGV="$ARGV" FAKE_GO_PID="$PIDFILE" PATH="$sabbin:$WORK/fakego:$PATH" \
+	bash "$src/install-go-clean-cache-shim.sh" --dir "$sabbin" >"$OUT" 2>"$ERR"; then
+	fail "CASE 19: installer reported success over a shim that does not refuse"
+elif [ "$(argv_joined)" = "clean|-cache|" ]; then
+	fail "CASE 19: the refusal probe REACHED the real toolchain as 'clean -cache'"
+elif [ "$(argv_joined)" != "version|" ]; then
+	fail "CASE 19: unexpected final real-go invocation [$(argv_joined)] (wanted the version probe)"
+else
+	pass "CASE 19: a shim that fails to refuse is caught without the probe reaching the real go"
+fi
+
 # ------------------------------------------------------------------ verdict
 if [ "$failures" -ne 0 ]; then
 	echo "FAILED: $failures case(s)" >&2
