@@ -124,6 +124,23 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		// pinned by the caching_store_unavailable / reality_first suites.
 		"availabilityGate": true, "unavailableSkipLogged": true,
 		"degradedReads": true,
+		// The ADR-0094 D6 observability gauge. Unlike the entries above, the
+		// seam DOES write these — setDepsCompleteLocked runs inside
+		// mergeSnapshotLocked — so the exclusion rests on a different argument:
+		// every one of them is a pure FUNCTION of depsComplete's transitions,
+		// and depsComplete itself is compared above. A divergence here that is
+		// not already a depsComplete divergence is unreachable, so comparing
+		// them adds no oracle power. Comparing them would instead SUBTRACT
+		// power: depsIncompleteSince is wall-clock (time.Now() at the
+		// transition), so a diff would report a spurious mismatch on every run
+		// and the whole oracle would have to be made clock-injecting to stay
+		// green. Their behavior is pinned directly by
+		// TestDepsCompleteGaugeReportsDwellAndLatchingDriver and
+		// TestDepsCompleteHasASingleWriter, which is what keeps this exclusion
+		// from being a blind spot.
+		"depsIncompleteSince": true, "depsIncompleteDriver": true,
+		"depsDegradations": true, "depsRestorations": true,
+		"depsWholeCacheWipes": true,
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CachingStore{}), comparedStore, excludedStore)
 
@@ -140,6 +157,14 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		// DegradedReads mirrors the gate counter above — an outage observable,
 		// not durable cache content the merge oracle compares.
 		"DegradedReads": true,
+		// The D6 gauge's read projection. Stats() copies these straight out of
+		// the CachingStore fields excluded above (DepsIncompleteFor is derived
+		// from DepsIncompleteSince at read time), so they carry no state the
+		// oracle is not already comparing through depsComplete.
+		"DepsComplete": true, "DepsIncompleteSince": true,
+		"DepsIncompleteFor": true, "DepsIncompleteDriver": true,
+		"DepsDegradations": true, "DepsRestorations": true,
+		"DepsWholeCacheWipes": true,
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CacheStats{}), comparedStats, excludedStats)
 }
