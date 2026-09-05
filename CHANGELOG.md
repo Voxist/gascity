@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`gc doctor` now checks for binary divergence** — the case where the `gc`
+  a probe verifies is not the `gc` the supervisor is executing. The new
+  `binary-divergence` check reads the running supervisor's executed image from
+  the process itself (`/proc/<pid>/exe` on Linux, `lsof` mapped-text entries on
+  macOS) rather than from the path its service unit names, and compares the two
+  by **file identity** — device and inode — never by path string. Several paths
+  symlinked or hardlinked to one artifact pass, as do two byte-identical
+  copies. Genuinely different binaries warn, naming both paths, both versions,
+  both modification times and which side is newer, so an operator can tell
+  whether they are verifying ahead of or behind the running fleet. A binary
+  replaced in place under a running supervisor warns too: the process keeps
+  executing the old inode while its reported path is unchanged, which Linux
+  marks `(deleted)` and macOS does not mark at all. Without this check, a
+  capability probe run from a shell can report a feature present while the
+  fleet runs a build that lacks it, or the reverse.
+
+  Every step that cannot obtain an answer says so rather than reaching a
+  verdict: a stat that failed, a binary that cannot be read, a platform with no
+  route to a process image, a PATH lookup that did not resolve, and a
+  supervisor liveness probe whose control socket did not answer all report
+  "binary divergence unverified" — never a divergence, and never a green
+  check. A green check means a comparison actually ran.
+
 ### Changed
 
 - **`make install` no longer writes `~/.local/bin/gc`.** Installing wrote the

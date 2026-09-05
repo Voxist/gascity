@@ -60,6 +60,7 @@ beads-role
 bd-context-probe
 controller
 supervisor-http-api
+binary-divergence
 agent-sessions
 zombie-sessions
 orphan-sessions

@@ -27,6 +27,15 @@ var (
 	newDoctorRigDoltServerCheck = doctor.NewRigDoltServerCheck
 	newDoctorDoltBackupCheck    = doctor.NewDoltBackupCheck
 	newDoctorDoltLocalOnlyCheck = doctor.NewDoltLocalOnlyRemoteCheck
+	// newDoctorBinaryDivergenceCheck is a seam so tests can assert the
+	// supervisor PID reaches the check without the real check probing the
+	// host for a process image.
+	newDoctorBinaryDivergenceCheck = doctor.NewBinaryDivergenceCheck
+	// supervisorProbePIDHook is the tri-state supervisor liveness probe: a
+	// positive pid, 0 when the probe established that none is running, and
+	// doctor.SupervisorPIDUnknown when it could not tell. A seam so a test can
+	// drive each of the three states without a real control socket.
+	supervisorProbePIDHook = supervisorPIDForDoctor
 )
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -136,9 +145,13 @@ func (c *doltTopologyCheck) CanFix() bool { return false }
 func (c *doltTopologyCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
 type buildDoctorChecksOpts struct {
-	Stderr               io.Writer
-	ControllerRunning    bool
-	SupervisorRunning    bool
+	Stderr            io.Writer
+	ControllerRunning bool
+	SupervisorRunning bool
+	// SupervisorPID is the running supervisor's pid, 0 when the liveness
+	// probe established that none is running, and
+	// doctor.SupervisorPIDUnknown when the probe did not settle it.
+	SupervisorPID        int
 	SkipCityDoltCheck    bool
 	SkipManagedDoltCheck bool
 	SkipRigDoltChecks    bool
@@ -286,6 +299,9 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	controllerRunning := opts.ControllerRunning
 	register(doctor.NewControllerCheck(cityPath, controllerRunning))
 	register(doctor.NewSupervisorHTTPCheck(opts.SupervisorRunning))
+	// Assert that the binary a probe verifies is the binary the supervisor
+	// executes. Nothing else in the system compares the two.
+	register(newDoctorBinaryDivergenceCheck(opts.SupervisorPID))
 
 	if cfgErr == nil && cfg != nil {
 		cityName := loadedCityName(cfg, cityPath)
@@ -481,7 +497,13 @@ func doDoctor(fix, verbose, jsonOut bool, checkTimeout time.Duration, stdout, st
 		resolveRigPaths(cityPath, cfg.Rigs)
 	}
 	controllerRunning := doctor.IsControllerRunning(cityPath)
-	supervisorRunning := supervisorAliveHook() != 0
+	// Deliberately the tri-state probe, not supervisorAliveHook: a control
+	// socket that accepted a connection and then went quiet returns 0 from the
+	// bare probe, and "no supervisor is running" is a green verdict for
+	// binary-divergence. A supervisor that is up, executing a stale image and
+	// wedged is exactly the state `gc doctor` is run to find.
+	supervisorPID := supervisorProbePIDHook()
+	supervisorRunning := supervisorPID > 0
 	skipRigDoltChecks := gcDoltSkip()
 	skipCityDoltCheck := skipRigDoltChecks || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
 	skipManagedDoltCheck := managedDoltOpsCheckSkip(cityPath, cfg, cfgErr)
@@ -499,6 +521,7 @@ func doDoctor(fix, verbose, jsonOut bool, checkTimeout time.Duration, stdout, st
 		Stderr:               stderr,
 		ControllerRunning:    controllerRunning,
 		SupervisorRunning:    supervisorRunning,
+		SupervisorPID:        supervisorPID,
 		SkipCityDoltCheck:    skipCityDoltCheck,
 		SkipManagedDoltCheck: skipManagedDoltCheck,
 		SkipRigDoltChecks:    skipRigDoltChecks,
