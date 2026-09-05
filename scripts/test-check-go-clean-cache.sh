@@ -336,6 +336,55 @@ grep -q 'internal/x/x.go:4' "$OUT" \
 	|| fail "CASE 15: wrapped exec.Command reported at the wrong line; got: $(cat "$OUT")"
 pass "CASE 15: a wrapped exec.Command is reported at its first physical line"
 
+# ---------------------------------------------------------------- CASE 16
+# REGRESSION: a comment line ending in a backslash must not swallow the next,
+# executing line into an exempt logical line.
+#
+# Joining continuations (CASE 15) introduced this. The joiner merges any
+# physical line ending in `\\` into the next, and the exemption test then runs on
+# the JOINED line -- which begins with `#`, so the whole thing was exempted and
+# a real, executing `go clean -cache` went unreported.
+#
+# In sh/bash a `#` comment ends at the newline: the next line EXECUTES,
+# backslash or not. (In make it genuinely continues, which is why the joiner is
+# right there and wrong here. The guard keeps the physical-line pass as a floor
+# for both rather than becoming language-aware, so the make case is a loud false
+# positive -- annotatable -- instead of a silent false negative.)
+#
+# NOTE FOR ANYONE EDITING THIS: CASE 15j passes with OR without the bug, because
+# both of its physical lines are comments. A case that distinguishes them must
+# have a NON-comment second line. That is the whole point of this one.
+assert_blocks "CASE 16a: comment ending in a backslash does not exempt the next line" \
+	"scripts/evade.sh" "$(printf '#!/bin/sh\n# see the note above \\\ngo clean -cache')"
+assert_blocks "CASE 16b: same, with the flag quoted" \
+	"scripts/evade.sh" "$(printf '# note \\\ngo clean \"-cache\"')"
+assert_blocks "CASE 16c: same, in a CI step" \
+	".github/workflows/x.yml" "$(printf '# note \\\n        run: go clean -cache')"
+assert_blocks "CASE 16d: two stacked continuation comments" \
+	"scripts/evade.sh" "$(printf '# a \\\n# b \\\ngo clean -cache')"
+
+# Reported at the physical line that actually executes.
+repo="$(new_repo case16report)"
+commit_file "$repo" "scripts/evade.sh" "$(printf '#!/bin/sh\n# see the note above \\\ngo clean -cache\n')"
+rc="$(run_check "$repo")"
+[ "$rc" -ne 0 ] || fail "CASE 16: evasion not blocked"
+grep -q 'scripts/evade.sh:3' "$OUT" \
+	|| fail "CASE 16: not reported at the executing line; got: $(cat "$OUT")"
+pass "CASE 16: reported at the executing physical line"
+
+# The floor must not resurrect double-reporting: an ordinary one-line violation
+# is found by both passes and must still be reported exactly once.
+repo="$(new_repo case16dedupe)"
+commit_file "$repo" "scripts/a.sh" 'go clean -cache'
+run_check "$repo" >/dev/null
+n="$(grep -c 'scripts/a.sh:1' "$OUT")"
+[ "$n" -eq 1 ] || fail "CASE 16: one-line violation reported $n times, want 1"
+pass "CASE 16: a violation found by both passes is reported once"
+
+# And the CASE 15 continuation catch must survive the floor being restored.
+assert_blocks "CASE 16e: continuation catch still works alongside the floor" \
+	"scripts/x.sh" "$(printf 'go clean \\\n  -cache')"
+
 # ------------------------------------------------------------------ verdict
 if [ "$failures" -ne 0 ]; then
 	echo "FAILED: $failures case(s)" >&2

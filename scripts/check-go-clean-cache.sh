@@ -216,12 +216,37 @@ for path in listing():
             return True
         return ALLOW_LINE in text_of_line and ALLOW_FILE not in text_of_line
 
-    for n, line in logical:
-        if exempt(line):
-            continue
+    def cmd_hit(line):
         m = CMD.search(line)
-        if m and (m.group("v") is None or m.group("v") not in FALSEY):
-            hits.append("%s:%d: %s" % (path, n, line.strip()))
+        return m is not None and (
+            m.group("v") is None or m.group("v") not in FALSEY
+        )
+
+    # TWO passes, unioned and deduped by line.
+    #
+    # The physical pass is a FLOOR and must not be removed. Joining
+    # continuations means a comment line ending in a backslash merges into the
+    # next line, and the exemption test then sees a logical line beginning with
+    # "#" -- so an executing command was silently exempted:
+    #
+    #     # see the note above \
+    #     go clean -cache        <- executes in sh/bash; was MISSED
+    #
+    # In sh/bash a comment ends at the newline and the next line runs, backslash
+    # or not. In make the continuation is real and the comment genuinely does
+    # continue. Rather than become language-aware -- narrower, and more to get
+    # wrong -- the guard keeps the physical pass for every surface, so the make
+    # case is a loud false positive (annotatable) instead of a silent false
+    # negative. A false negative here cannot be seen; a false positive can.
+    found = {}
+    for n, line in enumerate(lines, 1):
+        if not exempt(line) and cmd_hit(line):
+            found.setdefault(n, line.strip())
+    for n, line in logical:
+        if not exempt(line) and cmd_hit(line):
+            found.setdefault(n, line.strip())
+    for n in sorted(found):
+        hits.append("%s:%d: %s" % (path, n, found[n]))
 
     # The argv form is matched against the WHOLE file: \s already spans
     # newlines, so exec.Command("go",\n\t"clean",\n\t"-cache") -- which is
