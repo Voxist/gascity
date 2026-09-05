@@ -321,7 +321,9 @@ check-eventexport-isolation:
 ## Commit-time half of the ban only. It stops the command entering a script,
 ## Makefile recipe, CI step or exec.Command; it does NOT stop anyone running it
 ## (neither vp-g96b nor the 2026-09-05 recurrence was ever committed). The
-## runtime half is scripts/go-clean-cache-shim.sh.
+## runtime half is scripts/go-clean-cache-shim.sh, and the supported way to
+## reclaim space -- the alternative the refusal names -- is
+## scripts/trim-go-build-cache.sh, whose suite runs here too.
 ## Self-tests run from here rather than from Go wrappers: a wrapper per suite
 ## would add an exec.Command call site in a new _test.go file, which the P0.4
 ## resource census ratchets as untagged subprocess growth. Same shape as
@@ -329,6 +331,7 @@ check-eventexport-isolation:
 check-go-clean-cache:
 	bash scripts/test-check-go-clean-cache.sh
 	bash scripts/test-go-clean-cache-shim.sh
+	bash scripts/test-trim-go-build-cache.sh
 	bash scripts/check-go-clean-cache.sh
 
 ## check-resync-loss: detect Category-A resync merge loss (fork-added declarations silently dropped)
