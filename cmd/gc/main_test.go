@@ -109,6 +109,12 @@ func configureSupervisorHooksForTests() {
 	ensureSupervisorRunningHook = func(_, _ io.Writer) int { return 0 }
 	reloadSupervisorHook = func(_, _ io.Writer) int { return 0 }
 	supervisorAliveHook = func() int { return 0 }
+	// The tri-state probe needs the same neutralizing: its default walks the
+	// same candidate sockets, and guardSupervisorSocketDir panics the moment
+	// a test binary resolves the host's runtime dir. 0 is the settled
+	// negative — "the probe established that no supervisor is running" —
+	// which is what supervisorAliveHook's stub above means too.
+	supervisorProbePIDHook = func() int { return 0 }
 	// Neutralize systemd lingering so install tests never spawn loginctl
 	// or mutate the test runner's real linger state. Reporting linger as
 	// already enabled makes ensureSupervisorLinger a silent no-op, keeping

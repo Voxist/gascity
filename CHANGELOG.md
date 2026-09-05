@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capability probe run from a shell can report a feature present while the
   fleet runs a build that lacks it, or the reverse.
 
+  Every step that cannot obtain an answer says so rather than reaching a
+  verdict: a stat that failed, a binary that cannot be read, a platform with no
+  route to a process image, a PATH lookup that did not resolve, and a
+  supervisor liveness probe whose control socket did not answer all report
+  "binary divergence unverified" — never a divergence, and never a green
+  check. A green check means a comparison actually ran.
+
 ### Changed
 
 - **`gc pack registry publish` now refuses an unscoped pack name unless you

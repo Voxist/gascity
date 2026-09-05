@@ -3,9 +3,11 @@ package doctor
 import (
 	"debug/macho"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
@@ -21,6 +23,17 @@ func writeFakeBinary(t *testing.T, path, content string) string {
 		t.Fatalf("writing %s: %v", path, err)
 	}
 	return path
+}
+
+// linkTo hard-links newname to oldname and returns newname: a second route to
+// one inode, which is what a platform handle on an executing image behaves
+// like. Skips where the filesystem has no hard links.
+func linkTo(t *testing.T, oldname, newname string) string {
+	t.Helper()
+	if err := os.Link(oldname, newname); err != nil {
+		t.Skipf("hard links unsupported here: %v", err)
+	}
+	return newname
 }
 
 // symlink creates newname -> oldname and returns newname.
@@ -468,7 +481,9 @@ func TestBinaryDivergenceCheck_NotOnPath(t *testing.T) {
 	dir := t.TempDir()
 	executed := writeFakeBinary(t, filepath.Join(dir, "gc"), "running")
 	c := divergenceCheck(5, imageAt(t, executed), "")
-	c.lookPath = func(string) (string, error) { return "", fmt.Errorf("executable file not found in $PATH") }
+	// The error exec.LookPath actually returns. A lookalike string would pass
+	// while asserting nothing about which lookup failures mean "gc is absent".
+	c.lookPath = func(name string) (string, error) { return "", &exec.Error{Name: name, Err: exec.ErrNotFound} }
 
 	r := c.Run(&CheckContext{})
 
@@ -617,9 +632,12 @@ func TestSelectRunningImage_MissingIdentityIsAnError(t *testing.T) {
 func TestSelectRunningImage_DeletedImageIsReportedNotSkipped(t *testing.T) {
 	// The real predicate against paths that do not exist: nothing here can be
 	// read, let alone parsed as Mach-O.
+	dir := t.TempDir()
+	loader := writeFakeBinary(t, filepath.Join(dir, "dyld"), "the dynamic loader")
+	loaderID := identityOf(t, loader)
 	entries := []lsofEntry{
-		{name: filepath.Join(t.TempDir(), "gc-main-20260904-deadbeef"), dev: "0x100000f", ino: "1386167869"},
-		{name: "/usr/lib/dyld", dev: "0x100000f", ino: "1152921500312573255"},
+		{name: filepath.Join(dir, "gc-main-20260904-deadbeef"), dev: "0x100000f", ino: "1386167869"},
+		{name: loader, dev: fmt.Sprintf("%#x", loaderID.dev), ino: fmt.Sprint(loaderID.ino)},
 	}
 
 	got, err := selectRunningImage(entries, machOIsExecutable)
@@ -634,24 +652,40 @@ func TestSelectRunningImage_DeletedImageIsReportedNotSkipped(t *testing.T) {
 	}
 }
 
-// TestSelectRunningImage_UnreadableExecutableFallsBackToFirstEntry covers the
-// same fallback with the predicate stubbed, including the shell-wrapper shape:
-// a path replaced by something that is readable but is not a Mach-O image.
-func TestSelectRunningImage_UnreadableExecutableFallsBackToFirstEntry(t *testing.T) {
+// TestSelectRunningImage_SoleUnevaluatableEntryIsTheImage covers the fallback
+// with the predicate stubbed, in the shell-wrapper shape: the executable's
+// path replaced by something readable that is not a Mach-O image, every
+// library beside it still exactly the file lsof recorded.
+//
+// The libraries are real files with their real identities, because that is the
+// state the fallback's reasoning depends on: pass 1 established that none of
+// the entries it could evaluate is an executable, so the one entry it could
+// not evaluate is the image.
+func TestSelectRunningImage_SoleUnevaluatableEntryIsTheImage(t *testing.T) {
+	dir := t.TempDir()
+	image := writeFakeBinary(t, filepath.Join(dir, "gc"), "the running image")
+	loader := writeFakeBinary(t, filepath.Join(dir, "dyld"), "the dynamic loader")
+	imageID, loaderID := identityOf(t, image), identityOf(t, loader)
 	entries := []lsofEntry{
-		{name: "/opt/gc/bin/gc", dev: "0x1", ino: "7"},
-		{name: "/usr/lib/dyld", dev: "0x1", ino: "8"},
+		{name: image, dev: fmt.Sprintf("%#x", imageID.dev), ino: fmt.Sprint(imageID.ino)},
+		{name: loader, dev: fmt.Sprintf("%#x", loaderID.dev), ino: fmt.Sprint(loaderID.ino)},
+	}
+	// The wrapper install: a new inode at the executable's path, holding
+	// something that is not a Mach-O image.
+	wrapper := writeFakeBinary(t, filepath.Join(dir, "gc.wrapper"), "#!/bin/sh\nexec gc-real \"$@\"\n")
+	if err := os.Rename(wrapper, image); err != nil {
+		t.Fatalf("replacing %s: %v", image, err)
 	}
 
 	got, err := selectRunningImage(entries, func(string) bool { return false })
 	if err != nil {
-		t.Fatalf("selectRunningImage = %v, want the first entry reported", err)
+		t.Fatalf("selectRunningImage = %v, want the replaced entry reported", err)
 	}
-	if got.path != "/opt/gc/bin/gc" {
-		t.Errorf("path = %q, want the first mapped-text entry", got.path)
+	if got.path != image {
+		t.Errorf("path = %q, want the replaced executable %q rather than the untouched loader", got.path, image)
 	}
-	if got.id.ino != 7 {
-		t.Errorf("id.ino = %d, want 7", got.id.ino)
+	if got.id != imageID {
+		t.Errorf("id = %+v, want the identity lsof recorded %+v", got.id, imageID)
 	}
 }
 
@@ -662,9 +696,11 @@ func TestBinaryDivergenceCheck_ExecutedImageDeletedEndToEnd(t *testing.T) {
 	dir := t.TempDir()
 	artifact := writeFakeBinary(t, filepath.Join(dir, "gc-main-20260904-deadbeef"), "the bytes the fleet runs")
 	executing := imageAt(t, artifact)
+	loader := writeFakeBinary(t, filepath.Join(dir, "dyld"), "the dynamic loader")
+	loaderID := identityOf(t, loader)
 	entries := []lsofEntry{
 		{name: artifact, dev: fmt.Sprintf("%#x", executing.id.dev), ino: fmt.Sprint(executing.id.ino)},
-		{name: "/usr/lib/dyld", dev: "0x1", ino: "2"},
+		{name: loader, dev: fmt.Sprintf("%#x", loaderID.dev), ino: fmt.Sprint(loaderID.ino)},
 	}
 	if err := os.Remove(artifact); err != nil {
 		t.Fatalf("pruning %s: %v", artifact, err)
@@ -1073,8 +1109,10 @@ func TestBinaryDivergenceCheck_ReplacedImageWithIdenticalBytesIsOK(t *testing.T)
 	path := filepath.Join(dir, "gc-artifact")
 	writeFakeBinary(t, path, body)
 	executing := imageAt(t, path)
-	// A handle that still reads the original bytes, as /proc/<pid>/exe does.
-	executing.contentPath = writeFakeBinary(t, filepath.Join(dir, "exe-handle"), body)
+	// A handle on the executing inode itself, as /proc/<pid>/exe is. A hard
+	// link is the portable stand-in: a second route to the same bytes that
+	// survives the loss of the original name.
+	executing.contentPath = linkTo(t, path, filepath.Join(dir, "exe-handle"))
 
 	// The reinstall: a new inode at the same path, same bytes.
 	replacement := writeFakeBinary(t, filepath.Join(dir, "gc-artifact.new"), body)
@@ -1107,7 +1145,7 @@ func TestBinaryDivergenceCheck_ReplacedImageWithDifferentBytesDiverges(t *testin
 	path := filepath.Join(dir, "gc-artifact")
 	writeFakeBinary(t, path, "the bytes the fleet runs")
 	executing := imageAt(t, path)
-	executing.contentPath = writeFakeBinary(t, filepath.Join(dir, "exe-handle"), "the bytes the fleet runs")
+	executing.contentPath = linkTo(t, path, filepath.Join(dir, "exe-handle"))
 
 	replacement := writeFakeBinary(t, filepath.Join(dir, "gc-artifact.new"), "a different build")
 	if err := os.Rename(replacement, path); err != nil {
@@ -1267,5 +1305,332 @@ func TestFileIsReadable(t *testing.T) {
 	}
 	if fileIsReadable(filepath.Join(dir, "absent")) {
 		t.Error("fileIsReadable = true for a path that does not exist")
+	}
+}
+
+// TestBinaryDivergenceCheck_ContentHandleNamingAnotherFileIsNotTrusted is the
+// guard for the one route in this check that can still produce a green ✓ for a
+// fleet running different bytes.
+//
+// /proc/<pid>/exe is a magic link: opening or stat'ing it lands on the
+// executing inode, but *resolving* it as a symlink lands on whatever now sits
+// at the path it names. Reading the executed image through that resolution
+// therefore reports the replacement — and when the replacement is the binary
+// on PATH, as it is after any in-place install, the comparison answers "the
+// same binary" about a file the process is not executing.
+//
+// The world state below is one no other fixture builds: a contentPath handle
+// that resolves to different bytes than the running identity. The two existing
+// contentPath tests both supply a handle holding the original bytes, which is
+// why nothing caught this.
+func TestBinaryDivergenceCheck_ContentHandleNamingAnotherFileIsNotTrusted(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gc-artifact")
+	writeFakeBinary(t, path, "the bytes the fleet is running")
+	executing := imageAt(t, path)
+	// The handle names the path, as /proc/<pid>/exe does. A plain symlink is
+	// what resolving the magic link degrades to.
+	executing.contentPath = symlink(t, path, filepath.Join(dir, "exe-link"))
+
+	// The in-place install: the replacement and the PATH binary hold the same
+	// bytes as each other, and different bytes from the running image.
+	installed := "the build that was installed over it"
+	replacement := writeFakeBinary(t, filepath.Join(dir, "gc-artifact.new"), installed)
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatalf("replacing %s: %v", path, err)
+	}
+	verified := writeFakeBinary(t, filepath.Join(dir, "gc"), installed)
+
+	r := divergenceCheck(4242, executing, verified).Run(&CheckContext{})
+
+	if r.Status == StatusOK {
+		t.Fatalf("Status = StatusOK: the check read bytes through a stale name and called them the running image; message=%q", r.Message)
+	}
+	if strings.Contains(r.Message, "same binary") {
+		t.Errorf("Message = %q, must not claim the two are one binary from bytes it never established belong to the process", r.Message)
+	}
+	if !strings.Contains(r.Message, "no longer the file at") {
+		t.Errorf("Message = %q, want the unreachable-image verdict: the handle does not reach the running bytes", r.Message)
+	}
+}
+
+// TestExecutedFacts_ContentHandleMustReachTheRunningInode is the same property
+// at the seam that owns it, without the verdict machinery in the way.
+func TestExecutedFacts_ContentHandleMustReachTheRunningInode(t *testing.T) {
+	dir := t.TempDir()
+	running := writeFakeBinary(t, filepath.Join(dir, "running"), "running bytes")
+	img := imageAt(t, running)
+	other := writeFakeBinary(t, filepath.Join(dir, "other"), "some other file entirely")
+
+	img.contentPath = other
+	if _, reachable := executedFacts(img, imagePathReplaced); reachable {
+		t.Error("executedFacts trusted a handle that reaches a different inode; the bytes it returns are not the process's")
+	}
+
+	// The real shape: a handle that does reach the executing inode. A hard
+	// link is what /proc/<pid>/exe behaves like — a second route to the same
+	// bytes that survives the original name.
+	linked := filepath.Join(dir, "handle")
+	if err := os.Link(running, linked); err != nil {
+		t.Skipf("hard links unsupported here: %v", err)
+	}
+	img.contentPath = linked
+	f, reachable := executedFacts(img, imagePathReplaced)
+	if !reachable {
+		t.Fatal("executedFacts rejected a handle that does reach the executing inode")
+	}
+	if f.readPath() != linked {
+		t.Errorf("readPath = %q, want the handle %q — the resolution is what loses the inode", f.readPath(), linked)
+	}
+	if f.describePath() != running {
+		t.Errorf("describePath = %q, want the operator-facing path %q", f.describePath(), running)
+	}
+}
+
+// TestBinaryDivergenceCheck_ExecutedInodeUnderAnotherNameIsOK covers the
+// artifact reached by two hard links where the process loaded it through the
+// name that was later removed. The check already holds both identities when it
+// forms its verdict; warning "nothing on disk describes the running bytes"
+// over the top of evidence that the PATH binary IS the running inode sends an
+// operator to restart a supervisor that is already converged.
+func TestBinaryDivergenceCheck_ExecutedInodeUnderAnotherNameIsOK(t *testing.T) {
+	dir := t.TempDir()
+	loaded := writeFakeBinary(t, filepath.Join(dir, "gc-1.4.1"), "the one artifact")
+	onPath := filepath.Join(dir, "gc")
+	if err := os.Link(loaded, onPath); err != nil {
+		t.Skipf("hard links unsupported here: %v", err)
+	}
+	executing := imageAt(t, loaded)
+	if err := os.Remove(loaded); err != nil {
+		t.Fatalf("removing the loaded name %s: %v", loaded, err)
+	}
+
+	r := divergenceCheck(4242, executing, onPath).Run(&CheckContext{})
+
+	if r.Status != StatusOK {
+		t.Fatalf("Status = %v, want StatusOK: the PATH binary is the executed inode; message=%q", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "same binary") {
+		t.Errorf("Message = %q, want it to report the two as one binary", r.Message)
+	}
+	if r.FixHint != "" {
+		t.Errorf("FixHint = %q, want none: there is nothing for the operator to converge", r.FixHint)
+	}
+}
+
+// TestBinaryDivergenceCheck_UnlinkedInodeUnderAnotherNameIsNotOK is the guard
+// on the exemption above. When the platform reported the image unlinked the
+// kernel has already dropped that inode, so a file wearing its number is inode
+// reuse, not the running artifact.
+func TestBinaryDivergenceCheck_UnlinkedInodeUnderAnotherNameIsNotOK(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFakeBinary(t, filepath.Join(dir, "gc"), "bytes")
+	executing := imageAt(t, path)
+	executing.unlinked = true
+
+	r := divergenceCheck(4242, executing, path).Run(&CheckContext{})
+
+	if r.Status != StatusWarning {
+		t.Fatalf("Status = %v, want StatusWarning: a matching inode for an unlinked image is reuse; message=%q", r.Status, r.Message)
+	}
+	if strings.Contains(r.Message, "same binary") {
+		t.Errorf("Message = %q, must not read inode reuse as identity", r.Message)
+	}
+}
+
+// TestReportUnreachableImage_IntactPathIsNotCalledAReplacement covers the
+// TOCTOU half: executedFacts can fail to stat a path classifyImagePath
+// observed intact moments earlier. "That path was replaced or removed under
+// it" is then a state the check never established.
+func TestReportUnreachableImage_IntactPathIsNotCalledAReplacement(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFakeBinary(t, filepath.Join(dir, "gc-artifact"), "running")
+	verifiedPath := writeFakeBinary(t, filepath.Join(dir, "gc"), "on path")
+	c := divergenceCheck(4242, imageAt(t, path), verifiedPath)
+
+	r := c.reportUnreachableImage(&CheckResult{Name: c.Name()}, imageAt(t, path), imagePathIntact,
+		statBinary(verifiedPath), verifiedPath)
+
+	if strings.Contains(r.Message, "replaced or removed") {
+		t.Errorf("Message = %q, must not assert a replacement of a path it observed intact", r.Message)
+	}
+	if !strings.Contains(r.Message, path) {
+		t.Errorf("Message = %q, want it to still name the image path %s", r.Message, path)
+	}
+
+	replaced := c.reportUnreachableImage(&CheckResult{Name: c.Name()}, imageAt(t, path), imagePathReplaced,
+		statBinary(verifiedPath), verifiedPath)
+	if !strings.Contains(replaced.Message, "no longer the file at") {
+		t.Errorf("Message = %q, want the replaced wording when the path really was replaced", replaced.Message)
+	}
+}
+
+// TestBinaryDivergenceCheck_PathLookupFailureIsNotAClaimAboutPath separates
+// "gc is absent from PATH" — the only lookup outcome that is a fact about the
+// operator's PATH — from "the lookup did not answer". Reporting the second as
+// the first is a green ✓ asserting something never observed.
+func TestBinaryDivergenceCheck_PathLookupFailureIsNotAClaimAboutPath(t *testing.T) {
+	dir := t.TempDir()
+	executed := writeFakeBinary(t, filepath.Join(dir, "gc"), "running")
+
+	t.Run("not found is OK", func(t *testing.T) {
+		c := divergenceCheck(5, imageAt(t, executed), "")
+		c.lookPath = func(name string) (string, error) {
+			return "", &exec.Error{Name: name, Err: exec.ErrNotFound}
+		}
+
+		r := c.Run(&CheckContext{})
+
+		if r.Status != StatusOK {
+			t.Fatalf("Status = %v, want StatusOK when gc is genuinely absent; message=%q", r.Status, r.Message)
+		}
+		if !strings.Contains(r.Message, "not on PATH") {
+			t.Errorf("Message = %q, want it to note the missing PATH entry", r.Message)
+		}
+	})
+
+	t.Run("any other lookup failure is unverified", func(t *testing.T) {
+		c := divergenceCheck(5, imageAt(t, executed), "")
+		c.lookPath = func(name string) (string, error) {
+			return "", &exec.Error{Name: name, Err: fs.ErrPermission}
+		}
+
+		r := c.Run(&CheckContext{})
+
+		if r.Status != StatusWarning {
+			t.Fatalf("Status = %v, want StatusWarning; message=%q", r.Status, r.Message)
+		}
+		if !strings.Contains(r.Message, "unverified") {
+			t.Errorf("Message = %q, want it reported as unverified", r.Message)
+		}
+		if strings.Contains(r.Message, "not on PATH") {
+			t.Errorf("Message = %q, must not claim gc is absent from PATH on a lookup that never answered", r.Message)
+		}
+	})
+
+	t.Run("no lookup configured is unverified", func(t *testing.T) {
+		c := divergenceCheck(5, imageAt(t, executed), "")
+		c.lookPath = nil
+
+		r := c.Run(&CheckContext{})
+
+		if r.Status != StatusWarning {
+			t.Fatalf("Status = %v, want StatusWarning; message=%q", r.Status, r.Message)
+		}
+		if strings.Contains(r.Message, "not on PATH") {
+			t.Errorf("Message = %q: a check with no PATH lookup at all knows nothing about PATH", r.Message)
+		}
+	})
+
+	t.Run("a hit alongside ErrDot is still compared", func(t *testing.T) {
+		// exec.LookPath returns both a usable path and exec.ErrDot when the
+		// hit came from a relative PATH element. That binary is the one a
+		// probe would execute, so it is the one to compare against.
+		c := divergenceCheck(5, imageAt(t, executed), "")
+		c.lookPath = func(name string) (string, error) {
+			return executed, &exec.Error{Name: name, Err: exec.ErrDot}
+		}
+
+		r := c.Run(&CheckContext{})
+
+		if r.Status != StatusOK {
+			t.Fatalf("Status = %v, want StatusOK: the hit is the executed image itself; message=%q", r.Status, r.Message)
+		}
+		if strings.Contains(r.Message, "not on PATH") {
+			t.Errorf("Message = %q, must not discard a usable hit because an error came with it", r.Message)
+		}
+	})
+}
+
+// TestBinaryDivergenceCheck_UnknownSupervisorLivenessIsUnverified covers the
+// state a bare pid cannot carry. A control socket that accepted a connection
+// and then failed to answer returns 0 from the liveness probe, and 0 is the
+// one value that licenses a green verdict here — so a supervisor that is up,
+// executing a stale image and wedged reports healthy. That is the exact state
+// an operator runs `gc doctor` to find.
+func TestBinaryDivergenceCheck_UnknownSupervisorLivenessIsUnverified(t *testing.T) {
+	r := NewBinaryDivergenceCheck(SupervisorPIDUnknown).Run(&CheckContext{})
+
+	if r.Status != StatusWarning {
+		t.Fatalf("Status = %v, want StatusWarning; message=%q", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "unverified") {
+		t.Errorf("Message = %q, want it reported as unverified", r.Message)
+	}
+	if strings.Contains(r.Message, "supervisor not running") {
+		t.Errorf("Message = %q, must not assert the supervisor is absent from a probe that did not answer", r.Message)
+	}
+
+	// The settled negative is still a green check.
+	if got := NewBinaryDivergenceCheck(0).Run(&CheckContext{}); got.Status != StatusOK {
+		t.Errorf("Status = %v for a probe that established no supervisor is running, want StatusOK; message=%q", got.Status, got.Message)
+	}
+}
+
+// TestTriStateZeroValuesAreTheUnknownState pins the shape rather than a path
+// through it. Both enums used to put the permissive answer at iota-zero, so an
+// unset contentOutcome meant "identical bytes" and an unset imagePathState
+// meant "the path still names the running inode" — every accidental zero in
+// this file was the green answer.
+func TestTriStateZeroValuesAreTheUnknownState(t *testing.T) {
+	var outcome contentOutcome
+	if outcome != contentUnknown {
+		t.Errorf("the zero contentOutcome is %v, want contentUnknown", outcome)
+	}
+	var state imagePathState
+	if state != imagePathUnknown {
+		t.Errorf("the zero imagePathState is %v, want imagePathUnknown", state)
+	}
+}
+
+// TestCompareFailureNamesAnUnclassifiedOutcome covers the verdict switch's
+// default arm. It is unreachable from any producer today; the arm exists
+// because the arm that used to be there formed the DIVERGENCE verdict, so the
+// next contributor to add a contentOutcome without a case would have shipped
+// this file's defect for the fourth time.
+func TestCompareFailureNamesAnUnclassifiedOutcome(t *testing.T) {
+	read := fmt.Errorf("permission denied")
+	if got := compareFailure(contentUnknown, read); !errors.Is(got, read) {
+		t.Errorf("compareFailure = %v, want the read error that explains it", got)
+	}
+	got := compareFailure(contentOutcome(99), nil)
+	if got == nil {
+		t.Fatal("compareFailure on an unclassified outcome = nil; the message would read \"<nil>\"")
+	}
+	if !strings.Contains(got.Error(), "unclassified") {
+		t.Errorf("error = %q, want it to say the outcome had no verdict rather than borrow a read failure's wording", got)
+	}
+}
+
+// TestSelectRunningImage_AmbiguousUnevaluatableEntriesAreAnError is the guard
+// for pass 2's tie-break. When an installer replaces the whole tree, the
+// executable and its libraries are all unevaluatable together, and nothing
+// distinguishes them — so lsof's ordering decided which one got named as the
+// executed image, with a restart-the-supervisor hint attached. The resolver's
+// own comment says naming a library that way is worse than saying nothing.
+func TestSelectRunningImage_AmbiguousUnevaluatableEntriesAreAnError(t *testing.T) {
+	dir := t.TempDir()
+	lib := writeFakeBinary(t, filepath.Join(dir, "libicuuc.78.3.dylib"), "library")
+	image := writeFakeBinary(t, filepath.Join(dir, "gc-main-20260904"), "the running image")
+	entries := []lsofEntry{
+		{name: lib, dev: fmt.Sprintf("%#x", identityOf(t, lib).dev), ino: fmt.Sprint(identityOf(t, lib).ino)},
+		{name: image, dev: fmt.Sprintf("%#x", identityOf(t, image).dev), ino: fmt.Sprint(identityOf(t, image).ino)},
+	}
+	// The whole install tree replaced: every entry is now a different inode
+	// than the one lsof recorded, the library ordered first.
+	for _, p := range []string{lib, image} {
+		replacement := writeFakeBinary(t, p+".new", "a different build")
+		if err := os.Rename(replacement, p); err != nil {
+			t.Fatalf("replacing %s: %v", p, err)
+		}
+	}
+
+	got, err := selectRunningImage(entries, func(string) bool { return false })
+
+	if err == nil {
+		t.Fatalf("selectRunningImage named %q as the executed image on lsof's ordering alone; want an error", got.path)
+	}
+	if !strings.Contains(err.Error(), "cannot be told") {
+		t.Errorf("error = %q, want it to say which entry is the image could not be determined", err)
 	}
 }

@@ -98,21 +98,37 @@ func TestBuildDoctorChecks_BinaryDivergenceReceivesSupervisorPID(t *testing.T) {
 	}
 }
 
-// TestDoDoctorPassesSupervisorPIDToBinaryDivergence closes the last gap: that
-// doDoctor forwards the liveness probe's PID, not just its boolean.
-func TestDoDoctorPassesSupervisorPIDToBinaryDivergence(t *testing.T) {
-	t.Setenv("GC_DOLT", "skip")
-	t.Setenv("GC_CITY_PATH", doctorCityDir(t))
-	got := captureBinaryDivergencePID(t)
+// TestDoDoctorPassesSupervisorLivenessToBinaryDivergence closes the last gap:
+// that doDoctor forwards the liveness probe's whole answer, not just its
+// boolean and not just its PID.
+//
+// All three states matter. A supervisor that is up, executing a stale image
+// and wedged on its control socket answers no ping, and a probe that reports
+// that as pid 0 hands the check the one value that licenses a green verdict —
+// so the check reports healthy for the exact state `gc doctor` is run to find.
+// doctor.SupervisorPIDUnknown is what carries the difference across the seam,
+// and it has to survive the whole way.
+func TestDoDoctorPassesSupervisorLivenessToBinaryDivergence(t *testing.T) {
+	oldProbe := supervisorProbePIDHook
+	t.Cleanup(func() { supervisorProbePIDHook = oldProbe })
 
-	old := supervisorAliveHook
-	supervisorAliveHook = func() int { return probeSupervisorPID }
-	t.Cleanup(func() { supervisorAliveHook = old })
+	for name, tc := range map[string]int{
+		"a supervisor answered":            probeSupervisorPID,
+		"the probe settled that none runs": 0,
+		"the probe did not answer":         doctor.SupervisorPIDUnknown,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("GC_DOLT", "skip")
+			t.Setenv("GC_CITY_PATH", doctorCityDir(t))
+			got := captureBinaryDivergencePID(t)
+			supervisorProbePIDHook = func() int { return tc }
 
-	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, false, false, 0, &stdout, &stderr)
+			var stdout, stderr bytes.Buffer
+			_ = doDoctor(false, false, false, 0, &stdout, &stderr)
 
-	if *got != probeSupervisorPID {
-		t.Errorf("doDoctor built binary-divergence with pid %d, want the probed %d", *got, probeSupervisorPID)
+			if *got != tc {
+				t.Errorf("doDoctor built binary-divergence with pid %d, want the probed %d", *got, tc)
+			}
+		})
 	}
 }

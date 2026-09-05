@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
@@ -726,26 +728,92 @@ func supervisorAlive() int {
 }
 
 func runningSupervisorSocket() (string, int) {
+	sockPath, pid, _ := probeRunningSupervisor()
+	return sockPath, pid
+}
+
+// supervisorLiveness is what a control-socket probe established about the
+// supervisor.
+//
+// The tri-state exists because a bare pid destroys the distinction. A probe
+// that timed out and a supervisor that is not running both produce 0, and
+// callers that must not treat "did not answer" as "not running" — `gc doctor`,
+// which reports a green verdict for the latter — have no way to tell them
+// apart afterwards.
+type supervisorLiveness int
+
+const (
+	// supervisorLivenessUnknown means no candidate socket settled the
+	// question: one accepted a connection and then failed to answer with a
+	// parseable pid, or the probe ran out of budget. It is the zero value so
+	// an unset result never reads as a positive claim.
+	supervisorLivenessUnknown supervisorLiveness = iota
+	// supervisorLivenessAbsent means every candidate socket refused the
+	// connection outright, which is what a supervisor that is not running
+	// leaves behind.
+	supervisorLivenessAbsent
+	// supervisorLivenessAlive means a socket answered with the supervisor's
+	// pid.
+	supervisorLivenessAlive
+)
+
+// probeRunningSupervisor walks the candidate control sockets and reports the
+// first live one, along with what the walk established. When no socket
+// answered, the result is Absent only if every candidate refused outright;
+// one that connected and then went quiet leaves the answer Unknown.
+func probeRunningSupervisor() (string, int, supervisorLiveness) {
+	liveness := supervisorLivenessAbsent
 	for _, sockPath := range supervisorSocketPathCandidates() {
-		if pid := supervisorAliveAtPath(sockPath); pid != 0 {
-			return sockPath, pid
+		pid, got := probeSupervisorAtPath(sockPath)
+		if got == supervisorLivenessAlive {
+			return sockPath, pid, got
+		}
+		if got == supervisorLivenessUnknown {
+			liveness = supervisorLivenessUnknown
 		}
 	}
-	return "", 0
+	return "", 0, liveness
 }
 
-func supervisorAliveAtPath(sockPath string) int {
-	return supervisorAliveAtPathUntil(sockPath, time.Now().Add(3*time.Second))
+// supervisorPIDForDoctor renders the probe as the pid `gc doctor` passes to
+// checks that reason about the executed image, using doctor's sentinel for the
+// state a bare pid cannot carry.
+func supervisorPIDForDoctor() int {
+	_, pid, liveness := probeRunningSupervisor()
+	switch liveness {
+	case supervisorLivenessAlive:
+		return pid
+	case supervisorLivenessAbsent:
+		return 0
+	default:
+		return doctor.SupervisorPIDUnknown
+	}
 }
 
-// supervisorAliveAtPathUntil is supervisorAliveAtPath with a total budget.
-// Dial and read timeouts are each capped to the remaining time before
-// deadline so a wedged socket cannot stretch the probe beyond the caller's
-// wait budget.
+// probeSupervisorAtPath probes one control socket under the default budget.
+func probeSupervisorAtPath(sockPath string) (int, supervisorLiveness) {
+	return probeSupervisorAtPathUntil(sockPath, time.Now().Add(3*time.Second))
+}
+
+// supervisorAliveAtPathUntil reports the pid a control socket answers with, or
+// 0, under a total budget. Dial and read timeouts are each capped to the
+// remaining time before deadline so a wedged socket cannot stretch the probe
+// beyond the caller's wait budget. Callers that must not read 0 as "no
+// supervisor is running" want probeSupervisorAtPathUntil instead.
 func supervisorAliveAtPathUntil(sockPath string, deadline time.Time) int {
+	pid, _ := probeSupervisorAtPathUntil(sockPath, deadline)
+	return pid
+}
+
+// probeSupervisorAtPathUntil is supervisorAliveAtPathUntil with the state it
+// discards restored. Only a dial that was refused outright — no socket file,
+// or nothing listening on one — is evidence that no supervisor is running.
+// Every other failure (a connection that was accepted and then never answered,
+// a short read, a reply that does not parse) means the probe learned nothing.
+func probeSupervisorAtPathUntil(sockPath string, deadline time.Time) (int, supervisorLiveness) {
 	remaining := time.Until(deadline)
 	if remaining <= 0 {
-		return 0
+		return 0, supervisorLivenessUnknown
 	}
 	dialTimeout := 500 * time.Millisecond
 	if dialTimeout > remaining {
@@ -753,7 +821,7 @@ func supervisorAliveAtPathUntil(sockPath string, deadline time.Time) int {
 	}
 	conn, err := net.DialTimeout("unix", sockPath, dialTimeout)
 	if err != nil {
-		return 0
+		return 0, dialFailureLiveness(err)
 	}
 	defer conn.Close()           //nolint:errcheck
 	conn.Write([]byte("ping\n")) //nolint:errcheck
@@ -764,14 +832,34 @@ func supervisorAliveAtPathUntil(sockPath string, deadline time.Time) int {
 	conn.SetReadDeadline(readDeadline) //nolint:errcheck
 	buf := make([]byte, 64)
 	n, err := conn.Read(buf)
+	return supervisorPingReply(buf, n, err)
+}
+
+// supervisorPingReply classifies what came back from a control socket that
+// accepted the connection. Only a parseable positive pid establishes that a
+// supervisor is running; a read that timed out, a short read and a reply that
+// does not parse all leave the question open, because the socket answering at
+// all means something is there.
+func supervisorPingReply(buf []byte, n int, err error) (int, supervisorLiveness) {
 	if err != nil || n == 0 {
-		return 0
+		return 0, supervisorLivenessUnknown
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(buf[:n])))
-	if err != nil {
-		return 0
+	pid, convErr := strconv.Atoi(strings.TrimSpace(string(buf[:n])))
+	if convErr != nil || pid <= 0 {
+		return 0, supervisorLivenessUnknown
 	}
-	return pid
+	return pid, supervisorLivenessAlive
+}
+
+// dialFailureLiveness classifies why a control-socket dial failed. A missing
+// socket file or a refused connection is the residue a supervisor that is not
+// running leaves; a timeout, a permission error or a full listen backlog is
+// not, and must not be reported as one.
+func dialFailureLiveness(err error) supervisorLiveness {
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED) {
+		return supervisorLivenessAbsent
+	}
+	return supervisorLivenessUnknown
 }
 
 // stopSupervisor sends a stop command to the running supervisor and returns

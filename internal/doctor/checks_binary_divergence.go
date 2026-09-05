@@ -126,9 +126,23 @@ type BinaryDivergenceCheck struct {
 	versionOf func(path string) string
 }
 
+// SupervisorPIDUnknown is the supervisorPID a caller passes when its liveness
+// probe did not settle the question — the control socket accepted a connection
+// and then failed to answer, or answered unparseably.
+//
+// It exists because the caller's natural return type destroys the distinction
+// this check depends on. A probe that times out and a supervisor that is not
+// running both produce pid 0, and "no supervisor" is the one state that
+// licenses a green verdict here. A supervisor that is up, executing a stale
+// image, with a wedged control socket is exactly the state an operator runs
+// `gc doctor` to find, and it must not be reported as healthy.
+const SupervisorPIDUnknown = -1
+
 // NewBinaryDivergenceCheck returns a check that compares the image the running
 // supervisor is executing against the gc binary on PATH. supervisorPID should
-// come from the supervisor liveness probe; pass 0 when none is running.
+// come from the supervisor liveness probe: a positive pid when one answered,
+// 0 when the probe established that none is running, and SupervisorPIDUnknown
+// when the probe could not tell.
 func NewBinaryDivergenceCheck(supervisorPID int) *BinaryDivergenceCheck {
 	return &BinaryDivergenceCheck{
 		supervisorPID:       supervisorPID,
@@ -153,7 +167,13 @@ func (c *BinaryDivergenceCheck) Fix(_ *CheckContext) error { return nil }
 func (c *BinaryDivergenceCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 
-	if c.supervisorPID <= 0 {
+	if c.supervisorPID < 0 {
+		// A probe that did not answer has established nothing. Reporting the
+		// "no supervisor" verdict here would be this check's own defect —
+		// a verdict formed where no observation was made — one caller up.
+		return unverified(r, "cannot tell whether a supervisor is running: the liveness probe did not settle it, so there is no executed image to compare")
+	}
+	if c.supervisorPID == 0 {
 		r.Status = StatusOK
 		r.Message = "supervisor not running — no executed image to compare"
 		return r
@@ -179,11 +199,22 @@ func (c *BinaryDivergenceCheck) Run(_ *CheckContext) *CheckResult {
 		return unverified(r, "cannot resolve the image supervisor pid %d is executing: %v", c.supervisorPID, err)
 	}
 
+	// Three outcomes, and only one of them is a statement about PATH.
 	verifiedPath, err := c.resolvePathBinary()
-	if err != nil {
+	switch {
+	case err == nil:
+		// A hit. Fall through to the comparison below.
+	case errors.Is(err, exec.ErrNotFound):
+		// The only lookup failure that is a positive fact about PATH: gc is
+		// genuinely absent, so nothing verifies against it.
 		r.Status = StatusOK
 		r.Message = fmt.Sprintf("%s is not on PATH — nothing verifies against it (supervisor is executing %s)", gcCommandName, running.path)
 		return r
+	default:
+		// Every other failure means the lookup did not answer. "Not on PATH"
+		// is a claim about the operator's PATH that this check has not
+		// earned.
+		return unverified(r, "cannot resolve %s on PATH: %v", gcCommandName, err)
 	}
 
 	verified := statBinary(verifiedPath)
@@ -222,14 +253,36 @@ func (c *BinaryDivergenceCheck) Run(_ *CheckContext) *CheckResult {
 	// handle on the executing inode.
 	executed, reachable := executedFacts(running, state)
 	if !reachable {
-		return c.reportUnreachableImage(r, running, verified, verifiedPath)
+		// The executed inode can outlive the name it was loaded from: a
+		// second hard link, or a rename of the artifact out from under the
+		// process. When the PATH binary IS that inode, the fleet is running
+		// precisely what probes verify and there is nothing to converge —
+		// evidence already in hand, and reporting "nothing on disk describes
+		// the running bytes" over the top of it would send an operator to
+		// restart a healthy supervisor.
+		//
+		// Not when the platform reported the image unlinked, though. The
+		// kernel has already dropped that inode, so a file now wearing its
+		// number is inode reuse, not identity — the same reason the OK gate
+		// above requires imagePathIntact.
+		if !running.unlinked && running.id == verifiedID {
+			r.Status = StatusOK
+			r.Message = fmt.Sprintf(
+				"supervisor and PATH %s are the same binary — the executed inode %d is still on disk at %s, though the name it was loaded from (%s) is gone",
+				gcCommandName, running.id.ino, verified.realPath, running.path)
+			r.Details = []string{
+				fmt.Sprintf("executed by supervisor pid %d: inode %d, loaded from %s", c.supervisorPID, running.id.ino, running.path),
+				fmt.Sprintf("resolved on PATH: %s", verified.describe()),
+			}
+			return r
+		}
+		return c.reportUnreachableImage(r, running, state, verified, verifiedPath)
 	}
 
 	outcome, reason, err := compareContent(executed, verified)
 	switch outcome {
-	case contentUnknown:
-		return unverified(r, "cannot read %s and %s to compare their contents: %v",
-			executed.describePath(), verified.realPath, err)
+	case contentDiffers:
+		// The one outcome that licenses the divergence verdict formed below.
 	case contentSame:
 		r.Status = StatusOK
 		r.Message = fmt.Sprintf("supervisor and PATH %s are the same binary (%s)", gcCommandName, reason)
@@ -243,6 +296,15 @@ func (c *BinaryDivergenceCheck) Run(_ *CheckContext) *CheckResult {
 				running.path))
 		}
 		return r
+	default:
+		// contentUnknown, plus any outcome a later contributor adds without
+		// giving it a verdict here. Both mean the same thing: the comparison
+		// produced nothing this check may act on. Routing them to the
+		// divergence verdict below — which is what an implicit fallthrough
+		// would do — is the defect this file has now been corrected for
+		// three times, pre-armed for the next enum value.
+		return unverified(r, "cannot compare the contents of %s and %s: %v",
+			executed.describePath(), verified.realPath, compareFailure(outcome, err))
 	}
 
 	executed.version = c.version(executed.readPath())
@@ -270,18 +332,32 @@ func (c *BinaryDivergenceCheck) Run(_ *CheckContext) *CheckResult {
 // an artifact with no name on disk is established, actionable, and independent
 // of what the bytes turn out to be. It deliberately does NOT claim the two
 // binaries differ, because that has not been observed.
-func (c *BinaryDivergenceCheck) reportUnreachableImage(r *CheckResult, running runningImage, verified binaryFacts, verifiedPath string) *CheckResult {
+//
+// state is a parameter rather than a re-derivation because the wording asserts
+// one: an image whose path was observed intact and then failed to stat is a
+// read that lost a race, not a replacement, and saying "replaced or removed"
+// about it would assert a state this check never established.
+func (c *BinaryDivergenceCheck) reportUnreachableImage(r *CheckResult, running runningImage, state imagePathState, verified binaryFacts, verifiedPath string) *CheckResult {
 	verified.version = c.version(verifiedPath)
 	r.Status = StatusWarning
 	r.Message = fmt.Sprintf(
-		"supervisor pid %d is executing an image that is no longer the file at %s — that path was replaced or removed under it, so nothing on disk describes the running bytes (PATH %s resolves to %s)",
-		c.supervisorPID, running.path, gcCommandName, verified.realPath)
+		"supervisor pid %d is executing an image whose bytes cannot be read: %s (PATH %s resolves to %s)",
+		c.supervisorPID, unreachableReason(running.path, state), gcCommandName, verified.realPath)
 	r.Details = []string{
 		fmt.Sprintf("executed (what the fleet runs): inode %d — reachable only from inside the running process, so whether it matches the binary on PATH cannot be established from here", running.id.ino),
 		fmt.Sprintf("verified (what probes hit): %s", verified.describeVerbose()),
 	}
 	r.FixHint = fmt.Sprintf("no capability probe can describe the running bytes while the artifact behind them is gone; restart the supervisor so it re-executes the artifact now on disk, then re-run `%s doctor` to compare them", gcCommandName)
 	return r
+}
+
+// unreachableReason states why the running bytes could not be read, in the
+// terms the observed image-path state actually supports.
+func unreachableReason(path string, state imagePathState) string {
+	if state == imagePathIntact {
+		return fmt.Sprintf("%s is still the file it was loaded from, but it could not be read from there", path)
+	}
+	return fmt.Sprintf("it is no longer the file at %s — that path was replaced or removed under it, so nothing on disk describes the running bytes", path)
 }
 
 // unverified reports that the check could not establish whether the two
@@ -316,17 +392,22 @@ func sameBinaryReason(running runningImage, verified binaryFacts) string {
 type imagePathState int
 
 const (
-	// imagePathIntact means the path still names the running inode, so the
-	// bytes on disk at that path are the bytes the process is running.
-	imagePathIntact imagePathState = iota
-	// imagePathReplaced means the artifact was replaced or removed underneath
-	// the running process.
-	imagePathReplaced
 	// imagePathUnknown means the question could not be answered — a stat that
 	// failed for a reason other than the file being gone. Distinct from
 	// imagePathReplaced because a permission error is not evidence of a
 	// replacement.
-	imagePathUnknown
+	//
+	// It is the zero value on purpose. Every tri-state in this file puts the
+	// unknown state at iota-zero so that an unset value routes to "we did not
+	// establish this" rather than to the permissive answer; a zero that means
+	// "intact" would make every accidental one a silent green.
+	imagePathUnknown imagePathState = iota
+	// imagePathIntact means the path still names the running inode, so the
+	// bytes on disk at that path are the bytes the process is running.
+	imagePathIntact
+	// imagePathReplaced means the artifact was replaced or removed underneath
+	// the running process.
+	imagePathReplaced
 )
 
 // classifyImagePath answers whether an executed image is still on disk where
@@ -368,11 +449,32 @@ func executedFacts(running runningImage, state imagePathState) (binaryFacts, boo
 	if running.contentPath == "" {
 		return binaryFacts{}, false
 	}
-	f := statBinary(running.contentPath)
+	// Deliberately NOT statBinary: that resolves symlinks first, and resolving
+	// /proc/<pid>/exe is precisely the mistake the resolver's own comment
+	// warns against — it lands on whatever now sits at the path the link
+	// names, which on a replaced image is the file the process is NOT
+	// executing. A plain os.Stat of the magic link lands on the executing
+	// inode itself. (Today the "(deleted)" marker happens to make the
+	// resolution fail, so the bug is one filename away rather than live; the
+	// identity assertion below is what makes it not depend on that.)
+	f := binaryFacts{path: running.contentPath, realPath: running.contentPath}
+	info, err := os.Stat(f.realPath)
+	if err != nil {
+		return binaryFacts{}, false
+	}
+	// The handle is only a handle if it still reaches the running inode. A
+	// handle that reaches some other file would hand the single verdict-former
+	// bytes it never established belong to the process — and those bytes
+	// matching PATH would read as a green "same binary" for a fleet running
+	// something else.
+	if id, ok := fileIdentityOf(info); !ok || id != running.id {
+		return binaryFacts{}, false
+	}
+	f.info = info
 	// Report it under the path an operator recognizes, while reading it
 	// through the handle that still resolves to the running inode.
 	f.display = running.path
-	return f, f.info != nil
+	return f, true
 }
 
 // version returns the binary's self-declared version, or "" when versionOf is
@@ -384,17 +486,31 @@ func (c *BinaryDivergenceCheck) version(path string) string {
 	return c.versionOf(path)
 }
 
+// errNoPathLookup reports that this check was built without a PATH lookup at
+// all. It is deliberately not exec.ErrNotFound: "we never looked" is not
+// evidence that gc is absent from PATH.
+var errNoPathLookup = errors.New("no PATH lookup configured")
+
 // resolvePathBinary returns the absolute path PATH resolves gc to.
+//
+// The three states a lookup can end in are kept apart, because only one of
+// them says anything about PATH. A hit is a hit even when it arrives with an
+// error attached: exec.LookPath returns exec.ErrDot alongside a usable path
+// when the hit came from a relative PATH element, and that binary is exactly
+// the one a probe would execute, so it is the one to compare against.
 func (c *BinaryDivergenceCheck) resolvePathBinary() (string, error) {
 	if c.lookPath == nil {
-		return "", fmt.Errorf("no PATH lookup configured")
+		return "", errNoPathLookup
 	}
 	found, err := c.lookPath(gcCommandName)
-	if err != nil {
+	if found == "" {
+		if err == nil {
+			return "", fmt.Errorf("PATH lookup for %s returned neither a path nor an error", gcCommandName)
+		}
 		return "", err
 	}
-	abs, err := filepath.Abs(found)
-	if err != nil {
+	abs, absErr := filepath.Abs(found)
+	if absErr != nil {
 		return found, nil //nolint:nilerr // a relative hit is still comparable
 	}
 	return abs, nil
@@ -501,14 +617,27 @@ func describeSkew(d time.Duration) string {
 type contentOutcome int
 
 const (
+	// contentUnknown means at least one file could not be read. It is the
+	// zero value for the same reason imagePathUnknown is: an unset outcome
+	// must route to "not established", never to a verdict.
+	contentUnknown contentOutcome = iota
 	// contentSame means both files were read and hold identical bytes.
-	contentSame contentOutcome = iota
+	contentSame
 	// contentDiffers means both files were read and hold different bytes, or
 	// their sizes already settled it.
 	contentDiffers
-	// contentUnknown means at least one file could not be read.
-	contentUnknown
 )
+
+// compareFailure renders why a content comparison produced no usable answer.
+// An outcome with no verdict attached is a defect in this file rather than a
+// condition on the host, and it says so rather than borrowing the wording of a
+// failed read.
+func compareFailure(outcome contentOutcome, err error) error {
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("unclassified content comparison outcome %d", int(outcome))
+}
 
 // contentChunkSize bounds both the tail sample and the streaming read buffer.
 const contentChunkSize = 64 << 10
@@ -759,15 +888,20 @@ func parseLsofFileEntries(out []byte) []lsofEntry {
 //     than denylisting suffixes, so a data file ordered ahead of the image
 //     cannot be mistaken for it.
 //
-//  2. Failing that, the entry pass 1 could not evaluate at all: one whose file
-//     is no longer the file lsof recorded (gone, or a different inode than the
-//     one mapped), or one that cannot be opened for reading. Pass 1 answers its
-//     question by reading the file at the reported path, so it is blind to
+//  2. Failing that, the SOLE entry pass 1 could not evaluate at all: one whose
+//     file is no longer the file lsof recorded (gone, or a different inode than
+//     the one mapped), or one that cannot be opened for reading. Pass 1 answers
+//     its question by reading the file at the reported path, so it is blind to
 //     exactly the two states most worth reporting — an image deleted or
 //     overwritten underneath the process, and an image the operator lacks
-//     permission to read. A mapped library sitting readable and unchanged where
-//     it has always been is neither, so this pass cannot mistake one for the
-//     executable.
+//     permission to read. A process executes exactly one image, and pass 1
+//     established that none of the entries it could evaluate is an executable,
+//     so when exactly one entry is unevaluatable that entry is the image.
+//
+// "Sole" is load-bearing. When several entries are unevaluatable — an
+// installer that replaced the whole tree, libraries and executable together —
+// nothing distinguishes the image from the libraries beside it, and picking
+// the first is a guess dressed as an answer. Pass 2 refuses instead.
 //
 // When neither pass finds anything the answer is that it could not be
 // determined. Naming a shared library as the executed image — with a restart
@@ -782,17 +916,29 @@ func selectRunningImage(entries []lsofEntry, isExecutable func(string) bool) (ru
 			return imageFromLsofEntry(e)
 		}
 	}
+	var candidate runningImage
+	unevaluatable := 0
 	for _, e := range entries {
 		img, err := imageFromLsofEntry(e)
 		if err != nil {
 			continue
 		}
 		if classifyImagePath(img) == imagePathReplaced || !fileIsReadable(img.path) {
-			return img, nil
+			candidate = img
+			unevaluatable++
 		}
 	}
-	return runningImage{}, fmt.Errorf(
-		"no executable image among %d mapped-text entries, and every one of them is still the readable file lsof recorded", len(entries))
+	switch unevaluatable {
+	case 1:
+		return candidate, nil
+	case 0:
+		return runningImage{}, fmt.Errorf(
+			"no executable image among %d mapped-text entries, and every one of them is still the readable file lsof recorded", len(entries))
+	default:
+		return runningImage{}, fmt.Errorf(
+			"no executable image among %d mapped-text entries, and %d of them are no longer the readable files lsof recorded — which one is the executed image cannot be told from the libraries beside it",
+			len(entries), unevaluatable)
+	}
 }
 
 // fileIsReadable reports whether a path can be opened for reading. It is the
