@@ -146,7 +146,8 @@ func (c *DeployProvenanceCheck) Cheap() bool { return true }
 
 // runningBinaryPath resolves the running binary's on-disk path with
 // symlinks resolved, so the manifest lookup lands next to the real file
-// `make install` wrote (e.g. through the ~/.local/bin compatibility link).
+// rather than beside a deploy channel that links to it (`make deploy-fleet`
+// points ~/.local/bin/gc and its peers at the installed build).
 func runningBinaryPath() (string, error) {
 	p, err := os.Executable()
 	if err != nil {

@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`make install` no longer writes `~/.local/bin/gc`.** Installing wrote the
+  binary to `$(go env GOPATH)/bin/gc` and then relinked `~/.local/bin/gc` at
+  it. A deployment writes a real binary to that same path — a release install,
+  or a provenance-named `make artifact` build. Two writers, producing
+  different *kinds* of file, neither recording that it ran nor warning that it
+  was clobbering the other — so a `make install` from any checkout silently
+  moved a running deployment onto a dev build, and the machine went on
+  executing a stale image for an unknown period with nothing saying so.
+  `install` now writes exactly one path and touches no other.
+
+  Moving a deployment onto a build is the new `make deploy-fleet`. It takes
+  `GC_DEPLOY_BINARY` (default: what `make install` just wrote) and repoints
+  every channel in `GC_DEPLOY_CHANNELS` — `~/.local/bin/gc`,
+  `$(go env GOPATH)/bin/gc`, and `~/.gc/bin/gc` — at one resolved artifact.
+  Those three shadow each other on `PATH` and the winner differs per execution
+  context, so repointing only some of them re-splits which build a shell, an
+  agent hook, and the supervisor each run. On the fleet host the `PATH` winner
+  is `~/.gc/bin/gc`, not `~/.local/bin/gc` — this is the collapse voxist-city
+  ADR-0027 designed, made repeatable. It symlinks rather than copies, refuses
+  to move anything until the binary has proved it runs, swaps each channel
+  atomically (a temp symlink renamed into place, because `ln -sf` unlinks then
+  creates and leaves a window where a live `gc` lookup gets ENOENT), **runs
+  every channel afterwards** — `readlink` can only confirm the value just
+  written — clears and restores a `uchg` immutable pin under a `trap` instead
+  of letting the write fail silently, skips channels whose directory is absent,
+  errors rather than reporting success if it moved nothing at all, and leaves a
+  channel alone when it already *is* the build, decided by device and inode
+  rather than by comparing path text.
+
+  `$(go env GOPATH)/bin/gc` is itself a deploy channel, so on a deployed host it
+  is often a symlink at an artifact elsewhere. **`make install` now fails closed
+  on that state** rather than warning about it — a warning can only print once
+  the channel has already moved, and "nobody noticed" is the failure this
+  prevents. Override deliberately with `GC_ALLOW_CHANNEL_OVERWRITE=1`, or
+  redirect with `INSTALL_DIR=<dir>`. A symlink pointing *inside* that directory
+  is a local convenience, not a deployment, and does not trip the gate.
+
+  Upgrading: `make install` alone no longer updates a running deployment. Add
+  `make deploy-fleet` (then restart the supervisor — a running process keeps
+  executing the image it started with). Installing still replaces
+  `$(go env GOPATH)/bin/gc` itself, so `make install` re-splits the channels
+  until `make deploy-fleet` runs — the two are a pair, deliberately not chained.
+
 - **`gc pack registry publish` now refuses an unscoped pack name unless you
   pass `--allow-unscoped-name`.** Registry pack names are scoped as
   `<github-owner>/<pack>`, and the registry has always reserved bare names for
