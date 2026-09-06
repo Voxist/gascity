@@ -198,9 +198,18 @@ _pog_ownership_violation() {
 
 # _pog_resolve_bead_id: prints the bead id this push should be checked
 # against; prints nothing if none can be resolved. Resolution order:
-#   1. The current branch name, matched against ga-[0-9a-z]{6}(\.[0-9]+)* —
-#      the bead's own id format, extended with zero or more repeated
-#      sub-bead suffixes because this repo's real branch convention is
+#   1. The current branch name, matched against ga-[0-9a-z]{3,}(\.[0-9]+)* —
+#      {3,} and NOT {6}. Real bead ids are not fixed-width: of 649 open beads
+#      on 2026-09-06, 581 are 5 characters, 41 are 6, 26 are 4 and 1 is 3. The
+#      original {6} therefore resolved NOTHING on ~89% of branches, and this
+#      guard silently took its "no bead to check" branch and allowed the push.
+#      A bare lower bound is required rather than a wider exact width: {6}
+#      also TRUNCATES a 7-char id (ga-abcdefg -> ga-abcdef), resolving a
+#      different bead. {3,} is greedy and stops at the first character outside
+#      the class, so it reads the whole id out of fix/ga-elgvf-some-slug.
+#
+#      The pattern is the bead's own id format, extended with zero or more
+#      repeated sub-bead suffixes because this repo's real branch convention is
 #      builder/<bead-id>-<slug> and sub-beads are routine at any nesting
 #      depth: a single-level sub-bead (e.g. ga-fip9ps.1) as well as a
 #      grandchild (e.g. ga-o3ko1j.4.3). The suffix group must repeat (`*`),
@@ -277,7 +286,7 @@ _pog_resolve_bead_id() {
 
     local branch_id=""
     if [[ -n "$branch" ]]; then
-        branch_id="$(grep -oE 'ga-[0-9a-z]{6}(\.[0-9]+)*' <<<"$branch" | head -1 || true)"
+        branch_id="$(grep -oE 'ga-[0-9a-z]{3,}(\.[0-9]+)*' <<<"$branch" | head -1 || true)"
     fi
 
     # assignee_read_failed distinguishes "the read failed" (ambiguity) from
