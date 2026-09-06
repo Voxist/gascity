@@ -18,6 +18,7 @@ deprecated-attachment-fields
 dolt-topology
 dolt-drift
 port-file-consistency
+dolt-listener-deadline
 config-valid
 legacy-suspended-field
 rollout:beads.conditional_writes

@@ -906,6 +906,44 @@ func ensureBeadsProvider(cityPath string) error {
 			// succeeds, prefer the actual server state over the start error.
 			if managedBDProvider {
 				if healthErr := runProviderOpWithEnv(script, providerEnv, "health"); healthErr == nil {
+					// vp-9ex9z: "already live" is not enough. The ADR-0064
+					// delivery window starts a NESTED server on the same
+					// port with a raised read_timeout and publish=false,
+					// and a start that fails AFTER the window has bound
+					// that port (a cold drain outrunning this op's own
+					// context deadline is enough) leaves a healthy Dolt
+					// answering the probe. Publishing it admits the swarm
+					// to the raised deadline — the 2026-09-05 leak, where
+					// 48770 served at read_timeout_millis 600000 while
+					// city.toml said 30000. A window server is never
+					// publishable, and ADR-0064 constraint 2 forbids
+					// simply refusing, so reclaim its port and start again.
+					reclaimed, reclaimErr := reclaimStrandedDeliveryWindowServer(cityPath, os.Stderr)
+					if reclaimErr != nil {
+						return errors.Join(err, reclaimErr)
+					}
+					if reclaimed {
+						// The probe passed against the window's own server,
+						// not a publishable one. Its data dir is free now,
+						// so run the start again rather than publishing
+						// what the window left behind.
+						//
+						// The retry skips the window. The window's budget
+						// (5m) is larger than this op's own timeout (2m),
+						// so a window that stranded once will strand again
+						// and the retry would be guaranteed to fail the
+						// same way — which is how CI failed on da73e034
+						// and again on the first reclaim. Constraint 2 is
+						// what settles it: the durability drain has had
+						// its chance and lost, and availability wins the
+						// tie. The skip is not silent — the opt-out path
+						// writes the AC3 record to stderr and to the
+						// durable outcome file.
+						retryEnv := append(append([]string(nil), providerEnv...), "GC_DOLT_DELIVERY_WINDOW=0")
+						if retryErr := runProviderOpWithEnv(script, retryEnv, "start"); retryErr != nil {
+							return errors.Join(err, retryErr)
+						}
+					}
 					if err := publishManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
 						return err
 					}
