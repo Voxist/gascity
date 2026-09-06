@@ -305,37 +305,56 @@ var deliveryWindowProcessArgsFn = processArgs
 // window-server guard is testable without a live dolt on a real port.
 var deliveryWindowInspectFn = inspectManagedDoltProcess
 
-// deliveryWindowServerPIDFn is the seam ensureBeadsProvider's publish guard
-// resolves through, so the guard is testable without a live dolt.
+// deliveryWindowServerPIDFn is the seam ensureBeadsProvider's reclaim
+// resolves through, so it is testable without a live dolt on a real port.
 var deliveryWindowServerPIDFn = managedDoltDeliveryWindowServerPID
 
 // managedDoltResolvablePortFn is the seam over the managed-port lookup used
-// by the publish guard and by the dolt-listener-deadline doctor check.
+// by the stranded-window reclaim and by the dolt-listener-deadline doctor
+// check.
 var managedDoltResolvablePortFn = currentResolvableManagedDoltPort
 
-// deliveryWindowServerBlocksPublish reports why the live server must not be
-// published, or nil when publishing is safe.
+// deliveryWindowReclaimStopFn is the seam over the stop used to reclaim a
+// stranded window server. clearPublishedState is true: a published record
+// pointing at a window server is itself wrong and must go.
+var deliveryWindowReclaimStopFn = func(cityPath, port string) error {
+	_, err := stopManagedDoltProcessWithOptions(cityPath, port, true)
+	return err
+}
+
+// reclaimStrandedDeliveryWindowServer stops a delivery-window server that is
+// still holding the managed port after the start that armed it died, and
+// reports whether there was one.
 //
-// vp-9ex9z. ensureBeadsProvider treats "the start reported an error but the
-// health probe passes" as "the server was already live, publish it". That is
-// right for a racing start and wrong for a delivery window: the window binds
-// the managed port itself, and an outer start that fails after the window has
-// bound it (the lock gate refuses while the window server still owns the data
-// dir) leaves a healthy Dolt answering the probe at the RAISED deadline. On
-// 2026-09-05 that server was published and served the swarm on 48770 at
-// read_timeout_millis 600000 while city.toml said 30000. A window server's
-// entire safety argument (ADR-0064 D1) is that the swarm is never admitted to
-// it, so it is never publishable.
-func deliveryWindowServerBlocksPublish(cityPath string, startErr error) error {
+// vp-9ex9z, second half. ensureBeadsProvider treats "the start reported an
+// error but the health probe passes" as "the server was already live,
+// publish it". That is right for a racing start and wrong for a window
+// server: the window binds the managed port itself, so a start killed while
+// the window is up (a slow cold drain against the provider's context
+// deadline is enough) leaves a healthy Dolt answering the probe at the
+// RAISED deadline. Publishing it is how 48770 came to serve the swarm at
+// read_timeout_millis 600000 on 2026-09-05 while city.toml said 30000.
+//
+// Refusing outright would satisfy the safety rule and break ADR-0064
+// constraint 2 — "refusing to start Dolt because a backup did not drain
+// converts a durability gap into an availability outage, strictly worse".
+// So the stranded server is STOPPED instead, which the ownership arm in
+// managedDoltProcessArgsNameOwnedConfig makes possible, and the caller runs
+// an ordinary start into the freed data dir.
+func reclaimStrandedDeliveryWindowServer(cityPath string, stderr io.Writer) (bool, error) {
 	port := managedDoltResolvablePortFn(cityPath)
 	if port == "" {
-		return nil
+		return false, nil
 	}
-	windowPID := deliveryWindowServerPIDFn(cityPath, port)
-	if windowPID <= 0 {
-		return nil
+	pid := deliveryWindowServerPIDFn(cityPath, port)
+	if pid <= 0 {
+		return false, nil
 	}
-	return fmt.Errorf("managed dolt start failed and the server answering port %s (pid %d) is the delivery window's nested server, which must never be published (ADR-0064 D1): %w", port, windowPID, startErr)
+	fmt.Fprintf(stderr, "gc dolt: MANAGED DOLT DELIVERY WINDOW STRANDED: pid %d still holds port %s at the raised read timeout; stopping it so an ordinary start can bind\n", pid, port) //nolint:errcheck
+	if err := deliveryWindowReclaimStopFn(cityPath, port); err != nil {
+		return true, fmt.Errorf("stop stranded delivery window server (pid %d, port %s): %w", pid, port, err)
+	}
+	return true, nil
 }
 
 // managedDoltDeliveryWindowServerPID reports the pid of a live server that

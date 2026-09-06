@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -375,39 +376,69 @@ func TestWindowConfigProcessStaysOwned(t *testing.T) {
 	}
 }
 
-// The publish guard: ensureBeadsProvider's "start errored but the health
-// probe passes, so publish what is live" recovery must refuse when the live
-// server is the window's. That recovery is how the 2026-09-05 leak reached
-// dolt-state.json.
-func TestDeliveryWindowServerBlocksPublish(t *testing.T) {
-	prevPort, prevPID := managedDoltResolvablePortFn, deliveryWindowServerPIDFn
-	t.Cleanup(func() { managedDoltResolvablePortFn, deliveryWindowServerPIDFn = prevPort, prevPID })
-	startErr := errors.New("refusing to start dolt sql-server")
+// The reclaim guard: ensureBeadsProvider's "the start errored but the health
+// probe passes, so publish what is live" recovery must not publish a window
+// server. ADR-0064 constraint 2 forbids simply refusing, so the stranded
+// window server is stopped instead and the caller starts again. This is the
+// path CI exercised for real: a provider start that hit its context deadline
+// while the window server still held the managed port.
+func TestReclaimStrandedDeliveryWindowServer(t *testing.T) {
+	prevPort, prevPID, prevStop := managedDoltResolvablePortFn, deliveryWindowServerPIDFn, deliveryWindowReclaimStopFn
+	t.Cleanup(func() {
+		managedDoltResolvablePortFn, deliveryWindowServerPIDFn, deliveryWindowReclaimStopFn = prevPort, prevPID, prevStop
+	})
 
+	var stopped []string
 	managedDoltResolvablePortFn = func(string) string { return "48770" }
 	deliveryWindowServerPIDFn = func(string, string) int { return 4242 }
-	err := deliveryWindowServerBlocksPublish("/city", startErr)
-	if err == nil {
-		t.Fatal("a live window server must block the publish")
+	deliveryWindowReclaimStopFn = func(_, port string) error {
+		stopped = append(stopped, port)
+		return nil
 	}
-	if !errors.Is(err, startErr) {
-		t.Errorf("guard error = %v, want it to wrap the original start error", err)
+	var stderr bytes.Buffer
+	reclaimed, err := reclaimStrandedDeliveryWindowServer("/city", &stderr)
+	if err != nil {
+		t.Fatalf("reclaim = %v, want nil", err)
 	}
-	for _, want := range []string{"48770", "4242", "delivery window"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("guard error %q missing %q", err.Error(), want)
+	if !reclaimed {
+		t.Error("a live window server on the managed port must be reclaimed")
+	}
+	if len(stopped) != 1 || stopped[0] != "48770" {
+		t.Errorf("stop calls = %v, want one on 48770", stopped)
+	}
+	for _, want := range []string{"DELIVERY WINDOW STRANDED", "4242", "48770"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr %q missing %q", stderr.String(), want)
 		}
 	}
 
+	// An ordinary published server is left alone.
+	stopped = nil
 	deliveryWindowServerPIDFn = func(string, string) int { return 0 }
-	if err := deliveryWindowServerBlocksPublish("/city", startErr); err != nil {
-		t.Errorf("an ordinary live server must not block the publish: %v", err)
+	reclaimed, err = reclaimStrandedDeliveryWindowServer("/city", &stderr)
+	if err != nil || reclaimed {
+		t.Errorf("reclaim = (%v, %v), want (false, nil) for an ordinary server", reclaimed, err)
+	}
+	if len(stopped) != 0 {
+		t.Errorf("stop calls = %v, want none", stopped)
 	}
 
+	// No resolvable managed port: nothing to reclaim.
 	managedDoltResolvablePortFn = func(string) string { return "" }
 	deliveryWindowServerPIDFn = func(string, string) int { return 4242 }
-	if err := deliveryWindowServerBlocksPublish("/city", startErr); err != nil {
-		t.Errorf("no resolvable managed port must not block the publish: %v", err)
+	if reclaimed, err := reclaimStrandedDeliveryWindowServer("/city", &stderr); reclaimed || err != nil {
+		t.Errorf("reclaim = (%v, %v), want (false, nil) with no resolvable port", reclaimed, err)
+	}
+
+	// A stop that fails is reported, and still counts as "there was one".
+	managedDoltResolvablePortFn = func(string) string { return "48770" }
+	deliveryWindowReclaimStopFn = func(string, string) error { return errors.New("pid 4242 still alive after forced stop") }
+	reclaimed, err = reclaimStrandedDeliveryWindowServer("/city", &stderr)
+	if !reclaimed || err == nil {
+		t.Fatalf("reclaim = (%v, %v), want (true, error) when the stop fails", reclaimed, err)
+	}
+	if !strings.Contains(err.Error(), "stranded delivery window server") {
+		t.Errorf("reclaim error = %q, want it to name the stranded window server", err.Error())
 	}
 }
 
@@ -443,5 +474,157 @@ func TestManagedDoltDeliveryWindowServerPIDMatchesOnWindowConfig(t *testing.T) {
 	}
 	if got := managedDoltDeliveryWindowServerPID(cityPath, "48770"); got != 0 {
 		t.Errorf("published server reported as a window server (pid %d)", got)
+	}
+}
+
+// The caller wiring for the reclaim, end to end through ensureBeadsProvider.
+// This is the shape CI hit on da73e034: the managed start burned its context
+// deadline on a cold drain, the window server was still holding the managed
+// port, and the health probe therefore passed. The publish guard turned that
+// into a hard boot failure, which ADR-0064 constraint 2 forbids. What must
+// happen instead is stop the window server, start again, and publish the
+// server that second start produced.
+func TestEnsureBeadsProviderReclaimsStrandedWindowAndStartsAgain(t *testing.T) {
+	dir := t.TempDir()
+	script := gcBeadsBdScriptPath(dir)
+	callLog := filepath.Join(dir, "provider.log")
+	marker := filepath.Join(dir, "started")
+	attempts := filepath.Join(dir, "attempts")
+	port := reserveRandomTCPPort(t)
+	listener := startTCPListenerProcess(t, port)
+	if err := writeDoltRuntimeStateFile(providerManagedDoltStatePath(dir), doltRuntimeState{
+		Running:   true,
+		PID:       listener.Process.Pid,
+		Port:      port,
+		DataDir:   filepath.Join(dir, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("write provider state: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The first start fails the way the provider does when its context
+	// deadline expires under a window server; the second one succeeds.
+	content := "#!/bin/sh\n" +
+		"set -eu\n" +
+		"echo \"$1\" >> \"" + callLog + "\"\n" +
+		"case \"${1:-}\" in\n" +
+		"  start)\n" +
+		"    : > \"" + marker + "\"\n" +
+		"    echo x >> \"" + attempts + "\"\n" +
+		"    if [ \"$(wc -l < \"" + attempts + "\")\" -le 1 ]; then\n" +
+		"      echo 'context deadline exceeded' >&2\n" +
+		"      exit 1\n" +
+		"    fi\n" +
+		"    exit 0\n" +
+		"    ;;\n" +
+		"  health)\n" +
+		"    [ -f \"" + marker + "\" ]\n" +
+		"    ;;\n" +
+		"  *)\n" +
+		"    exit 0\n" +
+		"    ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	setScopedBeadsProviderForTest(t, dir, "bd")
+
+	prevPort, prevPID, prevStop := managedDoltResolvablePortFn, deliveryWindowServerPIDFn, deliveryWindowReclaimStopFn
+	t.Cleanup(func() {
+		managedDoltResolvablePortFn, deliveryWindowServerPIDFn, deliveryWindowReclaimStopFn = prevPort, prevPID, prevStop
+	})
+	var stopped int
+	managedDoltResolvablePortFn = func(string) string { return strconv.Itoa(port) }
+	deliveryWindowServerPIDFn = func(string, string) int { return 4242 }
+	deliveryWindowReclaimStopFn = func(string, string) error {
+		stopped++
+		return nil
+	}
+
+	if err := ensureBeadsProvider(dir); err != nil {
+		t.Fatalf("ensureBeadsProvider = %v, want nil — a stranded window must not block the boot (ADR-0064 constraint 2)", err)
+	}
+	if stopped != 1 {
+		t.Errorf("reclaim stops = %d, want 1", stopped)
+	}
+	data, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatalf("read call log: %v", err)
+	}
+	got := strings.Join(strings.Fields(string(data)), ",")
+	if want := "start,health,start"; got != want {
+		t.Errorf("provider calls = %s, want %s", got, want)
+	}
+}
+
+// The ordinary racing start is untouched: no window server on the port means
+// no reclaim, no second start, and the live server is published as before.
+func TestEnsureBeadsProviderLeavesAnOrdinaryRacingStartAlone(t *testing.T) {
+	dir := t.TempDir()
+	script := gcBeadsBdScriptPath(dir)
+	callLog := filepath.Join(dir, "provider.log")
+	marker := filepath.Join(dir, "started")
+	port := reserveRandomTCPPort(t)
+	listener := startTCPListenerProcess(t, port)
+	if err := writeDoltRuntimeStateFile(providerManagedDoltStatePath(dir), doltRuntimeState{
+		Running:   true,
+		PID:       listener.Process.Pid,
+		Port:      port,
+		DataDir:   filepath.Join(dir, ".beads", "dolt"),
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("write provider state: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := "#!/bin/sh\n" +
+		"set -eu\n" +
+		"echo \"$1\" >> \"" + callLog + "\"\n" +
+		"case \"${1:-}\" in\n" +
+		"  start)\n" +
+		"    : > \"" + marker + "\"\n" +
+		"    echo 'signal: terminated' >&2\n" +
+		"    exit 1\n" +
+		"    ;;\n" +
+		"  health)\n" +
+		"    [ -f \"" + marker + "\" ]\n" +
+		"    ;;\n" +
+		"  *)\n" +
+		"    exit 0\n" +
+		"    ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	setScopedBeadsProviderForTest(t, dir, "bd")
+
+	prevPort, prevPID, prevStop := managedDoltResolvablePortFn, deliveryWindowServerPIDFn, deliveryWindowReclaimStopFn
+	t.Cleanup(func() {
+		managedDoltResolvablePortFn, deliveryWindowServerPIDFn, deliveryWindowReclaimStopFn = prevPort, prevPID, prevStop
+	})
+	var stopped int
+	managedDoltResolvablePortFn = func(string) string { return strconv.Itoa(port) }
+	deliveryWindowServerPIDFn = func(string, string) int { return 0 }
+	deliveryWindowReclaimStopFn = func(string, string) error {
+		stopped++
+		return nil
+	}
+
+	if err := ensureBeadsProvider(dir); err != nil {
+		t.Fatalf("ensureBeadsProvider = %v, want nil", err)
+	}
+	if stopped != 0 {
+		t.Errorf("reclaim stops = %d, want none for an ordinary racing start", stopped)
+	}
+	data, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatalf("read call log: %v", err)
+	}
+	got := strings.Join(strings.Fields(string(data)), ",")
+	if want := "start,health"; got != want {
+		t.Errorf("provider calls = %s, want %s", got, want)
 	}
 }

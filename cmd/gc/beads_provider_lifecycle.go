@@ -910,15 +910,26 @@ func ensureBeadsProvider(cityPath string) error {
 					// delivery window starts a NESTED server on the same
 					// port with a raised read_timeout and publish=false,
 					// and a start that fails AFTER the window has bound
-					// that port (its lock gate refuses while the window
-					// server still owns the data dir) leaves a healthy
-					// Dolt answering the probe. Publishing it admits the
-					// swarm to the raised deadline — the 2026-09-05 leak,
-					// where 48770 served at read_timeout_millis 600000
-					// while city.toml said 30000. A window server is never
-					// publishable; report the original start failure.
-					if blockErr := deliveryWindowServerBlocksPublish(cityPath, err); blockErr != nil {
-						return blockErr
+					// that port (a cold drain outrunning this op's own
+					// context deadline is enough) leaves a healthy Dolt
+					// answering the probe. Publishing it admits the swarm
+					// to the raised deadline — the 2026-09-05 leak, where
+					// 48770 served at read_timeout_millis 600000 while
+					// city.toml said 30000. A window server is never
+					// publishable, and ADR-0064 constraint 2 forbids
+					// simply refusing, so reclaim its port and start again.
+					reclaimed, reclaimErr := reclaimStrandedDeliveryWindowServer(cityPath, os.Stderr)
+					if reclaimErr != nil {
+						return errors.Join(err, reclaimErr)
+					}
+					if reclaimed {
+						// The probe passed against the window's own server,
+						// not a publishable one. Its data dir is free now,
+						// so run the start again rather than publishing
+						// what the window left behind.
+						if retryErr := runProviderOpWithEnv(script, providerEnv, "start"); retryErr != nil {
+							return errors.Join(err, retryErr)
+						}
 					}
 					if err := publishManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
 						return err
