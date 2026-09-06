@@ -927,7 +927,20 @@ func ensureBeadsProvider(cityPath string) error {
 						// not a publishable one. Its data dir is free now,
 						// so run the start again rather than publishing
 						// what the window left behind.
-						if retryErr := runProviderOpWithEnv(script, providerEnv, "start"); retryErr != nil {
+						//
+						// The retry skips the window. The window's budget
+						// (5m) is larger than this op's own timeout (2m),
+						// so a window that stranded once will strand again
+						// and the retry would be guaranteed to fail the
+						// same way — which is how CI failed on da73e034
+						// and again on the first reclaim. Constraint 2 is
+						// what settles it: the durability drain has had
+						// its chance and lost, and availability wins the
+						// tie. The skip is not silent — the opt-out path
+						// writes the AC3 record to stderr and to the
+						// durable outcome file.
+						retryEnv := append(append([]string(nil), providerEnv...), "GC_DOLT_DELIVERY_WINDOW=0")
+						if retryErr := runProviderOpWithEnv(script, retryEnv, "start"); retryErr != nil {
 							return errors.Join(err, retryErr)
 						}
 					}

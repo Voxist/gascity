@@ -222,7 +222,9 @@ func startManagedDoltProcessWithConfig(cityPath, host, port, user, logLevel stri
 	// the window entirely today. Known gap (flagged in the vp-o52ia PR),
 	// not a design choice; closing it needs the window run between
 	// recovery's stop/preflight-cleanup and its own start.
-	if !runWindow && publish && deliveryWindowEnabled() {
+	// deliveryWindowEnabled() is checked inside runManagedDoltDeliveryWindow,
+	// not here, so the env-disabled path still writes its AC3 skip record.
+	if !runWindow && publish {
 		outcome := runManagedDoltDeliveryWindow(cityPath, host, port, user, logLevel, timeout, doltConfig)
 		report.DeliveryWindow = outcome
 		reportDeliveryWindowOutcome(outcome, os.Stderr)

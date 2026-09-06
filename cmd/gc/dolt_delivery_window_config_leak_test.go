@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -337,6 +338,35 @@ func TestDeliveryWindowDisabledLeavesOnlyThePublishedConfig(t *testing.T) {
 	if starts := recorder.configFiles(); len(starts) != 1 {
 		t.Errorf("dolt starts = %v, want exactly the published start", starts)
 	}
+	// AC3: env-disabled is a skip that must be recorded, not silence. The
+	// opt-out used to short-circuit before the outcome was built, so a start
+	// that skipped the drain left nothing behind at all.
+	outcome := readDeliveryWindowOutcomeFile(t, layout)
+	if outcome.Ran {
+		t.Error("outcome says the window ran with GC_DOLT_DELIVERY_WINDOW=0")
+	}
+	if !strings.Contains(outcome.Skipped, "GC_DOLT_DELIVERY_WINDOW") {
+		t.Errorf("skip reason = %q, want it to name the opt-out", outcome.Skipped)
+	}
+	var stderr bytes.Buffer
+	reportDeliveryWindowOutcome(outcome, &stderr)
+	if !strings.Contains(stderr.String(), "DELIVERY WINDOW SKIPPED") {
+		t.Errorf("stderr record = %q, want the AC3 skip line", stderr.String())
+	}
+}
+
+// readDeliveryWindowOutcomeFile reads the durable AC3/AC5 outcome record.
+func readDeliveryWindowOutcomeFile(t *testing.T, layout managedDoltRuntimeLayout) deliveryWindowOutcome {
+	t.Helper()
+	data, err := os.ReadFile(deliveryWindowOutcomeStatePath(layout.PackStateDir))
+	if err != nil {
+		t.Fatalf("read delivery window outcome record: %v", err)
+	}
+	var out deliveryWindowOutcome
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("decode delivery window outcome record: %v", err)
+	}
+	return out
 }
 
 func TestManagedDoltDeliveryWindowConfigFileIsAPublishedSibling(t *testing.T) {
@@ -508,7 +538,7 @@ func TestEnsureBeadsProviderReclaimsStrandedWindowAndStartsAgain(t *testing.T) {
 	// deadline expires under a window server; the second one succeeds.
 	content := "#!/bin/sh\n" +
 		"set -eu\n" +
-		"echo \"$1\" >> \"" + callLog + "\"\n" +
+		"echo \"$1 window=${GC_DOLT_DELIVERY_WINDOW:-unset}\" >> \"" + callLog + "\"\n" +
 		"case \"${1:-}\" in\n" +
 		"  start)\n" +
 		"    : > \"" + marker + "\"\n" +
@@ -553,8 +583,12 @@ func TestEnsureBeadsProviderReclaimsStrandedWindowAndStartsAgain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read call log: %v", err)
 	}
-	got := strings.Join(strings.Fields(string(data)), ",")
-	if want := "start,health,start"; got != want {
+	// The retry must skip the window: its budget outruns this op's timeout,
+	// so re-arming it would strand a window server again and fail the same
+	// way. Constraint 2 makes availability win that tie.
+	got := strings.Join(strings.Fields(strings.ReplaceAll(string(data), "\n", " ")), ",")
+	want := "start,window=unset,health,window=unset,start,window=0"
+	if got != want {
 		t.Errorf("provider calls = %s, want %s", got, want)
 	}
 }

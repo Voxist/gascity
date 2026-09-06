@@ -192,6 +192,17 @@ func runManagedDoltDeliveryWindow(cityPath, host, port, user, logLevel string, t
 	// below) via defer, so the durable record always carries a finalize
 	// timestamp without duplicating the stamp at each return site.
 	defer func() { out.At = deliveryWindowNowFn() }()
+
+	// AC3: env-disabled is a skip like any other, not silence. The opt-out
+	// is resolved HERE rather than at the call site so that disabling
+	// durability automation — by an operator, or by the reclaim retry in
+	// ensureBeadsProvider — still produces the loud record and the durable
+	// outcome file.
+	if !deliveryWindowEnabled() {
+		out.Skipped = "GC_DOLT_DELIVERY_WINDOW disables the window; this start did not drain"
+		return
+	}
+
 	budget := deliveryWindowBudget()
 	deadline := start.Add(budget)
 
