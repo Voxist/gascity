@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -203,5 +205,99 @@ func TestBuildOrderDispatcherFleetRoleFromEnv(t *testing.T) {
 	}
 	if got := ad.(*memoryOrderDispatcher).fleetRole; got != orders.RoleFleetHost {
 		t.Fatalf("fleetRole = %q, want %q", got, orders.RoleFleetHost)
+	}
+}
+
+// newRunOnScanCity writes a real city directory with an orders/ layer so the
+// test drives the production scan path rather than a hand-built order slice.
+func newRunOnScanCity(t *testing.T, role string) (string, *config.City) {
+	t.Helper()
+	cityDir := t.TempDir()
+	formulasDir := filepath.Join(cityDir, "formulas")
+	ordersDir := filepath.Join(cityDir, "orders")
+	for _, dir := range []string{formulasDir, ordersDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	write := func(name, runOn string) {
+		body := "[order]\nexec = \"true\"\ntrigger = \"cooldown\"\ninterval = \"1m\"\nno_work_gate = true\n"
+		if runOn != "" {
+			body += "run_on = \"" + runOn + "\"\n"
+		}
+		if err := os.WriteFile(filepath.Join(ordersDir, name+".toml"), []byte(body), 0o644); err != nil {
+			t.Fatalf("write order %s: %v", name, err)
+		}
+	}
+	write("merge-sweep", orders.RunOnFleetHost)
+	write("local-lint", "")
+
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		CityRole:      config.CityRoleConfig{Role: role},
+		FormulaLayers: config.FormulaLayers{City: []string{formulasDir}},
+	}
+	return cityDir, cfg
+}
+
+// End-to-end over the production scan: a scanned run_on order reaches the
+// dispatcher with the field intact, and the declared [city] role decides
+// whether it fires.
+func TestOrderDispatchRunOnFromScannedCity(t *testing.T) {
+	t.Setenv(config.FleetRoleEnvVar, "")
+	for _, tc := range []struct {
+		role     string
+		wantFire []string
+		wantSkip []string
+	}{
+		{orders.RoleSeat, []string{"local-lint"}, []string{"merge-sweep"}},
+		{orders.RoleFleetHost, []string{"local-lint", "merge-sweep"}, nil},
+	} {
+		t.Run(tc.role, func(t *testing.T) {
+			cityDir, cfg := newRunOnScanCity(t, tc.role)
+			var stderr bytes.Buffer
+			ad, snapshot := buildOrderDispatcherWithSnapshot(nil, cityDir, cfg, events.Discard, &stderr, "test")
+			if ad == nil {
+				t.Fatalf("nil dispatcher; stderr: %s", stderr.String())
+			}
+			if len(snapshot.Orders) != 2 {
+				t.Fatalf("scanned %d orders, want 2", len(snapshot.Orders))
+			}
+			mad := ad.(*memoryOrderDispatcher)
+			if mad.fleetRole != tc.role {
+				t.Fatalf("fleetRole = %q, want %q", mad.fleetRole, tc.role)
+			}
+			for _, a := range snapshot.Orders {
+				if a.Name == "merge-sweep" && a.RunOn != orders.RunOnFleetHost {
+					t.Fatalf("scanned merge-sweep lost run_on: %q", a.RunOn)
+				}
+			}
+
+			store := beads.NewMemStore()
+			mad.storeFn = func(execStoreTarget) (beads.Store, error) { return store, nil }
+			mad.execRun = successfulExec
+			mad.dispatch(context.Background(), cityDir, time.Now())
+			mad.drain(context.Background())
+
+			for _, name := range tc.wantFire {
+				beadsFor := trackingBeads(t, store, orders.RunLabel(name))
+				if len(beadsFor) == 0 {
+					t.Errorf("%s produced no tracking bead; stderr: %s", name, stderr.String())
+					continue
+				}
+				if got := beadsFor[0].Metadata["close_reason"]; got == "skipped:run_on" {
+					t.Errorf("%s was skipped but should have fired", name)
+				}
+			}
+			for _, name := range tc.wantSkip {
+				beadsFor := trackingBeads(t, store, orders.RunLabel(name))
+				if len(beadsFor) != 1 {
+					t.Fatalf("%s tracking beads = %d, want 1 skip record", name, len(beadsFor))
+				}
+				if got := beadsFor[0].Metadata["close_reason"]; got != "skipped:run_on" {
+					t.Errorf("%s close_reason = %q, want skipped:run_on", name, got)
+				}
+			}
+		})
 	}
 }
