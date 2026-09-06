@@ -148,11 +148,27 @@ die() {
 [ -x "$FIND" ] || die "$FIND is missing or not executable"
 probe_dir="$(mktemp -d)"
 trap 'rm -rf "$probe_dir"' EXIT
-: > "$probe_dir/probe"
-if ! "$FIND" "$probe_dir" -maxdepth 1 -name probe -newermt '1 day ago' -print \
-	2>/dev/null | grep -q probe; then
+# TWO polarities, deliberately. Selection below uses the NEGATED predicate
+# (`! -newermt`), so probing only that a fresh file MATCHES would pass a find
+# that evaluates -newermt as a constant true -- and `! true` then selects
+# nothing, so the job deletes nothing and exits 0. That is the same observable
+# outcome as the bfs trap this preflight exists to close: a silent no-op
+# reported as success. Asserting both directions catches a find that ignores
+# the predicate whichever way it fails.
+: > "$probe_dir/probe_new"
+: > "$probe_dir/probe_old"
+touch -t "$(date -v-10d '+%Y%m%d%H%M' 2>/dev/null || date -d '10 days ago' '+%Y%m%d%H%M')" \
+	"$probe_dir/probe_old" 2>/dev/null \
+	|| die "neither BSD nor GNU date accepted a relative offset; cannot probe $FIND"
+probe_out="$("$FIND" "$probe_dir" -maxdepth 1 -name 'probe_*' -newermt '1 day ago' -print 2>/dev/null)"
+if ! printf '%s\n' "$probe_out" | grep -q probe_new; then
 	die "$FIND does not support -newermt; refusing to run (a trim that cannot
 evaluate the age predicate would report success while deleting nothing)"
+fi
+if printf '%s\n' "$probe_out" | grep -q probe_old; then
+	die "$FIND evaluates -newermt as always-true; refusing to run (the negated
+predicate used for selection would then match nothing and the trim would
+report success while deleting nothing)"
 fi
 
 [ -n "$TRIM_DAYS" ] && [ "$TRIM_DAYS" -ge 1 ] 2>/dev/null \

@@ -519,6 +519,69 @@ assert_allowed "CASE 22g: -tags -cache is a tag named -cache, not the ban" clean
 assert_allowed "CASE 22h: a value flag with no -cache is not the ban" clean -tags foo -testcache
 assert_allowed "CASE 22i: a package path still ends the scan" clean ./pkg
 
+# ---------------------------------------------------------------- CASE 23
+# The rollback path. A failed post-install probe must not leave a shim we have
+# just proved untrustworthy ahead of the real toolchain -- and "restored" must
+# mean USABLE, not merely present with the right bytes.
+#
+# The first version of this rollback restored the file non-executable: mktemp
+# makes the backup slot 0600, `cp -f` leaves an existing destination's mode
+# alone, and `mv` carries the source's mode. bash skips a non-executable PATH
+# entry SILENTLY, so `go` resolved past the shim to the real toolchain -- the
+# ban unenforced, with "rolled back: restored the previous ..." on stderr.
+#
+# So the assertions are the property, not the file: executable, and a PATH walk
+# still resolves `go` TO the target. Asserting existence and content would have
+# passed against the bug.
+rb="$WORK/rollback"
+mkdir -p "$rb/bin"
+
+# A good shim first, so there is a prior copy to restore.
+FAKE_GO_ARGV="$ARGV" FAKE_GO_PID="$PIDFILE" PATH="$rb/bin:$WORK/fakego:$PATH" \
+	bash "$INSTALLER" --dir "$rb/bin" >"$OUT" 2>"$ERR" \
+	|| fail "CASE 23: could not install the good shim to set up the rollback"
+
+good_sum="$(shasum -a 256 <"$rb/bin/go" | cut -d" " -f1)"
+
+# Now reinstall from a sabotaged source so the refusal probe fails.
+sab="$WORK/rollback-src"
+mkdir -p "$sab"
+cp -f "$INSTALLER" "$sab/"
+sed 's/^if refuses_clean_cache "\$@"; then$/if false; then/' "$SHIM_SRC" >"$sab/go-clean-cache-shim.sh"
+
+if FAKE_GO_ARGV="$ARGV" FAKE_GO_PID="$PIDFILE" PATH="$rb/bin:$WORK/fakego:$PATH" \
+	bash "$sab/install-go-clean-cache-shim.sh" --dir "$rb/bin" >"$OUT" 2>"$ERR"; then
+	fail "CASE 23: installer reported success over a shim that does not refuse"
+elif [ ! -x "$rb/bin/go" ]; then
+	fail "CASE 23: rolled-back $rb/bin/go is NOT executable (mode $(ls -l "$rb/bin/go" | cut -c1-10)); bash will skip it and go resolves past the shim"
+elif [ "$(shasum -a 256 <"$rb/bin/go" | cut -d" " -f1)" != "$good_sum" ]; then
+	fail "CASE 23: rolled-back shim content differs from the good shim"
+elif [ "$(PATH="$rb/bin:$WORK/fakego:$PATH" command -v go)" != "$rb/bin/go" ]; then
+	fail "CASE 23: after rollback a PATH walk resolves go past the shim to $(PATH="$rb/bin:$WORK/fakego:$PATH" command -v go)"
+else
+	pass "CASE 23: a failed probe restores the prior shim, executable and still shadowing"
+fi
+
+# No prior install: rollback must REMOVE the new shim rather than leave a
+# condemned one on PATH.
+rb2="$WORK/rollback-fresh"
+mkdir -p "$rb2/bin"
+if FAKE_GO_ARGV="$ARGV" FAKE_GO_PID="$PIDFILE" PATH="$rb2/bin:$WORK/fakego:$PATH" \
+	bash "$sab/install-go-clean-cache-shim.sh" --dir "$rb2/bin" >"$OUT" 2>"$ERR"; then
+	fail "CASE 23b: installer reported success over a shim that does not refuse"
+elif [ -e "$rb2/bin/go" ]; then
+	fail "CASE 23b: a condemned shim was left at $rb2/bin/go with no prior copy to restore"
+else
+	pass "CASE 23b: with no prior install, a failed probe removes the shim"
+fi
+
+# The backup slot must not survive a successful install.
+if ls "$rb/bin"/go.prior.* >/dev/null 2>&1; then
+	fail "CASE 23c: a go.prior.* backup was left behind in a PATH directory"
+else
+	pass "CASE 23c: no backup slot left behind"
+fi
+
 # ------------------------------------------------------------------ verdict
 if [ "$failures" -ne 0 ]; then
 	echo "FAILED: $failures case(s)" >&2

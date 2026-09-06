@@ -195,7 +195,9 @@ refuses_clean_cache() {
 		# Consuming the value is also correct when the value ITSELF looks like
 		# the ban: `go clean -tags -cache` means tags="-cache", and cmd/go does
 		# not wipe -- so skipping it here agrees with the runtime rather than
-		# over-refusing.
+		# over-refusing. The static scanner flags this same input anyway: its
+		# regex backtracks. That is a deliberate over-refusal on its side, not a
+		# contract the two layers share.
 		#
 		# The -flag=value spelling consumes no extra argument and falls to the
 		# -* arm. Sourced from `go help build`'s flag list; a flag missing here

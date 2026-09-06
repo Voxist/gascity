@@ -161,6 +161,43 @@ echo "$out4" | grep -q 'newermt' \
 [ -f "$root4/00/$(hex64 300)-a" ] || fail "rejected run still deleted entries"
 pass "CASE 4: a find lacking -newermt is rejected loudly, before any deletion"
 
+# ---------------------------------------------------------------- CASE 4b
+# The OTHER polarity. CASE 4 covers a find that rejects -newermt outright. A
+# find that ACCEPTS it and evaluates it as constant true is just as fatal and
+# was not caught: selection uses the negated form (`! -newermt`), so `! true`
+# matches nothing, the candidate list is empty, and the job exits 0 having
+# deleted nothing -- the same silent no-op, reported as success.
+#
+# The original preflight probed only that a FRESH file matches, which is the
+# polarity opposite to the one selection depends on, so it passed this find.
+root4b="$WORK/case4b/go-build"
+make_cache "$root4b"
+fake_true="$WORK/fakefind-true"
+cat > "$fake_true" <<'EOF'
+#!/usr/bin/env bash
+# Accepts -newermt and silently drops it, i.e. evaluates it as constant true.
+args=(); skip=0
+for a in "$@"; do
+	if [ "$skip" = 1 ]; then skip=0; continue; fi
+	if [ "$a" = "-newermt" ]; then skip=1; continue; fi
+	args+=("$a")
+done
+exec /usr/bin/find "${args[@]}"
+EOF
+chmod +x "$fake_true"
+set +e
+out4b="$(TRIM_FIND="$fake_true" TRIM_DAYS=3 GO_BUILD_CACHE_DIR="$root4b" TRIM_LOG="$WORK/log4b" \
+	"$TRIM" 2>&1)"
+rc4b=$?
+set -e
+if [ "$rc4b" -eq 0 ]; then
+	fail "CASE 4b: a find that treats -newermt as always-true was accepted (would delete nothing and report success)"
+elif ! printf '%s' "$out4b" | grep -q 'always-true'; then
+	fail "CASE 4b: refused, but the message does not name the always-true cause: $out4b"
+else
+	pass "CASE 4b: a find that evaluates -newermt as always-true is refused"
+fi
+
 # ---------------------------------------------------------------- CASE 5
 # Fail closed: an entry-shaped name that is not a real cache entry aborts the
 # whole run rather than being silently skipped or blindly deleted.

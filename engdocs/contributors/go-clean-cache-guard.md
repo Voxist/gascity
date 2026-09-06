@@ -211,12 +211,13 @@ shim should not be described as making the operation impossible.
 
 ## Tests
 
-`make check-go-clean-cache` runs both suites and then the scan itself:
+`make check-go-clean-cache` runs all three suites and then the scan itself:
 
 | Suite | Covers |
 | --- | --- |
 | `scripts/test-check-go-clean-cache.sh` | layer 1 — the flag parse, the surface, both exemptions, `--staged`, the pre-commit wiring end to end, and this repository's own baseline |
 | `scripts/test-go-clean-cache-shim.sh` | layer 2 — refusal forms, every allowed form, argv/exit-status/stream/stdin fidelity, the exec, the override, and the installer |
+| `scripts/test-trim-go-build-cache.sh` | `scripts/trim-go-build-cache.sh` — the alternative the refusal names: selector safety (it can never match a cache root or the depth-1 bookkeeping), the two-polarity `-newermt` preflight, re-stat immediately before unlink, and `--dry-run` |
 
 They run from the Makefile target rather than from Go wrappers on purpose. A
 `_test.go` wrapper per suite would add an `exec.Command` call site in a new
@@ -226,6 +227,8 @@ is an explicit policy change requiring council review, not something a new
 guard should do as a side effect. `check-residency-boundary` runs its own
 self-test the same way.
 
-Both are hermetic. The shim suite drives a **fake** `go` on a temp `PATH`:
+All three are hermetic. The shim suite drives a **fake** `go` on a temp
+`PATH`, and the trim suite pins `GO_BUILD_CACHE_DIR` at a synthetic tree so the
+real cache is never read or written:
 `go clean -cache` is never executed anywhere in this repository's tests, which
 is the entire point of the thing under test.

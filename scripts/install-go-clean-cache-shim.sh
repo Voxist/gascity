@@ -218,10 +218,17 @@ prior_backup=""
 if [ -e "$TARGET" ]; then
 	prior_backup="$(mktemp "$TARGET.prior.XXXXXX")" \
 		|| die "could not create a backup slot in $DIR"
-	cp -f "$TARGET" "$prior_backup" || die "could not back up the existing $TARGET"
+	# -p, not plain -f: mktemp creates the slot at 0600, and cp into an existing
+	# regular file leaves the DESTINATION mode alone. rollback() then mv's that
+	# file back, and mv carries the SOURCE mode -- so a plain cp restores the
+	# shim non-executable. bash skips a non-executable PATH entry silently, so
+	# `go` would resolve past the shim to the real toolchain: the ban unenforced,
+	# while the operator has just been told the rollback succeeded. That is the
+	# state this installer exists to refuse to manufacture.
+	cp -pf "$TARGET" "$prior_backup" || die "could not back up the existing $TARGET"
 fi
 
-mv -f "$tmp" "$TARGET" || die "could not install $TARGET"
+mv -f "$tmp" "$TARGET" || { rm -f "$prior_backup"; die "could not install $TARGET"; }
 trap - EXIT
 
 # ------------------------------------------------------------------- verify
@@ -233,8 +240,13 @@ trap - EXIT
 # at $TARGET before (usually nothing) and then die.
 rollback() {
 	if [ -n "${prior_backup:-}" ] && [ -f "$prior_backup" ]; then
-		mv -f "$prior_backup" "$TARGET" 2>/dev/null \
-			&& echo "rolled back: restored the previous $TARGET" >&2
+		if mv -f "$prior_backup" "$TARGET" 2>/dev/null; then
+			echo "rolled back: restored the previous $TARGET" >&2
+		else
+			# Say so. Silence here leaves the condemned shim in place with the
+			# operator believing it was replaced.
+			echo "ROLLBACK FAILED: $TARGET still holds the shim that failed verification; remove it by hand" >&2
+		fi
 	else
 		rm -f "$TARGET" 2>/dev/null \
 			&& echo "rolled back: removed $TARGET" >&2

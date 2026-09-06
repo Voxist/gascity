@@ -119,7 +119,14 @@ QUOTE = "[" + chr(34) + chr(39) + "]?"
 # Flags that take a SEPARATE value. The value is not a "-" token, so without
 # this the repetition below stops at it and `go clean -tags foo -cache` is not
 # flagged -- while cmd/go still applies -cache. Mirrors the runtime shim arm
-# of the same name; the two must not drift.
+# of the same name: they agree on every -cache-behind-a-value-flag shape
+# (scanner CASE 18a-d and shim CASE 22a-f are the same six inputs).
+# They do NOT agree on `go clean -tags -cache`. The shim allows it, which is
+# correct -- cmd/go reads tags="-cache" and does not wipe -- while this regex
+# backtracks out of the value-flag alternative and flags it anyway. Python re
+# has no atomic groups, so the alternation is inherently backtrackable.
+# Kept as a deliberate over-refusal: loud, annotatable, fail-safe direction.
+# Do not "fix" it into a false negative.
 VALUE_FLAG = (
     r"-(?:p|covermode|coverpkg|asmflags|buildmode|buildvcs|compiler"
     r"|gccgoflags|gcflags|installsuffix|ldflags|mod|modfile|overlay"
