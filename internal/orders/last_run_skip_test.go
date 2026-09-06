@@ -148,3 +148,42 @@ func TestRunOnSkipRecordStaysInHistory(t *testing.T) {
 		t.Errorf("LastRun after a skip = %s (err %v), want zero", last, err)
 	}
 }
+
+// A skip reported as "completed" would tell every dashboard reading the order
+// feed that the order ran on the one city that is refusing to run it.
+func TestOrderRunStateForRunOnSkip(t *testing.T) {
+	store := beads.NewMemStore()
+	st := NewStore(beads.OrdersStore{Store: store})
+	if _, err := st.CreateRunSkippedRunOn("merge-sweep"); err != nil {
+		t.Fatalf("CreateRunSkippedRunOn: %v", err)
+	}
+	recent, err := st.RecentRuns("merge-sweep", 10)
+	if err != nil {
+		t.Fatalf("RecentRuns: %v", err)
+	}
+	if len(recent) != 1 {
+		t.Fatalf("RecentRuns = %d, want 1", len(recent))
+	}
+	if !recent[0].SkippedRunOn {
+		t.Fatal("decoded run lost its SkippedRunOn flag")
+	}
+	if got := recent[0].State(); got != "skipped" {
+		t.Fatalf("State() = %q, want %q", got, "skipped")
+	}
+}
+
+// A real closed run is unaffected.
+func TestOrderRunStateUnchangedForRealRun(t *testing.T) {
+	store := beads.NewMemStore()
+	seedRun(t, store, "digest", time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC))
+	recent, err := NewStore(beads.OrdersStore{Store: store}).RecentRuns("digest", 10)
+	if err != nil {
+		t.Fatalf("RecentRuns: %v", err)
+	}
+	if len(recent) != 1 {
+		t.Fatalf("RecentRuns = %d, want 1", len(recent))
+	}
+	if got := recent[0].State(); got == "skipped" {
+		t.Fatalf("State() = %q for a real run", got)
+	}
+}

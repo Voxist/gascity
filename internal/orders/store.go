@@ -176,11 +176,19 @@ type OrderRun struct {
 	SkippedRunOn bool
 }
 
-// State returns the feed-facing lifecycle status of the run: "failed" when the
-// terminal outcome is a failure or cancellation, "active" for an open run with
-// no failure, and "completed" for a closed run with no failure. It is the exact
+// State returns the feed-facing lifecycle status of the run: "skipped" for a
+// deliberate run_on skip, "failed" when the terminal outcome is a failure or
+// cancellation, "active" for an open run with no failure, and "completed" for a
+// closed run with no failure. Apart from the skip arm it is the exact
 // truth-table replacement for the order feed's orderTrackingStatus label crack.
+//
+// The skip arm exists for the same reason LastRun excludes these records: a
+// skip reported as "completed" tells every dashboard reading this feed that the
+// order ran here, on the one city that is refusing to run it.
 func (r OrderRun) State() string {
+	if r.SkippedRunOn {
+		return "skipped"
+	}
 	switch r.Outcome.Display() {
 	case "failed", "canceled":
 		return "failed"
