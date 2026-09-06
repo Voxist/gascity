@@ -207,8 +207,9 @@ _pog_ownership_violation() {
 #      also TRUNCATES a 7-char id (ga-abcdefg -> ga-abcdef), resolving a
 #      different bead. {3,} is greedy and stops at the first character outside
 #      the class, so it reads the whole id out of fix/ga-elgvf-some-slug.
-#      the bead's own id format, extended with zero or more repeated
-#      sub-bead suffixes because this repo's real branch convention is
+#
+#      The pattern is the bead's own id format, extended with zero or more
+#      repeated sub-bead suffixes because this repo's real branch convention is
 #      builder/<bead-id>-<slug> and sub-beads are routine at any nesting
 #      depth: a single-level sub-bead (e.g. ga-fip9ps.1) as well as a
 #      grandchild (e.g. ga-o3ko1j.4.3). The suffix group must repeat (`*`),
