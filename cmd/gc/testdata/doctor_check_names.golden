@@ -38,6 +38,7 @@ skill-collision
 skill-dangling-sink
 order-firing-current
 order-outcome-healthy
+order-run-on-role
 codex-hooks-drift
 beads-proxied-capability
 beads-expected-build

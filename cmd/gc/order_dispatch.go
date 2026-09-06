@@ -366,10 +366,23 @@ type memoryOrderDispatcher struct {
 	cfg                  *config.City
 	cityName             string
 	cityPath             string
-	cacheMu              sync.Mutex
-	lastRunCache         map[string]time.Time
-	gateBackoffUntil     map[string]time.Time
-	openWorkSuppression  map[string]orderOpenWorkSuppression
+	// fleetRole is this city's resolved role ("fleet-host" or "seat"),
+	// stamped once when the dispatcher is built. Orders whose run_on names a
+	// different role are skipped for the life of this dispatcher; a config
+	// reload builds a new one, which is what makes the role change take
+	// effect and what re-arms the once-per-generation skip record below.
+	fleetRole string
+	// runOnSkipNoted records the scoped names whose run_on skip has already
+	// been logged and stamped into order tracking. It is deliberately NOT
+	// carried across a reload (unlike lastRunCache and gateBackoffUntil): the
+	// skip is a per-generation fact, so it is reported once per reload rather
+	// than once per tick, and a reload that changes the role or the order set
+	// reports the new truth. Guarded by cacheMu.
+	runOnSkipNoted      map[string]bool
+	cacheMu             sync.Mutex
+	lastRunCache        map[string]time.Time
+	gateBackoffUntil    map[string]time.Time
+	openWorkSuppression map[string]orderOpenWorkSuppression
 
 	dispatchCtx    context.Context
 	dispatchCancel context.CancelFunc
@@ -554,6 +567,7 @@ func newMemoryOrderDispatcher(routes *storageRoutes, aa []orders.Order, cityPath
 		cfg:                  cfg,
 		cityName:             loadedCityName(cfg, cityPath),
 		cityPath:             cityPath,
+		fleetRole:            config.EffectiveFleetRoleFromEnv(cfg),
 		dispatchCtx:          dispatchCtx,
 		dispatchCancel:       dispatchCancel,
 	}
@@ -723,6 +737,13 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		a := m.aa[idx]
 		// Skip orders targeting suspended rigs.
 		if m.orderRigSuspended(a) {
+			continue
+		}
+		// Skip orders whose run_on names a fleet role this city does not
+		// hold. This is the durable half of the fleet-singleton guard: it
+		// holds regardless of how old the installed pack is, whereas a
+		// pack-level env guard only works once every seat has the new pack.
+		if m.skipForRunOn(cityPath, a, stores) {
 			continue
 		}
 
@@ -2462,6 +2483,72 @@ func (m *memoryOrderDispatcher) orderRigSuspended(a orders.Order) bool {
 		rigName = a.Rig
 	}
 	return m.rigSuspendedByName(rigName)
+}
+
+// orderRunOnSkipReason is the close_reason stamped on the tracking bead a
+// run_on skip records. It reads as a deliberate skip rather than a missing run,
+// so `gc order history` and the liveness/doctor readers can tell "this city was
+// never supposed to run it" apart from "it should have run and did not".
+const orderRunOnSkipReason = "skipped:run_on"
+
+// skipForRunOn reports whether a's run_on excludes this city's fleet role, and
+// on the first exclusion of this dispatcher generation logs one line and stamps
+// one closed tracking bead. Subsequent ticks skip silently: the condition is
+// static for the life of the dispatcher, so repeating it every tick would add a
+// per-order line to every tick of stderr and a bead write to every tick of the
+// store.
+func (m *memoryOrderDispatcher) skipForRunOn(cityPath string, a orders.Order, stores map[string]beads.Store) bool {
+	if a.RunsOn(m.fleetRole) {
+		return false
+	}
+	scoped := a.ScopedName()
+	if !m.claimRunOnSkipNote(scoped) {
+		return true
+	}
+	logDispatchError(m.stderr, "gc: order %s: %s (run_on=%s, city role=%s)",
+		scoped, orderRunOnSkipReason, a.RunOnOrDefault(), m.fleetRole)
+	m.recordRunOnSkip(cityPath, a, scoped, stores)
+	return true
+}
+
+// claimRunOnSkipNote returns true exactly once per scoped order per dispatcher
+// generation.
+func (m *memoryOrderDispatcher) claimRunOnSkipNote(scoped string) bool {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if m.runOnSkipNoted[scoped] {
+		return false
+	}
+	if m.runOnSkipNoted == nil {
+		m.runOnSkipNoted = make(map[string]bool)
+	}
+	m.runOnSkipNoted[scoped] = true
+	return true
+}
+
+// recordRunOnSkip stamps the deliberate skip into the order's tracking so a
+// reader of order history sees why the order has no runs on this city. Every
+// failure here is logged and swallowed: a skip that cannot be recorded must not
+// take the dispatch tick down, and the order is not going to run either way.
+func (m *memoryOrderDispatcher) recordRunOnSkip(cityPath string, a orders.Order, scoped string, stores map[string]beads.Store) {
+	target, err := resolveOrderStoreTarget(cityPath, m.cfg, a)
+	if err != nil {
+		logDispatchError(m.stderr, "gc: order dispatch: resolving target for %s: %v", scoped, err)
+		return
+	}
+	storeKey := orderStoreTargetKey(target)
+	store, ok := stores[storeKey]
+	if !ok {
+		store, err = m.storeFn(target)
+		if err != nil {
+			logDispatchError(m.stderr, "gc: order dispatch: opening %s store for %s: %v", target.ScopeKind, scoped, err)
+			return
+		}
+		stores[storeKey] = store
+	}
+	if _, err := m.orderFrontDoorFor(store).CreateRunClosed(scoped, orders.RunOutcomeNone, nil, orderRunOnSkipReason); err != nil {
+		logDispatchError(m.stderr, "gc: order %s: recording run_on skip: %v", scoped, err)
+	}
 }
 
 func (m *memoryOrderDispatcher) markTrackingFailure(store beads.Store, trackingID, scoped string, a orders.Order, headSeq uint64) {

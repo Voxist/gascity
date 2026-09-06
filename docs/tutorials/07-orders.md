@@ -277,6 +277,58 @@ rig-scoped orders appear once per importing rig (mirroring `scope` on
 was scanned from, so its formula must resolve from that pack rather than from any
 one rig's local `orders/` directory.
 
+## Fleet role and `run_on`
+
+`scope` decides how many copies of an order live inside one city. `run_on`
+decides which cities run it at all.
+
+When several cities install the same pack — a fleet host plus a developer's
+laptop seat, say — a fleet-singleton order (a merge sweep, a review gate, a
+delivery warden) instantiates on every one of them. Each becomes a competing
+instance with its own credentials and its own pack version. `run_on` pins such
+an order to one role:
+
+```toml
+[order]
+description = "Sweep merged pull requests across the fleet"
+trigger = "cooldown"
+interval = "5m"
+exec = "scripts/merge-sweep.sh"
+run_on = "fleet-host"   # "fleet-host", "seat", or "any" (default)
+```
+
+The city declares which role it holds:
+
+```toml
+[city]
+role = "fleet-host"     # "fleet-host" or "seat"; default "seat"
+```
+
+When `[city] role` is absent, gc reads the `VOXIST_FLEET_ROLE` environment
+variable instead, so a fleet that already exports the role from its supervisor
+environment needs no `city.toml` change. A declared role always wins over the
+variable, and an unrecognized variable value is ignored (a typo in a shell
+profile must not promote a seat to the fleet host). An unrecognized `[city]
+role` in `city.toml`, by contrast, is a load error.
+
+The three `run_on` values:
+
+| `run_on` | Runs on |
+| --- | --- |
+| `any` (default) | every city — the behavior of every order authored before this field existed |
+| `fleet-host` | only a city whose effective role is `fleet-host` |
+| `seat` | only a city whose effective role is not `fleet-host` |
+
+An order the dispatcher skips this way is not silently dropped. It is recorded
+in the order's own tracking with the close reason `skipped:run_on`, and logged
+once per config reload rather than once per tick. `gc order list` grows a
+`RUN_ON` column when any order declares the field and marks the affected rows
+`(skipped: run_on)`. `gc doctor` leaves such orders out of its stale-order check
+— they are skipped by design — and its `order-run-on-role` check warns when a
+city that is not the fleet host still has enabled, un-skipped `fleet-host`
+orders, which is either a role that was never declared or a pack whose orders
+belong in `[orders].skip`.
+
 ## Disabling and skipping orders
 
 Set `enabled = false` in an order's own definition to drop it from scanning

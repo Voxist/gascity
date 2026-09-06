@@ -17,6 +17,7 @@ City is the top-level configuration for a Gas City instance.
 |-------|------|----------|---------|-------------|
 | `include` | []string |  |  | Include lists config fragment files to merge into this config. Processed by LoadWithIncludes; not recursive (fragments cannot include). |
 | `workspace` | Workspace | **yes** |  | Workspace holds city-level metadata (name, default provider). |
+| `city` | CityRoleConfig |  |  | CityRole is the [city] table: this city's role in a multi-city fleet ("fleet-host" or "seat"). Orders select against it with run_on so a fleet-singleton order shipped in a shared pack fires on the fleet host only. Unset resolves through VOXIST_FLEET_ROLE, then to "seat". |
 | `providers` | map[string]ProviderSpec |  |  | Providers defines named provider presets for agent startup. |
 | `upstreams` | map[string]UpstreamSpec |  |  | Upstreams defines named model-serving endpoint presets selectable per agent via the Upstream axis (Phase C). Each maps a name → serving env (base URL + credential refs); see UpstreamSpec. |
 | `imports` | map[string]Import |  |  | Imports defines named pack imports. Each key is a local binding name; the authored public contract stores a durable source plus optional version. Processed during ExpandCityPacks. |
@@ -326,6 +327,14 @@ ChatSessionsConfig configures chat session behavior.
 |-------|------|----------|---------|-------------|
 | `idle_timeout` | string |  |  | IdleTimeout is the duration after which a detached chat session is auto-suspended. Duration string (e.g., "30m", "1h"). 0 = disabled. |
 | `grace_period` | string |  |  | GracePeriod is the duration after creation during which a manual session is protected from idle-sleep scale-to-zero. Duration string (e.g., "10m"). Empty = use default (10m). "0" = disabled. |
+
+## CityRoleConfig
+
+CityRoleConfig is the `[city]` table: this city's place in a multi-city fleet.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `role` | string |  |  | Role is "fleet-host" (the single city that owns fleet-wide automation) or "seat" (everything else). Empty means undeclared and resolves to "seat" unless VOXIST_FLEET_ROLE says otherwise. Orders select against it with their run_on field. Enum: `fleet-host`, `seat` |
 
 ## ConvergenceConfig
 

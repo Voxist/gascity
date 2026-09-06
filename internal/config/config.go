@@ -221,6 +221,11 @@ type City struct {
 	Include []string `toml:"include,omitempty"`
 	// Workspace holds city-level metadata (name, default provider).
 	Workspace Workspace `toml:"workspace"`
+	// CityRole is the [city] table: this city's role in a multi-city fleet
+	// ("fleet-host" or "seat"). Orders select against it with run_on so a
+	// fleet-singleton order shipped in a shared pack fires on the fleet host
+	// only. Unset resolves through VOXIST_FLEET_ROLE, then to "seat".
+	CityRole CityRoleConfig `toml:"city,omitempty"`
 	// Providers defines named provider presets for agent startup.
 	Providers map[string]ProviderSpec `toml:"providers,omitempty"`
 	// Upstreams defines named model-serving endpoint presets selectable per
@@ -5103,6 +5108,9 @@ func Load(fs fsys.FS, path string) (*City, error) {
 		return nil, err
 	}
 	if err := ValidateDoltConfig(cfg, path); err != nil {
+		return nil, err
+	}
+	if err := ValidateCityRole(cfg, path); err != nil {
 		return nil, err
 	}
 	return cfg, nil

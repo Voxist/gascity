@@ -160,6 +160,11 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 	}
 	cronIntervals := map[string]time.Duration{}
 	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg, cityPath)
+	// An order whose run_on names a role this city does not hold is never
+	// dispatched here by design, so it has no firing history and must not be
+	// reported stale. Without this the fleet-singleton guard would light up
+	// every seat's doctor with orders that are working exactly as intended.
+	fleetRole := config.EffectiveFleetRoleFromEnv(c.cfg)
 
 	// Resolve expected intervals before touching the event log so the read
 	// below can be bounded by the check's own staleness horizon:
@@ -174,6 +179,9 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 			continue
 		}
 		if orderFiringCurrentOrderSuspended(suspendedRigs, order) {
+			continue
+		}
+		if !order.RunsOn(fleetRole) {
 			continue
 		}
 		mo := monitoredOrder{order: order}
