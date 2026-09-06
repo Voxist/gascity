@@ -331,15 +331,6 @@ operator acknowledgement.`,
 
 // loadOrders is the common preamble for active order commands: resolve city,
 // load config, scan formula layers, apply overrides, and filter disabled orders.
-func loadOrders(stderr io.Writer, cmdName string) ([]orders.Order, int) {
-	return loadActiveOrders(stderr, cmdName)
-}
-
-func loadActiveOrders(stderr io.Writer, cmdName string) ([]orders.Order, int) {
-	_, _, aa, code := loadActiveOrdersWithCity(stderr, cmdName)
-	return aa, code
-}
-
 func loadOrdersWithCity(stderr io.Writer, cmdName string) (string, *config.City, []orders.Order, int) {
 	return loadActiveOrdersWithCity(stderr, cmdName)
 }
@@ -426,26 +417,41 @@ func cmdOrderListWithOptions(stdout, stderr io.Writer, jsonOutput bool) int {
 		}
 		return doOrderListJSON(cityPath, cfg, aa, stdout)
 	}
-	aa, code := loadOrders(stderr, "gc order list")
+	_, cfg, aa, code := loadOrdersWithCity(stderr, "gc order list")
 	if code != 0 {
 		return code
 	}
-	return doOrderList(aa, stdout)
+	return doOrderList(aa, config.EffectiveFleetRoleFromEnv(cfg), stdout)
 }
 
-// doOrderList prints a table of orders. Accepts pre-scanned orders for testability.
-func doOrderList(aa []orders.Order, stdout io.Writer) int {
+// doOrderList prints a table of orders. Accepts pre-scanned orders for
+// testability. role is the city's effective fleet role; an order whose run_on
+// excludes it is marked so the reader can tell an inert order from a live one
+// without cross-referencing city.toml.
+func doOrderList(aa []orders.Order, role string, stdout io.Writer) int {
 	if len(aa) == 0 {
 		fmt.Fprintln(stdout, "No orders found.") //nolint:errcheck // best-effort stdout
 		return 0
 	}
 
 	hasRig := anyOrderHasRig(aa)
+	// The RUN_ON column appears only when some order declares the field, the
+	// same way RIG appears only for rig-scoped orders: a city with no
+	// fleet-singleton orders keeps the narrower table it has today.
+	hasRunOn := anyOrderHasRunOn(aa)
+	header := []any{"NAME", "TYPE", "TRIGGER", "INTERVAL/SCHED"}
+	format := "%-20s %-8s %-12s %-15s"
 	if hasRig {
-		fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %-15s %s\n", "NAME", "TYPE", "TRIGGER", "INTERVAL/SCHED", "RIG", "TARGET") //nolint:errcheck
-	} else {
-		fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %s\n", "NAME", "TYPE", "TRIGGER", "INTERVAL/SCHED", "TARGET") //nolint:errcheck
+		format += " %-15s"
+		header = append(header, "RIG")
 	}
+	if hasRunOn {
+		format += " %-11s"
+		header = append(header, "RUN_ON")
+	}
+	format += " %s\n"
+	header = append(header, "TARGET")
+	fmt.Fprintf(stdout, format, header...) //nolint:errcheck // best-effort stdout
 	for _, a := range aa {
 		typ := "formula"
 		if a.IsExec() {
@@ -465,17 +471,34 @@ func doOrderList(aa []orders.Order, stdout io.Writer) int {
 		if pool == "" {
 			pool = "-"
 		}
-		rig := a.Rig
-		if rig == "" {
-			rig = "-"
+		if !a.RunsOn(role) {
+			pool += " (skipped: run_on)"
 		}
+		row := []any{a.Name, typ, a.Trigger, timing}
 		if hasRig {
-			fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %-15s %s\n", a.Name, typ, a.Trigger, timing, rig, pool) //nolint:errcheck
-		} else {
-			fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %s\n", a.Name, typ, a.Trigger, timing, pool) //nolint:errcheck
+			rig := a.Rig
+			if rig == "" {
+				rig = "-"
+			}
+			row = append(row, rig)
 		}
+		if hasRunOn {
+			row = append(row, a.RunOnOrDefault())
+		}
+		row = append(row, pool)
+		fmt.Fprintf(stdout, format, row...) //nolint:errcheck // best-effort stdout
 	}
 	return 0
+}
+
+// anyOrderHasRunOn returns true if any order declares run_on.
+func anyOrderHasRunOn(aa []orders.Order) bool {
+	for _, a := range aa {
+		if a.RunOn != "" {
+			return true
+		}
+	}
+	return false
 }
 
 type orderListJSON struct {
@@ -508,6 +531,7 @@ type orderJSON struct {
 	Formula      string            `json:"formula,omitempty"`
 	Exec         string            `json:"exec,omitempty"`
 	Trigger      string            `json:"trigger"`
+	RunOn        string            `json:"run_on,omitempty"`
 	Interval     string            `json:"interval,omitempty"`
 	Schedule     string            `json:"schedule,omitempty"`
 	Check        string            `json:"check,omitempty"`
@@ -578,6 +602,7 @@ func orderToJSON(a orders.Order) orderJSON {
 		Formula:      a.Formula,
 		Exec:         a.Exec,
 		Trigger:      a.Trigger,
+		RunOn:        a.RunOn,
 		Interval:     a.Interval,
 		Schedule:     a.Schedule,
 		Check:        a.Check,
@@ -650,6 +675,9 @@ func doOrderShow(aa []orders.Order, name, rig string, stdout, stderr io.Writer) 
 		w(fmt.Sprintf("Formula:     %s", a.Formula))
 	}
 	w(fmt.Sprintf("Trigger:     %s", a.Trigger))
+	if a.RunOn != "" {
+		w(fmt.Sprintf("Run on:      %s", a.RunOn))
+	}
 	if a.Interval != "" {
 		w(fmt.Sprintf("Interval:    %s", a.Interval))
 	}
@@ -1664,6 +1692,12 @@ func doOrderHistoryBounded(name, rig string, aa []orders.Order, resolveStores or
 		rig       string
 		id        string
 		createdAt time.Time
+		// skipped marks a run_on skip record. `gc order history` is the
+		// command doctor's hints send an operator to, and it has no outcome
+		// column, so without this a deliberate skip reads as a completed run
+		// at that timestamp — the exact confusion the skip record exists to
+		// prevent.
+		skipped bool
 	}
 	var entries []historyEntry
 	seenEntries := make(map[string]bool)
@@ -1703,6 +1737,7 @@ func doOrderHistoryBounded(name, rig string, aa []orders.Order, resolveStores or
 					rig:       a.Rig,
 					id:        r.ID,
 					createdAt: r.CreatedAt,
+					skipped:   r.SkippedRunOn,
 				})
 			}
 		}
@@ -1754,6 +1789,7 @@ func doOrderHistoryBounded(name, rig string, aa []orders.Order, resolveStores or
 				BeadID:    e.id,
 				Executed:  e.createdAt.Format(time.RFC3339),
 				CreatedAt: e.createdAt,
+				Skipped:   e.skipped,
 			})
 		}
 		return writeCLIJSONLineOrExit(stdout, stderr, "gc order history", payload)
@@ -1774,15 +1810,26 @@ func doOrderHistoryBounded(name, rig string, aa []orders.Order, resolveStores or
 			if rig == "" {
 				rig = "-"
 			}
-			fmt.Fprintf(stdout, "%-20s %-15s %-15s %s\n", e.order, rig, e.id, e.createdAt.Format(time.RFC3339)) //nolint:errcheck
+			fmt.Fprintf(stdout, "%-20s %-15s %-15s %s\n", e.order, rig, e.id, orderHistoryExecuted(e.createdAt, e.skipped)) //nolint:errcheck
 		}
 	} else {
 		fmt.Fprintf(stdout, "%-20s %-15s %s\n", "ORDER", "BEAD", "EXECUTED") //nolint:errcheck
 		for _, e := range entries {
-			fmt.Fprintf(stdout, "%-20s %-15s %s\n", e.order, e.id, e.createdAt.Format(time.RFC3339)) //nolint:errcheck
+			fmt.Fprintf(stdout, "%-20s %-15s %s\n", e.order, e.id, orderHistoryExecuted(e.createdAt, e.skipped)) //nolint:errcheck
 		}
 	}
 	return 0
+}
+
+// orderHistoryExecuted renders a history row's timestamp, marking a run_on skip
+// record so it cannot be read as a run at that time. The marker matches the one
+// `gc order list` puts on a skipped row.
+func orderHistoryExecuted(at time.Time, skipped bool) string {
+	stamp := at.Format(time.RFC3339)
+	if skipped {
+		return stamp + "  (skipped: run_on)"
+	}
+	return stamp
 }
 
 type orderHistoryJSONResult struct {
@@ -1800,6 +1847,8 @@ type orderHistoryJSONEntry struct {
 	BeadID    string    `json:"bead_id"`
 	Executed  string    `json:"executed"`
 	CreatedAt time.Time `json:"created_at"`
+	// Skipped marks a run_on skip record rather than a run. Absent means a run.
+	Skipped bool `json:"skipped,omitempty"`
 }
 
 type orderHistoryJSONSummary struct {

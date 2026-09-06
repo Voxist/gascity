@@ -277,6 +277,87 @@ rig-scoped orders appear once per importing rig (mirroring `scope` on
 was scanned from, so its formula must resolve from that pack rather than from any
 one rig's local `orders/` directory.
 
+## Fleet role and `run_on`
+
+`scope` decides how many copies of an order live inside one city. `run_on`
+decides which cities run it at all.
+
+When several cities install the same pack — a fleet host plus a developer's
+laptop seat, say — a fleet-singleton order (a merge sweep, a review gate, a
+delivery warden) instantiates on every one of them. Each becomes a competing
+instance with its own credentials and its own pack version. `run_on` pins such
+an order to one role:
+
+```toml
+[order]
+description = "Sweep merged pull requests across the fleet"
+trigger = "cooldown"
+interval = "5m"
+exec = "scripts/merge-sweep.sh"
+run_on = "fleet-host"   # "fleet-host", "seat", or "any" (default)
+```
+
+The city declares which role it holds:
+
+```toml
+[city]
+role = "fleet-host"     # "fleet-host" or "seat"; default "seat"
+```
+
+When `[city] role` is absent, gc reads the `VOXIST_FLEET_ROLE` environment
+variable instead, so a fleet that already exports the role from its supervisor
+environment needs no `city.toml` change. A declared role always wins over the
+variable, and an unrecognized variable value is ignored (a typo in a shell
+profile must not promote a seat to the fleet host). An unrecognized `[city]
+role` in `city.toml`, by contrast, is a load error.
+
+The three `run_on` values:
+
+| `run_on` | Runs on |
+| --- | --- |
+| `any` (default) | every city — the behavior of every order authored before this field existed |
+| `fleet-host` | only a city whose effective role is `fleet-host` |
+| `seat` | only a city whose effective role is not `fleet-host` |
+
+An order the dispatcher skips this way is not silently dropped. It is recorded
+in the order's own tracking with the close reason `skipped:run_on`, and logged
+once per config reload rather than once per tick. The record is excluded from
+the order's last-run time, so a skip never advances the cooldown clock or
+refreshes a liveness reader: a city that stopped running an order must not look
+freshly run. Everywhere the record is shown it is shown as a skip — `gc order
+history` marks the row, the order feed reports its status as `skipped`, and
+`gc order list` grows a `RUN_ON` column when any order declares the field and
+marks the affected rows `(skipped: run_on)`.
+
+### When a role goes missing
+
+An undeclared role resolves to `seat`, which means a fleet host that loses its
+`[city] role` looks exactly like an ordinary laptop — and stops running every
+fleet-singleton order it owns. Three behaviors exist to make that fault
+visible rather than quiet:
+
+- The dispatcher skips on the *effective* role, declared or defaulted. An
+  undeclared city must not run fleet automation.
+- `gc doctor`'s stale-order check excludes `run_on`-skipped orders only when
+  the role is actually **declared** — through `[city] role` or a valid
+  `VOXIST_FLEET_ROLE`. On a merely-assumed seat those orders stay monitored, so
+  the watchdog cannot be switched off by the fault it should report.
+- The `order-run-on-role` check escalates when two things are true at once:
+  the city declares **no role at all**, and it looks like the fleet city by a
+  signal that does not depend on the role — it declares rigs, or it pins
+  `[defaults.rig.imports]`. An enabled, un-skipped `fleet-host` order on such a
+  city is a **blocking error**: that automation is running nowhere, and nothing
+  says whether it should be. Both halves are needed. Nearly every working city
+  declares rigs, so the shape alone would gate an ordinary developer seat that
+  holds a rig and installs the shared pack, which is exactly what `run_on` is
+  built to allow. Declaring the role — `fleet-host` **or** `seat` — answers the
+  question and drops the finding to advisory, where the remedy is to add the
+  orders to `[orders].skip`.
+
+An unrecognized `VOXIST_FLEET_ROLE` value is ignored, but never silently: it is
+logged once when the dispatcher resolves the role and reported by
+`order-run-on-role`.
+
 ## Disabling and skipping orders
 
 Set `enabled = false` in an order's own definition to drop it from scanning
