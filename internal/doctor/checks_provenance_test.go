@@ -78,7 +78,7 @@ func writeProvenanceManifest(t *testing.T, repo, sha string) string {
 }
 
 func newTestDeployProvenanceCheck(binary, revision string, haveRevision bool) *DeployProvenanceCheck {
-	c := NewDeployProvenanceCheck()
+	c := NewDeployProvenanceCheck("")
 	c.BinaryPath = func() (string, error) { return binary, nil }
 	c.RunningRevision = func() (string, bool) { return revision, haveRevision }
 	return c
@@ -174,12 +174,15 @@ func TestDeployProvenanceCheckPrefixRevisionMatches(t *testing.T) {
 }
 
 func TestDeployProvenanceCheckDefaults(t *testing.T) {
-	c := NewDeployProvenanceCheck()
+	c := NewDeployProvenanceCheck("abc1234def")
 	if c.Name() != "deploy-provenance" {
 		t.Errorf("Name = %q, want deploy-provenance", c.Name())
 	}
 	if c.BinaryPath == nil || c.RunningRevision == nil {
 		t.Error("NewDeployProvenanceCheck must populate default resolvers")
+	}
+	if c.LinkedRevision != "abc1234def" {
+		t.Errorf("LinkedRevision = %q, want the injected revision", c.LinkedRevision)
 	}
 	if c.LineageRef != DefaultLineageRef {
 		t.Errorf("LineageRef = %q, want %q", c.LineageRef, DefaultLineageRef)
@@ -189,6 +192,128 @@ func TestDeployProvenanceCheckDefaults(t *testing.T) {
 	}
 	if c.WarmupEligible() {
 		t.Error("WarmupEligible = true, want false")
+	}
+}
+
+// TestDeployProvenanceCheckUsesLinkedRevisionWithoutEmbeddedVCS is the
+// regression this check spent its first three months unable to fire on. This
+// repo's Makefile builds gc with -buildvcs=false — `build` (and so `install`)
+// and `artifact` both do, because the toolchain stamps an ENCLOSING
+// repository's commit when the build runs from a linked worktree (ga-u7fb) —
+// so debug.ReadBuildInfo reports no vcs.revision in any gc it produces. An
+// embedded-only resolver therefore degrades every run to "provenance not
+// asserted", and the lineage assertion this check calls its load-bearing half
+// never runs at all. The linker-injected commit is the revision those builds
+// actually carry.
+func TestDeployProvenanceCheckUsesLinkedRevisionWithoutEmbeddedVCS(t *testing.T) {
+	repo, _, head, stray := provenanceTestRepo(t)
+
+	tests := []struct {
+		name       string
+		manifestAt string
+		linked     string
+		wantStatus CheckStatus
+		wantSubstr string
+	}{
+		{
+			name:       "ancestor commit passes on the linked revision alone",
+			manifestAt: head,
+			linked:     head,
+			wantStatus: StatusOK,
+			wantSubstr: "ancestor",
+		},
+		{
+			name:       "short linked revision still matches the full manifest sha",
+			manifestAt: head,
+			linked:     head[:9],
+			wantStatus: StatusOK,
+			wantSubstr: "ancestor",
+		},
+		{
+			name:       "stray commit is still caught",
+			manifestAt: stray,
+			linked:     stray,
+			wantStatus: StatusError,
+			wantSubstr: "not an ancestor",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewDeployProvenanceCheck(tt.linked)
+			c.BinaryPath = func() (string, error) {
+				return writeProvenanceManifest(t, repo, tt.manifestAt), nil
+			}
+			// The toolchain stamped nothing — exactly what -buildvcs=false
+			// produces.
+			c.RunningRevision = func() (string, bool) { return "", false }
+
+			r := c.Run(&CheckContext{})
+			if r.Status != tt.wantStatus {
+				t.Fatalf("status = %d (%s), want %d", r.Status, r.Message, tt.wantStatus)
+			}
+			if !strings.Contains(r.Message, tt.wantSubstr) {
+				t.Errorf("message = %q, want it to contain %q", r.Message, tt.wantSubstr)
+			}
+		})
+	}
+}
+
+// TestDeployProvenanceCheckEmbeddedRevisionWins pins the precedence: a
+// toolchain stamp is derived from the repository the build actually read, so
+// it outranks a value a Makefile passed on the command line.
+func TestDeployProvenanceCheckEmbeddedRevisionWins(t *testing.T) {
+	repo, base, head, _ := provenanceTestRepo(t)
+	c := NewDeployProvenanceCheck(base)
+	c.BinaryPath = func() (string, error) { return writeProvenanceManifest(t, repo, head), nil }
+	c.RunningRevision = func() (string, bool) { return head, true }
+
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d (%s), want StatusOK", r.Status, r.Message)
+	}
+}
+
+// TestDeployProvenanceCheckNoRevisionAtAll keeps the degrade path honest: with
+// neither source available the check must still assert nothing, and must not
+// read the "unknown" placeholder cmd/gc carries when no commit was injected as
+// if it were a revision — doing so turns "not asserted" into a false
+// stale-binary error.
+func TestDeployProvenanceCheckNoRevisionAtAll(t *testing.T) {
+	repo, _, head, _ := provenanceTestRepo(t)
+	for _, linked := range []string{"", "   ", "unknown"} {
+		t.Run("linked="+linked, func(t *testing.T) {
+			c := NewDeployProvenanceCheck(linked)
+			c.BinaryPath = func() (string, error) { return writeProvenanceManifest(t, repo, head), nil }
+			c.RunningRevision = func() (string, bool) { return "", false }
+
+			r := c.Run(&CheckContext{})
+			if r.Status != StatusWarning {
+				t.Fatalf("status = %d (%s), want StatusWarning", r.Status, r.Message)
+			}
+			if !strings.Contains(r.Message, "provenance not asserted") {
+				t.Errorf("message = %q, want it to say provenance was not asserted", r.Message)
+			}
+		})
+	}
+}
+
+// TestDeployProvenanceCheckDirtyLinkedRevision covers the stamp `make build`
+// writes from a modified tree: `-X main.commit=<sha>-dirty`. The suffix is not
+// part of any git revision, so it must not be compared as one — and the
+// commit it names cannot describe the bytes either, so the result is a
+// warning rather than the green a clean build earns.
+func TestDeployProvenanceCheckDirtyLinkedRevision(t *testing.T) {
+	repo, _, head, _ := provenanceTestRepo(t)
+	c := NewDeployProvenanceCheck(head + "-dirty")
+	c.BinaryPath = func() (string, error) { return writeProvenanceManifest(t, repo, head), nil }
+	c.RunningRevision = func() (string, bool) { return "", false }
+
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d (%s), want StatusWarning for a dirty build", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "modified working tree") {
+		t.Errorf("message = %q, want it to name the modified working tree", r.Message)
 	}
 }
 
@@ -303,7 +428,7 @@ func TestBdContextProbeCheck(t *testing.T) {
 }
 
 func TestCheapChecksSubset(t *testing.T) {
-	deploy := NewDeployProvenanceCheck()
+	deploy := NewDeployProvenanceCheck("")
 	expected := NewBeadsExpectedBuildCheck("x")
 	probe := NewBdContextProbeCheck()
 	role := &BeadsRoleCheck{}

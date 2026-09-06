@@ -31,6 +31,11 @@ var (
 	// supervisor PID reaches the check without the real check probing the
 	// host for a process image.
 	newDoctorBinaryDivergenceCheck = doctor.NewBinaryDivergenceCheck
+	// newDoctorDeployProvenanceCheck is a seam so a test can assert this
+	// binary's linked commit reaches the check. Without it the check has no
+	// revision to assert against at all: every gc this repo builds is built
+	// -buildvcs=false, so the toolchain embeds none.
+	newDoctorDeployProvenanceCheck = doctor.NewDeployProvenanceCheck
 	// supervisorProbePIDHook is the tri-state supervisor liveness probe: a
 	// positive pid, 0 when the probe established that none is running, and
 	// doctor.SupervisorPIDUnknown when it could not tell. A seam so a test can
@@ -280,7 +285,13 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// `make install` wrote next to it, and that commit must be
 	// ancestor-or-equal of the source repo's lineage ref. Degrades to a
 	// warning when no manifest/repo is available on this machine.
-	register(doctor.NewDeployProvenanceCheck())
+	//
+	// `commit` is passed because it is the revision a gc built here actually
+	// carries — the Makefile builds -buildvcs=false, so there is no embedded
+	// vcs.revision for the check to read. It has already absorbed the
+	// toolchain's stamp as a fallback in resolveBuildMetadata, for the
+	// `go install` builds that do carry one.
+	register(newDoctorDeployProvenanceCheck(commit))
 	// beads.role must be set before any bd command runs; check it here so
 	// the missing-role error appears before the downstream data/Dolt checks
 	// that will all fail for the same root cause.
