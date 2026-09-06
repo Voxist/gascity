@@ -545,7 +545,11 @@ func TestPreCommitWarnsOnlyWhenNpmAbsentAndSpecNotStaged(t *testing.T) {
 func restrictedPathWithoutNpm(t *testing.T, stubs map[string]string) string {
 	t.Helper()
 	binDir := t.TempDir()
-	for _, name := range []string{"bash", "git", "xargs"} {
+	// python3 joins bash/git/xargs because .githooks/pre-commit now runs
+	// scripts/check-go-clean-cache.sh (the `go clean -cache` ban guard,
+	// AGENTS.md "Build Cache Conventions"), whose scanner is python3. It is
+	// already a hook-path dependency via check-resync-loss.sh in pre-push.
+	for _, name := range []string{"bash", "git", "xargs", "python3"} {
 		realPath, err := exec.LookPath(name)
 		if err != nil {
 			t.Fatalf("resolve real %s on test host PATH: %v", name, err)

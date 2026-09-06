@@ -119,7 +119,7 @@ endif
 endif
 endif
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-resync-loss check-routed-test-rows check-split-topology-rows check-version-tag lint lint-full lint-new lint-changed lint-affected test-affected fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-herdr-live test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-bd-cli-contract test-bd-conditional-release-contract test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard test-cover-noncmdgc-shard cover check-self-contained install install-tools install-buildx setup clean generate check-schema complexity complexity-diff complexity-check complexity-update docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-eventexport-isolation check-go-clean-cache check-gomod-replace check-core-boundary check-native-dependency-surface check-resync-loss check-routed-test-rows check-split-topology-rows check-version-tag lint lint-full lint-new lint-changed lint-affected test-affected fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-herdr-live test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-bd-cli-contract test-bd-conditional-release-contract test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard test-cover-noncmdgc-shard cover check-self-contained install install-tools install-buildx setup clean generate check-schema complexity complexity-diff complexity-check complexity-update docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
 .PHONY: check-release-dist-ignore
 
 ## build: compile gc binary with version metadata
@@ -426,7 +426,7 @@ complexity-update:
 	@./scripts/ci/complexity.sh update
 
 ## check: run fast quality gates (pre-commit: unit tests only)
-check: fmt-check lint vet check-release-dist-ignore check-routed-test-rows check-split-topology-rows check-residency-boundary test
+check: fmt-check lint vet check-release-dist-ignore check-go-clean-cache check-routed-test-rows check-split-topology-rows check-residency-boundary test
 
 ## check-release-dist-ignore: keep GoReleaser output from marking release builds dirty
 check-release-dist-ignore:
@@ -489,6 +489,23 @@ check-native-dependency-surface:
 ## check-eventexport-isolation: keep the OSS event-export surface brand-free, single-sourced, and internal-free
 check-eventexport-isolation:
 	bash scripts/check-eventexport-isolation.sh
+
+## check-go-clean-cache: keep `go clean -cache` out of the codebase (AGENTS.md "Build Cache Conventions")
+## Commit-time half of the ban only. It stops the command entering a script,
+## Makefile recipe, CI step or exec.Command; it does NOT stop anyone running it
+## (neither vp-g96b nor the 2026-09-05 recurrence was ever committed). The
+## runtime half is scripts/go-clean-cache-shim.sh, and the supported way to
+## reclaim space -- the alternative the refusal names -- is
+## scripts/trim-go-build-cache.sh, whose suite runs here too.
+## Self-tests run from here rather than from Go wrappers: a wrapper per suite
+## would add an exec.Command call site in a new _test.go file, which the P0.4
+## resource census ratchets as untagged subprocess growth. Same shape as
+## check-residency-boundary above.
+check-go-clean-cache:
+	bash scripts/test-check-go-clean-cache.sh
+	bash scripts/test-go-clean-cache-shim.sh
+	bash scripts/test-trim-go-build-cache.sh
+	bash scripts/check-go-clean-cache.sh
 
 ## check-resync-loss: detect Category-A resync merge loss (fork-added declarations silently dropped)
 ## Pass MERGE=<sha> to check a specific merge commit; defaults to HEAD. Every

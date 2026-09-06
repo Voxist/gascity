@@ -209,6 +209,8 @@ jobs:
         run: make check-eventexport-isolation
       - name: Open-core boundary guard
         run: make check-core-boundary
+      - name: Build-cache ban guard
+        run: make check-go-clean-cache
       - name: Native DoltLite beads tests
         run: make test-native-doltlite-beads
 
