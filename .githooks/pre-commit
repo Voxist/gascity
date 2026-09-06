@@ -1,6 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# `go clean -cache` guard (AGENTS.md "Build Cache Conventions"; bead vp-g96b).
+# Runs BEFORE the four-category early exit below, because the files most likely
+# to acquire the command -- a shell script, a Makefile recipe, a CI step, an
+# order -- are in none of those four categories and would otherwise be skipped
+# entirely. Cheap: it scans only the staged content, so a commit that stages
+# nothing does no work.
+#
+# This is regression prevention, not incident prevention. Nothing was committed
+# in either the 2026-06-13 (vp-g96b) or 2026-09-05 wipe; a process ran the
+# command. Enforcing that at run time needs the PATH shim
+# (scripts/go-clean-cache-shim.sh), which no hook can substitute for.
+#
+# Resolved relative to THIS FILE, not to the working directory: git runs a hook
+# with cwd at the top of whatever repo is being committed to, which is not
+# necessarily the repo the hook itself ships in (the contract tests in
+# scripts/precommit_contract_test.go drive this hook against a temp repo, and a
+# `git worktree` commit does the same thing in production).
+# Parameter expansion only -- `dirname` is not a shell builtin, and this hook
+# runs under a deliberately restricted PATH in the contract tests.
+gcc_hook_dir="${BASH_SOURCE[0]%/*}"
+[ "$gcc_hook_dir" = "${BASH_SOURCE[0]}" ] && gcc_hook_dir="."
+gcc_guard="$gcc_hook_dir/../scripts/check-go-clean-cache.sh"
+if [ ! -x "$gcc_guard" ]; then
+  echo "pre-commit: $gcc_guard is missing or not executable — refusing to commit with the build-cache ban guard disabled (AGENTS.md \"Build Cache Conventions\")" >&2
+  exit 1
+fi
+if ! "$gcc_guard" --staged; then
+  exit 1
+fi
+
 staged_go_files=$(git diff --cached --name-only --diff-filter=ACM -- '*.go' || true)
 staged_web_src=$(git diff --cached --name-only --diff-filter=ACM -- 'internal/api/dashboardspa/web/shared/src/' 'internal/api/dashboardspa/web/frontend/src/' 'internal/api/dashboardspa/web/frontend/index.html' 'internal/api/dashboardspa/web/frontend/public/' 'internal/api/dashboardspa/web/package.json' 'internal/api/dashboardspa/web/shared/package.json' 'internal/api/dashboardspa/web/frontend/package.json' 'internal/api/dashboardspa/web/frontend/vite.config.ts' 'internal/api/dashboardspa/web/frontend/tsconfig.json' 'internal/api/dashboardspa/web/shared/tsconfig.json' || true)
 staged_docs=$(git diff --cached --name-only --diff-filter=ACM -- '*.md' 'docs/**' 'engdocs/**' 'plans/**' 'specs/**' 'AGENTS.md' 'CONTRIBUTING.md' 'README.md' 'TESTING.md' || true)
