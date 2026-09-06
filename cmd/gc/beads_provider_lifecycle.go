@@ -906,6 +906,20 @@ func ensureBeadsProvider(cityPath string) error {
 			// succeeds, prefer the actual server state over the start error.
 			if managedBDProvider {
 				if healthErr := runProviderOpWithEnv(script, providerEnv, "health"); healthErr == nil {
+					// vp-9ex9z: "already live" is not enough. The ADR-0064
+					// delivery window starts a NESTED server on the same
+					// port with a raised read_timeout and publish=false,
+					// and a start that fails AFTER the window has bound
+					// that port (its lock gate refuses while the window
+					// server still owns the data dir) leaves a healthy
+					// Dolt answering the probe. Publishing it admits the
+					// swarm to the raised deadline — the 2026-09-05 leak,
+					// where 48770 served at read_timeout_millis 600000
+					// while city.toml said 30000. A window server is never
+					// publishable; report the original start failure.
+					if blockErr := deliveryWindowServerBlocksPublish(cityPath, err); blockErr != nil {
+						return blockErr
+					}
 					if err := publishManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
 						return err
 					}

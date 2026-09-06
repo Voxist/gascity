@@ -47,6 +47,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -269,6 +270,110 @@ func reportDeliveryWindowOutcome(out deliveryWindowOutcome, stderr io.Writer) {
 	default:
 		fmt.Fprintf(stderr, "gc dolt: MANAGED DOLT DELIVERY WINDOW SKIPPED: %s\n", out.Skipped) //nolint:errcheck
 	}
+}
+
+// managedDoltDeliveryWindowConfigSuffix names the window server's OWN
+// rendered config, a sibling of the published server's. vp-9ex9z: the
+// nested start used to render its raised read_timeout into the SHARED
+// layout.ConfigFile — the file the comment at the top of this file already
+// called a "config copy" but which the start path never actually copied.
+// On 2026-09-05 (city 23:00Z and 23:52Z) that left
+// .gc/runtime/packs/dolt/dolt-config.yaml holding read_timeout_millis
+// 600000 while city.toml said 30000, and the server that ended up serving
+// the swarm on 48770 was running with the 10-minute reaper deadline — the
+// exact condition this file's header calls unsafe with live traffic.
+// Separating the paths makes the leak unrepresentable: the swarm-facing
+// config is only ever written by a start whose config came from city.toml.
+const managedDoltDeliveryWindowConfigSuffix = ".window"
+
+// managedDoltDeliveryWindowConfigFile derives the window server's config
+// path from the published one, so it honors GC_DOLT_CONFIG_FILE and every
+// other layout override exactly as layout.ConfigFile does
+// (dolt-config.yaml -> dolt-config.window.yaml).
+func managedDoltDeliveryWindowConfigFile(layout managedDoltRuntimeLayout) string {
+	dir, base := filepath.Split(layout.ConfigFile)
+	ext := filepath.Ext(base)
+	return filepath.Join(dir, strings.TrimSuffix(base, ext)+managedDoltDeliveryWindowConfigSuffix+ext)
+}
+
+// deliveryWindowProcessArgsFn is the seam over the process-argv read used by
+// managedDoltDeliveryWindowServerPID, so tests can describe a live server
+// without spawning one.
+var deliveryWindowProcessArgsFn = processArgs
+
+// deliveryWindowInspectFn is the seam over the port/pid inspection, so the
+// window-server guard is testable without a live dolt on a real port.
+var deliveryWindowInspectFn = inspectManagedDoltProcess
+
+// deliveryWindowServerPIDFn is the seam ensureBeadsProvider's publish guard
+// resolves through, so the guard is testable without a live dolt.
+var deliveryWindowServerPIDFn = managedDoltDeliveryWindowServerPID
+
+// managedDoltResolvablePortFn is the seam over the managed-port lookup used
+// by the publish guard and by the dolt-listener-deadline doctor check.
+var managedDoltResolvablePortFn = currentResolvableManagedDoltPort
+
+// deliveryWindowServerBlocksPublish reports why the live server must not be
+// published, or nil when publishing is safe.
+//
+// vp-9ex9z. ensureBeadsProvider treats "the start reported an error but the
+// health probe passes" as "the server was already live, publish it". That is
+// right for a racing start and wrong for a delivery window: the window binds
+// the managed port itself, and an outer start that fails after the window has
+// bound it (the lock gate refuses while the window server still owns the data
+// dir) leaves a healthy Dolt answering the probe at the RAISED deadline. On
+// 2026-09-05 that server was published and served the swarm on 48770 at
+// read_timeout_millis 600000 while city.toml said 30000. A window server's
+// entire safety argument (ADR-0064 D1) is that the swarm is never admitted to
+// it, so it is never publishable.
+func deliveryWindowServerBlocksPublish(cityPath string, startErr error) error {
+	port := managedDoltResolvablePortFn(cityPath)
+	if port == "" {
+		return nil
+	}
+	windowPID := deliveryWindowServerPIDFn(cityPath, port)
+	if windowPID <= 0 {
+		return nil
+	}
+	return fmt.Errorf("managed dolt start failed and the server answering port %s (pid %d) is the delivery window's nested server, which must never be published (ADR-0064 D1): %w", port, windowPID, startErr)
+}
+
+// managedDoltDeliveryWindowServerPID reports the pid of a live server that
+// was started from the delivery window's own config and is currently
+// holding the managed dolt port, or 0 when the port's occupant is not a
+// window server.
+//
+// This is the guard for the SECOND half of vp-9ex9z. The window server binds
+// the same port the published server will, so once the outer start fails
+// (its lock gate refuses while the window server still owns the data dir)
+// anything that probes the port finds a healthy Dolt answering and is
+// entitled to treat it as the managed server —
+// ensureBeadsProvider's start-error recovery did exactly that and published
+// it. A window server is never a publishable server: its whole safety
+// argument (ADR-0064 D1) is that the swarm is not admitted to it.
+func managedDoltDeliveryWindowServerPID(cityPath, port string) int {
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		return 0
+	}
+	windowConfig := managedDoltDeliveryWindowConfigFile(layout)
+	info, err := deliveryWindowInspectFn(cityPath, port)
+	if err != nil {
+		return 0
+	}
+	for _, pid := range []int{info.ManagedPID, info.PortHolderPID} {
+		if pid <= 0 {
+			continue
+		}
+		args, argsErr := deliveryWindowProcessArgsFn(pid)
+		if argsErr != nil {
+			continue
+		}
+		if containsProcessConfig(args, windowConfig) {
+			return pid
+		}
+	}
+	return 0
 }
 
 // deliveryWindowOutcomeFileName is the durable AC3/AC5 record's basename,

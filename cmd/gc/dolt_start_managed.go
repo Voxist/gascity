@@ -193,6 +193,21 @@ func startManagedDoltProcessWithConfig(cityPath, host, port, user, logLevel stri
 		doltConfig = *configOverride
 	}
 
+	// vp-9ex9z. The window server renders to its OWN file. Before this
+	// split, both the nested window start and the swarm-facing start wrote
+	// layout.ConfigFile, so the window's raised read_timeout_millis
+	// (dolt_delivery_window.go, windowCfg.ReadTimeoutMillis) landed in the
+	// published server's config; when the outer start then did not re-render
+	// — its lock gate below refuses while the window server still owns the
+	// data dir — the file, and the server answering the managed port, kept
+	// the 10-minute reaper deadline with the swarm admitted. The published
+	// config path is now written only by a start whose config came from
+	// city.toml.
+	configFile := layout.ConfigFile
+	if runWindow {
+		configFile = managedDoltDeliveryWindowConfigFile(layout)
+	}
+
 	// ADR-0064 D1/D2 (vp-o52ia): arm the delivery window BEFORE the lock
 	// wait below — the nested window start does its own lock wait, drains
 	// every store to a verified zero at a raised read_timeout, stops
@@ -265,7 +280,7 @@ func startManagedDoltProcessWithConfig(cityPath, host, port, user, logLevel stri
 		if err := managedDoltPreflightCleanupFn(cityPath); err != nil {
 			return report, err
 		}
-		if err := writeManagedDoltConfigFile(layout.ConfigFile, host, strconv.Itoa(currentPort), layout.DataDir, logLevel, doltConfig); err != nil {
+		if err := writeManagedDoltConfigFile(configFile, host, strconv.Itoa(currentPort), layout.DataDir, logLevel, doltConfig); err != nil {
 			return report, err
 		}
 
@@ -279,7 +294,7 @@ func startManagedDoltProcessWithConfig(cityPath, host, port, user, logLevel stri
 			return report, fmt.Errorf("open log file: %w", err)
 		}
 
-		started, err := managedDoltStartSQLServerFn(cityPath, layout.ConfigFile, layout.LogFile, logFile)
+		started, err := managedDoltStartSQLServerFn(cityPath, configFile, layout.LogFile, logFile)
 		if err != nil {
 			_ = logFile.Close()
 			return report, err
