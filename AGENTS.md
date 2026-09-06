@@ -105,6 +105,32 @@ of these, take upstream wholesale and re-run the generator:
   `internal/testenv/testdata/*.golden`, `scripts/*baseline*`,
   `scripts/*manifest*`
 
+**Two paths on that list are NOT regenerable, and taking them wholesale
+destroys fork data. Merge them; never `--theirs` them:**
+
+- `cmd/gc/productmetrics_command_census.json` is the census generator's
+  hand-maintained **INPUT**, not its output. `cmd/gen-command-census/main.go`
+  reads it as `paths.manifest` and derives `metrics_census_gen.go`,
+  `internal/productmetrics/command_ids_gen.go` and
+  `schemas/metrics/example/result.schema.json` *from* it. Taking upstream's
+  copy deletes the fork's census commands, and regenerating afterwards does
+  **not** restore them — the generator only re-derives from whatever manifest
+  it is handed. (Observed 2026-09-06: five fork commands lost this way —
+  beads-state, config-lint, provider-quota, provider-credentials,
+  provider-rotate-key.)
+- `internal/testpolicy/resourcecensus/census.go` is **hand-written Go** —
+  package doc, imports, types, methods. It carries the attribute only to
+  suppress the diff of a large bootstrap table. Taking it wholesale reverts
+  fork ratchet rows (six, on the same merge).
+
+This is the ga-d32bn family in a new shape: **exempted-but-not-regenerable.**
+Nothing catches it. Gate 1 exempts both by attribute; Gate 2 sees no lost Go
+declaration (the manifest is JSON; the ratchet rows are struct literals inside
+an existing declaration); `go build`, `go vet` and the real suite are all blind
+to a missing census entry. The attribute answers "should GitHub collapse this
+diff", which is not the same question as "can this be regenerated" — and rule 1
+conflates them.
+
 Every path above carries the `linguist-generated` attribute in
 `.gitattributes`, which is the single enforced source of truth this list
 mirrors: `scripts/check-resync-loss.sh`'s Gate 1 exemption
