@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
+
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/orders"
 )
@@ -124,5 +126,95 @@ func TestOrderShowDisplaysRunOn(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Run on:      "+orders.RunOnFleetHost) {
 		t.Fatalf("stdout missing the run_on line:\n%s", stdout.String())
+	}
+}
+
+// `gc order history` is where doctor's hints send an operator, and it has no
+// outcome column. A skip must not read there as a run at that timestamp.
+func TestOrderHistoryMarksRunOnSkipRecords(t *testing.T) {
+	store := beads.NewMemStore()
+	st := orders.NewStore(beads.OrdersStore{Store: store})
+	if _, err := st.CreateRunSkippedRunOn("merge-sweep"); err != nil {
+		t.Fatalf("CreateRunSkippedRunOn: %v", err)
+	}
+	if _, err := st.CreateRun("local-lint", orders.RunOpts{Outcome: orders.RunOutcomeExec}); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	aa := []orders.Order{
+		{Name: "merge-sweep", Trigger: "cooldown", Interval: "5m", Exec: "s.sh", RunOn: orders.RunOnFleetHost},
+		{Name: "local-lint", Trigger: "cooldown", Interval: "1m", Exec: "l.sh"},
+	}
+	var stdout bytes.Buffer
+	if code := doOrderHistory("", "", aa, beads.OrdersStore{Store: store}, &stdout); code != 0 {
+		t.Fatalf("doOrderHistory = %d, want 0", code)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
+		switch {
+		case strings.HasPrefix(line, "merge-sweep"):
+			if !strings.Contains(line, "(skipped: run_on)") {
+				t.Errorf("skip record not marked in history:\n%s", line)
+			}
+		case strings.HasPrefix(line, "local-lint"):
+			if strings.Contains(line, "(skipped: run_on)") {
+				t.Errorf("real run wrongly marked as skipped:\n%s", line)
+			}
+		}
+	}
+}
+
+func TestOrderHistoryJSONCarriesSkippedFlag(t *testing.T) {
+	store := beads.NewMemStore()
+	st := orders.NewStore(beads.OrdersStore{Store: store})
+	if _, err := st.CreateRunSkippedRunOn("merge-sweep"); err != nil {
+		t.Fatalf("CreateRunSkippedRunOn: %v", err)
+	}
+	aa := []orders.Order{{Name: "merge-sweep", Trigger: "cooldown", Interval: "5m", Exec: "s.sh", RunOn: orders.RunOnFleetHost}}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderHistoryWithStoresResolverJSON("merge-sweep", "", aa,
+		func(orders.Order) ([]beads.OrdersStore, error) {
+			return []beads.OrdersStore{{Store: store}}, nil
+		}, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderHistory JSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	var got struct {
+		Entries []struct {
+			Order   string `json:"order"`
+			Skipped bool   `json:"skipped"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("history JSON invalid: %v\n%s", err, stdout.String())
+	}
+	if len(got.Entries) != 1 || !got.Entries[0].Skipped {
+		t.Fatalf("entries = %+v, want one entry flagged skipped", got.Entries)
+	}
+}
+
+// The marker must survive the rig-qualified table too, which is a separate
+// format string.
+func TestOrderHistoryMarksRunOnSkipRecordsForRigOrders(t *testing.T) {
+	store := beads.NewMemStore()
+	st := orders.NewStore(beads.OrdersStore{Store: store})
+	if _, err := st.CreateRunSkippedRunOn("merge-sweep:rig:demo-repo"); err != nil {
+		t.Fatalf("CreateRunSkippedRunOn: %v", err)
+	}
+	aa := []orders.Order{{
+		Name: "merge-sweep", Rig: "demo-repo", Trigger: "cooldown",
+		Interval: "5m", Exec: "s.sh", RunOn: orders.RunOnFleetHost,
+	}}
+
+	var stdout bytes.Buffer
+	if code := doOrderHistory("merge-sweep", "demo-repo", aa, beads.OrdersStore{Store: store}, &stdout); code != 0 {
+		t.Fatalf("doOrderHistory = %d, want 0", code)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "demo-repo") {
+		t.Fatalf("stdout missing the RIG column value:\n%s", out)
+	}
+	if !strings.Contains(out, "(skipped: run_on)") {
+		t.Fatalf("skip record not marked in the rig-qualified table:\n%s", out)
 	}
 }

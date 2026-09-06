@@ -1692,6 +1692,12 @@ func doOrderHistoryBounded(name, rig string, aa []orders.Order, resolveStores or
 		rig       string
 		id        string
 		createdAt time.Time
+		// skipped marks a run_on skip record. `gc order history` is the
+		// command doctor's hints send an operator to, and it has no outcome
+		// column, so without this a deliberate skip reads as a completed run
+		// at that timestamp — the exact confusion the skip record exists to
+		// prevent.
+		skipped bool
 	}
 	var entries []historyEntry
 	seenEntries := make(map[string]bool)
@@ -1731,6 +1737,7 @@ func doOrderHistoryBounded(name, rig string, aa []orders.Order, resolveStores or
 					rig:       a.Rig,
 					id:        r.ID,
 					createdAt: r.CreatedAt,
+					skipped:   r.SkippedRunOn,
 				})
 			}
 		}
@@ -1782,6 +1789,7 @@ func doOrderHistoryBounded(name, rig string, aa []orders.Order, resolveStores or
 				BeadID:    e.id,
 				Executed:  e.createdAt.Format(time.RFC3339),
 				CreatedAt: e.createdAt,
+				Skipped:   e.skipped,
 			})
 		}
 		return writeCLIJSONLineOrExit(stdout, stderr, "gc order history", payload)
@@ -1802,15 +1810,26 @@ func doOrderHistoryBounded(name, rig string, aa []orders.Order, resolveStores or
 			if rig == "" {
 				rig = "-"
 			}
-			fmt.Fprintf(stdout, "%-20s %-15s %-15s %s\n", e.order, rig, e.id, e.createdAt.Format(time.RFC3339)) //nolint:errcheck
+			fmt.Fprintf(stdout, "%-20s %-15s %-15s %s\n", e.order, rig, e.id, orderHistoryExecuted(e.createdAt, e.skipped)) //nolint:errcheck
 		}
 	} else {
 		fmt.Fprintf(stdout, "%-20s %-15s %s\n", "ORDER", "BEAD", "EXECUTED") //nolint:errcheck
 		for _, e := range entries {
-			fmt.Fprintf(stdout, "%-20s %-15s %s\n", e.order, e.id, e.createdAt.Format(time.RFC3339)) //nolint:errcheck
+			fmt.Fprintf(stdout, "%-20s %-15s %s\n", e.order, e.id, orderHistoryExecuted(e.createdAt, e.skipped)) //nolint:errcheck
 		}
 	}
 	return 0
+}
+
+// orderHistoryExecuted renders a history row's timestamp, marking a run_on skip
+// record so it cannot be read as a run at that time. The marker matches the one
+// `gc order list` puts on a skipped row.
+func orderHistoryExecuted(at time.Time, skipped bool) string {
+	stamp := at.Format(time.RFC3339)
+	if skipped {
+		return stamp + "  (skipped: run_on)"
+	}
+	return stamp
 }
 
 type orderHistoryJSONResult struct {
@@ -1828,6 +1847,8 @@ type orderHistoryJSONEntry struct {
 	BeadID    string    `json:"bead_id"`
 	Executed  string    `json:"executed"`
 	CreatedAt time.Time `json:"created_at"`
+	// Skipped marks a run_on skip record rather than a run. Absent means a run.
+	Skipped bool `json:"skipped,omitempty"`
 }
 
 type orderHistoryJSONSummary struct {

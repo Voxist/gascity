@@ -321,12 +321,13 @@ The three `run_on` values:
 
 An order the dispatcher skips this way is not silently dropped. It is recorded
 in the order's own tracking with the close reason `skipped:run_on`, and logged
-once per config reload rather than once per tick. The skip record is visible in
-`gc order history` but is excluded from the order's last-run time, so a skip
-never advances the cooldown clock or refreshes a liveness reader: a city that
-stopped running an order must not look freshly run. `gc order list` grows a
-`RUN_ON` column when any order declares the field and marks the affected rows
-`(skipped: run_on)`.
+once per config reload rather than once per tick. The record is excluded from
+the order's last-run time, so a skip never advances the cooldown clock or
+refreshes a liveness reader: a city that stopped running an order must not look
+freshly run. Everywhere the record is shown it is shown as a skip — `gc order
+history` marks the row, the order feed reports its status as `skipped`, and
+`gc order list` grows a `RUN_ON` column when any order declares the field and
+marks the affected rows `(skipped: run_on)`.
 
 ### When a role goes missing
 
