@@ -8,13 +8,16 @@ import (
 )
 
 // TestCheckResyncLoss runs the shell self-test for
-// scripts/check-resync-loss.sh, the Category-A resync merge-loss gate
-// (ga-d32bn; AGENTS.md "Resync conventions" rule 5). It exercises the
+// scripts/check-resync-loss.sh, the resync merge-loss gate (ga-d32bn and
+// ga-8gpw4; AGENTS.md "Resync conventions" rules 5 and 6). It exercises the
 // historical 2026-08-31 resync merge, synthetic-repo fixtures for
 // DROPPED-FILE / the identical-change skip / conflict-hunk stripping /
-// (name, file) keying, and .githooks/pre-push wiring end to end against a
-// real bare remote. Hermetic: temp git repos and this repo's own
-// already-fetched history only, no network/gh/model calls.
+// (name, file) keying, the matched-pair fixtures that prove each gate goes
+// red on exactly one dropped declaration and green again when it is
+// restored (ga-qq43h), and .githooks/pre-push wiring end to end against a
+// real bare remote — in both the fork and the upstream direction.
+// Hermetic: temp git repos and this repo's own already-fetched history
+// only, no network/gh/model calls.
 func TestCheckResyncLoss(t *testing.T) {
 	root := repoRoot(t)
 
