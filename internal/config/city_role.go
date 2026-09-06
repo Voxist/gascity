@@ -124,9 +124,16 @@ func FleetRoleDeclaredFromEnv(cfg *City) bool {
 // ordinary seat — but not by this: a city that fans work out to rigs or pins
 // what every rig imports is running fleet automation whatever its role says.
 //
-// A seat that legitimately declares rigs and installs fleet-host orders will
-// match too. That is intended, and its remedy is the durable one: put those
-// orders in [orders].skip so they stop being scanned at all.
+// The signal is deliberately broad — nearly every working city declares rigs —
+// so it is NEVER sufficient on its own. Its only consumer pairs it with
+// "the city states no role" (see FleetRoleDeclared), because a seat that
+// declares rigs and installs a shared pack is the normal case run_on is built
+// to serve, not a fault. Read together the pair means "fleet-shaped, and nobody
+// ever said what this city is".
+//
+// It reads the AUTHORED [defaults.rig.imports] table, not the runtime-only
+// DefaultRigImports that compose populates from the root pack, so the rigs
+// clause is what matches in practice on template-generated cities.
 func LooksLikeFleetCity(cfg *City) bool {
 	if cfg == nil {
 		return false

@@ -249,9 +249,9 @@ func TestOrderFiringCurrent_UnknownEnvRoleDoesNotCountAsDeclared(t *testing.T) {
 
 // --- the second signal: a city that is evidently the fleet city ---
 
-// A city that declares rigs is running fleet automation. If its role is not
-// fleet-host, its fleet-singleton orders dispatch NOWHERE, which is an outage
-// and must gate — not read as the benign seat case.
+// A city that declares rigs is running fleet automation. With NO role declared
+// anywhere, its fleet-singleton orders dispatch nowhere on an assumption, which
+// is an outage and must gate — not read as the benign seat case.
 func TestOrderRunOnRole_FleetCityByRigsIsBlockingError(t *testing.T) {
 	cityPath, cfg := orderFiringTestCity(t)
 	cfg.Rigs = []config.Rig{{Name: "alpha", Path: filepath.Join(cityPath, "rigs", "alpha")}}
@@ -269,8 +269,9 @@ func TestOrderRunOnRole_FleetCityByRigsIsBlockingError(t *testing.T) {
 	}
 }
 
-// The default-rig import pin is the other half of the same signal, and matches
-// the rule the pack half applies.
+// The authored [defaults.rig.imports] pin is the other half of the same signal,
+// and matches the rule the pack half applies. (It is the authored table, not
+// the runtime-only DefaultRigImports compose populates from the root pack.)
 func TestOrderRunOnRole_FleetCityByDefaultRigImportsIsBlockingError(t *testing.T) {
 	cityPath, cfg := orderFiringTestCity(t)
 	cfg.Defaults = config.PackDefaults{Rig: config.PackRigDefaults{
@@ -284,20 +285,68 @@ func TestOrderRunOnRole_FleetCityByDefaultRigImportsIsBlockingError(t *testing.T
 	}
 }
 
-// Declaring role = "seat" does NOT clear the error on a fleet city: the orders
-// still dispatch nowhere. The remedy is the skip list, and the hint says so.
-func TestOrderRunOnRole_FleetCityDeclaringSeatStillErrors(t *testing.T) {
+// A seat that declares its role is the NORMAL case run_on is built to serve: a
+// developer city holding a rig, installing the shared pack, whose fleet-host
+// orders are correctly inert. Nearly every working city declares rigs, so
+// escalating on the fleet shape alone would gate all of them and invert the
+// feature. A declared role — even "seat" — means nothing is silently stopped,
+// so this stays advisory.
+func TestOrderRunOnRole_FleetShapedCityDeclaringSeatIsAdvisory(t *testing.T) {
 	cityPath, cfg := orderFiringTestCity(t)
 	cfg.Rigs = []config.Rig{{Name: "alpha", Path: filepath.Join(cityPath, "rigs", "alpha")}}
 	cfg.CityRole = config.CityRoleConfig{Role: orders.RoleSeat}
 	writeRunOnTestOrder(t, cityPath, "merge-sweep", orders.RunOnFleetHost)
 
 	result := NewOrderRunOnRoleCheck(cfg, cityPath, WithOrderRunOnRoleEnv("")).Run(&CheckContext{CityPath: cityPath})
-	if result.Status != StatusError {
-		t.Fatalf("status = %v, want Error; msg = %s", result.Status, result.Message)
+	if result.Status != StatusWarning {
+		t.Fatalf("status = %v, want Warning for a DECLARED seat; msg = %s", result.Status, result.Message)
+	}
+	if result.Severity != SeverityAdvisory {
+		t.Fatalf("severity = %v, want advisory — a declared seat must not gate", result.Severity)
 	}
 	if !strings.Contains(result.FixHint, "[orders].skip") {
 		t.Errorf("fix hint = %q, want the skip-list remedy", result.FixHint)
+	}
+}
+
+// The env var is a declaration too: a seat declared only through
+// VOXIST_FLEET_ROLE must not gate either.
+func TestOrderRunOnRole_FleetShapedCityWithEnvSeatIsAdvisory(t *testing.T) {
+	cityPath, cfg := orderFiringTestCity(t)
+	cfg.Rigs = []config.Rig{{Name: "alpha", Path: filepath.Join(cityPath, "rigs", "alpha")}}
+	writeRunOnTestOrder(t, cityPath, "merge-sweep", orders.RunOnFleetHost)
+
+	result := NewOrderRunOnRoleCheck(cfg, cityPath, WithOrderRunOnRoleEnv(orders.RoleSeat)).Run(&CheckContext{CityPath: cityPath})
+	if result.Status != StatusWarning || result.Severity != SeverityAdvisory {
+		t.Fatalf("status/severity = %v/%v, want Warning/Advisory; msg = %s", result.Status, result.Severity, result.Message)
+	}
+}
+
+// The mirror of the test above, and the case the escalation exists for: the
+// SAME fleet-shaped city with no role declared anywhere gates.
+func TestOrderRunOnRole_FleetShapedCityWithNoRoleDeclaredErrors(t *testing.T) {
+	cityPath, cfg := orderFiringTestCity(t)
+	cfg.Rigs = []config.Rig{{Name: "alpha", Path: filepath.Join(cityPath, "rigs", "alpha")}}
+	writeRunOnTestOrder(t, cityPath, "merge-sweep", orders.RunOnFleetHost)
+
+	result := NewOrderRunOnRoleCheck(cfg, cityPath, WithOrderRunOnRoleEnv("")).Run(&CheckContext{CityPath: cityPath})
+	if result.Status != StatusError || result.Severity != SeverityBlocking {
+		t.Fatalf("status/severity = %v/%v, want Error/Blocking; msg = %s", result.Status, result.Severity, result.Message)
+	}
+	if !strings.Contains(result.Message, "no [city] role is declared") {
+		t.Errorf("message = %q, want it to name the missing declaration as the cause", result.Message)
+	}
+}
+
+// A typo'd env value states nothing, so it must not downgrade the escalation.
+func TestOrderRunOnRole_FleetShapedCityWithUnknownEnvStillErrors(t *testing.T) {
+	cityPath, cfg := orderFiringTestCity(t)
+	cfg.Rigs = []config.Rig{{Name: "alpha", Path: filepath.Join(cityPath, "rigs", "alpha")}}
+	writeRunOnTestOrder(t, cityPath, "merge-sweep", orders.RunOnFleetHost)
+
+	result := NewOrderRunOnRoleCheck(cfg, cityPath, WithOrderRunOnRoleEnv("fleet")).Run(&CheckContext{CityPath: cityPath})
+	if result.Status != StatusError {
+		t.Fatalf("status = %v, want Error for an unreadable role declaration; msg = %s", result.Status, result.Message)
 	}
 }
 
@@ -334,6 +383,7 @@ func TestOrderRunOnRole_SeatAndFleetCityMessagesDiffer(t *testing.T) {
 	writeRunOnTestOrder(t, seatPath, "merge-sweep", orders.RunOnFleetHost)
 	seat := NewOrderRunOnRoleCheck(seatCfg, seatPath, WithOrderRunOnRoleEnv("")).Run(&CheckContext{CityPath: seatPath})
 
+	// Fleet-shaped AND role-less: the escalating case.
 	fleetPath, fleetCfg := orderFiringTestCity(t)
 	fleetCfg.Rigs = []config.Rig{{Name: "alpha", Path: filepath.Join(fleetPath, "rigs", "alpha")}}
 	writeRunOnTestOrder(t, fleetPath, "merge-sweep", orders.RunOnFleetHost)

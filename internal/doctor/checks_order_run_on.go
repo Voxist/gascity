@@ -29,14 +29,23 @@ const (
 // one place, and the durable fix is to put them in [orders].skip so they stop
 // being scanned at all.
 //
-// On a city that LOOKS LIKE THE FLEET CITY by a signal independent of the role
-// — it declares rigs, or it pins default-rig imports — the same finding is an
-// ERROR, and that distinction is the point of this check. The role cannot
-// detect its own absence: a fleet host whose `[city] role` declaration is lost
-// resolves to seat by default and starts skipping every fleet-singleton order,
-// which by role alone is byte-identical to a healthy seat. The second signal is
-// what tells those two apart, so this check reports the outage rather than
-// describing it in the same words it uses for the benign case.
+// It escalates to an ERROR in exactly one situation: the city states NO role at
+// all, and it looks like the fleet city by a signal independent of the role —
+// it declares rigs, or it pins default-rig imports. That pair is the silent
+// stop this check exists for. A fleet host whose `[city] role` declaration is
+// lost resolves to seat by default and starts skipping every fleet-singleton
+// order it owns; by role alone that is byte-identical to a healthy seat, so
+// only a second signal can tell them apart.
+//
+// Both halves are required, and the role-declared half is what keeps the check
+// honest. Nearly every working city declares rigs, so the fleet-shape signal
+// alone would escalate an ordinary seat that holds one rig and installs a
+// shared pack — inverting the whole point of run_on, which exists so a pack CAN
+// ship fleet-singleton orders everywhere. A city that says `[city] role =
+// "seat"` has answered the question; there is nothing silent left to report, so
+// it takes the advisory branch however fleet-shaped it looks. The discriminator
+// is the same one checks_order_firing.go uses to decide whether to trust the
+// role at all.
 type OrderRunOnRoleCheck struct {
 	cfg      *config.City
 	cityPath string
@@ -133,21 +142,24 @@ func (c *OrderRunOnRoleCheck) Run(ctx *CheckContext) *CheckResult {
 	result.Details = append(result.Details, fleetHostOnly...)
 	named := summarizeOrderNames(fleetHostOnly, orderRunOnRoleDetailLimit)
 
-	if config.LooksLikeFleetCity(c.cfg) {
+	// Escalate ONLY when the city states no role AND looks like the fleet city.
+	// Declaring a role — even "seat" — takes the advisory branch below: the
+	// operator has answered the question, so nothing is silently stopped.
+	if !config.FleetRoleDeclared(c.cfg, c.envValue()) && config.LooksLikeFleetCity(c.cfg) {
 		// The city fans work out to rigs or pins what every rig imports, so it
-		// is running fleet automation — but its role does not say fleet-host,
-		// so the dispatcher is skipping every fleet-singleton order it holds.
-		// Either the role declaration was lost (an outage: nothing is running
-		// this automation anywhere) or these orders do not belong here. Both
-		// need a human, so this gates.
+		// is running fleet automation — and nothing anywhere says what role it
+		// holds, so the dispatcher is skipping every fleet-singleton order it
+		// owns on an assumption. Either the role declaration was lost (an
+		// outage: this automation is running nowhere) or the city never made
+		// the choice. Both need a human, so this gates.
 		result.Status = StatusError
 		result.Severity = SeverityBlocking
 		result.Message = fmt.Sprintf(
-			"this city declares rigs or default-rig imports, so it runs fleet automation, but its role is %s: %d fleet-host order(s) are enabled here and dispatch nowhere: %s",
+			"this city declares rigs or default-rig imports, so it runs fleet automation, but no [city] role is declared and it defaults to %s: %d fleet-host order(s) are enabled here and dispatch nowhere: %s",
 			role, len(fleetHostOnly), named)
 		result.FixHint = fmt.Sprintf(
-			"set [city] role = %q in city.toml (or export %s=%s) if this is the fleet host — otherwise add these orders to [orders].skip so they stop being scanned here",
-			orders.RoleFleetHost, config.FleetRoleEnvVar, orders.RoleFleetHost)
+			"declare the role: set [city] role = %q in city.toml (or export %s=%s) if this is the fleet host, or role = %q if it is not — a declared seat also wants these orders in [orders].skip so they stop being scanned here",
+			orders.RoleFleetHost, config.FleetRoleEnvVar, orders.RoleFleetHost, orders.RoleSeat)
 		return result
 	}
 

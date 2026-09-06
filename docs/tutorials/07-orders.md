@@ -342,12 +342,17 @@ visible rather than quiet:
   the role is actually **declared** — through `[city] role` or a valid
   `VOXIST_FLEET_ROLE`. On a merely-assumed seat those orders stay monitored, so
   the watchdog cannot be switched off by the fault it should report.
-- The `order-run-on-role` check reads a second signal that does not depend on
-  the role at all: a city that declares rigs or pins `[defaults.rig.imports]`
-  is running fleet automation. On such a city an enabled, un-skipped
-  `fleet-host` order with a non-`fleet-host` role is a **blocking error** —
-  that automation is running nowhere. On an ordinary seat the same finding is
-  advisory, and the fix is to add the orders to `[orders].skip`.
+- The `order-run-on-role` check escalates when two things are true at once:
+  the city declares **no role at all**, and it looks like the fleet city by a
+  signal that does not depend on the role — it declares rigs, or it pins
+  `[defaults.rig.imports]`. An enabled, un-skipped `fleet-host` order on such a
+  city is a **blocking error**: that automation is running nowhere, and nothing
+  says whether it should be. Both halves are needed. Nearly every working city
+  declares rigs, so the shape alone would gate an ordinary developer seat that
+  holds a rig and installs the shared pack, which is exactly what `run_on` is
+  built to allow. Declaring the role — `fleet-host` **or** `seat` — answers the
+  question and drops the finding to advisory, where the remedy is to add the
+  orders to `[orders].skip`.
 
 An unrecognized `VOXIST_FLEET_ROLE` value is ignored, but never silently: it is
 logged once when the dispatcher resolves the role and reported by
