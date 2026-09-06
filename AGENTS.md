@@ -487,20 +487,63 @@ full rebuild, and any that calls `go clean -cache` mid-flight invalidates all
 the others' in-progress caches. The incident (vp-g96b, 2026-06-13) produced
 ~10 cascading cache-miss errors across the executor pool.
 
-**Just run `go build` / `make` — do NOT set `GOCACHE` yourself.** The host `go`
-shim already routes the default `GOCACHE` to a shared **on-disk** cache
-(`~/.cache/go-build`) and pins compile/link temp to disk
-(`GOTMPDIR=/var/tmp/gotmp`). A warm shared cache is faster and is never
-corrupted by a normal build.
+**Just run `go build` / `make` — do NOT set `GOCACHE` yourself.** A warm shared
+cache is faster and is never corrupted by a normal build. **How the sharing is
+arranged differs by host, so verify before reasoning from either description:**
 
-**Never point `GOCACHE` (or `TMPDIR`) at `/tmp`.** `/tmp` is a size-capped
-RAM-backed tmpfs (61G) shared by the whole fleet — including the harness's
-tool-output capture dir. A bare `mktemp -d` (no `-p` dir) resolves against the
-unset `$TMPDIR`, which defaults to `/tmp` — one cold cache built there is
-2-3GB, and a concurrent build wave fills tmpfs and ENOSPCs every agent
-on the host (incident gm-tkz1r / ga-x9k9b9, 2026-07). The shim deliberately
-does **not** relocate a `GOCACHE` you set explicitly, so an explicit `/tmp` path
-defeats it.
+- **Linux fleet host** (`/data/projects/gascity`): a host `go` shim routes the
+  default `GOCACHE` to a shared on-disk cache (`~/.cache/go-build`) and pins
+  compile/link temp to disk (`GOTMPDIR=/var/tmp/gotmp`). *Inherited from the
+  original authoring of this section; not re-verified from a macOS host.*
+- **macOS host** (`/Users/Shared/Github/gascity`): `GOTMPDIR` is **unset**, and
+  nothing routes `GOCACHE`. Sharing comes from configuration instead: every
+  `GOCACHE` entry in `voxist-city/city.toml` (14 as of this writing) points
+  every agent at
+  `~/Library/Caches/go-build`. *Verified on this host, 2026-09-05.*
+
+  There **is** a `go` shim at `~/bin/go`, but it does not touch `GOCACHE` — it
+  exists only to enforce the ban above. Installed 2026-09-05 after a second
+  `go clean -cache` incident, it sits ahead of `/opt/homebrew/bin` on both the
+  operator's PATH and the supervisor's, so it intercepts fleet agents as well as
+  interactive shells. It refuses `go clean -cache` / `--cache` — including
+  combined with other flags and behind `go -C dir` — and `exec`s everything else
+  through to `/opt/homebrew/bin/go` untouched. `go clean -testcache`,
+  `-modcache`, `-fuzzcache` and a bare `go clean` are explicitly **not**
+  blocked. It also refuses the flag when it arrives via the `GOFLAGS`
+  environment variable. Deliberate override:
+  `GC_ALLOW_GO_CLEAN_CACHE=1 go clean -cache`, which is never silent.
+  Uninstall: `scripts/install-go-clean-cache-shim.sh --dir ~/bin --uninstall`,
+  or `rm -f ~/bin/go`.
+
+  Known gaps, stated because a guard that overstates its reach is worse than
+  one that admits its edges: it does **not** cover an absolute-path invocation
+  (`/opt/homebrew/bin/go clean -cache`), an IDE with a pinned SDK path, root,
+  or `go env -w GOFLAGS=-cache` — which cmd/go reads from its own config file
+  rather than the environment, so the shim never sees it (bead `ga-mzx61`).
+  Layer 1, the repo scanner, catches the command entering the codebase and
+  would not have prevented either incident, since nothing was committed on
+  either occasion.
+  Source and rationale: `engdocs/contributors/go-clean-cache-guard.md`.
+
+The rules below hold on both, for the same underlying reason — one cache,
+many concurrent writers — regardless of which mechanism puts them there.
+
+**Never point `GOCACHE` (or `TMPDIR`) at `/tmp`.** On the Linux fleet host
+`/tmp` is a size-capped RAM-backed tmpfs (61G) shared by the whole fleet,
+including the harness's tool-output capture dir: one cold cache built there is
+2-3GB, and a concurrent build wave fills tmpfs and ENOSPCs every agent on the
+host (incident gm-tkz1r / ga-x9k9b9, 2026-07). A bare `mktemp -d` (no `-p` dir)
+resolves against the unset `$TMPDIR`, which defaults to `/tmp`. Where the shim
+exists it deliberately does **not** relocate a `GOCACHE` you set explicitly, so
+an explicit `/tmp` path defeats it. (On macOS `/private/tmp` is disk-backed,
+not tmpfs, so the ENOSPC mechanism does not apply — but `/tmp` is still the
+wrong place for a build cache and the rule stands unchanged.)
+
+**Cache growth is not self-limiting.** Go imposes no size cap — only a fixed
+5-day trim applied opportunistically — and with the fleet building
+continuously the cache outgrows that sweep. It reached 463GB on the macOS host
+before a 3-day trim recovered 175GiB. Do not solve this with `go clean -cache`
+(see the hard ban above); the maintained trim job is the supported route.
 
 **If you truly need an isolated cold build** (a from-scratch compile without
 `go clean -cache`), put the throwaway cache **on disk** and remove it
