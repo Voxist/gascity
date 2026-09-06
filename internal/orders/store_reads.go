@@ -397,30 +397,75 @@ func (s *Store) LastRun(name string) (time.Time, error) {
 	label := labelOrderRunPrefix + name
 	var latest time.Time
 	for _, store := range s.mixedLegStores() {
-		results, err := store.List(beads.ListQuery{
-			Label:         label,
-			Limit:         1,
-			IncludeClosed: true,
-			Sort:          beads.SortCreatedDesc,
-			TierMode:      beads.TierBoth,
-			// Aggregate read: reduces to max(CreatedAt), so the backing tie-break
-			// at the boundary is irrelevant. Opt into the bounded backing limit.
-			AllowBackingCreatedLimit: true,
-		})
+		newest, err := lastRealRunForLeg(store, label, name)
 		if err != nil {
-			if len(results) == 0 {
-				return time.Time{}, err
-			}
-			runtimeHelpersLogf("orders: last-run lookup partially failed for %s: %v", name, err)
+			return time.Time{}, err
 		}
-		if len(results) == 0 {
-			continue
-		}
-		if results[0].CreatedAt.After(latest) {
-			latest = results[0].CreatedAt
+		if newest.After(latest) {
+			latest = newest
 		}
 	}
 	return latest, nil
+}
+
+// lastRunSkipWindow bounds the widened re-read taken only when the newest row
+// for an order is a run_on skip record. It is a window, not a full scan: skips
+// are written once per dispatcher generation (once per config reload), so the
+// run of skip records sitting above the last real run is bounded by how many
+// times the controller reloaded since the role changed. If every row inside
+// the window is a skip, LastRun reports the zero time — "no real run found" —
+// which pushes a liveness reader toward reporting staleness rather than away
+// from it. That is the correct direction to fail for a watchdog: the whole
+// point of excluding these rows is that a city which stopped running an order
+// must not look freshly-run.
+const lastRunSkipWindow = 64
+
+// lastRealRunForLeg returns the newest CreatedAt for label on one store leg,
+// ignoring run_on skip records.
+//
+// The hot path is unchanged: one row, bounded, exactly the read this was before
+// skip records existed. The widened re-read happens only when that one row IS a
+// skip, which is only true on a city that is currently skipping the order.
+func lastRealRunForLeg(store beads.Store, label, name string) (time.Time, error) {
+	query := beads.ListQuery{
+		Label:         label,
+		Limit:         1,
+		IncludeClosed: true,
+		Sort:          beads.SortCreatedDesc,
+		TierMode:      beads.TierBoth,
+		// Aggregate read: reduces to max(CreatedAt), so the backing tie-break
+		// at the boundary is irrelevant. Opt into the bounded backing limit.
+		AllowBackingCreatedLimit: true,
+	}
+	results, err := store.List(query)
+	if err != nil {
+		if len(results) == 0 {
+			return time.Time{}, err
+		}
+		runtimeHelpersLogf("orders: last-run lookup partially failed for %s: %v", name, err)
+	}
+	if len(results) == 0 {
+		return time.Time{}, nil
+	}
+	if !IsRunOnSkipBead(results[0]) {
+		return results[0].CreatedAt, nil
+	}
+
+	query.Limit = lastRunSkipWindow
+	widened, err := store.List(query)
+	if err != nil {
+		if len(widened) == 0 {
+			return time.Time{}, err
+		}
+		runtimeHelpersLogf("orders: last-run lookup partially failed for %s: %v", name, err)
+	}
+	for _, b := range widened {
+		if IsRunOnSkipBead(b) {
+			continue
+		}
+		return b.CreatedAt, nil
+	}
+	return time.Time{}, nil
 }
 
 // Cursor reports the max event seq (the order's event-bus high-water mark) for

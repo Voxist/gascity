@@ -321,13 +321,36 @@ The three `run_on` values:
 
 An order the dispatcher skips this way is not silently dropped. It is recorded
 in the order's own tracking with the close reason `skipped:run_on`, and logged
-once per config reload rather than once per tick. `gc order list` grows a
+once per config reload rather than once per tick. The skip record is visible in
+`gc order history` but is excluded from the order's last-run time, so a skip
+never advances the cooldown clock or refreshes a liveness reader: a city that
+stopped running an order must not look freshly run. `gc order list` grows a
 `RUN_ON` column when any order declares the field and marks the affected rows
-`(skipped: run_on)`. `gc doctor` leaves such orders out of its stale-order check
-— they are skipped by design — and its `order-run-on-role` check warns when a
-city that is not the fleet host still has enabled, un-skipped `fleet-host`
-orders, which is either a role that was never declared or a pack whose orders
-belong in `[orders].skip`.
+`(skipped: run_on)`.
+
+### When a role goes missing
+
+An undeclared role resolves to `seat`, which means a fleet host that loses its
+`[city] role` looks exactly like an ordinary laptop — and stops running every
+fleet-singleton order it owns. Three behaviors exist to make that fault
+visible rather than quiet:
+
+- The dispatcher skips on the *effective* role, declared or defaulted. An
+  undeclared city must not run fleet automation.
+- `gc doctor`'s stale-order check excludes `run_on`-skipped orders only when
+  the role is actually **declared** — through `[city] role` or a valid
+  `VOXIST_FLEET_ROLE`. On a merely-assumed seat those orders stay monitored, so
+  the watchdog cannot be switched off by the fault it should report.
+- The `order-run-on-role` check reads a second signal that does not depend on
+  the role at all: a city that declares rigs or pins `[defaults.rig.imports]`
+  is running fleet automation. On such a city an enabled, un-skipped
+  `fleet-host` order with a non-`fleet-host` role is a **blocking error** —
+  that automation is running nowhere. On an ordinary seat the same finding is
+  advisory, and the fix is to add the orders to `[orders].skip`.
+
+An unrecognized `VOXIST_FLEET_ROLE` value is ignored, but never silently: it is
+logged once when the dispatcher resolves the role and reported by
+`order-run-on-role`.
 
 ## Disabling and skipping orders
 

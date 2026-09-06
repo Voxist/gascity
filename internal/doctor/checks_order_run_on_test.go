@@ -152,12 +152,14 @@ func TestSummarizeOrderNames(t *testing.T) {
 	}
 }
 
-// order-firing-current must not report a fleet-host order on a seat as stale:
-// the dispatcher skips it on purpose, so it has no firing history by design.
+// order-firing-current must not report a fleet-host order on a DECLARED seat as
+// stale: the dispatcher skips it on purpose, so it has no firing history by
+// design.
 func TestOrderFiringCurrent_SkipsOrdersExcludedByRunOn(t *testing.T) {
 	t.Setenv(config.FleetRoleEnvVar, "")
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	cityPath, cfg := orderFiringTestCity(t)
+	cfg.CityRole = config.CityRoleConfig{Role: orders.RoleSeat}
 	writeRunOnTestOrder(t, cityPath, "merge-sweep", orders.RunOnFleetHost)
 	writeOrderFiringTestEvents(t, cityPath,
 		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
@@ -187,5 +189,176 @@ func TestOrderFiringCurrent_MonitorsFleetHostOrdersOnTheHost(t *testing.T) {
 	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
 	if !strings.Contains(strings.Join(append(result.Details, result.Message), "\n"), "merge-sweep") {
 		t.Fatalf("result = %s / %v, want merge-sweep monitored on the fleet host", result.Message, result.Details)
+	}
+}
+
+// The exclusion is gated on the role being DECLARED. A fleet host that loses
+// its role declaration defaults to seat and stops dispatching its fleet-host
+// orders; if the defaulted role also excluded them from the staleness check,
+// the watchdog would be switched off by the very fault it exists to report.
+func TestOrderFiringCurrent_UndeclaredRoleStillMonitorsFleetHostOrders(t *testing.T) {
+	t.Setenv(config.FleetRoleEnvVar, "")
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeRunOnTestOrder(t, cityPath, "merge-sweep", orders.RunOnFleetHost)
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "merge-sweep", Ts: now.Add(-24 * time.Hour)},
+	)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if !strings.Contains(strings.Join(append(result.Details, result.Message), "\n"), "merge-sweep") {
+		t.Fatalf("result = %s / %v; an undeclared role must not exempt fleet-host orders from staleness", result.Message, result.Details)
+	}
+}
+
+// A role declared through the environment is a declaration too, so it does
+// quiet the check — the fleet already exports VOXIST_FLEET_ROLE.
+func TestOrderFiringCurrent_EnvDeclaredSeatExcludesFleetHostOrders(t *testing.T) {
+	t.Setenv(config.FleetRoleEnvVar, orders.RoleSeat)
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeRunOnTestOrder(t, cityPath, "merge-sweep", orders.RunOnFleetHost)
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+	)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if strings.Contains(strings.Join(append(result.Details, result.Message), "\n"), "merge-sweep") {
+		t.Fatalf("result = %s / %v; a declared seat should exempt the order", result.Message, result.Details)
+	}
+}
+
+// An unrecognized environment value states nothing, so it must not count as a
+// declaration — a typo must not disarm the staleness check.
+func TestOrderFiringCurrent_UnknownEnvRoleDoesNotCountAsDeclared(t *testing.T) {
+	t.Setenv(config.FleetRoleEnvVar, "fleet")
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeRunOnTestOrder(t, cityPath, "merge-sweep", orders.RunOnFleetHost)
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-24 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "merge-sweep", Ts: now.Add(-24 * time.Hour)},
+	)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if !strings.Contains(strings.Join(append(result.Details, result.Message), "\n"), "merge-sweep") {
+		t.Fatalf("result = %s / %v; an unknown env value must not exempt the order", result.Message, result.Details)
+	}
+}
+
+// --- the second signal: a city that is evidently the fleet city ---
+
+// A city that declares rigs is running fleet automation. If its role is not
+// fleet-host, its fleet-singleton orders dispatch NOWHERE, which is an outage
+// and must gate — not read as the benign seat case.
+func TestOrderRunOnRole_FleetCityByRigsIsBlockingError(t *testing.T) {
+	cityPath, cfg := orderFiringTestCity(t)
+	cfg.Rigs = []config.Rig{{Name: "alpha", Path: filepath.Join(cityPath, "rigs", "alpha")}}
+	writeRunOnTestOrder(t, cityPath, "merge-sweep", orders.RunOnFleetHost)
+
+	result := NewOrderRunOnRoleCheck(cfg, cityPath, WithOrderRunOnRoleEnv("")).Run(&CheckContext{CityPath: cityPath})
+	if result.Status != StatusError {
+		t.Fatalf("status = %v, want Error for a role-less fleet city; msg = %s", result.Status, result.Message)
+	}
+	if result.Severity != SeverityBlocking {
+		t.Fatalf("severity = %v, want blocking", result.Severity)
+	}
+	if !strings.Contains(result.Message, "merge-sweep") {
+		t.Errorf("message = %q, want it to name the skipped order", result.Message)
+	}
+}
+
+// The default-rig import pin is the other half of the same signal, and matches
+// the rule the pack half applies.
+func TestOrderRunOnRole_FleetCityByDefaultRigImportsIsBlockingError(t *testing.T) {
+	cityPath, cfg := orderFiringTestCity(t)
+	cfg.Defaults = config.PackDefaults{Rig: config.PackRigDefaults{
+		Imports: map[string]config.Import{"core": {}},
+	}}
+	writeRunOnTestOrder(t, cityPath, "merge-sweep", orders.RunOnFleetHost)
+
+	result := NewOrderRunOnRoleCheck(cfg, cityPath, WithOrderRunOnRoleEnv("")).Run(&CheckContext{CityPath: cityPath})
+	if result.Status != StatusError {
+		t.Fatalf("status = %v, want Error; msg = %s", result.Status, result.Message)
+	}
+}
+
+// Declaring role = "seat" does NOT clear the error on a fleet city: the orders
+// still dispatch nowhere. The remedy is the skip list, and the hint says so.
+func TestOrderRunOnRole_FleetCityDeclaringSeatStillErrors(t *testing.T) {
+	cityPath, cfg := orderFiringTestCity(t)
+	cfg.Rigs = []config.Rig{{Name: "alpha", Path: filepath.Join(cityPath, "rigs", "alpha")}}
+	cfg.CityRole = config.CityRoleConfig{Role: orders.RoleSeat}
+	writeRunOnTestOrder(t, cityPath, "merge-sweep", orders.RunOnFleetHost)
+
+	result := NewOrderRunOnRoleCheck(cfg, cityPath, WithOrderRunOnRoleEnv("")).Run(&CheckContext{CityPath: cityPath})
+	if result.Status != StatusError {
+		t.Fatalf("status = %v, want Error; msg = %s", result.Status, result.Message)
+	}
+	if !strings.Contains(result.FixHint, "[orders].skip") {
+		t.Errorf("fix hint = %q, want the skip-list remedy", result.FixHint)
+	}
+}
+
+// A fleet city that declares fleet-host is healthy.
+func TestOrderRunOnRole_FleetCityDeclaringFleetHostIsOK(t *testing.T) {
+	cityPath, cfg := orderFiringTestCity(t)
+	cfg.Rigs = []config.Rig{{Name: "alpha", Path: filepath.Join(cityPath, "rigs", "alpha")}}
+	cfg.CityRole = config.CityRoleConfig{Role: orders.RoleFleetHost}
+	writeRunOnTestOrder(t, cityPath, "merge-sweep", orders.RunOnFleetHost)
+
+	result := NewOrderRunOnRoleCheck(cfg, cityPath, WithOrderRunOnRoleEnv("")).Run(&CheckContext{CityPath: cityPath})
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, want OK; msg = %s", result.Status, result.Message)
+	}
+}
+
+// A fleet city with no fleet-host orders has nothing skipped, so nothing to say.
+func TestOrderRunOnRole_FleetCityWithNoFleetHostOrdersIsOK(t *testing.T) {
+	cityPath, cfg := orderFiringTestCity(t)
+	cfg.Rigs = []config.Rig{{Name: "alpha", Path: filepath.Join(cityPath, "rigs", "alpha")}}
+	writeRunOnTestOrder(t, cityPath, "local-lint", "")
+
+	result := NewOrderRunOnRoleCheck(cfg, cityPath, WithOrderRunOnRoleEnv("")).Run(&CheckContext{CityPath: cityPath})
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, want OK; msg = %s", result.Status, result.Message)
+	}
+}
+
+// The seat case must stay ADVISORY and must NOT be worded like the outage: the
+// two were byte-identical before the second signal existed, which is what made
+// the check useless as a detector.
+func TestOrderRunOnRole_SeatAndFleetCityMessagesDiffer(t *testing.T) {
+	seatPath, seatCfg := orderFiringTestCity(t)
+	writeRunOnTestOrder(t, seatPath, "merge-sweep", orders.RunOnFleetHost)
+	seat := NewOrderRunOnRoleCheck(seatCfg, seatPath, WithOrderRunOnRoleEnv("")).Run(&CheckContext{CityPath: seatPath})
+
+	fleetPath, fleetCfg := orderFiringTestCity(t)
+	fleetCfg.Rigs = []config.Rig{{Name: "alpha", Path: filepath.Join(fleetPath, "rigs", "alpha")}}
+	writeRunOnTestOrder(t, fleetPath, "merge-sweep", orders.RunOnFleetHost)
+	fleet := NewOrderRunOnRoleCheck(fleetCfg, fleetPath, WithOrderRunOnRoleEnv("")).Run(&CheckContext{CityPath: fleetPath})
+
+	if seat.Status != StatusWarning || seat.Severity != SeverityAdvisory {
+		t.Fatalf("seat = %v/%v, want Warning/Advisory", seat.Status, seat.Severity)
+	}
+	if fleet.Status != StatusError || fleet.Severity != SeverityBlocking {
+		t.Fatalf("fleet city = %v/%v, want Error/Blocking", fleet.Status, fleet.Severity)
+	}
+	if seat.Message == fleet.Message {
+		t.Fatalf("seat and fleet-city messages are identical; the check cannot distinguish them:\n%s", seat.Message)
+	}
+}
+
+// An ignored VOXIST_FLEET_ROLE value is surfaced by the check rather than
+// silently dropping the city to seat.
+func TestOrderRunOnRole_UnknownEnvValueIsReported(t *testing.T) {
+	cityPath, cfg := orderFiringTestCity(t)
+	writeRunOnTestOrder(t, cityPath, "merge-sweep", orders.RunOnFleetHost)
+
+	result := NewOrderRunOnRoleCheck(cfg, cityPath, WithOrderRunOnRoleEnv("fleet")).Run(&CheckContext{CityPath: cityPath})
+	joined := strings.Join(result.Details, "\n")
+	if !strings.Contains(joined, config.FleetRoleEnvVar) || !strings.Contains(joined, "not a known city role") {
+		t.Fatalf("details = %v, want the ignored-env-value warning", result.Details)
 	}
 }

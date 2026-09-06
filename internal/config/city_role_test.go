@@ -128,3 +128,91 @@ func TestCityRoleAbsentTableLoads(t *testing.T) {
 		t.Fatalf("EffectiveFleetRole = %q, want %q", got, orders.RoleSeat)
 	}
 }
+
+func TestFleetRoleDeclared(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		declared string
+		env      string
+		want     bool
+	}{
+		{"nothing declared", "", "", false},
+		{"config declares seat", orders.RoleSeat, "", true},
+		{"config declares fleet-host", orders.RoleFleetHost, "", true},
+		{"env declares seat", "", orders.RoleSeat, true},
+		{"env declares fleet-host", "", orders.RoleFleetHost, true},
+		{"env whitespace tolerant", "", " seat ", true},
+		// An ignored value states nothing. Counting it as a declaration would
+		// let a typo disarm the checks that gate on a declared role.
+		{"unknown env is not a declaration", "", "fleet", false},
+		{"config wins even with a bad env", orders.RoleFleetHost, "fleet", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &City{CityRole: CityRoleConfig{Role: tc.declared}}
+			if got := FleetRoleDeclared(cfg, tc.env); got != tc.want {
+				t.Fatalf("FleetRoleDeclared(%q, %q) = %v, want %v", tc.declared, tc.env, got, tc.want)
+			}
+		})
+	}
+	if FleetRoleDeclared(nil, "") {
+		t.Error("FleetRoleDeclared(nil, \"\") = true, want false")
+	}
+	if !FleetRoleDeclared(nil, orders.RoleFleetHost) {
+		t.Error("FleetRoleDeclared(nil, fleet-host) = false, want true")
+	}
+}
+
+func TestEffectiveFleetRoleWarnsOnUnknownEnvValue(t *testing.T) {
+	role, warning := EffectiveFleetRoleWithWarning(&City{}, "fleet")
+	if role != orders.RoleSeat {
+		t.Fatalf("role = %q, want %q", role, orders.RoleSeat)
+	}
+	if warning == "" {
+		t.Fatal("no warning for an ignored env value — dropping the fleet host to seat must never be silent")
+	}
+	for _, want := range []string{FleetRoleEnvVar, "fleet", orders.RoleSeat} {
+		if !strings.Contains(warning, want) {
+			t.Errorf("warning = %q, want it to mention %q", warning, want)
+		}
+	}
+}
+
+// A declared role already decides the outcome, but an unreadable env value is
+// still reported: it is a broken declaration the operator meant to work.
+func TestEffectiveFleetRoleWarnsOnUnknownEnvValueEvenWhenDeclared(t *testing.T) {
+	role, warning := EffectiveFleetRoleWithWarning(&City{CityRole: CityRoleConfig{Role: orders.RoleFleetHost}}, "fleet")
+	if role != orders.RoleFleetHost {
+		t.Fatalf("role = %q, want the declared %q", role, orders.RoleFleetHost)
+	}
+	if warning == "" {
+		t.Fatal("expected a warning for the ignored env value")
+	}
+}
+
+func TestEffectiveFleetRoleNoWarningForValidOrEmptyEnv(t *testing.T) {
+	for _, env := range []string{"", orders.RoleSeat, orders.RoleFleetHost, "  "} {
+		if _, warning := EffectiveFleetRoleWithWarning(&City{}, env); warning != "" {
+			t.Errorf("EffectiveFleetRoleWithWarning(env=%q) warned: %q", env, warning)
+		}
+	}
+}
+
+func TestLooksLikeFleetCity(t *testing.T) {
+	if LooksLikeFleetCity(nil) {
+		t.Error("LooksLikeFleetCity(nil) = true, want false")
+	}
+	if LooksLikeFleetCity(&City{}) {
+		t.Error("bare city should not look like the fleet city")
+	}
+	if !LooksLikeFleetCity(&City{Rigs: []Rig{{Name: "alpha"}}}) {
+		t.Error("a city declaring rigs should look like the fleet city")
+	}
+	withDefaults := &City{Defaults: PackDefaults{Rig: PackRigDefaults{Imports: map[string]Import{"core": {}}}}}
+	if !LooksLikeFleetCity(withDefaults) {
+		t.Error("a city pinning default-rig imports should look like the fleet city")
+	}
+	// The signal is a property of the composed config, never of a path.
+	if LooksLikeFleetCity(&City{ResolvedWorkspaceName: "fleet-host-city"}) {
+		t.Error("the signal must not be derived from a name or path")
+	}
+}

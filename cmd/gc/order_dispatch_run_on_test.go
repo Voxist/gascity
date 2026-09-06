@@ -301,3 +301,98 @@ func TestOrderDispatchRunOnFromScannedCity(t *testing.T) {
 		})
 	}
 }
+
+// An unrecognized VOXIST_FLEET_ROLE silently leaves the city as a seat, which
+// on the fleet host stops every fleet-singleton order. The dispatcher must say
+// so when it resolves the role.
+func TestBuildOrderDispatcherLogsIgnoredFleetRoleEnv(t *testing.T) {
+	t.Setenv(config.FleetRoleEnvVar, "fleet")
+	var stderr bytes.Buffer
+	ad := buildOrderDispatcherFromOrderSet(nil, t.TempDir(), &config.City{},
+		[]orders.Order{runOnOrder("sweep", orders.RunOnFleetHost)}, events.Discard, &stderr)
+	if ad == nil {
+		t.Fatal("buildOrderDispatcherFromOrderSet returned nil")
+	}
+	if got := ad.(*memoryOrderDispatcher).fleetRole; got != orders.RoleSeat {
+		t.Fatalf("fleetRole = %q, want %q for an unreadable env value", got, orders.RoleSeat)
+	}
+	out := stderr.String()
+	if !strings.Contains(out, config.FleetRoleEnvVar) || !strings.Contains(out, "not a known city role") {
+		t.Fatalf("stderr = %q, want the ignored-env-value warning", out)
+	}
+}
+
+func TestBuildOrderDispatcherSilentForValidFleetRoleEnv(t *testing.T) {
+	t.Setenv(config.FleetRoleEnvVar, orders.RoleFleetHost)
+	var stderr bytes.Buffer
+	buildOrderDispatcherFromOrderSet(nil, t.TempDir(), &config.City{},
+		[]orders.Order{runOnOrder("sweep", orders.RunOnFleetHost)}, events.Discard, &stderr)
+	if strings.Contains(stderr.String(), "not a known city role") {
+		t.Fatalf("stderr = %q, want no warning for a valid env value", stderr.String())
+	}
+}
+
+// End-to-end on the fault the reviewer named: the dispatcher records a skip,
+// and that record must not make the order look freshly run to the cooldown /
+// liveness reader. A skip that refreshed the clock would let a city that
+// stopped running an order report as healthy forever.
+func TestOrderDispatchRunOnSkipDoesNotAdvanceCooldownClock(t *testing.T) {
+	store := beads.NewMemStore()
+	var stderr bytes.Buffer
+	ad := runOnDispatcher([]orders.Order{runOnOrder("merge-sweep", orders.RunOnFleetHost)},
+		orders.RoleSeat, store, successfulExec, &stderr)
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	if len(trackingBeads(t, store, orders.RunLabel("merge-sweep"))) != 1 {
+		t.Fatal("expected the skip record to be written")
+	}
+	last, err := orderLastRunFn(store)("merge-sweep")
+	if err != nil {
+		t.Fatalf("LastRun: %v", err)
+	}
+	if !last.IsZero() {
+		t.Fatalf("LastRun = %s after a skip, want zero — the skip refreshed liveness", last)
+	}
+}
+
+// The dispatcher's own tracking index is a second cooldown clock, cached and
+// carried across reloads. A skip record must not set it either: an order whose
+// city refuses to run it would otherwise read as freshly run there.
+func TestOrderDispatchTrackingIndexIgnoresRunOnSkips(t *testing.T) {
+	store := beads.NewMemStore()
+	var stderr bytes.Buffer
+	ad := runOnDispatcher([]orders.Order{runOnOrder("merge-sweep", orders.RunOnFleetHost)},
+		orders.RoleSeat, store, successfulExec, &stderr)
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	idx := newOrderDispatchTrackingIndex(&stderr)
+	got, err := idx.lastRunForStore(store, "k", "merge-sweep")
+	if err != nil {
+		t.Fatalf("lastRunForStore: %v", err)
+	}
+	if !got.IsZero() {
+		t.Fatalf("tracking index lastRun = %s after a skip, want zero", got)
+	}
+}
+
+// A real run still sets the index — the exclusion is for skips only.
+func TestOrderDispatchTrackingIndexKeepsRealRuns(t *testing.T) {
+	store := beads.NewMemStore()
+	var stderr bytes.Buffer
+	ad := runOnDispatcher([]orders.Order{runOnOrder("local-lint", orders.RunOnSeat)},
+		orders.RoleSeat, store, successfulExec, &stderr)
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	idx := newOrderDispatchTrackingIndex(&stderr)
+	got, err := idx.lastRunForStore(store, "k", "local-lint")
+	if err != nil {
+		t.Fatalf("lastRunForStore: %v", err)
+	}
+	if got.IsZero() {
+		t.Fatal("tracking index lastRun = zero for an order that actually ran")
+	}
+}

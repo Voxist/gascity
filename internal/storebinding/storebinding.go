@@ -311,6 +311,7 @@ type OrdersStore interface {
 	CloseRun(string, string) error
 	DeleteRun(string) error
 	CreateRunClosed(string, orders.RunOutcome, *orders.EventCursor, string) (orders.OrderRun, error)
+	CreateRunSkippedRunOn(string) (orders.OrderRun, error)
 	Get(string) (orders.OrderRun, error)
 	RunDetail(string) (orders.RunDetail, error)
 	RecentRuns(string, int) ([]orders.OrderRun, error)

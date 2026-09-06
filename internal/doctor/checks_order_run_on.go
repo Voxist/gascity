@@ -21,15 +21,22 @@ const (
 )
 
 // OrderRunOnRoleCheck reports fleet-host orders installed on a city that is not
-// the fleet host.
+// the fleet host, at one of two severities.
 //
-// These orders are inert — the dispatcher skips them on their run_on — so this
-// is not a failure. It is the duplicate-automation signal: the city has
+// On an ordinary seat this is advisory. The orders are inert — the dispatcher
+// skips them on their run_on — so nothing is broken; the city has simply
 // installed a pack whose fleet-singleton orders were only ever meant to run in
-// one place, which means either the city should declare `[city] role =
-// "fleet-host"` (it really is the host and its automation is currently off), or
-// it should skip those orders outright so they stop being scanned, evaluated,
-// and reported at all. Silence here would leave both mistakes invisible.
+// one place, and the durable fix is to put them in [orders].skip so they stop
+// being scanned at all.
+//
+// On a city that LOOKS LIKE THE FLEET CITY by a signal independent of the role
+// — it declares rigs, or it pins default-rig imports — the same finding is an
+// ERROR, and that distinction is the point of this check. The role cannot
+// detect its own absence: a fleet host whose `[city] role` declaration is lost
+// resolves to seat by default and starts skipping every fleet-singleton order,
+// which by role alone is byte-identical to a healthy seat. The second signal is
+// what tells those two apart, so this check reports the outage rather than
+// describing it in the same words it uses for the benign case.
 type OrderRunOnRoleCheck struct {
 	cfg      *config.City
 	cityPath string
@@ -96,7 +103,10 @@ func (c *OrderRunOnRoleCheck) Run(ctx *CheckContext) *CheckResult {
 		return result
 	}
 
-	role := config.EffectiveFleetRole(c.cfg, c.envValue())
+	role, roleWarning := config.EffectiveFleetRoleWithWarning(c.cfg, c.envValue())
+	if roleWarning != "" {
+		result.Details = append(result.Details, roleWarning)
+	}
 	if role == orders.RoleFleetHost {
 		result.Message = "city role is fleet-host"
 		return result
@@ -120,12 +130,32 @@ func (c *OrderRunOnRoleCheck) Run(ctx *CheckContext) *CheckResult {
 		return result
 	}
 	sort.Strings(fleetHostOnly)
+	result.Details = append(result.Details, fleetHostOnly...)
+	named := summarizeOrderNames(fleetHostOnly, orderRunOnRoleDetailLimit)
+
+	if config.LooksLikeFleetCity(c.cfg) {
+		// The city fans work out to rigs or pins what every rig imports, so it
+		// is running fleet automation — but its role does not say fleet-host,
+		// so the dispatcher is skipping every fleet-singleton order it holds.
+		// Either the role declaration was lost (an outage: nothing is running
+		// this automation anywhere) or these orders do not belong here. Both
+		// need a human, so this gates.
+		result.Status = StatusError
+		result.Severity = SeverityBlocking
+		result.Message = fmt.Sprintf(
+			"this city declares rigs or default-rig imports, so it runs fleet automation, but its role is %s: %d fleet-host order(s) are enabled here and dispatch nowhere: %s",
+			role, len(fleetHostOnly), named)
+		result.FixHint = fmt.Sprintf(
+			"set [city] role = %q in city.toml (or export %s=%s) if this is the fleet host — otherwise add these orders to [orders].skip so they stop being scanned here",
+			orders.RoleFleetHost, config.FleetRoleEnvVar, orders.RoleFleetHost)
+		return result
+	}
 
 	result.Status = StatusWarning
+	result.Severity = SeverityAdvisory
 	result.Message = fmt.Sprintf(
 		"city role is %s but %d fleet-host order(s) are enabled here and never dispatch: %s",
-		role, len(fleetHostOnly), summarizeOrderNames(fleetHostOnly, orderRunOnRoleDetailLimit))
-	result.Details = fleetHostOnly
+		role, len(fleetHostOnly), named)
 	if config.FleetRoleIsDeclared(c.cfg) {
 		result.FixHint = fmt.Sprintf(
 			"this city declares [city] role = %q, so these orders are inert: add them to [orders].skip in city.toml, or set role = %q if this city is the fleet host",

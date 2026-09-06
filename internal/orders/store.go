@@ -47,7 +47,20 @@ const (
 	labelWispFailed     = "wisp-failed"
 	labelWispCanceled   = "wisp-canceled"
 	labelTriggerEnvFail = "trigger-env-failed"
+
+	// labelOrderSkipRunOn marks a tracking bead that records a deliberate
+	// run_on skip rather than a run. It is a LABEL, not only the close_reason
+	// metadata, because LastRun must be able to exclude these rows from a
+	// bounded label read: a skip that advanced the cooldown clock would make a
+	// city that stopped running an order look freshly-run to every liveness
+	// reader, which is precisely the watchdog this field exists to keep armed.
+	labelOrderSkipRunOn = "order-skip:run_on"
 )
+
+// SkipReasonRunOn is the close reason stamped on a tracking bead that records
+// a deliberate run_on skip. It reads as "this city was never supposed to run
+// it" rather than "it should have run and did not".
+const SkipReasonRunOn = "skipped:run_on"
 
 // RunOutcome enumerates the terminal outcome of an order run. Each value maps
 // to a fixed label set that the dispatcher stamps on the tracking bead. The
@@ -155,6 +168,12 @@ type OrderRun struct {
 	Open bool
 	// Cursor is the decoded EventCursor (max seq across the run's labels).
 	Cursor EventCursor
+	// SkippedRunOn reports that this record is a deliberate run_on skip, not a
+	// run. It is decoded from the bead's label so every consumer of the
+	// cooldown clock can exclude it: a skip that counted as a run would let a
+	// city which STOPPED dispatching an order report the freshest possible
+	// last-run to the cooldown gate and to every liveness reader.
+	SkippedRunOn bool
 }
 
 // State returns the feed-facing lifecycle status of the run: "failed" when the
@@ -380,6 +399,33 @@ func (s *Store) CreateRunClosed(scoped string, outcome RunOutcome, cursor *Event
 	return run, nil
 }
 
+// CreateRunSkippedRunOn records a deliberate run_on skip for scoped: a closed
+// tracking bead carrying the order's run label (so `gc order history` shows
+// why the order has no runs on this city) plus labelOrderSkipRunOn (so LastRun
+// and every cooldown/liveness reader downstream of it skip the row instead of
+// treating the skip as a fresh run).
+func (s *Store) CreateRunSkippedRunOn(scoped string) (OrderRun, error) {
+	created, err := s.store.Create(beads.Bead{
+		Title:     trackingTitle(scoped),
+		Labels:    append(baseLabels(scoped, RunOutcomeNone), labelOrderSkipRunOn),
+		NoHistory: true,
+	})
+	if err != nil {
+		return OrderRun{}, fmt.Errorf("creating run_on skip record for %q: %w", scoped, err)
+	}
+	run := OrderRun{ID: created.ID, Scoped: scoped, CreatedAt: created.CreatedAt, SkippedRunOn: true}
+	if err := s.CloseRun(created.ID, SkipReasonRunOn); err != nil {
+		return run, err
+	}
+	return run, nil
+}
+
+// IsRunOnSkipBead reports whether b records a deliberate run_on skip rather
+// than a run.
+func IsRunOnSkipBead(b beads.Bead) bool {
+	return beadLabelsContain(b.Labels, labelOrderSkipRunOn)
+}
+
 // RecentRuns lists the tracking/order-run beads for scoped newest-first
 // (including closed), decoded into OrderRun values. It is the typed face of the
 // `gc order history` read (cmd_order.go): it confines the order-run-label List
@@ -506,6 +552,8 @@ func decodeRun(scoped string, b beads.Bead) OrderRun {
 		UpdatedAt: b.UpdatedAt,
 		Open:      b.Status != "closed",
 		Cursor:    EventCursor(MaxSeqFromLabels([][]string{b.Labels})),
+
+		SkippedRunOn: IsRunOnSkipBead(b),
 	}
 }
 
