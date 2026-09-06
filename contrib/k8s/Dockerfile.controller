@@ -18,7 +18,22 @@ FROM ${BASE}
 USER root
 
 # kubectl for agent attach and beads/events exec providers.
-ARG KUBECTL_VERSION=v1.36.0
+#
+# v1.37.0, not v1.36.x: kubectl is the last PREBUILT Go binary in these images
+# (everything else -- bd, gc, gh, dolt -- is rebuilt from source with asserted
+# module floors), so its pin is the only remedy available for a finding against
+# it. Measured with `go version -m` on the published linux/amd64 binaries:
+#
+#   v1.36.0  go1.26.2  x/net 0.49.0  x/text 0.33.0   <- 25 image-scan findings
+#   v1.36.4  go1.26.5  x/net 0.49.0                  <- a patch bump clears none
+#   v1.37.0  go1.26.6  x/net 0.57.0  x/text 0.40.0   <- clears all 25
+#
+# This is a k8s MINOR bump: kubectl supports one minor of client/server skew, so
+# a v1.37 client covers 1.36-1.38 servers and drops support for a 1.35 one.
+# Re-check the fleet's cluster versions before lowering it again (ga-7jqwr).
+# The checksum below is fetched and verified per release, so bumping this ARG
+# needs no second pin. Do NOT re-add a waiver instead of bumping (ga-elgvf).
+ARG KUBECTL_VERSION=v1.37.0
 RUN curl -fsSL \
     "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
     -o /tmp/kubectl \
