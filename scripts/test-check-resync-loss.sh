@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# test-check-resync-loss.sh — tests for scripts/check-resync-loss.sh (bead
-# ga-d32bn). Three layers:
+# test-check-resync-loss.sh — tests for scripts/check-resync-loss.sh (beads
+# ga-d32bn, ga-8gpw4, ga-qq43h). Four layers:
 #
 #   1. Historical regression: run the script against the REAL 2026-08-31
 #      resync merge (15913af6aed2dae965d0fd6706bbf3e66458afca, in this
@@ -15,7 +15,14 @@
 #      identical-change skip, conflict-hunk stripping, and (name, file)
 #      keying — each isolates one specific fix so a regression in that one
 #      fix fails only its own case.
-#   3. Hook wiring: a real .githooks/pre-push, installed into a real temp
+#   3. Matched-pair fixtures (ga-qq43h): ONE fixture, three merge commits
+#      over identical parents differing by exactly one declaration — the
+#      correct merge (must exit 0), the same tree minus the fork's
+#      declaration (must fail Gate 2), and the same tree minus upstream's
+#      (must fail Gate 3). Every other case proves the gate reacts to
+#      something; these prove it reacts to the MINIMAL realistic regression,
+#      and that it goes green again the moment the declaration is restored.
+#   4. Hook wiring: a real .githooks/pre-push, installed into a real temp
 #      repo pushing to a real bare remote, actually refuses a push whose
 #      tip is a merge commit with real Category-A loss, allows one whose
 #      tip is a clean merge, never invokes check-resync-loss.sh at all for
@@ -816,7 +823,629 @@ fi
 rm -rf "$updel_repo"
 
 # ---------------------------------------------------------------------------
-# 12. Hook wiring: a real .githooks/pre-push, installed into a real temp repo
+# 12. MATCHED-PAIR fixtures (bead ga-qq43h: "every guard ships a fixture
+#     proving it fails without the fix"). Every case above proves the gate
+#     reacts to SOMETHING. These prove it reacts to THIS — the minimal
+#     realistic regression — by holding one fixture fixed and perturbing
+#     exactly one declaration.
+#
+#     One BASE/OURS/THEIRS, three merge commits over the identical parent
+#     pair, differing from each other by exactly one declaration:
+#
+#       kept          the correct 3-way result (both sides' additions) — the
+#                     control. Must exit 0 with no hit in either direction.
+#       drop-fork     `kept` minus the fork's TestForkOnly, nothing else.
+#                     Must fail with a Gate 2 RESOLUTION-BUG.
+#       drop-upstream `kept` minus upstream's TestUpstreamOnly, nothing else.
+#                     Must fail with a Gate 3 UPSTREAM-RESOLUTION-BUG.
+#
+#     The two additions sit in disjoint regions of one shared _test.go with
+#     filler between them, so a plain `git merge-file` keeps both with no
+#     conflict: that is what makes each loss a RESOLUTION-BUG (a defect in
+#     how the merge was resolved) rather than a MERGE-OUTCOME, and it is the
+#     precise shape of the ga-d32bn / ga-8gpw4 incidents.
+#
+#     The drop-upstream case is the one the shipped gate could not see at
+#     all before ga-8gpw4: run it against a Gate-1+2-only check-resync-loss.sh
+#     and it exits 0.
+# ---------------------------------------------------------------------------
+echo "== matched pair: one fixture, one declaration dropped in each direction =="
+
+pair_repo="$(mktemp -d "${TMPDIR:-/tmp}/crl-test-pair.XXXXXX")"
+(
+	set -e
+	cd "$pair_repo"
+	git init -q -b main
+
+	cat >shared_test.go <<'EOF'
+package fixture
+
+func TestBase(t *testing.T) {}
+
+func helperOne() {}
+func helperTwo() {}
+func helperThree() {}
+func helperFour() {}
+func helperFive() {}
+func helperSix() {}
+func helperSeven() {}
+func helperEight() {}
+func helperNine() {}
+func helperTen() {}
+func helperEleven() {}
+func helperTwelve() {}
+EOF
+	git add -A
+	git commit -qm base
+
+	# Fork appends TestForkOnly at the END and annotates helperTen. The
+	# annotation's length and position are both load-bearing; the block
+	# itself explains why.
+	git checkout -q -b ours
+	cat >shared_test.go <<'EOF'
+package fixture
+
+func TestBase(t *testing.T) {}
+
+func helperOne() {}
+func helperTwo() {}
+func helperThree() {}
+func helperFour() {}
+func helperFive() {}
+func helperSix() {}
+func helperSeven() {}
+func helperEight() {}
+func helperNine() {}
+// fork: boot-path notes for helperTen.
+//
+// This block is deliberately long. Gate 1's near-theirs heuristic treats a
+// merge result within GATE1_NEAR_THEIRS_MAX_DELTA (20) lines of THEIRS as a
+// took-theirs once Gate 2 corroborates it, so a one-line fork-side edit here
+// would leave the drop-fork merge inside that window and fire a Gate 1
+// verdict on top of the Gate 2 one. The case would still go red, but it would
+// no longer isolate Gate 2, which is the entire point of a matched pair
+// (ga-qq43h: the perturbation must be minimal AND the guard's scope must
+// equal the invariant's scope). Twenty-plus lines of fork-side content that
+// the merge KEEPS puts the delta outside the window, so the only verdict on
+// the drop-fork merge is the declaration one.
+//
+// It also has to sit far away from every upstream-side edit. `git merge-file`
+// emits a conflict hunk when the two sides touch overlapping regions, and the
+// extractor strips conflict hunks before asking whether a declaration
+// survived — content that reached the merge only inside a conflict marker is
+// content a human had to adjudicate, which is a MERGE-OUTCOME, not a
+// RESOLUTION-BUG. Upstream edits the top of the file and helperThree; this
+// block is anchored at helperTen, six declarations below, well outside the
+// three lines of context diff3 uses.
+func helperTen() {}
+func helperEleven() {}
+func helperTwelve() {}
+
+func TestForkOnly(t *testing.T) {}
+EOF
+	git add -A
+	git commit -qm "fork: add TestForkOnly, annotate helperTen"
+
+	# Upstream inserts TestUpstreamOnly near the TOP and annotates
+	# helperThree — both far from every fork-side edit.
+	git checkout -q -b theirs main
+	cat >shared_test.go <<'EOF'
+package fixture
+
+func TestBase(t *testing.T) {}
+
+func TestUpstreamOnly(t *testing.T) {}
+
+func helperOne() {}
+func helperTwo() {}
+// upstream: empty-pool notes for helperThree.
+//
+// The mirror of the fork's block below, and long for the mirror reason: it
+// keeps the drop-upstream merge from being byte-identical to the
+// fork's blob, which would fire Gate 3's file-level UPSTREAM-TOOK-OURS on
+// top of the declaration verdict and stop the case from isolating Gate 3's
+// declaration-level half.
+//
+// Gate 3 has no near-ours counterpart to GATE1_NEAR_THEIRS_MAX_DELTA, so
+// length is not strictly load-bearing on this side — but keeping the two
+// sides the same shape means a future change to either heuristic breaks
+// both cases together instead of leaving one silently vacuous.
+func helperThree() {}
+func helperFour() {}
+func helperFive() {}
+func helperSix() {}
+func helperSeven() {}
+func helperEight() {}
+func helperNine() {}
+func helperTen() {}
+func helperEleven() {}
+func helperTwelve() {}
+EOF
+	git add -A
+	git commit -qm "upstream: add TestUpstreamOnly, annotate helperThree"
+
+	ours_sha=$(git rev-parse ours)
+	theirs_sha=$(git rev-parse theirs)
+	git checkout -q ours
+
+	# --- control: the correct 3-way result, every edit from both sides ---
+	cat >shared_test.go <<'EOF'
+package fixture
+
+func TestBase(t *testing.T) {}
+
+func TestUpstreamOnly(t *testing.T) {}
+
+func helperOne() {}
+func helperTwo() {}
+// upstream: empty-pool notes for helperThree.
+//
+// The mirror of the fork's block below, and long for the mirror reason: it
+// keeps the drop-upstream merge from being byte-identical to the
+// fork's blob, which would fire Gate 3's file-level UPSTREAM-TOOK-OURS on
+// top of the declaration verdict and stop the case from isolating Gate 3's
+// declaration-level half.
+//
+// Gate 3 has no near-ours counterpart to GATE1_NEAR_THEIRS_MAX_DELTA, so
+// length is not strictly load-bearing on this side — but keeping the two
+// sides the same shape means a future change to either heuristic breaks
+// both cases together instead of leaving one silently vacuous.
+func helperThree() {}
+func helperFour() {}
+func helperFive() {}
+func helperSix() {}
+func helperSeven() {}
+func helperEight() {}
+func helperNine() {}
+// fork: boot-path notes for helperTen.
+//
+// This block is deliberately long. Gate 1's near-theirs heuristic treats a
+// merge result within GATE1_NEAR_THEIRS_MAX_DELTA (20) lines of THEIRS as a
+// took-theirs once Gate 2 corroborates it, so a one-line fork-side edit here
+// would leave the drop-fork merge inside that window and fire a Gate 1
+// verdict on top of the Gate 2 one. The case would still go red, but it would
+// no longer isolate Gate 2, which is the entire point of a matched pair
+// (ga-qq43h: the perturbation must be minimal AND the guard's scope must
+// equal the invariant's scope). Twenty-plus lines of fork-side content that
+// the merge KEEPS puts the delta outside the window, so the only verdict on
+// the drop-fork merge is the declaration one.
+//
+// It also has to sit far away from every upstream-side edit. `git merge-file`
+// emits a conflict hunk when the two sides touch overlapping regions, and the
+// extractor strips conflict hunks before asking whether a declaration
+// survived — content that reached the merge only inside a conflict marker is
+// content a human had to adjudicate, which is a MERGE-OUTCOME, not a
+// RESOLUTION-BUG. Upstream edits the top of the file and helperThree; this
+// block is anchored at helperTen, six declarations below, well outside the
+// three lines of context diff3 uses.
+func helperTen() {}
+func helperEleven() {}
+func helperTwelve() {}
+
+func TestForkOnly(t *testing.T) {}
+EOF
+	git add -A
+	git commit-tree "$(git write-tree)" -p "$ours_sha" -p "$theirs_sha" \
+		-m "resync: correct merge, both sides kept" >KEPT_SHA
+
+	# --- perturbation 1: the SAME tree minus the fork's one declaration ---
+	cat >shared_test.go <<'EOF'
+package fixture
+
+func TestBase(t *testing.T) {}
+
+func TestUpstreamOnly(t *testing.T) {}
+
+func helperOne() {}
+func helperTwo() {}
+// upstream: empty-pool notes for helperThree.
+//
+// The mirror of the fork's block below, and long for the mirror reason: it
+// keeps the drop-upstream merge from being byte-identical to the
+// fork's blob, which would fire Gate 3's file-level UPSTREAM-TOOK-OURS on
+// top of the declaration verdict and stop the case from isolating Gate 3's
+// declaration-level half.
+//
+// Gate 3 has no near-ours counterpart to GATE1_NEAR_THEIRS_MAX_DELTA, so
+// length is not strictly load-bearing on this side — but keeping the two
+// sides the same shape means a future change to either heuristic breaks
+// both cases together instead of leaving one silently vacuous.
+func helperThree() {}
+func helperFour() {}
+func helperFive() {}
+func helperSix() {}
+func helperSeven() {}
+func helperEight() {}
+func helperNine() {}
+// fork: boot-path notes for helperTen.
+//
+// This block is deliberately long. Gate 1's near-theirs heuristic treats a
+// merge result within GATE1_NEAR_THEIRS_MAX_DELTA (20) lines of THEIRS as a
+// took-theirs once Gate 2 corroborates it, so a one-line fork-side edit here
+// would leave the drop-fork merge inside that window and fire a Gate 1
+// verdict on top of the Gate 2 one. The case would still go red, but it would
+// no longer isolate Gate 2, which is the entire point of a matched pair
+// (ga-qq43h: the perturbation must be minimal AND the guard's scope must
+// equal the invariant's scope). Twenty-plus lines of fork-side content that
+// the merge KEEPS puts the delta outside the window, so the only verdict on
+// the drop-fork merge is the declaration one.
+//
+// It also has to sit far away from every upstream-side edit. `git merge-file`
+// emits a conflict hunk when the two sides touch overlapping regions, and the
+// extractor strips conflict hunks before asking whether a declaration
+// survived — content that reached the merge only inside a conflict marker is
+// content a human had to adjudicate, which is a MERGE-OUTCOME, not a
+// RESOLUTION-BUG. Upstream edits the top of the file and helperThree; this
+// block is anchored at helperTen, six declarations below, well outside the
+// three lines of context diff3 uses.
+func helperTen() {}
+func helperEleven() {}
+func helperTwelve() {}
+EOF
+	git add -A
+	git commit-tree "$(git write-tree)" -p "$ours_sha" -p "$theirs_sha" \
+		-m "resync: (simulated --theirs-shaped) drop TestForkOnly" >DROP_FORK_SHA
+
+	# --- perturbation 2: the SAME tree minus upstream's one declaration ---
+	cat >shared_test.go <<'EOF'
+package fixture
+
+func TestBase(t *testing.T) {}
+
+func helperOne() {}
+func helperTwo() {}
+// upstream: empty-pool notes for helperThree.
+//
+// The mirror of the fork's block below, and long for the mirror reason: it
+// keeps the drop-upstream merge from being byte-identical to the
+// fork's blob, which would fire Gate 3's file-level UPSTREAM-TOOK-OURS on
+// top of the declaration verdict and stop the case from isolating Gate 3's
+// declaration-level half.
+//
+// Gate 3 has no near-ours counterpart to GATE1_NEAR_THEIRS_MAX_DELTA, so
+// length is not strictly load-bearing on this side — but keeping the two
+// sides the same shape means a future change to either heuristic breaks
+// both cases together instead of leaving one silently vacuous.
+func helperThree() {}
+func helperFour() {}
+func helperFive() {}
+func helperSix() {}
+func helperSeven() {}
+func helperEight() {}
+func helperNine() {}
+// fork: boot-path notes for helperTen.
+//
+// This block is deliberately long. Gate 1's near-theirs heuristic treats a
+// merge result within GATE1_NEAR_THEIRS_MAX_DELTA (20) lines of THEIRS as a
+// took-theirs once Gate 2 corroborates it, so a one-line fork-side edit here
+// would leave the drop-fork merge inside that window and fire a Gate 1
+// verdict on top of the Gate 2 one. The case would still go red, but it would
+// no longer isolate Gate 2, which is the entire point of a matched pair
+// (ga-qq43h: the perturbation must be minimal AND the guard's scope must
+// equal the invariant's scope). Twenty-plus lines of fork-side content that
+// the merge KEEPS puts the delta outside the window, so the only verdict on
+// the drop-fork merge is the declaration one.
+//
+// It also has to sit far away from every upstream-side edit. `git merge-file`
+// emits a conflict hunk when the two sides touch overlapping regions, and the
+// extractor strips conflict hunks before asking whether a declaration
+// survived — content that reached the merge only inside a conflict marker is
+// content a human had to adjudicate, which is a MERGE-OUTCOME, not a
+// RESOLUTION-BUG. Upstream edits the top of the file and helperThree; this
+// block is anchored at helperTen, six declarations below, well outside the
+// three lines of context diff3 uses.
+func helperTen() {}
+func helperEleven() {}
+func helperTwelve() {}
+
+func TestForkOnly(t *testing.T) {}
+EOF
+	git add -A
+	git commit-tree "$(git write-tree)" -p "$ours_sha" -p "$theirs_sha" \
+		-m "resync: (simulated --ours-shaped) drop TestUpstreamOnly" >DROP_UPSTREAM_SHA
+)
+pair_rc_setup=$?
+
+if [ "$pair_rc_setup" -ne 0 ]; then
+	record_fail "matched-pair fixture builds" "setup failed, rc=$pair_rc_setup"
+else
+	pair_out=$(mktemp "${TMPDIR:-/tmp}/crl-test-pair-out.XXXXXX")
+
+	# Control: the restored/correct merge must be clean in BOTH directions.
+	# Anchored to the two-space verdict-line prefix both gates print, NOT a
+	# bare substring: the per-gate summary lines spell every verdict name out
+	# with a count in front of it ("0 RESOLUTION-BUG, 0 MERGE-OUTCOME"), so an
+	# unanchored negative grep can never pass and the case would fail on a
+	# perfectly clean merge.
+	(cd "$pair_repo" && bash "$SCRIPT" "$(cat "$pair_repo/KEPT_SHA")") >"$pair_out" 2>&1
+	pair_kept_rc=$?
+	if [ "$pair_kept_rc" -eq 0 ] &&
+		! grep -qE "^  (UPSTREAM-)?(RESOLUTION-BUG|MERGE-OUTCOME|DROPPED-FILE|PURE-LOSS|TOOK-THEIRS|TOOK-OURS)" "$pair_out"; then
+		record_pass "control: correct merge keeping both declarations exits 0"
+	else
+		record_fail "control: correct merge keeping both declarations exits 0" "exit=$pair_kept_rc:"
+		sed 's/^/    /' "$pair_out"
+	fi
+
+	# Perturbation 1 — fork direction (Gate 2). EXACTLY one verdict: the
+	# summary lines assert both other gates stayed at zero. Without that, a
+	# fixture whose perturbation also trips Gate 1 or Gate 3 would still
+	# "pass" and prove nothing about Gate 2 specifically.
+	(cd "$pair_repo" && bash "$SCRIPT" "$(cat "$pair_repo/DROP_FORK_SHA")") >"$pair_out" 2>&1
+	pair_fork_rc=$?
+	if [ "$pair_fork_rc" -ne 0 ] &&
+		grep -q "^  RESOLUTION-BUG   TestForkOnly  (shared_test.go)" "$pair_out" &&
+		grep -q "^Gate 1: 0 unexempted hit(s)" "$pair_out" &&
+		grep -q "^Gate 2: 1 missing (decl, file) pair(s) — 1 RESOLUTION-BUG" "$pair_out" &&
+		grep -q "^Gate 3: 0 unexempted file-level hit(s) (0 exempted); 0 missing" "$pair_out"; then
+		record_pass "gate 2 fails on exactly one dropped fork-added declaration"
+	else
+		record_fail "gate 2 fails on exactly one dropped fork-added declaration" "exit=$pair_fork_rc:"
+		sed 's/^/    /' "$pair_out"
+	fi
+
+	# Perturbation 2 — upstream direction (Gate 3, ga-8gpw4). This is the
+	# case that exits 0 on a Gate-1+2-only script.
+	(cd "$pair_repo" && bash "$SCRIPT" "$(cat "$pair_repo/DROP_UPSTREAM_SHA")") >"$pair_out" 2>&1
+	pair_up_rc=$?
+	if [ "$pair_up_rc" -ne 0 ] &&
+		grep -q "^  UPSTREAM-RESOLUTION-BUG TestUpstreamOnly  (shared_test.go)" "$pair_out" &&
+		grep -q "^Gate 1: 0 unexempted hit(s)" "$pair_out" &&
+		grep -q "^Gate 2: 0 missing (decl, file) pair(s)" "$pair_out" &&
+		grep -q "^Gate 3: 0 unexempted file-level hit(s) (0 exempted); 1 missing (decl, file) pair(s) — 1 UPSTREAM-RESOLUTION-BUG" "$pair_out"; then
+		record_pass "gate 3 fails on exactly one dropped upstream-added declaration"
+	else
+		record_fail "gate 3 fails on exactly one dropped upstream-added declaration" "exit=$pair_up_rc:"
+		sed 's/^/    /' "$pair_out"
+	fi
+
+	rm -f "$pair_out"
+fi
+rm -rf "$pair_repo"
+
+# ---------------------------------------------------------------------------
+# 13. Gate 3 file-level, both polarities of the one condition that separates
+#     them. "OURS does not have this file" has two causes, and treating them
+#     alike is a live bug in either direction:
+#
+#       BASE lacks it too  -> UPSTREAM ADDED IT. The merge dropping an
+#                             upstream-added file wholesale is the most
+#                             clear-cut upstream loss there is; the
+#                             2026-08-31 merge did exactly this to
+#                             cmd/gc/dolt_cleanup_discovery{,_test}.go.
+#                             MUST fail.
+#       BASE has it        -> the FORK deleted it before the merge. Accepting
+#                             that standing fork decision is correct, and
+#                             re-raising it on every resync forever would
+#                             train operators to ignore the gate. MUST NOT
+#                             fail, at the file level OR the declaration
+#                             level (the two must agree).
+#
+#     Testing only the first would leave the skip untested; testing only the
+#     second would pass on a gate that never fires at all.
+# ---------------------------------------------------------------------------
+echo "== gate 3: upstream-added file dropped by the merge, vs a fork-deleted file =="
+
+upfile_repo="$(mktemp -d "${TMPDIR:-/tmp}/crl-test-upfile.XXXXXX")"
+(
+	set -e
+	cd "$upfile_repo"
+	git init -q -b main
+	cat >keep.go <<'EOF'
+package fixture
+
+func Keep() {}
+EOF
+	cat >gone.go <<'EOF'
+package fixture
+
+func Gone() {}
+EOF
+	git add -A
+	git commit -qm base
+
+	# Fork deletes gone.go and leaves keep.go alone.
+	git checkout -q -b ours
+	git rm -q gone.go
+	git commit -qm "fork: delete gone.go"
+
+	# Upstream adds a wholly new file AND keeps extending the file the fork
+	# deleted.
+	git checkout -q -b theirs main
+	cat >added.go <<'EOF'
+package fixture
+
+func UpstreamAdded() {}
+EOF
+	cat >>gone.go <<'EOF'
+
+func UpstreamTouchedGone() {}
+EOF
+	git add -A
+	git commit -qm "upstream: add added.go, extend gone.go"
+
+	ours_sha=$(git rev-parse ours)
+	theirs_sha=$(git rev-parse theirs)
+	git checkout -q ours
+
+	# Merge that correctly takes upstream's new file and correctly honors the
+	# fork's deletion of gone.go. Must be clean.
+	git checkout -q theirs -- added.go
+	git add -A
+	git commit-tree "$(git write-tree)" -p "$ours_sha" -p "$theirs_sha" \
+		-m "resync: take upstream's added.go, honor the fork's deletion of gone.go" >GOOD_SHA
+
+	# Same merge, minus upstream's added.go. One file, nothing else changed.
+	git rm -q --cached added.go
+	rm -f added.go
+	git commit-tree "$(git write-tree)" -p "$ours_sha" -p "$theirs_sha" \
+		-m "resync: (simulated) drop upstream's added.go" >BAD_SHA
+)
+upfile_rc_setup=$?
+
+if [ "$upfile_rc_setup" -ne 0 ]; then
+	record_fail "gate 3 file-level fixture builds" "setup failed, rc=$upfile_rc_setup"
+else
+	upfile_out=$(mktemp "${TMPDIR:-/tmp}/crl-test-upfile-out.XXXXXX")
+
+	(cd "$upfile_repo" && bash "$SCRIPT" "$(cat "$upfile_repo/GOOD_SHA")") >"$upfile_out" 2>&1
+	upfile_good_rc=$?
+	if [ "$upfile_good_rc" -eq 0 ] &&
+		! grep -q "^  UPSTREAM-DROPPED-FILE" "$upfile_out" &&
+		! grep -q "^  UPSTREAM-RESOLUTION-BUG" "$upfile_out" &&
+		grep -q "^  UPSTREAM-FORK-DELETED UpstreamTouchedGone" "$upfile_out"; then
+		record_pass "gate 3 honors a fork deletion (informational only) and exits 0"
+	else
+		record_fail "gate 3 honors a fork deletion (informational only) and exits 0" "exit=$upfile_good_rc:"
+		sed 's/^/    /' "$upfile_out"
+	fi
+
+	(cd "$upfile_repo" && bash "$SCRIPT" "$(cat "$upfile_repo/BAD_SHA")") >"$upfile_out" 2>&1
+	upfile_bad_rc=$?
+	if [ "$upfile_bad_rc" -ne 0 ] &&
+		grep -q "^  UPSTREAM-DROPPED-FILE	added.go" "$upfile_out"; then
+		record_pass "gate 3 fails on an upstream-added file the merge dropped"
+	else
+		record_fail "gate 3 fails on an upstream-added file the merge dropped" "exit=$upfile_bad_rc:"
+		sed 's/^/    /' "$upfile_out"
+	fi
+
+	rm -f "$upfile_out"
+fi
+rm -rf "$upfile_repo"
+
+# ---------------------------------------------------------------------------
+# 14. Gate 3 file-level UPSTREAM-TOOK-OURS — the shape NO declaration-level
+#     check can see. Upstream MODIFIES an existing declaration rather than
+#     adding one, so the declaration set does not change and Gate 3's
+#     decl-level half reports a clean "0 missing" on a merge that took the
+#     fork's blob verbatim and discarded upstream's edit outright. On the
+#     real 2026-08-31 merge this is cmd/gc/dolt_cleanup_drop.go and
+#     internal/doctor/checks_order_firing_bounded_test.go — invisible to
+#     every other check in the script.
+#
+#     The same fixture carries the both-sides-identical negative control in
+#     same.go: OURS and THEIRS converged on byte-identical content, so
+#     merge == ours is the ONLY correct 3-way result and nothing was
+#     discarded. It must produce no verdict at all, in either merge. A gate
+#     that called that a took-ours would fire on every upstreamed fork patch
+#     forever.
+# ---------------------------------------------------------------------------
+echo "== gate 3: merge takes the fork's blob verbatim (no decl-set change) =="
+
+tookours_repo="$(mktemp -d "${TMPDIR:-/tmp}/crl-test-tookours.XXXXXX")"
+(
+	set -e
+	cd "$tookours_repo"
+	git init -q -b main
+	cat >mod.go <<'EOF'
+package fixture
+
+func Existing() {}
+EOF
+	cat >same.go <<'EOF'
+package fixture
+
+func Same() {}
+EOF
+	git add -A
+	git commit -qm base
+
+	git checkout -q -b ours
+	cat >mod.go <<'EOF'
+package fixture
+
+// fork: Existing is called from the fork's boot path.
+func Existing() {}
+EOF
+	cat >same.go <<'EOF'
+package fixture
+
+// both sides converged on this exact line.
+func Same() {}
+EOF
+	git add -A
+	git commit -qm "fork: annotate Existing; converge same.go"
+
+	git checkout -q -b theirs main
+	cat >mod.go <<'EOF'
+package fixture
+
+// upstream: Existing now returns early when the pool is empty.
+func Existing() {}
+EOF
+	cat >same.go <<'EOF'
+package fixture
+
+// both sides converged on this exact line.
+func Same() {}
+EOF
+	git add -A
+	git commit -qm "upstream: annotate Existing; converge same.go identically"
+
+	ours_sha=$(git rev-parse ours)
+	theirs_sha=$(git rev-parse theirs)
+	git checkout -q ours
+
+	# Correct resolution: a real merge of the two annotations. Neither
+	# parent's blob verbatim, so no file-level verdict in either direction.
+	cat >mod.go <<'EOF'
+package fixture
+
+// fork: Existing is called from the fork's boot path.
+// upstream: Existing now returns early when the pool is empty.
+func Existing() {}
+EOF
+	git add -A
+	git commit-tree "$(git write-tree)" -p "$ours_sha" -p "$theirs_sha" \
+		-m "resync: keep both annotations on Existing" >GOOD_SHA
+
+	# The minimal regression: mod.go resolved --ours. Nothing else differs,
+	# and no declaration name changed anywhere in the tree.
+	git checkout -q ours -- mod.go
+	git add -A
+	git commit-tree "$(git write-tree)" -p "$ours_sha" -p "$theirs_sha" \
+		-m "resync: (simulated --ours) take the fork's mod.go verbatim" >BAD_SHA
+)
+tookours_rc_setup=$?
+
+if [ "$tookours_rc_setup" -ne 0 ]; then
+	record_fail "gate 3 took-ours fixture builds" "setup failed, rc=$tookours_rc_setup"
+else
+	tookours_out=$(mktemp "${TMPDIR:-/tmp}/crl-test-tookours-out.XXXXXX")
+
+	(cd "$tookours_repo" && bash "$SCRIPT" "$(cat "$tookours_repo/GOOD_SHA")") >"$tookours_out" 2>&1
+	tookours_good_rc=$?
+	if [ "$tookours_good_rc" -eq 0 ] &&
+		! grep -qE "^  (UPSTREAM-)?(TOOK-OURS|TOOK-THEIRS|PURE-LOSS|UPSTREAM-PURE-LOSS)" "$tookours_out" &&
+		! grep -q "same.go" "$tookours_out"; then
+		record_pass "control: a real merge of both annotations exits 0, and an identical both-sides change is never a took-ours"
+	else
+		record_fail "control: a real merge of both annotations exits 0, and an identical both-sides change is never a took-ours" "exit=$tookours_good_rc:"
+		sed 's/^/    /' "$tookours_out"
+	fi
+
+	(cd "$tookours_repo" && bash "$SCRIPT" "$(cat "$tookours_repo/BAD_SHA")") >"$tookours_out" 2>&1
+	tookours_bad_rc=$?
+	# The decl-level assertion is the point: 0 missing pairs in BOTH
+	# directions, and the file-level check is the only thing that fires.
+	if [ "$tookours_bad_rc" -ne 0 ] &&
+		grep -q "^  UPSTREAM-TOOK-OURS	mod.go" "$tookours_out" &&
+		grep -q "^Gate 2: 0 missing (decl, file) pair(s)" "$tookours_out" &&
+		grep -q "0 UPSTREAM-RESOLUTION-BUG" "$tookours_out" &&
+		! grep -q "same.go" "$tookours_out"; then
+		record_pass "gate 3 fails on a took-ours file whose declaration set never changed"
+	else
+		record_fail "gate 3 fails on a took-ours file whose declaration set never changed" "exit=$tookours_bad_rc:"
+		sed 's/^/    /' "$tookours_out"
+	fi
+
+	rm -f "$tookours_out"
+fi
+rm -rf "$tookours_repo"
+
+# ---------------------------------------------------------------------------
+# 15. Hook wiring: a real .githooks/pre-push, installed into a real temp repo
 #    with a real bare remote. Before this, `make check-resync-loss` existed
 #    but nothing called it — the gate only ran when an operator remembered
 #    the AGENTS.md sentence. These prove the hook actually enforces it.
@@ -942,6 +1571,103 @@ else
 	rm -f "$hookA_out"
 fi
 rm -rf "$hookA_remote" "$hookA_work"
+
+echo "-- refuses a push whose tip is a merge commit with UPSTREAM-side loss only --"
+# The end-to-end proof for ga-8gpw4: a merge whose ONLY defect is an
+# --ours-shaped resolution dropping an upstream-added declaration. Gates 1
+# and 2 are clean on it by construction (the fork's own additions all
+# survive, and no file matches upstream's blob), so before Gate 3 this push
+# sailed through the hook. The declaration-level loss is invisible to
+# `go build` and `go vet` for the reason recorded in check-resync-loss.sh's
+# header: deleting a test never fails a build.
+read -r hookG_remote hookG_work <<<"$(hook_setup_repo real)"
+(
+	set -e
+	cd "$hookG_work"
+	git checkout -q -b ours
+	cat >shared_test.go <<'EOF'
+package fixture
+
+func TestBase(t *testing.T) {}
+
+func helperOne()   {}
+func helperTwo()   {}
+func helperThree() {}
+func helperFour()  {}
+func helperFive()  {}
+func helperSix()   {}
+EOF
+	git add -A
+	git commit -qm "fork: add shared_test.go"
+	git checkout -q main
+	git merge -q --ff-only ours
+	git push -q origin main
+	git checkout -q ours
+
+	cat >shared_test.go <<'EOF'
+package fixture
+
+func TestBase(t *testing.T) {}
+
+func helperOne()   {}
+func helperTwo()   {}
+func helperThree() {}
+func helperFour()  {}
+func helperFive()  {}
+func helperSix()   {}
+
+func TestForkOnly(t *testing.T) {}
+EOF
+	git add -A
+	git commit -qm "fork: add TestForkOnly at the end"
+
+	git checkout -q -b theirs main
+	cat >shared_test.go <<'EOF'
+package fixture
+
+func TestBase(t *testing.T) {}
+
+func TestUpstreamOnly(t *testing.T) {}
+
+func helperOne()   {}
+func helperTwo()   {}
+func helperThree() {}
+func helperFour()  {}
+func helperFive()  {}
+func helperSix()   {}
+EOF
+	git add -A
+	git commit -qm "upstream: add TestUpstreamOnly near the top"
+
+	ours_sha=$(git rev-parse ours)
+	theirs_sha=$(git rev-parse theirs)
+	git checkout -q ours
+	# --ours-shaped resolution: the fork's blob verbatim. Every fork-added
+	# declaration survives; upstream's TestUpstreamOnly does not.
+	git checkout -q ours -- shared_test.go
+	git add -A
+	bad_tree=$(git write-tree)
+	bad_merge=$(git commit-tree "$bad_tree" -p "$ours_sha" -p "$theirs_sha" -m "resync: (simulated --ours) drop TestUpstreamOnly")
+	git reset -q --hard "$bad_merge"
+)
+hookG_setup_rc=$?
+if [ "$hookG_setup_rc" -ne 0 ]; then
+	record_fail "hook/blocks-push-with-upstream-side-loss" "fixture setup failed, rc=$hookG_setup_rc"
+else
+	hookG_out=$(mktemp "${TMPDIR:-/tmp}/crl-hook-outG.XXXXXX")
+	(cd "$hookG_work" && GIT_TERMINAL_PROMPT=0 git push origin ours) >"$hookG_out" 2>&1
+	hookG_rc=$?
+	if [ "$hookG_rc" -ne 0 ] &&
+		[ -z "$(hook_remote_sha "$hookG_remote" "refs/heads/ours")" ] &&
+		grep -q "^  UPSTREAM-RESOLUTION-BUG TestUpstreamOnly" "$hookG_out"; then
+		record_pass "hook/blocks-push-with-upstream-side-loss (rejected, remote untouched)"
+	else
+		record_fail "hook/blocks-push-with-upstream-side-loss" "rc=$hookG_rc remote_sha=$(hook_remote_sha "$hookG_remote" "refs/heads/ours"):"
+		sed 's/^/    /' "$hookG_out"
+	fi
+	rm -f "$hookG_out"
+fi
+rm -rf "$hookG_remote" "$hookG_work"
 
 echo "-- allows a push whose tip is a clean merge --"
 read -r hookB_remote hookB_work <<<"$(hook_setup_repo real)"
