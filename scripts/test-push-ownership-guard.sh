@@ -543,6 +543,72 @@ test_bead_id_branch_wins_and_warns_on_disagreement() {
     rm -rf "$repo" "$fbd"
 }
 
+# Regression: real bead ids are NOT six characters wide, and the resolver's
+# regex was `ga-[0-9a-z]{6}`. Of 649 open beads on 2026-09-06, 581 were FIVE
+# characters, 41 six, 26 four, 1 three -- so ~89% of branches resolved to
+# NOTHING, the guard took its "no bead to check" branch, and every such push
+# was allowed unguarded. Every live worktree branch in the repo was affected.
+#
+# It survived because every id this suite exercised was six characters
+# (ga-fip9ps, ga-abc123, ga-cand01, ga-fallbk, ga-held01): the guard was
+# verified only against inputs selected to match its own regex, so it could
+# not fail. These cases use the widths that actually occur.
+#
+# The fix is `{3,}` and not a wider fixed width: `{6}` also TRUNCATES a 7-char
+# id (ga-abcdefg -> ga-abcdef), silently resolving a DIFFERENT bead, which the
+# seven-char case below pins.
+test_bead_id_resolves_five_char_id() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "fix/ga-elgvf-trivy-waiver-cliff")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    printf '[{"id":"ga-other01.9"}]' > "$fbd/fake-bd-state/list-json"
+    write_show_json "$fbd" "ga-elgvf" "in_progress" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && grep -q "ga-elgvf" <<<"$out"; then
+        record_pass "resolve/five-char-id (the 89% case)"
+    else
+        record_fail "resolve/five-char-id" "expected the branch id ga-elgvf to resolve, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# A four-character id (26 of 649) must resolve too.
+test_bead_id_resolves_four_char_id() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "fix/ga-9wsr-local-only-dolt")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    printf '[{"id":"ga-other01.9"}]' > "$fbd/fake-bd-state/list-json"
+    write_show_json "$fbd" "ga-9wsr" "in_progress" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && grep -q "ga-9wsr" <<<"$out"; then
+        record_pass "resolve/four-char-id"
+    else
+        record_fail "resolve/four-char-id" "expected ga-9wsr to resolve, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# A SEVEN-character id must resolve WHOLE. This is why the fix is a lower
+# bound: under {6} this branch resolved to ga-abcdef -- a different bead --
+# rather than failing to resolve, which is the worse of the two failures.
+test_bead_id_does_not_truncate_seven_char_id() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "fix/ga-abcdefg-seven-char")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    printf '[{"id":"ga-other01.9"}]' > "$fbd/fake-bd-state/list-json"
+    write_show_json "$fbd" "ga-abcdefg" "in_progress" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && grep -q "ga-abcdefg" <<<"$out" && ! grep -qE 'ga-abcdef([^g]|$)' <<<"$out"; then
+        record_pass "resolve/seven-char-id-not-truncated"
+    else
+        record_fail "resolve/seven-char-id-not-truncated" "expected ga-abcdefg whole, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
 # Regression: a branch encoding a multi-level sub-bead id (a grandchild bead,
 # e.g. ga-o3ko1j.4.3) must resolve to the FULL id, not truncate after the
 # first dotted segment. Caught live: builder/ga-o3ko1j.4.3's push resolved to
@@ -1259,6 +1325,9 @@ run_all() {
     test_retry_unreachable_message_mentions_retry_before_no_verify
     test_retry_parse_failure_message_mentions_retry_before_no_verify
     test_bead_id_branch_wins_and_warns_on_disagreement
+    test_bead_id_resolves_five_char_id
+    test_bead_id_resolves_four_char_id
+    test_bead_id_does_not_truncate_seven_char_id
     test_bead_id_branch_resolves_multi_level_subbead_id
     test_bead_id_fallback_used_when_branch_no_match
     test_bead_id_branch_reused_prefers_open_successor_when_branch_bead_closed
