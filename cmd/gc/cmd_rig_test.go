@@ -3205,12 +3205,9 @@ func TestRouteRigList_APIJSONIncludesCacheAge(t *testing.T) {
 
 func TestRouteRigList_APIJSONPreservesFallbackContract(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
-	// This test exercises the render/fallback contract, not liveness. HQ running
-	// now derives from controllerStatusForCity (false with no live controller),
-	// so pin the seam true to keep asserting the API-render shape.
-	prevHQRunning := rigListHQRunning
-	rigListHQRunning = func(string) bool { return true }
-	defer func() { rigListHQRunning = prevHQRunning }()
+	// This test exercises the render/fallback contract, not liveness. HQ
+	// running now derives from the API read itself (the server that answered
+	// IS the controller), so no seam needs pinning.
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
