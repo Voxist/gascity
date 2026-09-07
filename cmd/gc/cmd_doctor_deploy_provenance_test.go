@@ -32,6 +32,13 @@ func TestBuildDoctorChecks_DeployProvenanceReceivesLinkedCommit(t *testing.T) {
 	}
 	t.Cleanup(func() { newDoctorDeployProvenanceCheck = old })
 
+	// A sentinel only `commit` can carry, so the assertions below distinguish
+	// it from `date` and `version` (all three are "unknown"/"dev" otherwise).
+	oldCommit := commit
+	commit = "seam-sentinel-commit"
+	wantCommit := commit
+	t.Cleanup(func() { commit = oldCommit })
+
 	cfg := &config.City{Workspace: config.Workspace{Name: "demo"}}
 	buildDoctorChecks(doctorCityDir(t), cfg, nil, buildDoctorChecksOpts{
 		SkipCityDoltCheck:    true,
@@ -41,7 +48,21 @@ func TestBuildDoctorChecks_DeployProvenanceReceivesLinkedCommit(t *testing.T) {
 	if !seen {
 		t.Fatal("deploy-provenance check was never constructed")
 	}
-	if got != commit {
-		t.Errorf("linked revision = %q, want this binary's commit %q", got, commit)
+	// Assert IDENTITY against a value only `commit` can hold, not inequality
+	// against `commit` itself. In a test binary the ldflags are absent, so
+	// `commit`, `version` and `date` all fall back to their placeholders and
+	// `commit` is literally "unknown" -- so `got != commit` is satisfied by
+	// ANY non-empty build-metadata variable. Substituting `date` for `commit`
+	// at the registration site passes this test unchanged; substituting "" is
+	// the only mutation it catches. The guard then proves "a non-empty build
+	// variable is passed", which is weaker than its own name claims.
+	//
+	// Pinning a sentinel through the real `commit` variable closes that: only
+	// the variable this check is contracted to read can carry it.
+	if got != wantCommit {
+		t.Errorf("linked revision = %q, want the value of this binary's `commit` variable %q", got, wantCommit)
+	}
+	if got == date || got == version {
+		t.Errorf("linked revision = %q, which is the value of `date`/`version`, not `commit`: the registration site is passing the wrong build variable", got)
 	}
 }
