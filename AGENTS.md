@@ -98,12 +98,51 @@ of these, take upstream wholesale and re-run the generator:
 - `internal/api/openapi.json`, `docs/reference/schema/openapi.*`
 - `docs/reference/schema/city-schema.*`, `docs/reference/schema/pack-schema.*`,
   `docs/reference/cli.md`, `docs/reference/config.md`
-- `cmd/gc/productmetrics_command_census.json`, `cmd/gc/metrics_census_gen.go`
+- `cmd/gc/productmetrics_command_census.json` — **NOT regenerable; merge it, see
+  below** — `cmd/gc/metrics_census_gen.go`
 - `internal/api/dashboardspa/**` generated TS and `dist/`
 - `internal/api/genclient/client_gen.go`
-- test ratchets and baselines: `internal/testpolicy/resourcecensus/census.go`,
+- test ratchets and baselines: `internal/testpolicy/resourcecensus/census.go`
+  (**NOT regenerable; merge it, see below**),
   `internal/testenv/testdata/*.golden`, `scripts/*baseline*`,
   `scripts/*manifest*`
+
+**Two paths on that list are NOT regenerable, and taking them wholesale
+destroys fork data. Merge them; never `--theirs` them:**
+
+- `cmd/gc/productmetrics_command_census.json` is the census generator's
+  hand-maintained **INPUT**, not its output. `cmd/gen-command-census/main.go`
+  reads it as `paths.manifest` and derives `metrics_census_gen.go`,
+  `internal/productmetrics/command_ids_gen.go` and
+  `schemas/metrics/example/result.schema.json` *from* it. Taking upstream's
+  copy deletes the fork's census commands, and regenerating afterwards does
+  **not** restore them — the generator only re-derives from whatever manifest
+  it is handed. (Observed once, during the 2026-09-06 resync: five fork commands
+  were lost this way — beads-state, config-lint, provider-quota,
+  provider-credentials, provider-rotate-key — and all five were restored
+  before that merge landed. They are present today; this is the incident
+  record, not a standing gap.)
+- `internal/testpolicy/resourcecensus/census.go` is **hand-written Go** —
+  package doc, imports, types, methods. It carries the attribute only to
+  suppress the diff of a large bootstrap table. Taking it wholesale reverts
+  fork ratchet rows (six, on the same merge).
+
+This is the ga-d32bn family in a new shape: **exempted-but-not-regenerable.**
+Gate 1 exempts both by attribute; Gate 2 sees no lost Go declaration (the
+manifest is JSON; the ratchet rows are struct literals inside an existing
+declaration); `go build`, `go vet` and the real suite are all blind to a missing
+census entry. Gate 3 inherits Gate 1's exemption, so it does not close this
+either.
+
+One check does exist for the manifest, and it is worth knowing its exact scope:
+`internal/commandcensus/generate.go`'s `ValidateEvolution` compares the manifest
+against the committed `command_ids_gen.go` catalog and fails loudly — naming the
+dropped ids — if a prior allocation was removed or remapped. It fires only when
+the two **disagree**. Taking the manifest and the catalog from upstream
+*together*, which is exactly what rule 1 instructs, keeps them consistent with
+each other and silent about what the fork lost. The attribute answers "should GitHub collapse this
+diff", which is not the same question as "can this be regenerated" — and rule 1
+conflates them.
 
 Every path above carries the `linguist-generated` attribute in
 `.gitattributes`, which is the single enforced source of truth this list
