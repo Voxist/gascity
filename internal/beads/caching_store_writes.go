@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // Create passes through to the backing store and updates the cache.
@@ -394,6 +396,10 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 
 // SetMetadata sets a single metadata key-value on a bead.
 func (c *CachingStore) SetMetadata(id, key, value string) error {
+	if err := beadmeta.ValidateMetadataValue(key, value); err != nil {
+		return err
+	}
+
 	// Idempotence: if the cached bead already has metadata[key] == value,
 	// the backing call is a no-op semantically. Skipping it avoids the
 	// bd subprocess invocation and — crucially — avoids firing bd's
@@ -449,6 +455,10 @@ func (c *CachingStore) SetMetadata(id, key, value string) error {
 
 // SetMetadataBatch sets multiple metadata key-values on a bead.
 func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := beadmeta.ValidateMetadataValues(kvs); err != nil {
+		return err
+	}
+
 	if len(kvs) == 0 {
 		return nil
 	}
@@ -605,6 +615,10 @@ func (tx *cachingStoreTx) Update(id string, opts UpdateOpts) error {
 }
 
 func (tx *cachingStoreTx) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := beadmeta.ValidateMetadataValues(kvs); err != nil {
+		return err
+	}
+
 	if len(kvs) == 0 {
 		return nil
 	}

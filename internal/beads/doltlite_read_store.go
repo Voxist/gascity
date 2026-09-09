@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, CGO_ENABLED=0 safe
 )
 
@@ -579,6 +580,10 @@ func hasOrderRunLabel(labels []string) bool {
 }
 
 func (s *DoltliteReadStore) Update(id string, opts UpdateOpts) error {
+	if err := beadmeta.ValidateMetadataValues(opts.Metadata); err != nil {
+		return err
+	}
+
 	err := s.BdStore.Update(id, opts)
 	if err == nil {
 		s.resetOrderRunCache()
@@ -619,6 +624,10 @@ func (s *DoltliteReadStore) Delete(id string) error {
 }
 
 func (s *DoltliteReadStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := beadmeta.ValidateMetadataValues(kvs); err != nil {
+		return err
+	}
+
 	if len(kvs) == 0 {
 		return nil
 	}
@@ -654,6 +663,10 @@ func (s *DoltliteReadStore) SetMetadataBatch(id string, kvs map[string]string) e
 }
 
 func (s *DoltliteReadStore) SetMetadata(id, key, value string) error {
+	if err := beadmeta.ValidateMetadataValue(key, value); err != nil {
+		return err
+	}
+
 	return s.SetMetadataBatch(id, map[string]string{key: value})
 }
 
