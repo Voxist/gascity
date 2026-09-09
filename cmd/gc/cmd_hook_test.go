@@ -1248,9 +1248,18 @@ func TestClaimHookWorkEmitsSelectionStats(t *testing.T) {
 	run := func(_, dir string, _ []string) (string, error) {
 		switch dir {
 		case "city":
-			return `[{"id":"hw-city","status":"open","priority":1,"metadata":{"gc.routed_to":"worker"}}]`, nil
+			// The created_at pair is load-bearing: with no parseable age the
+			// equal-(tier, priority) tie stays UNRESOLVED (tieWith reports true
+			// when either side lacks an age) and bestStoreWithWork rotates the
+			// winner on the nanosecond clock (hookTieBreakIndex over
+			// UnixNano), so "own store wins" would be a coin flip per process —
+			// which is exactly how this test failed on CI with riga selected
+			// (2026-09-09, shard 3) while passing locally. Pinning city as the
+			// strictly older candidate routes the tie through the D2 age
+			// tiebreak instead, and the expected winner is clock-independent.
+			return `[{"id":"hw-city","status":"open","priority":1,"created_at":"2026-08-20T00:00:00Z","metadata":{"gc.routed_to":"worker"}}]`, nil
 		case "riga":
-			return `[{"id":"hw-riga","status":"open","priority":1,"metadata":{"gc.routed_to":"worker"}}]`, nil
+			return `[{"id":"hw-riga","status":"open","priority":1,"created_at":"2026-08-21T00:00:00Z","metadata":{"gc.routed_to":"worker"}}]`, nil
 		default:
 			t.Fatalf("unexpected store dir %q", dir)
 			return "", nil
@@ -1300,7 +1309,7 @@ func TestClaimHookWorkEmitsSelectionStats(t *testing.T) {
 		t.Fatalf("stats.TotalReadyCandidates = %d, want 2 (one row per store)", stats.TotalReadyCandidates)
 	}
 	if stats.SelectedStore != "city" {
-		t.Fatalf("stats.SelectedStore = %q, want %q (own store, tied on priority)", stats.SelectedStore, "city")
+		t.Fatalf("stats.SelectedStore = %q, want %q (own store, older on the D2 age tiebreak)", stats.SelectedStore, "city")
 	}
 	// Emitted exactly once for this single-attempt claim — not once per
 	// internal bestStoreWithWork call in the loop.
