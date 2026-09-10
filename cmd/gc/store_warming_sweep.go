@@ -28,6 +28,10 @@ import (
 // alternative — blocking the tick on a store that cannot answer — is the
 // outage this plan exists to convert into a degradation.
 
+// residency:allow — a caller's own list, filtered. It takes the []beads.Store
+// the sweep already resolved and returns a SUBSET of it; it enumerates
+// nothing, resolves no owner, and can only ever remove entries.
+//
 // filterDegradedSweepStores drops stores whose vc-ny00 breaker is open and
 // announces what it skipped. A store whose scope cannot be identified is
 // always kept: "unknown" must never mean "skip", or a store-type change

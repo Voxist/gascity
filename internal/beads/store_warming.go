@@ -136,6 +136,32 @@ type StoreWarmingState struct {
 	DegradedUntil time.Time `json:"degraded_until,omitempty"`
 }
 
+// storeWarmingNowFn is the seam over the breaker's clock, matching the
+// deliveryWindowNowFn convention used by the delivery window. The breaker's
+// whole contract is time-based (a 60s cooldown, re-entry by the first probe
+// after it expires), and a test that had to SLEEP through that cooldown
+// would be both slow and flaky on a loaded host. Production reads the real
+// clock; only tests move it.
+//
+// Note this governs the breaker's DECISIONS, never the probe measurement:
+// how long a store's read actually took is real elapsed time, measured by
+// the reconcile, and is not something a seam may fake.
+var storeWarmingNowFn = time.Now
+
+func storeWarmingNow() time.Time { return storeWarmingNowFn() }
+
+// storeWarmingProbeElapsedFn is the seam over the latency a probe reports.
+// Production is the identity function, so this is behaviorally invisible
+// outside tests.
+//
+// It exists because the alternative is worse: a test that needs a read to
+// exceed the wall would otherwise have to SLEEP past it, which is slow, flaky
+// on a loaded host, and — per the resource census's own standing invariant —
+// a fixed-sleep call site that may not grow. Stating the observed latency is
+// both more honest about what is under test (the state machine's reaction to
+// a duration) and deterministic.
+var storeWarmingProbeElapsedFn = func(actual time.Duration) time.Duration { return actual }
+
 // storeWarmingSink receives every state TRANSITION (not every probe) so
 // the durable record is rewritten when something changed and left alone
 // otherwise. cmd/gc registers the PackStateDir writer at boot; in a process
@@ -291,7 +317,7 @@ func storeWarmingTrackerFor(prefix string) *storeWarmingTracker {
 	if t, ok := storeWarmingRegistry.trackers[key]; ok {
 		return t
 	}
-	t := newStoreWarmingTracker(key, time.Now())
+	t := newStoreWarmingTracker(key, storeWarmingNow())
 	storeWarmingRegistry.trackers[key] = t
 	return t
 }
@@ -317,14 +343,14 @@ func lookupStoreWarmingTracker(prefix string) *storeWarmingTracker {
 // evidence of degradation, and the alternative would skip every store on a
 // fresh process.
 func StoreIsDegraded(prefix string) bool {
-	return lookupStoreWarmingTracker(prefix).breakerOpen(time.Now())
+	return lookupStoreWarmingTracker(prefix).breakerOpen(storeWarmingNow())
 }
 
 // StoreWarmingStates returns a snapshot of every tracked store's record,
 // sorted by store id so the durable file and any log rendering are stable
 // across passes.
 func StoreWarmingStates() []StoreWarmingState {
-	now := time.Now()
+	now := storeWarmingNow()
 	storeWarmingRegistry.mu.Lock()
 	trackers := make([]*storeWarmingTracker, 0, len(storeWarmingRegistry.trackers))
 	for _, t := range storeWarmingRegistry.trackers {
@@ -345,7 +371,7 @@ func StoreWarmingStates() []StoreWarmingState {
 // provider restarts the server underneath caches that are already live, and
 // no reconcile probe can observe that in advance.
 func MarkStoreWarmingByPrefix(prefix string) {
-	if st, changed := storeWarmingTrackerFor(prefix).markWarming(time.Now()); changed && storeWarmingEnabled() {
+	if st, changed := storeWarmingTrackerFor(prefix).markWarming(storeWarmingNow()); changed && storeWarmingEnabled() {
 		publishStoreWarmingState(st)
 	}
 }
@@ -540,7 +566,7 @@ func (c *CachingStore) StoreDegraded() bool {
 	if c == nil {
 		return false
 	}
-	return c.warm.breakerOpen(time.Now())
+	return c.warm.breakerOpen(storeWarmingNow())
 }
 
 // WarmingState returns this cache's current published warming record.
@@ -548,7 +574,7 @@ func (c *CachingStore) WarmingState() StoreWarmingState {
 	if c == nil {
 		return StoreWarmingState{}
 	}
-	return c.warm.snapshot(time.Now())
+	return c.warm.snapshot(storeWarmingNow())
 }
 
 // MarkStoreWarming forces this cache into the warming state. The provider
@@ -558,7 +584,7 @@ func (c *CachingStore) MarkStoreWarming() {
 	if c == nil {
 		return
 	}
-	if st, changed := c.warm.markWarming(time.Now()); changed && storeWarmingEnabled() {
+	if st, changed := c.warm.markWarming(storeWarmingNow()); changed && storeWarmingEnabled() {
 		publishStoreWarmingState(st)
 	}
 }
@@ -570,7 +596,7 @@ func (c *CachingStore) recordStoreProbe(now time.Time, elapsed time.Duration, fa
 	if c == nil || c.warm == nil {
 		return
 	}
-	st, changed := c.warm.recordProbe(now, elapsed, failed, bound)
+	st, changed := c.warm.recordProbe(now, storeWarmingProbeElapsedFn(elapsed), failed, bound)
 	if changed && storeWarmingEnabled() {
 		publishStoreWarmingState(st)
 	}

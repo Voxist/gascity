@@ -23,12 +23,16 @@ import (
 // separately by the AC6 suite.
 const warmingTestWall = 40 * time.Millisecond
 
-// prefixedStore is a beads.Store that reports an id prefix and can be made
-// slow — the two properties the warming machinery reads.
+// prefixedStore is a beads.Store that reports an id prefix — the property the
+// warming machinery keys every verdict on.
+//
+// It does not sleep to simulate a slow store. Probe latency is stated through
+// storeWarmingPassProbeFn (see statePassLatency), which keeps these tests
+// deterministic and keeps the suite from adding fixed-sleep call sites the
+// resource census forbids growing.
 type prefixedStore struct {
 	beads.Store
 	prefix string
-	delay  time.Duration
 	err    error
 	lists  int
 }
@@ -41,13 +45,28 @@ func (s *prefixedStore) IDPrefix() string { return s.prefix }
 
 func (s *prefixedStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 	s.lists++
-	if s.delay > 0 {
-		time.Sleep(s.delay)
-	}
 	if s.err != nil {
 		return nil, s.err
 	}
 	return s.Store.List(q)
+}
+
+// statePassLatency makes every warming-pass probe report d, and surfaces the
+// store's own error when it has one, so a test can hold a store on either
+// side of the wall without waiting for a real clock.
+func statePassLatency(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := storeWarmingPassProbeFn
+	storeWarmingPassProbeFn = func(store beads.Store) (time.Duration, error) {
+		if ps, ok := store.(*prefixedStore); ok {
+			ps.lists++
+			if ps.err != nil {
+				return d, ps.err
+			}
+		}
+		return d, nil
+	}
+	t.Cleanup(func() { storeWarmingPassProbeFn = prev })
 }
 
 func useWarmingTestWall(t *testing.T) {
@@ -266,6 +285,7 @@ func TestWarmingPassStopsAsSoonAsAStoreBeatsTheWall(t *testing.T) {
 	t.Cleanup(beads.ResetStoreWarmingRegistryForTest)
 
 	fast := newPrefixedStore("vcnyfast")
+	statePassLatency(t, time.Millisecond)
 	out := runStoreWarmingPass([]beads.Store{fast}, time.Minute, warmingTestWall, func(time.Duration) {})
 
 	if out.State != storeWarmingPassStateRan {
@@ -289,7 +309,7 @@ func TestWarmingPassHonorsItsBudgetAgainstAStoreThatNeverWarms(t *testing.T) {
 	t.Cleanup(beads.ResetStoreWarmingRegistryForTest)
 
 	slow := newPrefixedStore("vcnyslow")
-	slow.delay = warmingTestWall * 2
+	statePassLatency(t, warmingTestWall*2)
 
 	started := time.Now()
 	out := runStoreWarmingPass([]beads.Store{slow}, 250*time.Millisecond, warmingTestWall, func(time.Duration) {})
@@ -321,6 +341,7 @@ func TestWarmingPassReportsFailedWhenEveryStoreErrors(t *testing.T) {
 
 	broken := newPrefixedStore("vcnybroken")
 	broken.err = fmt.Errorf("dial tcp: connection refused")
+	statePassLatency(t, time.Millisecond)
 
 	out := runStoreWarmingPass([]beads.Store{broken}, 200*time.Millisecond, warmingTestWall, func(time.Duration) {})
 	if out.State != storeWarmingPassStateFailed {
@@ -341,10 +362,9 @@ func TestWarmingPassBudgetIsSharedNotPerStore(t *testing.T) {
 
 	var stores []beads.Store
 	for i := 0; i < 4; i++ {
-		s := newPrefixedStore(fmt.Sprintf("vcnyb%d", i))
-		s.delay = warmingTestWall * 2
-		stores = append(stores, s)
+		stores = append(stores, newPrefixedStore(fmt.Sprintf("vcnyb%d", i)))
 	}
+	statePassLatency(t, warmingTestWall*2)
 
 	started := time.Now()
 	runStoreWarmingPass(stores, 300*time.Millisecond, warmingTestWall, func(time.Duration) {})
@@ -458,9 +478,10 @@ func TestStartWarmingPassReturnsImmediately(t *testing.T) {
 	t.Cleanup(beads.ResetStoreWarmingRegistryForTest)
 
 	prev := storeWarmingPassStoresFn
+	// Blocks forever rather than sleeping: the assertion is that the CALLER
+	// does not wait, so the stub only has to never return.
 	storeWarmingPassStoresFn = func(string) ([]beads.Store, func(), error) {
-		time.Sleep(30 * time.Second)
-		return nil, func() {}, nil
+		select {}
 	}
 	t.Cleanup(func() { storeWarmingPassStoresFn = prev })
 

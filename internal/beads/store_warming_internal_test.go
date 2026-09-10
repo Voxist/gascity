@@ -397,19 +397,23 @@ func TestOnlyTransitionsArePublished(t *testing.T) {
 	}
 }
 
-// slowFailRunner is a bd runner whose list calls take a controllable amount
-// of time and then fail — the shape of the listener reaping a query at
-// read_timeout_millis, which is what the 2026-09-06 incident's reads did.
+// slowFailRunner is a bd runner whose list calls fail the way the listener
+// reaping a query at read_timeout_millis fails, which is what the 2026-09-06
+// incident's reads did.
+//
+// It does NOT sleep to produce a slow read. The duration the state machine
+// reacts to is supplied through storeWarmingProbeElapsedFn (see stateElapsed
+// below), so these tests are deterministic rather than racing a real clock on
+// a loaded host.
 type slowFailRunner struct {
 	mu    sync.Mutex
-	delay time.Duration
 	fail  bool
 	lists int
 }
 
 func (r *slowFailRunner) run(_, name string, args ...string) ([]byte, error) {
 	r.mu.Lock()
-	delay, fail := r.delay, r.fail
+	fail := r.fail
 	if len(args) > 0 && args[0] == "list" {
 		r.lists++
 	}
@@ -420,11 +424,8 @@ func (r *slowFailRunner) run(_, name string, args ...string) ([]byte, error) {
 	}
 	switch args[0] {
 	case "list":
-		if delay > 0 {
-			time.Sleep(delay)
-		}
 		if fail {
-			return nil, fmt.Errorf("timed out after %s", delay)
+			return nil, fmt.Errorf("timed out after %s", warmingTestWall)
 		}
 		return []byte(`[{"id":"vcny-1","title":"one","status":"open"}]`), nil
 	case "version":
@@ -433,10 +434,20 @@ func (r *slowFailRunner) run(_, name string, args ...string) ([]byte, error) {
 	return []byte(`[]`), nil
 }
 
-func (r *slowFailRunner) set(delay time.Duration, fail bool) {
+func (r *slowFailRunner) set(fail bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.delay, r.fail = delay, fail
+	r.fail = fail
+}
+
+// stateElapsed makes every probe report the given duration, so a test can put
+// the state machine on either side of the wall without sleeping.
+func stateElapsed(t *testing.T, d time.Duration) {
+	t.Helper()
+	storeWarmingProbeElapsedFn = func(time.Duration) time.Duration { return d }
+	t.Cleanup(func() {
+		storeWarmingProbeElapsedFn = func(actual time.Duration) time.Duration { return actual }
+	})
 }
 
 func (r *slowFailRunner) listCount() int {
@@ -457,7 +468,8 @@ func TestDegradedStoreIsSkippedAndAnnouncedByTheReconciler(t *testing.T) {
 	logs := captureLog(t)
 
 	runner := &slowFailRunner{}
-	runner.set(warmingTestWall+20*time.Millisecond, true)
+	runner.set(true)
+	stateElapsed(t, warmingTestWall+time.Millisecond)
 	cache := newCachingStore(NewBdStore("/city", runner.run), "vcnyskip", nil)
 
 	for i := 0; i < defaultStoreBreakerTrips; i++ {
@@ -498,7 +510,8 @@ func TestDegradedSkipIsAnnouncedOncePerEpisode(t *testing.T) {
 	logs := captureLog(t)
 
 	runner := &slowFailRunner{}
-	runner.set(warmingTestWall+20*time.Millisecond, true)
+	runner.set(true)
+	stateElapsed(t, warmingTestWall+time.Millisecond)
 	cache := newCachingStore(NewBdStore("/city", runner.run), "vcnyonce", nil)
 	for i := 0; i < defaultStoreBreakerTrips; i++ {
 		cache.runReconciliation()
@@ -519,6 +532,7 @@ func TestReconcileHeartbeatCarriesTheWarmingGauge(t *testing.T) {
 	logs := captureLog(t)
 
 	runner := &slowFailRunner{}
+	stateElapsed(t, time.Millisecond)
 	cache := newCachingStore(NewBdStore("/city", runner.run), "vcnygauge", nil)
 	cache.runReconciliation()
 
@@ -545,7 +559,8 @@ func TestDegradedStoreStillHeartbeatsWithinOneWindow(t *testing.T) {
 	logs := captureLog(t)
 
 	runner := &slowFailRunner{}
-	runner.set(warmingTestWall+20*time.Millisecond, true)
+	runner.set(true)
+	stateElapsed(t, warmingTestWall+time.Millisecond)
 	cache := newCachingStore(NewBdStore("/city", runner.run), "vcnyquiet", nil)
 	cache.runReconciliation()
 
@@ -567,6 +582,7 @@ func TestWarmingStateKillSwitchLeavesTheHeartbeatPrePlanIdentical(t *testing.T) 
 	logs := captureLog(t)
 
 	runner := &slowFailRunner{}
+	stateElapsed(t, time.Millisecond)
 	cache := newCachingStore(NewBdStore("/city", runner.run), "vcnyoff", nil)
 	cache.runReconciliation()
 
@@ -595,6 +611,7 @@ func TestWarmingStateKillSwitchSuppressesTheDurableRecord(t *testing.T) {
 	t.Cleanup(func() { SetStoreWarmingStateSink(nil) })
 
 	runner := &slowFailRunner{}
+	stateElapsed(t, time.Millisecond)
 	cache := newCachingStore(NewBdStore("/city", runner.run), "vcnyoff2", nil)
 	cache.runReconciliation()
 	cache.runReconciliation()
@@ -610,10 +627,10 @@ func TestWarmingStateKillSwitchSuppressesTheDurableRecord(t *testing.T) {
 // resumes without operator action.
 func TestReconcileRecoversAfterTheCooldownExpires(t *testing.T) {
 	useTestWall(t)
-	t.Setenv(storeBreakerCooldownEnv, "1")
 
 	runner := &slowFailRunner{}
-	runner.set(warmingTestWall+20*time.Millisecond, true)
+	runner.set(true)
+	stateElapsed(t, warmingTestWall+time.Millisecond)
 	cache := newCachingStore(NewBdStore("/city", runner.run), "vcnyheal", nil)
 	for i := 0; i < defaultStoreBreakerTrips; i++ {
 		cache.runReconciliation()
@@ -622,9 +639,15 @@ func TestReconcileRecoversAfterTheCooldownExpires(t *testing.T) {
 		t.Fatal("precondition: store did not degrade")
 	}
 
-	// The store heals; the cooldown expires; the next cycle probes it.
-	runner.set(0, false)
-	time.Sleep(1100 * time.Millisecond)
+	// The store heals and the cooldown expires. The clock is MOVED, not
+	// waited on: the breaker's contract is time-based, and sleeping through
+	// a real cooldown would make this test both slow and flaky on a loaded
+	// host without testing anything the seam does not.
+	runner.set(false)
+	stateElapsed(t, time.Millisecond)
+	base := time.Now()
+	storeWarmingNowFn = func() time.Time { return base.Add(2 * storeBreakerCooldown()) }
+	t.Cleanup(func() { storeWarmingNowFn = time.Now })
 	callsBefore := runner.listCount()
 	cache.runReconciliation()
 	if runner.listCount() == callsBefore {

@@ -329,7 +329,7 @@ func (c *CachingStore) runReconciliation() {
 		// while the store cannot answer. Recording here is what makes the
 		// breaker trip at all, and what puts `store=warming` in the log
 		// within one window of onset (AC3).
-		c.recordStoreProbe(time.Now(), bdLatency, true, readBound)
+		c.recordStoreProbe(storeWarmingNow(), bdLatency, true, readBound)
 		c.mu.Lock()
 		c.syncFailures++
 		if (IsPartialResult(err) || c.syncFailures >= maxCacheSyncFailures) && (c.state == cacheLive || c.state == cachePartial) {
@@ -375,7 +375,7 @@ func (c *CachingStore) runReconciliation() {
 	}
 	useFreshDeps := depsComplete && depErr == nil
 
-	c.recordStoreProbe(time.Now(), bdLatency, false, readBound)
+	c.recordStoreProbe(storeWarmingNow(), bdLatency, false, readBound)
 
 	c.mu.Lock()
 	now := time.Now()
@@ -835,7 +835,7 @@ func (c *CachingStore) reconcileDegradedSkip() bool {
 	if c == nil || c.warm == nil {
 		return false
 	}
-	if !c.warm.breakerOpen(time.Now()) {
+	if !c.warm.breakerOpen(storeWarmingNow()) {
 		c.mu.Lock()
 		c.warmingSkipLogged = false
 		c.mu.Unlock()
@@ -846,7 +846,7 @@ func (c *CachingStore) reconcileDegradedSkip() bool {
 	c.warmingSkipLogged = true
 	c.mu.Unlock()
 	if !logged {
-		st := c.warm.snapshot(time.Now())
+		st := c.warm.snapshot(storeWarmingNow())
 		c.recordProblem("reconcile skipped", fmt.Errorf(
 			"store=degraded rig=%s probe_ms=%d bound_exceeded=%d wall_ms=%d; serving stale-marked cache until the breaker cooldown expires",
 			st.Store, st.ProbeMs, st.BoundExceeded, st.WallMs))

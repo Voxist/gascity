@@ -195,7 +195,7 @@ func runStoreWarmingPass(stores []beads.Store, budget, wall time.Duration, sleep
 		backoff := storeWarmingPassInitialBackoff
 		for time.Now().Before(deadline) {
 			result.Attempts++
-			elapsed, err := storeWarmingPassProbe(store)
+			elapsed, err := storeWarmingPassProbeFn(store)
 			result.LastProbeMs = elapsed.Milliseconds()
 			if err != nil {
 				result.Err = err.Error()
@@ -269,14 +269,26 @@ func reportStoreWarmingPassOutcome(out storeWarmingPassOutcome, stderr io.Writer
 	}
 }
 
+// storeWarmingPassProbeFn is the seam over one attempt's reads, so a test can
+// state the latency the listener returned instead of producing it by
+// sleeping. Production points at the real three-shape probe above.
+var storeWarmingPassProbeFn = storeWarmingPassProbe
+
 // storeWarmingPassStoresFn is the seam over store resolution, so the pass is
 // testable without a live city on disk. Production resolves the same
 // per-scope order stores the tracking sweep walks — the reads whose latency
 // is what stalls the tick.
 var storeWarmingPassStoresFn = defaultStoreWarmingPassStores
 
+// residency:allow — not a residency answer. It re-uses the order-tracking
+// sweep's OWN already-resolved per-scope enumeration verbatim
+// (orderTrackingSweepStoresForConfigTargets) so the warming pass warms
+// exactly the stores whose latency stalls the tick; it resolves no owner and
+// makes no placement decision of its own.
 func defaultStoreWarmingPassStores(cityPath string) ([]beads.Store, func(), error) {
-	cfg, err := loadCityConfig(cityPath)
+	// os.Stderr, not a discard: a city.toml that cannot be read cleanly is
+	// something the operator must see, and this pass is loud by contract.
+	cfg, err := loadCityConfig(cityPath, os.Stderr)
 	if err != nil {
 		return nil, func() {}, err
 	}
