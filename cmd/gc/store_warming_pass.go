@@ -34,7 +34,7 @@ import (
 // process, one deadline, fixed at start; session overrides are accepted and
 // ignored). Three read shapes per attempt, cheapest first, so a store that
 // is merely unreachable fails fast instead of burning the budget on a scan:
-// an id-keyed lookup (the "SELECT 1" analogue), the reconcile's own
+// an id-keyed lookup (the "SELECT 1" analog), the reconcile's own
 // full-scan shape, and the order-tracking sweep's label query — the heavy
 // read whose slowness is what actually stalls the tick.
 //
