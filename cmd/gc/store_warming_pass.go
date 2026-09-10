@@ -258,8 +258,9 @@ func reportStoreWarmingPassOutcome(out storeWarmingPassOutcome, stderr io.Writer
 				warmed++
 			}
 		}
-		fmt.Fprintf(stderr, "gc dolt: STORE WARMING PASS: warmed %d/%d store(s) in %s (budget %ds, wall %dms)\n",
-			warmed, len(out.Stores), out.Duration, out.BudgetS, out.WallMs) //nolint:errcheck
+		msg := fmt.Sprintf("gc dolt: STORE WARMING PASS: warmed %d/%d store(s) in %s (budget %ds, wall %dms)\n",
+			warmed, len(out.Stores), out.Duration, out.BudgetS, out.WallMs)
+		fmt.Fprint(stderr, msg) //nolint:errcheck
 	case storeWarmingPassStateFailed:
 		fmt.Fprintf(stderr, "gc dolt: STORE WARMING PASS FAILED (ran %s): %s\n", out.Duration, out.Err) //nolint:errcheck
 	case storeWarmingPassStateStarted:

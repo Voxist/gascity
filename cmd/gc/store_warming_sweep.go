@@ -56,8 +56,9 @@ func filterDegradedSweepStores(stores []beads.Store, stderr io.Writer, logPrefix
 		// operator's question during an incident is "is the tick still
 		// moving", which a per-pass line answers and a once-per-episode
 		// line does not.
-		fmt.Fprintf(stderr, "%s: order tracking sweep: skipping degraded store(s) %v; "+
-			"serving the rest of the sweep (vc-ny00 L1)\n", logPrefix, skipped) //nolint:errcheck // best-effort stderr
+		msg := fmt.Sprintf("%s: order tracking sweep: skipping degraded store(s) %v; "+
+			"serving the rest of the sweep (vc-ny00 L1)\n", logPrefix, skipped)
+		fmt.Fprint(stderr, msg) //nolint:errcheck // best-effort stderr
 	}
 	return kept
 }
