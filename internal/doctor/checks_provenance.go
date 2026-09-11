@@ -197,13 +197,20 @@ func (c *DeployProvenanceCheck) runningRevision() (revision string, dirty, ok bo
 // stale or clobbered binary.
 func normalizeRevision(stamp string) (revision string, dirty bool) {
 	stamp = strings.TrimSpace(stamp)
+	// Strip the dirty suffix BEFORE testing the placeholder. The two are
+	// independent: Makefile:29-30 derives COMMIT and DIRTY from separate
+	// shell fallbacks, so a tree with no commits and uncommitted files
+	// stamps "unknown-dirty". Testing the placeholder first matches only a
+	// bare "unknown", letting that stamp through as the literal revision
+	// "unknown" to be compared against a real sha -- the exact false
+	// "stale process or clobbered binary" report this function exists to
+	// prevent.
+	stamp, dirty = strings.CutSuffix(stamp, dirtyRevisionSuffix)
+	stamp = strings.TrimSpace(stamp)
 	if stamp == "" || stamp == unknownRevision {
-		return "", false
+		return "", dirty
 	}
-	if trimmed, cut := strings.CutSuffix(stamp, dirtyRevisionSuffix); cut {
-		return strings.TrimSpace(trimmed), true
-	}
-	return stamp, false
+	return stamp, dirty
 }
 
 // CanFix returns false — remediation is a rebuild/reinstall, not something
