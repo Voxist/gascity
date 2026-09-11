@@ -244,7 +244,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	root := repoRoot(t)
 	input := readFile(t, root, ".github/requirements/mcp-agent-mail.in")
 	for _, want := range []string{
-		"gitpython>=3.1.57",
+		"gitpython>=3.1.59",
 		"pillow>=12.3.0",
 		"aiohttp>=3.14.3",
 	} {
@@ -265,7 +265,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	// regenerating the lock leaves stale hashes that fail the image build.
 	lock := readFile(t, root, ".github/requirements/mcp-agent-mail.txt")
 	for _, want := range []string{
-		"gitpython==3.1.58 \\",
+		"gitpython==3.1.62 \\",
 		"pillow==12.3.0 \\",
 		"aiohttp==3.14.3 \\",
 		"cryptography==50.0.0 \\",
