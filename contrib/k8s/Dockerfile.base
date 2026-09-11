@@ -20,7 +20,7 @@ ARG DOLT_VERSION=2.1.7
 ARG DOLT_SOURCE_REF=781cbb730221ea7df4fc7995255bb336df9c3864
 ARG DOLT_SOURCE_SHA256=0b0c9bce8baef26baa7e0e5825cd2d7d6101daf6fc9673f38dac9670afb66847
 # 1.83.1, not 1.83.0: CVE-2026-84304 (HIGH) is in 1.83.0 and fixed in 1.83.1.
-ARG GRPC_VERSION=1.83.1
+ARG GRPC_VERSION=1.83.2
 # 0.41.0, not 0.39.0: the x/crypto floor below drags x/text to 0.41.0 in both
 # the gh and dolt module graphs, and the post-build checks assert this ARG by
 # EXACT `go version -m` match. An ARG that sits below what the build resolves
@@ -32,7 +32,7 @@ ARG XTEXT_VERSION=0.41.0
 # fixed 0.55.0) and x/mod CVE-2026-56864/56865 (HIGH, fixed 0.40.0). Floors,
 # applied to both tool builds below; each must be >= what the source resolves
 # (ga-0emb8), verified against the pinned gh and dolt sources.
-ARG XCRYPTO_VERSION=0.55.0
+ARG XCRYPTO_VERSION=0.56.0
 ARG XMOD_VERSION=0.40.0
 # dolt reaches github.com/apache/thrift through go.opentelemetry.io/otel/
 # exporters/jaeger v1.17.0, which pins the v0.13.1-0.20201008052519 pseudo-
