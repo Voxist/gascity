@@ -488,6 +488,52 @@ test_retry_recovers_then_still_blocks_on_real_ownership_change() {
     rm -rf "$repo" "$fbd"
 }
 
+# ga-grenu: when EVERY attempt expired on the clock and none reported an
+# error, the store is slow, not absent. The message must say so and name the
+# budget knob, because the old wording ("unreachable ... bd/Dolt needs
+# attention" + "--no-verify") pointed at the wrong subsystem and offered
+# disarming the guard as the remedy -- which is how a load spike turns into a
+# bypassed ownership check.
+test_timeout_message_names_the_budget_not_an_outage() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    mkdir -p "$fbd/fake-bd-state"
+    echo 3 > "$fbd/fake-bd-state/show-sleep"   # healthy but slower than the budget
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 1 2>&1)"; rc=$?  # budget 1s < 3s sleep
+    if [[ $rc -ne 0 ]] \
+        && grep -q "exceeded POG_TIMEOUT_SECONDS" <<<"$out" \
+        && grep -q "POG_TIMEOUT_SECONDS=60 git push" <<<"$out" \
+        && ! grep -q "bd/Dolt needs attention" <<<"$out"; then
+        record_pass "timeout/message-names-budget-not-outage (rc=$rc)"
+    else
+        record_fail "timeout/message-names-budget-not-outage" "expected a timeout-specific message naming the budget and a larger-budget retry, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# ga-grenu: a store that ERRORS (rather than hanging) must still produce the
+# outage-flavoured wording. The two failure modes must not collapse back into
+# one message -- that collapse is the defect.
+test_error_message_still_reports_unreachable() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    mkdir -p "$fbd/fake-bd-state"
+    echo 1 > "$fbd/fake-bd-state/show-exit"    # errors immediately, never hangs
+    out="$(POG_READ_ATTEMPTS=2 run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] \
+        && grep -q "unreachable after" <<<"$out" \
+        && ! grep -q "exceeded POG_TIMEOUT_SECONDS" <<<"$out"; then
+        record_pass "timeout/error-path-keeps-unreachable-wording (rc=$rc)"
+    else
+        record_fail "timeout/error-path-keeps-unreachable-wording" "expected unreachable wording (not the timeout wording) when bd errors, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
 test_retry_unreachable_message_mentions_retry_before_no_verify() {
     local repo fbd out rc before_noverify
     repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
@@ -1322,6 +1368,8 @@ run_all() {
     test_retry_recovers_from_transient_failure
     test_retry_exhausted_still_blocks
     test_retry_recovers_then_still_blocks_on_real_ownership_change
+    test_timeout_message_names_the_budget_not_an_outage
+    test_error_message_still_reports_unreachable
     test_retry_unreachable_message_mentions_retry_before_no_verify
     test_retry_parse_failure_message_mentions_retry_before_no_verify
     test_bead_id_branch_wins_and_warns_on_disagreement
