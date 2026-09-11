@@ -32,6 +32,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "binary divergence unverified" — never a divergence, and never a green
   check. A green check means a comparison actually ran.
 
+### Fixed
+
+- **`gc doctor`'s `deploy-provenance` check can assert provenance again.** It
+  read the running binary's revision from `debug.ReadBuildInfo`'s
+  `vcs.revision` only. Since `-buildvcs=false` reached the `build` target on
+  2026-08-07 — `artifact` had it already, both because the Go toolchain
+  identifies a repository by a `.git` *directory* and so stamps whichever
+  repository *encloses* a linked worktree rather than the worktree being
+  compiled — no `gc` this repo produces carries that setting. Every run of the
+  check therefore reported "provenance not asserted" and silently retired the
+  lineage assertion its own documentation calls the load-bearing half: the one
+  that catches a deploy built from a stray or rebased-away branch, which a
+  "running == on-disk" comparison passes when both are stale. The check now
+  falls back to the revision the linker injected (`-X main.commit`), which is
+  the revision those builds actually carry, and `cmd/gc` passes it in.
+  Precedence goes to the toolchain's stamp when one exists (a `go install`
+  build), since it is derived from the repository the build read rather than
+  from a value a Makefile passed on the command line.
+
+  Two stamps that name no commit are no longer treated as if they did. The
+  `unknown` placeholder a binary carries when nothing was injected degrades to
+  "provenance not asserted" rather than being compared against a manifest and
+  reported as a stale or clobbered binary. A `-dirty` stamp — what `make build`
+  writes from a modified tree — has the suffix stripped before comparison,
+  since no git revision carries it, and reports a warning rather than a green:
+  the commit is in the lineage, but the deployed bytes are not that commit.
+
 ### Changed
 
 - **`make install` no longer writes `~/.local/bin/gc`.** Installing wrote the

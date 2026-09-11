@@ -20,8 +20,18 @@ import (
 // stale or built from a stray branch — incident-5's actual shape.
 const DefaultLineageRef = "fork/main"
 
+// unknownRevision is the placeholder a gc binary carries when no commit was
+// injected at link time. It names no commit, so it must never be compared
+// against a manifest as if it did.
+const unknownRevision = "unknown"
+
+// dirtyRevisionSuffix marks a revision stamp built from a modified working
+// tree. No git revision carries it, so it is stripped before comparison and
+// reported separately.
+const dirtyRevisionSuffix = "-dirty"
+
 // DeployProvenanceCheck asserts machine-derived deploy provenance:
-//  1. the running binary's embedded vcs.revision matches the build
+//  1. the revision the running binary was built from matches the build
 //     manifest `make install` wrote next to the installed binary, and
 //  2. that manifest commit is ancestor-or-equal of the source repo's
 //     lineage ref head (`git merge-base --is-ancestor`, read-only).
@@ -29,26 +39,44 @@ const DefaultLineageRef = "fork/main"
 // A plain "running == on-disk" comparison passes when both are stale, so
 // the lineage assertion is the load-bearing half. The check degrades to a
 // warning (never a hard failure) when provenance simply cannot be
-// asserted: no manifest installed, no embedded revision (test binaries),
-// or the source repo/ref being unavailable on this machine.
+// asserted: no manifest installed, no revision in the running binary at
+// all, or the source repo/ref being unavailable on this machine.
 type DeployProvenanceCheck struct {
 	// BinaryPath resolves the on-disk path of the running binary. Defaults
 	// to os.Executable with symlinks resolved.
 	BinaryPath func() (string, error)
-	// RunningRevision reports the VCS revision embedded in the running
-	// binary. Defaults to debug.ReadBuildInfo's vcs.revision setting.
+	// RunningRevision reports the VCS revision the Go toolchain embedded in
+	// the running binary. Defaults to debug.ReadBuildInfo's vcs.revision
+	// setting.
 	RunningRevision func() (string, bool)
+	// LinkedRevision is the revision the linker injected (-X main.commit),
+	// used when the toolchain embedded none.
+	//
+	// It is not a fallback for an exotic case; it is the only revision a gc
+	// built by this repo carries. `make build` (and so `make install`) and
+	// `make artifact` both pass -buildvcs=false, because the toolchain
+	// identifies a repository by a `.git` DIRECTORY and so stamps whichever
+	// repository encloses a linked worktree rather than the worktree being
+	// compiled (ga-u7fb). With stamping off, RunningRevision reports nothing
+	// for every deployed binary and this check can only ever say "provenance
+	// not asserted" — including for the lineage half it calls load-bearing.
+	//
+	// Empty, or unknownRevision, when nothing was injected.
+	LinkedRevision string
 	// LineageRef is the source-repo ref the deployed commit must be
 	// reachable from. Defaults to DefaultLineageRef.
 	LineageRef string
 }
 
 // NewDeployProvenanceCheck returns a DeployProvenanceCheck with the
-// default self-inspection resolvers and lineage ref.
-func NewDeployProvenanceCheck() *DeployProvenanceCheck {
+// default self-inspection resolvers and lineage ref. linkedRevision is the
+// commit the linker injected into this binary — cmd/gc's `commit` — which is
+// what a -buildvcs=false build has in place of an embedded vcs.revision.
+func NewDeployProvenanceCheck(linkedRevision string) *DeployProvenanceCheck {
 	return &DeployProvenanceCheck{
 		BinaryPath:      runningBinaryPath,
 		RunningRevision: runningBinaryRevision,
+		LinkedRevision:  linkedRevision,
 		LineageRef:      DefaultLineageRef,
 	}
 }
@@ -81,10 +109,10 @@ func (c *DeployProvenanceCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 
-	revision, ok := c.RunningRevision()
-	if !ok || strings.TrimSpace(revision) == "" {
+	revision, dirty, ok := c.runningRevision()
+	if !ok {
 		r.Status = StatusWarning
-		r.Message = "running binary embeds no vcs.revision; provenance not asserted"
+		r.Message = "running binary reports no revision (no embedded vcs.revision, no linker-injected commit); provenance not asserted"
 		return r
 	}
 	if !revisionsEqual(revision, manifest.CommitSHA) {
@@ -124,9 +152,58 @@ func (c *DeployProvenanceCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 
+	if dirty {
+		// The commit is in the lineage; the bytes are not that commit. Saying
+		// only the first would hand an operator a green for a build carrying
+		// changes that exist nowhere but the tree it was compiled in.
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("running binary was built from a modified working tree at %s; that commit is ancestor-or-equal of %s, but the deployed bytes are not it",
+			shortRevision(manifest.CommitSHA), ref)
+		r.FixHint = "rebuild and reinstall from a clean tree so the deployed bytes are the commit the manifest names"
+		return r
+	}
+
 	r.Status = StatusOK
 	r.Message = fmt.Sprintf("running binary %s matches the install manifest and is ancestor-or-equal of %s", shortRevision(manifest.CommitSHA), ref)
 	return r
+}
+
+// runningRevision reports the revision the running binary was built from,
+// whether that stamp says the tree was modified, and whether any revision was
+// found at all.
+//
+// The toolchain's embedded stamp wins when present: it is derived from the
+// repository the build actually read, where the linked one is a value a
+// Makefile passed on the command line. Neither is trusted to be a bare
+// revision — see normalizeRevision.
+func (c *DeployProvenanceCheck) runningRevision() (revision string, dirty, ok bool) {
+	if c.RunningRevision != nil {
+		if raw, have := c.RunningRevision(); have {
+			if rev, isDirty := normalizeRevision(raw); rev != "" {
+				return rev, isDirty, true
+			}
+		}
+	}
+	if rev, isDirty := normalizeRevision(c.LinkedRevision); rev != "" {
+		return rev, isDirty, true
+	}
+	return "", false, false
+}
+
+// normalizeRevision reduces a revision stamp to the bare commit it names and
+// reports whether it was marked dirty. It returns "" when the stamp names no
+// commit: unknownRevision is a placeholder, and comparing it against a
+// manifest would turn "provenance not asserted" into a false report of a
+// stale or clobbered binary.
+func normalizeRevision(stamp string) (revision string, dirty bool) {
+	stamp = strings.TrimSpace(stamp)
+	if stamp == "" || stamp == unknownRevision {
+		return "", false
+	}
+	if trimmed, cut := strings.CutSuffix(stamp, dirtyRevisionSuffix); cut {
+		return strings.TrimSpace(trimmed), true
+	}
+	return stamp, false
 }
 
 // CanFix returns false — remediation is a rebuild/reinstall, not something
