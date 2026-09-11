@@ -20,7 +20,7 @@ ARG DOLT_VERSION=2.1.7
 ARG DOLT_SOURCE_REF=781cbb730221ea7df4fc7995255bb336df9c3864
 ARG DOLT_SOURCE_SHA256=0b0c9bce8baef26baa7e0e5825cd2d7d6101daf6fc9673f38dac9670afb66847
 # 1.83.1, not 1.83.0: CVE-2026-84304 (HIGH) is in 1.83.0 and fixed in 1.83.1.
-ARG GRPC_VERSION=1.83.1
+ARG GRPC_VERSION=1.83.2
 # 0.41.0, not 0.39.0: the x/crypto floor below drags x/text to 0.41.0 in both
 # the gh and dolt module graphs, and the post-build checks assert this ARG by
 # EXACT `go version -m` match. An ARG that sits below what the build resolves

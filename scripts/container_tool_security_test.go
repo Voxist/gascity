@@ -13,7 +13,7 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 		ghVersion     = "2.96.0"
 		ghSourceRef   = "b300f2ec7ec9dc9addc39b2ad88c54097ded7ca0"
 		doltSourceRef = "781cbb730221ea7df4fc7995255bb336df9c3864"
-		grpcVersion   = "1.83.1"
+		grpcVersion   = "1.83.2"
 		xtextVersion  = "0.41.0"
 		// Floors for the gh and dolt builds; see Dockerfile.base.
 		xcryptoVersion            = "0.56.0"
@@ -106,7 +106,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		bdSourceSHA256 = "587ad18b765d90e75b64ca4bb57c12520befd8bece96545d48e98add26bc8f0f"
 		bdBuild        = "3e03250ee"
 		bdBranch       = "HEAD"
-		grpcVersion    = "1.83.1"
+		grpcVersion    = "1.83.2"
 		// Floors, not exact pins: each must be >= what the pinned source
 		// resolves, because pinning BELOW that is a silent downgrade
 		// (ga-0emb8). x/text is 0.41.0 in both images now: the x/crypto floor
