@@ -699,3 +699,94 @@ func TestClaimStoreWithFallbackUsesSelectedStoreWhenStillReady(t *testing.T) {
 		t.Fatalf("calls = %v, want a single [city] re-validation", calls)
 	}
 }
+
+// TestTieWithNeverRotatesAPairResolvedByAge pins the ga-bt1nl contract
+// directly, because the defect it guards was invisible at the level the
+// existing selection test observes it: that test asserts a winner, and a coin
+// flip produces the right winner half the time, so a single pass accepted the
+// bug on every other run since it was written.
+//
+// The contract is the one tieWith's doc states: it reports a tie only when the
+// sameness was NOT resolved by age. Both ages known is always resolved — older
+// wins under betterThan, exact match takes slice order — so it is never
+// rotatable, whether the ages differ or match. Only an unknown age leaves the
+// tie genuinely unresolved.
+func TestTieWithNeverRotatesAPairResolvedByAge(t *testing.T) {
+	older := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC)
+
+	for _, tc := range []struct {
+		name string
+		a, b hookCandidateRank
+		want bool
+	}{
+		{
+			// The ga-bt1nl case. Differing known ages are the one pair the D2
+			// tiebreak exists to settle; reporting them as a rotatable tie
+			// hands the decision to UnixNano instead.
+			name: "both ages known, differing -> resolved, not rotatable",
+			a:    hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true},
+			b:    hookCandidateRank{tier: 1, priority: 1, age: newer, hasAge: true},
+			want: false,
+		},
+		{
+			name: "both ages known, differing, reversed -> still not rotatable",
+			a:    hookCandidateRank{tier: 1, priority: 1, age: newer, hasAge: true},
+			b:    hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true},
+			want: false,
+		},
+		{
+			name: "both ages known, equal -> resolved tie, slice order",
+			a:    hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true},
+			b:    hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true},
+			want: false,
+		},
+		{
+			name: "left age unknown -> unresolved, keeps pre-D2 rotation",
+			a:    hookCandidateRank{tier: 1, priority: 1},
+			b:    hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true},
+			want: true,
+		},
+		{
+			name: "right age unknown -> unresolved, keeps pre-D2 rotation",
+			a:    hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true},
+			b:    hookCandidateRank{tier: 1, priority: 1},
+			want: true,
+		},
+		{
+			name: "both ages unknown -> unresolved, keeps pre-D2 rotation",
+			a:    hookCandidateRank{tier: 1, priority: 1},
+			b:    hookCandidateRank{tier: 1, priority: 1},
+			want: true,
+		},
+		{
+			name: "different tier -> not a tie at all",
+			a:    hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true},
+			b:    hookCandidateRank{tier: 2, priority: 1, age: older, hasAge: true},
+			want: false,
+		},
+		{
+			name: "different priority -> not a tie at all",
+			a:    hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true},
+			b:    hookCandidateRank{tier: 1, priority: 2, age: older, hasAge: true},
+			want: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.a.tieWith(tc.b); got != tc.want {
+				t.Errorf("tieWith = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// The pair that must stay ordered rather than rotated: older wins outright
+	// in exactly one direction, which is what makes the selection deterministic.
+	a := hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true}
+	b := hookCandidateRank{tier: 1, priority: 1, age: newer, hasAge: true}
+	if !a.betterThan(b) {
+		t.Error("older candidate must win betterThan")
+	}
+	if b.betterThan(a) {
+		t.Error("newer candidate must not win betterThan")
+	}
+}
