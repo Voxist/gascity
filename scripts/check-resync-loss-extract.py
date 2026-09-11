@@ -5,15 +5,38 @@ Ported from the ga-d32bn forensics prototype (validated against the real
 2026-08-31 resync merge, 15913af6a). See that script's header for the full
 mechanism this guards against.
 
-Gate 2 asks: which (declaration, file) pairs did the fork add that upstream
-never had an opinion on (present in OURS, absent from that exact file in
-both BASE and THEIRS), and which of those are missing from the MERGE
-result? Keyed by the (name, file) pair throughout, never by bare name alone
-— a name that also exists somewhere unrelated in BASE or THEIRS must not
-hide a real fork-added declaration of the same name in a different file.
-For each missing pair this script runs a plain `git merge-file -p` over the
-three versions of the file that declared it and checks whether the
-declaration's name still appears in that output:
+This script computes BOTH directions of the same question in one pass over
+the four trees (the tree parse is the expensive part; running it twice for
+two scripts would double the cost for nothing).
+
+Gate 2 (fork direction) asks: which (declaration, file) pairs did the fork
+add that upstream never had an opinion on (present in OURS, absent from
+that exact file in both BASE and THEIRS), and which of those are missing
+from the MERGE result?
+
+Gate 3 (upstream direction, bead ga-8gpw4) asks the mirror-image question:
+which pairs did UPSTREAM add that the fork never had an opinion on (present
+in THEIRS, absent from that exact file in both BASE and OURS), and which of
+those are missing from the MERGE result? Gate 2 catches a `--theirs`-shaped
+resolution discarding the fork's side; Gate 3 catches an `--ours`-shaped
+resolution discarding upstream's. ga-d32bn was the first shape, so the gate
+was built for it; the 2026-09-04 resync then hit the second shape
+(internal/hooks/hooks_test.go resolved --ours, silently dropping all three
+upstream-added cursor tests) with Gate 2 reporting a clean "0 missing" on
+that exact tree. Gate 3's verdicts carry an `UPSTREAM-` prefix so a reader
+(or a grep) can tell the two directions apart without knowing which section
+a line came from.
+
+Both directions are keyed by the (name, file) pair throughout, never by
+bare name alone — a name that also exists somewhere unrelated in the two
+other trees must not hide a real added declaration of the same name in a
+different file. For each missing pair this script runs a plain
+`git merge-file -p` over the three versions of the file that declared it
+and checks whether the declaration's name still appears in that output.
+The oracle is direction-agnostic: `git merge-file -p OURS BASE THEIRS` is
+the text a plain 3-way merge would produce, and a name surviving outside
+every conflict hunk in it would have been delivered unattended whichever
+side contributed it:
 
   - present  -> RESOLUTION-BUG: a naive 3-way merge would have kept it: the
                 loss was introduced by how THIS merge was hand-resolved, not
@@ -37,14 +60,19 @@ the resync-loss-mechanism bd memory; it is not a substitute for `go vet`.
 
 Usage:
   check-resync-loss-extract.py BASE OURS THEIRS MERGE \
-      --summary-out FILE --detail-out FILE
+      --summary-out FILE --detail-out FILE \
+      --upstream-report-out FILE --upstream-detail-out FILE
 
-Prints one human-formatted report line per missing declaration to stdout,
-decl-count bookkeeping to stderr, a tiny `KEY=N` summary (no JSON, no `tail`
-needed to read it) to --summary-out for the caller to gate on, and the same
-per-declaration data as tab-separated `VERDICT\tNAME\tFILE` lines to
---detail-out for the caller to `cut -f`/`awk -F'\t'` instead of re-parsing
-the human-formatted stdout report.
+Prints one human-formatted report line per missing FORK-added declaration to
+stdout, decl-count bookkeeping to stderr, a tiny `KEY=N` summary (no JSON,
+no `tail` needed to read it) to --summary-out for the caller to gate on, and
+the same per-declaration data as tab-separated `VERDICT\tNAME\tFILE` lines
+to --detail-out for the caller to `cut -f`/`awk -F'\t'` instead of
+re-parsing the human-formatted stdout report. The upstream direction's
+report and detail go to their own two files rather than being interleaved
+into stdout/--detail-out, so the caller renders the two gates as separate
+sections and the fork-direction detail file keeps the exact format its
+existing consumers (Gate 1's near-theirs corroboration) already parse.
 """
 import argparse
 import os
@@ -186,6 +214,60 @@ def three_way_merge_text(repo, base, ours, theirs, path, cache):
     return clean_text
 
 
+def analyze_direction(repo, base, ours, theirs, missing_pairs, cache, verdict_prefix):
+    """Classify every missing (decl, file) pair; return counts and report lines.
+
+    Shared by Gate 2 (verdict_prefix "") and Gate 3 (verdict_prefix
+    "UPSTREAM-"): the classification is identical in both directions, only
+    the set of pairs fed in and the label printed differ. `cache` is the
+    per-path `git merge-file` memo, shared across both directions because a
+    single file can lose declarations in both at once and re-merging it
+    would be pure waste.
+
+    Returns (bugs, outcomes, exempt, report_lines, detail_lines).
+    """
+    bug = 0
+    outcome = 0
+    exempt = 0
+    report_lines = []
+    detail_lines = []
+    for name, fname in missing_pairs:
+        if is_generated(repo, fname):
+            # AGENTS.md rule 1 licenses taking this file wholesale from
+            # upstream; Gate 1 already exempts the file itself, and a
+            # declaration "lost" from it is that same licensed outcome,
+            # not a resync-resolution defect. Reported for visibility,
+            # not counted toward RESOLUTION-BUG/MERGE-OUTCOME, and never
+            # fails the gate.
+            exempt += 1
+            verdict = verdict_prefix + "EXEMPT"
+            report_lines.append(f"  {verdict:16s} {name}  ({fname})  (generated, AGENTS.md rule 1)")
+            detail_lines.append(f"{verdict}\t{name}\t{fname}")
+            continue
+        clean_text = three_way_merge_text(repo, base, ours, theirs, fname, cache)
+        pat = re.compile(r"\b" + re.escape(name) + r"\b")
+        if pat.search(clean_text):
+            # Survives outside every conflict-marked hunk (or there was
+            # no conflict at all): a plain, unattended 3-way merge would
+            # have delivered it. Losing it was a defect in how THIS
+            # merge was hand-resolved, not an unavoidable conflict.
+            verdict = verdict_prefix + "RESOLUTION-BUG"
+            bug += 1
+        else:
+            # Either absent outright, or present only inside a conflict
+            # marker a human had to resolve by hand — even git's own
+            # automatic merge would not have delivered it standalone.
+            verdict = verdict_prefix + "MERGE-OUTCOME"
+            outcome += 1
+        report_lines.append(f"  {verdict:16s} {name}  ({fname})")
+        # Tab-separated for the shell caller to `cut -f`/`awk -F'\t'`
+        # instead of re-parsing the human-formatted line above — a name
+        # or file containing a space or paren would otherwise silently
+        # corrupt that split.
+        detail_lines.append(f"{verdict}\t{name}\t{fname}")
+    return bug, outcome, exempt, report_lines, detail_lines
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("base")
@@ -197,7 +279,17 @@ def main():
     ap.add_argument(
         "--detail-out",
         required=True,
-        help="machine-parseable VERDICT\\tNAME\\tFILE, one line per missing declaration",
+        help="machine-parseable VERDICT\\tNAME\\tFILE, one line per missing fork-added declaration",
+    )
+    ap.add_argument(
+        "--upstream-report-out",
+        required=True,
+        help="Gate 3 (upstream direction) human-formatted report",
+    )
+    ap.add_argument(
+        "--upstream-detail-out",
+        required=True,
+        help="machine-parseable VERDICT\\tNAME\\tFILE, one line per missing upstream-added declaration",
     )
     args = ap.parse_args()
 
@@ -226,53 +318,79 @@ def main():
     forkadded_pairs = ours_pairs - base_pairs - theirs_pairs
     missing_pairs = sorted(forkadded_pairs - merge_pairs)
 
+    # Gate 3 (ga-8gpw4): the exact mirror image. Upstream added it, the fork
+    # never had an opinion on it (absent from that same file in both BASE and
+    # OURS), and the merge does not have it — an `--ours`-shaped resolution
+    # discarded it.
+    upstream_added_pairs = theirs_pairs - base_pairs - ours_pairs
+    upstream_missing_pairs = sorted(upstream_added_pairs - merge_pairs)
+
+    # A file BASE had that the fork deleted before the merge is a standing
+    # fork decision, not a resync mishandling: upstream continuing to add
+    # declarations to a file this fork no longer carries cannot be "lost" by
+    # the merge. Reported in its own bucket so the operator still sees it,
+    # never counted as a defect. Kept in lockstep with the identical skip in
+    # check-resync-loss.sh's Gate 3 file-level loop — the two must agree, or
+    # one level exempts what the other fails on.
+    fork_deleted_files = set(
+        f
+        for f in run(["git", "-C", repo, "diff", "--name-only", "--diff-filter=D", args.base, args.ours])
+        .stdout.decode()
+        .split("\n")
+        if f
+    )
+    upstream_fork_deleted_pairs = [p for p in upstream_missing_pairs if p[1] in fork_deleted_files]
+    upstream_missing_pairs = [p for p in upstream_missing_pairs if p[1] not in fork_deleted_files]
     print(f"# fork-added (decl, file) pairs (ours - base - theirs): {len(forkadded_pairs)}", file=sys.stderr)
     print(f"# fork-added (decl, file) pairs still missing from merge: {len(missing_pairs)}", file=sys.stderr)
+    print(
+        f"# upstream-added (decl, file) pairs (theirs - base - ours): {len(upstream_added_pairs)}",
+        file=sys.stderr,
+    )
+    print(
+        f"# upstream-added (decl, file) pairs still missing from merge: {len(upstream_missing_pairs)} "
+        f"(+{len(upstream_fork_deleted_pairs)} in files the fork had deleted)",
+        file=sys.stderr,
+    )
 
+    # One merge-file memo shared by both directions: the same file can lose
+    # declarations in both at once (a hand-resolved shared _test.go is the
+    # canonical case), and re-merging it per direction would be pure waste.
     cache = {}
-    bug = 0
-    outcome = 0
-    exempt = 0
-    with open(args.detail_out, "w", encoding="utf-8") as detail_fh:
-        for name, fname in missing_pairs:
-            if is_generated(repo, fname):
-                # AGENTS.md rule 1 licenses taking this file wholesale from
-                # upstream; Gate 1 already exempts the file itself, and a
-                # declaration "lost" from it is that same licensed outcome,
-                # not a resync-resolution defect. Reported for visibility,
-                # not counted toward RESOLUTION-BUG/MERGE-OUTCOME, and never
-                # fails the gate.
-                exempt += 1
-                print(f"  {'EXEMPT':16s} {name}  ({fname})  (generated, AGENTS.md rule 1)")
-                detail_fh.write(f"EXEMPT\t{name}\t{fname}\n")
-                continue
-            clean_text = three_way_merge_text(repo, args.base, args.ours, args.theirs, fname, cache)
-            pat = re.compile(r"\b" + re.escape(name) + r"\b")
-            if pat.search(clean_text):
-                # Survives outside every conflict-marked hunk (or there was
-                # no conflict at all): a plain, unattended 3-way merge would
-                # have delivered it. Losing it was a defect in how THIS
-                # merge was hand-resolved, not an unavoidable conflict.
-                verdict = "RESOLUTION-BUG"
-                bug += 1
-            else:
-                # Either absent outright, or present only inside a conflict
-                # marker a human had to resolve by hand — even git's own
-                # automatic merge would not have delivered it standalone.
-                verdict = "MERGE-OUTCOME"
-                outcome += 1
-            print(f"  {verdict:16s} {name}  ({fname})")
-            # Tab-separated for the shell caller to `cut -f`/`awk -F'\t'`
-            # instead of re-parsing the human-formatted line above — a name
-            # or file containing a space or paren would otherwise silently
-            # corrupt that split.
-            detail_fh.write(f"{verdict}\t{name}\t{fname}\n")
+
+    bug, outcome, exempt, report_lines, detail_lines = analyze_direction(
+        repo, args.base, args.ours, args.theirs, missing_pairs, cache, ""
+    )
+    for line in report_lines:
+        print(line)
+    with open(args.detail_out, "w", encoding="utf-8") as fh:
+        for line in detail_lines:
+            fh.write(line + "\n")
+
+    up_bug, up_outcome, up_exempt, up_report_lines, up_detail_lines = analyze_direction(
+        repo, args.base, args.ours, args.theirs, upstream_missing_pairs, cache, "UPSTREAM-"
+    )
+    for name, fname in upstream_fork_deleted_pairs:
+        verdict = "UPSTREAM-FORK-DELETED"
+        up_report_lines.append(f"  {verdict:16s} {name}  ({fname})  (fork deleted this file before the merge)")
+        up_detail_lines.append(f"{verdict}\t{name}\t{fname}")
+    with open(args.upstream_report_out, "w", encoding="utf-8") as fh:
+        for line in up_report_lines:
+            fh.write(line + "\n")
+    with open(args.upstream_detail_out, "w", encoding="utf-8") as fh:
+        for line in up_detail_lines:
+            fh.write(line + "\n")
 
     with open(args.summary_out, "w", encoding="utf-8") as fh:
         fh.write(f"RESOLUTION_BUGS={bug}\n")
         fh.write(f"MERGE_OUTCOMES={outcome}\n")
         fh.write(f"EXEMPT={exempt}\n")
         fh.write(f"MISSING={len(missing_pairs)}\n")
+        fh.write(f"UPSTREAM_RESOLUTION_BUGS={up_bug}\n")
+        fh.write(f"UPSTREAM_MERGE_OUTCOMES={up_outcome}\n")
+        fh.write(f"UPSTREAM_EXEMPT={up_exempt}\n")
+        fh.write(f"UPSTREAM_MISSING={len(upstream_missing_pairs)}\n")
+        fh.write(f"UPSTREAM_FORK_DELETED={len(upstream_fork_deleted_pairs)}\n")
 
 
 if __name__ == "__main__":

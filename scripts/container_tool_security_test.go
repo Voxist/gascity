@@ -423,12 +423,15 @@ func TestTrivyIgnoreCarriesNoThriftWaiver(t *testing.T) {
 
 // TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools enforces that the rebuilt-from-
 // source tools (bd, dolt, gh) carry no Go-stdlib CVE waiver. The image build rebuilds
-// them with the Go 1.26.5 toolchain, which fixes every stdlib CVE listed, so a waiver
+// them with the Go 1.26.8 toolchain, which fixes every stdlib CVE listed, so a waiver
 // on those paths would let the scan gate keep masking a regressed rebuild instead of
-// proving the fix holds. The residual x/net / x/crypto module waivers that bd and dolt
-// legitimately keep (external binaries the grpc-only rebuild does not touch) are out of
-// scope here; gc's x/net / x/crypto module waivers are enforced separately by
-// TestTrivyIgnoreDropsGCModuleWaiversPastThreshold.
+// proving the fix holds.
+//
+// The rebuilds are no longer grpc-only: they apply and assert x/text, x/crypto, x/mod
+// and thrift floors too, so these same paths must carry no MODULE waiver either --
+// enforced by TestTrivyIgnoreDropsModuleWaiversForRebuiltTools. gc's module waivers are
+// enforced by TestTrivyIgnoreDropsGCModuleWaiversPastThreshold, and kubectl's, the last
+// prebuilt binary, by TestTrivyIgnoreDropsKubectlWaiversPastPinnedVersion.
 func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	root := repoRoot(t)
 
@@ -461,7 +464,7 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 				ghWaived = true
 			}
 			if stdlibCVEs[v.ID] && rebuiltPaths[p] {
-				t.Errorf("%s still waives rebuilt tool %q for a Go-stdlib CVE the 1.26.5 rebuild clears; drop the path so the scan proves the fix stays effective", v.ID, p)
+				t.Errorf("%s still waives rebuilt tool %q for a Go-stdlib CVE the Go 1.26.8 rebuild clears; drop the path so the scan proves the fix stays effective", v.ID, p)
 			}
 		}
 	}
@@ -589,4 +592,162 @@ func TestTrivyIgnoreDropsGCModuleWaiversPastThreshold(t *testing.T) {
 			t.Errorf("%s still waives usr/local/bin/gc but go.mod pins %s >= %s, which fixes it; drop the gc path so the container scan proves the gc binary is clean", v.ID, fix.module, fix.fixVersion)
 		}
 	}
+}
+
+// trivyIgnoreWaivers returns the parsed waiver entries of .trivyignore.yaml.
+func trivyIgnoreWaivers(t *testing.T) []struct {
+	ID    string   `yaml:"id"`
+	Paths []string `yaml:"paths"`
+} {
+	t.Helper()
+	var doc struct {
+		Vulnerabilities []struct {
+			ID    string   `yaml:"id"`
+			Paths []string `yaml:"paths"`
+		} `yaml:"vulnerabilities"`
+	}
+	if err := yaml.Unmarshal([]byte(readFile(t, repoRoot(t), ".trivyignore.yaml")), &doc); err != nil {
+		t.Fatalf("parsing .trivyignore.yaml: %v", err)
+	}
+	return doc.Vulnerabilities
+}
+
+// TestTrivyIgnoreCarriesNoBRWaiver enforces that usr/local/bin/br is never
+// waived. br is the beads_rust CLI (Dicklesworthstone/beads_rust), a Rust
+// binary: the pinned v0.1.20 artifact CI installs carries no Go build info at
+// all, so trivy's gobinary analyzer skips it and no Go CVE can ever be
+// attributed to that path. Reproduce with
+//
+//	go version -m br  =>  "not a Go executable"
+//
+// Ten Go-stdlib waivers nevertheless named this path for months, waiving a
+// finding that cannot occur and padding the waiver set that produced the
+// 2026-09-07 expiry cliff (ga-elgvf). A waiver here is always a mistake: if br
+// ever does carry a real finding, the scan must go red so it gets looked at.
+func TestTrivyIgnoreCarriesNoBRWaiver(t *testing.T) {
+	for _, v := range trivyIgnoreWaivers(t) {
+		for _, p := range v.Paths {
+			if p == "usr/local/bin/br" {
+				t.Errorf("%s waives %q, but br is a Rust binary with no Go build info and can carry no Go CVE; drop the path", v.ID, p)
+			}
+		}
+	}
+}
+
+// TestTrivyIgnoreDropsModuleWaiversForRebuiltTools enforces that the
+// rebuilt-from-source tools (bd, dolt, gh) carry no x/crypto or x/net module
+// waiver. Each rebuild applies XCRYPTO_VERSION and asserts it on the produced
+// artifact with `go version -m`, so the shipped binaries provably link
+// x/crypto >= 0.55.0 -- past the 0.52.0 that fixes every x/crypto/ssh CVE
+// below.
+//
+// That assertion also settles x/net without a separate floor: golang.org/x/crypto
+// v0.55.0 requires golang.org/x/net v0.57.0, so under minimal version selection
+// any x/net linked into these binaries is >= 0.57.0, past the 0.53.0/0.55.0
+// fixes below. If x/net is not linked at all, there is no finding to waive.
+// Either way the waiver is unnecessary, and keeping one would let the scan mask
+// a regressed rebuild instead of proving the floor holds (ga-elgvf).
+func TestTrivyIgnoreDropsModuleWaiversForRebuiltTools(t *testing.T) {
+	rebuiltPaths := map[string]bool{
+		"usr/local/bin/bd":   true,
+		"usr/local/bin/dolt": true,
+		"usr/bin/gh":         true,
+	}
+	// module CVEs cleared by the asserted x/crypto 0.55.0 floor and the
+	// x/net 0.57.0 it selects.
+	moduleCVEs := map[string]string{
+		"CVE-2026-33814": "golang.org/x/net (fixed 0.53.0)",
+		"CVE-2026-25680": "golang.org/x/net (fixed 0.55.0)",
+		"CVE-2026-25681": "golang.org/x/net (fixed 0.55.0)",
+		"CVE-2026-27136": "golang.org/x/net (fixed 0.55.0)",
+		"CVE-2026-39821": "golang.org/x/net (fixed 0.55.0)",
+		"CVE-2026-42502": "golang.org/x/net (fixed 0.55.0)",
+		"CVE-2026-42506": "golang.org/x/net (fixed 0.55.0)",
+		"CVE-2026-46600": "golang.org/x/net (fixed 0.56.0)",
+		"CVE-2026-39832": "golang.org/x/crypto (fixed 0.52.0)",
+		"CVE-2026-39835": "golang.org/x/crypto (fixed 0.52.0)",
+		"CVE-2026-42508": "golang.org/x/crypto (fixed 0.52.0)",
+		"CVE-2026-46595": "golang.org/x/crypto (fixed 0.52.0)",
+		"CVE-2026-46597": "golang.org/x/crypto (fixed 0.52.0)",
+	}
+
+	for _, v := range trivyIgnoreWaivers(t) {
+		mod, tracked := moduleCVEs[v.ID]
+		if !tracked {
+			continue
+		}
+		for _, p := range v.Paths {
+			if rebuiltPaths[p] {
+				t.Errorf("%s still waives rebuilt tool %q for %s, which the asserted XCRYPTO_VERSION floor clears; drop the path so the scan proves the fix stays effective", v.ID, p, mod)
+			}
+		}
+	}
+}
+
+// TestTrivyIgnoreDropsKubectlWaiversPastPinnedVersion enforces that no
+// usr/local/bin/kubectl waiver outlives the KUBECTL_VERSION bump that fixes it.
+// kubectl is the last prebuilt (not rebuilt-from-source) binary in the images,
+// so its only remedy is the pin in contrib/k8s/Dockerfile.controller. Each CVE
+// below records the first kubectl release whose embedded toolchain and modules
+// clear it, measured with `go version -m` on the published linux/amd64 binary:
+//
+//	v1.36.0  go1.26.2  x/net 0.49.0  x/text 0.33.0
+//	v1.37.0  go1.26.6  x/net 0.57.0  x/text 0.40.0
+//
+// Once the pin reaches that release the waiver must go, or the scan would stay
+// green without proving the shipped kubectl is clean -- the same rule
+// TestTrivyIgnoreDropsGCModuleWaiversPastThreshold applies to gc (ga-elgvf,
+// ga-7jqwr).
+func TestTrivyIgnoreDropsKubectlWaiversPastPinnedVersion(t *testing.T) {
+	root := repoRoot(t)
+
+	// Every CVE the file waived for kubectl at the 2026-09-07 horizon. All are
+	// cleared by v1.37.0: the Go-stdlib entries by go1.26.6, CVE-2026-46600 by
+	// x/net 0.57.0, CVE-2026-56852 by x/text 0.40.0.
+	kubectlCVEs := map[string]string{
+		"CVE-2026-33811": "v1.37.0", "CVE-2026-33814": "v1.37.0",
+		"CVE-2026-33818": "v1.37.0", "CVE-2026-39820": "v1.37.0",
+		"CVE-2026-39822": "v1.37.0", "CVE-2026-39823": "v1.37.0",
+		"CVE-2026-39825": "v1.37.0", "CVE-2026-39826": "v1.37.0",
+		"CVE-2026-39836": "v1.37.0", "CVE-2026-42499": "v1.37.0",
+		"CVE-2026-42504": "v1.37.0", "CVE-2026-27145": "v1.37.0",
+		"CVE-2026-56852": "v1.37.0", "CVE-2026-56853": "v1.37.0",
+		"CVE-2026-56858": "v1.37.0", "CVE-2026-56859": "v1.37.0",
+		"CVE-2026-56860": "v1.37.0", "CVE-2026-56862": "v1.37.0",
+		"CVE-2026-25680": "v1.37.0", "CVE-2026-25681": "v1.37.0",
+		"CVE-2026-27136": "v1.37.0", "CVE-2026-39821": "v1.37.0",
+		"CVE-2026-42502": "v1.37.0", "CVE-2026-42506": "v1.37.0",
+		"CVE-2026-46600": "v1.37.0",
+	}
+
+	pinned := dockerfileARG(t, readFile(t, root, "contrib/k8s/Dockerfile.controller"), "KUBECTL_VERSION")
+	have := parseModuleSemver(t, pinned)
+
+	for _, v := range trivyIgnoreWaivers(t) {
+		fixedIn, tracked := kubectlCVEs[v.ID]
+		if !tracked {
+			continue
+		}
+		for _, p := range v.Paths {
+			if p != "usr/local/bin/kubectl" {
+				continue
+			}
+			if semverAtLeast(have, parseModuleSemver(t, fixedIn)) {
+				t.Errorf("%s still waives usr/local/bin/kubectl but Dockerfile.controller pins KUBECTL_VERSION %s >= %s, which clears it; drop the path so the container scan proves the shipped kubectl is clean", v.ID, pinned, fixedIn)
+			}
+		}
+	}
+}
+
+// dockerfileARG returns the default value of `ARG name=value` in a Dockerfile.
+func dockerfileARG(t *testing.T, dockerfile, name string) string {
+	t.Helper()
+	for _, line := range strings.Split(dockerfile, "\n") {
+		line = strings.TrimSpace(line)
+		if v, ok := strings.CutPrefix(line, "ARG "+name+"="); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	t.Fatalf("no `ARG %s=` in Dockerfile", name)
+	return ""
 }

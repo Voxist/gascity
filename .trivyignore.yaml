@@ -1,273 +1,63 @@
-vulnerabilities:
-  # Expiry horizon bulk-extended 2026-07-06: 2026-07-07 -> 2026-08-07.
-  #
-  # Rebuilt-from-source tools clear the Go-stdlib CVEs: contrib/k8s/Dockerfile.base
-  # rebuilds gh and dolt, and contrib/k8s/Dockerfile.agent rebuilds bd, all with the
-  # Go 1.26.5 toolchain, and each build asserts the artifact embeds patched grpc
-  # (`go version -m ... google.golang.org/grpc`). Those three paths are therefore
-  # NOT waived below: if a rebuilt bd/dolt/gh ever re-triggers a Go-stdlib CVE the
-  # scan must fail so the regression is visible, not silently waived. Only the
-  # still-external prebuilt binaries (br, kubectl) keep Go-stdlib waivers.
-  #
-  # The x/net and x/crypto waivers further below are unaffected by the grpc
-  # rebuild, so bd/dolt/gc still pin the vulnerable x/net/x/crypto module
-  # versions and keep those entries.
-  #
-  # github.com/apache/thrift is NO LONGER waived on any path. The dolt and bd
-  # source rebuilds now apply a `go get github.com/apache/thrift@v0.24.0`
-  # floor (THRIFT_VERSION in Dockerfile.base and Dockerfile.agent) and assert
-  # it on the produced binary, which clears both CVE-2026-43871 (fixed 0.24.0)
-  # and CVE-2026-41602 (fixed 0.23.0). Do not re-add a thrift waiver: if a
-  # rebuild ever regresses the floor the scan must go red (ga-rx7nw).
-  #
-  # Go stdlib CVEs disclosed 2026-05-12. Fixed in Go 1.25.10 / 1.26.3 for the
-  # first batch (33811–42499); Go 1.26.4 / 1.25.11 for CVE-2026-42504 and
-  # CVE-2026-27145; Go 1.26.5 / 1.25.12 for CVE-2026-39822. br and kubectl are
-  # external prebuilt binaries still on Go 1.26.2 stdlib; remove each once its
-  # upstream rebuilds against 1.26.5+. Durable full fix tracked in ga-frh27v.
-  - id: CVE-2026-33811
-    paths:
-      - "usr/local/bin/br"
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-09-07
-    statement: External prebuilt br and kubectl still embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+). Rebuilt bd/dolt/gh (Go 1.26.5) clear this and are no longer waived.
-  - id: CVE-2026-33814
-    paths:
-      - "usr/local/bin/br"
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-09-07
-    statement: External prebuilt br and kubectl still embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+). Rebuilt bd/dolt/gh (Go 1.26.5) clear this and are no longer waived. (gc's separate x/net http2 instance is waived below.)
-  - id: CVE-2026-39820
-    paths:
-      - "usr/local/bin/br"
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-09-07
-    statement: External prebuilt br and kubectl still embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+). Rebuilt bd/dolt/gh (Go 1.26.5) clear this and are no longer waived.
-  - id: CVE-2026-39822
-    paths:
-      - "usr/local/bin/br"
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-09-07
-    statement: Go stdlib os.Root symlink CVE (fixed Go 1.26.5 / 1.25.12); external prebuilt br and kubectl still affected pending upstream rebuilds. Rebuilt bd/dolt/gh (Go 1.26.5) clear it and are no longer waived; gc also builds with Go 1.26.5.
-  - id: CVE-2026-39823
-    paths:
-      - "usr/local/bin/br"
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-09-07
-    statement: External prebuilt br and kubectl still embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+). Rebuilt bd/dolt/gh (Go 1.26.5) clear this and are no longer waived.
-  - id: CVE-2026-39825
-    paths:
-      - "usr/local/bin/br"
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-09-07
-    statement: External prebuilt br and kubectl still embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+). Rebuilt bd/dolt/gh (Go 1.26.5) clear this and are no longer waived.
-  - id: CVE-2026-39826
-    paths:
-      - "usr/local/bin/br"
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-09-07
-    statement: External prebuilt br and kubectl still embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+). Rebuilt bd/dolt/gh (Go 1.26.5) clear this and are no longer waived.
-  - id: CVE-2026-39836
-    paths:
-      - "usr/local/bin/br"
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-09-07
-    statement: External prebuilt br and kubectl still embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+). Rebuilt bd/dolt/gh (Go 1.26.5) clear this and are no longer waived.
-  - id: CVE-2026-42499
-    paths:
-      - "usr/local/bin/br"
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-09-07
-    statement: External prebuilt br and kubectl still embed Go 1.26.2 stdlib; remove once each rebuilds against 1.26.3+ (or 1.25.10+). Rebuilt bd/dolt/gh (Go 1.26.5) clear this and are no longer waived.
-  - id: CVE-2026-42504
-    paths:
-      - "usr/local/bin/br"
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-09-07
-    statement: Go stdlib MIME-header DoS (CVE-2026-42504, fixed Go 1.26.4 / 1.25.11); external prebuilt br and kubectl still affected. Rebuilt bd/dolt/gh (Go 1.26.5) clear it and are no longer waived; gc cleared via go.mod toolchain.
-  - id: CVE-2026-27145
-    paths:
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-09-07
-    statement: Go stdlib x509 hostname verification issue (CVE-2026-27145), fixed in Go 1.26.4 / 1.25.11. kubectl in the base image still embeds Go 1.26.2; remove once the bundled CLI rebuilds against 1.26.4+. Rebuilt bd/dolt (Go 1.26.5) cleared and no longer waived.
-  # golang.org/x/text norm.Iter infinite loop, fixed in x/text 0.39.0. Every other
-  # affected binary is fixed in this change: gc via go.mod, and gh/dolt/bd via the
-  # XTEXT_VERSION override their from-source rebuilds now apply (each asserted with
-  # `go version -m`). kubectl is the sole exception — it is an external prebuilt
-  # release, and no published kubectl carries the fix: k8s.io/kubernetes still pins
-  # golang.org/x/text v0.33.0 as of v1.36.3, the newest release at time of writing.
-  # There is no version to bump to. Remove once upstream Kubernetes ships a release
-  # built against x/text >= 0.39.0.
-  - id: CVE-2026-56852
-    paths:
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-09-07
-    statement: golang.org/x/text norm.Iter infinite loop (fixed in 0.39.0). kubectl is external prebuilt; no published kubectl release carries the fix (k8s.io/kubernetes pins x/text v0.33.0 through v1.36.3). Rebuilt gh/dolt/bd and gc are patched and are NOT waived. Remove once Kubernetes releases against x/text >= 0.39.0.
-  - id: CVE-2026-25680
-    paths:
-      - "usr/local/bin/dolt"
-    expired_at: 2026-09-07
-    statement: Dolt v2.1.7 still bundles a Go module set with this x/net HTML parsing issue; remove once upstream rebuilds against the fixed x/net release.
-  - id: CVE-2026-25681
-    paths:
-      - "usr/local/bin/dolt"
-    expired_at: 2026-09-07
-    statement: Dolt v2.1.7 still bundles a Go module set with this x/net HTML rendering issue; remove once upstream rebuilds against the fixed x/net release.
-  - id: CVE-2026-27136
-    paths:
-      - "usr/local/bin/dolt"
-    expired_at: 2026-09-07
-    statement: Dolt v2.1.7 still bundles a Go module set with this x/net HTML rendering issue; remove once upstream rebuilds against the fixed x/net release.
-  - id: CVE-2026-39821
-    paths:
-      - "usr/local/bin/dolt"
-    expired_at: 2026-09-07
-    statement: Dolt v2.1.7 still bundles a Go module set with this x/net idna issue; remove once upstream rebuilds against the fixed x/net release.
-  - id: CVE-2026-42502
-    paths:
-      - "usr/local/bin/dolt"
-    expired_at: 2026-09-07
-    statement: Dolt v2.1.7 still bundles a Go module set with this x/net HTML rendering issue; remove once upstream rebuilds against the fixed x/net release.
-  - id: CVE-2026-42506
-    paths:
-      - "usr/local/bin/dolt"
-    expired_at: 2026-09-07
-    statement: Dolt v2.1.7 still bundles a Go module set with this x/net HTML rendering issue; remove once upstream rebuilds against the fixed x/net release.
-  - id: CVE-2026-39832
-    paths:
-      - "usr/local/bin/dolt"
-    expired_at: 2026-09-07
-    statement: Dolt v2.1.7 still bundles golang.org/x/crypto v0.48.0; remove once upstream rebuilds against the fixed release.
-  - id: CVE-2026-39835
-    paths:
-      - "usr/local/bin/dolt"
-    expired_at: 2026-09-07
-    statement: Dolt v2.1.7 still bundles golang.org/x/crypto v0.48.0; remove once upstream rebuilds against the fixed release.
-  - id: CVE-2026-42508
-    paths:
-      - "usr/local/bin/dolt"
-    expired_at: 2026-09-07
-    statement: Dolt v2.1.7 still bundles golang.org/x/crypto v0.48.0; remove once upstream rebuilds against the fixed release.
-  - id: CVE-2026-46595
-    paths:
-      - "usr/local/bin/dolt"
-    expired_at: 2026-09-07
-    statement: Dolt v2.1.7 still bundles golang.org/x/crypto v0.48.0; remove once upstream rebuilds against the fixed release.
-  - id: CVE-2026-46597
-    paths:
-      - "usr/local/bin/dolt"
-    expired_at: 2026-09-07
-    statement: Dolt v2.1.7 still bundles golang.org/x/crypto v0.48.0; remove once upstream rebuilds against the fixed release.
-  # The golang.org/x/net (HTML/idna/http2) and golang.org/x/crypto/ssh CVEs in
-  # the same series the dolt entries above waive are also reported against the
-  # bd CLI binary (steveyegge/beads v1.1.0, external), the gc binary, and the
-  # external kubectl binary (golang.org/x/net v0.49.0; the gc-controller image
-  # adds kubectl on top of the agent image). With set -e the Container Scan
-  # halts at the first failing image, so kubectl's x/net findings stayed masked
-  # until the bd/gc findings were waived.
-  #
-  # This change bumps gc's go.mod to golang.org/x/net v0.54.0 and
-  # golang.org/x/crypto v0.52.0, which clears the gc instance of every
-  # x/crypto/ssh CVE below (fixed in x/crypto 0.52.0) and CVE-2026-33814
-  # (x/net http2, fixed in 0.53.0); the gc path is therefore dropped from those
-  # entries so the scan must prove gc is clean rather than mask it. bd (beads v1.1.0) and
-  # kubectl stay external and base-pre-existing (Container Scan already red on
-  # main, scheduled run 2026-06-24); remove their paths once they rebuild
-  # upstream. TestTrivyIgnoreDropsGCModuleWaiversPastThreshold enforces that no
-  # gc waiver outlives its go.mod fix version.
-  - id: CVE-2026-25680
-    paths:
-      - "usr/local/bin/bd"
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-09-07
-    statement: golang.org/x/net HTML parsing DoS; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.1.0) and kubectl (external, x/net v0.49.0). gc cleared by the golang.org/x/net v0.56.0 bump the x/text 0.39.0 upgrade pulled in. Remove once bd/kubectl rebuild upstream.
-  - id: CVE-2026-25681
-    paths:
-      - "usr/local/bin/bd"
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-09-07
-    statement: golang.org/x/net HTML rendering issue; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.1.0) and kubectl (external, x/net v0.49.0). gc cleared by the golang.org/x/net v0.56.0 bump the x/text 0.39.0 upgrade pulled in. Remove once bd/kubectl rebuild upstream.
-  - id: CVE-2026-27136
-    paths:
-      - "usr/local/bin/bd"
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-09-07
-    statement: golang.org/x/net HTML rendering issue; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.1.0) and kubectl (external, x/net v0.49.0). gc cleared by the golang.org/x/net v0.56.0 bump the x/text 0.39.0 upgrade pulled in. Remove once bd/kubectl rebuild upstream.
-  - id: CVE-2026-39821
-    paths:
-      - "usr/local/bin/bd"
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-09-07
-    statement: golang.org/x/net/idna issue; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.1.0) and kubectl (external, x/net v0.49.0). gc cleared by the golang.org/x/net v0.56.0 bump the x/text 0.39.0 upgrade pulled in. Remove once bd/kubectl rebuild upstream.
-  - id: CVE-2026-42502
-    paths:
-      - "usr/local/bin/bd"
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-09-07
-    statement: golang.org/x/net HTML rendering issue; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.1.0) and kubectl (external, x/net v0.49.0). gc cleared by the golang.org/x/net v0.56.0 bump the x/text 0.39.0 upgrade pulled in. Remove once bd/kubectl rebuild upstream.
-  - id: CVE-2026-42506
-    paths:
-      - "usr/local/bin/bd"
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-09-07
-    statement: golang.org/x/net HTML rendering issue; base-pre-existing (also red on main 2026-06-24). Present in bd (beads v1.1.0) and kubectl (external, x/net v0.49.0). gc cleared by the golang.org/x/net v0.56.0 bump the x/text 0.39.0 upgrade pulled in. Remove once bd/kubectl rebuild upstream.
-  - id: CVE-2026-39832
-    paths:
-      - "usr/local/bin/bd"
-    expired_at: 2026-09-07
-    statement: golang.org/x/crypto/ssh/agent CVE; present in bd (beads v1.1.0). gc cleared by the golang.org/x/crypto v0.52.0 bump in this change. Remove once bd rebuilds against x/crypto >= 0.52.0.
-  - id: CVE-2026-39835
-    paths:
-      - "usr/local/bin/bd"
-    expired_at: 2026-09-07
-    statement: golang.org/x/crypto/ssh CVE; present in bd (beads v1.1.0). gc cleared by the golang.org/x/crypto v0.52.0 bump in this change. Remove once bd rebuilds against x/crypto >= 0.52.0.
-  - id: CVE-2026-42508
-    paths:
-      - "usr/local/bin/bd"
-    expired_at: 2026-09-07
-    statement: golang.org/x/crypto/ssh/knownhosts CVE; present in bd (beads v1.1.0). gc cleared by the golang.org/x/crypto v0.52.0 bump in this change. Remove once bd rebuilds against x/crypto >= 0.52.0.
-  - id: CVE-2026-46595
-    paths:
-      - "usr/local/bin/bd"
-    expired_at: 2026-09-07
-    statement: golang.org/x/crypto/ssh CVE; present in bd (beads v1.1.0). gc cleared by the golang.org/x/crypto v0.52.0 bump in this change. Remove once bd rebuilds against x/crypto >= 0.52.0.
-  - id: CVE-2026-46597
-    paths:
-      - "usr/local/bin/bd"
-    expired_at: 2026-09-07
-    statement: golang.org/x/crypto/ssh CVE; present in bd (beads v1.1.0). gc cleared by the golang.org/x/crypto v0.52.0 bump in this change. Remove once bd rebuilds against x/crypto >= 0.52.0.
-  - id: CVE-2026-33818
-    paths:
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-09-07
-    statement: Go stdlib CVE fixed in Go 1.26.6; the prebuilt kubectl v1.36.0 embeds Go 1.26.2. Every tool we build from source (bd, gc, gh, dolt) is on Go 1.26.8 and is not waived. Durable fix is kubectl v1.37.0, which embeds Go 1.26.6 (ga-7jqwr); a k8s minor bump with client/server skew to weigh, so tracked rather than done in a security-floor PR.
-  - id: CVE-2026-46600
-    paths:
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-09-07
-    statement: golang.org/x/net fix is 0.56.0; the prebuilt kubectl v1.36.0 links x/net 0.49.0. Same remedy as CVE-2026-33818 above (kubectl v1.37.0), same expiry.
-  - id: CVE-2026-56853
-    paths:
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-09-07
-    statement: External prebuilt kubectl still embeds Go 1.26.2 stdlib (Go 1.26.6 fix, surfaced 2026-09-02 on the schema-0066 repin); same cause and expiry as the waivers above, replaced by the kubectl 1.37.0 bump tracked in ga-7jqwr.
-  - id: CVE-2026-56858
-    paths:
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-09-07
-    statement: External prebuilt kubectl still embeds Go 1.26.2 stdlib (Go 1.26.6 fix, surfaced 2026-09-02 on the schema-0066 repin); same cause and expiry as the waivers above, replaced by the kubectl 1.37.0 bump tracked in ga-7jqwr.
-  - id: CVE-2026-56859
-    paths:
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-09-07
-    statement: External prebuilt kubectl still embeds Go 1.26.2 stdlib (Go 1.26.6 fix, surfaced 2026-09-02 on the schema-0066 repin); same cause and expiry as the waivers above, replaced by the kubectl 1.37.0 bump tracked in ga-7jqwr.
-  - id: CVE-2026-56860
-    paths:
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-09-07
-    statement: External prebuilt kubectl still embeds Go 1.26.2 stdlib (Go 1.26.6 fix, surfaced 2026-09-02 on the schema-0066 repin); same cause and expiry as the waivers above, replaced by the kubectl 1.37.0 bump tracked in ga-7jqwr.
-  - id: CVE-2026-56862
-    paths:
-      - "usr/local/bin/kubectl"
-    expired_at: 2026-09-07
-    statement: External prebuilt kubectl still embeds Go 1.26.2 stdlib (Go 1.26.6 fix, surfaced 2026-09-02 on the schema-0066 repin); same cause and expiry as the waivers above, replaced by the kubectl 1.37.0 bump tracked in ga-7jqwr.
+# Container image scan waivers (trivy, HIGH+CRITICAL, --ignore-unfixed,
+# --exit-code 1). Consumed by .github/workflows/container-scan.yml.
+#
+# THIS LIST IS EMPTY, AND THAT IS THE INTENDED STEADY STATE.
+#
+# Every finding the file used to waive is now fixed at the source rather than
+# suppressed. The four images carry exactly five binaries that trivy analyses:
+#
+#   bd, gh, dolt  rebuilt from pinned source (Dockerfile.base, Dockerfile.agent)
+#                 with the Go 1.26.8 toolchain and explicit module floors --
+#                 grpc, x/text, x/crypto, x/mod, thrift -- each ASSERTED on the
+#                 produced artifact with `go version -m`. A regressed rebuild
+#                 fails the image build, loudly, instead of being waived.
+#   gc            built from this module; go.mod pins the fixed x/net,
+#                 x/crypto, x/text and x/mod (guarded by
+#                 TestTrivyIgnoreDropsGCModuleWaiversPastThreshold).
+#   kubectl       the only PREBUILT binary left, pinned in Dockerfile.controller
+#                 and remedied by bumping that pin (guarded by
+#                 TestTrivyIgnoreDropsKubectlWaiversPastPinnedVersion).
+#
+# usr/local/bin/br is NOT in that list: br is the beads_rust CLI, a Rust binary
+# with no Go build info, so trivy's gobinary analyser skips it entirely and no
+# Go CVE can be attributed to it. It may never be waived
+# (TestTrivyIgnoreCarriesNoBRWaiver).
+#
+# WHY THE FILE IS EMPTY RATHER THAN EXTENDED (ga-elgvf)
+#
+# This file reached 41 entries that all expired on the same day, 2026-09-07,
+# because each horizon was reached by bulk-extending every entry at once
+# (2026-06-12 -> 07-07 -> 08-07 -> 09-07). Bulk extension is what builds a
+# cliff: it re-dates waivers nobody re-examined, so entries outlive their
+# finding and the set only ever grows. Re-measured on 2026-09-06, of those 41:
+#
+#   10  br       waived a finding that cannot occur (br is not a Go binary)
+#   22  bd/dolt  fixed by the asserted x/crypto 0.55.0 floor, which also selects
+#                x/net 0.57.0 through its own go.mod requirement
+#   25  kubectl  fixed by the v1.36.0 -> v1.37.0 pin bump (go1.26.6, x/net
+#                0.57.0, x/text 0.40.0)
+#
+# (paths sum above 41: some entries waived two paths.) Not one of the 41 was
+# still load-bearing. They were extended four times anyway.
+#
+# The statements also cited "ga-frh27v" as the durable fix. That bead does not
+# exist in this fork's tracker -- it was an UPSTREAM id (gastownhall PR #3536,
+# branch builder/ga-frh27v) that came across in a resync -- so the file's only
+# escape hatch pointed at nothing lookup-able for months. Cite a bead that
+# resolves in the tracker of the repo the file lives in.
+#
+# BEFORE ADDING AN ENTRY
+#
+# 1. Measure, do not infer. `go version -m <binary>` on the exact artifact the
+#    image ships names the toolchain and every linked module version. A waiver
+#    whose statement is not backed by a measurement is how this file grew.
+# 2. Waive only what has no fix available. If a version bump or a module floor
+#    clears it, do that instead -- the source rebuilds above exist precisely so
+#    that "upstream has not rebuilt yet" stops being an argument.
+# 3. Scope to the narrowest path, and give a real expiry with a concrete
+#    trigger ("once kubectl >= X ships"), not a shared horizon.
+# 4. Set expiries per entry. Never bulk-extend the file: re-measure each entry
+#    and delete the ones that no longer apply.
+# 5. Cite a bead id that resolves via `bd show`.
+
+vulnerabilities: []

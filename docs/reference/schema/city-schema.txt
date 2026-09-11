@@ -1202,6 +1202,10 @@
           "$ref": "#/$defs/Workspace",
           "description": "Workspace holds city-level metadata (name, default provider)."
         },
+        "city": {
+          "$ref": "#/$defs/CityRoleConfig",
+          "description": "CityRole is the [city] table: this city's role in a multi-city fleet\n(\"fleet-host\" or \"seat\"). Orders select against it with run_on so a\nfleet-singleton order shipped in a shared pack fires on the fleet host\nonly. Unset resolves through VOXIST_FLEET_ROLE, then to \"seat\"."
+        },
         "providers": {
           "additionalProperties": {
             "$ref": "#/$defs/ProviderSpec"
@@ -1364,6 +1368,21 @@
         "workspace"
       ],
       "description": "City is the top-level configuration for a Gas City instance."
+    },
+    "CityRoleConfig": {
+      "properties": {
+        "role": {
+          "type": "string",
+          "enum": [
+            "fleet-host",
+            "seat"
+          ],
+          "description": "Role is \"fleet-host\" (the single city that owns fleet-wide automation)\nor \"seat\" (everything else). Empty means undeclared and resolves to\n\"seat\" unless VOXIST_FLEET_ROLE says otherwise. Orders select against\nit with their run_on field."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "CityRoleConfig is the `[city]` table: this city's place in a multi-city fleet."
     },
     "ConvergenceConfig": {
       "properties": {

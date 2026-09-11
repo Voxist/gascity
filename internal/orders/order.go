@@ -33,6 +33,19 @@ type Order struct {
 	// import the pack; "rig" (the default when empty) registers it once per
 	// importing rig. Mirrors [[named_session]].scope.
 	Scope string `toml:"scope,omitempty"`
+	// RunOn restricts which fleet role dispatches this order:
+	// "fleet-host" runs it only on the city that declares `[city] role =
+	// "fleet-host"`, "seat" runs it only on cities that do not, and "any"
+	// (the default when empty) runs it everywhere. It answers a different
+	// question from Scope: Scope decides how many copies of the order pack
+	// expansion registers WITHIN one city, RunOn decides which cities in a
+	// fleet dispatch it at all. A fleet-singleton order — a merge sweep, a
+	// review gate, a delivery warden — shipped in a shared pack otherwise
+	// runs once per city that installs the pack, so a developer seat becomes
+	// a competing instance with its own credentials and pack version
+	// (voxist vp-sgxy5). The city's role comes from `[city] role` or, when
+	// that is unset, the VOXIST_FLEET_ROLE environment variable.
+	RunOn string `toml:"run_on,omitempty"`
 	// Trigger is the order scheduler selector: "cooldown", "cron",
 	// "condition", "event", or "manual". This is distinct from the
 	// separate "gate" concepts used elsewhere in the system.
@@ -129,6 +142,7 @@ type orderDecode struct {
 	Formula      string                `toml:"formula,omitempty"`
 	Exec         string                `toml:"exec,omitempty"`
 	Scope        string                `toml:"scope,omitempty"`
+	RunOn        string                `toml:"run_on,omitempty"`
 	Trigger      string                `toml:"trigger,omitempty"`
 	Gate         string                `toml:"gate,omitempty"`
 	Interval     string                `toml:"interval,omitempty"`
@@ -157,6 +171,7 @@ func (d orderDecode) normalized() Order {
 		Formula:      d.Formula,
 		Exec:         d.Exec,
 		Scope:        d.Scope,
+		RunOn:        d.RunOn,
 		Trigger:      trigger,
 		Interval:     d.Interval,
 		Schedule:     d.Schedule,
@@ -277,6 +292,11 @@ func Validate(a Order) error {
 	case "", "city", "rig":
 	default:
 		return fmt.Errorf("order %q: unknown scope %q (want \"city\" or \"rig\")", a.Name, a.Scope)
+	}
+	// run_on, if set, must be a known value. Empty defaults to RunOnAny, so
+	// an order authored before this field existed keeps running everywhere.
+	if !IsValidRunOn(a.RunOn) {
+		return fmt.Errorf("order %q: unknown run_on %q (want %s)", a.Name, a.RunOn, strings.Join(quoteAll(ValidRunOn), ", "))
 	}
 	// Validate timeout if set.
 	if a.Timeout != "" {

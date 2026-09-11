@@ -411,6 +411,12 @@ func (o *wrappedOrdersStore) CreateRunClosed(order string, outcome orders.RunOut
 	return run, err
 }
 
+func (o *wrappedOrdersStore) CreateRunSkippedRunOn(order string) (orders.OrderRun, error) {
+	run, err := o.OrdersStore.CreateRunSkippedRunOn(order)
+	o.emitter.observe(ClassEventWrite, "CreateRunSkippedRunOn", err)
+	return run, err
+}
+
 func (o *wrappedOrdersStore) Get(id string) (orders.OrderRun, error) {
 	run, err := o.OrdersStore.Get(id)
 	o.emitter.observe(ClassEventRead, "Get", err)

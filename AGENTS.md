@@ -98,12 +98,51 @@ of these, take upstream wholesale and re-run the generator:
 - `internal/api/openapi.json`, `docs/reference/schema/openapi.*`
 - `docs/reference/schema/city-schema.*`, `docs/reference/schema/pack-schema.*`,
   `docs/reference/cli.md`, `docs/reference/config.md`
-- `cmd/gc/productmetrics_command_census.json`, `cmd/gc/metrics_census_gen.go`
+- `cmd/gc/productmetrics_command_census.json` — **NOT regenerable; merge it, see
+  below** — `cmd/gc/metrics_census_gen.go`
 - `internal/api/dashboardspa/**` generated TS and `dist/`
 - `internal/api/genclient/client_gen.go`
-- test ratchets and baselines: `internal/testpolicy/resourcecensus/census.go`,
+- test ratchets and baselines: `internal/testpolicy/resourcecensus/census.go`
+  (**NOT regenerable; merge it, see below**),
   `internal/testenv/testdata/*.golden`, `scripts/*baseline*`,
   `scripts/*manifest*`
+
+**Two paths on that list are NOT regenerable, and taking them wholesale
+destroys fork data. Merge them; never `--theirs` them:**
+
+- `cmd/gc/productmetrics_command_census.json` is the census generator's
+  hand-maintained **INPUT**, not its output. `cmd/gen-command-census/main.go`
+  reads it as `paths.manifest` and derives `metrics_census_gen.go`,
+  `internal/productmetrics/command_ids_gen.go` and
+  `schemas/metrics/example/result.schema.json` *from* it. Taking upstream's
+  copy deletes the fork's census commands, and regenerating afterwards does
+  **not** restore them — the generator only re-derives from whatever manifest
+  it is handed. (Observed once, during the 2026-09-06 resync: five fork commands
+  were lost this way — beads-state, config-lint, provider-quota,
+  provider-credentials, provider-rotate-key — and all five were restored
+  before that merge landed. They are present today; this is the incident
+  record, not a standing gap.)
+- `internal/testpolicy/resourcecensus/census.go` is **hand-written Go** —
+  package doc, imports, types, methods. It carries the attribute only to
+  suppress the diff of a large bootstrap table. Taking it wholesale reverts
+  fork ratchet rows (six, on the same merge).
+
+This is the ga-d32bn family in a new shape: **exempted-but-not-regenerable.**
+Gate 1 exempts both by attribute; Gate 2 sees no lost Go declaration (the
+manifest is JSON; the ratchet rows are struct literals inside an existing
+declaration); `go build`, `go vet` and the real suite are all blind to a missing
+census entry. Gate 3 inherits Gate 1's exemption, so it does not close this
+either.
+
+One check does exist for the manifest, and it is worth knowing its exact scope:
+`internal/commandcensus/generate.go`'s `ValidateEvolution` compares the manifest
+against the committed `command_ids_gen.go` catalog and fails loudly — naming the
+dropped ids — if a prior allocation was removed or remapped. It fires only when
+the two **disagree**. Taking the manifest and the catalog from upstream
+*together*, which is exactly what rule 1 instructs, keeps them consistent with
+each other and silent about what the fork lost. The attribute answers "should GitHub collapse this
+diff", which is not the same question as "can this be regenerated" — and rule 1
+conflates them.
 
 Every path above carries the `linguist-generated` attribute in
 `.gitattributes`, which is the single enforced source of truth this list
@@ -140,11 +179,49 @@ still shipped four runtime regressions.
 list above.** A shared `_test.go` file is never on that list and is never
 taken wholesale — it is merged, the same as any other hand-authored file. The
 2026-08-31 resync applied rule 1's instinct to shared test files anyway and
-silently dropped 234 fork-added declarations (ga-d32bn): `go build`, `go vet`,
+silently dropped fork-added declarations (ga-d32bn): `go build`, `go vet`,
 and rule 4's real-suite run are all blind to this class, because deleting a
 test never fails a build — the suite passes precisely because the tests that
 would have failed are the ones that got deleted. Every resync runs
-`scripts/check-resync-loss.sh` on the merge commit before push to catch it.
+`scripts/check-resync-loss.sh` on the merge commit before push to catch it;
+`.githooks/pre-push` invokes it on every merge commit a push introduces, so
+it is not something an operator has to remember.
+
+Measured with the shipped gate, that merge lost **254 fork-added
+(declaration, file) pairs** — 120 of them in `linguist-generated` files
+(exempt under rule 1), leaving 134 real ones: 114 `RESOLUTION-BUG` (a plain
+3-way merge would have kept them) and 20 `MERGE-OUTCOME`. Earlier prose in
+this file and in ga-d32bn quoted 234 and 113; both were intermediate counts
+from prototypes that keyed on bare declaration names and had no
+generated-file exemption. 254/134/114 is the number the committed tooling
+reproduces, and it is the one to cite.
+
+**6. The loss is symmetric, and so is the gate.** Taking OURS wholesale on a
+file upstream changed drops upstream-added code exactly the way rule 5's
+took-theirs drops fork-added code, and it is just as invisible to build, vet
+and the suite. The 2026-09-04 resync resolved `internal/hooks/hooks_test.go`
+with `--ours` and silently dropped all three upstream-added cursor tests
+while the fork-side gate reported "0 missing" on that exact tree (ga-8gpw4).
+`check-resync-loss.sh` Gate 3 now asks the mirror-image question, at both
+levels, and reports every verdict with an `UPSTREAM-` prefix: upstream-added
+declarations absent from the merge, and — over `*.go` only — files the merge
+dropped or took from the fork verbatim (`UPSTREAM-DROPPED-FILE`,
+`UPSTREAM-PURE-LOSS`, `UPSTREAM-TOOK-OURS`).
+
+The file-level half is not redundant with the declaration-level half. When
+upstream MODIFIES an existing declaration rather than adding one, the
+declaration set does not change, so a merge that takes the fork's blob
+verbatim drops the change with the declaration check reporting nothing. Run
+against the 2026-08-31 merge, Gate 3 finds 5 upstream-added declarations and
+5 took-ours files that the fork-side gates never saw — and two of those
+files, `cmd/gc/dolt_cleanup_drop.go` and
+`internal/doctor/checks_order_firing_bounded_test.go`, are visible to
+nothing else in the script.
+
+Scoping the file-level half to `*.go` is deliberate. Over all paths a
+took-ours check fires on every file this fork legitimately owns outright
+(`AGENTS.md`, `CHANGELOG.md`, fork-only workflows), and a gate that cannot
+be passed is worse than no gate.
 
 ## Development approach
 

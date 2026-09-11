@@ -381,12 +381,12 @@ func TestBestHookCandidateRank(t *testing.T) {
 		want  hookCandidateRank
 		ok    bool
 	}{
-		{"routed with priority", `[{"id":"a","priority":1}]`, hookCandidateRank{hookTierRouted, 1}, true},
-		{"absent priority is not P0", `[{"id":"a"}]`, hookCandidateRank{hookTierRouted, hookDefaultCandidatePriority}, true},
-		{"assignee lifts the tier", `[{"id":"a","assignee":"me","priority":3}]`, hookCandidateRank{hookTierAssigned, 3}, true},
-		{"in_progress is the top tier", `[{"id":"a","assignee":"me","status":"in_progress","priority":3}]`, hookCandidateRank{hookTierInProgress, 3}, true},
-		{"blank assignee stays routed", `[{"id":"a","assignee":"  ","priority":1}]`, hookCandidateRank{hookTierRouted, 1}, true},
-		{"best of several rows wins", `[{"id":"a","priority":3},{"id":"b","priority":0}]`, hookCandidateRank{hookTierRouted, 0}, true},
+		{"routed with priority", `[{"id":"a","priority":1}]`, hookCandidateRank{tier: hookTierRouted, priority: 1}, true},
+		{"absent priority is not P0", `[{"id":"a"}]`, hookCandidateRank{tier: hookTierRouted, priority: hookDefaultCandidatePriority}, true},
+		{"assignee lifts the tier", `[{"id":"a","assignee":"me","priority":3}]`, hookCandidateRank{tier: hookTierAssigned, priority: 3}, true},
+		{"in_progress is the top tier", `[{"id":"a","assignee":"me","status":"in_progress","priority":3}]`, hookCandidateRank{tier: hookTierInProgress, priority: 3}, true},
+		{"blank assignee stays routed", `[{"id":"a","assignee":"  ","priority":1}]`, hookCandidateRank{tier: hookTierRouted, priority: 1}, true},
+		{"best of several rows wins", `[{"id":"a","priority":3},{"id":"b","priority":0}]`, hookCandidateRank{tier: hookTierRouted, priority: 0}, true},
 		{"empty array is unrankable", `[]`, hookCandidateRank{}, false},
 		{"non-JSON is unrankable", `not json`, hookCandidateRank{}, false},
 		{"array of non-objects is unrankable", `["a"]`, hookCandidateRank{}, false},
@@ -400,6 +400,163 @@ func TestBestHookCandidateRank(t *testing.T) {
 				t.Fatalf("rank = %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestBestHookCandidateRankParsesAge pins the D2 wire input: the best row's
+// created_at becomes the rank's age, and an unparseable or absent created_at
+// leaves hasAge false (the tiebreak then does not apply to that row).
+func TestBestHookCandidateRankParsesAge(t *testing.T) {
+	rank, _, ok := bestHookCandidateRank(`[{"id":"a","priority":1,"created_at":"2026-08-13T09:00:00Z"}]`)
+	if !ok {
+		t.Fatalf("ok = false, want rankable")
+	}
+	want := time.Date(2026, 8, 13, 9, 0, 0, 0, time.UTC)
+	if !rank.hasAge || !rank.age.Equal(want) {
+		t.Fatalf("age = %v (hasAge %v), want %v", rank.age, rank.hasAge, want)
+	}
+
+	rank, _, ok = bestHookCandidateRank(`[{"id":"a","priority":1,"created_at":"not-a-date"}]`)
+	if !ok || rank.hasAge {
+		t.Fatalf("unparseable created_at must leave hasAge false; got %+v ok=%v", rank, ok)
+	}
+	rank, _, ok = bestHookCandidateRank(`[{"id":"a","priority":1}]`)
+	if !ok || rank.hasAge {
+		t.Fatalf("absent created_at must leave hasAge false; got %+v ok=%v", rank, ok)
+	}
+}
+
+// TestBestStoreWithWorkD1ProbeRefinesRank is the ADR-0076 regression fixture
+// (acceptance criterion 2): the agent's own store's window is full of aged P3s
+// while its real best routed work is a P1 outside the window — the measured
+// 2026-08-13 shape, where the busiest store advertised the WORST rank. Without
+// the probe the own store loses to a quiet rig's P2; with the D1 probe the
+// store's advertised rank comes from the probe's best-by-priority row and it
+// must win.
+func TestBestStoreWithWorkD1ProbeRefinesRank(t *testing.T) {
+	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
+	agedP3 := `[{"id":"ci-aged-1","priority":3,"created_at":"2026-07-01T00:00:00Z"}]`
+	freshP1 := `[{"id":"ci-fresh-1","priority":1,"created_at":"2026-08-13T00:00:00Z"}]`
+	rigP2 := `[{"id":"va-1","priority":2,"created_at":"2026-08-01T00:00:00Z"}]`
+	run := func(command, dir string, _ []string) (string, error) {
+		if command == "probe" {
+			if dir == "city" {
+				return freshP1, nil // the P1 the window hides
+			}
+			return rigP2, nil
+		}
+		if dir == "city" {
+			return agedP3, nil // window: aged P3s only
+		}
+		return rigP2, nil
+	}
+	// Without the probe: riga's P2 beats the city window's P3 (the bug).
+	_, got, err := bestStoreWithWork("q", stores, stores[0], run)
+	if err != nil || got.dir != "riga" {
+		t.Fatalf("pre-D1 shape: store.dir = %q err %v, want riga", got.dir, err)
+	}
+	// With the probe: city's hidden P1 must be ranked and win.
+	_, got, err = bestStoreWithWork("q", stores, stores[0], run, hookStoreRankOptions{RankProbeCommand: "probe"})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got.dir != "city" {
+		t.Fatalf("store.dir = %q, want city — the probe's P1 must outrank riga's P2", got.dir)
+	}
+}
+
+// TestBestStoreWithWorkProbeFailureKeepsWindowRank pins C3: a probe that
+// errors or returns garbage is best-effort. The store keeps its window rank
+// and selection proceeds — a flaky probe must never wedge the hook.
+func TestBestStoreWithWorkProbeFailureKeepsWindowRank(t *testing.T) {
+	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
+	run := func(command, dir string, _ []string) (string, error) {
+		if command == "probe" {
+			if dir == "city" {
+				return "", errTestStoreTimeout // primary probe fails
+			}
+			return "not json", nil // rig probe unparseable
+		}
+		if dir == "city" {
+			return `[{"id":"ci-1","priority":2}]`, nil
+		}
+		return `[{"id":"va-1","priority":1}]`, nil
+	}
+	_, got, err := bestStoreWithWork("q", stores, stores[0], run, hookStoreRankOptions{RankProbeCommand: "probe"})
+	if err != nil {
+		t.Fatalf("a failed probe must not error the hook: %v", err)
+	}
+	if got.dir != "riga" {
+		t.Fatalf("store.dir = %q, want riga (window ranks stand when probes fail)", got.dir)
+	}
+}
+
+// TestBestStoreWithWorkBreaksExactTiesOnAge is ADR-0076 acceptance criterion
+// 3: two stores tying on (tier, priority) select the one with the OLDER best
+// candidate — age is ADR-0035's anti-starvation axis, and positional ties are
+// how one early-registered rig owned the front door for 34 days.
+func TestBestStoreWithWorkBreaksExactTiesOnAge(t *testing.T) {
+	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
+	run := func(_, dir string, _ []string) (string, error) {
+		if dir == "city" {
+			return `[{"id":"ci-1","priority":1,"created_at":"2026-08-10T00:00:00Z"}]`, nil
+		}
+		return `[{"id":"va-1","priority":1,"created_at":"2026-07-08T00:00:00Z"}]`, nil // older
+	}
+	withHookTieBreakClock(t, time.Unix(0, 1)) // the offset that would rotate an unresolved tie to riga anyway
+	_, got, err := bestStoreWithWork("q", stores, stores[0], run)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got.dir != "riga" {
+		t.Fatalf("store.dir = %q, want riga — the older best candidate must win the tie, not the clock", got.dir)
+	}
+
+	// Equal KNOWN ages keep slice order (ADR-0076 D2), even at a clock offset
+	// that would otherwise rotate.
+	run = func(_, dir string, _ []string) (string, error) {
+		return `[{"id":"tied-` + dir + `","priority":1,"created_at":"2026-08-01T00:00:00Z"}]`, nil
+	}
+	_, got, err = bestStoreWithWork("q", stores, stores[0], run)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got.dir != "city" {
+		t.Fatalf("store.dir = %q, want city — equal known ages keep slice order", got.dir)
+	}
+}
+
+// TestBestStoreWithWorkCollectsSelectionStats pins the D3 telemetry: counts
+// are per store consulted, the total is the sum of ready rows, and the
+// selected store is recorded.
+func TestBestStoreWithWorkCollectsSelectionStats(t *testing.T) {
+	stores := []hookStore{{dir: "city"}, {dir: "riga"}, {dir: "rigb"}}
+	run := func(_, dir string, _ []string) (string, error) {
+		switch dir {
+		case "city":
+			return `[]`, nil
+		case "riga":
+			return `[{"id":"va-1","priority":2},{"id":"va-2","priority":2}]`, nil
+		default:
+			return `[{"id":"vb-1","priority":1}]`, nil
+		}
+	}
+	var stats hookSelectionStats
+	_, got, err := bestStoreWithWork("q", stores, stores[0], run, hookStoreRankOptions{Stats: &stats})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got.dir != "rigb" {
+		t.Fatalf("store.dir = %q, want rigb (P1)", got.dir)
+	}
+	if stats.StoresWithReadyWork != 2 {
+		t.Fatalf("StoresWithReadyWork = %d, want 2", stats.StoresWithReadyWork)
+	}
+	if stats.TotalReadyCandidates != 3 {
+		t.Fatalf("TotalReadyCandidates = %d, want 3", stats.TotalReadyCandidates)
+	}
+	if stats.SelectedStore != "rigb" {
+		t.Fatalf("SelectedStore = %q, want rigb", stats.SelectedStore)
 	}
 }
 

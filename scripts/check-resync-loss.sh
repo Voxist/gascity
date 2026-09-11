@@ -3,8 +3,14 @@
 # commit (bead ga-d32bn; mechanism recorded in the bd memory
 # resync-loss-mechanism-took-theirs-on-shared-test-files).
 #
-# THE PROBLEM: the 2026-08-31 resync (merge 15913af6a) silently dropped 234
-# fork-added declarations. Git did not lose them — `git merge-file` retains
+# THE PROBLEM: the 2026-08-31 resync (merge 15913af6a) silently dropped 254
+# fork-added (declaration, file) pairs — 120 in linguist-generated files
+# (exempt, see is_exempt below), leaving 134 real ones: 114 RESOLUTION-BUG
+# and 20 MERGE-OUTCOME. (Earlier prose quoted 234 and ga-d32bn quoted 113;
+# both were prototype counts, keyed on bare declaration names and with no
+# generated-file exemption. This script reproduces 254/134/114 — run
+# `scripts/check-resync-loss.sh 15913af6a` to see it.)
+# Git did not lose them — `git merge-file` retains
 # every one of them (see Gate 2 below). They were lost because shared
 # `_test.go` files were resolved by taking upstream's blob wholesale: a rule
 # AGENTS.md's "Resync conventions" rule 1 states for GENERATED artifacts
@@ -62,6 +68,56 @@
 #                   rewrite on both sides). Reported for human triage but
 #                   does not fail the gate on its own.
 #
+# GATE 3 — the mirror image of Gates 1 and 2, in the upstream direction
+# (bead ga-8gpw4). Verdicts carry an UPSTREAM- prefix and mean exactly what
+# their fork-side counterparts mean.
+#   file-level, over '*.go' only (see KNOWN LIMITS):
+#     UPSTREAM-DROPPED-FILE  merge is missing a file upstream has, UNLESS the
+#                            fork had already deleted it before the merge.
+#     UPSTREAM-PURE-LOSS     merge == ours AND ours == base: the fork never
+#                            touched it, so the merge simply reverted
+#                            upstream's change to the merge base.
+#     UPSTREAM-TOOK-OURS     merge == ours AND ours != base: the merge is the
+#                            fork's blob verbatim, discarding upstream's side.
+#   declaration-level:
+#     UPSTREAM-RESOLUTION-BUG / UPSTREAM-MERGE-OUTCOME / UPSTREAM-EXEMPT —
+#     upstream-added declarations (present in THEIRS, absent from that same
+#     file in both BASE and OURS) that are missing from MERGE, classified by
+#     the same `git merge-file` oracle Gate 2 uses.
+#     UPSTREAM-FORK-DELETED — informational: the declaration is missing
+#     because the fork had deleted the whole file before the merge. Never
+#     fails the gate, and kept in lockstep with the file-level skip above.
+#
+# WHY IT EXISTS: Gates 1 and 2 only look one direction. They catch a
+# `--theirs`-shaped resolution discarding the fork's side, because ga-d32bn
+# was that shape. A `--ours`-shaped resolution discarding UPSTREAM's side is
+# the same defect class and was structurally invisible to them: on
+# 2026-09-04, the first live resync run, internal/hooks/hooks_test.go was
+# resolved --ours and silently dropped all three upstream-added cursor tests
+# while Gate 2 reported "0 missing" on that exact tree. It was caught only by
+# counting `func Test` by hand.
+#
+# KNOWN LIMITS, both inherent to a declaration-granular check and documented
+# here rather than papered over:
+#   - Intra-declaration loss is invisible in BOTH directions. Deleting a
+#     table entry from an existing test function shrinks coverage without
+#     changing the decl set.
+#   - Gate 3's file-level half is scoped to '*.go', unlike Gate 1's, which
+#     runs over every path. Over all paths a took-ours check fires on every
+#     file the fork legitimately owns outright (AGENTS.md, CHANGELOG.md,
+#     fork-only workflows), and a gate that cannot be passed is worse than
+#     no gate. Over .go there is no such class.
+#   - Gate 3 has no near-ours counterpart to Gate 1's
+#     GATE1_NEAR_THEIRS_MAX_DELTA heuristic, so a merge that takes ours and
+#     then reapplies a small unrelated patch gets no file-level label. It is
+#     labelling only: that heuristic is gated on corroboration from the
+#     declaration-level check, which has already failed the gate whenever it
+#     would fire.
+#   - Gate 3's file-level check deliberately skips a file OURS had already
+#     deleted before the merge: accepting the fork's own prior deletion is a
+#     standing fork decision, and re-raising it on every resync forever
+#     would train operators to ignore the gate.
+#
 # ADD-ONS (informational only, never fail the gate):
 #   - dangling references: `git grep -w` each Gate-2-missing symbol against
 #     MERGE. Since the tree presumably builds, any hit is a comment or
@@ -73,9 +129,11 @@
 #     ([daemon].on_boot_stagger survived as a published, documented,
 #     completely unread config knob after its readers were dropped).
 #
-# EXIT STATUS: non-zero if any unexempted Gate-1 hit or any Gate-2
-# RESOLUTION-BUG is found. Zero otherwise (MERGE-OUTCOME and the add-ons do
-# not affect exit status — they need a human, not a mechanical fix).
+# EXIT STATUS: non-zero if any unexempted Gate-1 hit, any Gate-2
+# RESOLUTION-BUG, or any Gate-3 UPSTREAM-RESOLUTION-BUG or unexempted
+# file-level hit is found. Zero otherwise (MERGE-OUTCOME in either
+# direction and the add-ons do not affect exit status — they need a human,
+# not a mechanical fix).
 set -uo pipefail # intentionally NOT -e: run every check and aggregate.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -190,26 +248,41 @@ gate2_summary=$(mktemp "${TMPDIR:-/tmp}/crl-gate2-summary.XXXXXX") || exit 1
 gate2_report=$(mktemp "${TMPDIR:-/tmp}/crl-gate2-report.XXXXXX") || exit 1
 gate2_detail=$(mktemp "${TMPDIR:-/tmp}/crl-gate2-detail.XXXXXX") || exit 1
 gate2_bug_files=$(mktemp "${TMPDIR:-/tmp}/crl-gate2-bugfiles.XXXXXX") || exit 1
-trap 'rm -f "$gate2_summary" "$gate2_report" "$gate2_detail" "$gate2_bug_files"' EXIT
+gate3_report=$(mktemp "${TMPDIR:-/tmp}/crl-gate3-report.XXXXXX") || exit 1
+gate3_detail=$(mktemp "${TMPDIR:-/tmp}/crl-gate3-detail.XXXXXX") || exit 1
+trap 'rm -f "$gate2_summary" "$gate2_report" "$gate2_detail" "$gate2_bug_files" "$gate3_report" "$gate3_detail"' EXIT
 
-if ! python3 "$EXTRACTOR" "$BASE" "$OURS" "$THEIRS" "$MERGE" --summary-out "$gate2_summary" --detail-out "$gate2_detail" >"$gate2_report"; then
+# Both directions come from ONE extractor run: parsing the four trees is the
+# expensive part of Gate 2/3, and a second script re-parsing them to ask the
+# mirror-image question would double the cost of every resync push for
+# nothing.
+resolution_bugs=0
+merge_outcomes=0
+gate2_exempt=0
+missing=0
+up_resolution_bugs=0
+up_merge_outcomes=0
+gate3_exempt=0
+up_missing=0
+gate3_fork_deleted=0
+if ! python3 "$EXTRACTOR" "$BASE" "$OURS" "$THEIRS" "$MERGE" \
+	--summary-out "$gate2_summary" --detail-out "$gate2_detail" \
+	--upstream-report-out "$gate3_report" --upstream-detail-out "$gate3_detail" \
+	>"$gate2_report"; then
 	note "BLOCKED — check-resync-loss-extract.py failed (fail-closed)"
 	failed=1
-	resolution_bugs=0
-	merge_outcomes=0
-	gate2_exempt=0
-	missing=0
 else
-	resolution_bugs=0
-	merge_outcomes=0
-	gate2_exempt=0
-	missing=0
 	while IFS='=' read -r key val; do
 		case "$key" in
 		RESOLUTION_BUGS) resolution_bugs="$val" ;;
 		MERGE_OUTCOMES) merge_outcomes="$val" ;;
 		EXEMPT) gate2_exempt="$val" ;;
 		MISSING) missing="$val" ;;
+		UPSTREAM_RESOLUTION_BUGS) up_resolution_bugs="$val" ;;
+		UPSTREAM_MERGE_OUTCOMES) up_merge_outcomes="$val" ;;
+		UPSTREAM_EXEMPT) gate3_exempt="$val" ;;
+		UPSTREAM_MISSING) up_missing="$val" ;;
+		UPSTREAM_FORK_DELETED) gate3_fork_deleted="$val" ;;
 		esac
 	done <"$gate2_summary"
 fi
@@ -306,12 +379,111 @@ if [ "$resolution_bugs" -gt 0 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# ADD-ON: dangling references to a Gate-2-missing symbol.
+# GATE 3 — the upstream direction (bead ga-8gpw4). File-level first, then the
+# declaration-level report the extractor already computed above.
+# ---------------------------------------------------------------------------
+echo
+echo "=== GATE 3: upstream-added content absent from the merge result ==="
+gate3_hits=0
+gate3_file_exempt=0
+while IFS= read -r f; do
+	[ -n "$f" ] || continue
+	th=$(git rev-parse -q --verify "${THEIRS}:${f}" 2>/dev/null || true)
+	# Upstream deleted the file: nothing of upstream's to drop.
+	[ -n "$th" ] || continue
+
+	oh=$(git rev-parse -q --verify "${OURS}:${f}" 2>/dev/null || true)
+	bh=$(git rev-parse -q --verify "${BASE}:${f}" 2>/dev/null || true)
+	mh=$(git rev-parse -q --verify "${MERGE}:${f}" 2>/dev/null || true)
+
+	# Both sides made the identical change, or the fork had already
+	# upstreamed it. merge == ours is then the ONLY correct 3-way result and
+	# nothing was discarded. Skipped before any verdict logic runs, exactly
+	# as Gate 1 does for the mirror case — both-sides-identical is not loss.
+	if [ -n "$oh" ] && [ "$oh" = "$th" ]; then
+		continue
+	fi
+	# Upstream did not actually change this file relative to BASE (rename or
+	# mode-only entry in the diff list): nothing of upstream's at stake.
+	if [ "$th" = "$bh" ]; then
+		continue
+	fi
+
+	verdict=""
+	detail=""
+	if [ -z "$mh" ]; then
+		if [ -z "$oh" ] && [ -n "$bh" ]; then
+			# BASE had the file and the fork had ALREADY deleted it before
+			# the merge. The merge accepting that standing fork decision is
+			# not a resync mishandling, and re-raising it on every resync
+			# forever would train operators to ignore this gate. Skip — see
+			# KNOWN LIMITS.
+			#
+			# The `-n "$bh"` half is load-bearing, not defensive padding:
+			# without it this branch also swallows the case BASE never had
+			# the file at all, i.e. UPSTREAM ADDED IT — the most clear-cut
+			# upstream loss there is. "OURS does not have it" is not
+			# evidence of a fork decision when there was nothing yet to
+			# decide about.
+			:
+		elif [ -z "$bh" ]; then
+			verdict="UPSTREAM-DROPPED-FILE"
+			detail="upstream added it; merge does not have it"
+		else
+			verdict="UPSTREAM-DROPPED-FILE"
+			detail="upstream and fork both have it; merge does not"
+		fi
+	elif [ -n "$oh" ] && [ "$mh" = "$oh" ]; then
+		# The exact mirror of Gate 1's PURE-LOSS / TOOK-THEIRS split. This
+		# is the shape the declaration-level check above cannot see at all:
+		# upstream MODIFYING an existing declaration changes no decl name,
+		# so a merge that takes the fork's blob verbatim drops the change
+		# with Gate 3 reporting nothing. On the 2026-08-31 merge that is
+		# cmd/gc/dolt_cleanup_drop.go and
+		# internal/doctor/checks_order_firing_bounded_test.go — invisible to
+		# every other check in this script.
+		#
+		# Scoped to '*.go' on purpose (see the pathspec below). A file-level
+		# took-ours check over ALL paths would fire on every file the fork
+		# legitimately owns outright — AGENTS.md, CHANGELOG.md, fork-only
+		# workflows — and a gate that cannot be passed is worse than no
+		# gate. Over .go there is no such class: 5 hits across the whole
+		# 372-commit 2026-08-31 resync, every one a real triage item.
+		if [ "$oh" = "$bh" ]; then
+			verdict="UPSTREAM-PURE-LOSS"
+			detail="the fork never touched it; merge reverted to the merge base"
+		else
+			verdict="UPSTREAM-TOOK-OURS"
+			detail="merge is the fork's blob verbatim, discarding upstream's change"
+		fi
+	fi
+
+	[ -n "$verdict" ] || continue
+
+	if is_exempt "$f"; then
+		gate3_file_exempt=$((gate3_file_exempt + 1))
+		note "  EXEMPT (generated, AGENTS.md rule 1) $verdict $f"
+		continue
+	fi
+
+	gate3_hits=$((gate3_hits + 1))
+	failed=1
+	echo "  $verdict	$f	($detail)"
+done < <(git diff --name-only "$BASE" "$THEIRS" -- '*.go')
+
+cat "$gate3_report"
+echo "Gate 3: $gate3_hits unexempted file-level hit(s) ($gate3_file_exempt exempted); $up_missing missing (decl, file) pair(s) — $up_resolution_bugs UPSTREAM-RESOLUTION-BUG, $up_merge_outcomes UPSTREAM-MERGE-OUTCOME, $gate3_exempt UPSTREAM-EXEMPT; $gate3_fork_deleted in fork-deleted file(s) (informational)."
+if [ "$up_resolution_bugs" -gt 0 ]; then
+	failed=1
+fi
+
+# ---------------------------------------------------------------------------
+# ADD-ON: dangling references to a Gate-2- or Gate-3-missing symbol.
 # ---------------------------------------------------------------------------
 echo
 echo "=== ADD-ON: dangling references to a missing symbol (informational) ==="
 dangling=0
-if [ -s "$gate2_detail" ]; then
+if [ -s "$gate2_detail" ] || [ -s "$gate3_detail" ]; then
 	while read -r _verdict name; do
 		[ -n "$name" ] || continue
 		hits=$(git grep -wI -n "$name" "$MERGE" -- '*.go' 2>/dev/null | grep -v "^${MERGE}:.*:.*\b${name}\b(" || true)
@@ -322,7 +494,7 @@ if [ -s "$gate2_detail" ]; then
 				echo "    $hit"
 			done <<<"$hits"
 		fi
-	done < <(cut -f1,2 "$gate2_detail" | sort -u)
+	done < <(cat "$gate2_detail" "$gate3_detail" | cut -f1,2 | sort -u)
 fi
 echo "Add-on: $dangling dangling reference(s) found (does not affect exit status)."
 
@@ -373,12 +545,13 @@ echo
 echo "=== SUMMARY ==="
 printf '%-14s %s\n' "Gate 1:" "$gate1_hits unexempted hit(s) ($gate1_exempt exempted)"
 printf '%-14s %s\n' "Gate 2:" "$resolution_bugs RESOLUTION-BUG, $merge_outcomes MERGE-OUTCOME, $gate2_exempt EXEMPT (of $missing missing)"
+printf '%-14s %s\n' "Gate 3:" "$gate3_hits unexempted file-level hit(s) ($gate3_file_exempt exempted); $up_resolution_bugs UPSTREAM-RESOLUTION-BUG, $up_merge_outcomes UPSTREAM-MERGE-OUTCOME, $gate3_exempt UPSTREAM-EXEMPT (of $up_missing missing)"
 printf '%-14s %s\n' "Dangling refs:" "$dangling"
 printf '%-14s %s\n' "Dead knobs:" "$dead_knobs"
 
 if [ "$failed" -ne 0 ]; then
-	note "RESYNC LOSS DETECTED — see Gate 1 / Gate 2 hits above. Do not push until triaged (bead ga-d32bn)."
+	note "RESYNC LOSS DETECTED — see Gate 1 / Gate 2 / Gate 3 hits above. Do not push until triaged (beads ga-d32bn, ga-8gpw4)."
 	exit 1
 fi
-note "OK — no unexempted Gate 1 hit and no Gate 2 RESOLUTION-BUG."
+note "OK — no unexempted Gate 1 hit, no Gate 2 RESOLUTION-BUG, no Gate 3 upstream loss."
 exit 0
