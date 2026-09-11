@@ -536,19 +536,33 @@ func (c *CachingStore) mergeSnapshotLocked(
 	for id, freshBead := range freshByID {
 		freshDeps := c.depsForReconcileLocked(id, freshBead, depMap, useFreshDeps)
 		cached, cachedExists := c.beads[id]
-		// Differ substitution: a nil'd (invalidated) verdict compares as the
-		// value the cache disowned, so the invalidation itself never reads as
-		// a store-side nil<->set transition (the ADR-0094 flood).
+		// Differ substitution (ADR-0094): a nil'd (invalidated) verdict compares
+		// as the value the cache disowned, so the invalidation itself never reads
+		// as a store-side nil<->set transition (the bead.updated flood).
 		//
-		// Only when the FRESH row carries a verdict. When the projection is
-		// DEGRADED the fresh row is nil too; substituting then manufactures a
-		// value-vs-nil difference out of two nils, and because a verdict-less
-		// absorb keeps the mark, the same spurious bead.updated re-fires on
-		// every reconcile tick until the projection recovers — a sustained
-		// per-tick flood in exactly the degraded shape (round-4 review;
-		// reproduced at 1 event/tick before this guard). Fresh-nil vs
-		// cached-nil compares silently, which is what upstream's sentinel did
-		// in this shape all along.
+		// Only the nil -> verdict direction, and only when the FRESH row carries
+		// a verdict. Comparing against the DISOWNED VALUE rather than suppressing
+		// is what keeps this honest: a verdict that genuinely changed across the
+		// blind window still emits, a mere restoration does not. That requires
+		// every site which nils a held verdict to have RECORDED it —
+		// clearReadyProjectionLocked always did; absorbReadyProjectionLocked's
+		// decline and the prime rebuild's replace branch did not, and that
+		// omission is the flood vc-vlyk reproduced (vc-u2n6 pairs both).
+		//
+		// The verdict -> nil direction is deliberately NOT neutralised here, and
+		// that is a ruling, not an oversight. Suppressing it does remove the other
+		// half of the reproduction (measured: 100 emissions on main -> 50 with the
+		// two ledger records above -> 0 with a verdict->nil arm added), but it is
+		// unsound: the guard fixture drives its decline by flapping a BLOCKING
+		// TARGET's status, which is the identical code path
+		// (readyBlockingDependencyTargetStatusChangedLocked) a real unblock takes,
+		// so no local signal separates them. Both arm shapes tried were caught by
+		// the differential oracle — a blanket arm swallowed a real
+		// blocked -> ready transition (marg_preserve_blocked-target), and gating it
+		// on !useFreshDeps still diverged from the frozen reference by an extra
+		// notification (seed0_case6407). Closing that half means deciding whether a
+		// projection-dark tick may withhold a real transition for one cycle; that
+		// is an ADR-0094 semantics question with its own bead, not a differ tweak.
 		if cachedExists && cached.IsBlocked == nil && freshBead.IsBlocked != nil {
 			if v, ok := c.readyProjectionInvalid[id]; ok {
 				vv := v

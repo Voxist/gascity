@@ -219,7 +219,36 @@ func buildExpectedNewEnd(st storeState, in snapshotInputs, postPreserveFresh map
 	// deps under depsComplete=true.
 	exp.depsComplete = expectedNextDepsComplete(st, in, postPreserveFresh)
 	exp.readyLost = expectedReadyLost(st, exp.beads)
+	exp.readyInvalid = expectedReadyInvalid(st, exp.beads)
 	return exp
+}
+
+// expectedReadyInvalid re-derives the disowned-verdict ledger the merge leaves
+// behind (ADR-0094, vc-u2n6), from the input state and the independently built
+// end beads map alone — never from the seam.
+//
+// Same population as expectedReadyLost, carrying the VALUE: a row whose verdict
+// the merge dropped has been nil'd for a cache-internal reason, so
+// absorbReadyProjectionLocked's decline records what it disowned for the
+// reconcile differ to substitute on the tick the projection answers again.
+// Membership alone is not enough to compare — two runs agreeing on which rows
+// were disowned but disagreeing on the value would flood differently — so the
+// value is derived here and diffed by diffBoolMap.
+//
+// The two ledgers coincide on this path and only on this path: readyLost is
+// also written conditionally by clearReadyProjectionLocked (the event/write
+// path, outside the seam) and readyInvalid unconditionally there, and the prime
+// rebuild records a disowned value without a lost mark. Neither runs inside
+// mergeSnapshotLocked, so within the seam one derivation serves both.
+func expectedReadyInvalid(st storeState, endBeads map[string]Bead) map[string]bool {
+	invalid := map[string]bool{}
+	for id, end := range endBeads {
+		cached, existed := st.beads[id]
+		if existed && cached.IsBlocked != nil && end.IsBlocked == nil {
+			invalid[id] = *cached.IsBlocked
+		}
+	}
+	return invalid
 }
 
 // expectedReadyLost re-derives the rows whose projected verdict the merge

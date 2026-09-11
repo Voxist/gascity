@@ -502,6 +502,9 @@ func (c *CachingStore) advanceObservationLocked() {
 // nil'd out of the row and must not be trusted until the next observation.
 // Caller must hold c.mu in write mode.
 func (c *CachingStore) markReadyProjectionInvalidLocked(id string, value bool) {
+	if c.readyProjectionInvalid == nil {
+		c.readyProjectionInvalid = make(map[string]bool)
+	}
 	c.readyProjectionInvalid[id] = value
 }
 
@@ -684,6 +687,25 @@ func (c *CachingStore) absorbReadyProjectionLocked(id string, bead Bead, opts ab
 		delete(c.readyProjectionLost, id)
 		return bead
 	}
+	// The decline nils this row's verdict for a CACHE-INTERNAL reason (this
+	// absorb is authoritative-from-fresh, or the row's deps moved), exactly as
+	// clearReadyProjectionLocked does — so it must record the disowned value
+	// the same way. Without this the reconcile differ's substitution has
+	// nothing to substitute for a declined row, and the nil->verdict half of a
+	// projection flap re-emits bead.updated on every cycle with the
+	// substitution structurally unable to fire: the ADR-0094 flood, reproduced
+	// on the deployed build and on main by TestBdStoreBackedFloodReproduction
+	// (vc-vlyk RED, repaired here for vc-u2n6).
+	//
+	// This completes the value ledger; it does NOT merge the two. The split is
+	// load-bearing and stays: readyProjectionLost is the READ-declining key set
+	// (readyProjectionUnknownLocked, ga-cfhgr) and is marked conditionally by
+	// clearReadyProjectionLocked; readyProjectionInvalid is the disowned-value
+	// ledger only the differ consults, and every site that nils a verdict owes
+	// it an entry. Both are discharged together by the next observed verdict
+	// (absorbFreshLocked's observedVerdict branch and the clear above), evicted
+	// together (evictLocked), and carried over together by the prime rebuild.
+	c.markReadyProjectionInvalidLocked(id, *cached.IsBlocked)
 	c.markReadyProjectionLostLocked(id)
 	return bead
 }
@@ -1210,7 +1232,10 @@ func (c *CachingStore) prime(ctx context.Context) error {
 		// Same reasoning for the ADR-0094 invalidation marks: the prime
 		// snapshot ran the ready projection over every row it carries, so those
 		// rows are freshly observed and their invalidation is discharged. Only
-		// rows kept from the old cache can still be awaiting re-observation.
+		// rows kept from the old cache can still be awaiting re-observation —
+		// and rows the prime replaced with a VERDICT-LESS row, because that
+		// premise fails exactly when the projection was degraded for the prime
+		// scan. See the disowned-value record in the carry-over loop below.
 		nextReadyInvalid := make(map[string]bool)
 		for id, current := range c.beads {
 			if fresh, exists := beadMap[id]; exists {
@@ -1226,6 +1251,26 @@ func (c *CachingStore) prime(ctx context.Context) error {
 						nextReadyInvalid[id] = v
 					}
 					c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
+					continue
+				}
+				// The fresh row replaces the cached one. When it carries no
+				// verdict but the cached row held one, this prime is a NIL-ING
+				// SITE like any other — the projection was degraded for the
+				// scan — so it owes the differ the disowned value. Dropping it
+				// here is what let a full prime taken during a projection
+				// outage re-open the ADR-0094 flood on the next tick that the
+				// projection answered: the substitution had nothing to
+				// substitute (vc-u2n6; the tick-7 residue after the decline-site
+				// repair, TestBdStoreBackedFloodReproduction).
+				//
+				// Only the value ledger. readyProjectionLost is the read-decline
+				// set with its own conditional contract; a degraded prime has
+				// never marked it and widening that is a readiness-semantics
+				// change, not this repair. invalid-without-lost is already a
+				// reachable, valid state (clearReadyProjectionLocked marks lost
+				// conditionally and invalid unconditionally).
+				if fresh.IsBlocked == nil && current.IsBlocked != nil {
+					nextReadyInvalid[id] = *current.IsBlocked
 				}
 				continue
 			}
