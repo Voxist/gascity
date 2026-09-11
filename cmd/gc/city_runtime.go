@@ -562,6 +562,11 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		cityRoot = filepath.Dir(cr.tomlPath)
 	}
 
+	// vc-ny00 L2: point the store-warming state machine at this city's pack
+	// state dir. The supervisor is the only process that publishes the
+	// durable record — see registerStoreWarmingStateSink.
+	registerStoreWarmingStateSink(cityRoot, cr.stderr)
+
 	// Enforce restrictive permissions on .gc/ and its subdirectories.
 	enforceGCPermissions(cr.cityPath, cr.stderr)
 
@@ -1925,6 +1930,10 @@ func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, []orderTrackin
 	// opened at boot, never a second resolution, so nothing here is closed by
 	// closeOpened — the runtime owns that handle for its whole life.
 	stores = appendOrdersSweepStore(stores, cr.relocatedOrdersStore())
+	// vc-ny00 L1: never serialize the tick behind a store whose breaker is
+	// already open. Filtered AFTER the opens above so closeOpened still
+	// releases every handle this call created, degraded or not.
+	stores = filterDegradedSweepStores(stores, cr.stderr, cr.logPrefix)
 	closeOpened := func() {
 		for _, s := range freshlyOpened {
 			_ = closeBeadStoreHandle(s) //nolint:errcheck // best-effort

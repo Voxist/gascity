@@ -94,6 +94,20 @@ func (s orderTrackingSweepScopedStore) orderTrackingSweepKey() string {
 	return s.key
 }
 
+// IDPrefix forwards the wrapped store's bead-id prefix. beads.Store does not
+// declare IDPrefix, so it does not promote through the embedded interface —
+// the same reason label and key need explicit accessors above. The
+// vc-ny00 sweep-isolation filter (store_warming_sweep.go) needs it to ask
+// whether THIS scope's store is the degraded one. Returns "" when the
+// wrapped store does not expose a prefix, which the filter reads as
+// "unknown scope, do not skip".
+func (s orderTrackingSweepScopedStore) IDPrefix() string {
+	if inner, ok := s.Store.(interface{ IDPrefix() string }); ok {
+		return inner.IDPrefix()
+	}
+	return ""
+}
+
 func openCityOrderStore(stderr io.Writer, cmdName string) (beads.OrdersStore, int) {
 	cityPath, err := resolveCity()
 	if err != nil {

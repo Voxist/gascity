@@ -328,3 +328,26 @@ func TraceBDCall(source, dir string, args []string, start time.Time, exitCode in
 	data = append(data, '\n')
 	_, _ = f.Write(data) //nolint:errcheck // best-effort trace log
 }
+
+// InReconcilerTick reports whether the calling goroutine is running inside
+// a reconciler tick frame, as recorded by SetReconcilerTickTrigger.
+//
+// This is the tick-context seam L1 of the vc-ny00 store-warming plan needs:
+// bdCommandTimeoutFor bounds tick-context READS far below the listener's
+// steady-state read_timeout_millis so the client fast-fails before the
+// server's own deadline kills the query, and the serial tick can never pay
+// the full wall per store (vc-5gui: the 2026-09-06 00:33 cliff was a tick
+// serialized behind stores × 120s while the supervisor logged nothing).
+//
+// It carries the SAME best-effort, process-global caveat as the trigger it
+// reads (see reconcilerTickTrigger): the value is set by runTick around the
+// tick body, so a bd read issued by a DIFFERENT supervisor goroutine that
+// happens to overlap a tick also sees tick context and gets the shorter
+// bound. That is deliberate and safe in this direction — the effect is a
+// faster failure on a read the caller must already handle, never a longer
+// one — and the whole mechanism is disabled by GC_BD_TICK_READ_TIMEOUT_S=0.
+// Non-supervisor processes (CLI, hooks, sling) never set the trigger at all,
+// so they keep the 120s bound.
+func InReconcilerTick() bool {
+	return reconcilerTickTrigger.Load() != nil
+}
