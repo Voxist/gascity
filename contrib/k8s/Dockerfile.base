@@ -32,7 +32,7 @@ ARG XTEXT_VERSION=0.41.0
 # fixed 0.55.0) and x/mod CVE-2026-56864/56865 (HIGH, fixed 0.40.0). Floors,
 # applied to both tool builds below; each must be >= what the source resolves
 # (ga-0emb8), verified against the pinned gh and dolt sources.
-ARG XCRYPTO_VERSION=0.55.0
+ARG XCRYPTO_VERSION=0.56.0
 ARG XMOD_VERSION=0.40.0
 # dolt reaches github.com/apache/thrift through go.opentelemetry.io/otel/
 # exporters/jaeger v1.17.0, which pins the v0.13.1-0.20201008052519 pseudo-

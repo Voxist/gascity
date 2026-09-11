@@ -16,7 +16,7 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 		grpcVersion   = "1.83.1"
 		xtextVersion  = "0.41.0"
 		// Floors for the gh and dolt builds; see Dockerfile.base.
-		xcryptoVersion            = "0.55.0"
+		xcryptoVersion            = "0.56.0"
 		xmodVersion               = "0.40.0"
 		thriftVersion             = "0.24.0"
 		ghSourceSHA256            = "a0c18c98c73f7333f73e19b3a0bf5bd18673f3dc226193ab6478b3ea1ea18f03"
@@ -112,10 +112,14 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		// (ga-0emb8). x/text is 0.41.0 in both images now: the x/crypto floor
 		// drags x/text there in bd's, gh's and dolt's module graphs alike.
 		xtextVersion = "0.41.0"
-		// CVE-2026-56854 (CRITICAL, fixed 0.55.0) and CVE-2026-56864 (HIGH,
-		// fixed 0.40.0). The pinned source declares x/crypto 0.54.0 and x/mod
-		// 0.37.0, and the image scan gates HIGH+CRITICAL with --exit-code 1.
-		xcryptoVersion = "0.55.0"
+		// x/crypto is 0.56.0, not 0.55.0. Three advisories reach crypto/ssh,
+		// which this image links: CVE-2026-56854 (CRITICAL) is fixed in
+		// 0.55.0, but CVE-2026-78662 and CVE-2026-56855 (SSH channel-deadlock
+		// DoS, both published 2026-09-02) need 0.56.0. x/mod needs 0.40.0 for
+		// CVE-2026-56864 and CVE-2026-56865 (sumdb). The pinned source
+		// declares x/crypto 0.54.0 and x/mod 0.37.0, and the image scan gates
+		// HIGH+CRITICAL with --exit-code 1.
+		xcryptoVersion = "0.56.0"
 		xmodVersion    = "0.40.0"
 		// CVE-2026-43871 (HIGH, TCompactProtocol varint byte-count DoS, fixed
 		// 0.24.0). bd embeds dolt as a library and reaches thrift through the

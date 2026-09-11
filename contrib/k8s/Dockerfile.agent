@@ -44,7 +44,7 @@ ARG XTEXT_VERSION=0.41.0
 # image scan gates HIGH+CRITICAL with --exit-code 1, so both floors are needed
 # for a green scan; verified against the exact pinned source: all upgrades, no
 # downgrades, bd builds.
-ARG XCRYPTO_VERSION=0.55.0
+ARG XCRYPTO_VERSION=0.56.0
 ARG XMOD_VERSION=0.40.0
 # bd embeds dolt as a library, so it reaches github.com/apache/thrift through
 # the parquet writer. The pinned source resolves thrift 0.23.0, which carries
