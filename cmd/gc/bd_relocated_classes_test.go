@@ -1716,33 +1716,33 @@ func TestGcBdCreateFailsClosedOnAFileBackedBulkCreateOnASplitCity(t *testing.T) 
 // TestBdCreateRefusesAnInfraShapedCreateBehindABdRootFlag pins the guard
 // against the flags that used to switch it off.
 //
-// bd accepts its root flags BEFORE the subcommand, and several of them consume
-// the next argument as a value (`--database`, `--mem-profile`, `--db`,
-// `--actor`, `--dolt-auto-commit`, and the hidden `--format`). A global
-// manifest that did not know one of them left bdRelocatedClassVerb reading that
-// flag's VALUE as the verb, or reporting the argv undecidable — and both
-// answers forward the create. bd accepts every flag listed below and goes on to
-// mint, so the disarmed guard was the only thing between an ordinary invocation
-// and a stranded bead.
+// bd accepts its root flags BEFORE the subcommand, and seven of them consume the
+// next argument as a value (`--actor`, `--database`, `--db`, `-C`/`--directory`,
+// `--dolt-auto-commit`, `--format`, `--mem-profile`). A global manifest that
+// filed one of them as a bool, or did not know it at all, left
+// bdRelocatedClassVerb reading a flag's VALUE as the verb
+// (`--database beads_other create …` resolves to "beads_other") or reporting the
+// argv undecidable — and both answers forward the create. bd accepts every one
+// of these flags and goes on to mint, so the disarmed guard was the only thing
+// between an ordinary invocation and a stranded bead.
 //
-// `--profile <value>` and `--server-url <value>` are deliberately NOT in this
-// table. The 2026-09-05 resync removed them after checking beads
-// cmd/bd/main.go across deps.env's supported range: neither is a value flag on
-// any bd this repo runs. `--profile` is registered `PersistentFlags().BoolVar`
-// in v1.0.4 and in v1.1.0, and no longer exists at 3e03250ee (renamed
-// `--cpu-profile`); `--server-url` is not a persistent flag in any of the
-// three. So neither spelling can strand a bead — bd rejects the whole
-// invocation ("unknown command" / "unknown flag") and mints nothing, which is
-// why the premise "bd accepts every one of these and goes on to mint" does not
-// hold for them. Filing `--profile` as a value flag to make that case pass
-// would open a real bypass on v1.0.4/v1.1.0, where it IS a bool: `bd --profile
-// create --type message hello` would then have "create" eaten as the flag's
-// value, and the create bd really does run would arrive unguarded. See
-// globalValueFlags in internal/bdflags/bdflags.go.
+// Only flags the PINNED bd actually registers belong here. `--server-url` is
+// gone entirely and is not listed. `--profile` is kept, because this fork does
+// NOT link v1.3.0-rc.2: deps.env pins the fork-first bridge (BD_LIB_REF
+// d530cddfa64b / BD_SOURCE_REF 3e03250ee), and across that supported range
+// `--profile` is a real BOOL persistent flag on v1.0.4 and v1.1.0. Its inline
+// spelling must therefore still be refused here. Upstream's note applies once
+// the bridge exits and go.mod moves to the RC: at that point --profile is an
+// unknown flag bd rejects outright, and this row exercises the
+// undecidable-verb arm documented on bdRelocatedClassCreateRefusal instead.
 func TestBdCreateRefusesAnInfraShapedCreateBehindABdRootFlag(t *testing.T) {
 	for name, prefix := range map[string][]string{
 		"--profile inline":       {"--profile=default"},
 		"--database":             {"--database", "beads_other"},
+		"--database inline":      {"--database=beads_other"},
+		"--actor":                {"--actor", "gastown/mayor"},
+		"--dolt-auto-commit":     {"--dolt-auto-commit", "off"},
+		"--format":               {"--format", "json"},
 		"--mem-profile":          {"--mem-profile", "/tmp/heap.out"},
 		"--no-color":             {"--no-color"},
 		"--cpu-profile":          {"--cpu-profile"},

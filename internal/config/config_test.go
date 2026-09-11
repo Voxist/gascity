@@ -1878,6 +1878,39 @@ func TestEffectiveWorkQueryDefault(t *testing.T) {
 	}
 }
 
+// TestEffectiveWorkQueryRoutedTierServesCanonicalPriorityOrder pins the claim
+// tier's ordering contract: the tier 3 routed probe must ride the reader's
+// canonical (priority, created_at, id) default order, never an explicit
+// --sort oldest. An oldest-first bound here is a priority-blind claim window —
+// a routed P0 behind more than --limit older lower-priority rows is never
+// served at all, so pool workers deterministically starve the highest-priority
+// routed work (measured 2026-08-25: 11 P0 molecules parked behind 34 older
+// wave-2 rows, zero P0s in the served window). The run_target migration
+// fallback keeps --sort oldest deliberately — it is a retirement-window
+// probe (ga-dhf44), not the claim path's order contract.
+//
+// Scoped to routedReadyTierCommand rather than the whole work query on
+// purpose: two other probes read gc.routed_to and keep --sort oldest by
+// design — the gc.run_target migration fallback above, and the assigned
+// graph-anchor probe (assignedGraphWorkflowAnchorReadyFunctionScript), which
+// orders the steps of one already-assigned workflow rather than choosing
+// which bead to claim. Asserting over the whole query would bind their
+// contracts to this one. The served bytes stay pinned by the workquery
+// goldens.
+func TestEffectiveWorkQueryRoutedTierServesCanonicalPriorityOrder(t *testing.T) {
+	blind := `"gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest`
+	mk := routedReadyTierCommand
+	for name, got := range map[string]string{
+		"default":   mk(QueryTopology{}),
+		"bd105":     mk(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}}),
+		"federated": mk(QueryTopology{FederatedReady: true}),
+	} {
+		if strings.Contains(got, blind) {
+			t.Errorf("%s: routed tier must serve the reader's canonical priority-first default order, not --sort oldest: %q", name, got)
+		}
+	}
+}
+
 func TestEffectiveWorkQueryBD105CompatibilityOptIn(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveWorkQueryFor(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}})
@@ -2285,7 +2318,7 @@ esac
 	}
 }
 
-func TestEffectiveWorkQueryRoutedQueueUsesNativeOldestSortAcrossReadyTiers(t *testing.T) {
+func TestEffectiveWorkQueryRoutedQueueUsesNativeCanonicalSortAcrossReadyTiers(t *testing.T) {
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	got := a.EffectiveWorkQuery()
 	for _, want := range []string{
@@ -2302,18 +2335,15 @@ func TestEffectiveWorkQueryRoutedQueueUsesNativeOldestSortAcrossReadyTiers(t *te
 set -eu
 case "$*" in
   "ready --metadata-field gc.routed_to=hello-world/worker --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --json --sort hybrid --limit=20")
-    printf '[{"id":"older-no-history","priority":2,"created_at":"2026-05-20T06:09:30Z","no_history":true}]'
+    printf '[{"id":"served-no-history","priority":2,"created_at":"2026-05-20T06:09:30Z","no_history":true}]'
     ;;
   *)
     printf '[]'
     ;;
 esac
 `)
-	if !strings.Contains(out, "older-no-history") {
-		t.Fatalf("EffectiveWorkQuery() did not pick oldest routed work: %q", out)
-	}
-	if strings.Contains(out, "newer-durable") {
-		t.Fatalf("EffectiveWorkQuery() returned more than first oldest routed work: %q", out)
+	if !strings.Contains(out, "served-no-history") {
+		t.Fatalf("EffectiveWorkQuery() did not pick routed work from the reader's canonical-order window: %q", out)
 	}
 }
 
@@ -2339,13 +2369,23 @@ func TestGeneratedBdReadCommandsStayBd104StorageCompatible(t *testing.T) {
 	}
 }
 
-func TestEffectiveWorkQueryRoutedQueueUsesOldestBeforePriority(t *testing.T) {
+// TestEffectiveWorkQueryRoutedQueueRidesReaderPriorityOrder pins the inverse
+// of the retired oldest-before-priority contract: the routed tier carries NO
+// explicit --sort, so the reader's canonical (priority, created_at, id)
+// default decides the served window and a younger P0 outranks older P1/P2
+// rows. The stub emulates that reader: it serves the priority-ordered window
+// only for the flagless query, so a reintroduced --sort oldest fails here
+// (the routed case stops matching) as well as in the negative-assertion test.
+func TestEffectiveWorkQueryRoutedQueueRidesReaderPriorityOrder(t *testing.T) {
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	out := runEffectiveWorkQuery(t, a, map[string]string{
 		"GC_SESSION_ORIGIN": "ephemeral",
 	}, `#!/bin/sh
 set -eu
 case "$*" in
+  *"ready --metadata-field gc.routed_to=hello-world/worker"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort priority"*"--limit=5"*)
+    printf '[{"id":"newer-p0","priority":0,"created_at":"2026-05-21T06:09:30Z"}]'
+    ;;
   *"ready --metadata-field gc.routed_to=hello-world/worker"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort hybrid"*"--limit=20"*)
     printf '[{"id":"older-p2","priority":2,"created_at":"2026-05-20T06:09:30Z"}]'
     ;;
@@ -2354,11 +2394,8 @@ case "$*" in
     ;;
 esac
 `)
-	if !strings.Contains(out, "older-p2") {
-		t.Fatalf("EffectiveWorkQuery() did not pick oldest routed work across priorities: %q", out)
-	}
-	if strings.Contains(out, "newer-p0") {
-		t.Fatalf("EffectiveWorkQuery() returned newer high-priority routed work before oldest: %q", out)
+	if !strings.Contains(out, "newer-p0") {
+		t.Fatalf("EffectiveWorkQuery() did not surface the reader's priority-first routed window: %q", out)
 	}
 }
 
@@ -8591,13 +8628,15 @@ func TestEffectiveWorkQueryRoutedQueueUsesHybridSortHonoringPriority(t *testing.
 	// (P1 49 -> 1) is re-measured live post-deploy (ADR-0035 AC 3), which a mock
 	// bd cannot reproduce.
 	mayor := Agent{Name: "mayor"}
+	bd105 := QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}}
 	cases := []struct {
 		name string
 		got  string
+		tier string
 	}{
-		{"bd104", mayor.EffectiveWorkQuery()},
+		{"bd104", mayor.EffectiveWorkQuery(), routedReadyTierCommand(QueryTopology{})},
 		// EffectiveWorkQueryForBeads was folded into EffectiveWorkQueryFor(QueryTopology).
-		{"bd105", mayor.EffectiveWorkQueryFor(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}})},
+		{"bd105", mayor.EffectiveWorkQueryFor(bd105), routedReadyTierCommand(bd105)},
 	}
 	for _, tc := range cases {
 		// Canonical routed tier honors priority for fresh work via hybrid.
@@ -8607,8 +8646,16 @@ func TestEffectiveWorkQueryRoutedQueueUsesHybridSortHonoringPriority(t *testing.
 		// ...and must NOT revert to the priority-blind FIFO on the routed tier.
 		// (The negative probe searched for `hybrid` rather than `oldest` before
 		// the v1.4.0 resync, so it could never fire; corrected here.)
-		if strings.Contains(tc.got, `gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest`) {
-			t.Errorf("%s: routed tier still uses priority-blind --sort oldest: %q", tc.name, tc.got)
+		//
+		// Scoped to routedReadyTierCommand, not the whole work query: upstream's
+		// assigned graph-anchor probe (assignedGraphWorkflowAnchorReadyFunctionScript,
+		// #5474) reads the same gc.routed_to predicate and keeps --sort oldest by
+		// design — it orders the steps of one already-assigned workflow rather
+		// than choosing which bead to claim — so a whole-query assertion would
+		// bind that probe's contract to this one. Same scoping rationale as
+		// TestEffectiveWorkQueryRoutedTierServesCanonicalPriorityOrder.
+		if strings.Contains(tc.tier, `gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json --sort oldest`) {
+			t.Errorf("%s: routed tier still uses priority-blind --sort oldest: %q", tc.name, tc.tier)
 		}
 		// The retiring migration probe (ga-dhf44) deliberately stays --sort
 		// oldest; the fix does not touch the migration builder.

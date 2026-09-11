@@ -220,7 +220,8 @@
               "config-lint",
               "provider-quota",
               "provider-rotate-key",
-              "provider-credentials"
+              "provider-credentials",
+              "storage-preflight"
             ]
           },
           "event_id": {

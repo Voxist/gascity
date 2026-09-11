@@ -366,12 +366,3 @@ func goTestScriptEnv(t *testing.T, tmpDir string) []string {
 	}
 	return env
 }
-
-func goEnvValue(t *testing.T, key string) string {
-	t.Helper()
-	out, err := exec.Command("go", "env", key).Output()
-	if err != nil {
-		t.Fatalf("go env %s: %v", key, err)
-	}
-	return strings.TrimSpace(string(out))
-}

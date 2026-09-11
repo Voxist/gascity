@@ -124,7 +124,24 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	)
 
 	root := repoRoot(t)
-	bdVersion := readDotenv(t, root+"/deps.env")["BD_VERSION"]
+	env := readDotenv(t, root+"/deps.env")
+	// The image stamps -X main.Version=${BD_VERSION} onto source fetched at
+	// BD_SOURCE_REF, and the Dockerfile's own `grep Version = "${bd_version}"
+	// cmd/bd/version.go` fails the build if those two name different releases.
+	// Assert it here rather than discovering it in a docker build CI may not run.
+	//
+	// Upstream anchors this on BD_CURRENT_VERSION, because upstream's
+	// BD_SOURCE_REF tracks BD_CURRENT_REF and BD_VERSION is a separate role —
+	// the published tarball CI installs, which legitimately lags a
+	// bleeding-edge cell pinned to a commit with no release. Under the
+	// fork-first bridge (ga-zzcjs) that identity does not hold: BD_SOURCE_REF
+	// is the Voxist/beads fork tip, which tracks NOTHING in the matrix
+	// (TestBDVersionPins skips the unified-pin assertion whenever a bridge ref
+	// is set), and BD_VERSION is precisely the version string that pinned
+	// source declares. So BD_VERSION is this fork's correct anchor for exactly
+	// upstream's reason: anchor on whatever names the version the pinned
+	// SOURCE declares. Re-anchor on BD_CURRENT_VERSION when the bridge exits.
+	bdVersion := env["BD_VERSION"]
 	if bdVersion != "v1.2.2" {
 		t.Fatalf("deps.env BD_VERSION = %q, want v1.2.2 for the pinned source build", bdVersion)
 	}

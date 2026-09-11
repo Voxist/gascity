@@ -348,33 +348,33 @@ func TestInjectedImmutableCommandCatalogRoundTripsWithoutExpandingProduction(t *
 		t.Fatal("production encoder accepted a non-sentinel ID from an injected-only catalog")
 	}
 
-	generatedCount := 0
-	generatedCommandIDCatalog(func(commandIDEntry) { generatedCount++ })
-	// 201 upstream + 4 fork-only runnable commands (gc beads state, gc config
-	// lint, gc provider quota, gc provider credentials). The fifth fork-only
-	// census path, "gc provider", is a command group and carries the shared
-	// group id rather than a catalog entry, so it does not count here.
-	//
-	// Re-derived at the 2026-08-31 resync by regenerating from the merged
-	// census manifest (go run ./cmd/gen-command-census), not by adjusting the
-	// number until this test passed. Upstream grew 193 -> 201 and took ids
-	// 198-205, which the fork-only commands had held; the allocation ledger is
-	// append-only, so the four were reallocated to 206-209 (next_id 210) — a
-	// fork-local id remap only, since none of the four exists upstream.
-	//
-	// 206 rather than 205 because the id ledger is append-only: one id in the
-	// range was allocated and then retired, and the census tombstones it so an
-	// event recorded by an older binary still decodes. generate.go emits a
-	// catalog identity for every tombstone, so the total is 205 live plus 1
-	// retired. Re-derived by regenerating, as above.
-	if generatedCount != 206 {
-		t.Fatalf("generated production catalog has %d entries, want 206", generatedCount)
+	countCatalog := func(catalog func(func(commandIDEntry))) int {
+		n := 0
+		catalog(func(commandIDEntry) { n++ })
+		return n
 	}
+	production := countCatalog(productionCommandIDCatalog)
 
 	injected := func(yield func(commandIDEntry)) {
 		productionCommandIDCatalog(yield)
 		yield(commandIDEntry{id: injectedID, wire: "injected-only"})
 	}
+	// The injected catalog must be production plus the one test entry, and
+	// production must be the same size afterwards. A literal count here would
+	// break on every command the CLI gains while proving neither — which is
+	// why upstream replaced one, and why this fork dropped its own (206, then
+	// 207 once upstream's `gc storage preflight` merged in). The fork-local id
+	// allocations that literal used to document now live where they belong: in
+	// cmd/gc/productmetrics_command_census.json, whose append-only ledger
+	// commandcensus.ValidateEvolution enforces on every regeneration.
+	if got := countCatalog(injected); got != production+1 {
+		t.Fatalf("injected catalog has %d entries against a production catalog of %d, want exactly one more", got, production)
+	}
+	defer func() {
+		if got := countCatalog(productionCommandIDCatalog); got != production {
+			t.Errorf("production catalog went from %d to %d entries, so injection mutated it", production, got)
+		}
+	}()
 	encoded, err := encodeEventWithCommandIDCatalog(event, injected)
 	if err != nil {
 		t.Fatalf("encodeEventWithCommandIDCatalog: %v", err)

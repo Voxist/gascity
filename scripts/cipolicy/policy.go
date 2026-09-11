@@ -98,6 +98,12 @@ const (
 	// .github/actions/setup-gascity-* auto-merged both sides as well, moving
 	// this pin along with the two workflow execution pins above.
 	expectedSetupActionHash = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
+	// Re-derived again at the 2026-09-11 resync (102 upstream commits): ci.yml
+	// and nightly.yml auto-merged both sides — upstream moved BD_VERSION while
+	// the fork kept the BD_REPO/BD_SOURCE_REF bridge block at every pin site —
+	// so the merged execution shape hashes to neither side's prior pin. Every
+	// value below is the candidate digest this package printed for the MERGED
+	// workflows, never adopted from a side.
 )
 
 var requiredFilterPaths = map[string][]string{

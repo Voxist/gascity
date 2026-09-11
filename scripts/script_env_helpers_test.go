@@ -107,3 +107,16 @@ func makeTargetBody(t *testing.T, makefile, target string) string {
 	}
 	return body
 }
+
+// goEnvValue returns `go env <key>` for the toolchain under test. Shared across
+// the tag boundary (the fork's scripts-package split, d8f911616): upstream added
+// it inside the now integration-tagged go_test_observable_test.go, and the
+// untagged git_test_env_test.go also calls it.
+func goEnvValue(t *testing.T, key string) string {
+	t.Helper()
+	out, err := exec.Command("go", "env", key).Output()
+	if err != nil {
+		t.Fatalf("go env %s: %v", key, err)
+	}
+	return strings.TrimSpace(string(out))
+}

@@ -769,7 +769,10 @@ func bdRelocatedClassGraphPlanClass(scopeRoot, path string) (class coordclass.Cl
 // mints behind reached this arm and switched the guard off. (Upstream's version
 // of this note also named --profile and --server-url; the 2026-09-05 resync
 // checked beads cmd/bd/main.go and neither takes a value on any bd in deps.env's
-// range, so for those two the premise held all along — see the note on
+// range, so for those two the premise held all along. Upstream has since
+// confirmed the other half from v1.3.0-rc.2: --profile is renamed --cpu-profile
+// and --server-url is gone, so on the RC bd rejects both outright. This fork
+// still links the bridge pin, where --profile is a live bool — see the note on
 // TestBdCreateRefusesAnInfraShapedCreateBehindABdRootFlag.) The manifests are
 // pinned exactly — value and bool
 // sets compared separately by TestGlobalValueFlagsIsComplete and
