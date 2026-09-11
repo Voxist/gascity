@@ -77,6 +77,30 @@ func DroppedMetadataPairs(args []string) []string {
 	return dropped
 }
 
+// SetMetadataPairs returns every key=value pair the argv passes via
+// --set-metadata flags, in argv order — both the two-token form
+// (`--set-metadata k=v`) and the inline form (`--set-metadata=k=v`).
+//
+// A trailing `--set-metadata` with no value is skipped: it is malformed argv
+// that bd itself rejects, not a pair this scanner can judge.
+func SetMetadataPairs(args []string) []string {
+	var pairs []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--set-metadata" {
+			if i+1 < len(args) {
+				pairs = append(pairs, args[i+1])
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(a, "--set-metadata=") {
+			pairs = append(pairs, strings.TrimPrefix(a, "--set-metadata="))
+		}
+	}
+	return pairs
+}
+
 // DroppedMetadataRefusal builds the refusal message for a `bd update` whose
 // metadata pairs would be silently dropped, or reports false for any other verb
 // and every well-formed invocation. prefix names the entry point (e.g. "gc bd").

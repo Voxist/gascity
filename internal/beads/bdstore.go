@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
@@ -1199,6 +1200,10 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 // CreateWithStorage persists a new bead via bd create using a storage tier
 // selected by policy middleware.
 func (s *BdStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, error) {
+	if err := beadmeta.ValidateMetadataValues(b.Metadata); err != nil {
+		return Bead{}, err
+	}
+
 	effectiveEphemeral, effectiveNoHistory, err := effectiveStorageFlags(b, storage)
 	if err != nil {
 		return Bead{}, fmt.Errorf("bd create: %w", err)
@@ -1439,6 +1444,10 @@ func bdUpdateArgs(id string, opts UpdateOpts) []string {
 
 // Update modifies fields of an existing bead via bd update.
 func (s *BdStore) Update(id string, opts UpdateOpts) error {
+	if err := beadmeta.ValidateMetadataValues(opts.Metadata); err != nil {
+		return err
+	}
+
 	args := bdUpdateArgs(id, opts)
 	// No fields to update — no-op (bd errors on empty update).
 	if len(args) == 3 {
@@ -1791,6 +1800,10 @@ func parseBDMutationBead(op string, out []byte) (Bead, error) {
 // invocation. It is intended for controller hot paths that need the semantics
 // of bd update, not bd close, across a batch of known bead IDs.
 func (s *BdStore) UpdateAll(ids []string, opts UpdateOpts) (int, error) {
+	if err := beadmeta.ValidateMetadataValues(opts.Metadata); err != nil {
+		return 0, err
+	}
+
 	if len(ids) == 0 {
 		return 0, nil
 	}
@@ -1918,6 +1931,10 @@ func beadSliceContains(items []Bead, id string) bool {
 
 // SetMetadata sets a key-value metadata pair on a bead via bd update.
 func (s *BdStore) SetMetadata(id, key, value string) error {
+	if err := beadmeta.ValidateMetadataValue(key, value); err != nil {
+		return err
+	}
+
 	err := s.runBDTransientWrite("update", "--json", id,
 		"--set-metadata", key+"="+value)
 	if err != nil {
@@ -1933,6 +1950,10 @@ func (s *BdStore) SetMetadata(id, key, value string) error {
 // sequential bd update calls. Note: not truly atomic for external stores,
 // but each individual call is idempotent.
 func (s *BdStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := beadmeta.ValidateMetadataValues(kvs); err != nil {
+		return err
+	}
+
 	if len(kvs) == 0 {
 		return nil
 	}
@@ -2064,6 +2085,10 @@ func (tx *bdStoreTx) Update(id string, opts UpdateOpts) error {
 }
 
 func (tx *bdStoreTx) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := beadmeta.ValidateMetadataValues(kvs); err != nil {
+		return err
+	}
+
 	if len(kvs) == 0 {
 		return nil
 	}

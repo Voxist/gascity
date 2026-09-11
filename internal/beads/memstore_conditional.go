@@ -3,6 +3,8 @@ package beads
 import (
 	"fmt"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 var (
@@ -35,6 +37,10 @@ func (m *MemStore) probeConditionalWriteCapability() (bool, string) {
 // expectedRevision, otherwise it returns *PreconditionFailedError. When the
 // instance has DisableConditionalWrites set it returns ErrConditionalWriteUnsupported.
 func (m *MemStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
+	if err := beadmeta.ValidateMetadataValues(opts.Metadata); err != nil {
+		return err
+	}
+
 	if err := validateConditionalUpdateOpts(opts); err != nil {
 		return fmt.Errorf("conditional update %s: %w", id, err)
 	}
@@ -102,6 +108,10 @@ func (m *MemStore) DeleteIfMatch(id string, expectedRevision int64) error {
 // Reading a key from a nil metadata map yields "", so the absent case falls out
 // naturally. Returns (true, nil) on swap, (false, nil) on a genuine mismatch.
 func (m *MemStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	if err := beadmeta.ValidateMetadataValue(key, next); err != nil {
+		return false, err
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.DisableConditionalWrites {

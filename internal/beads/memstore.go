@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // MemStore is an in-memory Store implementation backed by a slice. It is
@@ -116,6 +118,10 @@ func cloneBead(b Bead) Bead {
 // Create persists a new bead in memory with a sequential ID, or with the
 // caller's own ID when HonorExplicitIDs is set and the ID is free.
 func (m *MemStore) Create(b Bead) (Bead, error) {
+	if err := beadmeta.ValidateMetadataValues(b.Metadata); err != nil {
+		return Bead{}, err
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -284,6 +290,10 @@ func (m *MemStore) applyUpdateLocked(i int, opts UpdateOpts) {
 // Update modifies fields of an existing bead. Only non-nil fields in opts
 // are applied. Returns a wrapped ErrNotFound if the ID does not exist.
 func (m *MemStore) Update(id string, opts UpdateOpts) error {
+	if err := beadmeta.ValidateMetadataValues(opts.Metadata); err != nil {
+		return err
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	i := m.indexOfLocked(id)
@@ -574,6 +584,10 @@ func (m *MemStore) ListByMetadata(filters map[string]string, limit int, opts ...
 // SetMetadata sets a key-value metadata pair on a bead. Returns a wrapped
 // ErrNotFound if the bead does not exist.
 func (m *MemStore) SetMetadata(id, key, value string) error {
+	if err := beadmeta.ValidateMetadataValue(key, value); err != nil {
+		return err
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for i, b := range m.beads {
@@ -592,6 +606,10 @@ func (m *MemStore) SetMetadata(id, key, value string) error {
 
 // SetMetadataBatch atomically sets multiple key-value metadata pairs on a bead.
 func (m *MemStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := beadmeta.ValidateMetadataValues(kvs); err != nil {
+		return err
+	}
+
 	if len(kvs) == 0 {
 		return nil
 	}

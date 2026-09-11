@@ -330,6 +330,13 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// Refuse a conventioned-key value violation before any store work, so the
+	// invalid state is unrepresentable at this boundary too (vp-gbxl9).
+	if msg, refused := conventionalMetadataValueRefusal(bdArgs); refused {
+		fmt.Fprint(stderr, msg) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
 	cityPath, err := resolveBdCity(cityName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr

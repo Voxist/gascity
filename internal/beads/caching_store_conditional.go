@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
@@ -235,6 +236,10 @@ func (c *CachingStore) DeleteIfMatch(id string, expectedRevision int64) error {
 // `expected`, and without the evict a cross-process loser re-reads the same
 // stale value through the cache and re-loses until an unrelated reconcile.
 func (c *CachingStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	if err := beadmeta.ValidateMetadataValue(key, next); err != nil {
+		return false, err
+	}
+
 	// Resolve the NARROW capability, not ConditionalWriter: a backing that can
 	// do value-CAS but cannot soundly fence on a revision (NativeDoltStore)
 	// declares MetadataCASWriter only, and every ConditionalWriter satisfies
