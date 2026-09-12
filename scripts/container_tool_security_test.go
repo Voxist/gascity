@@ -102,7 +102,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		// existing upstream v1.2.2 TAG is not such a release: it sits on a
 		// different lineage at schema 0053.
 		// BD_VERSION itself is NOT diverged — the pinned commit declares 1.2.2.
-		bdSourceRef    = "3e03250ee1675ebcd63ca3f5d1660560947eab7c"
+		bdSourceRef    = "73a5bdc65b5fa9cb384683a47e579efa61bd999b"
 		bdSourceSHA256 = "587ad18b765d90e75b64ca4bb57c12520befd8bece96545d48e98add26bc8f0f"
 		bdBuild        = "3e03250ee"
 		bdBranch       = "HEAD"
