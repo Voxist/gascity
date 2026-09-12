@@ -534,6 +534,49 @@ test_error_message_still_reports_unreachable() {
     rm -rf "$repo" "$fbd"
 }
 
+# ga-6kev4: stock macOS ships neither `timeout` nor `gtimeout` (both are GNU
+# coreutils), and _pog_timeout then runs the read UNBOUNDED. Two things follow
+# that are invisible on any host that has them installed: POG_TIMEOUT_SECONDS
+# enforces nothing, and rc is never 124 so the timeout-specific wording added
+# for ga-grenu can never fire -- the operator sees the outage wording that
+# recommends --no-verify, which is precisely what that change existed to stop.
+#
+# This test removes both binaries from PATH and asserts the guard SAYS so,
+# rather than silently degrading. It is the only coverage of that host, because
+# every machine that runs this suite today has coreutils.
+test_unbounded_without_coreutils_announces_itself() {
+    local repo fbd out rc bin stripped
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/var/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    mkdir -p "$fbd/fake-bd-state"
+    echo 1 > "$fbd/fake-bd-state/show-exit"
+
+    # Rebuild PATH with every directory that provides timeout/gtimeout removed,
+    # so the only variable is the presence of the bounding tool.
+    stripped=""
+    local IFS=:
+    for bin in $PATH; do
+        [[ -z "$bin" ]] && continue
+        if [[ -x "$bin/timeout" || -x "$bin/gtimeout" ]]; then
+            continue
+        fi
+        stripped="${stripped:+$stripped:}$bin"
+    done
+    unset IFS
+
+    out="$(PATH="$stripped" run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] \
+        && grep -q "enforced nothing" <<<"$out" \
+        && grep -q "ga-6kev4" <<<"$out" \
+        && ! grep -q "timed out at" <<<"$out"; then
+        record_pass "coreutils/unbounded-fallback-announces-itself (rc=$rc)"
+    else
+        record_fail "coreutils/unbounded-fallback-announces-itself" "expected the guard to say the budget enforced nothing and cite ga-6kev4, and NOT to report a timeout tally, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
 test_retry_unreachable_message_mentions_retry_before_no_verify() {
     local repo fbd out rc before_noverify
     repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
@@ -1369,6 +1412,7 @@ run_all() {
     test_retry_exhausted_still_blocks
     test_retry_recovers_then_still_blocks_on_real_ownership_change
     test_timeout_message_names_the_budget_not_an_outage
+    test_unbounded_without_coreutils_announces_itself
     test_error_message_still_reports_unreachable
     test_retry_unreachable_message_mentions_retry_before_no_verify
     test_retry_parse_failure_message_mentions_retry_before_no_verify

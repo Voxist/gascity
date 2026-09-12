@@ -94,13 +94,34 @@ POG_AMBIGUOUS_SENTINEL="__pog_unresolved_ambiguous__"
 # test/agents/graph-dispatch.sh (the only bounded-exec precedent in this
 # repo). Falls back to unbounded passthrough when neither is available
 # rather than failing the whole guard open or closed on a missing dev tool.
+# POG_TIMEOUT_BIN is resolved ONCE, at load, in the guard's own shell -- not
+# per call inside _pog_timeout, which every caller reaches through $( ) and so
+# runs in a subshell whose variables die with it. Empty means no bounding tool
+# was found and reads run UNBOUNDED (ga-6kev4).
+#
+# This matters more than it looks: stock macOS ships neither `timeout` nor
+# `gtimeout` (both are GNU coreutils). On such a host POG_TIMEOUT_SECONDS bounds
+# nothing, so raising its default is inert, a hung bd hangs the push with no
+# diagnostic, and -- because rc is then never 124 -- the timeout-specific
+# message below can never fire and the operator sees the outage wording that
+# recommends --no-verify. That is the exact failure this guard's message was
+# changed to stop. A guard that silently stops bounding anything is worse than
+# one that never bounded, so the fallback stays (failing the push on a missing
+# dev tool would be worse still) but it announces itself.
+POG_TIMEOUT_BIN=""
+if command -v timeout >/dev/null 2>&1; then
+    POG_TIMEOUT_BIN="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+    POG_TIMEOUT_BIN="gtimeout"
+else
+    echo "push-ownership-guard: WARNING — neither \`timeout\` nor \`gtimeout\` is on PATH, so bd reads run UNBOUNDED and POG_TIMEOUT_SECONDS=${POG_TIMEOUT_SECONDS}s enforces nothing. A hung bd will hang this push. Install GNU coreutils (\`brew install coreutils\`) to restore the bound. (ga-6kev4)" >&2
+fi
+
 _pog_timeout() {
     local bound="$1"
     shift
-    if command -v timeout >/dev/null 2>&1; then
-        timeout "$bound" "$@"
-    elif command -v gtimeout >/dev/null 2>&1; then
-        gtimeout "$bound" "$@"
+    if [[ -n "$POG_TIMEOUT_BIN" ]]; then
+        "$POG_TIMEOUT_BIN" "$bound" "$@"
     else
         "$@"
     fi
@@ -497,7 +518,14 @@ assert_bead_still_claimed() {
             # rather than pointing at bd/Dolt and offering --no-verify.
             echo "push-ownership-guard: BLOCKED — bd show $id exceeded POG_TIMEOUT_SECONDS=${POG_TIMEOUT_SECONDS}s on all $POG_READ_ATTEMPTS attempts (no attempt reported an error). The store is answering too slowly for the budget, which usually means the box is loaded — it is NOT necessarily down. Re-run with a larger budget first: POG_TIMEOUT_SECONDS=60 git push ... . Last resort: git push --no-verify" >&2
         else
-            echo "push-ownership-guard: BLOCKED — bd show $id unreachable after $POG_READ_ATTEMPTS attempts (${_pog_t:-0} timed out at ${POG_TIMEOUT_SECONDS}s, ${_pog_f:-0} errored); re-run the push first — if it keeps failing, bd/Dolt needs attention. Last resort: git push --no-verify" >&2
+            if [[ -z "$POG_TIMEOUT_BIN" ]]; then
+                # No bounding tool, so "0 timed out" is a property of this host,
+                # not evidence the store was responsive. Say so rather than let
+                # the tally imply a budget was applied.
+                echo "push-ownership-guard: BLOCKED — bd show $id failed on all $POG_READ_ATTEMPTS attempts (${_pog_f:-0} errored). NOTE: neither \`timeout\` nor \`gtimeout\` is on PATH, so POG_TIMEOUT_SECONDS enforced nothing and a slow store is indistinguishable from a failing one here — install GNU coreutils to get that distinction back (ga-6kev4). Re-run the push first; if it keeps failing, bd/Dolt needs attention. Last resort: git push --no-verify" >&2
+            else
+                echo "push-ownership-guard: BLOCKED — bd show $id unreachable after $POG_READ_ATTEMPTS attempts (${_pog_t:-0} timed out at ${POG_TIMEOUT_SECONDS}s, ${_pog_f:-0} errored); re-run the push first — if it keeps failing, bd/Dolt needs attention. Last resort: git push --no-verify" >&2
+            fi
         fi
         return 1
     fi
