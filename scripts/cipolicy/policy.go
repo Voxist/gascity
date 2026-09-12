@@ -78,7 +78,16 @@ const (
 	// execution-shape change -- a new blocking step -- so this tripwire
 	// firing is the intended behavior and re-pinning is the correct
 	// response. No other job, step, or shell text moved.
-	expectedCIExecutionHash     = "a50d4f7f1ed6e2c95220339fe8d8fabcf4d75177e46660d1ff9383eae2e463d2"
+	// Re-derived for the beads 0067 repin (ga-d63th): BD_SOURCE_REF moves
+	// 3e03250ee -> 73a5bdc65 at its five ci.yml pin sites so the workflow
+	// matches deps.env, whose BD_LIB_REF had to advance for gc to open the
+	// live city's v67 store. The repin is the ONLY execution-shape change --
+	// verified by diffing .github/workflows against fork/main with both SHAs
+	// filtered out, which leaves an empty diff. No job, step, shell text or
+	// trigger moved. Same class as the BD_REPO/BD_SOURCE_REF repins already
+	// recorded above, so this tripwire firing is the intended behaviour and
+	// re-pinning is the correct response.
+	expectedCIExecutionHash     = "76c074e11a07710b77975e4d931d8d3f1e588fd7fec29429f29503cb24f24ea6"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
@@ -93,7 +102,11 @@ const (
 	// side's prior value. Setup-action pin below is untouched: the composite
 	// actions were taken from the resync verbatim (go version now derives
 	// from the go.mod directive, which the repin moves to 1.26.8).
-	expectedNightlyExecutionHash = "ae810fdba17ca29c0076c2337516d9ceb1ddc8aa803e6e2df67c162c40e4288d"
+	// Re-derived for the same beads 0067 repin as the CI pin above:
+	// BD_SOURCE_REF moves at nightly.yml's two pin sites and nothing else.
+	// Re-derived independently rather than assumed from the CI pin, per the
+	// rule already recorded above — each pin is its own tripwire.
+	expectedNightlyExecutionHash = "220081045684f2130e737c55e23640cc46f3ff2f02f9ae51751fa6e4ca8f46b8"
 	// Re-derived at the 2026-08-31 resync: the composite setup actions under
 	// .github/actions/setup-gascity-* auto-merged both sides as well, moving
 	// this pin along with the two workflow execution pins above.
