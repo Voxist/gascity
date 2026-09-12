@@ -195,10 +195,14 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	}
 
 	goMod := readFile(t, root, "go.mod")
-	wantGRPCModule := "google.golang.org/grpc v" + grpcVersion
-	if got := strings.Count(goMod, wantGRPCModule); got != 1 {
-		t.Errorf("go.mod contains %q %d times, want exactly 1 so the gc binary embeds the patched grpc", wantGRPCModule, got)
-	}
+	// grpc's go.mod requirement is asserted by the FLOOR table below, alongside
+	// x/text, x/crypto and x/mod, rather than by counting an exact
+	// "module vVERSION" substring. The count was brittle in both directions: it
+	// asserted equality where the security requirement is >= (so a future bump
+	// past the floor would fail a guard meant to enforce a minimum), and a raw
+	// substring match does not respect module-name boundaries the way
+	// goModVersion's exact field comparison does — go.mod also carries
+	// go.opentelemetry.io/.../google.golang.org/grpc/otelgrpc.
 	// bd resolves x/text through its own module graph, not gc's, so the gc binary
 	// and the bd binary each need their own floor. This is the gc side.
 	//
@@ -208,15 +212,22 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	// match, so an ARG has to track the resolved value). Conflating the two is
 	// how the x/text override silently became a downgrade: see ga-0emb8.
 	const (
-		xtextFloor   = "0.40.0" // CVE-2026-56852
-		xcryptoFloor = "0.55.0" // CVE-2026-56854 (CRITICAL)
+		xtextFloor = "0.40.0" // CVE-2026-56852
+		// 0.56.0, not 0.55.0: 0.55.0 clears only CVE-2026-56854 (CRITICAL).
+		// CVE-2026-78662 and CVE-2026-56855 (SSH channel-deadlock DoS,
+		// published 2026-09-02) are fixed in 0.56.0. A floor left at 0.55.0
+		// would accept a downgrade to a version this repo has already
+		// established is insufficient.
+		xcryptoFloor = "0.56.0" // CVE-2026-56854, CVE-2026-78662, CVE-2026-56855
 		xmodFloor    = "0.40.0" // CVE-2026-56864 (HIGH)
 		thriftFloor  = "0.24.0" // CVE-2026-43871 (HIGH)
+		grpcFloor    = "1.83.2" // CVE-2026-84445 (HIGH, xDS server DoS)
 	)
 	for _, f := range []struct{ module, floor, cve string }{
 		{"golang.org/x/text", xtextFloor, "CVE-2026-56852"},
 		{"golang.org/x/crypto", xcryptoFloor, "CVE-2026-56854"},
 		{"golang.org/x/mod", xmodFloor, "CVE-2026-56864"},
+		{"google.golang.org/grpc", grpcFloor, "CVE-2026-84445"},
 	} {
 		if got := goModVersion(t, goMod, f.module); !semverAtLeast(got, parseModuleSemver(t, "v"+f.floor)) {
 			t.Errorf("go.mod pins %s %v, want >= v%s so the gc binary clears %s", f.module, got, f.floor, f.cve)
@@ -315,7 +326,11 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 func parsePyVersion(v string) ([3]int, bool) {
 	var out [3]int
 	parts := strings.Split(strings.TrimSpace(v), ".")
-	if len(parts) == 0 || len(parts) > 4 {
+	// strings.Split never returns an empty slice, so len(parts) >= 1 always;
+	// the empty-string case is rejected by the Atoi below rather than by a
+	// length check. An unreachable guard is indistinguishable from a working
+	// one, so the invariant is stated here instead of pretended at.
+	if len(parts) > 4 {
 		return out, false
 	}
 	for i, p := range parts {
