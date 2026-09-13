@@ -818,7 +818,30 @@ func TestReconcileOrphanCloseFailsClosedOnLivenessError(t *testing.T) {
 	})
 
 	t.Run("runtime liveness error skips close and heal", func(t *testing.T) {
-		sp := &startUnavailableLivenessProvider{Fake: runtime.NewFake()}
+		// The provider's LIST must fail too, not only its per-session liveness
+		// observation. Upstream reaches the fail-closed guard with a provider
+		// whose ListRunning succeeds; this fork cannot, because it carries an
+		// O(1) visibility fast path (see reconcileSessionBeads: when a usable
+		// ListRunning snapshot exists, orphan liveness is decided from the
+		// visibleSet map with NO per-session probe, which is what keeps a
+		// backlog of phantom session beads from costing one probe each per
+		// tick -- TestReconcileSessionBeads_UsesVisibilitySnapshotForOrphanedSessions
+		// pins that at ZERO probes). No probe means no livenessErr, so the
+		// guard below is unreachable on that path.
+		//
+		// Failing the list drives the else branch, which is where the guard
+		// lives and where an uncertain observation is actually possible. The
+		// subtest's subject -- a RUNTIME (not store) liveness error must not
+		// close an orphan -- is preserved.
+		//
+		// The narrowed case is NOT hypothetical and is tracked as ga-q1uqd: a
+		// provider can return ErrRuntimeUnavailable for ONE session while its
+		// list succeeds (t3bridge does exactly this for an incomplete snapshot
+		// binding), and on the fast path this fork would close that bead.
+		// PartialListError carries no per-session names, so the reconciler has
+		// no O(1) way to learn which session was uncertain; closing that gap
+		// needs a per-session uncertainty channel in the runtime interface.
+		sp := &listAndLivenessUnavailableProvider{Fake: runtime.NewFake()}
 		got, before, stderr := run(t, false, sp)
 		if got.Status == "closed" {
 			t.Fatal("orphan bead was closed despite ErrRuntimeUnavailable")

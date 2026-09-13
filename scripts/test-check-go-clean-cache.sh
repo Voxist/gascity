@@ -38,6 +38,20 @@ new_repo() {
 	git -C "$d" init -q
 	git -C "$d" config user.email t@example.com
 	git -C "$d" config user.name t
+	# CASE 14 runs the REAL .githooks/pre-commit with cwd inside this fixture,
+	# and that hook resolves repo_root via `git rev-parse --show-toplevel` --
+	# which is this repo, not the one the hook ships in. Upstream's pre-commit
+	# now chains to .githooks/lib/beads-chain.sh before reaching the guard, so
+	# without a copy here the hook dies on "No such file or directory" and the
+	# case fails for a reason that has nothing to do with the build-cache ban.
+	#
+	# The real script is safe to use rather than merely convenient: it exits 0
+	# outright when bd is not installed, and when bd IS installed `bd hooks run`
+	# answers exit 3 ("no beads database") for a throwaway repo, which
+	# beads-chain.sh deliberately swallows.
+	mkdir -p "$d/.githooks/lib"
+	cp "$REPO_ROOT/.githooks/lib/beads-chain.sh" "$d/.githooks/lib/beads-chain.sh"
+	chmod +x "$d/.githooks/lib/beads-chain.sh"
 	printf '%s' "$d"
 }
 

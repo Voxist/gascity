@@ -23,6 +23,23 @@ func (p *startUnavailableLivenessProvider) ObserveLivenessWithError(name string,
 	return runtime.ObserveLiveness(p.Fake, name, processNames), fmt.Errorf("start preflight: %w", runtime.ErrRuntimeUnavailable)
 }
 
+// listAndLivenessUnavailableProvider fails BOTH the per-session liveness
+// observation and the tick's ListRunning snapshot. The second failure is what
+// makes it usable against reconcileSessionBeads' orphan path on this fork: a
+// usable snapshot takes the O(1) visibility fast path, which never probes and
+// so never produces the liveness error the fail-closed guard keys on.
+type listAndLivenessUnavailableProvider struct {
+	*runtime.Fake
+}
+
+func (p *listAndLivenessUnavailableProvider) ObserveLivenessWithError(name string, processNames []string) (runtime.Liveness, error) {
+	return runtime.ObserveLiveness(p.Fake, name, processNames), fmt.Errorf("start preflight: %w", runtime.ErrRuntimeUnavailable)
+}
+
+func (p *listAndLivenessUnavailableProvider) ListRunning(string) ([]string, error) {
+	return nil, fmt.Errorf("list running: %w", runtime.ErrRuntimeUnavailable)
+}
+
 type startConfirmedAbsentProvider struct {
 	*runtime.Fake
 }
