@@ -20,12 +20,18 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 var _ ConditionalWriter = (*SQLiteStore)(nil)
 
 // UpdateIfMatch applies opts only when the stored revision matches.
 func (s *SQLiteStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
+	if err := beadmeta.ValidateMetadataValues(opts.Metadata); err != nil {
+		return err
+	}
+
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
@@ -77,6 +83,10 @@ func (s *SQLiteStore) DeleteIfMatch(id string, expectedRevision int64) error {
 // expected. A genuine mismatch is (false, nil) — the caller lost the race —
 // distinct from an error.
 func (s *SQLiteStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	if err := beadmeta.ValidateMetadataValue(key, next); err != nil {
+		return false, err
+	}
+
 	if err := s.ensureOpen(); err != nil {
 		return false, err
 	}

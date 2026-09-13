@@ -1,6 +1,10 @@
 package beads
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
+)
 
 // FileStore embeds *MemStore, which implements ConditionalWriter — but the
 // promoted methods would write straight to the in-memory MemStore, bypassing
@@ -15,6 +19,9 @@ var _ ConditionalWriter = (*FileStore)(nil)
 // then flushes to disk. A precondition failure or not-found leaves the store
 // unchanged (no save). A failed flush rolls back the in-memory mutation.
 func (fs *FileStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
+	if err := beadmeta.ValidateMetadataValues(opts.Metadata); err != nil {
+		return err
+	}
 	if err := validateConditionalUpdateOpts(opts); err != nil {
 		return fmt.Errorf("conditional update %s: %w", id, err)
 	}
@@ -97,6 +104,9 @@ func (fs *FileStore) DeleteIfMatch(id string, expectedRevision int64) error {
 // flushes to disk. A genuine value mismatch returns (false, nil) without a save;
 // a swap persists and returns (true, nil).
 func (fs *FileStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	if err := beadmeta.ValidateMetadataValue(key, next); err != nil {
+		return false, err
+	}
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
 	if fs.DisableConditionalWrites {

@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	beadslib "github.com/steveyegge/beads"
 )
 
@@ -999,6 +1000,10 @@ func (s *NativeDoltStore) CreateWithStorage(b Bead, storage StorageClass) (Bead,
 
 // Create persists a new bead through the upstream beads storage layer.
 func (s *NativeDoltStore) Create(b Bead) (Bead, error) {
+	if err := beadmeta.ValidateMetadataValues(b.Metadata); err != nil {
+		return Bead{}, err
+	}
+
 	issue, err := nativeIssueFromBead(b)
 	if err != nil {
 		return Bead{}, err
@@ -1059,6 +1064,10 @@ func (s *NativeDoltStore) Get(id string) (Bead, error) {
 
 // Update modifies an existing bead through the upstream beads storage layer.
 func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
+	if err := beadmeta.ValidateMetadataValues(opts.Metadata); err != nil {
+		return err
+	}
+
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -1122,6 +1131,10 @@ func (s *NativeDoltStore) applyUpdateInTx(ctx context.Context, tx beadslib.Trans
 // transaction. Mirrors SetMetadataBatch, sharing the read-modify-write path so
 // the Store.Tx route coalesces with sibling writes into a single commit.
 func (s *NativeDoltStore) applySetMetadataBatchInTx(ctx context.Context, tx beadslib.Transaction, id string, kvs map[string]string) error {
+	if err := beadmeta.ValidateMetadataValues(kvs); err != nil {
+		return err
+	}
+
 	if len(kvs) == 0 {
 		return nil
 	}
@@ -1570,6 +1583,10 @@ func (s *NativeDoltStore) ListByMetadata(filters map[string]string, limit int, o
 
 // SetMetadata sets a single metadata key on a bead.
 func (s *NativeDoltStore) SetMetadata(id, key, value string) error {
+	if err := beadmeta.ValidateMetadataValue(key, value); err != nil {
+		return err
+	}
+
 	return s.SetMetadataBatch(id, map[string]string{key: value})
 }
 
@@ -1618,6 +1635,10 @@ func retryOnNativeDoltSerializationConflict(attempt func() error) error {
 
 // SetMetadataBatch sets multiple metadata keys on a bead.
 func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := beadmeta.ValidateMetadataValues(kvs); err != nil {
+		return err
+	}
+
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return err
@@ -1744,6 +1765,10 @@ func (t *nativeDoltTx) Update(id string, opts UpdateOpts) error {
 }
 
 func (t *nativeDoltTx) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := beadmeta.ValidateMetadataValues(kvs); err != nil {
+		return err
+	}
+
 	return t.store.applySetMetadataBatchInTx(t.ctx, t.tx, id, kvs)
 }
 

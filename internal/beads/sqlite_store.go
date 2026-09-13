@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, CGO_ENABLED=0 safe
 )
 
@@ -589,6 +590,10 @@ func (s *SQLiteStore) CreateWithForeignID(b Bead) (Bead, error) {
 // duplicate-id error, provided it carries one of the store's reserved
 // namespaces when the store is fenced (WithSQLiteStoreReservedIDPrefixes).
 func (s *SQLiteStore) Create(b Bead) (Bead, error) {
+	if err := beadmeta.ValidateMetadataValues(b.Metadata); err != nil {
+		return Bead{}, err
+	}
+
 	return s.create(b, false)
 }
 
@@ -1166,6 +1171,10 @@ func applySQLiteUpdateOpts(b Bead, opts UpdateOpts) Bead {
 
 // Update modifies fields of an existing bead.
 func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
+	if err := beadmeta.ValidateMetadataValues(opts.Metadata); err != nil {
+		return err
+	}
+
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
@@ -1600,11 +1609,19 @@ func (s *SQLiteStore) ListByMetadata(filters map[string]string, limit int, opts 
 
 // SetMetadata sets a key-value metadata pair on a bead.
 func (s *SQLiteStore) SetMetadata(id, key, value string) error {
+	if err := beadmeta.ValidateMetadataValue(key, value); err != nil {
+		return err
+	}
+
 	return s.SetMetadataBatch(id, map[string]string{key: value})
 }
 
 // SetMetadataBatch atomically sets multiple metadata keys on a bead.
 func (s *SQLiteStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := beadmeta.ValidateMetadataValues(kvs); err != nil {
+		return err
+	}
+
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
@@ -1719,6 +1736,10 @@ func (t *sqliteStoreTx) Update(id string, opts UpdateOpts) error {
 }
 
 func (t *sqliteStoreTx) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := beadmeta.ValidateMetadataValues(kvs); err != nil {
+		return err
+	}
+
 	if len(kvs) == 0 {
 		return nil
 	}

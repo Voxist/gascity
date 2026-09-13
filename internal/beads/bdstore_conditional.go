@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // This file holds BdStore's ConditionalWriter machinery that has no exit-code to
@@ -388,6 +390,10 @@ func conditionalWriteBackoff(attempt int) time.Duration {
 // ErrConditionalWriteUnsupported rather than falling through to an
 // unconditional write.
 func (s *BdStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
+	if err := beadmeta.ValidateMetadataValues(opts.Metadata); err != nil {
+		return err
+	}
+
 	if err := validateConditionalUpdateOpts(opts); err != nil {
 		return fmt.Errorf("conditional update %s: %w", id, err)
 	}
@@ -527,6 +533,10 @@ func (s *BdStore) finalizeConditionalWrite(id, verb string, expectedRevision int
 // genuine value loss ((false,nil)) or a precondition — so consumers re-enter
 // level-triggered instead of stranding a reservation (DESIGN §8.4).
 func (s *BdStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	if err := beadmeta.ValidateMetadataValue(key, next); err != nil {
+		return false, err
+	}
+
 	if capable, _ := s.conditionalWritesCapable(); !capable {
 		return false, ErrConditionalWriteUnsupported
 	}

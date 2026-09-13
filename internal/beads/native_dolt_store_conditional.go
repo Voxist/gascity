@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	beadslib "github.com/steveyegge/beads"
 )
 
@@ -101,6 +102,10 @@ func (s *NativeDoltStore) probeConditionalWriteCapability() (bool, string) {
 // UpdateIfMatch applies row-backed opts only while id still has
 // expectedRevision.
 func (s *NativeDoltStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
+	if err := beadmeta.ValidateMetadataValues(opts.Metadata); err != nil {
+		return err
+	}
+
 	if err := validateConditionalUpdateOpts(opts); err != nil {
 		return fmt.Errorf("conditional update %s: %w", id, err)
 	}
@@ -252,6 +257,10 @@ func (s *NativeDoltStore) conditionalWriteError(
 // objects, and arrays. The transaction compares through that public string
 // view, then replaces only the selected raw JSON member with a JSON string.
 func (s *NativeDoltStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	if err := beadmeta.ValidateMetadataValue(key, next); err != nil {
+		return false, err
+	}
+
 	storage, release, err := s.acquireStorage()
 	if err != nil {
 		return false, err

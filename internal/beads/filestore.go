@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -306,6 +307,10 @@ func (fs *FileStore) refreshReadStateLocked() error {
 // If the disk flush fails, the in-memory mutation is rolled back to keep
 // the MemStore and file in sync.
 func (fs *FileStore) Create(b Bead) (Bead, error) {
+	if err := beadmeta.ValidateMetadataValues(b.Metadata); err != nil {
+		return Bead{}, err
+	}
+
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
 	if err := fs.locker.Lock(); err != nil {
@@ -330,6 +335,10 @@ func (fs *FileStore) Create(b Bead) (Bead, error) {
 // Update delegates to MemStore.Update and flushes to disk.
 // If the disk flush fails, the in-memory mutation is rolled back.
 func (fs *FileStore) Update(id string, opts UpdateOpts) error {
+	if err := beadmeta.ValidateMetadataValues(opts.Metadata); err != nil {
+		return err
+	}
+
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
 	if err := fs.locker.Lock(); err != nil {
@@ -471,6 +480,10 @@ func (fs *FileStore) CloseAll(ids []string, metadata map[string]string) (int, er
 // SetMetadata delegates to MemStore.SetMetadata and flushes to disk.
 // If the disk flush fails, the in-memory mutation is rolled back.
 func (fs *FileStore) SetMetadata(id, key, value string) error {
+	if err := beadmeta.ValidateMetadataValue(key, value); err != nil {
+		return err
+	}
+
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
 	if err := fs.locker.Lock(); err != nil {
@@ -494,6 +507,10 @@ func (fs *FileStore) SetMetadata(id, key, value string) error {
 // SetMetadataBatch delegates to MemStore.SetMetadataBatch and flushes to disk.
 // If the disk flush fails, the in-memory mutation is rolled back.
 func (fs *FileStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if err := beadmeta.ValidateMetadataValues(kvs); err != nil {
+		return err
+	}
+
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
 	if err := fs.locker.Lock(); err != nil {
