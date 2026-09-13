@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
@@ -62,10 +63,15 @@ func writeDoltRuntimeStateFile(path string, state doltRuntimeState) error {
 }
 
 // preservedDoltStartedAt returns the StartedAt that should be written: the one
-// already on disk when it names the SAME live pid, otherwise the incoming one.
-// Unreadable or absent prior state, a zero/changed pid, or an empty prior
-// stamp all fall through to the incoming value, so this can only ever keep a
-// start time that was already recorded for that exact process.
+// already on disk when it names the SAME pid, otherwise the incoming one.
+// Unreadable or absent prior state, a zero/changed pid, or a prior stamp that
+// is empty or not RFC3339 all fall through to the incoming value, so this can
+// only ever keep a well-formed start time already recorded for that pid.
+//
+// The pid is compared, not probed for liveness: a liveness check would not
+// narrow this further, since pid reuse -- the one case where a matching pid is
+// a different process -- means the reusing process IS alive. Reuse is bounded
+// instead by the caller, which only ever writes a pid it just observed.
 func preservedDoltStartedAt(path string, state doltRuntimeState) string {
 	if state.PID <= 0 {
 		return state.StartedAt
@@ -74,7 +80,7 @@ func preservedDoltStartedAt(path string, state doltRuntimeState) string {
 	if err != nil || prior.PID != state.PID {
 		return state.StartedAt
 	}
-	if strings.TrimSpace(prior.StartedAt) == "" {
+	if _, err := time.Parse(time.RFC3339, strings.TrimSpace(prior.StartedAt)); err != nil {
 		return state.StartedAt
 	}
 	return prior.StartedAt

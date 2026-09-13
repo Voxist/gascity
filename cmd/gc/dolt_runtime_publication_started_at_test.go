@@ -58,6 +58,9 @@ func TestWriteDoltRuntimeStateFileStartedAtFallThroughs(t *testing.T) {
 		{"different pid is a real restart", 83926, prior, 99999, incoming},
 		{"stop write carries PID 0", 83926, prior, 0, incoming},
 		{"prior stamp empty", 83926, "", 83926, incoming},
+		{"prior stamp whitespace", 83926, "   ", 83926, incoming},
+		{"prior stamp not a date", 83926, "not-a-date", 83926, incoming},
+		{"prior stamp wrong layout", 83926, "2026-09-13 10:52:11", 83926, incoming},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state.json")
