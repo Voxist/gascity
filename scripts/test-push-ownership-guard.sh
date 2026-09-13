@@ -560,18 +560,29 @@ test_unbounded_without_coreutils_announces_itself() {
     mkdir -p "$fbd/fake-bd-state"
     echo 1 > "$fbd/fake-bd-state/show-exit"
 
-    # Rebuild PATH with every directory that provides timeout/gtimeout removed,
-    # so the only variable is the presence of the bounding tool.
-    stripped=""
-    local IFS=:
-    for bin in $PATH; do
-        [[ -z "$bin" ]] && continue
-        if [[ -x "$bin/timeout" || -x "$bin/gtimeout" ]]; then
-            continue
+    # Build a PATH containing ONLY the binaries the guard needs, deliberately
+    # omitting timeout/gtimeout, so the bounding tool is the single variable.
+    #
+    # An earlier version removed every PATH DIRECTORY that provided
+    # timeout/gtimeout. That is platform-dependent and broke on Linux CI: there
+    # `timeout` lives in /usr/bin alongside git, jq, grep and cat, so stripping
+    # it took the guard's whole toolchain with it and the run died rc=127 --
+    # a command-not-found, which proves nothing about the unbounded path. It
+    # passed on macOS only because Homebrew puts timeout in /opt/homebrew/bin
+    # and leaves /usr/bin intact.
+    local shimdir="$fbd/nobound-bin"
+    mkdir -p "$shimdir"
+    local tool resolved
+    for tool in bash git jq grep cat sed head tail awk cut tr wc sort uniq date mktemp rm sleep printf; do
+        resolved="$(command -v "$tool" 2>/dev/null || true)"
+        if [[ -z "$resolved" ]]; then
+            record_fail "coreutils/unbounded-fallback-announces-itself" "cannot build a bounded-tool-free PATH: required tool '$tool' not found on this host"
+            rm -rf "$repo" "$fbd"
+            return
         fi
-        stripped="${stripped:+$stripped:}$bin"
+        ln -sf "$resolved" "$shimdir/$tool"
     done
-    unset IFS
+    stripped="$shimdir"
 
     out="$(PATH="$stripped" run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
     if [[ $rc -ne 0 ]] \
