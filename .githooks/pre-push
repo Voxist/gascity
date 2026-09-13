@@ -97,6 +97,29 @@ if [ "$go_changed" -eq 0 ]; then
   exit 0
 fi
 
+# Gate 3 (fast test tier) escape hatch: a dedicated LOCAL_TESTS_ACK=1, for the
+# same reason RESYNC_LOSS_ACK exists above (vc-dq0b). `git push --no-verify` is
+# the only bypass this gate has today, and it disarms all three gates at once —
+# including the ga-fip9ps.1 bead-ownership guard, which is fail-closed precisely
+# because a stale push already clobbered another agent's base (PR #4243). A
+# host-dependent tier failure should not cost that guard.
+#
+# Scoped by position: gates 1 and 2 have already run and passed by the time
+# control reaches here, so this ack can only skip the tier below it. It does not
+# widen the existing hole, it narrows it — from "disarm three gates, silently"
+# to "disarm one gate, loudly".
+#
+# Default-off: with LOCAL_TESTS_ACK unset this is a no-op and the tier runs
+# exactly as before, so the ack cannot strand a push.
+#
+# The notice is deliberately named and greppable. Today's --no-verify bypass
+# leaves no trace at all, so an audit cannot distinguish a skipped tier from a
+# passing one; use of this ack must be visible in the push's own output.
+if [ "${LOCAL_TESTS_ACK:-0}" = "1" ]; then
+  echo "pre-push: LOCAL_TESTS_ACK=1 — gate 3 (make test-fast-parallel) SKIPPED by operator acknowledgement; gates 1 (resync-loss) and 2 (bead-ownership) ran and passed (vc-dq0b)" >&2
+  exit 0
+fi
+
 # The Makefile and direct sharded runner share scripts/test-local-job-count as
 # their default policy. Do not shadow it here; an explicit override still wins.
 exec make test-fast-parallel
