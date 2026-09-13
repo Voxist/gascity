@@ -85,7 +85,7 @@ const (
 	// verified by diffing .github/workflows against fork/main with both SHAs
 	// filtered out, which leaves an empty diff. No job, step, shell text or
 	// trigger moved. Same class as the BD_REPO/BD_SOURCE_REF repins already
-	// recorded above, so this tripwire firing is the intended behaviour and
+	// recorded above, so this tripwire firing is the intended behavior and
 	// re-pinning is the correct response.
 	expectedCIExecutionHash     = "76c074e11a07710b77975e4d931d8d3f1e588fd7fec29429f29503cb24f24ea6"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
