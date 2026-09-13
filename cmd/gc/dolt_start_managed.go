@@ -332,6 +332,17 @@ func startManagedDoltProcessWithConfig(cityPath, host, port, user, logLevel stri
 				if err := publishManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
 					return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
 				}
+				// vc-ny00 L3: the delivery window has released the NBS lock
+				// and the swarm server is up and published, so this is the
+				// first moment a warming read can reach the LIVE listener.
+				// Returns immediately — the pass runs on its own goroutine
+				// and never blocks serving (constraint 3). Only the
+				// swarm-facing start warms: runWindow is the nested window
+				// server, which is quiesced by construction and about to
+				// stop.
+				if !runWindow {
+					startStoreWarmingPass(cityPath, layout.PackStateDir, os.Stderr)
+				}
 			}
 			disarmManagedDoltStartedProcess(started)
 			return report, nil

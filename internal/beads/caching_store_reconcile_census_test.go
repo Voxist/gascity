@@ -124,6 +124,19 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		// pinned by the caching_store_unavailable / reality_first suites.
 		"availabilityGate": true, "unavailableSkipLogged": true,
 		"degradedReads": true,
+		// The vc-ny00 store-warming pair, excluded on the same argument as
+		// the availability-gate fork directly above and for the same reason:
+		// both are about backing-store LATENCY, not durable cache content.
+		// warm points at the process-global tracker keyed by this store's id
+		// prefix (store_warming.go) — a shared collaborator, not cache state,
+		// and comparing a pointer to shared mutable state would compare the
+		// registry rather than the merge. warmingSkipLogged dedupes one
+		// announcement per degraded episode, exactly as unavailableSkipLogged
+		// does for an outage episode. Neither is written by
+		// mergeSnapshotLocked and the merge end state does not depend on
+		// either; their behavior is pinned by the store-warming suite
+		// (TestStoreWarming*, TestReconcileBreaker*).
+		"warm": true, "warmingSkipLogged": true,
 		// fullScopeSnapshot records whether the snapshot has ever held the
 		// complete nonclosed set, so the degraded read paths can refuse to
 		// present a PrimeActive-only snapshot as a complete answer. The seam

@@ -368,7 +368,11 @@ func bdCommandTimeoutFor(name string, args []string) time.Duration {
 	}
 	switch args[0] {
 	case "count", "list", "ready", "show", "sql", "stats", "version":
-		return bdReadCommandTimeout
+		// Inside a reconciler tick the read class is bounded well below
+		// the listener's steady-state deadline so the serial tick can
+		// never pay the wall per store (vc-ny00 L1); every other caller
+		// keeps bdReadCommandTimeout. See bd_tick_read_timeout.go.
+		return bdTickReadBound()
 	case "query":
 		return bdQueryCommandTimeout
 	default:
