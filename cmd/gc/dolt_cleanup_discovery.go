@@ -62,7 +62,7 @@ func doltProcRigOwner(p DoltProcInfo, rigs []resolverRig) (string, bool) {
 	if cfg := extractConfigPath(p.Argv); cfg != "" {
 		candidates = append(candidates, cfg)
 	}
-	if dd, ok := argvFlagValue(p.Argv, "--data-dir"); ok && dd != "" {
+	if dd, ok := argvFlagValue(p.Argv); ok && dd != "" {
 		candidates = append(candidates, dd)
 	}
 	if len(candidates) == 0 {

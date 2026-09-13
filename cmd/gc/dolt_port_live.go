@@ -208,7 +208,7 @@ func doltProcMatchesManagedLayout(p DoltProcInfo, layout managedDoltRuntimeLayou
 	if cfg := extractConfigPath(p.Argv); cfg != "" && strings.TrimSpace(layout.ConfigFile) != "" && samePath(cfg, layout.ConfigFile) {
 		return true
 	}
-	if dd, ok := argvFlagValue(p.Argv, "--data-dir"); ok && dd != "" && strings.TrimSpace(layout.DataDir) != "" && samePath(dd, layout.DataDir) {
+	if dd, ok := argvFlagValue(p.Argv); ok && dd != "" && strings.TrimSpace(layout.DataDir) != "" && samePath(dd, layout.DataDir) {
 		return true
 	}
 	return false
