@@ -465,6 +465,52 @@ func TestBestStoreWithWorkD1ProbeRefinesRank(t *testing.T) {
 	}
 }
 
+// TestBestStoreWithWorkD1ProbeDoesNotOverwriteAnOlderWindowAge covers the
+// SECOND tieWith call site (the D1 probe adoption), which the existing probe
+// fixture never reaches: TestBestStoreWithWorkD1ProbeRefinesRank uses a
+// better-PRIORITY probe, so it takes the `less` arm and the `tieWith` arm stays
+// unexercised. The probe path looked covered because a probe test existed.
+//
+// The adoption condition is `probeRank.less(rank) || probeRank.tieWith(rank)`,
+// and `less` compares tier and priority ONLY. So an equal-priority probe row
+// reaches tieWith, and under the ga-bt1nl inversion a DIFFERING age reported a
+// tie — which adopted the probe's rank wholesale, overwriting the window's
+// older age with the probe's younger one. That is a D2 violation in its own
+// right: the window is ordered oldest-first, so for equal priority the probe's
+// row can never be older than the window's pick, and adopting it can only make
+// the rank younger.
+//
+// Here city's window holds genuinely the oldest work (2026-07-01). Its probe
+// reports the same priority but a younger row (2026-08-20). riga sits between
+// them. City must win on age; before the fix the probe's age overwrote the
+// window's and riga won.
+func TestBestStoreWithWorkD1ProbeDoesNotOverwriteAnOlderWindowAge(t *testing.T) {
+	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
+	const routed = `,"metadata":{"gc.routed_to":"worker"}`
+	cityWindow := `[{"id":"ci-oldest","priority":1,"created_at":"2026-07-01T00:00:00Z"` + routed + `}]`
+	cityProbe := `[{"id":"ci-younger","priority":1,"created_at":"2026-08-20T00:00:00Z"` + routed + `}]`
+	rigaAny := `[{"id":"va-1","priority":1,"created_at":"2026-08-01T00:00:00Z"` + routed + `}]`
+	run := func(command, dir string, _ []string) (string, error) {
+		if command == "probe" {
+			if dir == "city" {
+				return cityProbe, nil
+			}
+			return rigaAny, nil
+		}
+		if dir == "city" {
+			return cityWindow, nil
+		}
+		return rigaAny, nil
+	}
+	_, got, err := bestStoreWithWork("q", stores, stores[0], run, hookStoreRankOptions{RankProbeCommand: "probe"})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got.dir != "city" {
+		t.Errorf("store.dir = %q, want city — an equal-priority probe row must not overwrite the window's older age (the probe's 2026-08-20 is younger than the window's 2026-07-01)", got.dir)
+	}
+}
+
 // TestBestStoreWithWorkProbeFailureKeepsWindowRank pins C3: a probe that
 // errors or returns garbage is best-effort. The store keeps its window rank
 // and selection proceeds — a flaky probe must never wedge the hook.
@@ -697,5 +743,96 @@ func TestClaimStoreWithFallbackUsesSelectedStoreWhenStillReady(t *testing.T) {
 	}
 	if len(calls) != 1 || calls[0] != "city" {
 		t.Fatalf("calls = %v, want a single [city] re-validation", calls)
+	}
+}
+
+// TestTieWithNeverRotatesAPairResolvedByAge pins the ga-bt1nl contract
+// directly, because the defect it guards was invisible at the level the
+// existing selection test observes it: that test asserts a winner, and a coin
+// flip produces the right winner half the time, so a single pass accepted the
+// bug on every other run since it was written.
+//
+// The contract is the one tieWith's doc states: it reports a tie only when the
+// sameness was NOT resolved by age. Both ages known is always resolved — older
+// wins under betterThan, exact match takes slice order — so it is never
+// rotatable, whether the ages differ or match. Only an unknown age leaves the
+// tie genuinely unresolved.
+func TestTieWithNeverRotatesAPairResolvedByAge(t *testing.T) {
+	older := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC)
+
+	for _, tc := range []struct {
+		name string
+		a, b hookCandidateRank
+		want bool
+	}{
+		{
+			// The ga-bt1nl case. Differing known ages are the one pair the D2
+			// tiebreak exists to settle; reporting them as a rotatable tie
+			// hands the decision to UnixNano instead.
+			name: "both ages known, differing -> resolved, not rotatable",
+			a:    hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true},
+			b:    hookCandidateRank{tier: 1, priority: 1, age: newer, hasAge: true},
+			want: false,
+		},
+		{
+			name: "both ages known, differing, reversed -> still not rotatable",
+			a:    hookCandidateRank{tier: 1, priority: 1, age: newer, hasAge: true},
+			b:    hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true},
+			want: false,
+		},
+		{
+			name: "both ages known, equal -> resolved tie, slice order",
+			a:    hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true},
+			b:    hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true},
+			want: false,
+		},
+		{
+			name: "left age unknown -> unresolved, keeps pre-D2 rotation",
+			a:    hookCandidateRank{tier: 1, priority: 1},
+			b:    hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true},
+			want: true,
+		},
+		{
+			name: "right age unknown -> unresolved, keeps pre-D2 rotation",
+			a:    hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true},
+			b:    hookCandidateRank{tier: 1, priority: 1},
+			want: true,
+		},
+		{
+			name: "both ages unknown -> unresolved, keeps pre-D2 rotation",
+			a:    hookCandidateRank{tier: 1, priority: 1},
+			b:    hookCandidateRank{tier: 1, priority: 1},
+			want: true,
+		},
+		{
+			name: "different tier -> not a tie at all",
+			a:    hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true},
+			b:    hookCandidateRank{tier: 2, priority: 1, age: older, hasAge: true},
+			want: false,
+		},
+		{
+			name: "different priority -> not a tie at all",
+			a:    hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true},
+			b:    hookCandidateRank{tier: 1, priority: 2, age: older, hasAge: true},
+			want: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.a.tieWith(tc.b); got != tc.want {
+				t.Errorf("tieWith = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// The pair that must stay ordered rather than rotated: older wins outright
+	// in exactly one direction, which is what makes the selection deterministic.
+	a := hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true}
+	b := hookCandidateRank{tier: 1, priority: 1, age: newer, hasAge: true}
+	if !a.betterThan(b) {
+		t.Error("older candidate must win betterThan")
+	}
+	if b.betterThan(a) {
+		t.Error("newer candidate must not win betterThan")
 	}
 }
