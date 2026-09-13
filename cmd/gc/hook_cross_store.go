@@ -681,16 +681,28 @@ func (r hookCandidateRank) olderThan(other hookCandidateRank) bool {
 
 // tieWith reports whether r and other are the same (tier, priority) AND that
 // sameness was not resolved by age — the case bestStoreWithWork's rotation
-// exists for. When both sides carry an age, an exact age match is a resolved
-// tie (slice order per ADR-0076 D2) and is NOT rotatable; when either age is
-// unknown the tie is unresolved and keeps the pre-D2 ga-kbbg9a rotation, which
-// is what stops an unreadable created_at from restoring permanent starvation.
+// exists for. When BOTH sides carry an age the pair is resolved either way and
+// is never rotatable: a strictly older side wins under betterThan, and an exact
+// match is a resolved tie taking slice order (ADR-0076 D2). Only when an age is
+// unknown is the tie genuinely unresolved, and that keeps the pre-D2 ga-kbbg9a
+// rotation, which is what stops an unreadable created_at from restoring
+// permanent starvation.
+//
+// This previously returned !r.age.Equal(other.age) for the both-known case,
+// reporting a rotatable tie precisely when the ages DIFFER — the one case the
+// age tiebreak exists to settle (ga-bt1nl). bestStoreWithWork then accumulated
+// the younger store alongside the older one and picked between them with
+// hookTieBreakIndex, which is seeded from UnixNano, so the D2 winner was a coin
+// flip. It only misfired when the older store was enumerated FIRST (otherwise
+// betterThan resets the tied set), i.e. the primary/own-store case — so D2's
+// anti-starvation guarantee degraded to the pre-D2 rotation exactly where it
+// mattered most.
 func (r hookCandidateRank) tieWith(other hookCandidateRank) bool {
 	if r.tier != other.tier || r.priority != other.priority {
 		return false
 	}
 	if r.hasAge && other.hasAge {
-		return !r.age.Equal(other.age)
+		return false
 	}
 	return true
 }
