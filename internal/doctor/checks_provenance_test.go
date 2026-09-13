@@ -280,7 +280,12 @@ func TestDeployProvenanceCheckEmbeddedRevisionWins(t *testing.T) {
 // stale-binary error.
 func TestDeployProvenanceCheckNoRevisionAtAll(t *testing.T) {
 	repo, _, head, _ := provenanceTestRepo(t)
-	for _, linked := range []string{"", "   ", "unknown"} {
+	// "unknown-dirty" is the intersection this table and the dirty-stamp test
+	// each missed: Makefile:29-30 derives COMMIT and DIRTY from independent
+	// shell fallbacks, so a tree with no commits and uncommitted files stamps
+	// both at once. It belongs here, not with the dirty cases, because it
+	// names no commit.
+	for _, linked := range []string{"", "   ", "unknown", "unknown-dirty", "  unknown-dirty  "} {
 		t.Run("linked="+linked, func(t *testing.T) {
 			c := NewDeployProvenanceCheck(linked)
 			c.BinaryPath = func() (string, error) { return writeProvenanceManifest(t, repo, head), nil }
@@ -292,6 +297,39 @@ func TestDeployProvenanceCheckNoRevisionAtAll(t *testing.T) {
 			}
 			if !strings.Contains(r.Message, "provenance not asserted") {
 				t.Errorf("message = %q, want it to say provenance was not asserted", r.Message)
+			}
+		})
+	}
+}
+
+// TestNormalizeRevisionStripsDirtyBeforeTestingPlaceholder pins the ordering
+// inside normalizeRevision. Testing the "unknown" placeholder before stripping
+// "-dirty" matches only a bare "unknown", so "unknown-dirty" survives as the
+// literal revision "unknown" and is compared against a real sha — reported as
+// a stale or clobbered binary, which is what this function exists to prevent.
+func TestNormalizeRevisionStripsDirtyBeforeTestingPlaceholder(t *testing.T) {
+	for _, tc := range []struct {
+		stamp    string
+		wantRev  string
+		wantDirt bool
+	}{
+		{"", "", false},
+		{"   ", "", false},
+		{"unknown", "", false},
+		{"unknown-dirty", "", true},
+		{"  unknown-dirty  ", "", true},
+		{"abc1234", "abc1234", false},
+		{"abc1234-dirty", "abc1234", true},
+		{"  abc1234-dirty  ", "abc1234", true},
+		{"-dirty", "", true},
+	} {
+		t.Run("stamp="+tc.stamp, func(t *testing.T) {
+			rev, dirty := normalizeRevision(tc.stamp)
+			if rev != tc.wantRev || dirty != tc.wantDirt {
+				t.Errorf("normalizeRevision(%q) = (%q, %v), want (%q, %v)", tc.stamp, rev, dirty, tc.wantRev, tc.wantDirt)
+			}
+			if rev == unknownRevision {
+				t.Errorf("normalizeRevision(%q) returned the placeholder %q as a revision; it would be compared against a real sha", tc.stamp, rev)
 			}
 		})
 	}
