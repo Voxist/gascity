@@ -427,7 +427,7 @@ func newCachingStore(backing Store, idPrefix string, onChange func(eventType, be
 		beadSeq:                make(map[string]uint64),
 		localBeadAt:            make(map[string]time.Time),
 		deletedSeq:             make(map[string]uint64),
-		depsIncompleteSince:    time.Now(),
+		depsIncompleteSince:    depsClock(),
 		depsIncompleteDriver:   "cache-construction",
 		readyProjectionInvalid: make(map[string]bool),
 		readyProjectionLost:    make(map[string]struct{}),
@@ -1495,7 +1495,7 @@ func (c *CachingStore) Stats() CacheStats {
 	s.DepsRestorations = c.depsRestorations
 	s.DepsWholeCacheWipes = c.depsWholeCacheWipes
 	if !c.depsComplete && !c.depsIncompleteSince.IsZero() {
-		s.DepsIncompleteFor = time.Since(c.depsIncompleteSince)
+		s.DepsIncompleteFor = depsClock().Sub(c.depsIncompleteSince)
 	}
 	switch c.state {
 	case cachePartial:
@@ -1536,6 +1536,15 @@ func (c *CachingStore) recordProblem(op string, err error) {
 
 // setDepsCompleteLocked is the only writer of c.depsComplete outside tests. It
 // exists so the flag's dwell time is observable (ADR-0094 D6): routing every
+// depsClock is the clock the ADR-0094 D6 dwell is measured against: the latch
+// stamp, the construction stamp and the Stats() elapsed read must all come
+// from it, or a test that controls one still races the others. Overridable so
+// the dwell can be asserted EXACTLY rather than as "> 0" -- on a
+// microsecond-granularity clock (macOS) a latch and an immediately following
+// read land in the same tick and elapse exactly zero, which is a property of
+// the clock and not of the gauge (ga-eyz5l).
+var depsClock = time.Now
+
 // write through one place keeps depsIncompleteSince, the latching driver and
 // the transition counters exact by construction rather than by convention.
 //
@@ -1560,7 +1569,7 @@ func (c *CachingStore) setDepsCompleteLocked(complete bool, driver string) {
 		return
 	}
 	c.depsDegradations++
-	c.depsIncompleteSince = time.Now()
+	c.depsIncompleteSince = depsClock()
 	c.depsIncompleteDriver = driver
 }
 
