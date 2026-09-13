@@ -42,7 +42,7 @@ func protectTestOpts(t *testing.T, recordedPort string, live liveDoltPortResolut
 //
 // A live process is present on the recorded port here but is NOT attributable by
 // argv (no --config/--data-dir under a rig root), which is what makes the live
-// path silent and the file the last line of defence.
+// path silent and the file the last line of defense.
 func TestProtectedDoltPortsFallsBackToRecordedPortWhenLiveResolutionFails(t *testing.T) {
 	opts := protectTestOpts(t, "3310", liveDoltPortResolution{}, os.ErrNotExist)
 	procs := []DoltProcInfo{{PID: 4242, Argv: []string{"dolt", "sql-server"}, Ports: []int{3310}}}
@@ -90,7 +90,7 @@ func TestProtectedDoltPortsIgnoresMalformedRecordedPort(t *testing.T) {
 	}
 }
 
-// TestProtectedDoltPortsStillAttributesLiveRigOwnedProcess guards the behaviour
+// TestProtectedDoltPortsStillAttributesLiveRigOwnedProcess guards the behavior
 // the PR added, so the fallback cannot be mistaken for a replacement: a process
 // whose --config sits under a rig root is attributed from live state, with no
 // recorded port file present at all.
