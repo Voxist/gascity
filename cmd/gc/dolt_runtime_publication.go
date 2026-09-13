@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
@@ -29,16 +30,54 @@ func readDoltRuntimeStateFile(path string) (doltRuntimeState, error) {
 	return state, nil
 }
 
+// writeDoltRuntimeStateFile persists state to path atomically.
+//
+// It PRESERVES an existing StartedAt when the PID is unchanged. started_at
+// dates a PROCESS, so while a pid keeps running its start time is a fact about
+// the past and cannot legitimately move. Callers that rebuild the state from
+// scratch -- `gc dolt state` defaults an omitted --started-at to time.Now()
+// (cmd_dolt_state.go) -- would otherwise restamp it on every refresh, which is
+// exactly what was observed on the live city: pid 83926 constant since
+// 10:52:11Z while started_at walked 12:48:13 -> 12:52:02 -> 12:53:54 ->
+// 13:01:53 with no restart in between (vc-8mfq).
+//
+// Guarding here rather than at the caller closes it for every caller, including
+// ones outside this repo -- the caller driving that restamp was never
+// identified. A real restart gets a new pid and so is never preserved; a stop
+// write carries PID 0 and is likewise unaffected. The residual case is OS pid
+// reuse, where a genuinely new process inherits the old start time; that is
+// rarer, and strictly less wrong, than discarding the true start time on every
+// single write.
 func writeDoltRuntimeStateFile(path string, state doltRuntimeState) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
+	state.StartedAt = preservedDoltStartedAt(path, state)
 	data, err := json.Marshal(state)
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
 	return fsys.WriteFileAtomic(fsys.OSFS{}, path, data, 0o644)
+}
+
+// preservedDoltStartedAt returns the StartedAt that should be written: the one
+// already on disk when it names the SAME live pid, otherwise the incoming one.
+// Unreadable or absent prior state, a zero/changed pid, or an empty prior
+// stamp all fall through to the incoming value, so this can only ever keep a
+// start time that was already recorded for that exact process.
+func preservedDoltStartedAt(path string, state doltRuntimeState) string {
+	if state.PID <= 0 {
+		return state.StartedAt
+	}
+	prior, err := readDoltRuntimeStateFile(path)
+	if err != nil || prior.PID != state.PID {
+		return state.StartedAt
+	}
+	if strings.TrimSpace(prior.StartedAt) == "" {
+		return state.StartedAt
+	}
+	return prior.StartedAt
 }
 
 func removeDoltRuntimeStateFile(path string) error {
