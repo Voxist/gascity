@@ -1536,9 +1536,12 @@ func (c *CachingStore) recordProblem(op string, err error) {
 
 // setDepsCompleteLocked is the only writer of c.depsComplete outside tests. It
 // exists so the flag's dwell time is observable (ADR-0094 D6): routing every
-// depsClock is the clock the ADR-0094 D6 dwell is measured against: the latch
-// stamp, the construction stamp and the Stats() elapsed read must all come
-// from it, or a test that controls one still races the others. Overridable so
+// depsClock is the clock the ADR-0094 D6 dwell is measured against. FOUR sites
+// consult it — the construction stamp, the latch stamp, the Stats() elapsed
+// read, and the deps_for= field in the reconcile heartbeat log
+// (caching_store_reconcile.go) — because a test that controls one still races
+// the others, and a log that reports a different dwell than the gauge it
+// mirrors is worse than no log. Overridable so
 // the dwell can be asserted EXACTLY rather than as "> 0" -- on a
 // microsecond-granularity clock (macOS) a latch and an immediately following
 // read land in the same tick and elapse exactly zero, which is a property of
