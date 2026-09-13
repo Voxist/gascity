@@ -544,6 +544,14 @@ test_error_message_still_reports_unreachable() {
 # This test removes both binaries from PATH and asserts the guard SAYS so,
 # rather than silently degrading. It is the only coverage of that host, because
 # every machine that runs this suite today has coreutils.
+#
+# It asserts BOTH messages, and the distinction is one character of tense:
+#   load-time warning : "... POG_TIMEOUT_SECONDS=Ns enforces nothing"   (present)
+#   block message     : "... POG_TIMEOUT_SECONDS enforced nothing"      (past)
+# An earlier version grepped only the past-tense string, which appears solely in
+# the block message — so deleting the entire load-time `echo WARNING` line left
+# this test green. A test for a guard that silently does nothing was itself
+# silently not testing the announcement.
 test_unbounded_without_coreutils_announces_itself() {
     local repo fbd out rc bin stripped
     repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
@@ -567,6 +575,8 @@ test_unbounded_without_coreutils_announces_itself() {
 
     out="$(PATH="$stripped" run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
     if [[ $rc -ne 0 ]] \
+        && grep -q "WARNING — neither" <<<"$out" \
+        && grep -q "enforces nothing" <<<"$out" \
         && grep -q "enforced nothing" <<<"$out" \
         && grep -q "ga-6kev4" <<<"$out" \
         && ! grep -q "timed out at" <<<"$out"; then
