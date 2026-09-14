@@ -104,7 +104,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		// BD_VERSION itself is NOT diverged — the pinned commit declares 1.2.2.
 		bdSourceRef    = "73a5bdc65b5fa9cb384683a47e579efa61bd999b"
 		bdSourceSHA256 = "f572a92ebaf5d0acde21e685fcafe0178e7f5a158b56e437f161a65bdcb52fdb"
-		bdBuild        = "3e03250ee"
+		bdBuild        = "73a5bdc65"
 		bdBranch       = "HEAD"
 		grpcVersion    = "1.83.1"
 		// Floors, not exact pins: each must be >= what the pinned source
