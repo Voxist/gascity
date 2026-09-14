@@ -34,7 +34,7 @@ ARG BD_SOURCE_SHA256=587ad18b765d90e75b64ca4bb57c12520befd8bece96545d48e98add26b
 ARG BD_BUILD=3e03250ee
 ARG BD_BRANCH=HEAD
 # 1.83.1, not 1.83.0: CVE-2026-84304 (HIGH) is in 1.83.0 and fixed in 1.83.1.
-ARG GRPC_VERSION=1.83.1
+ARG GRPC_VERSION=1.83.2
 # x/text 0.41.0, not 0.40.0: the x/crypto floor below drags x/text to 0.41.0,
 # and pinning BELOW what the module graph then selects is a silent downgrade
 # (ga-0emb8). Every override here must be >= what the pinned source resolves.
@@ -44,7 +44,7 @@ ARG XTEXT_VERSION=0.41.0
 # image scan gates HIGH+CRITICAL with --exit-code 1, so both floors are needed
 # for a green scan; verified against the exact pinned source: all upgrades, no
 # downgrades, bd builds.
-ARG XCRYPTO_VERSION=0.55.0
+ARG XCRYPTO_VERSION=0.56.0
 ARG XMOD_VERSION=0.40.0
 # bd embeds dolt as a library, so it reaches github.com/apache/thrift through
 # the parquet writer. The pinned source resolves thrift 0.23.0, which carries

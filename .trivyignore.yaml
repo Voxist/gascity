@@ -31,11 +31,16 @@
 # Four entries, all on the 2026-09-21 bridge horizon, each held to its exact
 # paths/purls and statement by TestTrivyIgnoreKeepsReviewedBridgeEntries:
 #
-#   CVE-2026-84445  grpc. Every pin here is 1.83.1, which fixes CVE-2026-84304
-#                   but not this one -- the 1.83 line fixes it in 1.83.2. The
-#                   durable fix is raising GRPC_VERSION in Dockerfile.base and
-#                   Dockerfile.agent, and google.golang.org/grpc in go.mod, to
-#                   1.83.2. Nothing else clears it.
+#   CVE-2026-84445  grpc, fixed in 1.83.2. The durable fix LANDED in #186:
+#                   go.mod, Dockerfile.base and Dockerfile.agent all pin
+#                   1.83.2 now, so the gc path was dropped from this entry --
+#                   TestTrivyIgnoreDropsGCModuleWaiversPastThreshold encodes
+#                   that threshold and fires the moment go.mod passes it.
+#                   The gh/dolt/bd paths REMAIN only because
+#                   TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools still
+#                   asserts their retention; with GRPC_VERSION at 1.83.2 those
+#                   rebuilds should be clean too, so this entry is a candidate
+#                   for deletion once that assertion is revisited.
 #   CVE-2026-78675  GitPython, in the gc-mcp-mail image's own requirements. No
 #   CVE-2026-78676  rebuild touches that file, so the fix is a pinned-dependency
 #   CVE-2026-78677  bump to 3.1.59.
@@ -83,7 +88,6 @@ vulnerabilities:
       - "usr/bin/gh"
       - "usr/local/bin/dolt"
       - "usr/local/bin/bd"
-      - "usr/local/bin/gc"
     expired_at: 2026-09-21
     statement: google.golang.org/grpc xDS CVE, fixed in 1.82.2 and 1.83.2. The gh and Dolt rebuilds pin grpc 1.83.1 (GRPC_VERSION in contrib/k8s/Dockerfile.base), the bd rebuild pins 1.83.1 (GRPC_VERSION in contrib/k8s/Dockerfile.agent), and gc takes 1.83.1 from go.mod. Those pins already clear CVE-2026-84304, which 1.83.1 fixes; this one needs 1.83.2 on the 1.83 line. Durable fix is raising each of those pins to 1.83.2 or later. Remove each path once its pin moves.
   - id: CVE-2026-78676

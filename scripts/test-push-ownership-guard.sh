@@ -107,6 +107,120 @@ remote_sha() {
 #                                          list-call-count).
 # ---------------------------------------------------------------------------
 
+# write_fake_timeout installs a `timeout` into a fake-bin dir when the host has
+# no GNU coreutils one. The two ga-grenu cases below assert the guard's
+# TIMEOUT-path wording, and the guard resolves POG_TIMEOUT_BIN once at load via
+# `command -v timeout`: with no timeout on PATH it resolves to "", runs bd
+# unbounded, and the slow-bd fixture simply completes -- so the cases fail with
+# the load-time "enforces nothing" warning instead of the message they exist to
+# check. That is what happens on the Mac CI runner, which ships no coreutils.
+#
+# Depending on the runner's toolchain for a property of OUR guard is the bug;
+# this makes the cases hermetic on any host. Installed only when the host lacks
+# a real timeout, so hosts WITH coreutils keep exercising the genuine binary and
+# a real regression there still fails.
+#
+# Called from those two cases ONLY, never from write_fake_bd. run_guard prepends
+# the fake-bd dir to PATH for every case, and
+# coreutils/unbounded-fallback-announces-itself exists to assert what the guard
+# says when NO bounding tool is reachable -- so a timeout installed for all
+# fixtures would defeat that case on exactly the no-coreutils host this function
+# is here to serve.
+#
+# perl's alarm, not a shell watchdog. `( sleep N; kill ... ) &` has two defects,
+# both of which bite precisely on the timeout path:
+#   1. Using `kill -0 $watch_pid` to decide "did the watchdog fire" infers a
+#      happens-before that does not exist. The watchdog's own TERM is what
+#      unblocks `wait`, so whether bash has reaped it is a race; losing that
+#      race returns the command's signal status 143 instead of 124. Measured at
+#      4/200 on the isolated tie shape and 1/105 end-to-end through the real
+#      guard -- where it surfaces as "1 errored" instead of "1 timed out",
+#      i.e. ga-grenu reintroduced by the fixture in the very test that pins
+#      that message.
+#   2. `sleep` is a GRANDCHILD of the subshell, so killing the watchdog leaves
+#      it running, holding the caller's command-substitution pipe open for the
+#      full budget -- every non-expiring bd read cost a whole budget.
+# alarm survives exec (POSIX), so the timer applies to the real command; there
+# is no watchdog to race and no sleep to orphan.
+write_fake_timeout() {
+    local dir="$1"
+    if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
+        return 0
+    fi
+    local perl_bin
+    perl_bin="$(command -v perl 2>/dev/null || true)"
+    if [ -z "$perl_bin" ]; then
+        # No bounding mechanism at all. Install nothing rather than a shim that
+        # cannot bound: the two cases then fail loudly on the real cause instead
+        # of passing for a manufactured reason.
+        return 0
+    fi
+    cat > "$dir/timeout" <<'FAKETIMEOUT'
+#!/usr/bin/env bash
+# Minimal `timeout <seconds> <cmd...>`: exit 124 if the command outlives the
+# bound, otherwise the command's own status.
+#
+# PERL_BIN is an absolute path resolved when this file was written, NOT a bare
+# `perl`. The guard runs with its own PATH, which is not the one this shim was
+# installed under -- and one case in this harness replaces PATH wholesale with a
+# symlink list that has no perl. A bare `perl` there is command-not-found, the
+# shim exits 127, and the guard classifies that as an ERROR rather than a
+# TIMEOUT -- reintroducing ga-grenu by a new route, in the very cases added to
+# pin its message.
+bound="$1"
+shift
+
+# Reject a bound perl would numify to 0. `alarm 0` CANCELS the timer, so
+# `timeout abc cmd` would run unbounded and report success -- a silent
+# fail-open, and the one place this form is worse than a shell watchdog, which
+# at least errors on an invalid interval. GNU exits 125 without running the
+# command; match that. A bound of 0 IS valid and does mean "no limit", which is
+# also GNU's behaviour. beads' own hook chain validates its interval for the
+# same reason (beads #5503).
+case "$bound" in
+    ''|*[!0-9]*) echo "timeout: invalid time interval '$bound'" >&2; exit 125 ;;
+esac
+
+# `or exit 127` because a failed exec otherwise falls through to perl's own
+# exit 0, reporting SUCCESS for a command that never ran. GNU reports 127.
+PERL_BIN -e 'alarm shift; exec @ARGV or exit 127' -- "$bound" "$@"
+status=$?
+# SIGALRM killed the command: 128+14. Report it the way timeout(1) does.
+# NOTE: a command that traps or ignores SIGALRM defeats this bound entirely,
+# where GNU (which signals with TERM, then KILL) would still report 124. No
+# fixture here traps ALRM; do not add one.
+#
+# On the expiry path bash prints its own "Alarm clock: 14" job-control line to
+# THIS script's stderr, which GNU timeout does not. It is absorbed by the
+# guard's own `2>/dev/null` at the call site (zero occurrences across a full
+# suite run) and is deliberately not suppressed here: separating bash's report
+# from the command's real stderr is not possible without discarding both.
+if [ "$status" -eq 142 ]; then
+    status=124
+fi
+exit "$status"
+FAKETIMEOUT
+    # Bake the absolute interpreter path in; see the PERL_BIN note in the shim.
+    #
+    # Checked, and the placeholder is re-inspected afterwards, because the
+    # failure is SILENT and lands on the timeout path. An unsubstituted shim
+    # still installs and is still executable; it just exits 127 on the literal
+    # `PERL_BIN`, and _pog_read_with_retry classifies 127 as an ERROR rather
+    # than a TIMEOUT -- reintroducing ga-grenu's wrong message inside the two
+    # cases this function exists to make hermetic. `sed` succeeding is not the
+    # same fact as the substitution having happened, so assert the stronger one.
+    if ! sed -i.bak "s|^PERL_BIN |${perl_bin} |" "$dir/timeout"; then
+        echo "write_fake_timeout: sed failed to bake the perl path into $dir/timeout" >&2
+        return 1
+    fi
+    rm -f "$dir/timeout.bak"
+    if grep -q '^PERL_BIN ' "$dir/timeout"; then
+        echo "write_fake_timeout: PERL_BIN placeholder survived substitution in $dir/timeout" >&2
+        return 1
+    fi
+    chmod +x "$dir/timeout"
+}
+
 write_fake_bd() {
     local dir="$1"
     mkdir -p "$dir/fake-bd-state"
@@ -504,6 +618,7 @@ test_timeout_message_names_the_budget_not_an_outage() {
     repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
     fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
     write_fake_bd "$fbd"
+    write_fake_timeout "$fbd"
     mkdir -p "$fbd/fake-bd-state"
     echo 3 > "$fbd/fake-bd-state/show-sleep"   # healthy but slower than the budget
     out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 1 2>&1)"; rc=$?  # budget 1s < 3s sleep
@@ -526,6 +641,7 @@ test_error_message_still_reports_unreachable() {
     repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
     fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
     write_fake_bd "$fbd"
+    write_fake_timeout "$fbd"
     mkdir -p "$fbd/fake-bd-state"
     echo 1 > "$fbd/fake-bd-state/show-exit"    # errors immediately, never hangs
     out="$(POG_READ_ATTEMPTS=2 run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?

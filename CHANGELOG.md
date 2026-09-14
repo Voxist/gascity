@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Cleared every unwaived HIGH/CRITICAL finding the image scan reports**, across
+  all four scanned images rather than the one the work started on. `x/crypto`
+  moves 0.55.0 → **0.56.0**: 0.55.0 clears only `CVE-2026-56854` (CRITICAL),
+  while `CVE-2026-78662` and `CVE-2026-56855` (SSH channel-deadlock DoS,
+  published 2026-09-02) need 0.56.0. `grpc` moves 1.83.1 → **1.83.2** for
+  `CVE-2026-84445` (HIGH, xDS server DoS), which affects `gc-agent-base`,
+  `gc-agent` and `gc-controller`. GitPython's floor moves 3.1.57 → **3.1.59**
+  for `CVE-2026-78676` (CRITICAL, remote code execution via config injection)
+  plus `CVE-2026-78675` and `CVE-2026-78677`, which affects `gc-mcp-mail`; its
+  hash-pinned lock is regenerated with the `uv pip compile` invocation recorded
+  in its own header and resolves to 3.1.62, with both hashes verified against
+  PyPI's published digests independently of the resolver.
+
+  Each pin lives in more than one place and all of them move together: `go.mod`
+  for the `gc` binary, the `XCRYPTO_VERSION`/`GRPC_VERSION` ARGs in both
+  `Dockerfile.base` and `Dockerfile.agent` for the rebuilt `gh` tool, and the
+  test constants that assert those ARGs per image.
+
+### Changed
+
+- **The container security guards now assert security FLOORS rather than exact
+  versions**, which is what their own comments already claimed they did. The
+  mcp-agent-mail lock check pinned a resolved version by exact string, so the
+  next ordinary regeneration to a *more* patched release would have failed with
+  "missing patched dependency" — an assertion that inverts into telling the
+  maintainer to downgrade, on a package whose median release gap is five days.
+  It now compares against the floor using a new `parsePyVersion`, because PyPI
+  versions are not Go module semver: the cryptography project ships
+  two-component stable releases, so reusing the existing semver helper would
+  have aborted the whole check on a legitimate future 51.0. Prerelease suffixes
+  are rejected rather than truncated, since truncating would let `3.9.0rc0`
+  satisfy a floor of `3.9.0`.
+
+  `grpc`'s go.mod requirement moves into the same floor table as `x/text`,
+  `x/crypto` and `x/mod`, replacing a `strings.Count(...) != 1` assertion that
+  was brittle in both directions — it asserted equality where the requirement is
+  a minimum, and a raw substring match does not respect module-name boundaries
+  the way the exact field comparison does.
+
+- **`x/crypto`'s security floor was raised to 0.56.0.** It had been left at
+  0.55.0 while the module itself moved, so the guard would have accepted a
+  downgrade to a version this repository has already established is
+  insufficient.
+
 ### Added
 
 - **`gc storage preflight` reports everything the infra-class cutover would
