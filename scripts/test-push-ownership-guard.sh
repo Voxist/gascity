@@ -488,6 +488,116 @@ test_retry_recovers_then_still_blocks_on_real_ownership_change() {
     rm -rf "$repo" "$fbd"
 }
 
+# ga-grenu: when EVERY attempt expired on the clock and none reported an
+# error, the store is slow, not absent. The message must say so and name the
+# budget knob, because the old wording ("unreachable ... bd/Dolt needs
+# attention" + "--no-verify") pointed at the wrong subsystem and offered
+# disarming the guard as the remedy -- which is how a load spike turns into a
+# bypassed ownership check.
+test_timeout_message_names_the_budget_not_an_outage() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    mkdir -p "$fbd/fake-bd-state"
+    echo 3 > "$fbd/fake-bd-state/show-sleep"   # healthy but slower than the budget
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 1 2>&1)"; rc=$?  # budget 1s < 3s sleep
+    if [[ $rc -ne 0 ]] \
+        && grep -q "exceeded POG_TIMEOUT_SECONDS" <<<"$out" \
+        && grep -q "POG_TIMEOUT_SECONDS=60 git push" <<<"$out" \
+        && ! grep -q "bd/Dolt needs attention" <<<"$out"; then
+        record_pass "timeout/message-names-budget-not-outage (rc=$rc)"
+    else
+        record_fail "timeout/message-names-budget-not-outage" "expected a timeout-specific message naming the budget and a larger-budget retry, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# ga-grenu: a store that ERRORS (rather than hanging) must still produce the
+# outage-flavoured wording. The two failure modes must not collapse back into
+# one message -- that collapse is the defect.
+test_error_message_still_reports_unreachable() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    mkdir -p "$fbd/fake-bd-state"
+    echo 1 > "$fbd/fake-bd-state/show-exit"    # errors immediately, never hangs
+    out="$(POG_READ_ATTEMPTS=2 run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] \
+        && grep -q "unreachable after" <<<"$out" \
+        && ! grep -q "exceeded POG_TIMEOUT_SECONDS" <<<"$out"; then
+        record_pass "timeout/error-path-keeps-unreachable-wording (rc=$rc)"
+    else
+        record_fail "timeout/error-path-keeps-unreachable-wording" "expected unreachable wording (not the timeout wording) when bd errors, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# ga-6kev4: stock macOS ships neither `timeout` nor `gtimeout` (both are GNU
+# coreutils), and _pog_timeout then runs the read UNBOUNDED. Two things follow
+# that are invisible on any host that has them installed: POG_TIMEOUT_SECONDS
+# enforces nothing, and rc is never 124 so the timeout-specific wording added
+# for ga-grenu can never fire -- the operator sees the outage wording that
+# recommends --no-verify, which is precisely what that change existed to stop.
+#
+# This test removes both binaries from PATH and asserts the guard SAYS so,
+# rather than silently degrading. It is the only coverage of that host, because
+# every machine that runs this suite today has coreutils.
+#
+# It asserts BOTH messages, and the distinction is one character of tense:
+#   load-time warning : "... POG_TIMEOUT_SECONDS=Ns enforces nothing"   (present)
+#   block message     : "... POG_TIMEOUT_SECONDS enforced nothing"      (past)
+# An earlier version grepped only the past-tense string, which appears solely in
+# the block message — so deleting the entire load-time `echo WARNING` line left
+# this test green. A test for a guard that silently does nothing was itself
+# silently not testing the announcement.
+test_unbounded_without_coreutils_announces_itself() {
+    local repo fbd out rc bin stripped
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/var/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    mkdir -p "$fbd/fake-bd-state"
+    echo 1 > "$fbd/fake-bd-state/show-exit"
+
+    # Build a PATH containing ONLY the binaries the guard needs, deliberately
+    # omitting timeout/gtimeout, so the bounding tool is the single variable.
+    #
+    # An earlier version removed every PATH DIRECTORY that provided
+    # timeout/gtimeout. That is platform-dependent and broke on Linux CI: there
+    # `timeout` lives in /usr/bin alongside git, jq, grep and cat, so stripping
+    # it took the guard's whole toolchain with it and the run died rc=127 --
+    # a command-not-found, which proves nothing about the unbounded path. It
+    # passed on macOS only because Homebrew puts timeout in /opt/homebrew/bin
+    # and leaves /usr/bin intact.
+    local shimdir="$fbd/nobound-bin"
+    mkdir -p "$shimdir"
+    local tool resolved
+    for tool in bash git jq grep cat sed head tail awk cut tr wc sort uniq date mktemp rm sleep printf; do
+        resolved="$(command -v "$tool" 2>/dev/null || true)"
+        if [[ -z "$resolved" ]]; then
+            record_fail "coreutils/unbounded-fallback-announces-itself" "cannot build a bounded-tool-free PATH: required tool '$tool' not found on this host"
+            rm -rf "$repo" "$fbd"
+            return
+        fi
+        ln -sf "$resolved" "$shimdir/$tool"
+    done
+    stripped="$shimdir"
+
+    out="$(PATH="$stripped" run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] \
+        && grep -q "WARNING — neither" <<<"$out" \
+        && grep -q "enforces nothing" <<<"$out" \
+        && grep -q "enforced nothing" <<<"$out" \
+        && grep -q "ga-6kev4" <<<"$out" \
+        && ! grep -q "timed out at" <<<"$out"; then
+        record_pass "coreutils/unbounded-fallback-announces-itself (rc=$rc)"
+    else
+        record_fail "coreutils/unbounded-fallback-announces-itself" "expected the guard to say the budget enforced nothing and cite ga-6kev4, and NOT to report a timeout tally, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
 test_retry_unreachable_message_mentions_retry_before_no_verify() {
     local repo fbd out rc before_noverify
     repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
@@ -1322,6 +1432,9 @@ run_all() {
     test_retry_recovers_from_transient_failure
     test_retry_exhausted_still_blocks
     test_retry_recovers_then_still_blocks_on_real_ownership_change
+    test_timeout_message_names_the_budget_not_an_outage
+    test_unbounded_without_coreutils_announces_itself
+    test_error_message_still_reports_unreachable
     test_retry_unreachable_message_mentions_retry_before_no_verify
     test_retry_parse_failure_message_mentions_retry_before_no_verify
     test_bead_id_branch_wins_and_warns_on_disagreement
