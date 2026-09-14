@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 740 = 738 + 2 for the 0066-era beads library (BD_LIB_REF d530cddfa):
+# 740 = 738 + 2 for the 0066/0067-era beads library (BD_LIB_REF a690b0a8c):
 # cloud.google.com/go/pubsub/v2 and github.com/zeebo/errs enter as transitive
 # requirements of the newer beads module. `go mod why -m` reports "main module
 # does not need module" for both — they are module-graph entries only, never
