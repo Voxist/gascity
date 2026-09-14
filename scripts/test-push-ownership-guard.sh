@@ -201,7 +201,23 @@ fi
 exit "$status"
 FAKETIMEOUT
     # Bake the absolute interpreter path in; see the PERL_BIN note in the shim.
-    sed -i.bak "s|^PERL_BIN |${perl_bin} |" "$dir/timeout" && rm -f "$dir/timeout.bak"
+    #
+    # Checked, and the placeholder is re-inspected afterwards, because the
+    # failure is SILENT and lands on the timeout path. An unsubstituted shim
+    # still installs and is still executable; it just exits 127 on the literal
+    # `PERL_BIN`, and _pog_read_with_retry classifies 127 as an ERROR rather
+    # than a TIMEOUT -- reintroducing ga-grenu's wrong message inside the two
+    # cases this function exists to make hermetic. `sed` succeeding is not the
+    # same fact as the substitution having happened, so assert the stronger one.
+    if ! sed -i.bak "s|^PERL_BIN |${perl_bin} |" "$dir/timeout"; then
+        echo "write_fake_timeout: sed failed to bake the perl path into $dir/timeout" >&2
+        return 1
+    fi
+    rm -f "$dir/timeout.bak"
+    if grep -q '^PERL_BIN ' "$dir/timeout"; then
+        echo "write_fake_timeout: PERL_BIN placeholder survived substitution in $dir/timeout" >&2
+        return 1
+    fi
     chmod +x "$dir/timeout"
 }
 
