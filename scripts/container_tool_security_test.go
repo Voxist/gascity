@@ -92,34 +92,35 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	const (
 		// FORK DIVERGENCE — FORK-FIRST BRIDGE (ga-zzcjs; supersedes the
 		// ADR-0026 C5 upstream bridge). The image builds bd from the
-		// Voxist/beads fork tip (schema 0066 plus fork-only fixes; the
-		// 0062->0066 store migration was rehearsed and cut over
+		// Voxist/beads fork tip (schema 0067 plus fork-only fixes; the
+		// 0066->0067 store migration was rehearsed and cut over
 		// deliberately). go.mod links BD_LIB_REF — the fork tip's newest
 		// upstream ancestor — because fork commits do not resolve on the
 		// module path. These values move together with deps.env and go.mod;
-		// a published release >= 0066 on a module-resolvable repo retires
+		// a published release >= 0067 on a module-resolvable repo retires
 		// the bridge (one change: BD_VERSION=tag, drop the refs). Note the
 		// existing upstream v1.2.2 TAG is not such a release: it sits on a
 		// different lineage at schema 0053.
 		// BD_VERSION itself is NOT diverged — the pinned commit declares 1.2.2.
-		bdSourceRef    = "3e03250ee1675ebcd63ca3f5d1660560947eab7c"
-		bdSourceSHA256 = "587ad18b765d90e75b64ca4bb57c12520befd8bece96545d48e98add26bc8f0f"
-		bdBuild        = "3e03250ee"
+		bdSourceRef    = "73a5bdc65b5fa9cb384683a47e579efa61bd999b"
+		bdSourceSHA256 = "f572a92ebaf5d0acde21e685fcafe0178e7f5a158b56e437f161a65bdcb52fdb"
+		bdBuild        = "73a5bdc65"
 		bdBranch       = "HEAD"
-		grpcVersion    = "1.83.1"
+		grpcVersion    = "1.83.2"
 		// Floors, not exact pins: each must be >= what the pinned source
 		// resolves, because pinning BELOW that is a silent downgrade
 		// (ga-0emb8). x/text is 0.41.0 in both images now: the x/crypto floor
 		// drags x/text there in bd's, gh's and dolt's module graphs alike.
 		xtextVersion = "0.41.0"
 		// CVE-2026-56854 (CRITICAL, fixed 0.55.0) and CVE-2026-56864 (HIGH,
-		// fixed 0.40.0). The pinned source declares x/crypto 0.54.0 and x/mod
-		// 0.37.0, and the image scan gates HIGH+CRITICAL with --exit-code 1.
-		xcryptoVersion = "0.55.0"
+		// fixed 0.40.0). The pinned source now declares x/crypto 0.56.0 and
+		// x/mod 0.40.0, so these sit at parity with it rather than above it.
+		xcryptoVersion = "0.56.0"
 		xmodVersion    = "0.40.0"
 		// CVE-2026-43871 (HIGH, TCompactProtocol varint byte-count DoS, fixed
 		// 0.24.0). bd embeds dolt as a library and reaches thrift through the
-		// parquet writer; the pinned source resolves 0.23.0.
+		// parquet writer; the pinned source still resolves 0.23.0, so this is
+		// the one floor that remains a genuine lift.
 		thriftVersion = "0.24.0"
 	)
 
