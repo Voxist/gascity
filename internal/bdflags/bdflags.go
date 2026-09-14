@@ -47,22 +47,20 @@ import (
 // bd across the supported range. --format, which #5601 omits, is a real
 // hidden persistent String in all three.
 var globalValueFlags = map[string]bool{
-	"--actor": true, "--db": true, "-C": true, "--directory": true,
-	"--dolt-auto-commit": true, "--mem-profile": true,
-	"--database": true,
 	// --format is a HIDDEN persistent StringVar ("Output format (json). Alias
-	// for --json", MarkHidden'd immediately after registration) present in
-	// every supported bd from v1.0.4 to a75c226c9. Being hidden, it appears in
-	// NO `bd --help` output — so neither a help-sourced audit nor
-	// freshness_test.go's live `--help` probe can see it, and it stayed missing
-	// here while every visible persistent flag was pinned. It is still accepted
-	// before the verb and still consumes the next token: omitting it made
-	// SplitGlobalFlags read "json" out of `bd --format json update <id> ...`,
-	// so DroppedMetadataRefusal — scoped to verb "update" — never fired and the
-	// silent 1-of-N metadata write it exists to prevent went through.
-	// Verified 2026-08-31 against bd 1.1.0 (a75c226c9): `bd --format json
-	// ready -n 1` is accepted and emits JSON.
-	"--format": true,
+	// for --json", MarkHidden'd immediately after registration) present in every
+	// supported bd from v1.0.4 to a75c226c9. Being hidden, it appears in NO
+	// `bd --help` output — so neither a help-sourced audit nor freshness_test.go's
+	// live `--help` probe can see it, and it stayed missing here while every
+	// visible persistent flag was pinned. It is still accepted before the verb and
+	// still consumes the next token: omitting it made SplitGlobalFlags read "json"
+	// out of `bd --format json update <id> ...`, so DroppedMetadataRefusal —
+	// scoped to verb "update" — never fired and the silent 1-of-N metadata write
+	// it exists to prevent went through. Verified 2026-08-31 against bd 1.1.0
+	// (a75c226c9): `bd --format json ready -n 1` is accepted and emits JSON.
+	"--actor": true, "--database": true, "--db": true, "-C": true,
+	"--directory": true, "--dolt-auto-commit": true, "--format": true,
+	"--mem-profile": true,
 }
 
 // globalBoolFlags are accepted by every bd subcommand and take no value.
@@ -107,13 +105,14 @@ var globalBoolFlags = map[string]bool{
 // global set), keyed by subcommand: a single word ("update") or, for
 // compound bd subcommands, "parent child" ("mol pour"). The key set here
 // defines every subcommand this package knows about — see Known/Subcommands.
+//
+// Sourced from `bd <sub> --help` (bd 1.3.0-rc.2, 2026-09-10).
 var valueFlagsBySub = map[string]map[string]bool{
 	"create": {
 		// --storage-class added 2026-08-11 against bd a75c226c9 (0060-era
 		// wisp storage-class selector); --allow-empty-description (bool,
 		// below) same provenance.
-		"--storage-class": true,
-		"--acceptance":    true, "--append-notes": true, "-a": true, "--assignee": true,
+		"--acceptance": true, "--append-notes": true, "-a": true, "--assignee": true,
 		"--body-file": true, "--context": true, "--defer": true, "--deps": true,
 		"-d": true, "--description": true, "--design": true, "--design-file": true,
 		"--due": true, "-e": true, "--estimate": true, "--event-actor": true,
@@ -122,7 +121,8 @@ var valueFlagsBySub = map[string]map[string]bool{
 		"--id": true, "-l": true, "--labels": true, "--metadata": true,
 		"--mol-type": true, "--notes": true, "--parent": true, "-p": true,
 		"--priority": true, "--repo": true, "--skills": true, "--spec-id": true,
-		"-s": true, "--status": true, "--title": true, "-t": true, "--type": true, "--waits-for": true,
+		"-s": true, "--status": true, "--storage-class": true, "--title": true,
+		"-t": true, "--type": true, "--waits-for": true,
 		"--waits-for-gate": true, "--wisp-type": true,
 	},
 	"update": {
@@ -158,10 +158,10 @@ var valueFlagsBySub = map[string]map[string]bool{
 	"ready": {
 		// --label-pattern/--label-regex/--max-rows added 2026-08-11 against
 		// bd a75c226c9 (fork-first repin, ga-zzcjs).
-		"--label-pattern": true, "--label-regex": true, "--max-rows": true,
 		"-a": true, "--assignee": true, "--exclude-label": true, "--exclude-type": true,
 		"--has-metadata-key": true, "-l": true, "--label": true, "--label-any": true,
-		"-n": true, "--limit": true, "--metadata-field": true, "--mol": true,
+		"--label-pattern": true, "--label-regex": true, "-n": true, "--limit": true,
+		"--max-rows": true, "--metadata-field": true, "--mol": true,
 		"--mol-type": true, "--offset": true, "--parent": true, "-p": true,
 		"--priority": true, "-s": true, "--sort": true, "-t": true, "--type": true,
 	},
@@ -170,14 +170,15 @@ var valueFlagsBySub = map[string]map[string]bool{
 		"--created-after": true, "--created-before": true, "--defer-after": true,
 		"--defer-before": true, "--desc-contains": true, "--due-after": true,
 		"--due-before": true, "--exclude-label": true, "--exclude-type": true,
-		// --external-contains/--external-ref/--max-rows (+ bools below)
-		// added 2026-08-11 against bd a75c226c9 (fork-first repin, ga-zzcjs).
-		"--external-contains": true, "--external-ref": true, "--max-rows": true,
-		"--format": true, "--has-metadata-key": true, "--id": true, "-l": true,
+		// --external-contains/--external-ref/--max-rows (+ bools below) added
+		// 2026-08-11 against bd a75c226c9 (fork-first repin, ga-zzcjs).
+		"--external-contains": true, "--external-ref": true, "--format": true,
+		"--has-metadata-key": true, "--id": true, "-l": true,
 		"--label": true, "--label-any": true, "--label-pattern": true,
-		"--label-regex": true, "-n": true, "--limit": true, "--metadata-field": true,
-		"--mol-type": true, "--notes-contains": true, "--offset": true,
-		"--parent": true, "-p": true, "--priority": true, "--priority-max": true,
+		"--label-regex": true, "-n": true, "--limit": true, "--max-rows": true,
+		"--metadata-field": true, "--mol-type": true, "--notes-contains": true,
+		"--offset": true, "--parent": true, "-p": true, "--priority": true,
+		"--priority-max": true,
 		"--priority-min": true, "--sort": true, "--spec": true, "-s": true,
 		"--status": true, "--title": true, "--title-contains": true, "-t": true,
 		"--type": true, "--updated-after": true, "--updated-before": true,
@@ -213,16 +214,21 @@ var valueFlagsBySub = map[string]map[string]bool{
 
 // boolFlagsBySub holds each subcommand's boolean (no-value) flags beyond the
 // global set. Same keying convention as valueFlagsBySub.
+//
+// Sourced from `bd <sub> --help` (bd 1.3.0-rc.2, 2026-09-10). A flag whose
+// help renders as `string[="default"]` — cobra's NoOptDefVal — belongs here,
+// not in valueFlagsBySub: it never consumes the next argv token, so
+// `bd list --deps all` leaves "all" positional.
 var boolFlagsBySub = map[string]map[string]bool{
 	"create": {
-		"--allow-empty-description": true,
-		"--dry-run":                 true, "--ephemeral": true, "--force": true, "--no-history": true,
-		"--no-inherit-labels": true, "--silent": true, "--stdin": true, "--validate": true,
+		"--allow-empty-description": true, "--dry-run": true, "--ephemeral": true,
+		"--force": true, "--no-history": true, "--no-inherit-labels": true,
+		"--silent": true, "--stdin": true, "--validate": true,
 	},
 	"update": {
-		"--force":                   true,
 		"--allow-empty-description": true, "--claim": true, "--ephemeral": true,
-		"--history": true, "--no-history": true, "--persistent": true, "--stdin": true,
+		"--force": true, "--history": true, "--no-history": true,
+		"--persistent": true, "--stdin": true,
 	},
 	"close": {
 		"--claim-next": true, "--continue": true, "-f": true, "--force": true,
@@ -233,27 +239,22 @@ var boolFlagsBySub = map[string]map[string]bool{
 		"--cascade": true, "--dry-run": true, "-f": true, "--force": true,
 	},
 	"ready": {
-		// --brief added 2026-09-01 against bd 3e03250ee (schema-0066 repin).
-		"--brief": true,
-		"--claim": true, "--explain": true, "--gated": true, "--include-deferred": true,
-		"--include-ephemeral": true, "--plain": true, "--pretty": true, "-u": true, "--unassigned": true,
+		// --brief/--brief-deps added 2026-09-01 against bd 3e03250ee (schema-0066 repin).
+		"--brief": true, "--claim": true, "--explain": true, "--gated": true,
+		"--include-deferred": true, "--include-ephemeral": true, "--plain": true,
+		"--pretty": true, "-u": true, "--unassigned": true,
 	},
 	"list": {
-		// --brief added 2026-09-01 against bd 3e03250ee (schema-0066 repin).
-		"--brief": true,
-		"--deps":  true,
-		"--all":   true, "--deferred": true, "--empty-description": true, "--flat": true,
-		"--include-ephemeral": true,
-		"--include-gates":     true, "--include-infra": true, "--include-templates": true,
+		"--all": true, "--brief": true, "--deferred": true, "--deps": true,
+		"--empty-description": true, "--flat": true, "--include-ephemeral": true,
+		"--include-gates": true, "--include-infra": true, "--include-templates": true,
 		"--long": true, "--no-assignee": true, "--no-labels": true, "--no-pager": true,
 		"--no-parent": true, "--no-pinned": true, "--overdue": true, "--pinned": true,
 		"--pretty": true, "--ready": true, "-r": true, "--reverse": true,
 		"--skip-labels": true, "--tree": true, "-w": true, "--watch": true,
 	},
 	"show": {
-		// --brief-deps added 2026-09-01 against bd 3e03250ee (schema-0066 repin).
-		"--brief-deps": true,
-		"--children":   true, "--current": true, "--include-comments": true,
+		"--brief-deps": true, "--children": true, "--current": true, "--include-comments": true,
 		"--include-dependents": true, "--local-time": true, "--long": true,
 		"--refs": true, "--short": true, "--thread": true, "-w": true, "--watch": true,
 	},

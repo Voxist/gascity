@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 740 = 738 + 2 for the 0066-era beads library (BD_LIB_REF d530cddfa):
-# cloud.google.com/go/pubsub/v2 and github.com/zeebo/errs enter as transitive
-# requirements of the newer beads module. `go mod why -m` reports "main module
-# does not need module" for both — they are module-graph entries only, never
-# linked into the gc binary (which held at ~252 MB against the 270 MB cap).
-# Revisit with the same trigger as the line below.
-#
-# 738 = 728 + 10 for the 0062-era beads library (the ga-zzcjs repin,
-# BD_LIB_REF): beads main grew an OpenAPI toolchain (kin-openapi,
-# oapi-codegen, oasdiff/yaml, speakeasy jsonpath/overlay, marshmallow,
-# go-yit, yaml-jsonpath, deepcopy, decimal128) that rides gc's module graph
-# as indirect requirements. Revisit when beads trims its api-gen deps or a
-# release supersedes the bridge.
+# MEASURED, not picked: this fork links the fork-first bridge's beads
+# (BD_LIB_REF d530cddfa), not upstream's v1.3.0-rc.2, so neither side's cap
+# applies unchanged. Upstream re-baselined to 737 for the RC (727 -> 737: nine
+# OpenAPI-toolchain modules behind bd's `bd serve` HTTP API — kin-openapi,
+# oapi-codegen/v2, speakeasy-api/{openapi,jsonpath}, oasdiff/{yaml,yaml3},
+# vmware-labs/yaml-jsonpath, dprotaso/go-yit — plus zeebo/errs, and
+# cloud.google.com/go/pubsub/v2 pulled through by the google.golang.org/api
+# bump MVS forced alongside it). The 0066-era bridge library reaches the same
+# stack by a different route; the value below is the count this merged module
+# graph actually produces. None of the OpenAPI stack links into gc — only bd's
+# internal/httpapi/apigen imports it, which the root beads package never
+# reaches, and the binary held at ~252 MB against the 270 MB cap. Revisit when
+# beads trims its api-gen deps or a release supersedes the bridge.
 max_modules="${GC_NATIVE_DEP_MAX_MODULES:-740}"
 # max_binary_bytes re-baselined 2026-08-29 (ga-iuznq2). The build below now
 # adds -trimpath and CGO_ENABLED=0, which removes cross-host path-embedding
