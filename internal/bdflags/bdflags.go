@@ -235,6 +235,13 @@ var boolFlagsBySub = map[string]map[string]bool{
 	"ready": {
 		// --brief added 2026-09-01 against bd 3e03250ee (schema-0066 repin).
 		"--brief": true,
+		// --flat added 2026-09-13 against bd 73a5bdc65 (the schema-0067 repin
+		// this branch pins, and the bd the fleet is running). It is a boolean
+		// alias for --plain -- "spelled the way bd list spells it" -- so it
+		// belongs in this value-less map, not the flags-with-arguments one
+		// above. The manifest must be a SUPERSET of the installed bd's real
+		// flags; being a superset is fine, being short by one is not.
+		"--flat":  true,
 		"--claim": true, "--explain": true, "--gated": true, "--include-deferred": true,
 		"--include-ephemeral": true, "--plain": true, "--pretty": true, "-u": true, "--unassigned": true,
 	},
