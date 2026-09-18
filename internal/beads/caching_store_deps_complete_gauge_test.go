@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestDepsCompleteHasASingleWriter pins the ADR-0094 D6 gauge to the flag it
@@ -100,6 +101,22 @@ func TestDepsCompleteGaugeReportsDwellAndLatchingDriver(t *testing.T) {
 		t.Fatalf("DepsRestorations = %d, want 1", s.DepsRestorations)
 	}
 
+	// Drive the dwell off a controlled clock rather than the wall clock. The
+	// gauge computes DepsIncompleteFor as depsClock().Sub(depsIncompleteSince),
+	// so a latch and an immediately following Stats() read landing in the same
+	// clock tick elapse EXACTLY zero. macOS time.Now() has microsecond
+	// granularity, which made that a frequent failure under load and blocked
+	// unrelated pushes through the pre-push gate (ga-eyz5l).
+	//
+	// A fixed sleep would trade one flake for another and is ratcheted against
+	// by internal/testpolicy/resourcecensus. Stubbing the clock removes the
+	// race outright AND strengthens the assertion: the dwell is checked for an
+	// exact value below, not merely for being positive.
+	fakeNow := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	origClock := depsClock
+	depsClock = func() time.Time { return fakeNow }
+	t.Cleanup(func() { depsClock = origClock })
+
 	c.mu.Lock()
 	c.setDepsCompleteLocked(false, "event-updated-deps-unknown")
 	latchedAt := c.depsIncompleteSince
@@ -107,6 +124,10 @@ func TestDepsCompleteGaugeReportsDwellAndLatchingDriver(t *testing.T) {
 	// or re-attribute the latch.
 	c.setDepsCompleteLocked(false, "reconcile-row-degraded")
 	c.mu.Unlock()
+
+	// Advance the controlled clock by a known interval; the dwell must equal it.
+	const dwell = 90 * time.Second
+	fakeNow = fakeNow.Add(dwell)
 
 	s = c.Stats()
 	if s.DepsComplete {
@@ -121,8 +142,8 @@ func TestDepsCompleteGaugeReportsDwellAndLatchingDriver(t *testing.T) {
 	if s.DepsDegradations != 1 {
 		t.Fatalf("DepsDegradations = %d, want 1 — a no-op re-assert must not count as a transition", s.DepsDegradations)
 	}
-	if s.DepsIncompleteFor <= 0 {
-		t.Fatalf("DepsIncompleteFor = %v, want a positive dwell", s.DepsIncompleteFor)
+	if s.DepsIncompleteFor != dwell {
+		t.Fatalf("DepsIncompleteFor = %v, want exactly %v — the dwell must measure elapsed time since the latch", s.DepsIncompleteFor, dwell)
 	}
 }
 

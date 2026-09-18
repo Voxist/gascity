@@ -32,15 +32,22 @@ func oldEffectiveWorkQuery(a *Agent, topo QueryTopology) string {
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
 		script := standardAssignedWorkQueryScript(topo) +
-			poolDemandOriginGateScript() +
+			poolDemandOriginGateScriptWithGraphAnchorFallback() +
 			poolDemandFirstRowFunctionScript(topo) +
+			assignedGraphWorkflowAnchorReadyFunctionScript(topo) +
+			`probe_assigned_graph_anchor_ready "$1"; ` +
+			graphWorkflowAnchorFallbackBeforeFreshPoolScript() +
 			`probe_pool_demand "$1"; ` +
 			`printf "[]"`
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
 	script := legacyControlAssignedWorkQueryScript(topo) +
-		poolDemandOriginGateScript() +
+		poolDemandOriginGateScriptWithGraphAnchorFallback() +
 		poolDemandFirstRowFunctionScript(topo) +
+		assignedGraphWorkflowAnchorReadyFunctionScript(topo) +
+		`probe_assigned_graph_anchor_ready "$1"; ` +
+		`probe_assigned_graph_anchor_ready "$2"; ` +
+		graphWorkflowAnchorFallbackBeforeFreshPoolScript() +
 		`probe_pool_demand "$1"; ` +
 		`probe_pool_demand "$2"; ` +
 		`printf "[]"`
@@ -375,24 +382,50 @@ func renormalizeFederatedCommand(federated string) string {
 	federated = replaceFragment(federated,
 		inProgressBlockedByEnrichmentScript(true, true),
 		inProgressBlockedByEnrichmentScript(false, true))
+	federated = replaceFragment(federated,
+		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(true, true),
+		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(false, true))
 	for _, shellVar := range []string{"id", "cand"} {
 		federated = replaceFragment(federated,
 			assignedInProgressTierCommand(shellVar, QueryTopology{FederatedReady: true}),
 			assignedInProgressTierCommand(shellVar, QueryTopology{}))
+		federated = replaceFragment(federated,
+			assignedInProgressCandidatesTierCommand(shellVar, QueryTopology{FederatedReady: true}),
+			assignedInProgressCandidatesTierCommand(shellVar, QueryTopology{}))
 	}
+	// ADR-0076 D4 (vp-d1kjk): the routed tier unions a priority probe and the
+	// oldest-first lookahead, so its federated/single-store difference is now
+	// two independently reader/failure/sink-gated reads instead of one. Same
+	// principle as the two fragments above: diff the production function's
+	// own two forms rather than pasting a hand-written pattern here. This
+	// function's only caller always compares under BD105 ready semantics, so
+	// that Beads config is fixed here to match — otherwise the fragment would
+	// miss the --include-ephemeral flag bd105 adds and silently no-op.
+	//
+	// The diffed fragment is the routed tier's FULL poolDemandFirstRowFunctionScript
+	// wrapping (`r=$(...)` + its OWN readyReaderFailurePropagation), not just
+	// routedReadyTierCommand's return value alone: routedReadyTierCommand no
+	// longer ends on the sink/fail-gated read it did pre-D4 (it now ends on
+	// the jq merge), so substituting only its own text would strand the
+	// caller's outer `|| exit $?` unswapped against the single-store form's
+	// sink-suffixed tail — the leftover this test caught on the first pass.
+	bd105 := BeadsConfig{BDCompatibility: BeadsBDCompatibility105}
+	routedTierWrapped := func(topo QueryTopology) string {
+		return `r=$(` + routedReadyTierCommand(topo) + `)` + readyReaderFailurePropagation(topo.FederatedReady)
+	}
+	federated = replaceFragment(federated,
+		routedTierWrapped(QueryTopology{Beads: bd105, FederatedReady: true}),
+		routedTierWrapped(QueryTopology{Beads: bd105}))
 	federated = strings.ReplaceAll(federated, gcReadyCommand, bdReadyCommand)
 	federated = strings.ReplaceAll(federated, `--json --limit=1) || exit $?`, `--json --limit=1 2>/dev/null)`)
-	// Two sorts now appear: the routed pool tier uses --sort hybrid (ADR-0035)
-	// while the run_target migration tier still uses --sort oldest, so the
-	// normalisation must cover BOTH rather than substituting one for the other.
-	for _, sortFlag := range []string{"oldest", "hybrid"} {
-		federated = strings.ReplaceAll(federated,
-			`--sort `+sortFlag+` --limit=20) || exit $?`,
-			`--sort `+sortFlag+` --limit=20 2>/dev/null)`)
-		federated = strings.ReplaceAll(federated,
-			`--sort `+sortFlag+` --limit=20 2>/dev/null) || exit $?`,
-			`--sort `+sortFlag+` --limit=20 2>/dev/null)`)
-	}
+	// Suffix-matched so one pair covers every --limit=20 read regardless of its
+	// --sort: the routed tier's ADR-0035 hybrid lookahead, the run_target
+	// migration fallback's retirement-window `--sort oldest`, and the graph
+	// anchor probe's `--sort oldest`. Upstream's shape, kept because it is the
+	// general one — the fork's per-sort loop had to be extended for each new
+	// sort flag and would have missed the anchor probe.
+	federated = strings.ReplaceAll(federated, `--limit=20) || exit $?`, `--limit=20 2>/dev/null)`)
+	federated = strings.ReplaceAll(federated, `--limit=20 2>/dev/null) || exit $?`, `--limit=20 2>/dev/null)`)
 	return federated
 }
 

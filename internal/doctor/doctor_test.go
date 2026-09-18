@@ -61,6 +61,7 @@ func TestCheckWarmupEligibleDefaultsFalse(t *testing.T) {
 		&BeadsRoleCheck{},
 		&BeadsStoreCheck{},
 		&BinaryCheck{},
+		&BinaryDivergenceCheck{},
 		&BuiltinPackFamilyCheck{},
 		&CityConfigCheck{},
 		&CityStructureCheck{},

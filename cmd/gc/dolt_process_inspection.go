@@ -711,7 +711,7 @@ func managedDoltProcessOwnedWithStateDir(pid int, layout managedDoltRuntimeLayou
 
 	procArgs, _ := processArgs(pid)
 	switch {
-	case containsProcessConfig(procArgs, layout.ConfigFile):
+	case managedDoltProcessArgsNameOwnedConfig(procArgs, layout):
 		return true
 	case hasOtherProcessConfig(procArgs):
 		return false
@@ -784,6 +784,21 @@ func processArgsFromPS(pid int, timeout time.Duration) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// managedDoltProcessArgsNameOwnedConfig reports whether argv names one of
+// the config files gc renders for THIS city's managed dolt: the published
+// one, or the ADR-0064 delivery window's sibling (vp-9ex9z).
+//
+// The window arm is load-bearing. The window's nested server is started with
+// --config dolt-config.window.yaml, and without this arm the
+// hasOtherProcessConfig case classifies it as another project's dolt server,
+// at which point stopManagedDoltProcessWithOptions declines to signal it and
+// a raised-deadline server is stranded on the managed port — the failure the
+// config split exists to prevent, reintroduced from the other side.
+func managedDoltProcessArgsNameOwnedConfig(args string, layout managedDoltRuntimeLayout) bool {
+	return containsProcessConfig(args, layout.ConfigFile) ||
+		containsProcessConfig(args, managedDoltDeliveryWindowConfigFile(layout))
 }
 
 func containsProcessConfig(args, configFile string) bool {

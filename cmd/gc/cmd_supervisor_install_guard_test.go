@@ -153,6 +153,7 @@ func TestInstallSupervisorLaunchdBinaryMismatchGuard(t *testing.T) {
 			gcHome := filepath.Join(homeDir, ".gc")
 			currentBinary := filepath.Join(homeDir, "bin", "gc")
 			t.Setenv("HOME", homeDir)
+			useDefaultSupervisorLaunchAgentsDir(t)
 			t.Setenv("GC_HOME", gcHome)
 			setSupervisorInstallForceForTest(t, tc.force)
 

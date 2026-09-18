@@ -24,6 +24,13 @@ func TestCurrentWorkflowsMatchPolicy(t *testing.T) {
 	}
 }
 
+func TestPlaywrightChromiumInstallHardensAgainstHungAptMirror(t *testing.T) {
+	docs := loadPolicyDocuments(t)
+	if err := validatePlaywrightInstallHardening(docs.ci); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMakeTestCIPolicyRunsStaticScopeContracts(t *testing.T) {
 	// -tags integration is load-bearing: two of the named contracts live in
 	// the integration-tagged pr_static_scope_contract_test.go (ga-4h8bu

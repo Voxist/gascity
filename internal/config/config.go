@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -221,6 +222,11 @@ type City struct {
 	Include []string `toml:"include,omitempty"`
 	// Workspace holds city-level metadata (name, default provider).
 	Workspace Workspace `toml:"workspace"`
+	// CityRole is the [city] table: this city's role in a multi-city fleet
+	// ("fleet-host" or "seat"). Orders select against it with run_on so a
+	// fleet-singleton order shipped in a shared pack fires on the fleet host
+	// only. Unset resolves through VOXIST_FLEET_ROLE, then to "seat".
+	CityRole CityRoleConfig `toml:"city,omitempty"`
 	// Providers defines named provider presets for agent startup.
 	Providers map[string]ProviderSpec `toml:"providers,omitempty"`
 	// Upstreams defines named model-serving endpoint presets selectable per
@@ -1178,16 +1184,17 @@ func (r *Rig) EffectivePrefix() string {
 	return DeriveBeadsPrefix(r.Name)
 }
 
-// Coordination class names, mirroring coordclass.Class.String(). They are part of
-// the [beads.classes.<name>] config contract and must not change without a
-// migration.
+// Coordination class names. They are part of the [beads.classes.<name>] config
+// contract and must not change without a migration. They no longer MIRROR
+// coordclass.Class.String() — both spell the same beadmeta constants, so the
+// two vocabularies cannot drift apart.
 const (
-	BeadClassWork      = "work"
-	BeadClassGraph     = "graph"
-	BeadClassMessaging = "messaging"
-	BeadClassSessions  = "sessions"
-	BeadClassOrders    = "orders"
-	BeadClassNudges    = "nudges"
+	BeadClassWork      = beadmeta.ClassNameWork
+	BeadClassGraph     = beadmeta.ClassNameGraph
+	BeadClassMessaging = beadmeta.ClassNameMessaging
+	BeadClassSessions  = beadmeta.ClassNameSessions
+	BeadClassOrders    = beadmeta.ClassNameOrders
+	BeadClassNudges    = beadmeta.ClassNameNudges
 )
 
 // EffectiveDefaultBranch returns the rig's recorded default branch, or the
@@ -5103,6 +5110,9 @@ func Load(fs fsys.FS, path string) (*City, error) {
 		return nil, err
 	}
 	if err := ValidateDoltConfig(cfg, path); err != nil {
+		return nil, err
+	}
+	if err := ValidateCityRole(cfg, path); err != nil {
 		return nil, err
 	}
 	return cfg, nil

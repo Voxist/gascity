@@ -56,6 +56,7 @@ func TestSweepStaleIsolatedSupervisorLaunchdRemovesOnlyStale(t *testing.T) {
 	homeDir := t.TempDir()
 	ownGCHome := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	useDefaultSupervisorLaunchAgentsDir(t)
 	t.Setenv("GC_HOME", ownGCHome)
 	oldGOOS := supervisorRuntimeGOOS
 	supervisorRuntimeGOOS = "darwin"
@@ -247,6 +248,7 @@ func TestInstallSupervisorLaunchdSweepsStaleSiblings(t *testing.T) {
 	homeDir := t.TempDir()
 	gcHome := filepath.Join(t.TempDir(), "isolated-home")
 	t.Setenv("HOME", homeDir)
+	useDefaultSupervisorLaunchAgentsDir(t)
 	t.Setenv("GC_HOME", gcHome)
 	oldGOOS := supervisorRuntimeGOOS
 	supervisorRuntimeGOOS = "darwin"
@@ -287,6 +289,7 @@ func TestUninstallSupervisorLaunchdSweepsStaleSiblings(t *testing.T) {
 	homeDir := t.TempDir()
 	gcHome := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	useDefaultSupervisorLaunchAgentsDir(t)
 	t.Setenv("GC_HOME", gcHome)
 	oldGOOS := supervisorRuntimeGOOS
 	supervisorRuntimeGOOS = "darwin"
