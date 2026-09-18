@@ -91,7 +91,16 @@ const (
 	// #195's BD_SOURCE_REF move (3e03250ee -> 73a5bdc65) at its pin sites, so
 	// the merged file hashes to NEITHER side's pin. Taken from the candidate
 	// digest this package printed for the merged workflow, not adopted.
-	expectedCIExecutionHash     = "7894fe36d9f67c0856de6e012ed75b06845ccb6386670c4c3f9b6345587ef14a"
+	// Re-derived for the upstream-v1.3.0 repin: BD_SOURCE_REF
+	// (73a5bdc65 -> 99d81dd4d) and BD_VERSION (v1.2.2 -> v1.90.0) moved at
+	// ci.yml's five pin sites and nothing else -- env values inside jobs whose
+	// shape is otherwise byte-identical. Taken from the candidate digest this
+	// package printed for the changed workflow.
+	// Re-derived for the bd v1.91.0 repin: BD_SOURCE_REF
+	// (99d81dd4d -> 2498618eb) and BD_VERSION (v1.90.0 -> v1.91.0) moved at
+	// the same five pin sites and nothing else. Taken from the candidate
+	// digest this package printed for the changed workflow.
+	expectedCIExecutionHash     = "61b7de469d0f35806bde6e49082c40336c276a6774ec86cb28acc682caed1475"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
@@ -110,7 +119,12 @@ const (
 	// BD_SOURCE_REF moved at nightly's two pin sites and nothing else. The
 	// semantic projection was read to confirm that -- env.BD_SOURCE_REF is
 	// the only differing field.
-	expectedNightlyExecutionHash = "220081045684f2130e737c55e23640cc46f3ff2f02f9ae51751fa6e4ca8f46b8"
+	// Re-derived for the upstream-v1.3.0 repin: BD_SOURCE_REF and BD_VERSION
+	// moved at nightly's two pin sites and nothing else. Taken from the
+	// candidate digest this package printed for the changed workflow.
+	// Re-derived for the bd v1.91.0 repin: the same two pin sites, same two
+	// keys, nothing else.
+	expectedNightlyExecutionHash = "ff702fc4e0aec70e0caba25b6a5c0084e57f6835d5f5bdf3a1ec2cb52dd6536f"
 	// Re-derived at the 2026-08-31 resync: the composite setup actions under
 	// .github/actions/setup-gascity-* auto-merged both sides as well, moving
 	// this pin along with the two workflow execution pins above.

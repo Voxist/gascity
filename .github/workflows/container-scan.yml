@@ -180,10 +180,11 @@ jobs:
           # scripts below, not just this shell. install-bd-archive.sh reads
           # BD_SOURCE_REF/BD_REPO from the environment to take the
           # build-from-source bridge path; without them it treats BD_VERSION
-          # as a release tag. BD_VERSION is currently v1.2.2, which is ALSO a
-          # real published beads release on a different lineage carrying
-          # schema 0053 -- so a plain `. ./deps.env` here silently installs the
-          # wrong binary through the unpinned API fallback.
+          # as a release tag and resolves it on gastownhall/beads through the
+          # unpinned API fallback. Whether that fails or silently installs an
+          # unrelated binary depends only on whether upstream has a release of
+          # the same name (under the earlier v1.2.2 pin it did), so a plain
+          # `. ./deps.env` here is never safe.
           set -a
           . ./deps.env
           set +a
