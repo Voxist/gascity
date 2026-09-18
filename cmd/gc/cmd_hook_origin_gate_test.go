@@ -53,7 +53,22 @@ esac
 // instrument an operator runs. gc hook is. This test pins the whole path.
 func TestCmdHookNamedOriginReportsGatedReasonRatherThanSilentEmpty(t *testing.T) {
 	hookOriginGateCity(t)
-	t.Setenv("GC_ALIAS", "worker")
+	// GC_ALIAS deliberately does NOT match the routed target. Upstream #6180
+	// added namedSelfTargetAdmit to the gate script --
+	// `[ -n "$GC_ALIAS" ] && [ "$1" = "$GC_ALIAS" ]` -- which runs FIRST and
+	// admits a named session outright when the target it is probing IS its own
+	// alias. The fixture routes hw-1 to gc.routed_to=worker, so with
+	// GC_ALIAS="worker" the seat is admitted and takes work addressed TO
+	// ITSELF. That is not the pool-poaching this test guards against, and
+	// upstream is right that such work "stays exactly the work the claim path
+	// already accepts" -- but it does mean the old GC_ALIAS="worker" no longer
+	// exercises a refusal at all.
+	//
+	// The property under test is unchanged: a named seat must not take routed
+	// work addressed to SOMEONE ELSE, and when the gate refuses it must say so
+	// rather than reporting a silent empty (vc-ozanp5 / ADR-0043). A
+	// non-matching alias is what puts the gate in that state now.
+	t.Setenv("GC_ALIAS", "other-seat")
 	t.Setenv("GC_AGENT", "worker")
 	t.Setenv("GC_SESSION_ID", "worker-session-id")
 	t.Setenv("GC_SESSION_NAME", "worker-session")
@@ -111,7 +126,26 @@ func TestCmdHookEphemeralOriginFindsRoutedWorkAndStaysSilent(t *testing.T) {
 // actually runs — would ship unproven.
 func TestCmdHookClaimNamedOriginReportsGatedReason(t *testing.T) {
 	hookOriginGateCity(t)
-	t.Setenv("GC_ALIAS", "worker")
+	// GC_ALIAS deliberately does NOT match the probe target. Upstream #6180
+	// added namedSelfTargetAdmit to the gate script --
+	// `[ -n "$GC_ALIAS" ] && [ "$1" = "$GC_ALIAS" ]` -- which runs FIRST and
+	// admits a named session outright when its alias IS the target it is
+	// probing, on the reasoning that such work is exactly what the claim path
+	// already accepts. An admitted session is never refused, so it prints no
+	// refusal line.
+	//
+	// This test predates that and used GC_ALIAS="worker" against target
+	// "worker", so after the 2026-09-13 resync it was silently exercising the
+	// ADMITTED path while still asserting the refusal, and failed. The read
+	// path above keeps GC_ALIAS="worker" because its probe targets differ and
+	// the admit does not fire there.
+	//
+	// The subject here is unchanged and is NOT about which sessions are
+	// admitted: it is that the CLAIM path must not SWALLOW a refusal the gate
+	// did emit. Using a non-matching alias keeps this a named seat with a real
+	// identity while making the gate actually refuse, which is the only state
+	// in which "was the reason surfaced?" is a meaningful question.
+	t.Setenv("GC_ALIAS", "other-seat")
 	t.Setenv("GC_AGENT", "worker")
 	t.Setenv("GC_SESSION_ID", "worker-session-id")
 	t.Setenv("GC_SESSION_NAME", "worker-session")

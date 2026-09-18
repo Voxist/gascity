@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -19,6 +20,13 @@ const (
 	// approximating shell semantics: any execution change requires explicit
 	// policy review, while workflow, job, step, and input descriptions remain
 	// free to change. A failure prints the projection and candidate digest.
+	// Re-derived at the 2026-09-13 resync (158 upstream commits, superseding
+	// the 102-commit 2026-09-11 branch): ci.yml and nightly.yml auto-merged
+	// both sides — upstream moved BD_VERSION while the fork kept the
+	// BD_REPO/BD_SOURCE_REF bridge block at every pin site — so the merged
+	// execution shape hashes to neither side's prior pin. Every value below is
+	// the candidate digest this package printed for the MERGED workflows,
+	// never adopted from a side.
 	expectedCITriggersHash = "d1a8bcd089019589658d8f154af9c26a70877285d84a384c2dcea299efc9554a"
 	// MERGE INTENT (v1.4.0 resync): re-derived, not picked. This pin is a
 	// tripwire over the CI workflow's semantic execution shape. .github/workflows/ci.yml
@@ -78,11 +86,12 @@ const (
 	// execution-shape change -- a new blocking step -- so this tripwire
 	// firing is the intended behavior and re-pinning is the correct
 	// response. No other job, step, or shell text moved.
-	// Re-derived again for the 0066->0067 repin: BD_SOURCE_REF moved at its
-	// five ci.yml pin sites (3e03250ee -> 73a5bdc65) and nowhere else. Same
-	// class as the earlier BD_REPO/BD_SOURCE_REF repin noted above -- an env
-	// value change inside jobs whose shape is otherwise byte-identical.
-	expectedCIExecutionHash     = "76c074e11a07710b77975e4d931d8d3f1e588fd7fec29429f29503cb24f24ea6"
+	// Re-derived again for the 0066->0067 repin (#195) merged into the
+	// 2026-09-13 resync: ci.yml carries both the resync's execution shape and
+	// #195's BD_SOURCE_REF move (3e03250ee -> 73a5bdc65) at its pin sites, so
+	// the merged file hashes to NEITHER side's pin. Taken from the candidate
+	// digest this package printed for the merged workflow, not adopted.
+	expectedCIExecutionHash     = "7894fe36d9f67c0856de6e012ed75b06845ccb6386670c4c3f9b6345587ef14a"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
@@ -261,6 +270,9 @@ func validate(ci, nightly, action map[string]any) error {
 	if err := validatePRProviderOwnership(ci); err != nil {
 		return err
 	}
+	if err := validatePlaywrightInstallHardening(ci); err != nil {
+		return err
+	}
 	if err := assertWorkflowExecution("CI", ci, expectedCIExecutionHash); err != nil {
 		return err
 	}
@@ -424,6 +436,60 @@ func validateNightlyProviderOwnership(workflow map[string]any) error {
 				match.name,
 			)
 		}
+	}
+	return nil
+}
+
+// validatePlaywrightInstallHardening ensures the Dashboard SPA's Playwright
+// Chromium install step fails fast on a hung apt mirror instead of consuming
+// its whole retry budget on a single stuck attempt: each retry wraps the
+// install command with a per-attempt timeout, and apt itself gets an
+// explicit HTTP timeout so a dead mirror errors instead of hanging.
+func validatePlaywrightInstallHardening(workflow map[string]any) error {
+	job, err := workflowJob(workflow, "dashboard")
+	if err != nil {
+		return err
+	}
+	steps, err := mappingSlice(job["steps"], "dashboard steps")
+	if err != nil {
+		return err
+	}
+	const stepName = "Install Playwright Chromium"
+	var installStep map[string]any
+	for _, candidate := range steps {
+		if candidate["name"] == stepName {
+			installStep = candidate
+			break
+		}
+	}
+	if installStep == nil {
+		return fmt.Errorf("dashboard job is missing the %q step", stepName)
+	}
+	if installStep["timeout-minutes"] != 12 {
+		return fmt.Errorf("%q step must keep its outer timeout-minutes at 12", stepName)
+	}
+	run, ok := installStep["run"].(string)
+	if !ok {
+		return fmt.Errorf("%q step must have a run script", stepName)
+	}
+	aptTimeoutIndex := strings.Index(run, `Acquire::http::Timeout "15"`)
+	if aptTimeoutIndex < 0 {
+		return fmt.Errorf(
+			"%q step must configure an apt HTTP timeout (Acquire::http::Timeout \"15\") so a dead mirror errors instead of hanging",
+			stepName,
+		)
+	}
+	const perAttemptInstall = "timeout 240 npm run test:e2e:install:ci"
+	installIndex := strings.Index(run, perAttemptInstall)
+	if installIndex < 0 {
+		return fmt.Errorf(
+			"%q step must wrap each retry attempt with a per-attempt timeout (%q) so a hung install cannot consume the whole step budget",
+			stepName,
+			perAttemptInstall,
+		)
+	}
+	if aptTimeoutIndex > installIndex {
+		return fmt.Errorf("%q step must configure the apt HTTP timeout before the retry loop runs", stepName)
 	}
 	return nil
 }

@@ -604,11 +604,16 @@ func TestCatalogBindsACPWithDirAndDefersDefaultConstructor(t *testing.T) {
 				}
 				withDirProof = claim.Proof
 			case repoSymbol("internal/runtime/acp", "NewSeamBacked"):
-				// PROVED here, not waived: the fork closed this contract with
-				// TestACPConformanceSharedDir (internal/runtime/acp/
-				// conformance_test.go, //go:build integration). Verified
-				// 2026-08-31 — the test exists and passes under the integration
-				// tag, so reverting this to a waiver would discard a real proof.
+				// PROVED here, not waived: the fork closed this contract with a
+				// direct conformance run over NewSeamBacked. Upstream still
+				// carries it as a waiver expiring 2026-10-08 whose stated
+				// remaining gap is a clean Darwin-lane run blocked by ga-csh74h
+				// (upstream's Mac CI is broken); this fork's Mac suite runs, so
+				// the proof stands. The 2026-09-13 resync renamed the entrypoint
+				// to upstream's TestACPDefaultDirConformance — a better test
+				// (PID-scoped session names, so concurrent runs cannot collide
+				// in the shared default dir) — and retargeted the proof to it.
+				// Reverting this to a waiver would discard a real proof.
 				if claim.Disposition != DispositionProved {
 					t.Errorf("ACP default disposition = %q, want %q", claim.Disposition, DispositionProved)
 				}
@@ -634,12 +639,20 @@ func TestCatalogBindsACPWithDirAndDefersDefaultConstructor(t *testing.T) {
 	// the conformance harness never made, is not the proof this claim asserts.
 	// The 2026-08-31 merge kept the file check and dropped both of these
 	// (they lived in the fork's TestCatalogBindsACPConstructors).
-	if defaultProof.File != "internal/runtime/acp/conformance_test.go" || defaultProof.Test != "TestACPConformanceSharedDir" {
-		t.Errorf("ACP default proof = %s#%s, want ACP shared-dir conformance entrypoint", defaultProof.File, defaultProof.Test)
+	if defaultProof.File != "internal/runtime/acp/conformance_test.go" || defaultProof.Test != "TestACPDefaultDirConformance" {
+		t.Errorf("ACP default proof = %s#%s, want ACP default-dir conformance entrypoint", defaultProof.File, defaultProof.Test)
 	}
-	if got, want := renderSymbolRefs(defaultProof.AllowedCalls), "fmt.Sprintf, internal/runtime/acp.acpConformanceCommand, sync/atomic.AddInt64"; got != want {
+	if got, want := renderSymbolRefs(defaultProof.AllowedCalls), "fmt.Sprintf, internal/runtime/acp.acpConformanceCommand, os.Getpid, sync/atomic.AddInt64"; got != want {
 		t.Errorf("ACP default allowed calls = %q, want %q", got, want)
 	}
+	// Upstream's three waiver-reason assertions are deliberately absent here.
+	// They checked that a WAIVER's prose named TestACPDefaultDirConformance and
+	// the ga-csh74h Darwin blocker; on this fork the same claim is PROVED, so
+	// there is no waiver and no reason string to assert against. The property
+	// they protected — that the claim rests on a test which actually exercises
+	// NewSeamBacked, not on the WithDir proof — is carried more strongly by the
+	// File/Test/AllowedCalls assertions above, which bind the proof to that
+	// exact entrypoint rather than to prose describing it.
 }
 
 func TestCatalogBindsExecCompositionToSeamBackedContract(t *testing.T) {
