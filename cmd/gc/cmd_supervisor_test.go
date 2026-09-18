@@ -1243,6 +1243,7 @@ func TestRenderSupervisorTemplateUsesCanonicalRelativeGCHome(t *testing.T) {
 func TestSupervisorLaunchdPlistPathUsesIsolatedLabelForIsolatedGCHome(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	useDefaultSupervisorLaunchAgentsDir(t)
 	t.Setenv("GC_HOME", filepath.Join(t.TempDir(), "isolated-home"))
 
 	label := supervisorLaunchdLabel()
@@ -3459,6 +3460,7 @@ func TestInstallSupervisorLaunchdRemovesMatchingLegacyDefaultPlistForIsolatedGCH
 	homeDir := t.TempDir()
 	gcHome := filepath.Join(t.TempDir(), "isolated-home")
 	t.Setenv("HOME", homeDir)
+	useDefaultSupervisorLaunchAgentsDir(t)
 	t.Setenv("GC_HOME", gcHome)
 
 	legacyPath := filepath.Join(homeDir, "Library", "LaunchAgents", defaultSupervisorLaunchdLabel+".plist")
@@ -3662,6 +3664,7 @@ func TestInstallSupervisorLaunchdKeepsLegacyPlistWhenNewServiceFails(t *testing.
 	homeDir := t.TempDir()
 	gcHome := filepath.Join(t.TempDir(), "isolated-home")
 	t.Setenv("HOME", homeDir)
+	useDefaultSupervisorLaunchAgentsDir(t)
 	t.Setenv("GC_HOME", gcHome)
 
 	legacyPath := legacySupervisorLaunchdPlistPath()
@@ -3887,6 +3890,7 @@ func TestInstallSupervisorLaunchdRestoresPreviousCurrentPlistWhenUpdateFails(t *
 	homeDir := t.TempDir()
 	gcHome := filepath.Join(t.TempDir(), "isolated-home")
 	t.Setenv("HOME", homeDir)
+	useDefaultSupervisorLaunchAgentsDir(t)
 	t.Setenv("GC_HOME", gcHome)
 
 	currentPath := filepath.Join(homeDir, "Library", "LaunchAgents", supervisorLaunchdLabel()+".plist")
@@ -3964,6 +3968,7 @@ func TestInstallSupervisorLaunchdSkipsReloadWhenUnchangedAndSupervisorAlive(t *t
 	homeDir := t.TempDir()
 	gcHome := filepath.Join(t.TempDir(), "isolated-home")
 	t.Setenv("HOME", homeDir)
+	useDefaultSupervisorLaunchAgentsDir(t)
 	t.Setenv("GC_HOME", gcHome)
 
 	data := &supervisorServiceData{
@@ -4015,6 +4020,7 @@ func TestInstallSupervisorLaunchdReloadsWhenUnchangedButSupervisorStopped(t *tes
 	homeDir := t.TempDir()
 	gcHome := filepath.Join(t.TempDir(), "isolated-home")
 	t.Setenv("HOME", homeDir)
+	useDefaultSupervisorLaunchAgentsDir(t)
 	t.Setenv("GC_HOME", gcHome)
 
 	data := &supervisorServiceData{
@@ -4069,6 +4075,7 @@ func TestUninstallSupervisorLaunchdRemovesMatchingLegacyDefaultPlistForIsolatedG
 	homeDir := t.TempDir()
 	gcHome := filepath.Join(t.TempDir(), "isolated-home")
 	t.Setenv("HOME", homeDir)
+	useDefaultSupervisorLaunchAgentsDir(t)
 	t.Setenv("GC_HOME", gcHome)
 
 	currentPath := filepath.Join(homeDir, "Library", "LaunchAgents", supervisorLaunchdLabel()+".plist")
@@ -4132,6 +4139,7 @@ func TestUninstallSupervisorLaunchdUsesControlSocketWhenSupervisorRunning(t *tes
 	homeDir := t.TempDir()
 	gcHome := shortTempDir(t, "gc-home-")
 	t.Setenv("HOME", homeDir)
+	useDefaultSupervisorLaunchAgentsDir(t)
 	t.Setenv("GC_HOME", gcHome)
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
@@ -4265,6 +4273,7 @@ func TestUninstallSupervisorLaunchdIgnoresLegacyUnloadFailures(t *testing.T) {
 	homeDir := t.TempDir()
 	gcHome := filepath.Join(t.TempDir(), "isolated-home")
 	t.Setenv("HOME", homeDir)
+	useDefaultSupervisorLaunchAgentsDir(t)
 	t.Setenv("GC_HOME", gcHome)
 
 	currentPath := filepath.Join(homeDir, "Library", "LaunchAgents", supervisorLaunchdLabel()+".plist")

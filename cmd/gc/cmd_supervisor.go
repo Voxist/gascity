@@ -1446,6 +1446,19 @@ func configureSupervisorRuntime() {
 	}
 }
 
+// testHarnessDefaultPortError refuses a supervisor config that leaves the API
+// port unset while running under a test harness. The default port is the
+// production supervisor's: a test supervisor that falls back to it either
+// fails as a "duplicate" or, worse, wins the port and takes the fleet's
+// controller offline (ga-32bb2). Test supervisors must pin their own port.
+func testHarnessDefaultPortError(s supervisor.Section) error {
+	if s.Port > 0 || os.Getenv(managedDoltTestModeEnv) != "1" {
+		return nil
+	}
+	return fmt.Errorf("refusing to bind the default API port %d under a test harness (%s=1); set [supervisor] port in %s",
+		s.PortOrDefault(), managedDoltTestModeEnv, supervisor.ConfigPath())
+}
+
 // runSupervisor is the main supervisor loop. It acquires the lock,
 // starts a control socket, reads the registry, starts CityRuntimes,
 // and runs until canceled.
@@ -1551,6 +1564,10 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	supCfg, err := supervisorLoadConfig(supervisor.ConfigPath())
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: config: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if err := testHarnessDefaultPortError(supCfg.Supervisor); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: %v\n", err) //nolint:errcheck
 		return 1
 	}
 

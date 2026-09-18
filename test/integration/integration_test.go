@@ -84,6 +84,7 @@ const (
 	integrationDoltIdentityEnv = "GC_INTEGRATION_DOLT_IDENTITY_MODE"
 	managedDoltTestModeEnv     = "GC_MANAGED_DOLT_TEST_MODE"
 	managedDoltTestParentEnv   = "GC_MANAGED_DOLT_TEST_PARENT_PID"
+	launchAgentsDirEnv         = "GC_SUPERVISOR_LAUNCH_AGENTS_DIR"
 	doltIdentityModeIsolated   = "isolated"
 	doltIdentityModeGlobal     = "global"
 	doltIdentityModeSkip       = "skip"
@@ -184,6 +185,9 @@ func TestMain(m *testing.M) {
 	if err := os.MkdirAll(integrationToolBinDir, 0o755); err != nil {
 		panic("integration: creating integration tool bin dir: " + err.Error())
 	}
+	if err := writeLaunchctlRefusalShim(integrationToolBinDir); err != nil {
+		panic("integration: writing launchctl shim: " + err.Error())
+	}
 
 	if override, ok, err := binaryOverride(integrationGCBinaryEnv); err != nil {
 		panic("integration: resolving GC override: " + err.Error())
@@ -258,6 +262,7 @@ func TestMain(m *testing.M) {
 	// cities have actually shut down, avoiding a race with process-table
 	// cleanup below.
 	stopIntegrationSupervisorWithTimeout(integrationSupervisorStopTimeout)
+	bootoutTestLaunchAgents(integrationLaunchAgentsDir(testGCHome))
 
 	// Post-sweep: clean up any sessions that survived individual test cleanup.
 	if !subprocess {
@@ -609,6 +614,54 @@ func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
 	if !strings.HasPrefix(wantRef, m[1]) {
 		t.Errorf("go.mod links beads commit %s (%s), deps.env expects %s", m[1], version, wantRef)
 	}
+}
+
+// writeLaunchctlRefusalShim puts a launchctl on every gc subprocess's PATH
+// that refuses all calls (ga-32bb2). The install path then rolls its plist
+// back and ensureSupervisorRunning falls through to a bare-forked supervisor
+// — the same path a host without a service manager takes — so no test ever
+// loads a KeepAlive job into the operator's launchd domain, where it would
+// outlive its GC_HOME and relaunch onto the production supervisor port.
+// Mirrors test/acceptance/helpers installServiceManagerShims.
+func writeLaunchctlRefusalShim(dir string) error {
+	const body = "#!/bin/sh\n# gc integration: never touch the real launchd domain (ga-32bb2).\necho 'launchctl is disabled under gc integration tests' >&2\nexit 1\n"
+	return os.WriteFile(filepath.Join(dir, "launchctl"), []byte(body), 0o755)
+}
+
+// bootoutTestLaunchAgents boots out and removes every plist in a test's
+// injected LaunchAgents dir. With the refusal shim nothing is ever loaded,
+// so this is the backstop that keeps a failed or regressed test from
+// orphaning a launchd job. It targets only labels found in dir, which is a
+// per-test temp path, never the operator's real LaunchAgents, and among those
+// only per-GC_HOME test labels: a plist named after the production label in
+// dir must never make the backstop boot out the production supervisor.
+func bootoutTestLaunchAgents(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".plist") {
+			continue
+		}
+		label := strings.TrimSuffix(name, ".plist")
+		if isTestSupervisorLaunchdLabel(label) {
+			_, _ = runCommand("", nil, 10*time.Second, "/bin/launchctl", "bootout", "gui/"+strconv.Itoa(os.Getuid())+"/"+label)
+		}
+		_ = os.Remove(filepath.Join(dir, name))
+	}
+}
+
+// testSupervisorLaunchdLabelPrefix is the prefix of the per-GC_HOME labels a
+// test supervisor installs; the bare production label has no suffix.
+const testSupervisorLaunchdLabelPrefix = "com.gascity.supervisor."
+
+// isTestSupervisorLaunchdLabel reports whether label is a per-GC_HOME test
+// supervisor label that bootoutTestLaunchAgents may boot out.
+func isTestSupervisorLaunchdLabel(label string) bool {
+	return strings.HasPrefix(label, testSupervisorLaunchdLabelPrefix) &&
+		len(label) > len(testSupervisorLaunchdLabelPrefix)
 }
 
 func writeExecShim(path, target string) error {
@@ -1442,6 +1495,7 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	env = filterEnv(env, integrationGCBinaryEnv)
 	env = filterEnv(env, integrationDoltBinaryEnv)
 	env = filterEnv(env, "BEADS_DOLT_AUTO_START")
+	env = filterEnv(env, launchAgentsDirEnv)
 	if !useDolt {
 		env = append(env, "GC_DOLT=skip")
 	}
@@ -1459,8 +1513,17 @@ func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
 	// (resolveAutoStart priority bug), so the env var is the only
 	// reliable kill-switch. Mirrors bdRuntimeEnv in cmd/gc/bd_env.go.
 	env = append(env, "BEADS_DOLT_AUTO_START=0")
+	// HOME stays pinned to the real home below, so without this every plist
+	// gc writes would land in the operator's ~/Library/LaunchAgents (ga-32bb2).
+	env = append(env, launchAgentsDirEnv+"="+integrationLaunchAgentsDir(gcHome))
 	env = pinRealHomeEnv(env)
 	return env
+}
+
+// integrationLaunchAgentsDir is the per-GC_HOME stand-in for
+// ~/Library/LaunchAgents; it is removed with the GC_HOME it lives under.
+func integrationLaunchAgentsDir(gcHome string) string {
+	return filepath.Join(gcHome, "LaunchAgents")
 }
 
 // pinRealHomeEnv pins HOME to the real passwd-db home for the current uid.
@@ -1536,6 +1599,9 @@ func newIsolatedEnvRoot(t *testing.T, useDolt bool) (string, string, []string) {
 	})
 	registerIntegrationDoltSQLServerCleanup(t, root)
 	gcHome := filepath.Join(root, "gc-home")
+	// Registered after the RemoveAll above so it runs first (LIFO), while the
+	// plists it boots out still exist — including when the test failed.
+	t.Cleanup(func() { bootoutTestLaunchAgents(integrationLaunchAgentsDir(gcHome)) })
 	runtimeDir := filepath.Join(root, "runtime")
 	if err := os.MkdirAll(gcHome, 0o755); err != nil {
 		t.Fatalf("creating isolated GC_HOME: %v", err)
