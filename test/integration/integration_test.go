@@ -632,7 +632,9 @@ func writeLaunchctlRefusalShim(dir string) error {
 // injected LaunchAgents dir. With the refusal shim nothing is ever loaded,
 // so this is the backstop that keeps a failed or regressed test from
 // orphaning a launchd job. It targets only labels found in dir, which is a
-// per-test temp path, never the operator's real LaunchAgents.
+// per-test temp path, never the operator's real LaunchAgents, and among those
+// only per-GC_HOME test labels: a plist named after the production label in
+// dir must never make the backstop boot out the production supervisor.
 func bootoutTestLaunchAgents(dir string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -644,9 +646,22 @@ func bootoutTestLaunchAgents(dir string) {
 			continue
 		}
 		label := strings.TrimSuffix(name, ".plist")
-		_, _ = runCommand("", nil, 10*time.Second, "/bin/launchctl", "bootout", "gui/"+strconv.Itoa(os.Getuid())+"/"+label)
+		if isTestSupervisorLaunchdLabel(label) {
+			_, _ = runCommand("", nil, 10*time.Second, "/bin/launchctl", "bootout", "gui/"+strconv.Itoa(os.Getuid())+"/"+label)
+		}
 		_ = os.Remove(filepath.Join(dir, name))
 	}
+}
+
+// testSupervisorLaunchdLabelPrefix is the prefix of the per-GC_HOME labels a
+// test supervisor installs; the bare production label has no suffix.
+const testSupervisorLaunchdLabelPrefix = "com.gascity.supervisor."
+
+// isTestSupervisorLaunchdLabel reports whether label is a per-GC_HOME test
+// supervisor label that bootoutTestLaunchAgents may boot out.
+func isTestSupervisorLaunchdLabel(label string) bool {
+	return strings.HasPrefix(label, testSupervisorLaunchdLabelPrefix) &&
+		len(label) > len(testSupervisorLaunchdLabelPrefix)
 }
 
 func writeExecShim(path, target string) error {

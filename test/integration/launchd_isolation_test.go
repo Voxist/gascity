@@ -132,3 +132,21 @@ func TestSupervisorInstallNeverWritesRealLaunchAgents(t *testing.T) {
 		}
 	}
 }
+
+// TestBootoutBackstopNeverTargetsProductionLabel pins that the cleanup
+// backstop only boots out per-GC_HOME test labels, so a production-named
+// plist in a test's LaunchAgents dir cannot stop the operator's supervisor.
+func TestBootoutBackstopNeverTargetsProductionLabel(t *testing.T) {
+	cases := map[string]bool{
+		"com.gascity.supervisor":                 false,
+		"com.gascity.supervisor.":                false,
+		"com.gascity.dashboard-watchdog":         false,
+		"com.example.other":                      false,
+		"com.gascity.supervisor.gc-home-0123abc": true,
+	}
+	for label, want := range cases {
+		if got := isTestSupervisorLaunchdLabel(label); got != want {
+			t.Errorf("isTestSupervisorLaunchdLabel(%q) = %v, want %v", label, got, want)
+		}
+	}
+}
