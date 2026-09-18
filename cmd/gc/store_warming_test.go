@@ -74,17 +74,27 @@ func useWarmingTestWall(t *testing.T) {
 	t.Setenv("GC_STORE_WARMING_WALL_MS", fmt.Sprintf("%d", warmingTestWall.Milliseconds()))
 }
 
-// degradeStore drives a store's tracker into the open-breaker state through
-// the real state machine, so these tests exercise the production predicate
-// rather than a hand-set flag.
-func degradeStore(t *testing.T, prefix string) {
+// degradeScope opens a scope's REAL transport breaker the way the bd runner
+// does: consecutive bd calls killed at their per-command deadline, each
+// classified and recorded through the production helpers. The city comes from
+// writeBreakerTestCity (three failures trip, one-hour open), so the verdict
+// cannot expire mid-test.
+func degradeScope(t *testing.T, cityPath, scopeRoot string) {
 	t.Helper()
-	for i := 0; i < 5; i++ {
-		beads.RecordStoreProbeForTest(prefix, warmingTestWall*2, true)
+	breaker := bdScopeBreaker(cityPath, scopeRoot)
+	timeout := fmt.Errorf("bd list: timed out after %s", beads.TickReadBoundForTest())
+	for i := 0; i < 3; i++ {
+		recordBdBreakerOutcome(breaker, bdInvocationTimedOut("bd", timeout))
 	}
-	if !beads.StoreIsDegraded(prefix) {
-		t.Fatalf("precondition: store %q did not degrade", prefix)
+	if breaker.Available() {
+		t.Fatalf("precondition: scope %q breaker did not open", scopeRoot)
 	}
+}
+
+// sweepScoped wraps a store the way orderTrackingSweepStoresFromTargets does,
+// so the filter sees the production shape.
+func sweepScoped(store beads.Store, label, scopeRoot string) beads.Store {
+	return orderTrackingSweepScopedStore{Store: store, label: label, key: scopeRoot, scopeRoot: scopeRoot}
 }
 
 // TestDegradedStoresAreDroppedFromTheTickSweep is AC1's tick half and AC2's
@@ -94,27 +104,26 @@ func degradeStore(t *testing.T, prefix string) {
 // serial tick body. On 2026-09-06 that body serialized behind stores that
 // could not answer, and the observable result was 20 cooldown orders going
 // stale simultaneously while the supervisor logged nothing for 15 minutes.
-// The store the reconciler has already proven cannot answer must not be
+// A scope the transport breaker has already declared unavailable must not be
 // walked again by the sweep on the tick path.
 func TestDegradedStoresAreDroppedFromTheTickSweep(t *testing.T) {
-	useWarmingTestWall(t)
-	beads.ResetStoreWarmingRegistryForTest()
-	t.Cleanup(beads.ResetStoreWarmingRegistryForTest)
+	cityPath := writeBreakerTestCity(t, "")
+	sickRoot, wellRoot := t.TempDir(), t.TempDir()
+	degradeScope(t, cityPath, sickRoot)
 
-	sick := newPrefixedStore("vcnysick")
-	well := newPrefixedStore("vcnywell")
-	degradeStore(t, "vcnysick")
+	sick := sweepScoped(newPrefixedStore("vcnysick"), `rig "sick"`, sickRoot)
+	well := sweepScoped(newPrefixedStore("vcnywell"), `rig "well"`, wellRoot)
 
 	var stderr bytes.Buffer
-	kept := filterDegradedSweepStores([]beads.Store{sick, well}, &stderr, "test")
+	kept := filterDegradedSweepStores(cityPath, []beads.Store{sick, well}, &stderr, "test")
 
 	if len(kept) != 1 {
 		t.Fatalf("kept %d store(s), want 1 — the degraded store must be dropped", len(kept))
 	}
-	if got, _ := sweepStorePrefix(kept[0]); got != "vcnywell" {
-		t.Fatalf("kept store = %q, want the healthy vcnywell", got)
+	if got := kept[0].(orderTrackingSweepScopedStore).scopeRoot; got != wellRoot {
+		t.Fatalf("kept store scope = %q, want the healthy %q", got, wellRoot)
 	}
-	if !strings.Contains(stderr.String(), "vcnysick") {
+	if !strings.Contains(stderr.String(), `rig "sick"`) {
 		t.Fatalf("the skip was not announced; a silent skip leaves the operator "+
 			"with no reason for the sweep's reduced scope.\nstderr: %s", stderr.String())
 	}
@@ -123,13 +132,13 @@ func TestDegradedStoresAreDroppedFromTheTickSweep(t *testing.T) {
 // TestHealthyStoresSurviveTheSweepFilterUntouched is the other half of the
 // isolation property: a degraded store must not take the fleet with it.
 func TestHealthyStoresSurviveTheSweepFilterUntouched(t *testing.T) {
-	useWarmingTestWall(t)
-	beads.ResetStoreWarmingRegistryForTest()
-	t.Cleanup(beads.ResetStoreWarmingRegistryForTest)
-
-	stores := []beads.Store{newPrefixedStore("vcnya"), newPrefixedStore("vcnyb")}
+	cityPath := writeBreakerTestCity(t, "")
+	stores := []beads.Store{
+		sweepScoped(newPrefixedStore("vcnya"), `rig "a"`, t.TempDir()),
+		sweepScoped(newPrefixedStore("vcnyb"), `rig "b"`, t.TempDir()),
+	}
 	var stderr bytes.Buffer
-	kept := filterDegradedSweepStores(stores, &stderr, "test")
+	kept := filterDegradedSweepStores(cityPath, stores, &stderr, "test")
 
 	if len(kept) != 2 {
 		t.Fatalf("kept %d of 2 healthy stores", len(kept))
@@ -141,17 +150,18 @@ func TestHealthyStoresSurviveTheSweepFilterUntouched(t *testing.T) {
 
 // TestSweepFilterKeepsStoresItCannotIdentify pins the fail-safe direction.
 // "Unknown scope" must never mean "skip": a store-type change that stopped
-// exposing IDPrefix would otherwise silently disable both watchdogs, which
-// is the stale-tracking jam (#2168) reintroduced by accident.
+// carrying its scope root would otherwise silently disable both watchdogs,
+// which is the stale-tracking jam (#2168) reintroduced by accident. The
+// orders binding serves every scope and names none, so it is kept too.
 func TestSweepFilterKeepsStoresItCannotIdentify(t *testing.T) {
-	useWarmingTestWall(t)
-	beads.ResetStoreWarmingRegistryForTest()
-	t.Cleanup(beads.ResetStoreWarmingRegistryForTest)
+	cityPath := writeBreakerTestCity(t, "")
+	degradeScope(t, cityPath, cityPath)
 
 	anonymous := beads.NewMemStore()
-	kept := filterDegradedSweepStores([]beads.Store{anonymous}, nil, "test")
-	if len(kept) != 1 {
-		t.Fatal("a store with no identifiable prefix was skipped; unknown must mean keep")
+	ordersBinding := sweepScoped(beads.NewMemStore(), "orders binding", "")
+	kept := filterDegradedSweepStores(cityPath, []beads.Store{anonymous, ordersBinding}, nil, "test")
+	if len(kept) != 2 {
+		t.Fatalf("kept %d of 2 stores with no identifiable scope; unknown must mean keep", len(kept))
 	}
 }
 
@@ -162,8 +172,8 @@ func TestSweepFilterKeepsStoresItCannotIdentify(t *testing.T) {
 // Before: each store's reads were bounded at bdReadCommandTimeout (120s), 4x
 // the listener's own wall, inside a serial tick — so N stores could cost
 // N x 120s per phase. After: a tick-context read is bounded below the wall,
-// and a store that exceeds it twice stops costing anything at all for the
-// breaker cooldown.
+// and each one that times out counts against the scope's transport breaker,
+// which stops the scope costing anything at all while it is open.
 func TestWorstCaseTickCostIsBoundedByTheTickRead(t *testing.T) {
 	t.Parallel()
 
@@ -182,7 +192,7 @@ func TestWorstCaseTickCostIsBoundedByTheTickRead(t *testing.T) {
 
 	// The property that matters at fleet scale: 20 stores at the pre-plan
 	// bound is a 40-minute tick; at the tick bound it is bounded by
-	// stores x tickBound, and by zero once the breakers open.
+	// stores x tickBound, and by zero once the scope breakers open.
 	const stores = 20
 	if got := time.Duration(stores) * tickBound; got >= time.Duration(stores)*preplan {
 		t.Fatalf("worst-case %d-store tick did not improve: %s", stores, got)

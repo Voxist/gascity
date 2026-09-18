@@ -84,6 +84,9 @@ type orderTrackingSweepScopedStore struct {
 	beads.Store
 	label string
 	key   string
+	// scopeRoot is the scope whose transport breaker governs this store;
+	// empty for a store that serves no single scope (the orders binding).
+	scopeRoot string
 }
 
 func (s orderTrackingSweepScopedStore) orderTrackingSweepLabel() string {
@@ -96,11 +99,9 @@ func (s orderTrackingSweepScopedStore) orderTrackingSweepKey() string {
 
 // IDPrefix forwards the wrapped store's bead-id prefix. beads.Store does not
 // declare IDPrefix, so it does not promote through the embedded interface —
-// the same reason label and key need explicit accessors above. The
-// vc-ny00 sweep-isolation filter (store_warming_sweep.go) needs it to ask
-// whether THIS scope's store is the degraded one. Returns "" when the
-// wrapped store does not expose a prefix, which the filter reads as
-// "unknown scope, do not skip".
+// the same reason label and key need explicit accessors above. The vc-ny00
+// warming pass (store_warming_pass.go) keys each store's warming record by
+// it. Returns "" when the wrapped store does not expose a prefix.
 func (s orderTrackingSweepScopedStore) IDPrefix() string {
 	if inner, ok := s.Store.(interface{ IDPrefix() string }); ok {
 		return inner.IDPrefix()
@@ -772,9 +773,10 @@ func orderTrackingSweepStoresFromTargets(targets []orderTrackingSweepTarget, ope
 			continue
 		}
 		stores = append(stores, orderTrackingSweepScopedStore{
-			Store: store,
-			label: sweepTarget.label,
-			key:   key,
+			Store:     store,
+			label:     sweepTarget.label,
+			key:       key,
+			scopeRoot: sweepTarget.target.ScopeRoot,
 		})
 	}
 	return stores, errors.Join(errs...)

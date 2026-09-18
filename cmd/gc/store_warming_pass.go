@@ -24,8 +24,9 @@ import (
 //
 // WHAT IT IS NOT. It is not the fix for the incident. The 2026-09-06 cliff
 // began +29 MINUTES after start, long after any boot-time gate had finished,
-// so a one-shot post-start pass could not have caught it — L1's bound and
-// breaker and L2's continuous, probe-entered state machine are what make
+// so a one-shot post-start pass could not have caught it — L1's bound, the
+// scope transport breaker its timeouts trip, and L2's continuous,
+// probe-entered state machine are what make
 // that class survivable and visible. This pass only SHORTENS the degraded
 // period after a restart, which is the one case it can see coming.
 //
@@ -182,7 +183,7 @@ func runStoreWarmingPass(stores []beads.Store, budget, wall time.Duration, sleep
 	deadline := started.Add(budget)
 
 	for _, store := range stores {
-		prefix, ok := sweepStorePrefix(store)
+		prefix, ok := warmingPassStorePrefix(store)
 		if !ok {
 			prefix = "(no-prefix)"
 		}
@@ -367,4 +368,22 @@ func persistStoreWarmingPassOutcome(packStateDir string, out storeWarmingPassOut
 		// observability, never a start precondition.
 		fmt.Fprintf(stderr, "gc dolt: failed to persist store warming pass record: %v\n", err) //nolint:errcheck
 	}
+}
+
+// warmingPassStorePrefix recovers a store's bead-id prefix, the key its
+// warming record is published under. Reports ok=false when the store does not
+// expose one.
+func warmingPassStorePrefix(store beads.Store) (string, bool) {
+	if store == nil {
+		return "", false
+	}
+	prefixer, ok := store.(interface{ IDPrefix() string })
+	if !ok {
+		return "", false
+	}
+	prefix := prefixer.IDPrefix()
+	if prefix == "" {
+		return "", false
+	}
+	return prefix, true
 }

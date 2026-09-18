@@ -317,6 +317,20 @@ func (b *Breaker) State() State {
 	return b.state
 }
 
+// OpenUntil returns the earliest probe admission time while the breaker is
+// open, and the zero time in any other state. It never mutates state.
+func (b *Breaker) OpenUntil() time.Time {
+	if !b.settings.Enabled {
+		return time.Time{}
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.state != StateOpen {
+		return time.Time{}
+	}
+	return b.deadline
+}
+
 // openLocked moves to StateOpen with a full-jitter backoff deadline.
 // Caller must hold b.mu and have set b.trips.
 func (b *Breaker) openLocked(now time.Time) {

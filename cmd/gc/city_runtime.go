@@ -1930,10 +1930,11 @@ func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, []orderTrackin
 	// opened at boot, never a second resolution, so nothing here is closed by
 	// closeOpened — the runtime owns that handle for its whole life.
 	stores = appendOrdersSweepStore(stores, cr.relocatedOrdersStore())
-	// vc-ny00 L1: never serialize the tick behind a store whose breaker is
-	// already open. Filtered AFTER the opens above so closeOpened still
-	// releases every handle this call created, degraded or not.
-	stores = filterDegradedSweepStores(stores, cr.stderr, cr.logPrefix)
+	// vc-ny00 L1: never serialize the tick behind a store whose scope
+	// transport breaker is already open. Filtered AFTER the opens above so
+	// closeOpened still releases every handle this call created, degraded
+	// or not.
+	stores = filterDegradedSweepStores(cr.cityPath, stores, cr.stderr, cr.logPrefix)
 	closeOpened := func() {
 		for _, s := range freshlyOpened {
 			_ = closeBeadStoreHandle(s) //nolint:errcheck // best-effort

@@ -61,10 +61,10 @@ type CachingStore struct {
 	// as distinct from the flag's own state.
 	depsWholeCacheWipes int64
 
-	// warm is this store's warming/degraded state machine (vc-ny00 L1+L2).
-	// It carries its own mutex and is deliberately NOT guarded by c.mu:
-	// the tick goroutine reads it to decide whether to skip a degraded
-	// store, and that read must not queue behind cache work.
+	// warm is this store's warming state machine (vc-ny00 L2). It carries
+	// its own mutex and is deliberately NOT guarded by c.mu: the durable
+	// record renders every store's tracker on any one store's transition,
+	// and that render must not queue behind this cache's work.
 	warm *storeWarmingTracker
 
 	// readyProjectionInvalid holds, per bead id, the is_blocked verdict this
@@ -121,11 +121,6 @@ type CachingStore struct {
 	// unavailableSkipLogged dedupes the reconcile-skip problem log to one
 	// entry per unavailable episode. Guarded by mu.
 	unavailableSkipLogged bool
-	// warmingSkipLogged dedupes the vc-ny00 breaker's reconcile-skip
-	// announcement to one entry per degraded episode, the same shape
-	// unavailableSkipLogged gives the availability gate's skip. Guarded
-	// by mu.
-	warmingSkipLogged bool
 	// degradedReads counts reads served from last-good cache while the
 	// availability gate reported the store unavailable.
 	degradedReads atomic.Int64
@@ -452,8 +447,8 @@ func newCachingStore(backing Store, idPrefix string, onChange func(eventType, be
 		// A cache that has not yet completed a sub-wall probe starts
 		// WARMING, not healthy — see newStoreWarmingTracker. The tracker
 		// comes from the process-global registry rather than being owned
-		// here, so the order-tracking sweep's own store objects for this
-		// same scope read the same verdict (see store_warming.go).
+		// here, so the durable record can render every store at once (see
+		// store_warming.go).
 		warm: storeWarmingTrackerFor(idPrefix),
 	}
 }

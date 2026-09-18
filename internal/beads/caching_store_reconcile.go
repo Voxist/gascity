@@ -297,14 +297,12 @@ func (c *CachingStore) runReconciliation() {
 	// Breaker open: skip the cycle cheaply (one problem entry per episode)
 	// unless a recovery probe is due, in which case the scan below doubles
 	// as the probe.
+	// vc-ny00 L2: publish the transport breaker's verdict on every cycle,
+	// the skipped ones included — they are the only cycles of an outage
+	// that run no probe, so without this the record would never say
+	// degraded while the store is being skipped.
+	c.observeStoreAvailability()
 	if c.reconcileUnavailableSkip() {
-		return
-	}
-	// vc-ny00 L1: a store whose breaker is open costs this cycle nothing.
-	// The cached snapshot serves stale-marked and the skip is announced;
-	// re-entry is by probe — the first reconcile after the cooldown
-	// expires runs normally and IS that probe.
-	if c.reconcileDegradedSkip() {
 		return
 	}
 	start := time.Now()
@@ -326,9 +324,8 @@ func (c *CachingStore) runReconciliation() {
 		bdLatency := time.Since(bdStart)
 		// vc-ny00 L2: the failing read is a probe too, and it is the ONLY
 		// probe during an episode — the success heartbeat below never runs
-		// while the store cannot answer. Recording here is what makes the
-		// breaker trip at all, and what puts `store=warming` in the log
-		// within one window of onset (AC3).
+		// while the store cannot answer. Recording here is what puts
+		// `store=warming` in the log within one window of onset (AC3).
 		c.recordStoreProbe(storeWarmingNow(), bdLatency, true, readBound)
 		c.mu.Lock()
 		c.syncFailures++
@@ -823,40 +820,11 @@ func (c *CachingStore) reconcileSuccessLogLocked(now time.Time, elapsed time.Dur
 	// switched off, which is what makes the kill switch byte-identical to
 	// the pre-plan line (AC7).
 	if storeWarmingEnabled() {
-		if field := c.warm.heartbeatField(now); field != "" {
+		if field := c.warm.heartbeatField(); field != "" {
 			line += " " + field
 		}
 	}
 	return line, true
-}
-
-// reconcileDegradedSkip reports whether this cycle is skipped because the
-// vc-ny00 breaker is open for this store, announcing the skip once per
-// episode. It mirrors reconcileUnavailableSkip's shape deliberately: the
-// two are the same kind of decision (do not pay for a store that cannot
-// answer) taken on different evidence — an availability gate there, a run
-// of bound-exceeded probes here.
-func (c *CachingStore) reconcileDegradedSkip() bool {
-	if c == nil || c.warm == nil {
-		return false
-	}
-	if !c.warm.breakerOpen(storeWarmingNow()) {
-		c.mu.Lock()
-		c.warmingSkipLogged = false
-		c.mu.Unlock()
-		return false
-	}
-	c.mu.Lock()
-	logged := c.warmingSkipLogged
-	c.warmingSkipLogged = true
-	c.mu.Unlock()
-	if !logged {
-		st := c.warm.snapshot(storeWarmingNow())
-		c.recordProblem("reconcile skipped", fmt.Errorf(
-			"store=degraded rig=%s probe_ms=%d bound_exceeded=%d wall_ms=%d; serving stale-marked cache until the breaker cooldown expires",
-			st.Store, st.ProbeMs, st.BoundExceeded, st.WallMs))
-	}
-	return true
 }
 
 // reconcileDegradedLogLocked composes the heartbeat for a cycle whose read
@@ -880,7 +848,7 @@ func (c *CachingStore) reconcileDegradedLogLocked(now time.Time, elapsed time.Du
 	if rig == "" {
 		rig = storeWarmingNoPrefix
 	}
-	field := c.warm.heartbeatField(now)
+	field := c.warm.heartbeatField()
 	return fmt.Sprintf(
 		"beads cache: reconcile failed rig=%s took=%s sync_failures=%d %s",
 		rig, elapsed.Round(time.Millisecond), c.syncFailures, field), true

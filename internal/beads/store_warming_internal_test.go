@@ -114,56 +114,114 @@ func TestTickReadBoundHonorsAnOperatorSetValue(t *testing.T) {
 	}
 }
 
-// TestBreakerTripsWithinNBoundExceededReads is AC1's state-machine half:
-// a store whose reads exceed the bound is broken within N reads, not after
-// an unbounded run of them.
-func TestBreakerTripsWithinNBoundExceededReads(t *testing.T) {
+// open is the breaker verdict "unavailable, probe admission at until" — what
+// the cache reads through its AvailabilityGate while the scope's transport
+// breaker is open.
+func open(until time.Time) storeAvailability {
+	return storeAvailability{degraded: true, until: until}
+}
+
+// closed is the breaker verdict "available".
+var closed = storeAvailability{}
+
+// TestBoundExceededReadsAreWarmingNotADegradeDecision pins the division of
+// labor. A run of bound-exceeded reads is warming EVIDENCE, counted and
+// published; whether the store is skipped is the transport breaker's call,
+// which this state machine never makes on its own.
+func TestBoundExceededReadsAreWarmingNotADegradeDecision(t *testing.T) {
 	useTestWall(t)
-	tr := storeWarmingTrackerFor("vcny-trip")
+	tr := storeWarmingTrackerFor("vcny-bound")
 	now := time.Now()
-
-	st, _ := tr.recordProbe(now, warmingTestWall+time.Millisecond, true, bdReadCommandTimeout)
-	if st.Degraded {
-		t.Fatalf("after 1 bound-exceeded read the breaker is open; want it to need %d", defaultStoreBreakerTrips)
-	}
-	if st.State != "warming" {
-		t.Fatalf("after 1 bound-exceeded read: state = %q, want warming", st.State)
+	tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout, closed)
+	if st, _ := tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout, closed); st.State != "healthy" {
+		t.Fatalf("precondition: state = %q, want healthy", st.State)
 	}
 
-	st, _ = tr.recordProbe(now, warmingTestWall+time.Millisecond, true, bdReadCommandTimeout)
-	if !st.Degraded {
-		t.Fatalf("after %d bound-exceeded reads the breaker is still closed; the "+
-			"tick would keep paying for this store (vc-ny00 AC1)", defaultStoreBreakerTrips)
-	}
-	if st.BoundExceeded != defaultStoreBreakerTrips {
-		t.Fatalf("BoundExceeded = %d, want %d", st.BoundExceeded, defaultStoreBreakerTrips)
-	}
-	if !tr.breakerOpen(now) {
-		t.Fatal("breakerOpen reports closed immediately after the trip")
-	}
-	if !tr.breakerOpen(now.Add(storeBreakerCooldown() - time.Second)) {
-		t.Fatal("breaker closed before its cooldown expired")
-	}
-	if tr.breakerOpen(now.Add(storeBreakerCooldown() + time.Second)) {
-		t.Fatal("breaker still open after the cooldown expired; re-entry must be " +
-			"by probe, and the probe is the first reconcile after the cooldown")
+	for i := 1; i <= 5; i++ {
+		st, _ := tr.recordProbe(now, warmingTestWall+time.Millisecond, true, bdReadCommandTimeout, closed)
+		if st.State != "warming" {
+			t.Fatalf("bound-exceeded read %d: state = %q, want warming", i, st.State)
+		}
+		if st.BoundExceeded != i {
+			t.Fatalf("bound-exceeded read %d: BoundExceeded = %d, want %d", i, st.BoundExceeded, i)
+		}
+		if st.Degraded {
+			t.Fatalf("bound-exceeded read %d: the state machine declared the store degraded "+
+				"while the breaker was closed; degraded is the transport breaker's verdict only", i)
+		}
 	}
 }
 
-// TestSlowButAnsweringStoreIsWarmingNeverDegraded pins the distinction the
-// breaker rests on. A store that answers over the wall is doing real work
-// and returning real data; skipping it would trade a slow answer for no
-// answer. Only a store that FAILED at or beyond the wall is degraded.
+// TestATickBoundTimeoutIsBoundExceeded pins why the caller passes the bound
+// that applied to the read. A tick-context read is reaped at L1's bound, well
+// below the wall; judged against the wall alone it would look like a fast
+// failure and the store would never read as warming during the very episode
+// L1 exists to bound.
+func TestATickBoundTimeoutIsBoundExceeded(t *testing.T) {
+	useTestWall(t)
+	tr := storeWarmingTrackerFor("vcny-tickbound")
+	tickBound := warmingTestWall / 4
+
+	st, _ := tr.recordProbe(time.Now(), tickBound, true, tickBound, closed)
+	if st.BoundExceeded != 1 {
+		t.Fatalf("a read failed at the tick bound (%s, below the %s wall): BoundExceeded = %d, want 1",
+			tickBound, warmingTestWall, st.BoundExceeded)
+	}
+}
+
+// TestDegradedFollowsTheBreakerVerdict is the replacement for a second
+// breaker: the published degraded flag and deadline are exactly the transport
+// breaker's, a degraded store is always warming, and it cannot leave warming
+// while the breaker still holds it — however fast its last reads were.
+func TestDegradedFollowsTheBreakerVerdict(t *testing.T) {
+	useTestWall(t)
+	tr := storeWarmingTrackerFor("vcny-verdict")
+	now := time.Now()
+	tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout, closed)
+	tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout, closed)
+
+	until := now.Add(time.Minute)
+	st, changed := tr.observeAvailability(now, open(until))
+	if !changed || !st.Degraded || st.State != "warming" {
+		t.Fatalf("breaker opened: changed=%v degraded=%v state=%q, want an announced degraded warming store",
+			changed, st.Degraded, st.State)
+	}
+	if !st.DegradedUntil.Equal(until) {
+		t.Fatalf("DegradedUntil = %v, want the breaker's own deadline %v", st.DegradedUntil, until)
+	}
+
+	for i := 0; i < 3; i++ {
+		if st, _ = tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout, open(until)); st.State != "warming" {
+			t.Fatalf("fast probe %d while the breaker is open: state = %q, want warming", i+1, st.State)
+		}
+	}
+
+	st, changed = tr.observeAvailability(now, closed)
+	if !changed || st.Degraded || !st.DegradedUntil.IsZero() {
+		t.Fatalf("breaker closed: changed=%v degraded=%v until=%v, want an announced recovery with no deadline",
+			changed, st.Degraded, st.DegradedUntil)
+	}
+	if st.State != "warming" {
+		t.Fatalf("breaker closed: state = %q, want warming until two good probes", st.State)
+	}
+	tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout, closed)
+	if st, _ = tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout, closed); st.State != "healthy" {
+		t.Fatalf("two good probes after recovery: state = %q, want healthy", st.State)
+	}
+}
+
+// TestSlowButAnsweringStoreIsWarmingNeverDegraded pins that slow is not
+// degraded. A store that answers over the wall is doing real work and
+// returning real data; nothing in this state machine may mark it degraded.
 func TestSlowButAnsweringStoreIsWarmingNeverDegraded(t *testing.T) {
 	useTestWall(t)
 	tr := storeWarmingTrackerFor("vcny-slow")
 	now := time.Now()
 
-	for i := 0; i < defaultStoreBreakerTrips+3; i++ {
-		st, _ := tr.recordProbe(now, warmingTestWall*2, false, bdReadCommandTimeout)
+	for i := 0; i < 5; i++ {
+		st, _ := tr.recordProbe(now, warmingTestWall*2, false, bdReadCommandTimeout, closed)
 		if st.Degraded {
-			t.Fatalf("probe %d: a SUCCEEDING slow read opened the breaker; only a "+
-				"read that failed at or beyond the wall may", i+1)
+			t.Fatalf("probe %d: a SUCCEEDING slow read marked the store degraded", i+1)
 		}
 		if st.State != "warming" {
 			t.Fatalf("probe %d: state = %q, want warming", i+1, st.State)
@@ -171,21 +229,23 @@ func TestSlowButAnsweringStoreIsWarmingNeverDegraded(t *testing.T) {
 	}
 }
 
-// TestFailFastDoesNotTripTheWarmingBreaker keeps this mechanism off another
-// mechanism's territory. A read that fails immediately is a broken store or
-// a bad query — the existing syncFailures circuit breaker's class — not a
-// slow one. Tripping here would make the warming record explain a stale
-// order set that warming had nothing to do with, which is precisely the
+// TestFailFastIsNotWarmingEvidence keeps this mechanism off another
+// mechanism's territory. A read that fails immediately is a broken store or a
+// bad query, not a slow one; reporting it as warming would make the record
+// explain a stale order set that warming had nothing to do with, which is the
 // false signal the pack-side consumer must not be handed.
-func TestFailFastDoesNotTripTheWarmingBreaker(t *testing.T) {
+func TestFailFastIsNotWarmingEvidence(t *testing.T) {
 	useTestWall(t)
 	tr := storeWarmingTrackerFor("vcny-fast-fail")
 	now := time.Now()
+	tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout, closed)
+	tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout, closed)
 
-	for i := 0; i < defaultStoreBreakerTrips+3; i++ {
-		st, _ := tr.recordProbe(now, time.Millisecond, true, bdReadCommandTimeout)
-		if st.Degraded {
-			t.Fatalf("probe %d: a fast failure opened the warming breaker", i+1)
+	for i := 0; i < 5; i++ {
+		st, _ := tr.recordProbe(now, time.Millisecond, true, bdReadCommandTimeout, closed)
+		if st.State != "healthy" || st.BoundExceeded != 0 {
+			t.Fatalf("fast failure %d: state=%q bound_exceeded=%d, want healthy and 0",
+				i+1, st.State, st.BoundExceeded)
 		}
 	}
 }
@@ -199,16 +259,16 @@ func TestWarmingExitsOnlyAfterTwoConsecutiveSubWallProbes(t *testing.T) {
 	tr := storeWarmingTrackerFor("vcny-exit")
 	now := time.Now()
 
-	if st := tr.snapshot(now); st.State != "warming" {
+	if st := tr.snapshot(); st.State != "warming" {
 		t.Fatalf("a freshly tracked store starts %q; want warming — a store this "+
 			"process has never read has not been SHOWN healthy", st.State)
 	}
 
-	st, _ := tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout)
+	st, _ := tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout, closed)
 	if st.State != "warming" {
 		t.Fatalf("after 1 good probe: state = %q, want warming still", st.State)
 	}
-	st, changed := tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout)
+	st, changed := tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout, closed)
 	if st.State != "healthy" {
 		t.Fatalf("after 2 consecutive good probes: state = %q, want healthy", st.State)
 	}
@@ -218,100 +278,38 @@ func TestWarmingExitsOnlyAfterTwoConsecutiveSubWallProbes(t *testing.T) {
 
 	// A single slow probe re-enters warming and resets the run, so the exit
 	// needs two fresh good probes rather than one.
-	if st, _ = tr.recordProbe(now, warmingTestWall*2, false, bdReadCommandTimeout); st.State != "warming" {
+	if st, _ = tr.recordProbe(now, warmingTestWall*2, false, bdReadCommandTimeout, closed); st.State != "warming" {
 		t.Fatalf("after a slow probe: state = %q, want warming", st.State)
 	}
-	if st, _ = tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout); st.State != "warming" {
+	if st, _ = tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout, closed); st.State != "warming" {
 		t.Fatalf("one good probe after re-entry: state = %q, want warming (run was reset)", st.State)
 	}
-	if st, _ = tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout); st.State != "healthy" {
+	if st, _ = tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout, closed); st.State != "healthy" {
 		t.Fatalf("two good probes after re-entry: state = %q, want healthy", st.State)
 	}
 }
 
-// TestAPassingProbeClosesAnOpenBreakerImmediately pins the recovery edge.
-// The cooldown exists to stop hammering a store that cannot answer, not to
-// keep punishing one that just did.
-func TestAPassingProbeClosesAnOpenBreakerImmediately(t *testing.T) {
-	useTestWall(t)
-	tr := storeWarmingTrackerFor("vcny-recover")
-	now := time.Now()
-
-	for i := 0; i < defaultStoreBreakerTrips; i++ {
-		tr.recordProbe(now, warmingTestWall+time.Millisecond, true, bdReadCommandTimeout)
-	}
-	if !tr.breakerOpen(now) {
-		t.Fatal("precondition: breaker did not open")
-	}
-	st, _ := tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout)
-	if st.Degraded || tr.breakerOpen(now) {
-		t.Fatal("a passing probe left the breaker open")
-	}
-}
-
-// TestBreakerKillSwitchNeverSkipsAStore covers AC7 for L1's breaker knob:
-// with GC_STORE_BREAKER_TRIPS=0 the state machine still measures and still
-// announces, but no store is ever skipped — byte-identical to the pre-plan
-// reconcile schedule.
-func TestBreakerKillSwitchNeverSkipsAStore(t *testing.T) {
-	useTestWall(t)
-	t.Setenv(storeBreakerTripsEnv, "0")
-	tr := storeWarmingTrackerFor("vcny-nobreaker")
-	now := time.Now()
-
-	for i := 0; i < 10; i++ {
-		st, _ := tr.recordProbe(now, warmingTestWall+time.Millisecond, true, bdReadCommandTimeout)
-		if st.Degraded {
-			t.Fatalf("probe %d: breaker opened with GC_STORE_BREAKER_TRIPS=0", i+1)
-		}
-		if st.State != "warming" {
-			t.Fatalf("probe %d: state = %q, want warming — the kill switch disables "+
-				"SKIPPING, not measurement", i+1, st.State)
-		}
-	}
-	if tr.breakerOpen(now) {
-		t.Fatal("breakerOpen true with the breaker disabled")
-	}
-}
-
-// TestOneStoresBreakerDoesNotDegradeAnother is the ISOLATION property in
-// its most direct form: the 2026-09-06 failure was one slow store stalling
-// order dispatch fleet-wide.
+// TestOneStoresBreakerDoesNotDegradeAnother is the ISOLATION property in its
+// most direct form: the 2026-09-06 failure was one slow store stalling order
+// dispatch fleet-wide. Each store's record carries its own scope's verdict.
 func TestOneStoresBreakerDoesNotDegradeAnother(t *testing.T) {
 	useTestWall(t)
 	now := time.Now()
 	sick := storeWarmingTrackerFor("vcny-sick")
 	well := storeWarmingTrackerFor("vcny-well")
 
-	for i := 0; i < defaultStoreBreakerTrips; i++ {
-		sick.recordProbe(now, warmingTestWall+time.Millisecond, true, bdReadCommandTimeout)
-		well.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout)
-	}
-	if !sick.breakerOpen(now) {
-		t.Fatal("the sick store's breaker did not open")
-	}
-	if well.breakerOpen(now) {
-		t.Fatal("a healthy store was degraded by another store's breaker")
-	}
-	if !StoreIsDegraded("vcny-sick") {
-		t.Fatal("StoreIsDegraded does not see the sick store's open breaker")
-	}
-	if StoreIsDegraded("vcny-well") {
-		t.Fatal("StoreIsDegraded reports a healthy store as degraded")
-	}
-}
+	sick.observeAvailability(now, open(now.Add(time.Minute)))
+	well.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout, closed)
 
-// TestStoreIsDegradedIsFalseForAnUnprobedStore pins that absence of
-// evidence is not evidence of degradation. The registry must not mint a
-// warming tracker on a bare lookup, or every store on a fresh process would
-// read as degraded and the tick would skip all of them.
-func TestStoreIsDegradedIsFalseForAnUnprobedStore(t *testing.T) {
-	useTestWall(t)
-	if StoreIsDegraded("vcny-never-seen") {
-		t.Fatal("an unprobed store reports degraded")
+	byStore := map[string]StoreWarmingState{}
+	for _, st := range StoreWarmingStates() {
+		byStore[st.Store] = st
 	}
-	if got := StoreWarmingStates(); len(got) != 0 {
-		t.Fatalf("a bare StoreIsDegraded lookup created %d tracker(s); it must not", len(got))
+	if !byStore["vcny-sick"].Degraded {
+		t.Fatal("the sick store's record does not carry its breaker's verdict")
+	}
+	if byStore["vcny-well"].Degraded {
+		t.Fatal("a healthy store's record was degraded by another store's breaker")
 	}
 }
 
@@ -322,7 +320,7 @@ func TestStoreWarmingStatesAreSortedAndPerStore(t *testing.T) {
 	useTestWall(t)
 	now := time.Now()
 	for _, name := range []string{"vcny-c", "vcny-a", "vcny-b"} {
-		storeWarmingTrackerFor(name).recordProbe(now, time.Millisecond, false, bdReadCommandTimeout)
+		storeWarmingTrackerFor(name).recordProbe(now, time.Millisecond, false, bdReadCommandTimeout, closed)
 	}
 	got := StoreWarmingStates()
 	if len(got) != 3 {
@@ -347,9 +345,9 @@ func TestMarkStoreWarmingCoversTheManagedStartEdge(t *testing.T) {
 	useTestWall(t)
 	now := time.Now()
 	tr := storeWarmingTrackerFor("vcny-restart")
-	tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout)
-	tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout)
-	if st := tr.snapshot(now); st.State != "healthy" {
+	tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout, closed)
+	tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout, closed)
+	if st := tr.snapshot(); st.State != "healthy" {
 		t.Fatalf("precondition: state = %q, want healthy", st.State)
 	}
 
@@ -358,7 +356,7 @@ func TestMarkStoreWarmingCoversTheManagedStartEdge(t *testing.T) {
 	t.Cleanup(func() { SetStoreWarmingStateSink(nil) })
 
 	MarkStoreWarmingByPrefix("vcny-restart")
-	if st := tr.snapshot(now); st.State != "warming" {
+	if st := tr.snapshot(); st.State != "warming" {
 		t.Fatalf("after MarkStoreWarmingByPrefix: state = %q, want warming", st.State)
 	}
 	if len(published) != 1 || published[0].State != "warming" {
@@ -378,28 +376,26 @@ func TestMarkStoreWarmingCoversTheManagedStartEdge(t *testing.T) {
 // meaningless as a dwell signal, which is the thing the vc-5gui RCA lacked.
 func TestOnlyTransitionsArePublished(t *testing.T) {
 	useTestWall(t)
-	var published []StoreWarmingState
-	SetStoreWarmingStateSink(func(st StoreWarmingState) { published = append(published, st) })
-	t.Cleanup(func() { SetStoreWarmingStateSink(nil) })
-
 	now := time.Now()
 	tr := storeWarmingTrackerFor("vcny-transitions")
-	tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout)
-	st, changed := tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout)
+	tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout, closed)
+	st, changed := tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout, closed)
 	if !changed || st.State != "healthy" {
 		t.Fatalf("want an announced healthy transition, got changed=%v state=%q", changed, st.State)
 	}
-	// Three more good probes change nothing.
+	// Three more good probes, and a steady-closed breaker, change nothing.
 	for i := 0; i < 3; i++ {
-		if _, changed := tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout); changed {
+		if _, changed := tr.recordProbe(now, time.Millisecond, false, bdReadCommandTimeout, closed); changed {
 			t.Fatalf("steady-state probe %d was announced as a transition", i+1)
+		}
+		if _, changed := tr.observeAvailability(now, closed); changed {
+			t.Fatalf("steady closed breaker observation %d was announced as a transition", i+1)
 		}
 	}
 }
 
-// slowFailRunner is a bd runner whose list calls fail the way the listener
-// reaping a query at read_timeout_millis fails, which is what the 2026-09-06
-// incident's reads did.
+// slowFailRunner is a bd runner whose list calls fail the way a read reaped
+// at its deadline fails, which is what the 2026-09-06 incident's reads did.
 //
 // It does NOT sleep to produce a slow read. The duration the state machine
 // reacts to is supplied through storeWarmingProbeElapsedFn (see stateElapsed
@@ -440,6 +436,12 @@ func (r *slowFailRunner) set(fail bool) {
 	r.fail = fail
 }
 
+func (r *slowFailRunner) listCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lists
+}
+
 // stateElapsed makes every probe report the given duration, so a test can put
 // the state machine on either side of the wall without sleeping.
 func stateElapsed(t *testing.T, d time.Duration) {
@@ -450,78 +452,137 @@ func stateElapsed(t *testing.T, d time.Duration) {
 	})
 }
 
-func (r *slowFailRunner) listCount() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.lists
+// breakerGate is an AvailabilityGate whose verdict the test sets, standing in
+// for the scope's *resilience.Breaker that cmd/gc wires into every cache —
+// including its OpenUntil deadline. That the real breaker trips on the reads
+// L1 bounds is pinned end to end in cmd/gc
+// (TestTickBoundReadTimeoutCountsAgainstTheScopeBreaker).
+type breakerGate struct {
+	mu        sync.Mutex
+	available bool
+	probeDue  bool
+	until     time.Time
+}
+
+func newBreakerGate() *breakerGate { return &breakerGate{available: true} }
+
+func (g *breakerGate) Available() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.available
+}
+
+func (g *breakerGate) ProbeDue() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.probeDue
+}
+
+func (g *breakerGate) OpenUntil() time.Time {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.available {
+		return time.Time{}
+	}
+	return g.until
+}
+
+func (g *breakerGate) trip(until time.Time) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.available, g.probeDue, g.until = false, false, until
+}
+
+func (g *breakerGate) probeWindow() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.probeDue = true
+}
+
+func (g *breakerGate) close() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.available, g.probeDue, g.until = true, false, time.Time{}
 }
 
 // TestDegradedStoreIsSkippedAndAnnouncedByTheReconciler is AC1's reconcile
-// half and AC2's announcement half, on the real code path.
-//
-// It reproduces the 00:33 cliff in miniature: a store whose reads exceed the
-// bound. What must follow is the OPPOSITE of the incident — the reconciler
-// stops paying for the store (the backing is not called again), and the skip
-// is announced rather than silent.
+// half and AC2's announcement half, on the real code path: once the scope's
+// transport breaker is open, the reconciler stops paying for the store (the
+// backing is not called again), the skip is announced once, and the durable
+// record says degraded with the breaker's own deadline.
 func TestDegradedStoreIsSkippedAndAnnouncedByTheReconciler(t *testing.T) {
 	useTestWall(t)
 	logs := captureLog(t)
+	var published []StoreWarmingState
+	SetStoreWarmingStateSink(func(st StoreWarmingState) { published = append(published, st) })
+	t.Cleanup(func() { SetStoreWarmingStateSink(nil) })
 
 	runner := &slowFailRunner{}
 	runner.set(true)
 	stateElapsed(t, warmingTestWall+time.Millisecond)
+	gate := newBreakerGate()
 	cache := newCachingStore(NewBdStore("/city", runner.run), "vcnyskip", nil)
+	cache.SetAvailabilityGate(gate)
 
-	for i := 0; i < defaultStoreBreakerTrips; i++ {
-		cache.runReconciliation()
-	}
-	if !cache.StoreDegraded() {
-		t.Fatalf("after %d bound-exceeded reconciles the store is not degraded; "+
-			"the tick would keep paying for it", defaultStoreBreakerTrips)
-	}
+	cache.runReconciliation()
+	until := time.Now().Add(time.Hour)
+	gate.trip(until)
 	callsAtTrip := runner.listCount()
 
-	// The whole point: a degraded store costs the next cycles NOTHING.
 	for i := 0; i < 5; i++ {
 		cache.runReconciliation()
 	}
 	if got := runner.listCount(); got != callsAtTrip {
 		t.Fatalf("the backing was called %d more time(s) while the breaker was open; "+
-			"a degraded store must cost the reconciler nothing until the cooldown expires",
+			"a degraded store must cost the reconciler nothing until a probe is due",
 			got-callsAtTrip)
 	}
-
-	out := logs.String()
-	if !strings.Contains(out, "store=degraded") {
-		t.Fatalf("the skip was not announced — a silent skip is the vp-cblo shape "+
-			"this layer exists to prevent.\nlog:\n%s", out)
+	if got := strings.Count(logs.String(), "circuit breaker open"); got != 1 {
+		t.Fatalf("the skip was announced %d time(s), want exactly 1 per episode — "+
+			"silence is the vp-cblo shape, one line per cycle is a flood.\nlog:\n%s", got, logs.String())
 	}
-	if !strings.Contains(out, "vcnyskip") {
-		t.Fatalf("the announcement does not name the store.\nlog:\n%s", out)
+	st := cache.WarmingState()
+	if !st.Degraded || st.State != "warming" || !st.DegradedUntil.Equal(until) {
+		t.Fatalf("record while skipped = %+v, want degraded warming until the breaker's %v", st, until)
+	}
+	if len(published) == 0 || !published[len(published)-1].Degraded {
+		t.Fatalf("the degraded transition was not published to the durable record: %+v", published)
 	}
 }
 
-// TestDegradedSkipIsAnnouncedOncePerEpisode keeps the announcement useful.
-// One line per episode is a signal; one per skipped cycle is a flood that
-// buries the rest of the supervisor log — the same reason the availability
-// gate's own skip dedupes.
-func TestDegradedSkipIsAnnouncedOncePerEpisode(t *testing.T) {
+// TestReconcileRecoversWhenTheBreakerAdmitsAProbe pins the re-entry rule:
+// when the breaker's probe is due the reconcile runs and IS the probe, and
+// once the breaker closes the record says so without operator action.
+func TestReconcileRecoversWhenTheBreakerAdmitsAProbe(t *testing.T) {
 	useTestWall(t)
-	logs := captureLog(t)
 
 	runner := &slowFailRunner{}
 	runner.set(true)
 	stateElapsed(t, warmingTestWall+time.Millisecond)
-	cache := newCachingStore(NewBdStore("/city", runner.run), "vcnyonce", nil)
-	for i := 0; i < defaultStoreBreakerTrips; i++ {
-		cache.runReconciliation()
-	}
-	for i := 0; i < 5; i++ {
-		cache.runReconciliation()
+	gate := newBreakerGate()
+	cache := newCachingStore(NewBdStore("/city", runner.run), "vcnyheal", nil)
+	cache.SetAvailabilityGate(gate)
+	cache.runReconciliation()
+	gate.trip(time.Now().Add(time.Hour))
+	cache.runReconciliation()
+	if !cache.WarmingState().Degraded {
+		t.Fatal("precondition: store did not read as degraded")
 	}
 
-	if got := strings.Count(logs.String(), "store=degraded"); got != 1 {
-		t.Fatalf("the skip was announced %d times, want exactly 1 per episode", got)
+	runner.set(false)
+	stateElapsed(t, time.Millisecond)
+	gate.probeWindow()
+	callsBefore := runner.listCount()
+	cache.runReconciliation()
+	if runner.listCount() == callsBefore {
+		t.Fatal("the reconciler did not run the probe the breaker admitted; " +
+			"this store would stay degraded forever")
+	}
+
+	gate.close()
+	cache.runReconciliation()
+	if st := cache.WarmingState(); st.Degraded {
+		t.Fatalf("the breaker closed but the record still says degraded: %+v", st)
 	}
 }
 
@@ -601,7 +662,8 @@ func TestWarmingStateKillSwitchLeavesTheHeartbeatPrePlanIdentical(t *testing.T) 
 }
 
 // TestWarmingStateKillSwitchSuppressesTheDurableRecord completes AC7 for
-// L2: nothing is published when the layer is off.
+// L2: nothing is published when the layer is off, the breaker's verdict
+// included.
 func TestWarmingStateKillSwitchSuppressesTheDurableRecord(t *testing.T) {
 	useTestWall(t)
 	t.Setenv(storeWarmingStateEnv, "0")
@@ -612,49 +674,16 @@ func TestWarmingStateKillSwitchSuppressesTheDurableRecord(t *testing.T) {
 
 	runner := &slowFailRunner{}
 	stateElapsed(t, time.Millisecond)
+	gate := newBreakerGate()
 	cache := newCachingStore(NewBdStore("/city", runner.run), "vcnyoff2", nil)
+	cache.SetAvailabilityGate(gate)
 	cache.runReconciliation()
+	cache.runReconciliation()
+	gate.trip(time.Now().Add(time.Hour))
 	cache.runReconciliation()
 	MarkStoreWarmingByPrefix("vcnyoff2")
 
 	if len(published) != 0 {
 		t.Fatalf("GC_STORE_WARMING_STATE=0 published %d record(s), want 0: %+v", len(published), published)
-	}
-}
-
-// TestReconcileRecoversAfterTheCooldownExpires pins the re-entry rule: the
-// first reconcile after the cooldown IS the probe, so a store that healed
-// resumes without operator action.
-func TestReconcileRecoversAfterTheCooldownExpires(t *testing.T) {
-	useTestWall(t)
-
-	runner := &slowFailRunner{}
-	runner.set(true)
-	stateElapsed(t, warmingTestWall+time.Millisecond)
-	cache := newCachingStore(NewBdStore("/city", runner.run), "vcnyheal", nil)
-	for i := 0; i < defaultStoreBreakerTrips; i++ {
-		cache.runReconciliation()
-	}
-	if !cache.StoreDegraded() {
-		t.Fatal("precondition: store did not degrade")
-	}
-
-	// The store heals and the cooldown expires. The clock is MOVED, not
-	// waited on: the breaker's contract is time-based, and sleeping through
-	// a real cooldown would make this test both slow and flaky on a loaded
-	// host without testing anything the seam does not.
-	runner.set(false)
-	stateElapsed(t, time.Millisecond)
-	base := time.Now()
-	storeWarmingNowFn = func() time.Time { return base.Add(2 * storeBreakerCooldown()) }
-	t.Cleanup(func() { storeWarmingNowFn = time.Now })
-	callsBefore := runner.listCount()
-	cache.runReconciliation()
-	if runner.listCount() == callsBefore {
-		t.Fatal("the reconciler never re-probed after the cooldown expired; " +
-			"re-entry is by probe and this store would stay degraded forever")
-	}
-	if cache.StoreDegraded() {
-		t.Fatal("a passing probe after the cooldown left the store degraded")
 	}
 }

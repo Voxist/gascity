@@ -26,8 +26,10 @@ import (
 // — 10s by default. The relation 10s < 30000ms is LOAD-BEARING, not a
 // round number: the client must give up BEFORE the server's own deadline
 // reaps the query, so the tick pays the client bound and not the wall. It
-// also keeps a fully-degraded fleet's worst-case tick at stores × 10s once
-// (and then breaker-zero — see storeWarmingTracker) instead of unbounded.
+// also keeps a fully-degraded fleet's worst-case tick bounded by stores × 10s
+// per read, and at zero for a scope once its transport breaker opens: a read
+// killed at this bound is a per-command timeout, which the bd runner counts
+// against the scope breaker (cmd/gc bdInvocationTimedOut, ga-2bo4m).
 //
 // WHAT IT DOES NOT DO. It does not change read_timeout_millis, which stays
 // at the operator-settled 30000 everywhere in steady state (decision B,
