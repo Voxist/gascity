@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# MEASURED, not picked: this fork links the fork-first bridge's beads
-# (BD_LIB_REF d530cddfa), not upstream's v1.3.0-rc.2, so neither side's cap
-# applies unchanged. Upstream re-baselined to 737 for the RC (727 -> 737: nine
-# OpenAPI-toolchain modules behind bd's `bd serve` HTTP API — kin-openapi,
-# oapi-codegen/v2, speakeasy-api/{openapi,jsonpath}, oasdiff/{yaml,yaml3},
-# vmware-labs/yaml-jsonpath, dprotaso/go-yit — plus zeebo/errs, and
-# cloud.google.com/go/pubsub/v2 pulled through by the google.golang.org/api
-# bump MVS forced alongside it). The 0066-era bridge library reaches the same
-# stack by a different route; the value below is the count this merged module
-# graph actually produces. None of the OpenAPI stack links into gc — only bd's
-# internal/httpapi/apigen imports it, which the root beads package never
-# reaches, and the binary held at ~252 MB against the 270 MB cap. Revisit when
-# beads trims its api-gen deps or a release supersedes the bridge.
+# 740, MEASURED on the merged module graph (`go list -m all`, 2026-09-18),
+# not picked from either side -- and it lands exactly on the cap, so any new
+# transitive module will trip this guard, which is the intent.
+#
+# Two independent sources account for it:
+#   - Upstream re-baselined for the v1.3.0-rc.2 RC around bd's `bd serve`
+#     HTTP API: an OpenAPI toolchain (kin-openapi, oapi-codegen/v2,
+#     speakeasy-api/{openapi,jsonpath}, oasdiff/{yaml,yaml3},
+#     vmware-labs/yaml-jsonpath, dprotaso/go-yit) plus deps the
+#     google.golang.org/api bump pulled in. Only bd's internal/httpapi/apigen
+#     imports that stack; the root beads package gc links never reaches it.
+#   - The 0067-era beads library this fork links (BD_LIB_REF a690b0a8c)
+#     brings cloud.google.com/go/pubsub/v2 and github.com/zeebo/errs as
+#     transitive requirements. `go mod why -m` reports "main module does not
+#     need module" for both: module-graph entries, never linked into gc.
+# The two overlap, which is why the merged total is not the sum of the sides'
+# deltas. The gc binary held at ~252 MB against the 270 MB cap. Revisit when
+# beads trims its api-gen deps or a release supersedes the fork-first bridge.
 max_modules="${GC_NATIVE_DEP_MAX_MODULES:-740}"
 # max_binary_bytes re-baselined 2026-08-29 (ga-iuznq2). The build below now
 # adds -trimpath and CGO_ENABLED=0, which removes cross-host path-embedding

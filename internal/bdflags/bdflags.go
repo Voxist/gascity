@@ -240,7 +240,10 @@ var boolFlagsBySub = map[string]map[string]bool{
 	},
 	"ready": {
 		// --brief/--brief-deps added 2026-09-01 against bd 3e03250ee (schema-0066 repin).
-		"--brief": true, "--claim": true, "--explain": true, "--gated": true,
+		// --flat added 2026-09-18 against bd 73a5bdc65 (schema-0067): on `bd ready`
+		// a value-less alias for --plain, spelled the way bd list spells it. The
+		// freshness test is per command, so list's --flat does not cover ready.
+		"--brief": true, "--claim": true, "--explain": true, "--flat": true, "--gated": true,
 		"--include-deferred": true, "--include-ephemeral": true, "--plain": true,
 		"--pretty": true, "-u": true, "--unassigned": true,
 	},
