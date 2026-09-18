@@ -549,7 +549,7 @@ func (c *CachingStore) mergeSnapshotLocked(
 		// decline and the prime rebuild's replace branch did not, and that
 		// omission is the flood vc-vlyk reproduced (vc-u2n6 pairs both).
 		//
-		// The verdict -> nil direction is deliberately NOT neutralised here, and
+		// The verdict -> nil direction is deliberately NOT neutralized here, and
 		// that is a ruling, not an oversight. Suppressing it does remove the other
 		// half of the reproduction (measured: 100 emissions on main -> 50 with the
 		// two ledger records above -> 0 with a verdict->nil arm added), but it is

@@ -299,3 +299,68 @@ func equalIDs(got, want []string) bool {
 	}
 	return true
 }
+
+// verdictFlipStore stamps a chosen is_blocked verdict on every row while
+// verdict is set, and returns the rows verdict-less under projectionErr
+// otherwise — a projection that answered one prime and went dark for the next.
+type verdictFlipStore struct {
+	Store
+	verdict       *bool
+	projectionErr error
+}
+
+func (v *verdictFlipStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, error) {
+	if v.verdict == nil {
+		return items, v.projectionErr
+	}
+	for i := range items {
+		blocked := *v.verdict
+		items[i].IsBlocked = &blocked
+	}
+	return items, nil
+}
+
+// TestDegradedPrimeRecordsTheVerdictItDisowns pins the prime rebuild as a
+// verdict-nil'ing site (vc-u2n6). A full prime taken while the projection is
+// dark replaces a row that held a verdict with one that holds none; unless the
+// disowned value lands in readyProjectionInvalid, the reconcile differ has
+// nothing to substitute when the projection answers again and the restoration
+// re-emits bead.updated (the ADR-0094 flood).
+func TestDegradedPrimeRecordsTheVerdictItDisowns(t *testing.T) {
+	backing := NewMemStore()
+	b, err := backing.Create(Bead{Type: "task", Status: "open", Title: "held verdict"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	blocked := true
+	store := &verdictFlipStore{Store: backing, verdict: &blocked}
+	cache := NewCachingStoreForTest(store, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("first Prime: %v", err)
+	}
+	cache.mu.RLock()
+	held := cache.beads[b.ID].IsBlocked
+	cache.mu.RUnlock()
+	if held == nil || !*held {
+		t.Fatalf("after the answered prime IsBlocked = %v, want true", held)
+	}
+
+	store.verdict = nil
+	store.projectionErr = unsupportedProjectionCause()
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("degraded Prime: %v", err)
+	}
+
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	if got := cache.beads[b.ID].IsBlocked; got != nil {
+		t.Fatalf("after the degraded prime IsBlocked = %v, want nil (the prime must replace the row)", *got)
+	}
+	v, ok := cache.readyProjectionInvalid[b.ID]
+	if !ok {
+		t.Fatal("readyProjectionInvalid has no entry for the row the degraded prime nil'd: the differ cannot substitute the disowned verdict")
+	}
+	if !v {
+		t.Fatalf("readyProjectionInvalid[%s] = false, want the disowned value true", b.ID)
+	}
+}
