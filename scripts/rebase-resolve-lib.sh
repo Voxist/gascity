@@ -306,15 +306,18 @@ attempt_trivial_conflict_resolution() {
     # Guard: if NOTHING was resolved but git still reports unmerged files, the
     # porcelain parse missed something — treat as real conflict, don't claim
     # success on an unresolved tree.
-    if (( resolved_count == 0 )) && git ls-files --unmerged 2>/dev/null | grep -q .; then
+    # Captured rather than piped into `grep -q` (ga-gvag6): a caller running
+    # under pipefail would otherwise see an early grep exit SIGPIPE the
+    # listing and read a non-empty unmerged set as empty.
+    if (( resolved_count == 0 )) && [ -n "$(git ls-files --unmerged 2>/dev/null)" ]; then
         return 1
     fi
 
     # Final safety net: no conflict markers may remain in any tracked file.
-    if git -c core.pager=cat grep -lE '^(<<<<<<< |=======$|>>>>>>> )' -- . >/dev/null 2>&1; then
-        if git -c core.pager=cat grep -lE '^(<<<<<<< |=======$|>>>>>>> )' -- . 2>/dev/null | grep -q .; then
-            return 1
-        fi
+    # git grep's own exit status answers it; piping into `grep -q` could read
+    # as "none" under a pipefail caller once the listing SIGPIPEs (ga-gvag6).
+    if git -c core.pager=cat grep -qE '^(<<<<<<< |=======$|>>>>>>> )' -- . 2>/dev/null; then
+        return 1
     fi
 
     return 0
@@ -445,7 +448,8 @@ attempt_bounded_self_rebase() {
     fi
 
     # Belt-and-suspenders: no conflict markers may remain anywhere.
-    if git -c core.pager=cat grep -lE '^(<<<<<<< |=======$|>>>>>>> )' -- . 2>/dev/null | grep -q .; then
+    # git grep's own exit status, not a `| grep -q` pipeline (ga-gvag6).
+    if git -c core.pager=cat grep -qE '^(<<<<<<< |=======$|>>>>>>> )' -- . 2>/dev/null; then
         git rebase --abort >/dev/null 2>&1 || true
         return 12
     fi
