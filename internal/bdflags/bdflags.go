@@ -235,6 +235,13 @@ var boolFlagsBySub = map[string]map[string]bool{
 	"ready": {
 		// --brief added 2026-09-01 against bd 3e03250ee (schema-0066 repin).
 		"--brief": true,
+		// --flat added 2026-09-18 against bd 73a5bdc65 (the schema-0067 repin
+		// this branch pins, and the bd the fleet runs). On `bd ready` it is a
+		// value-less alias for --plain, "spelled the way bd list spells it", so
+		// it belongs here beside --plain. `list` already carried --flat below;
+		// `ready` did not, and the freshness test is per-command, so a --flat
+		// entry anywhere in this file says nothing about `ready`.
+		"--flat":  true,
 		"--claim": true, "--explain": true, "--gated": true, "--include-deferred": true,
 		"--include-ephemeral": true, "--plain": true, "--pretty": true, "-u": true, "--unassigned": true,
 	},

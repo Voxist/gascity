@@ -78,7 +78,11 @@ const (
 	// execution-shape change -- a new blocking step -- so this tripwire
 	// firing is the intended behavior and re-pinning is the correct
 	// response. No other job, step, or shell text moved.
-	expectedCIExecutionHash     = "a50d4f7f1ed6e2c95220339fe8d8fabcf4d75177e46660d1ff9383eae2e463d2"
+	// Re-derived again for the 0066->0067 repin: BD_SOURCE_REF moved at its
+	// five ci.yml pin sites (3e03250ee -> 73a5bdc65) and nowhere else. Same
+	// class as the earlier BD_REPO/BD_SOURCE_REF repin noted above -- an env
+	// value change inside jobs whose shape is otherwise byte-identical.
+	expectedCIExecutionHash     = "76c074e11a07710b77975e4d931d8d3f1e588fd7fec29429f29503cb24f24ea6"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
@@ -93,7 +97,11 @@ const (
 	// side's prior value. Setup-action pin below is untouched: the composite
 	// actions were taken from the resync verbatim (go version now derives
 	// from the go.mod directive, which the repin moves to 1.26.8).
-	expectedNightlyExecutionHash = "ae810fdba17ca29c0076c2337516d9ceb1ddc8aa803e6e2df67c162c40e4288d"
+	// Re-derived for the 0066->0067 repin alongside the CI pin above:
+	// BD_SOURCE_REF moved at nightly's two pin sites and nothing else. The
+	// semantic projection was read to confirm that -- env.BD_SOURCE_REF is
+	// the only differing field.
+	expectedNightlyExecutionHash = "220081045684f2130e737c55e23640cc46f3ff2f02f9ae51751fa6e4ca8f46b8"
 	// Re-derived at the 2026-08-31 resync: the composite setup actions under
 	// .github/actions/setup-gascity-* auto-merged both sides as well, moving
 	// this pin along with the two workflow execution pins above.
