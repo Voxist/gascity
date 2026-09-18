@@ -1972,7 +1972,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		if !desired {
 			var providerAlive bool
 			var livenessErr error
-			if (listRunErr == nil || listRunPartial) && sp != nil {
+			// A preserved configured named session never takes the fast path.
+			// It is kept open below and heals from providerAlive, so it must be
+			// observed here, BEFORE the preserved-named observation and its
+			// fail-closed guard, exactly as upstream orders it: observe, guard,
+			// then heal. Taking the snapshot instead shifts the preserved
+			// observation to first and the generic one to after the heal, so an
+			// uncertain second observation is refused only once the heal is
+			// already durable (ga-9uoe8). The probe cost is bounded by the
+			// configured named specs, not by the phantom backlog.
+			if (listRunErr == nil || listRunPartial) && sp != nil && !preserveConfiguredNamedSessionBeadInfo(info, cfg, cityName) {
 				// Fast path: a real runtime provider produced a usable snapshot
 				// this tick, so the visibleSet map is an authoritative liveness
 				// signal — absence means dead. Decide from the O(1) snapshot with
