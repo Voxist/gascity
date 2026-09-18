@@ -258,7 +258,7 @@ func TestBDVersionPins(t *testing.T) {
 // shell variables, not environment variables, and install-bd-archive.sh reads
 // them from the environment to choose the build-from-source path. Without them
 // it treats BD_VERSION as a release tag and resolves it against
-// gastownhall/beads through the forbidden API digest fallback. At v1.90.0 no
+// gastownhall/beads through the forbidden API digest fallback. At v1.91.0 no
 // such upstream release exists, so today the miss fails; but under the earlier
 // v1.2.2 pin an unrelated upstream release of that name existed and the miss
 // silently installed the wrong binary. Whether it fails or misinstalls depends

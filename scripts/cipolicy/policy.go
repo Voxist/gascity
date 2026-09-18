@@ -96,7 +96,11 @@ const (
 	// ci.yml's five pin sites and nothing else -- env values inside jobs whose
 	// shape is otherwise byte-identical. Taken from the candidate digest this
 	// package printed for the changed workflow.
-	expectedCIExecutionHash     = "4ab7a19447e4c15c46f0d6e92e3d6f1264c75fae10b39d7c647d5ddf7040d9de"
+	// Re-derived for the bd v1.91.0 repin: BD_SOURCE_REF
+	// (99d81dd4d -> 2498618eb) and BD_VERSION (v1.90.0 -> v1.91.0) moved at
+	// the same five pin sites and nothing else. Taken from the candidate
+	// digest this package printed for the changed workflow.
+	expectedCIExecutionHash     = "61b7de469d0f35806bde6e49082c40336c276a6774ec86cb28acc682caed1475"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
@@ -118,7 +122,9 @@ const (
 	// Re-derived for the upstream-v1.3.0 repin: BD_SOURCE_REF and BD_VERSION
 	// moved at nightly's two pin sites and nothing else. Taken from the
 	// candidate digest this package printed for the changed workflow.
-	expectedNightlyExecutionHash = "e167f812295c57da5cfed41428d7d09ab19e825d4d823660eda4269959b3f16c"
+	// Re-derived for the bd v1.91.0 repin: the same two pin sites, same two
+	// keys, nothing else.
+	expectedNightlyExecutionHash = "ff702fc4e0aec70e0caba25b6a5c0084e57f6835d5f5bdf3a1ec2cb52dd6536f"
 	// Re-derived at the 2026-08-31 resync: the composite setup actions under
 	// .github/actions/setup-gascity-* auto-merged both sides as well, moving
 	// this pin along with the two workflow execution pins above.

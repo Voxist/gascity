@@ -859,7 +859,7 @@ func TestBuildPinnedBDBinaryForTestsUsesGoModSource(t *testing.T) {
 		if bridged {
 			// Under the fork-first bridge BD_VERSION describes the fork build
 			// commit, not this upstream library commit, so the two declared
-			// versions legitimately differ (fork 1.90.0 vs upstream 1.3.0 at
+			// versions legitimately differ (fork 1.91.0 vs upstream 1.3.0 at
 			// the v1.3.0 repin). The exact-commit guarantee is the module
 			// metadata check below; only the version-string equality is moot.
 			wantVersion = ""
