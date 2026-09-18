@@ -694,7 +694,7 @@ func (c *CachingStore) absorbReadyProjectionLocked(id string, bead Bead, opts ab
 	// nothing to substitute for a declined row, and the nil->verdict half of a
 	// projection flap re-emits bead.updated on every cycle with the
 	// substitution structurally unable to fire: the ADR-0094 flood, reproduced
-	// on the deployed build and on main by TestBdStoreBackedFloodReproduction
+	// on the deployed build and on main by #165's flood reproduction
 	// (vc-vlyk RED, repaired here for vc-u2n6).
 	//
 	// This completes the value ledger; it does NOT merge the two. The split is
@@ -1261,7 +1261,13 @@ func (c *CachingStore) prime(ctx context.Context) error {
 				// outage re-open the ADR-0094 flood on the next tick that the
 				// projection answered: the substitution had nothing to
 				// substitute (vc-u2n6; the tick-7 residue after the decline-site
-				// repair, TestBdStoreBackedFloodReproduction).
+				// repair in #165's flood reproduction).
+				//
+				// A cached row that is ALREADY verdict-less may still owe an
+				// entry: clearReadyProjectionLocked nils the row and records the
+				// value, and a degraded prime replacing that row has nothing
+				// newer to offer, so the recorded value carries forward. Only an
+				// answering fresh row discharges it.
 				//
 				// Only the value ledger. readyProjectionLost is the read-decline
 				// set with its own conditional contract; a degraded prime has
@@ -1269,8 +1275,12 @@ func (c *CachingStore) prime(ctx context.Context) error {
 				// change, not this repair. invalid-without-lost is already a
 				// reachable, valid state (clearReadyProjectionLocked marks lost
 				// conditionally and invalid unconditionally).
-				if fresh.IsBlocked == nil && current.IsBlocked != nil {
-					nextReadyInvalid[id] = *current.IsBlocked
+				if fresh.IsBlocked == nil {
+					if current.IsBlocked != nil {
+						nextReadyInvalid[id] = *current.IsBlocked
+					} else if v, ok := c.readyProjectionInvalid[id]; ok {
+						nextReadyInvalid[id] = v
+					}
 				}
 				continue
 			}
