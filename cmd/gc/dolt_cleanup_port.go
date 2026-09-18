@@ -97,7 +97,7 @@ func ResolveDoltPort(in PortResolverInput) PortResolution {
 
 	liveResolve := in.LiveResolve
 	if liveResolve == nil {
-		liveResolve = newLiveDoltPortResolver().resolve
+		liveResolve = newLiveDoltPortResolverForExplicitCity().resolve
 	}
 	live, liveErr := liveResolve(in.CityPath)
 	res.Tried = append(res.Tried, live.Attempts...)

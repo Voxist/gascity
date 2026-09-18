@@ -191,16 +191,17 @@ func (c *doltTopologyCheck) CanFix() bool { return false }
 func (c *doltTopologyCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
 type buildDoctorChecksOpts struct {
-	Stderr            io.Writer
-	ControllerRunning bool
-	SupervisorRunning bool
+	Stderr                  io.Writer
+	ControllerRunning       bool
+	SupervisorRunning       bool
 	// SupervisorPID is the running supervisor's pid, 0 when the liveness
 	// probe established that none is running, and
 	// doctor.SupervisorPIDUnknown when the probe did not settle it.
-	SupervisorPID        int
-	SkipCityDoltCheck    bool
-	SkipManagedDoltCheck bool
-	SkipRigDoltChecks    bool
+	SupervisorPID           int
+	SupervisorUnitOwnership doctor.SupervisorUnitOwnership
+	SkipCityDoltCheck       bool
+	SkipManagedDoltCheck    bool
+	SkipRigDoltChecks       bool
 	// SkipStorePreflight suppresses the #5064 bead-store probe. Set by the
 	// `gc start` warmup path: every store-dependent check the preflight gates
 	// is WarmupEligible() == false, so warmupEligibleChecks filters all of them
@@ -249,6 +250,9 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	register(expandedConfigLoadCheck{})
 	register(&doctor.ImplicitImportCacheCheck{})
 	register(&doctor.DeprecatedAttachmentFieldsCheck{})
+	// Reads only ctx.CityPath, so it stays outside the config gate: a broken
+	// city.toml is precisely when session diagnostics need to be visible.
+	register(doctor.NewNudgeUnconfirmedCheck())
 
 	// Config-dependent checks run only when city.toml loaded cleanly. If it
 	// fails, the core config check above reports the parse error.
@@ -356,6 +360,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// Assert that the binary a probe verifies is the binary the supervisor
 	// executes. Nothing else in the system compares the two.
 	register(newDoctorBinaryDivergenceCheck(opts.SupervisorPID))
+	register(doctor.NewSupervisorUnitOwnershipCheck(opts.SupervisorRunning, opts.SupervisorPID, opts.SupervisorUnitOwnership))
 
 	if cfgErr == nil && cfg != nil {
 		cityName := loadedCityName(cfg, cityPath)
@@ -419,6 +424,10 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			register(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
 			register(&prDeliveryDoctorCheck{cityPath: cityPath, newStore: storeFactory})
 			register(newStartupHealthEpisodesCheck(cfg, cityPath, storeFactory))
+			// Differential probe: the preflight above just proved the store
+			// reachable with the controller's environment, so a read that
+			// fails under the gate sandbox isolates the sandbox (ga-pqlgh).
+			register(newGateSandboxReadCheck(cityPath))
 		}
 	}
 	register(newDoctorDoltServerCheck(cityPath, opts.SkipCityDoltCheck))
@@ -433,6 +442,10 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// and external Dolt workspaces do not get irrelevant local-binary warnings.
 	register(doctor.NewDoltNomsSizeCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
 	register(doctor.NewDoltJournalSizeCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
+	// Managed Dolt server log growth canary. dolt.log is opened O_APPEND at
+	// every start and nothing rotates or truncates it, so it accumulates for
+	// the life of the pack runtime directory.
+	register(doctor.NewDoltLogSizeCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
 	register(doctor.NewDoltConfigCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
 	// Read-timeout death-match guard (vc-wz5): the doltpool client idle-conn
 	// ceiling must stay below the managed server read_timeout_millis, or the
@@ -483,9 +496,14 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		// bead-store-preflight already registered early (near city data gates) when storeOK is false.
 		for _, rig := range activeRigs {
 			register(doctor.NewRigPathCheck(rig))
+			// Per-bead worktrees live at <rig>/worktrees/, not under
+			// $CITY/.gc/worktrees/, so none of the city-scoped worktree
+			// checks above can see them.
+			register(doctor.NewRigWorktreesCheck(rig, doctorCfg))
 			register(doctor.NewRigGitCheck(rig))
 			register(doctor.NewRigRootBranchCheck(rig))
 			register(doctor.NewRigIdentityTriadCheck(cityPath, rig))
+			register(doctor.NewRigSSHKeepaliveCheck(rig))
 			register(doctor.NewRigBDSplitStoreCheck(cityPath, rig))
 			if storeOK {
 				register(doctor.NewRigBeadsCheck(cityPath, rig, storeFactory))
@@ -562,6 +580,16 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 	// wedged is exactly the state `gc doctor` is run to find.
 	supervisorPID := supervisorProbePIDHook()
 	supervisorRunning := supervisorPID > 0
+	var supervisorUnitOwnership doctor.SupervisorUnitOwnership
+	if supervisorRunning {
+		raw := supervisorDetermineUnitOwnership(supervisorPID)
+		supervisorUnitOwnership = doctor.SupervisorUnitOwnership{
+			Status:     raw.Status,
+			Unit:       raw.Unit,
+			UnitActive: raw.UnitActive,
+			UnitPID:    raw.UnitPID,
+		}
+	}
 	skipRigDoltChecks := gcDoltSkip()
 	skipCityDoltCheck := skipRigDoltChecks || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
 	skipManagedDoltCheck := managedDoltOpsCheckSkip(cityPath, cfg, cfgErr)
@@ -576,15 +604,16 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 		rolloutFlags, rolloutResolveErr = rollout.Resolve(cfg, rollout.ResolveOptions{})
 	}
 	registered := buildDoctorChecks(cityPath, cfg, cfgErr, buildDoctorChecksOpts{
-		Stderr:               stderr,
-		ControllerRunning:    controllerRunning,
-		SupervisorRunning:    supervisorRunning,
-		SupervisorPID:        supervisorPID,
-		SkipCityDoltCheck:    skipCityDoltCheck,
-		SkipManagedDoltCheck: skipManagedDoltCheck,
-		SkipRigDoltChecks:    skipRigDoltChecks,
-		RolloutFlags:         rolloutFlags,
-		RolloutResolveErr:    rolloutResolveErr,
+		Stderr:                  stderr,
+		ControllerRunning:       controllerRunning,
+		SupervisorRunning:       supervisorRunning,
+		SupervisorPID:           supervisorPID,
+		SupervisorUnitOwnership: supervisorUnitOwnership,
+		SkipCityDoltCheck:       skipCityDoltCheck,
+		SkipManagedDoltCheck:    skipManagedDoltCheck,
+		SkipRigDoltChecks:       skipRigDoltChecks,
+		RolloutFlags:            rolloutFlags,
+		RolloutResolveErr:       rolloutResolveErr,
 	})
 	selected, unmatched := doctor.SelectChecks(registered, splitDoctorCheckNames(opts.Checks))
 	if len(unmatched) > 0 {

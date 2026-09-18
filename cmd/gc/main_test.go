@@ -246,7 +246,8 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	testTempRootAliveSentinel = sentinel
-	if err := os.Setenv("TMPDIR", testTempRoot); err != nil {
+	hostTmpRoot, err := adoptPerRunTMPDIR(testTempRoot)
+	if err != nil {
 		panic(err)
 	}
 	tmuxSocketParentRoot := os.Getenv(testTmuxSocketParentRootEnv)
@@ -273,12 +274,7 @@ func TestMain(m *testing.M) {
 	if err := tmuxtest.ConfigureProcessEnv(tmuxSocketRoot); err != nil {
 		panic(err)
 	}
-	tmpRoot := os.TempDir()
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testGCHomeDirPrefix)
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testRuntimeDirPrefix)
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testProviderStubDirPrefix)
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testSlingFormulaDirPrefix)
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testSlingCityDirPrefix)
+	sweepLegacyCmdGCFixtureDirs(hostTmpRoot)
 	initSharedSlingTestFixtures(testTempRoot)
 
 	gcHome, err := os.MkdirTemp("", pidPrefixedTempPattern(testGCHomeDirPrefix))

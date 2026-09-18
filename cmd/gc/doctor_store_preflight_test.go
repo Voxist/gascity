@@ -30,6 +30,7 @@ var doctorCityStoreDependentNames = []string{
 	"session-model",
 	"pr-delivery",
 	"startup-health-episodes",
+	"gate-sandbox-reads",
 	"custom-types:city",
 	"hold-label-conventions:city",
 }

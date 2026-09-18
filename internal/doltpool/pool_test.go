@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/config"
-
 	mysql "github.com/go-sql-driver/mysql"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // TestFormatDSNBracketsIPv6Host pins the address form for every host
@@ -190,5 +190,25 @@ func TestPoolIdleReapingConstants(t *testing.T) {
 	}
 	if want := connMaxIdleTime; IdleConnCeiling() != want {
 		t.Fatalf("IdleConnCeiling() = %v, want %v (the tighter of connMaxIdleTime/connMaxLifetime)", IdleConnCeiling(), want)
+	}
+}
+
+// TestIdleTimeoutBelowServerReaper pins the property the whole setting exists
+// for: the client must close an idle connection before the server reaps it.
+// The reaper on this dolt version is read_timeout_millis, NOT wait_timeout,
+// which measured inert on dolt 2.2.3 (#5383) — cmd/gc/cmd_dolt_config_test.go
+// guards the same attribution on the generated-config side. Bounding against
+// the wait_timeout value too keeps this correct if a future dolt implements it.
+func TestIdleTimeoutBelowServerReaper(t *testing.T) {
+	readReaper := time.Duration(config.DefaultDoltReadTimeoutMillis) * time.Millisecond
+	if connMaxIdleTime >= readReaper {
+		t.Fatalf("connMaxIdleTime = %v, must be < read_timeout %v", connMaxIdleTime, readReaper)
+	}
+	waitBound := time.Duration(config.DefaultDoltWaitTimeoutSeconds) * time.Second
+	if connMaxIdleTime >= waitBound {
+		t.Fatalf("connMaxIdleTime = %v, must be < wait_timeout %v", connMaxIdleTime, waitBound)
+	}
+	if connMaxIdleTime >= connMaxLifetime {
+		t.Fatalf("connMaxIdleTime = %v, must be < connMaxLifetime %v", connMaxIdleTime, connMaxLifetime)
 	}
 }
