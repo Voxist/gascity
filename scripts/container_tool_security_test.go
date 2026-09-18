@@ -98,13 +98,14 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		// upstream ancestor — because fork commits do not resolve on the
 		// module path. These values move together with deps.env and go.mod;
 		// a published release >= 0067 on a module-resolvable repo retires
-		// the bridge (one change: BD_VERSION=tag, drop the refs). Note the
-		// existing upstream v1.2.2 TAG is not such a release: it sits on a
-		// different lineage at schema 0053.
-		// BD_VERSION itself is NOT diverged — the pinned commit declares 1.2.2.
-		bdSourceRef    = "73a5bdc65b5fa9cb384683a47e579efa61bd999b"
-		bdSourceSHA256 = "f572a92ebaf5d0acde21e685fcafe0178e7f5a158b56e437f161a65bdcb52fdb"
-		bdBuild        = "73a5bdc65"
+		// the bridge (one change: BD_VERSION=tag, drop the refs). Upstream
+		// v1.3.0 is not such a release: it tops out at schema 0066.
+		// BD_VERSION is the string the pinned commit declares (1.90.0). The
+		// fork's v1.90.0 TAG names an older commit, so bdBuild is what
+		// identifies this binary; see deps.env.
+		bdSourceRef    = "99d81dd4d6c4165ed7d328284424aaf443be067a"
+		bdSourceSHA256 = "16a818fe7871b3eb8e61c3e6083caab315c85fb6f4f64a356506eaeab0e60ac3"
+		bdBuild        = "99d81dd4d"
 		bdBranch       = "HEAD"
 		grpcVersion    = "1.83.2"
 		// Floors, not exact pins: each must be >= what the pinned source
@@ -148,8 +149,8 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	// upstream's reason: anchor on whatever names the version the pinned
 	// SOURCE declares. Re-anchor on BD_CURRENT_VERSION when the bridge exits.
 	bdVersion := env["BD_VERSION"]
-	if bdVersion != "v1.2.2" {
-		t.Fatalf("deps.env BD_VERSION = %q, want v1.2.2 for the pinned source build", bdVersion)
+	if bdVersion != "v1.90.0" {
+		t.Fatalf("deps.env BD_VERSION = %q, want v1.90.0 for the pinned source build", bdVersion)
 	}
 
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")

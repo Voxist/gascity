@@ -299,9 +299,9 @@ jobs:
         shard: [1, 2, 3]
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.2.2" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
+      BD_VERSION: "v1.90.0" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
       BD_REPO: "Voxist/beads"
-      BD_SOURCE_REF: "73a5bdc65b5fa9cb384683a47e579efa61bd999b" # fork-tip bd commit (schema 0067) — built from BD_REPO source by install-bd-archive.sh
+      BD_SOURCE_REF: "99d81dd4d6c4165ed7d328284424aaf443be067a" # fork-tip bd commit (schema 0067) — built from BD_REPO source by install-bd-archive.sh
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -330,9 +330,9 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.2.2" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
+      BD_VERSION: "v1.90.0" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
       BD_REPO: "Voxist/beads"
-      BD_SOURCE_REF: "73a5bdc65b5fa9cb384683a47e579efa61bd999b" # fork-tip bd commit (schema 0067) — built from BD_REPO source by install-bd-archive.sh
+      BD_SOURCE_REF: "99d81dd4d6c4165ed7d328284424aaf443be067a" # fork-tip bd commit (schema 0067) — built from BD_REPO source by install-bd-archive.sh
     strategy:
       fail-fast: false
       matrix:
@@ -606,9 +606,9 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.2.2" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
+      BD_VERSION: "v1.90.0" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
       BD_REPO: "Voxist/beads"
-      BD_SOURCE_REF: "73a5bdc65b5fa9cb384683a47e579efa61bd999b" # fork-tip bd commit (schema 0067) — built from BD_REPO source by install-bd-archive.sh
+      BD_SOURCE_REF: "99d81dd4d6c4165ed7d328284424aaf443be067a" # fork-tip bd commit (schema 0067) — built from BD_REPO source by install-bd-archive.sh
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -766,9 +766,9 @@ jobs:
             command: ./scripts/test-integration-shard rest-smoke-2-of-2
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.2.2" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
+      BD_VERSION: "v1.90.0" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
       BD_REPO: "Voxist/beads"
-      BD_SOURCE_REF: "73a5bdc65b5fa9cb384683a47e579efa61bd999b" # fork-tip bd commit (schema 0067) — built from BD_REPO source by install-bd-archive.sh
+      BD_SOURCE_REF: "99d81dd4d6c4165ed7d328284424aaf443be067a" # fork-tip bd commit (schema 0067) — built from BD_REPO source by install-bd-archive.sh
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -795,9 +795,9 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.2.2" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
+      BD_VERSION: "v1.90.0" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
       BD_REPO: "Voxist/beads"
-      BD_SOURCE_REF: "73a5bdc65b5fa9cb384683a47e579efa61bd999b" # fork-tip bd commit (schema 0067) — built from BD_REPO source by install-bd-archive.sh
+      BD_SOURCE_REF: "99d81dd4d6c4165ed7d328284424aaf443be067a" # fork-tip bd commit (schema 0067) — built from BD_REPO source by install-bd-archive.sh
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu

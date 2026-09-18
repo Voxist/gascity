@@ -19,6 +19,14 @@ set -euo pipefail
 # The two overlap, which is why the merged total is not the sum of the sides'
 # deltas. The gc binary held at ~252 MB against the 270 MB cap. Revisit when
 # beads trims its api-gen deps or a release supersedes the fork-first bridge.
+#
+# Re-measured 2026-09-18 at 737 after the v1.3.0 repin (BD_LIB_REF
+# 71c4cd08b): the newer beads library drops mohae/deepcopy,
+# perimeterx/marshmallow, woodsbury/decimal128 and
+# speakeasy-api/openapi-overlay, and adds speakeasy-api/openapi (not needed
+# by the main module per `go mod why -m`). The cap stays at 740 -- the three
+# modules of headroom are deliberate slack for the next beads bump, not a
+# ratchet target.
 max_modules="${GC_NATIVE_DEP_MAX_MODULES:-740}"
 # max_binary_bytes re-baselined 2026-08-29 (ga-iuznq2). The build below now
 # adds -trimpath and CGO_ENABLED=0, which removes cross-host path-embedding
