@@ -83,6 +83,10 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 		}
 	}
 	e.vars["GC_HOME"] = gcHome
+	// HOME is the real home, so without this gc writes its plist into the
+	// operator's ~/Library/LaunchAgents before the shim-forced rollback
+	// removes it (ga-32bb2).
+	e.vars["GC_SUPERVISOR_LAUNCH_AGENTS_DIR"] = filepath.Join(gcHome, "LaunchAgents")
 	e.vars["XDG_RUNTIME_DIR"] = runtimeDir
 	tmuxTmpDir := filepath.Join(runtimeDir, "tmux")
 	if err := os.MkdirAll(tmuxTmpDir, 0o700); err != nil {

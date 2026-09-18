@@ -124,7 +124,7 @@ func TestDoDoctorPassesSupervisorLivenessToBinaryDivergence(t *testing.T) {
 			supervisorProbePIDHook = func() int { return tc }
 
 			var stdout, stderr bytes.Buffer
-			_ = doDoctor(false, false, false, 0, &stdout, &stderr)
+			_ = doDoctor(doctorOpts{}, &stdout, &stderr)
 
 			if *got != tc {
 				t.Errorf("doDoctor built binary-divergence with pid %d, want the probed %d", *got, tc)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -294,10 +295,10 @@ func TestBestStoreWithWorkRanksTierAheadOfPriority(t *testing.T) {
 			wantDir: "riga",
 		},
 		{
-			name:    "assigned beats routed at worse priority",
+			name:    "assigned in one store does not beat routed at better priority in another",
 			cityRow: `[{"id":"ci-1","priority":0}]`,
 			rigRow:  `[{"id":"va-1","priority":3,"assignee":"me"}]`,
-			wantDir: "riga",
+			wantDir: "city",
 		},
 		{
 			name:    "within the routed tier, priority decides",
@@ -322,6 +323,39 @@ func TestBestStoreWithWorkRanksTierAheadOfPriority(t *testing.T) {
 				t.Fatalf("store.dir = %q, want %q", gotStore.dir, tc.wantDir)
 			}
 		})
+	}
+}
+
+// TestBestStoreWithWorkTreatsAssignedTierAsRoutedAcrossStores is the direct
+// regression test for ga-t922vm. TestBestStoreWithWorkRanksTierAheadOfPriority
+// above correctly pins that tier dominates priority WITHIN a single store's
+// ranking (that mirrors bd's own three-tier work_query order). But
+// bestStoreWithWork was reusing that exact same tier comparison ACROSS
+// stores too — so a merely assigned-but-open bead in the primary store
+// permanently outranked routed rig work at any priority, and #5491's tie
+// rotation never got a chance to fire because the two candidates were never
+// at equal rank. Confirmed live: gm-j3o0fo (tier=assigned, priority=1) beat
+// ga-4twfqq (tier=routed, priority=1) on 10 consecutive gc hook runs even
+// though the rig bead was P0-equivalent urgent and routed specifically to
+// this agent's rig.
+//
+// Here the primary store's assigned bead is P3 and the rig's routed bead is
+// P0 — the rig bead must win once assigned and routed are tie-equivalent
+// across stores.
+func TestBestStoreWithWorkTreatsAssignedTierAsRoutedAcrossStores(t *testing.T) {
+	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
+	run := func(_, dir string, _ []string) (string, error) {
+		if dir == "city" {
+			return `[{"id":"ci-1","priority":3,"assignee":"x"}]`, nil
+		}
+		return `[{"id":"va-1","priority":0}]`, nil
+	}
+	_, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if gotStore.dir != "riga" {
+		t.Fatalf("store.dir = %q, want riga (routed P0 in a rig store must not lose to an assigned-but-open P3 in the primary store)", gotStore.dir)
 	}
 }
 
@@ -462,6 +496,52 @@ func TestBestStoreWithWorkD1ProbeRefinesRank(t *testing.T) {
 	}
 	if got.dir != "city" {
 		t.Fatalf("store.dir = %q, want city — the probe's P1 must outrank riga's P2", got.dir)
+	}
+}
+
+// TestBestStoreWithWorkD1ProbeDoesNotOverwriteAnOlderWindowAge covers the
+// SECOND tieWith call site (the D1 probe adoption), which the existing probe
+// fixture never reaches: TestBestStoreWithWorkD1ProbeRefinesRank uses a
+// better-PRIORITY probe, so it takes the `less` arm and the `tieWith` arm stays
+// unexercised. The probe path looked covered because a probe test existed.
+//
+// The adoption condition is `probeRank.less(rank) || probeRank.tieWith(rank)`,
+// and `less` compares tier and priority ONLY. So an equal-priority probe row
+// reaches tieWith, and under the ga-bt1nl inversion a DIFFERING age reported a
+// tie — which adopted the probe's rank wholesale, overwriting the window's
+// older age with the probe's younger one. That is a D2 violation in its own
+// right: the window is ordered oldest-first, so for equal priority the probe's
+// row can never be older than the window's pick, and adopting it can only make
+// the rank younger.
+//
+// Here city's window holds genuinely the oldest work (2026-07-01). Its probe
+// reports the same priority but a younger row (2026-08-20). riga sits between
+// them. City must win on age; before the fix the probe's age overwrote the
+// window's and riga won.
+func TestBestStoreWithWorkD1ProbeDoesNotOverwriteAnOlderWindowAge(t *testing.T) {
+	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
+	const routed = `,"metadata":{"gc.routed_to":"worker"}`
+	cityWindow := `[{"id":"ci-oldest","priority":1,"created_at":"2026-07-01T00:00:00Z"` + routed + `}]`
+	cityProbe := `[{"id":"ci-younger","priority":1,"created_at":"2026-08-20T00:00:00Z"` + routed + `}]`
+	rigaAny := `[{"id":"va-1","priority":1,"created_at":"2026-08-01T00:00:00Z"` + routed + `}]`
+	run := func(command, dir string, _ []string) (string, error) {
+		if command == "probe" {
+			if dir == "city" {
+				return cityProbe, nil
+			}
+			return rigaAny, nil
+		}
+		if dir == "city" {
+			return cityWindow, nil
+		}
+		return rigaAny, nil
+	}
+	_, got, err := bestStoreWithWork("q", stores, stores[0], run, hookStoreRankOptions{RankProbeCommand: "probe"})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got.dir != "city" {
+		t.Errorf("store.dir = %q, want city — an equal-priority probe row must not overwrite the window's older age (the probe's 2026-08-20 is younger than the window's 2026-07-01)", got.dir)
 	}
 }
 
@@ -697,5 +777,175 @@ func TestClaimStoreWithFallbackUsesSelectedStoreWhenStillReady(t *testing.T) {
 	}
 	if len(calls) != 1 || calls[0] != "city" {
 		t.Fatalf("calls = %v, want a single [city] re-validation", calls)
+	}
+}
+
+// TestTieWithNeverRotatesAPairResolvedByAge pins the ga-bt1nl contract
+// directly, because the defect it guards was invisible at the level the
+// existing selection test observes it: that test asserts a winner, and a coin
+// flip produces the right winner half the time, so a single pass accepted the
+// bug on every other run since it was written.
+//
+// The contract is the one tieWith's doc states: it reports a tie only when the
+// sameness was NOT resolved by age. Both ages known is always resolved — older
+// wins under betterThan, exact match takes slice order — so it is never
+// rotatable, whether the ages differ or match. Only an unknown age leaves the
+// tie genuinely unresolved.
+func TestTieWithNeverRotatesAPairResolvedByAge(t *testing.T) {
+	older := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC)
+
+	for _, tc := range []struct {
+		name string
+		a, b hookCandidateRank
+		want bool
+	}{
+		{
+			// The ga-bt1nl case. Differing known ages are the one pair the D2
+			// tiebreak exists to settle; reporting them as a rotatable tie
+			// hands the decision to UnixNano instead.
+			name: "both ages known, differing -> resolved, not rotatable",
+			a:    hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true},
+			b:    hookCandidateRank{tier: 1, priority: 1, age: newer, hasAge: true},
+			want: false,
+		},
+		{
+			name: "both ages known, differing, reversed -> still not rotatable",
+			a:    hookCandidateRank{tier: 1, priority: 1, age: newer, hasAge: true},
+			b:    hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true},
+			want: false,
+		},
+		{
+			name: "both ages known, equal -> resolved tie, slice order",
+			a:    hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true},
+			b:    hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true},
+			want: false,
+		},
+		{
+			name: "left age unknown -> unresolved, keeps pre-D2 rotation",
+			a:    hookCandidateRank{tier: 1, priority: 1},
+			b:    hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true},
+			want: true,
+		},
+		{
+			name: "right age unknown -> unresolved, keeps pre-D2 rotation",
+			a:    hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true},
+			b:    hookCandidateRank{tier: 1, priority: 1},
+			want: true,
+		},
+		{
+			name: "both ages unknown -> unresolved, keeps pre-D2 rotation",
+			a:    hookCandidateRank{tier: 1, priority: 1},
+			b:    hookCandidateRank{tier: 1, priority: 1},
+			want: true,
+		},
+		{
+			name: "different tier -> not a tie at all",
+			a:    hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true},
+			b:    hookCandidateRank{tier: 2, priority: 1, age: older, hasAge: true},
+			want: false,
+		},
+		{
+			name: "different priority -> not a tie at all",
+			a:    hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true},
+			b:    hookCandidateRank{tier: 1, priority: 2, age: older, hasAge: true},
+			want: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.a.tieWith(tc.b); got != tc.want {
+				t.Errorf("tieWith = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// The pair that must stay ordered rather than rotated: older wins outright
+	// in exactly one direction, which is what makes the selection deterministic.
+	a := hookCandidateRank{tier: 1, priority: 1, age: older, hasAge: true}
+	b := hookCandidateRank{tier: 1, priority: 1, age: newer, hasAge: true}
+	if !a.betterThan(b) {
+		t.Error("older candidate must win betterThan")
+	}
+	if b.betterThan(a) {
+		t.Error("newer candidate must not win betterThan")
+	}
+}
+
+// TestBestRankedCandidateAppliesAgeWithinOneDir pins the WITHIN-dir half of
+// bestRankedCandidate's two-pass reduction, which the 2026-09-13 resync changed
+// from upstream's less() to betterThan() and left unguarded: reverting it to
+// less() left the entire cmd/gc package green, because the only existing age
+// test (TestBestStoreWithWorkBreaksExactTiesOnAge) uses two DISTINCT dirs and
+// so exercises only the cross-dir pass.
+//
+// More than one hookStore entry can share a dir. They are separate query legs
+// over the SAME backing store, and the merged doc comment's "in real
+// deployments every hookWorkQueryStores entry already has a distinct dir" is an
+// unenforced assumption, not a constraint. A leg's dir comes from
+// agentCommandDir -> resolveAgentDirPath(cityPath, rigRoot), so two entries
+// collide whenever two rigs share a configured root -- the ordinary shape when
+// two rigs are two scopes over one checkout -- or a rig-scoped agent's rig root
+// resolves to the city root, which appendCityHookStore then appends a second
+// time at cityPath.
+//
+// Within that group the reduction must apply the same comparison
+// bestHookCandidateRank applies within one store's row array: betterThan,
+// INCLUDING the ADR-0076 D2 age tiebreak. Under less(), which has no age term,
+// the leg enumerated FIRST owns the dir outright and a strictly older candidate
+// in a sibling leg can never be returned -- D2's starvation shape reappearing
+// inside a single dir, which is the exact bug D2 exists to close.
+//
+// Every fixture choice below is load-bearing; changing any one of them lets the
+// less() mutation survive:
+//   - Same dir, DIFFERENT env. sameHookStore compares dir AND every env
+//     element, so the differing env keeps these two distinct stores while the
+//     shared dir puts them in one groups[] bucket. Identical env would make
+//     them the same store and there would be no group of size > 1 to reduce.
+//   - run discriminates on ENV, not dir. Every other fixture in this file
+//     switches on dir, which cannot work when both legs share one. Keying on
+//     call order would work today but would silently degenerate if the
+//     reduction ever reordered or cached its legs.
+//   - Both rows are the ROUTED tier (no status, no assignee). An in_progress
+//     row on the primary hits the unconditional resume short-circuit in
+//     bestStoreWithWork and returns before bestRankedCandidate runs at all; an
+//     assigned row would drag crossStoreRank's collapse into a test meant to
+//     isolate the within-dir pass.
+//   - Identical priority, so tier and priority agree and AGE is the only axis
+//     on which betterThan and less can differ.
+//   - Both created_at values parse as RFC3339, so both carry hasAge: true --
+//     olderThan returns false the moment either side lacks an age, and the test
+//     would then pass under both comparators.
+//   - The OLDER row is in the SECOND-enumerated leg. group[0] is leg A and only
+//     betterThan promotes leg B over it. Reverse them and less() also keeps the
+//     right answer, and the mutation survives.
+//
+// Fixture construction is the review agent's; the mutation verification and the
+// rationale above are independent. My own first version keyed on call order and
+// passed for the weaker reason described above.
+func TestBestRankedCandidateAppliesAgeWithinOneDir(t *testing.T) {
+	stores := []hookStore{
+		{dir: "shared", env: []string{"LEG=a"}},
+		{dir: "shared", env: []string{"LEG=b"}},
+	}
+	run := func(_, _ string, env []string) (string, error) {
+		for _, kv := range env {
+			if kv == "LEG=b" {
+				// Same tier and priority, strictly older.
+				return `[{"id":"older","priority":1,"created_at":"2026-07-01T00:00:00Z"}]`, nil
+			}
+		}
+		return `[{"id":"newer","priority":1,"created_at":"2026-08-01T00:00:00Z"}]`, nil
+	}
+
+	out, got, err := bestStoreWithWork("q", stores, stores[0], run)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if !strings.Contains(out, `"older"`) {
+		t.Fatalf("out = %q, want the OLDER candidate: two legs of one dir must be "+
+			"reduced on age, not on enumeration order", out)
+	}
+	if got.dir != "shared" {
+		t.Fatalf("store.dir = %q, want shared", got.dir)
 	}
 }

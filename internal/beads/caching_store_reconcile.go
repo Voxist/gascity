@@ -801,7 +801,12 @@ func (c *CachingStore) reconcileSuccessLogLocked(now time.Time, elapsed time.Dur
 	if !c.depsComplete {
 		depsField = "deps=incomplete"
 		if !c.depsIncompleteSince.IsZero() {
-			depsField += fmt.Sprintf(" deps_for=%s", now.Sub(c.depsIncompleteSince).Round(time.Second))
+			// depsClock(), not the reconcile pass's `now`: this is the same dwell
+			// Stats() reports, and a log that disagrees with the gauge it mirrors is
+			// worse than no log. Identical in production (both are time.Now); they
+			// diverge only under a stubbed clock, which is exactly when someone is
+			// reading both to compare them.
+			depsField += fmt.Sprintf(" deps_for=%s", depsClock().Sub(c.depsIncompleteSince).Round(time.Second))
 		}
 		if c.depsIncompleteDriver != "" {
 			depsField += " deps_driver=" + c.depsIncompleteDriver

@@ -1475,9 +1475,20 @@ hook_remote_sha() {
 # test-push-ownership-guard.sh's install_guard_hook).
 install_resync_hook() {
 	local repo="$1" resync_script="$2"
-	mkdir -p "$repo/scripts" "$repo/.githooks"
+	mkdir -p "$repo/scripts" "$repo/.githooks/lib"
 	cp "$REPO_ROOT/.githooks/pre-push" "$repo/.githooks/pre-push"
 	chmod +x "$repo/.githooks/pre-push"
+	# .githooks/pre-push chains to beads through .githooks/lib/beads-chain.sh
+	# before it reaches anything this file tests, so the fixture needs the real
+	# script or every hook case dies on "No such file or directory" long before
+	# the resync-loss gate is consulted. The real one is safe here rather than
+	# merely convenient: it exits 0 outright when bd is not installed, and when
+	# bd IS installed `bd hooks run` answers exit 3 ("no beads database") for a
+	# throwaway repo, which beads-chain.sh deliberately swallows. Copying it
+	# rather than stubbing it also keeps this fixture honest about the hook's
+	# real first action.
+	cp "$REPO_ROOT/.githooks/lib/beads-chain.sh" "$repo/.githooks/lib/beads-chain.sh"
+	chmod +x "$repo/.githooks/lib/beads-chain.sh"
 	cp "$REPO_ROOT/scripts/push-ownership-guard.sh" "$repo/scripts/push-ownership-guard.sh"
 	cp "$resync_script" "$repo/scripts/check-resync-loss.sh"
 	chmod +x "$repo/scripts/check-resync-loss.sh"
