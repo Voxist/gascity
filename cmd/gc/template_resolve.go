@@ -342,6 +342,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		agentEnv["GC_BEADS_SCOPE_ROOT"] = rigRoot
 	}
 
+	// configDir is the directory agent config-relative paths (pre-start
+	// scripts, session setup templates, and {{.ConfigDir}} in prompts)
+	// resolve against. Computed once, ahead of Step 9's prompt render, so
+	// the PromptContext and Step 11's SessionSetupContext agree (#5315).
+	configDir := resolveConfigDir(p.cityPath, cfgAgent.SourceDir)
+
 	// Step 9: Render prompt with beacon.
 	var prompt string
 	// Merge fragment sources: V1 global_fragments + inject_fragments,
@@ -391,6 +397,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		ProviderKey:             providerKey,
 		ProviderDisplayName:     providerDisplayName,
 		InstructionsFile:        instructionsFileForAgent(cfgAgent, p.workspace, p.providers),
+		ConfigDir:               configDir,
 		Env:                     cfgAgent.Env,
 	}, p.sessionTemplate, p.stderr, packDirs, fragments, p.beadStore)
 	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name, p.providers)
@@ -499,23 +506,17 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 				binding = resolved.UpstreamEnv
 			}
 			// Per field, the target env-var name is the upstream's override if set
-			// (for gateway harnesses), else the harness binding, else a hard error.
-			for _, r := range []struct{ value, override, bound, field string }{
-				{spec.BaseURL, spec.BaseURLEnv, binding.BaseURL, "base_url"},
-				{spec.APIKey, spec.APIKeyEnv, binding.APIKey, "api_key"},
-				{spec.AuthToken, spec.AuthTokenEnv, binding.AuthToken, "auth_token"},
-			} {
-				if r.value == "" {
+			// (for gateway harnesses), else the harness binding, else a hard
+			// error. upstreamServingFields is the single statement of that
+			// precedence, shared with the reporting side.
+			for _, r := range upstreamServingFields(spec, binding) {
+				if r.Value == "" {
 					continue
 				}
-				envName := r.override
-				if envName == "" {
-					envName = r.bound
+				if r.EnvName == "" {
+					return TemplateParams{}, fmt.Errorf("agent %q upstream %q sets %s, but its harness %q declares no upstream_env.%s binding (set %s_env on the upstream, or upstream_env.%s on the harness)", qualifiedName, upstreamName, r.Field, resolvedProviderName(resolved), r.Field, r.Field, r.Field)
 				}
-				if envName == "" {
-					return TemplateParams{}, fmt.Errorf("agent %q upstream %q sets %s, but its harness %q declares no upstream_env.%s binding (set %s_env on the upstream, or upstream_env.%s on the harness)", qualifiedName, upstreamName, r.field, resolvedProviderName(resolved), r.field, r.field, r.field)
-				}
-				env[envName] = processenv.ExpandSessionEnvValue(r.value)
+				env[r.EnvName] = processenv.ExpandSessionEnvValue(r.Value)
 			}
 		}
 		// Raw env is the harness-specific escape hatch, merged LAST (wins over the
@@ -541,21 +542,20 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		env[key] = val
 	}
 
-	// Step 11: Expand session setup templates.
-	configDir := p.cityPath
-	if cfgAgent.SourceDir != "" {
-		configDir = cfgAgent.SourceDir
-	}
+	// Step 11: Expand session setup templates. configDir was resolved ahead
+	// of Step 9 so the prompt's {{.ConfigDir}} and this SessionSetupContext
+	// agree (#5315).
 	setupCtx := SessionSetupContext{
-		Session:   sessName,
-		Agent:     qualifiedName,
-		AgentBase: agentBase,
-		Rig:       rigName,
-		RigRoot:   rigRoot,
-		CityRoot:  p.cityPath,
-		CityName:  p.cityName,
-		WorkDir:   workDir,
-		ConfigDir: configDir,
+		Session:       sessName,
+		Agent:         qualifiedName,
+		AgentBase:     agentBase,
+		Rig:           rigName,
+		RigRoot:       rigRoot,
+		CityRoot:      p.cityPath,
+		CityName:      p.cityName,
+		WorkDir:       workDir,
+		ConfigDir:     configDir,
+		DefaultBranch: dirCtx.DefaultBranch,
 	}
 	// The launch command is assembled from provider command + args and cannot
 	// be validated at config load; braces in it are also the ones most

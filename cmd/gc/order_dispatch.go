@@ -366,10 +366,23 @@ type memoryOrderDispatcher struct {
 	cfg                  *config.City
 	cityName             string
 	cityPath             string
-	cacheMu              sync.Mutex
-	lastRunCache         map[string]time.Time
-	gateBackoffUntil     map[string]time.Time
-	openWorkSuppression  map[string]orderOpenWorkSuppression
+	// fleetRole is this city's resolved role ("fleet-host" or "seat"),
+	// stamped once when the dispatcher is built. Orders whose run_on names a
+	// different role are skipped for the life of this dispatcher; a config
+	// reload builds a new one, which is what makes the role change take
+	// effect and what re-arms the once-per-generation skip record below.
+	fleetRole string
+	// runOnSkipNoted records the scoped names whose run_on skip has already
+	// been logged and stamped into order tracking. It is deliberately NOT
+	// carried across a reload (unlike lastRunCache and gateBackoffUntil): the
+	// skip is a per-generation fact, so it is reported once per reload rather
+	// than once per tick, and a reload that changes the role or the order set
+	// reports the new truth. Guarded by cacheMu.
+	runOnSkipNoted      map[string]bool
+	cacheMu             sync.Mutex
+	lastRunCache        map[string]time.Time
+	gateBackoffUntil    map[string]time.Time
+	openWorkSuppression map[string]orderOpenWorkSuppression
 
 	dispatchCtx    context.Context
 	dispatchCancel context.CancelFunc
@@ -534,6 +547,15 @@ func newMemoryOrderDispatcher(routes *storageRoutes, aa []orders.Order, cityPath
 		maxDispatchesPerTick = *cfg.Orders.MaxDispatchesPerTick
 	}
 
+	// Resolving the role here, once per dispatcher, is also where an ignored
+	// VOXIST_FLEET_ROLE value is reported: a value gc cannot read silently
+	// leaves the city as a seat, which on the fleet host means every
+	// fleet-singleton order stops firing with nothing to explain it.
+	fleetRole, roleWarning := config.EffectiveFleetRoleFromEnvWithWarning(cfg)
+	if roleWarning != "" {
+		logDispatchError(stderr, "gc: order dispatch: %s", roleWarning)
+	}
+
 	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
 	return &memoryOrderDispatcher{
 		aa: aa,
@@ -554,6 +576,7 @@ func newMemoryOrderDispatcher(routes *storageRoutes, aa []orders.Order, cityPath
 		cfg:                  cfg,
 		cityName:             loadedCityName(cfg, cityPath),
 		cityPath:             cityPath,
+		fleetRole:            fleetRole,
 		dispatchCtx:          dispatchCtx,
 		dispatchCancel:       dispatchCancel,
 	}
@@ -725,6 +748,22 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		if m.orderRigSuspended(a) {
 			continue
 		}
+		// Skip orders whose run_on names a fleet role this city does not
+		// hold. This is the durable half of the fleet-singleton guard: it
+		// holds regardless of how old the installed pack is, whereas a
+		// pack-level env guard only works once every seat has the new pack.
+		//
+		// This deliberately fires on a DEFAULTED seat too, not only a declared
+		// one: a laptop that has never heard of [city] role must not run fleet
+		// automation, and requiring a declaration first would leave every
+		// undeclared city running it. The asymmetry with doctor — which
+		// excludes these orders from its staleness check only when the role is
+		// declared — is the point: stop the duplicate dispatch everywhere, but
+		// keep the watchdog armed wherever the role might have been LOST
+		// rather than deliberately omitted.
+		if m.skipForRunOn(cityPath, a, stores) {
+			continue
+		}
 
 		target, err := resolveOrderStoreTarget(cityPath, m.cfg, a)
 		if err != nil {
@@ -767,9 +806,13 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			})
 			if err != nil {
 				if m.gateFailClosed(ctx, a, scoped, err) {
-					if errors.Is(err, errGateTimeout) {
-						// Anchor to actual wall clock after the gate consumed orderGateTimeout;
-						// using the tick-start 'now' would set a deadline that has already passed.
+					if isGateContentionTimeout(err) {
+						// Anchor to actual wall clock after the gate consumed its time
+						// budget (the per-order bound OR the underlying store query
+						// timing out, vp-gprv); using the tick-start 'now' would set a
+						// deadline that has already passed. Backing off on the store-query
+						// timeout too keeps a non-idempotent order from re-hammering a
+						// contended Dolt every tick (#3688 #3770).
 						m.setGateBackoff(scoped, time.Now().Add(orderGateBackoffDuration))
 					}
 					continue
@@ -922,9 +965,13 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			})
 			if err != nil {
 				if m.gateFailClosed(ctx, a, scoped, err) {
-					if errors.Is(err, errGateTimeout) {
-						// Anchor to actual wall clock after the gate consumed orderGateTimeout;
-						// using the tick-start 'now' would set a deadline that has already passed.
+					if isGateContentionTimeout(err) {
+						// Anchor to actual wall clock after the gate consumed its time
+						// budget (the per-order bound OR the underlying store query
+						// timing out, vp-gprv); using the tick-start 'now' would set a
+						// deadline that has already passed. Backing off on the store-query
+						// timeout too keeps a non-idempotent order from re-hammering a
+						// contended Dolt every tick (#3688 #3770).
 						m.setGateBackoff(scoped, time.Now().Add(orderGateBackoffDuration))
 					}
 					continue
@@ -1272,6 +1319,13 @@ func (idx *orderDispatchTrackingIndex) historyEntriesForStore(store beads.Store,
 	}
 	entries := make(map[string]orderTrackingSummary)
 	for _, run := range runs {
+		// A run_on skip record is not a run. Letting it set lastRun would make
+		// the dispatcher's own cooldown clock (and the cache it carries across
+		// reloads) report an order as freshly run on the very city that is
+		// refusing to run it — the same fault LastRun excludes it for.
+		if run.SkippedRunOn {
+			continue
+		}
 		summary := entries[run.Scoped]
 		if run.CreatedAt.After(summary.lastRun) {
 			summary.lastRun = run.CreatedAt
@@ -1967,12 +2021,51 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 	})
 }
 
-func prepareOrderWispRecipe(ctx context.Context, store beads.Store, a orders.Order, searchPaths []string, vars map[string]string) (*formula.Recipe, error) {
+// prepareOrderWispRecipe compiles an order's formula into a recipe and returns
+// the resolved invocation vars alongside it. The caller must thread those vars
+// into molecule.Instantiate; without them every {{var}} referencing a
+// caller-supplied value renders empty on the instantiated beads (#4668).
+func prepareOrderWispRecipe(ctx context.Context, store beads.Store, a orders.Order, searchPaths []string, vars map[string]string) (*formula.Recipe, map[string]string, error) {
 	inv, err := graphv2.PrepareInvocation(ctx, store, a.Formula, searchPaths, "", vars)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return formula.CompileWithoutRuntimeVarValidation(ctx, a.Formula, searchPaths, inv.Vars)
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, a.Formula, searchPaths, inv.Vars)
+	if err != nil {
+		return nil, nil, err
+	}
+	return recipe, inv.Vars, nil
+}
+
+// stampOrderWispRuntimeVars records the resolved runtime vars on a graph.v2
+// order wisp root (and any drain steps) so downstream fan-out recovers the
+// caller-supplied values, mirroring the sling path's runtime-vars stamp. It
+// deliberately omits the input-convoy and root-key identity metadata that the
+// cook/sling stamps also write: order dispatch does not dedup wisps by root
+// key, and stamping one would suppress legitimate repeat runs of a scheduled
+// or event order. No-op for non-graph recipes or when no vars are supplied.
+func stampOrderWispRuntimeVars(recipe *formula.Recipe, vars map[string]string) {
+	if recipe == nil || len(recipe.Steps) == 0 || !graphroute.IsCompiledGraphWorkflow(recipe) {
+		return
+	}
+	runtimeVars := graphv2.RuntimeVarsMetadata(vars)
+	if runtimeVars == "" {
+		return
+	}
+	root := &recipe.Steps[0]
+	if root.Metadata == nil {
+		root.Metadata = make(map[string]string)
+	}
+	root.Metadata[graphv2.RuntimeVarsMetadataKey] = runtimeVars
+	for i := range recipe.Steps {
+		if recipe.Steps[i].Metadata[beadmeta.KindMetadataKey] != beadmeta.KindDrain {
+			continue
+		}
+		if recipe.Steps[i].Metadata == nil {
+			recipe.Steps[i].Metadata = make(map[string]string)
+		}
+		recipe.Steps[i].Metadata[graphv2.RuntimeVarsMetadataKey] = runtimeVars
+	}
 }
 
 func poolOrderRouteVisibilityWarning(a orders.Order, recipe *formula.Recipe) string {
@@ -2250,11 +2343,8 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		}
 	}
 
-	var searchPaths []string
-	if a.FormulaLayer != "" {
-		searchPaths = []string{a.FormulaLayer}
-	}
-	recipe, err := prepareOrderWispRecipe(ctx, store, a, searchPaths, vars)
+	searchPaths := orderFormulaSearchPaths(m.cfg, a)
+	recipe, effectiveVars, err := prepareOrderWispRecipe(ctx, store, a, searchPaths, vars)
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
@@ -2265,12 +2355,13 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
 		return
 	}
-	// Same fix as `gc order run` (cmd_order.go): validate against the supplied vars.
-	// An empty Options drops them and reports every required var as missing. On this
-	// path that is worse than on the manual one — the controller fires unattended, so
-	// a cooldown/cron order using a required var would fail on every tick with nobody
-	// reading the order.failed events.
-	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Vars: vars}); err != nil {
+	// Same fix as `gc order run` (cmd_order.go): validate against the resolved
+	// invocation vars (declared defaults applied), not the caller's raw --var
+	// map. An empty Options drops them and reports every required var as
+	// missing. On this path that is worse than on the manual one — the
+	// controller fires unattended, so a cooldown/cron order using a required
+	// var would fail on every tick with nobody reading the order.failed events.
+	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Vars: effectiveVars}); err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
 			Actor:   "controller",
@@ -2336,7 +2427,14 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		return
 	}
 
-	cookResult, err := molecule.Instantiate(ctx, graphStore, recipe, molecule.Options{})
+	// Same fix as `gc order run` (cmd_order.go): thread the resolved
+	// invocation vars used for validation above into instantiation. An empty
+	// Options here falls back to formula defaults only, so every {{var}}
+	// referencing a caller-supplied value renders empty (or its default) on
+	// the created bead text instead of the caller's value (#4668).
+	stampOrderWispRuntimeVars(recipe, effectiveVars)
+
+	cookResult, err := molecule.Instantiate(ctx, graphStore, recipe, molecule.Options{Vars: effectiveVars})
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
@@ -2415,6 +2513,69 @@ func (m *memoryOrderDispatcher) orderRigSuspended(a orders.Order) bool {
 		rigName = a.Rig
 	}
 	return m.rigSuspendedByName(rigName)
+}
+
+// skipForRunOn reports whether a's run_on excludes this city's fleet role, and
+// on the first exclusion of this dispatcher generation logs one line and stamps
+// one closed tracking bead. Subsequent ticks skip silently: the condition is
+// static for the life of the dispatcher, so repeating it every tick would add a
+// per-order line to every tick of stderr and a bead write to every tick of the
+// store.
+func (m *memoryOrderDispatcher) skipForRunOn(cityPath string, a orders.Order, stores map[string]beads.Store) bool {
+	if a.RunsOn(m.fleetRole) {
+		return false
+	}
+	scoped := a.ScopedName()
+	if !m.claimRunOnSkipNote(scoped) {
+		return true
+	}
+	logDispatchError(m.stderr, "gc: order %s: %s (run_on=%s, city role=%s)",
+		scoped, orders.SkipReasonRunOn, a.RunOnOrDefault(), m.fleetRole)
+	m.recordRunOnSkip(cityPath, a, scoped, stores)
+	return true
+}
+
+// claimRunOnSkipNote returns true exactly once per scoped order per dispatcher
+// generation.
+func (m *memoryOrderDispatcher) claimRunOnSkipNote(scoped string) bool {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if m.runOnSkipNoted[scoped] {
+		return false
+	}
+	if m.runOnSkipNoted == nil {
+		m.runOnSkipNoted = make(map[string]bool)
+	}
+	m.runOnSkipNoted[scoped] = true
+	return true
+}
+
+// recordRunOnSkip stamps the deliberate skip into the order's tracking so a
+// reader of order history sees why the order has no runs on this city. Every
+// failure here is logged and swallowed: a skip that cannot be recorded must not
+// take the dispatch tick down, and the order is not going to run either way.
+func (m *memoryOrderDispatcher) recordRunOnSkip(cityPath string, a orders.Order, scoped string, stores map[string]beads.Store) {
+	target, err := resolveOrderStoreTarget(cityPath, m.cfg, a)
+	if err != nil {
+		logDispatchError(m.stderr, "gc: order dispatch: resolving target for %s: %v", scoped, err)
+		return
+	}
+	storeKey := orderStoreTargetKey(target)
+	store, ok := stores[storeKey]
+	if !ok {
+		store, err = m.storeFn(target)
+		if err != nil {
+			logDispatchError(m.stderr, "gc: order dispatch: opening %s store for %s: %v", target.ScopeKind, scoped, err)
+			return
+		}
+		stores[storeKey] = store
+	}
+	// CreateRunSkippedRunOn, not CreateRunClosed: the skip record carries a
+	// label that keeps it out of LastRun, so recording the skip cannot advance
+	// the order's cooldown clock or refresh any liveness reader downstream.
+	if _, err := m.orderFrontDoorFor(store).CreateRunSkippedRunOn(scoped); err != nil {
+		logDispatchError(m.stderr, "gc: order %s: recording run_on skip: %v", scoped, err)
+	}
 }
 
 func (m *memoryOrderDispatcher) markTrackingFailure(store beads.Store, trackingID, scoped string, a orders.Order, headSeq uint64) {
@@ -2839,20 +3000,38 @@ func gateOpenWorkBounded(ctx context.Context, timeout time.Duration, scoped stri
 	}
 }
 
+// isGateContentionTimeout reports whether a gate error is a store-contention
+// timeout that is safe to relax for idempotent orders. Two layers produce it:
+// the per-order gate bound elapsing (errGateTimeout, #2893) and the underlying
+// store/bd query itself timing out (beads.IsTimeoutError — e.g. the wisp-tier
+// "bd list both tiers: bd query: timed out after 30s", vp-gprv). Both mean the
+// gate could not complete because the store ran out of time, not because it
+// read a definitive answer or hit a genuine failure. A canceled dispatch
+// context and a real store-read error (parse/connection/"read failed") are NOT
+// contention timeouts.
+func isGateContentionTimeout(err error) bool {
+	return errors.Is(err, errGateTimeout) || beads.IsTimeoutError(err)
+}
+
 // gateFailClosed decides whether an open-work gate error must block dispatch of
 // this order, and logs the error. The blanket "skip on any gate error" was
-// wrong: idempotent sweep orders (feeders, nudger, route-reclaim) are safe to
-// double-dispatch, so a gate that times out under store contention must not
-// starve them forever (#2893 #2'). Policy:
+// wrong: idempotent sweep orders (feeders, nudger, route-reclaim, the
+// code-review-gate) are safe to double-dispatch, so a gate that times out under
+// store contention must not starve them forever (#2893 #2', vp-gprv). Policy:
 //   - dispatch context done (shutdown / tick deadline): always block — there is
 //     no point dispatching into a canceled context.
-//   - a per-order gate TIMEOUT (errGateTimeout): a non-idempotent order fails
-//     CLOSED (block, preserving single-flight); an idempotent order fails OPEN
-//     (dispatch anyway), since its re-run is a no-op.
+//   - a gate contention TIMEOUT (the per-order bound errGateTimeout OR the
+//     underlying store/bd query timing out, isGateContentionTimeout): a
+//     non-idempotent order fails CLOSED (block, preserving single-flight); an
+//     idempotent order fails OPEN (dispatch anyway), since its re-run is a
+//     no-op. The store-query timeout is folded in here because it is the same
+//     contention signal as the bound — before vp-gprv it reached this function
+//     as a raw store error and blocked even idempotent orders, starving
+//     code-review-gate fleet-wide whenever the wisp query timed out.
 //   - any other gate error (e.g. a genuine store-read failure): always block.
-//     Only the bounded-gate timeout is the #2893 contention signal that is
-//     safe to relax; a real store/gate error is a different signal where the
-//     conservative response is to fail CLOSED, matching the pre-#2893 behavior.
+//     Only a contention timeout is safe to relax; a real store/gate error is a
+//     different signal where the conservative response is to fail CLOSED,
+//     matching the pre-#2893 behavior.
 //
 // Failing open deliberately relaxes single-flight for idempotent orders: it may
 // dispatch while a prior run is still in flight. That is safe by the
@@ -2867,8 +3046,8 @@ func (m *memoryOrderDispatcher) gateFailClosed(ctx context.Context, a orders.Ord
 	if ctx.Err() != nil {
 		return true
 	}
-	if a.Idempotent && errors.Is(err, errGateTimeout) {
-		logDispatchError(m.stderr, "gc: order dispatch: %s open-work gate failed but order is idempotent; dispatching anyway (#2893)", scoped)
+	if a.Idempotent && isGateContentionTimeout(err) {
+		logDispatchError(m.stderr, "gc: order dispatch: %s open-work gate timed out but order is idempotent; dispatching anyway (#2893, vp-gprv)", scoped)
 		m.recordGateTimeoutFailOpen(a, scoped, err)
 		return false
 	}

@@ -160,6 +160,20 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 	}
 	cronIntervals := map[string]time.Duration{}
 	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg, cityPath)
+	// An order whose run_on names a role this city does not hold is never
+	// dispatched here by design, so it has no firing history and must not be
+	// reported stale. Without this the fleet-singleton guard would light up
+	// every seat's doctor with orders that are working exactly as intended.
+	//
+	// The exclusion is gated on the role being DECLARED, and that gate is the
+	// load-bearing half. A fleet host that loses its role declaration resolves
+	// to seat by default; excluding on the defaulted role would then remove
+	// exactly the fleet-host orders that just stopped running from the check
+	// that exists to notice they stopped — the watchdog disarmed by the fault
+	// it should report. So a merely-assumed seat keeps monitoring them, and
+	// only a city that actually states its role gets the quiet.
+	fleetRole := config.EffectiveFleetRoleFromEnv(c.cfg)
+	roleDeclared := config.FleetRoleDeclaredFromEnv(c.cfg)
 
 	// Resolve expected intervals before touching the event log so the read
 	// below can be bounded by the check's own staleness horizon:
@@ -174,6 +188,9 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 			continue
 		}
 		if orderFiringCurrentOrderSuspended(suspendedRigs, order) {
+			continue
+		}
+		if roleDeclared && !order.RunsOn(fleetRole) {
 			continue
 		}
 		mo := monitoredOrder{order: order}

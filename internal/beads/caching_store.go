@@ -37,6 +37,30 @@ type CachingStore struct {
 	beadSeq      map[string]uint64
 	localBeadAt  map[string]time.Time
 	deletedSeq   map[string]uint64
+
+	// depsIncompleteSince and the counters beside it are the ADR-0094 D6
+	// gauge. depsComplete steers clearDependentReadyProjectionsLocked --
+	// false selects the whole-cache branch, which nils every row's is_blocked
+	// on every one of that function's ~20 call sites. ADR-0094 named a
+	// permanently-false flag as the amplifier that turns a rare substitution
+	// miss into a universal one and set a trigger condition on it ("latched
+	// false for > 1h"), but nothing ever read the flag out of the process, so
+	// the trigger was unevaluable and the latch had only ever been inferred.
+	//
+	// depsIncompleteSince is stamped at construction (the cache genuinely
+	// starts without a dep projection) so dwell is measurable from process
+	// start, not only from the first observed flip. It is zeroed whenever the
+	// flag returns to true, so a non-zero value always dates the CURRENT
+	// degradation. Written only by setDepsCompleteLocked.
+	depsIncompleteSince  time.Time
+	depsIncompleteDriver string
+	depsDegradations     int64
+	depsRestorations     int64
+	// depsWholeCacheWipes counts selections of the whole-cache branch in
+	// clearDependentReadyProjectionsLocked -- the damage the flag causes,
+	// as distinct from the flag's own state.
+	depsWholeCacheWipes int64
+
 	// readyProjectionInvalid holds, per bead id, the is_blocked verdict this
 	// cache has invalidated and not yet re-observed (ADR-0094, vc-493m3j).
 	//
@@ -68,6 +92,15 @@ type CachingStore struct {
 	mutationSeq            uint64
 	observationRevision    uint64
 	primePartialErr        error
+
+	// fullScopeSnapshot reports whether c.beads has ever held the complete
+	// nonclosed set. PrimeActive loads partialPrimeStatuses only, so until a
+	// full prime or a clean full-scan reconcile promotes the cache live, the
+	// snapshot can answer those two status filters completely and nothing
+	// broader. The flag is monotone: a later self-degrade (cacheDegraded)
+	// keeps the rows the full scan produced, so scope does not lapse with
+	// liveness the way c.state does. Guarded by mu.
+	fullScopeSnapshot bool
 
 	// availabilityGate, when set, reports backing-store transport
 	// availability (the per-scope circuit breaker). See
@@ -160,6 +193,8 @@ const (
 	cacheDegraded
 )
 
+var partialPrimeStatuses = []string{"open", "in_progress"}
+
 type cacheProblemLogState struct {
 	lastAt     time.Time
 	suppressed int64
@@ -207,6 +242,29 @@ type CacheStats struct {
 	// "latency" (P95 above the high-water mark), or "both" (bead count
 	// and latency both push to MEDIUM).
 	CadenceDriver string
+
+	// DepsComplete reports whether the cache currently claims a complete
+	// dependency projection. False routes every dep and readiness read to the
+	// backing store AND puts clearDependentReadyProjectionsLocked on its
+	// whole-cache branch (ADR-0094 D6).
+	DepsComplete bool
+	// DepsIncompleteSince dates the current degradation; zero when
+	// DepsComplete is true. DepsIncompleteFor is the same fact as a dwell,
+	// computed at Stats() time -- this is what makes ADR-0094's "latched
+	// false for > 1h" trigger condition evaluable.
+	DepsIncompleteSince time.Time
+	DepsIncompleteFor   time.Duration
+	// DepsIncompleteDriver names the code path that latched the CURRENT
+	// degradation (not whichever site last re-asserted it), so a latch can be
+	// attributed without a debugger.
+	DepsIncompleteDriver string
+	// DepsDegradations / DepsRestorations count true->false and false->true
+	// transitions. A large DepsDegradations with a small DepsRestorations is
+	// the latch; both near zero with DepsComplete false is a flag that fell
+	// once and never recovered.
+	DepsDegradations    int64
+	DepsRestorations    int64
+	DepsWholeCacheWipes int64
 }
 
 const (
@@ -369,6 +427,8 @@ func newCachingStore(backing Store, idPrefix string, onChange func(eventType, be
 		beadSeq:                make(map[string]uint64),
 		localBeadAt:            make(map[string]time.Time),
 		deletedSeq:             make(map[string]uint64),
+		depsIncompleteSince:    depsClock(),
+		depsIncompleteDriver:   "cache-construction",
 		readyProjectionInvalid: make(map[string]bool),
 		readyProjectionLost:    make(map[string]struct{}),
 		problemLog:             make(map[string]cacheProblemLogState),
@@ -985,7 +1045,7 @@ func (c *CachingStore) PrimeActive() error {
 
 	var all []Bead
 	var partialErr error
-	for _, status := range []string{"open", "in_progress"} {
+	for _, status := range partialPrimeStatuses {
 		beads, err := c.backing.List(ListQuery{Status: status, TierMode: TierBoth})
 		if err != nil {
 			if !IsPartialResult(err) {
@@ -1185,7 +1245,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 		}
 		c.beads = nextBeads
 		c.deps = nextDeps
-		c.depsComplete = depsComplete && depErr == nil
+		c.setDepsCompleteLocked(depsComplete && depErr == nil, "prime-dep-snapshot-incomplete")
 		c.dirty = nextDirty
 		c.beadSeq = nextBeadSeq
 		c.localBeadAt = nextLocalBeadAt
@@ -1209,9 +1269,10 @@ func (c *CachingStore) prime(ctx context.Context) error {
 			}
 			c.absorbFreshLocked(id, b, now, opts)
 		}
-		c.depsComplete = false
+		c.setDepsCompleteLocked(false, "prime-partial-no-dep-snapshot")
 	}
 	c.state = cacheLive
+	c.fullScopeSnapshot = true
 	c.syncFailures = 0
 	c.circuitTripped = false
 	c.stats.SyncFailures = 0
@@ -1427,6 +1488,15 @@ func (c *CachingStore) Stats() CacheStats {
 
 	s := c.stats
 	s.DegradedReads = c.degradedReads.Load()
+	s.DepsComplete = c.depsComplete
+	s.DepsIncompleteSince = c.depsIncompleteSince
+	s.DepsIncompleteDriver = c.depsIncompleteDriver
+	s.DepsDegradations = c.depsDegradations
+	s.DepsRestorations = c.depsRestorations
+	s.DepsWholeCacheWipes = c.depsWholeCacheWipes
+	if !c.depsComplete && !c.depsIncompleteSince.IsZero() {
+		s.DepsIncompleteFor = depsClock().Sub(c.depsIncompleteSince)
+	}
 	switch c.state {
 	case cachePartial:
 		s.State = "partial"
@@ -1462,6 +1532,48 @@ func (c *CachingStore) recordProblem(op string, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.recordProblemLocked(op, err)
+}
+
+// setDepsCompleteLocked is the only writer of c.depsComplete outside tests. It
+// exists so the flag's dwell time is observable (ADR-0094 D6): routing every
+// depsClock is the clock the ADR-0094 D6 dwell is measured against. FOUR sites
+// consult it — the construction stamp, the latch stamp, the Stats() elapsed
+// read, and the deps_for= field in the reconcile heartbeat log
+// (caching_store_reconcile.go) — because a test that controls one still races
+// the others, and a log that reports a different dwell than the gauge it
+// mirrors is worse than no log. Overridable so
+// the dwell can be asserted EXACTLY rather than as "> 0" -- on a
+// microsecond-granularity clock (macOS) a latch and an immediately following
+// read land in the same tick and elapse exactly zero, which is a property of
+// the clock and not of the gauge (ga-eyz5l).
+var depsClock = time.Now
+
+// write through one place keeps depsIncompleteSince, the latching driver and
+// the transition counters exact by construction rather than by convention.
+//
+// driver is recorded only on a true->false transition, so the reported driver
+// always names the site that latched the CURRENT degradation. Re-asserting
+// false from a different path does not overwrite it and does not restart the
+// dwell -- the flag has been false since the first fall, and that is the fact
+// ADR-0094's ">1h" trigger asks about.
+//
+// TestDepsCompleteHasASingleWriter fails if any non-test file assigns the field
+// directly, which is what stops the gauge from drifting away from the flag.
+// Caller must hold c.mu.
+func (c *CachingStore) setDepsCompleteLocked(complete bool, driver string) {
+	if c.depsComplete == complete {
+		return
+	}
+	c.depsComplete = complete
+	if complete {
+		c.depsRestorations++
+		c.depsIncompleteSince = time.Time{}
+		c.depsIncompleteDriver = ""
+		return
+	}
+	c.depsDegradations++
+	c.depsIncompleteSince = depsClock()
+	c.depsIncompleteDriver = driver
 }
 
 func (c *CachingStore) recordProblemLocked(op string, err error) {

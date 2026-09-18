@@ -119,7 +119,7 @@ endif
 endif
 endif
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-split-topology-rows check-version-tag lint lint-full lint-new lint-changed lint-affected test-affected fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-herdr-live test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-bd-cli-contract test-bd-conditional-release-contract test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard test-cover-noncmdgc-shard cover check-self-contained install install-tools install-buildx setup clean generate check-schema complexity complexity-diff complexity-check complexity-update docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-eventexport-isolation check-go-clean-cache check-gomod-replace check-core-boundary check-native-dependency-surface check-resync-loss check-routed-test-rows check-split-topology-rows check-version-tag lint lint-full lint-new lint-changed lint-affected test-affected fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-herdr-live test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-bd-cli-contract test-bd-conditional-release-contract test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard test-cover-noncmdgc-shard cover check-self-contained install install-tools install-buildx setup clean generate check-schema complexity complexity-diff complexity-check complexity-update docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e check-hooks
 .PHONY: check-release-dist-ignore
 
 ## build: compile gc binary with version metadata
@@ -199,9 +199,60 @@ ifneq ($(_NIX_ICU_DEV),)
 		echo "OK: $$bin self-contained (RUNPATH present + clean-env boot passes)"
 endif
 
+# Deploy channels: the PATH entries a running deployment can resolve `gc`
+# through. They shadow each other -- which one wins differs per execution
+# context (interactive shell, agent hook, supervisor unit) -- so they are only
+# coherent while all of them name one binary.
+#
+# The precedence is not the obvious one. On the fleet host $(HOME)/.gc/bin
+# precedes BOTH $(HOME)/.local/bin and $(BIN_DIR), so `command -v gc` resolves
+# $(HOME)/.gc/bin/$(BINARY) -- not the path the supervisor's service unit
+# names. Anyone diagnosing a `gc` version divergence who assumes .local/bin
+# wins will reach the wrong conclusion.
+#
+# voxist-city ADR-0027 collapsed these three onto one artifact for exactly
+# that reason, and named "go install recreates ~/go/bin/gc as a real file"
+# as its re-evaluation trigger. `make deploy-fleet` is that collapse as a
+# repeatable target; it is the sole Makefile writer of these paths.
+# `install` reads them to warn, and never writes them.
+#
+# Note that installing still replaces $(BIN_DIR)/$(BINARY) itself -- that is
+# its job. So `make install` re-splits the channels until `make deploy-fleet`
+# runs. The two are a pair; running the first without the second leaves this
+# host's PATH winner on the previous build.
+GC_DEPLOY_DIR ?= $(HOME)/.gc/bin
+GC_DEPLOY_BINARY ?= $(INSTALL_DIR)/$(BINARY)
+GC_DEPLOY_CHANNELS ?= $(HOME)/.local/bin/$(BINARY) $(BIN_DIR)/$(BINARY) $(GC_DEPLOY_DIR)/$(BINARY)
+
 ## install: build and install gc to GOPATH/bin (same location as go install)
+#
+# Writes exactly one path: $(INSTALL_DIR)/$(BINARY). It deliberately does NOT
+# relink any deploy channel -- two writers at one path, last one wins in
+# silence, is how this machine ran a stale supervisor image for an unknown
+# period (vc-lwif). To move a running deployment onto this build, run the
+# explicit second step: `make deploy-fleet`.
 install: check-self-contained
 	@mkdir -p $(INSTALL_DIR)
+	@# Fail CLOSED, before writing anything. A symlink at the install path
+	@# pointing OUTSIDE $(INSTALL_DIR) is a deployed artifact, not a dev build,
+	@# and overwriting it is never what `make install` meant to do -- it moves
+	@# every context that resolves gc through that channel. A warning cannot
+	@# help here: it can only print after the channel has already moved, and
+	@# the failure this exists to prevent is precisely "nobody noticed".
+	@# deploy-fleet refuses to move a channel until the binary has proved it
+	@# runs; install is held to the same standard.
+	@set -e; \
+		if [ -z "$(GC_ALLOW_CHANNEL_OVERWRITE)" ] && [ -L "$(INSTALL_DIR)/$(BINARY)" ]; then \
+			prior=$$(readlink "$(INSTALL_DIR)/$(BINARY)"); \
+			case "$$prior" in \
+				"$(INSTALL_DIR)"/*) ;; \
+				*) echo "ERROR: $(INSTALL_DIR)/$(BINARY) is a deploy channel pointing at $$prior." >&2; \
+				   echo "       Installing would move every context that resolves gc through it onto this build." >&2; \
+				   echo "       Deliberate:  make install GC_ALLOW_CHANNEL_OVERWRITE=1 && make deploy-fleet" >&2; \
+				   echo "       Elsewhere:   make install INSTALL_DIR=<dir>" >&2; \
+				   exit 1;; \
+			esac; \
+		fi
 	@set -e; \
 		tmp="$(INSTALL_DIR)/.$(BINARY).tmp.$$$$"; \
 		trap 'rm -f "$$tmp"' EXIT INT TERM HUP; \
@@ -211,17 +262,139 @@ install: check-self-contained
 		trap - EXIT INT TERM HUP
 	@# Deploy provenance: machine-derived build manifest next to the binary
 	@go run ./cmd/writebuildmanifest -binary "$(INSTALL_DIR)/$(BINARY)" -repo "$(CURDIR)"
-	@# Migrate from old install location: replace stale binary with symlink
-	@if [ "$(INSTALL_DIR)" != "$(HOME)/.local/bin" ]; then \
-		if [ -f "$(HOME)/.local/bin/$(BINARY)" ] || [ -L "$(HOME)/.local/bin/$(BINARY)" ]; then \
-			rm -f "$(HOME)/.local/bin/$(BINARY)"; \
-		fi; \
-		if [ -d "$(HOME)/.local/bin" ]; then \
-			ln -sf "$(INSTALL_DIR)/$(BINARY)" "$(HOME)/.local/bin/$(BINARY)"; \
-			echo "Symlinked $(HOME)/.local/bin/$(BINARY) -> $(INSTALL_DIR)/$(BINARY)"; \
-		fi; \
-	fi
+	@# A DIFFERENT channel that resolves to the install path also moved with
+	@# this write. The fail-closed gate above covers the install path itself;
+	@# this covers everything pointing at it. A dangling channel is reported
+	@# too -- a broken channel is exactly what an operator wants to be told.
+	@set -e; \
+		for channel in $(GC_DEPLOY_CHANNELS); do \
+			[ "$$channel" != "$(INSTALL_DIR)/$(BINARY)" ] || continue; \
+			if [ -L "$$channel" ] && [ ! -e "$$channel" ]; then \
+				echo "WARNING: $$channel is a dangling symlink -> $$(readlink "$$channel")"; \
+				continue; \
+			fi; \
+			[ -e "$$channel" ] || continue; \
+			[ "$$channel" -ef "$(INSTALL_DIR)/$(BINARY)" ] || continue; \
+			echo "WARNING: $$channel resolves to $(INSTALL_DIR)/$(BINARY) -- this install moved it."; \
+			echo "         Anything running that binary is now on this build."; \
+		done
 	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY)"
+	@# $(INSTALL_DIR)/$(BINARY) is itself a deploy channel, so claiming the
+	@# channels were untouched would be false by this Makefile's own
+	@# definitions. Name what was written instead (ga-lwif MEDIUM).
+	@echo "$(INSTALL_DIR)/$(BINARY) is a deploy channel and was overwritten. The other channels were not."
+	@echo "To move a deployment onto this build: make deploy-fleet"
+
+## deploy-fleet: point every gc deploy channel at an installed build
+#
+# The second step `make install` no longer performs implicitly.
+# GC_DEPLOY_BINARY defaults to what `make install` just wrote:
+#
+#   make install && make deploy-fleet
+#
+# To deploy a provenance-named artifact instead of a bare dev build:
+#
+#   make artifact BASE_REF=Voxist/main ARTIFACT_DIR=$$HOME/.gc/bin
+#   make deploy-fleet GC_DEPLOY_BINARY=$$HOME/.gc/bin/gc-main-<date>-<sha>
+#
+# Every channel is SYMLINKED at the resolved real file, never copied.
+# Copying a signed binary is how this fork previously produced one that died
+# with SIGKILL 137; that did not reproduce for a linker-signed adhoc build
+# when this target was verified, but it does bite when a stable signing
+# identity is configured (see scripts/sign-darwin-local.sh). Linking sidesteps
+# the question entirely, costs nothing for a 250MB binary, and keeps the
+# deployed build legible -- `ls -l` on any channel names the artifact.
+#
+# The actual guard is the run-proof below: deploy-fleet executes the binary
+# and refuses to move a single channel until it has, so a build that cannot
+# run never reaches a deployment whatever the cause.
+#
+# A channel that already IS the build is kept, not linked. That test compares
+# file IDENTITY (-ef: same device and inode after resolving symlinks), never
+# path text: `ln -sfn x x` unlinks the real binary and leaves a
+# self-referential loop, and the readlink verification below still passes --
+# the link holds exactly what it was asked to hold -- so a textual compare
+# exits 0 while reporting success over a destroyed, unrecoverable build. Any
+# same-file/different-spelling pairing defeats a string compare: an interior
+# "/./" in GC_DEPLOY_BINARY, a channel directory that is itself a symlink, a
+# hard link, a relative path resolved against a different pwd, a symlinked
+# $$HOME. The `[ -e ]` conjunct is load-bearing, not decorative: it keeps a
+# DANGLING channel falling through to the link, which is what repairs it.
+#
+# Because readlink can only confirm what was just written, the loop is
+# followed by an execution readback: every channel is run. That is the
+# property this target owes its caller -- the pre-flight proves the ARTIFACT
+# runs, and only the readback proves the CHANNELS do.
+#
+# All channels move together; repointing only some re-splits them.
+.PHONY: deploy-fleet
+deploy-fleet:
+	@set -e; \
+		target="$(GC_DEPLOY_BINARY)"; \
+		if [ ! -e "$$target" ]; then \
+			echo "ERROR: GC_DEPLOY_BINARY $$target does not exist -- run 'make install' first, or name a binary built by 'make artifact'" >&2; \
+			exit 2; \
+		fi; \
+		case "$$target" in /*) ;; *) target="$$(pwd)/$$target";; esac; \
+		hops=0; \
+		while [ -L "$$target" ]; do \
+			hops=$$((hops + 1)); \
+			if [ "$$hops" -gt 40 ]; then \
+				echo "ERROR: symlink loop resolving $(GC_DEPLOY_BINARY)" >&2; exit 1; \
+			fi; \
+			link=$$(readlink "$$target"); \
+			case "$$link" in /*) target="$$link";; *) target="$$(dirname "$$target")/$$link";; esac; \
+		done; \
+		if [ ! -f "$$target" ] || [ ! -x "$$target" ]; then \
+			echo "ERROR: $$target is not an executable file" >&2; exit 1; \
+		fi; \
+		if ! "$$target" version >/dev/null 2>&1; then \
+			echo "ERROR: $$target does not run ('$$target version' failed) -- refusing to point a running deployment at it." >&2; \
+			echo "       On macOS a damaged codesign gives SIGKILL 137: build in place, and prefer linking over copying a signed binary." >&2; \
+			exit 1; \
+		fi; \
+		echo "Deploying $$target"; \
+		moved=0; \
+		for channel in $(GC_DEPLOY_CHANNELS); do \
+			dir=$$(dirname "$$channel"); \
+			if [ ! -d "$$dir" ]; then echo "  skip $$channel (no $$dir)"; continue; fi; \
+			if [ -e "$$channel" ] && [ "$$channel" -ef "$$target" ]; then \
+				echo "  keep $$channel (already the build)"; moved=$$((moved + 1)); continue; \
+			fi; \
+			pinned=; \
+			if [ -e "$$channel" ] || [ -L "$$channel" ]; then \
+				if [ "$$(uname)" = "Darwin" ]; then \
+					case "$$(ls -ldO "$$channel" 2>/dev/null | awk '{print $$5}')" in \
+						*uchg*) pinned="$$channel"; \
+							trap 'chflags -h uchg "$$pinned" 2>/dev/null || true' EXIT INT TERM HUP; \
+							chflags -h nouchg "$$channel";; \
+					esac; \
+				fi; \
+			fi; \
+			swap="$$channel.deploytmp.$$$$"; \
+			ln -sfn "$$target" "$$swap"; \
+			mv -f "$$swap" "$$channel"; \
+			if [ "$$(readlink "$$channel")" != "$$target" ]; then \
+				echo "ERROR: $$channel did not take the link" >&2; exit 1; \
+			fi; \
+			if [ -n "$$pinned" ]; then chflags -h uchg "$$channel"; trap - EXIT INT TERM HUP; fi; \
+			moved=$$((moved + 1)); \
+			echo "  $$channel -> $$target"; \
+		done; \
+		if [ "$$moved" -eq 0 ]; then \
+			echo "ERROR: no deploy channel was written -- GC_DEPLOY_CHANNELS matched nothing on this machine." >&2; \
+			echo "       Reporting success having moved nothing is the failure this target exists to prevent." >&2; \
+			exit 1; \
+		fi; \
+		for channel in $(GC_DEPLOY_CHANNELS); do \
+			[ -e "$$channel" ] || continue; \
+			if ! "$$channel" version >/dev/null 2>&1; then \
+				echo "ERROR: $$channel does not run after deploy -- the fleet would be dead." >&2; \
+				exit 1; \
+			fi; \
+		done; \
+		echo "Deploy channels now resolve to one binary, and every one of them ran."; \
+		echo "Restart the supervisor so it execs the new image (e.g. gc service restart) -- a running process keeps the image it started with."
 
 ## generate: regenerate JSON schemas and reference docs
 generate:
@@ -253,7 +426,7 @@ complexity-update:
 	@./scripts/ci/complexity.sh update
 
 ## check: run fast quality gates (pre-commit: unit tests only)
-check: fmt-check lint vet check-release-dist-ignore check-routed-test-rows check-split-topology-rows check-residency-boundary test
+check: fmt-check lint vet check-release-dist-ignore check-go-clean-cache check-routed-test-rows check-split-topology-rows check-residency-boundary test
 
 ## check-release-dist-ignore: keep GoReleaser output from marking release builds dirty
 check-release-dist-ignore:
@@ -316,6 +489,30 @@ check-native-dependency-surface:
 ## check-eventexport-isolation: keep the OSS event-export surface brand-free, single-sourced, and internal-free
 check-eventexport-isolation:
 	bash scripts/check-eventexport-isolation.sh
+
+## check-go-clean-cache: keep `go clean -cache` out of the codebase (AGENTS.md "Build Cache Conventions")
+## Commit-time half of the ban only. It stops the command entering a script,
+## Makefile recipe, CI step or exec.Command; it does NOT stop anyone running it
+## (neither vp-g96b nor the 2026-09-05 recurrence was ever committed). The
+## runtime half is scripts/go-clean-cache-shim.sh, and the supported way to
+## reclaim space -- the alternative the refusal names -- is
+## scripts/trim-go-build-cache.sh, whose suite runs here too.
+## Self-tests run from here rather than from Go wrappers: a wrapper per suite
+## would add an exec.Command call site in a new _test.go file, which the P0.4
+## resource census ratchets as untagged subprocess growth. Same shape as
+## check-residency-boundary above.
+check-go-clean-cache:
+	bash scripts/test-check-go-clean-cache.sh
+	bash scripts/test-go-clean-cache-shim.sh
+	bash scripts/test-trim-go-build-cache.sh
+	bash scripts/check-go-clean-cache.sh
+
+## check-resync-loss: detect Category-A resync merge loss (fork-added declarations silently dropped)
+## Pass MERGE=<sha> to check a specific merge commit; defaults to HEAD. Every
+## resync must run this on the merge commit before push (AGENTS.md "Resync
+## conventions" rule 5; bead ga-d32bn).
+check-resync-loss:
+	./scripts/check-resync-loss.sh $(MERGE)
 
 ## check-bd: verify bd (beads CLI) is installed
 check-bd:
@@ -501,6 +698,8 @@ TEST_ENV = env -i \
 	USER="$$USER" \
 	LOGNAME="$$LOGNAME" \
 	SHELL="$$SHELL" \
+	GIT_CONFIG_NOSYSTEM=1 \
+	GIT_CONFIG_GLOBAL="$$(scripts/test-gitconfig-path)" \
 	LANG="$$LANG" \
 	TMPDIR="$${TMPDIR:-/var/tmp}" \
 	OBSERVABLE_TEST_LOG="$${OBSERVABLE_TEST_LOG-}" \
@@ -682,7 +881,7 @@ setup-worker-inference:
 ## credential; the isolation this suite relies on flows through the per-run
 ## GC_HOME it hands to the gc subprocesses it spawns.
 test-worker-inference:
-	$(TEST_ENV) PROFILE="$(WORKER_INFERENCE_PROFILE)" GC_WORKER_REPORT_DIR="$(GC_WORKER_REPORT_DIR)" GC_HOME="$${GC_HOME:-$$HOME/.gc}" GC_TESTENV_PASSTHROUGH=GC_HOME go test -count=1 -tags acceptance_c -timeout 45m -v ./test/acceptance/worker_inference
+	$(TEST_ENV) GC_ACCEPTANCE_BD_BIN="$${GC_ACCEPTANCE_BD_BIN-}" GC_WORKER_INFERENCE_CURSOR_API_KEY="$${GC_WORKER_INFERENCE_CURSOR_API_KEY-}" GC_WORKER_INFERENCE_CURSOR_API_KEY_FILE="$${GC_WORKER_INFERENCE_CURSOR_API_KEY_FILE-}" CURSOR_API_KEY="$${CURSOR_API_KEY-}" PROFILE="$(WORKER_INFERENCE_PROFILE)" GC_WORKER_REPORT_DIR="$(GC_WORKER_REPORT_DIR)" GC_HOME="$${GC_HOME:-$$HOME/.gc}" GC_TESTENV_PASSTHROUGH=GC_HOME go test -count=1 -tags acceptance_c -timeout 45m -v ./test/acceptance/worker_inference
 
 ## test-worker-inference-phase3: alias for the live worker inference conformance package
 test-worker-inference-phase3: test-worker-inference
@@ -704,11 +903,15 @@ test-bd-cli-contract:
 		-run '^(TestBdBasicCRUD|TestBdDependencies|TestBdDestructive|TestBdWorkflow)$$' ./test/acceptance
 
 ## test-bd-conditional-release-contract: run the ReleaseIfCurrent CAS contract
-## against the bd on PATH. Split from test-bd-cli-contract because it is the one
-## bd contract the installable default cannot run: deps.env BD_VERSION predates
-## `--if-assignee`/`--if-status`, so it belongs on the source-built
-## BD_CURRENT_REF cell. GC_REQUIRE_BD_CONDITIONAL_RELEASE=1 turns the row's
-## capability skip into a failure, so the cell cannot pass while proving nothing.
+## against the bd on PATH. It was split from test-bd-cli-contract because it was
+## the one bd contract the installable default could not run -- deps.env
+## BD_VERSION predated `--if-assignee`/`--if-status`, so the row only had a home
+## on the source-built BD_CURRENT_REF cell. That is no longer true as of
+## BD_VERSION=v1.3.0-rc.2, which carries the flags, so the row now runs on every
+## cell rather than skipping on most. Kept separate anyway: it is the only
+## contract that needs a real CAS-capable bd, and BD_PREV_VERSION (v1.0.4) still
+## cannot run it. GC_REQUIRE_BD_CONDITIONAL_RELEASE=1 turns the row's capability
+## skip into a failure, so a cell cannot pass while proving nothing.
 ##
 ## The existence preflight closes the other way this cell can pass having proven
 ## nothing: a `-run` selector that matches no test is not an error to `go test`
@@ -1030,9 +1233,20 @@ test-k8s:
 	$(TEST_ENV) go test -tags integration ./test/integration/ -run TestK8sSessionConformance -v -count=1
 
 ## setup: install tools and git hooks
+## .githooks is the single core.hooksPath owner; its hooks chain every
+## beads-managed hook through .githooks/lib/beads-chain.sh, so reclaiming the
+## path from beads' installer does not disable beads.
 setup: install-tools
 	git config core.hooksPath .githooks
+	@./scripts/check-githooks-owner.sh
 	@echo "Done. Tools installed, pre-commit hook active."
+
+## check-hooks: verify .githooks is this clone's active core.hooksPath
+## The .githooks gates cannot report their own absence — when another installer
+## claims core.hooksPath they simply never run. This is the external detector.
+check-hooks:
+	@./scripts/check-githooks-owner.sh
+	@echo "core.hooksPath OK: .githooks gates are active."
 
 ## diagrams-excalidraw: render docs/diagrams/excalidraw/*.excalidraw to excalidraw-rendered/*.svg (idempotent)
 diagrams-excalidraw:

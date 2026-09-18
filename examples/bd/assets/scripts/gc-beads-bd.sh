@@ -970,6 +970,47 @@ probe_schema_state_or_die() {
         # enclosing function happens to be called inside a condition.
         state=0
         bd_runtime_schema_state "$db" || state=$?
+        if [ "$state" -eq 1 ]; then
+            # The probe is confident the schema is absent. That is the ordinary
+            # fresh-store answer, and it is also what a store whose config table
+            # is unreadable for any other reason looks like from here -- the
+            # probe only distinguishes "table not found: config" from a
+            # transport error, not a missing table from an unreadable one. The
+            # caller's only response to this answer is `bd init --force`, so ask
+            # the independent question first: does the database hold bd's own
+            # tables? "Absent schema" AND "holds bd tables" is a contradiction,
+            # and the destructive reading of it is the one that loses data --
+            # a forced reinit re-runs migrations over the existing working set,
+            # which beads refuses when a migrated table carries uncommitted
+            # changes (gastownhall/beads#4566), so city init dies naming neither
+            # the database nor the cause. Refuse instead. A count that says
+            # empty (1) or cannot tell (2) leaves the fresh-init path exactly as
+            # it was: only a positive "tables are present" stops it.
+            local holds=0
+            bd_runtime_store_holds_bd_tables "$db" || holds=$?
+            if [ "$holds" -eq 0 ]; then
+                # Tables present but the schema probe says absent. Before
+                # refusing, RETRY the schema read -- upstream's guard sits on
+                # bd_runtime_schema_ready's failure path and calls
+                # wait_for_bd_runtime_schema (8 attempts, 100ms->1s backoff)
+                # before it will refuse, and this branch has to keep that or it
+                # kills an init BOTH parents survive.
+                #
+                # The fork's probe retries only its UNDETERMINED answer (state
+                # 2), never a confident "table not found: config" -- but that
+                # confident answer is exactly what a store mid-bootstrap gives
+                # while another writer is creating config. Live cases: a
+                # concurrent bd bootstrap, a loaded managed Dolt, and this
+                # script's own GC_BD_INIT_RETRY=1 re-exec, which fires
+                # PRECISELY when wait_for_bd_runtime_schema has just failed and
+                # `bd init` has already created the tables.
+                if wait_for_bd_runtime_schema "$db"; then
+                    return 0
+                fi
+                die "database '$db' holds bd tables but its bd schema stayed unreadable across retries; refusing to force-reinitialize (data-safety). a forced reinit re-runs migrations over the existing working set, which beads rejects when a table it migrates carries uncommitted changes (gastownhall/beads#4566). inspect the store with 'bd dolt status' before retrying."
+            fi
+            return 1
+        fi
         if [ "$state" -ne 2 ]; then
             return "$state"
         fi
@@ -1015,6 +1056,55 @@ wait_for_bd_runtime_schema() {
     done
 
     return 1
+}
+
+# bd_runtime_bd_table_count prints how many of bd's own tables exist in the
+# database. It returns 1 without printing when the query itself fails, so a
+# caller can tell "this database is empty" from "the server did not answer" —
+# the distinction bd_runtime_schema_ready collapses by design, because a bare
+# readiness probe has no reason to care why it came back negative.
+#
+# The table names below are bd's, listed literally. That is a known ceiling on
+# how much the guard protects: if bd renames these or adds others, a populated
+# store whose tables all fall outside the list counts 0 and reads as empty, so
+# the force-reinit gets authorized again. The failure lands on the behaviour
+# that shipped before this guard existed rather than on something worse, and
+# widening the list belongs with whatever change renames the tables.
+bd_runtime_bd_table_count() {
+    local db="$1"
+    local host output
+    [ -n "$db" ] || return 1
+    valid_sql_name "$db" || return 1
+    host=$(connect_host)
+    output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -r csv -q "SELECT COUNT(*) AS cnt FROM information_schema.tables WHERE table_schema = '$db' AND table_name IN ('issues', 'comments', 'events', 'dependencies')" 2>/dev/null) || return 1
+    # Parse CSV: "cnt\n3\n" — take the last non-empty line, as get_connection_count does.
+    echo "$output" | tail -1 | tr -d '[:space:]'
+}
+
+# bd_runtime_store_holds_bd_tables answers whether the database carries bd's own
+# tables, which is what decides whether `bd init --force` would create schema or
+# migrate over live rows. It has three answers and the call site needs all three:
+#
+#   0  yes, tables are present. A forced reinit re-runs bd's migrations over the
+#      existing working set, and beads refuses to migrate any table holding
+#      uncommitted changes (gastownhall/beads#4566), so the reinit aborts city
+#      init instead of repairing anything.
+#   1  no, the database is empty. This is the genuinely-fresh store gc pre-seeds
+#      metadata.json for, and reinitializing it is exactly right.
+#   2  could not tell, because the query did not answer.
+#
+# Collapsing 2 into either of the others is the mistake this exists to prevent.
+# Folding it into 0 turns an unreadable count into a refusal to initialize a
+# fresh city; folding it into 1 re-creates the destructive guess this whole
+# guard was added to stop.
+bd_runtime_store_holds_bd_tables() {
+    local count
+    count=$(bd_runtime_bd_table_count "$1") || return 2
+    case "$count" in
+        ''|*[!0-9]*) return 2 ;;
+    esac
+    [ "$count" -gt 0 ]
 }
 
 # --- Robustness Helpers ---
@@ -2838,7 +2928,7 @@ run_bd_pinned() {
         export GC_DOLT_PASSWORD="$DOLT_PASSWORD"
         export BEADS_DOLT_SERVER_USER="$DOLT_USER"
         export BEADS_DOLT_PASSWORD="$DOLT_PASSWORD"
-        bd "$@"
+        "${BD_BIN:-bd}" "$@"
     )
 }
 
@@ -3412,8 +3502,7 @@ op_init() {
                 # a half-migrated store. `bd migrate schema` only; the bare
                 # repo-id migration stays off this path
                 # (TestGcBeadsBdInitUsesProjectIDHelperWithoutRepoIDMigration).
-                finish_bd_schema_migrations "$dir" "$dolt_database"
-                # GC owns canonical metadata/config normalization after this backend
+                finish_bd_schema_migrations "$dir" "$dolt_database"                # GC owns canonical metadata/config normalization after this backend
                 # bridge returns. Keep the backend focused on database registration
                 # and bd-specific bootstrap only.
                 ensure_beads_dir_permissions "$dir"

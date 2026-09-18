@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
@@ -101,6 +103,15 @@ until the supervisor socket is no longer answering, which is what
 most callers that need deterministic cleanup want (e.g., integration
 tests that then expect to remove temp directories without racing
 against lingering supervisor / controller subprocesses).
+
+Stopping the supervisor also stops the platform service that manages
+it, and stop exits non-zero when that fails; with --wait, gc further
+verifies on macOS that the launchd job is really gone before
+returning, sharing the same --wait-timeout deadline as the socket
+wait, and fails when it cannot confirm that. An operator stop also
+disables the launchd job, so it will not come back at the next login
+until 'gc supervisor install' — or 'gc start', which routes through
+install — re-enables it.
 
 When GC_SUPERVISOR_SYSTEMD_UNIT is set, stop is delegated to
 'systemctl [--user] stop <unit>' instead of the control-socket stop.
@@ -295,6 +306,10 @@ const supervisorPreserveSessionsOnSignalEnv = "GC_SUPERVISOR_PRESERVE_SESSIONS_O
 // the supervisor's environment via some other mechanism (e.g. a wrapper
 // around `gc supervisor run` that sources a credentials file).
 const supervisorOmitProviderCredsEnv = "GC_SUPERVISOR_OMIT_PROVIDER_CREDS"
+
+// supervisorEnvOptInVar names the variable whose value opts additional env
+// keys into the generated service file.
+const supervisorEnvOptInVar = "GC_SUPERVISOR_ENV"
 
 // 32768 is the Linux kernel default for net.ipv4.ip_local_port_range lower bound.
 const supervisorEphemeralPortWarningThreshold = 32768
@@ -722,26 +737,123 @@ func supervisorAlive() int {
 }
 
 func runningSupervisorSocket() (string, int) {
-	for _, sockPath := range supervisorSocketPathCandidates() {
-		if pid := supervisorAliveAtPath(sockPath); pid != 0 {
-			return sockPath, pid
+	sockPath, pid, _ := probeRunningSupervisor()
+	return sockPath, pid
+}
+
+// supervisorLiveness is what a control-socket probe established about the
+// supervisor.
+//
+// The tri-state exists because a bare pid destroys the distinction. A probe
+// that timed out and a supervisor that is not running both produce 0, and
+// callers that must not treat "did not answer" as "not running" — `gc doctor`,
+// which reports a green verdict for the latter — have no way to tell them
+// apart afterwards.
+type supervisorLiveness int
+
+const (
+	// supervisorLivenessUnknown means no candidate socket settled the
+	// question: one accepted a connection and then failed to answer with a
+	// parseable pid, or the probe ran out of budget. It is the zero value so
+	// an unset result never reads as a positive claim.
+	supervisorLivenessUnknown supervisorLiveness = iota
+	// supervisorLivenessAbsent means every candidate socket refused the
+	// connection outright, which is what a supervisor that is not running
+	// leaves behind.
+	supervisorLivenessAbsent
+	// supervisorLivenessAlive means a socket answered with the supervisor's
+	// pid.
+	supervisorLivenessAlive
+)
+
+// probeRunningSupervisor walks the candidate control sockets and reports the
+// first live one, along with what the walk established.
+func probeRunningSupervisor() (string, int, supervisorLiveness) {
+	return probeRunningSupervisorAt(supervisorSocketPathCandidates(), probeSupervisorAtPath)
+}
+
+// probeRunningSupervisorAt folds one answer per candidate socket into one
+// answer for the walk.
+//
+// Absent is earned only when EVERY candidate refused outright. A candidate
+// that accepted a connection and then went quiet may be a supervisor that is
+// up, executing a stale image and wedged on its socket, so folding it in as
+// "not running" would hand `gc doctor` the one pid value that licenses a green
+// verdict — the finding this tri-state exists for, reintroduced whole one
+// function above where it was fixed.
+//
+// paths and probe are parameters so the fold is testable: the real candidate
+// list comes from supervisorSocketPathCandidates, which panics in a test
+// binary rather than resolve the host's runtime dir, and opening a real socket
+// to answer it would grow a zero-growth resource-census ratchet.
+func probeRunningSupervisorAt(paths []string, probe func(string) (int, supervisorLiveness)) (string, int, supervisorLiveness) {
+	// Examining no candidate is not a negative result; it is no result.
+	if len(paths) == 0 {
+		return "", 0, supervisorLivenessUnknown
+	}
+	liveness := supervisorLivenessAbsent
+	for _, sockPath := range paths {
+		pid, got := probe(sockPath)
+		if got == supervisorLivenessAlive {
+			return sockPath, pid, got
+		}
+		if got == supervisorLivenessUnknown {
+			liveness = supervisorLivenessUnknown
 		}
 	}
-	return "", 0
+	return "", 0, liveness
 }
 
-func supervisorAliveAtPath(sockPath string) int {
-	return supervisorAliveAtPathUntil(sockPath, time.Now().Add(3*time.Second))
+// supervisorPIDForDoctor renders the probe as the pid `gc doctor` passes to
+// checks that reason about the executed image.
+func supervisorPIDForDoctor() int {
+	_, pid, liveness := probeRunningSupervisor()
+	return doctorPIDForLiveness(pid, liveness)
 }
 
-// supervisorAliveAtPathUntil is supervisorAliveAtPath with a total budget.
-// Dial and read timeouts are each capped to the remaining time before
-// deadline so a wedged socket cannot stretch the probe beyond the caller's
-// wait budget.
+// doctorPIDForLiveness maps a probe result onto doctor's pid contract, using
+// doctor's sentinel for the state a bare pid cannot carry.
+//
+// 0 is the value that makes the binary-divergence check report StatusOK
+// "supervisor not running", so it is reserved for a probe that established
+// absence. Everything else — including a liveness value outside the enum —
+// resolves to the sentinel, because the fail-safe direction here is "we did
+// not establish this", never the green answer.
+func doctorPIDForLiveness(pid int, liveness supervisorLiveness) int {
+	switch liveness {
+	case supervisorLivenessAlive:
+		return pid
+	case supervisorLivenessAbsent:
+		return 0
+	default:
+		return doctor.SupervisorPIDUnknown
+	}
+}
+
+// probeSupervisorAtPath probes one control socket under the default budget.
+func probeSupervisorAtPath(sockPath string) (int, supervisorLiveness) {
+	return probeSupervisorAtPathUntil(sockPath, time.Now().Add(3*time.Second))
+}
+
+// supervisorAliveAtPathUntil reports the pid a control socket answers with, or
+// 0, under a total budget. Dial and read timeouts are each capped to the
+// remaining time before deadline so a wedged socket cannot stretch the probe
+// beyond the caller's wait budget. Callers that must not read 0 as "no
+// supervisor is running" want probeSupervisorAtPathUntil instead.
 func supervisorAliveAtPathUntil(sockPath string, deadline time.Time) int {
+	pid, _ := probeSupervisorAtPathUntil(sockPath, deadline)
+	return pid
+}
+
+// probeSupervisorAtPathUntil is supervisorAliveAtPathUntil with the state it
+// discards restored. Only a dial that was refused outright — no socket file,
+// or nothing listening on one — is evidence that no supervisor is running.
+// Every other failure (a connection that was accepted and then never answered,
+// a short read, a reply that does not parse) means the probe learned nothing.
+func probeSupervisorAtPathUntil(sockPath string, deadline time.Time) (int, supervisorLiveness) {
 	remaining := time.Until(deadline)
 	if remaining <= 0 {
-		return 0
+		return 0, supervisorLivenessUnknown
 	}
 	dialTimeout := 500 * time.Millisecond
 	if dialTimeout > remaining {
@@ -749,7 +861,7 @@ func supervisorAliveAtPathUntil(sockPath string, deadline time.Time) int {
 	}
 	conn, err := net.DialTimeout("unix", sockPath, dialTimeout)
 	if err != nil {
-		return 0
+		return 0, dialFailureLiveness(err)
 	}
 	defer conn.Close()           //nolint:errcheck
 	conn.Write([]byte("ping\n")) //nolint:errcheck
@@ -760,14 +872,34 @@ func supervisorAliveAtPathUntil(sockPath string, deadline time.Time) int {
 	conn.SetReadDeadline(readDeadline) //nolint:errcheck
 	buf := make([]byte, 64)
 	n, err := conn.Read(buf)
+	return supervisorPingReply(buf, n, err)
+}
+
+// supervisorPingReply classifies what came back from a control socket that
+// accepted the connection. Only a parseable positive pid establishes that a
+// supervisor is running; a read that timed out, a short read and a reply that
+// does not parse all leave the question open, because the socket answering at
+// all means something is there.
+func supervisorPingReply(buf []byte, n int, err error) (int, supervisorLiveness) {
 	if err != nil || n == 0 {
-		return 0
+		return 0, supervisorLivenessUnknown
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(buf[:n])))
-	if err != nil {
-		return 0
+	pid, convErr := strconv.Atoi(strings.TrimSpace(string(buf[:n])))
+	if convErr != nil || pid <= 0 {
+		return 0, supervisorLivenessUnknown
 	}
-	return pid
+	return pid, supervisorLivenessAlive
+}
+
+// dialFailureLiveness classifies why a control-socket dial failed. A missing
+// socket file or a refused connection is the residue a supervisor that is not
+// running leaves; a timeout, a permission error or a full listen backlog is
+// not, and must not be reported as one.
+func dialFailureLiveness(err error) supervisorLiveness {
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED) {
+		return supervisorLivenessAbsent
+	}
+	return supervisorLivenessUnknown
 }
 
 // stopSupervisor sends a stop command to the running supervisor and returns
@@ -842,8 +974,12 @@ func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeou
 	if !jsonOut {
 		fmt.Fprintln(stdout, "Supervisor stopping...") //nolint:errcheck
 	}
-	unloadSupervisorService()
+	serviceErr := unloadSupervisorServiceHook()
 	if !wait {
+		if serviceErr != nil {
+			fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", serviceErr) //nolint:errcheck
+			return 1
+		}
 		if jsonOut {
 			return writeSupervisorStopSuccess(stdout, stderr, wait)
 		}
@@ -868,6 +1004,14 @@ func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeou
 			// budget — the server already told us shutdown finished.
 			if err := waitForSupervisorExitUntil(sockPath, time.Now().Add(5*time.Second)); err != nil {
 				fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
+				return 1
+			}
+			if serviceErr != nil {
+				fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", serviceErr) //nolint:errcheck
+				return 1
+			}
+			if err := verifySupervisorServiceStoppedHook(deadline); err != nil {
+				fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", err) //nolint:errcheck
 				return 1
 			}
 			if jsonOut {
@@ -898,6 +1042,14 @@ func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeou
 
 	if err := waitForSupervisorExitUntil(sockPath, deadline); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor stop: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if serviceErr != nil {
+		fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", serviceErr) //nolint:errcheck
+		return 1
+	}
+	if err := verifySupervisorServiceStoppedHook(deadline); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor stop: platform service did not stop durably: %v\n", err) //nolint:errcheck
 		return 1
 	}
 	if jsonOut {
@@ -1114,6 +1266,31 @@ func managedCityForcedStopTimeout(mc *managedCity) time.Duration {
 	return timeout * 5
 }
 
+// runCityShutdownBounded runs mc.cr.shutdown() in its own goroutine and waits
+// for it to finish, bounded by the forced-stop timeout (or mc.done closing
+// first). shutdown() is idempotent (guarded by sync.Once), so if it is
+// genuinely hung — e.g. on a beads/session call with no context of its own —
+// abandoning the goroutine past the bound is safe: it either completes later
+// on its own or blocks harmlessly forever without doing further work. This
+// keeps a hung shutdown() from blocking the caller's own bounded wait for
+// mc.done (#5256).
+func runCityShutdownBounded(mc *managedCity) {
+	if mc == nil || mc.cr == nil {
+		return
+	}
+	shutdownDone := make(chan struct{})
+	go func() {
+		defer func() { recover() }() //nolint:errcheck
+		defer close(shutdownDone)
+		mc.cr.shutdown()
+	}()
+	select {
+	case <-shutdownDone:
+	case <-mc.done:
+	case <-time.After(managedCityForcedStopTimeout(mc)):
+	}
+}
+
 // stopManagedCity cancels a city's context, waits up to its configured
 // grace period for it to exit, forces shutdown if it doesn't, and then
 // closes the bead provider and file recorder. It returns a non-nil error
@@ -1142,21 +1319,34 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) error {
 			stopErr = fmt.Errorf("city %q did not exit within %s after cancel", mc.name, timeout)
 		}
 	}
+	forceTimeout := managedCityForcedStopTimeout(mc)
 	if mc.cr != nil {
 		if mc.cr.forceStopShutdown != nil {
 			mc.cr.forceStopShutdown.Store(true)
 		}
-		func() {
-			defer func() { recover() }() //nolint:errcheck
-			mc.cr.shutdown()
-		}()
-	}
-	forceTimeout := managedCityForcedStopTimeout(mc)
-	if forceTimeout > 0 {
+		// forceDeadline bounds the *combined* time spent inside
+		// runCityShutdownBounded and the wait below by forceTimeout, not
+		// forceTimeout each: runCityShutdownBounded can return early (its
+		// shutdownDone fires as soon as mc.cr.shutdown() itself returns,
+		// which says nothing about whether mc.done has closed yet), so the
+		// remaining wait for mc.done must shrink by however long that
+		// already took rather than restart a fresh full-length timeout.
+		forceDeadline := time.Now().Add(forceTimeout)
+		runCityShutdownBounded(mc)
+		if forceTimeout > 0 {
+			select {
+			case <-mc.done:
+				// Forced shutdown completed within its budget — the city
+				// is out. Clear the pending error so we report success.
+				stopErr = nil
+			case <-time.After(time.Until(forceDeadline)):
+				fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after forced shutdown\n", mc.name, forceTimeout) //nolint:errcheck
+				stopErr = fmt.Errorf("city %q did not exit within %s after forced shutdown", mc.name, forceTimeout)
+			}
+		}
+	} else if forceTimeout > 0 {
 		select {
 		case <-mc.done:
-			// Forced shutdown completed before the second timeout — the
-			// city is out. Clear the pending error so we report success.
 			stopErr = nil
 		case <-time.After(forceTimeout):
 			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after forced shutdown\n", mc.name, forceTimeout) //nolint:errcheck
@@ -1193,17 +1383,24 @@ func stopManagedCityPreservingSessions(mc *managedCity, _ string, stderr io.Writ
 		}
 	}
 	if waitForRuntimeShutdown && mc.cr != nil {
-		func() {
-			defer func() { recover() }() //nolint:errcheck
-			mc.cr.shutdown()
-		}()
-		if timeout > 0 {
+		forceTimeout := managedCityForcedStopTimeout(mc)
+		// forceDeadline bounds the *combined* time spent inside
+		// runCityShutdownBounded and the wait below by forceTimeout, not
+		// forceTimeout each — see stopManagedCity for the full rationale:
+		// runCityShutdownBounded can return early (its shutdownDone fires as
+		// soon as mc.cr.shutdown() itself returns, which says nothing about
+		// whether mc.done has closed yet), so the remaining wait for mc.done
+		// must shrink by however long that already took rather than restart
+		// a fresh full-length timeout.
+		forceDeadline := time.Now().Add(forceTimeout)
+		runCityShutdownBounded(mc)
+		if forceTimeout > 0 {
 			select {
 			case <-mc.done:
 				stopErr = nil
-			case <-time.After(timeout):
-				fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after preserve-mode shutdown wait\n", mc.name, timeout) //nolint:errcheck
-				stopErr = fmt.Errorf("city %q did not exit within %s after preserve-mode shutdown wait", mc.name, timeout)
+			case <-time.After(time.Until(forceDeadline)):
+				fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after preserve-mode shutdown wait\n", mc.name, forceTimeout) //nolint:errcheck
+				stopErr = fmt.Errorf("city %q did not exit within %s after preserve-mode shutdown wait", mc.name, forceTimeout)
 			}
 		}
 	}
@@ -1247,6 +1444,19 @@ func configureSupervisorRuntime() {
 	if os.Getenv("GC_PPROF") != "1" {
 		goruntime.MemProfileRate = 0
 	}
+}
+
+// testHarnessDefaultPortError refuses a supervisor config that leaves the API
+// port unset while running under a test harness. The default port is the
+// production supervisor's: a test supervisor that falls back to it either
+// fails as a "duplicate" or, worse, wins the port and takes the fleet's
+// controller offline (ga-32bb2). Test supervisors must pin their own port.
+func testHarnessDefaultPortError(s supervisor.Section) error {
+	if s.Port > 0 || os.Getenv(managedDoltTestModeEnv) != "1" {
+		return nil
+	}
+	return fmt.Errorf("refusing to bind the default API port %d under a test harness (%s=1); set [supervisor] port in %s",
+		s.PortOrDefault(), managedDoltTestModeEnv, supervisor.ConfigPath())
 }
 
 // runSupervisor is the main supervisor loop. It acquires the lock,
@@ -1354,6 +1564,10 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	supCfg, err := supervisorLoadConfig(supervisor.ConfigPath())
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: config: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if err := testHarnessDefaultPortError(supCfg.Supervisor); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: %v\n", err) //nolint:errcheck
 		return 1
 	}
 

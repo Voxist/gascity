@@ -328,9 +328,10 @@ the flock requirement entirely.
 
 ## Cursor MCP Tools Still Prompt or Appear Unavailable
 
-The built-in `cursor` provider starts `cursor-agent` with `-f` and leaves
-Cursor's MCP approval prompt enabled by default. This avoids silently approving
-user or global MCP servers that Cursor can also see through `~/.cursor/mcp.json`.
+The built-in `cursor` provider starts `cursor-agent` with `-f --trust` so an
+unattended worker does not stop at Cursor's workspace-trust dialog. Use it only
+for workspaces whose contents you trust. The flag does not approve MCP servers;
+Cursor's MCP approval prompt remains enabled by default.
 
 For unattended Cursor pool workers, opt in only after confirming that every
 workspace and user/global MCP server visible to Cursor is trusted. The
@@ -344,8 +345,8 @@ mcp_approval = "approve"
 ```
 
 If you override Cursor `args` directly, the override replaces the built-in
-args. Include `-f` yourself and add `--approve-mcps` only for the same explicit
-trust decision. Agent-level `args` overrides behave the same way.
+args. Include `-f --trust` yourself and add `--approve-mcps` only for the same
+explicit MCP trust decision. Agent-level `args` overrides behave the same way.
 
 Existing Cursor sessions keep the command fingerprint they were created with.
 The supervisor reconciler restarts sessions automatically after the fingerprint
@@ -396,8 +397,77 @@ suppresses provider credentials from both sources.
 Apply the change by regenerating the service file:
 
 ```bash
-gc service restart     # restarts the launchd/systemd service
+gc supervisor install    # regenerate the service file and re-exec with it
 ```
+
+That is the whole apply step. When the rendered service file differs, install
+rewrites it, unloads the service and loads it again, which re-execs the
+supervisor under the service manager with the merged environment. `gc start`
+reaches the same path.
+
+<Warning>
+Do not reach for `gc supervisor stop` followed by `gc supervisor start`.
+`gc supervisor start` does not regenerate the service file and does not merge
+the secrets file: it launches a supervisor detached from the service manager
+carrying the calling shell's environment, and it refuses outright when one is
+already running. Using it here is how a rotation ends up serving the old value
+or a blank one.
+</Warning>
+
+One case to watch on macOS: when the rendered plist is byte-identical to the
+installed one and a supervisor is already alive, install reports
+`Installed launchd service` and exits 0 **without** re-execing. Nothing
+changed, so nothing was applied.
+
+The other way an install declines is not silent: a service file naming a
+different `gc` binary makes install exit 1 and tell you to pass `--force`, so
+it cannot be mistaken for a change that took.
+
+## Rotating a Provider API Key
+
+Symptom: an upstream key was rotated and you need the fleet on the new one,
+but it is not obvious which variable to change — a provider's credential is
+usually reached through two indirections.
+
+Use `gc provider credentials <provider>` to resolve it. The command reads the
+provider's `upstream_env` binding to find which env var carries the credential
+(`api_key` and `auth_token`; never `base_url`), resolves that name the way
+session start does, and follows the value's `$VAR` reference to the variable
+that actually holds the secret:
+
+```bash
+gc provider credentials zai
+```
+
+It is read-only, and it reports what would stop a change from taking effect:
+
+- a source variable the supervisor does not forward into its service
+  environment, which is dropped when the service file is regenerated — the
+  fleet then starts with a **blank** credential, not the old one;
+- a later config layer that overrides the credential for particular agents.
+  Session start merges `[workspace.env]` < provider < agent `env` and injects
+  the selected `[upstreams.<name>]` serving env last, so an agent that selects
+  an upstream reads a different variable than the provider names;
+- a malformed secrets file, which the supervisor abandons entirely rather than
+  skipping the bad line, dropping every credential in it.
+
+Then change the value at its source and apply it with the procedure in
+[Provider Credentials Dropped When the Supervisor Starts](#provider-credentials-dropped-when-the-supervisor-starts),
+followed by `gc restart` to cycle the agents.
+
+<Warning>
+Changing a credential does not apply itself. A credential change moves no
+config fingerprint, so no agent restarts on its own, and the supervisor
+resolves session environment from its own environment, fixed when it exec'd.
+Until the supervisor re-execs, every running session keeps the old credential.
+`gc restart` cycles agents only — `gc supervisor install` is what re-execs the
+supervisor.
+</Warning>
+
+One hazard the command cannot check for you: a value exported in the shell
+that regenerates the service file wins over the secrets file, which fills only
+names that shell left unset. If that shell exports the variable, the file entry
+is ignored and nothing changes.
 
 ## Supervisor Log Written Twice (journald + supervisor.log)
 
@@ -627,12 +697,23 @@ instead of mailing a hardcoded role. Orders inherit the orchestrator's
 environment, so set these at orchestrator start to customize routing:
 
 - `GC_ESCALATION_RECIPIENT` — mail recipient for escalations (default:
-  `human`, the reserved human mailbox).
+  `human`, the reserved human mailbox). An agent recipient is woken with
+  `--notify`; the `human` default is a mailbox with no session behind it,
+  so nothing is woken and the escalation waits until somebody reads that
+  inbox. Point this at the agent that surfaces alerts (the manager, on a
+  Slack-connected city) if you want maintenance advisories acted on rather
+  than filed.
 - `GC_ESCALATE_SCRIPT` — absolute path to an escalation script to run
   instead of searching packs.
 - `GC_ESCALATE_SEARCH_PACKS` — space-separated pack names searched (in
   order) for an `assets/scripts/escalate.sh` override (default:
   `gastown maintenance bd core`). A pack earlier in the list wins.
+- `GC_ESCALATE_SEND_TIMEOUT_SECS` — wall-clock bound on one escalation
+  send (default: 30). The wake can outlive the send it follows, and
+  escalations run inline in maintenance orders, so the bound keeps a slow
+  wake from stalling the run that raised the alarm. The mail is written
+  before the wake blocks, so a tripped bound costs the wake, not the
+  message, and the script still exits 0.
 - `GC_MAINTENANCE_DONE_TARGET` — session target to nudge with
   `MAINTENANCE_DONE:`/warn summaries when a maintenance run completes
   (default: unset, no completion nudge). Deployments that relied on the

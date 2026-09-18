@@ -107,6 +107,120 @@ remote_sha() {
 #                                          list-call-count).
 # ---------------------------------------------------------------------------
 
+# write_fake_timeout installs a `timeout` into a fake-bin dir when the host has
+# no GNU coreutils one. The two ga-grenu cases below assert the guard's
+# TIMEOUT-path wording, and the guard resolves POG_TIMEOUT_BIN once at load via
+# `command -v timeout`: with no timeout on PATH it resolves to "", runs bd
+# unbounded, and the slow-bd fixture simply completes -- so the cases fail with
+# the load-time "enforces nothing" warning instead of the message they exist to
+# check. That is what happens on the Mac CI runner, which ships no coreutils.
+#
+# Depending on the runner's toolchain for a property of OUR guard is the bug;
+# this makes the cases hermetic on any host. Installed only when the host lacks
+# a real timeout, so hosts WITH coreutils keep exercising the genuine binary and
+# a real regression there still fails.
+#
+# Called from those two cases ONLY, never from write_fake_bd. run_guard prepends
+# the fake-bd dir to PATH for every case, and
+# coreutils/unbounded-fallback-announces-itself exists to assert what the guard
+# says when NO bounding tool is reachable -- so a timeout installed for all
+# fixtures would defeat that case on exactly the no-coreutils host this function
+# is here to serve.
+#
+# perl's alarm, not a shell watchdog. `( sleep N; kill ... ) &` has two defects,
+# both of which bite precisely on the timeout path:
+#   1. Using `kill -0 $watch_pid` to decide "did the watchdog fire" infers a
+#      happens-before that does not exist. The watchdog's own TERM is what
+#      unblocks `wait`, so whether bash has reaped it is a race; losing that
+#      race returns the command's signal status 143 instead of 124. Measured at
+#      4/200 on the isolated tie shape and 1/105 end-to-end through the real
+#      guard -- where it surfaces as "1 errored" instead of "1 timed out",
+#      i.e. ga-grenu reintroduced by the fixture in the very test that pins
+#      that message.
+#   2. `sleep` is a GRANDCHILD of the subshell, so killing the watchdog leaves
+#      it running, holding the caller's command-substitution pipe open for the
+#      full budget -- every non-expiring bd read cost a whole budget.
+# alarm survives exec (POSIX), so the timer applies to the real command; there
+# is no watchdog to race and no sleep to orphan.
+write_fake_timeout() {
+    local dir="$1"
+    if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
+        return 0
+    fi
+    local perl_bin
+    perl_bin="$(command -v perl 2>/dev/null || true)"
+    if [ -z "$perl_bin" ]; then
+        # No bounding mechanism at all. Install nothing rather than a shim that
+        # cannot bound: the two cases then fail loudly on the real cause instead
+        # of passing for a manufactured reason.
+        return 0
+    fi
+    cat > "$dir/timeout" <<'FAKETIMEOUT'
+#!/usr/bin/env bash
+# Minimal `timeout <seconds> <cmd...>`: exit 124 if the command outlives the
+# bound, otherwise the command's own status.
+#
+# PERL_BIN is an absolute path resolved when this file was written, NOT a bare
+# `perl`. The guard runs with its own PATH, which is not the one this shim was
+# installed under -- and one case in this harness replaces PATH wholesale with a
+# symlink list that has no perl. A bare `perl` there is command-not-found, the
+# shim exits 127, and the guard classifies that as an ERROR rather than a
+# TIMEOUT -- reintroducing ga-grenu by a new route, in the very cases added to
+# pin its message.
+bound="$1"
+shift
+
+# Reject a bound perl would numify to 0. `alarm 0` CANCELS the timer, so
+# `timeout abc cmd` would run unbounded and report success -- a silent
+# fail-open, and the one place this form is worse than a shell watchdog, which
+# at least errors on an invalid interval. GNU exits 125 without running the
+# command; match that. A bound of 0 IS valid and does mean "no limit", which is
+# also GNU's behaviour. beads' own hook chain validates its interval for the
+# same reason (beads #5503).
+case "$bound" in
+    ''|*[!0-9]*) echo "timeout: invalid time interval '$bound'" >&2; exit 125 ;;
+esac
+
+# `or exit 127` because a failed exec otherwise falls through to perl's own
+# exit 0, reporting SUCCESS for a command that never ran. GNU reports 127.
+PERL_BIN -e 'alarm shift; exec @ARGV or exit 127' -- "$bound" "$@"
+status=$?
+# SIGALRM killed the command: 128+14. Report it the way timeout(1) does.
+# NOTE: a command that traps or ignores SIGALRM defeats this bound entirely,
+# where GNU (which signals with TERM, then KILL) would still report 124. No
+# fixture here traps ALRM; do not add one.
+#
+# On the expiry path bash prints its own "Alarm clock: 14" job-control line to
+# THIS script's stderr, which GNU timeout does not. It is absorbed by the
+# guard's own `2>/dev/null` at the call site (zero occurrences across a full
+# suite run) and is deliberately not suppressed here: separating bash's report
+# from the command's real stderr is not possible without discarding both.
+if [ "$status" -eq 142 ]; then
+    status=124
+fi
+exit "$status"
+FAKETIMEOUT
+    # Bake the absolute interpreter path in; see the PERL_BIN note in the shim.
+    #
+    # Checked, and the placeholder is re-inspected afterwards, because the
+    # failure is SILENT and lands on the timeout path. An unsubstituted shim
+    # still installs and is still executable; it just exits 127 on the literal
+    # `PERL_BIN`, and _pog_read_with_retry classifies 127 as an ERROR rather
+    # than a TIMEOUT -- reintroducing ga-grenu's wrong message inside the two
+    # cases this function exists to make hermetic. `sed` succeeding is not the
+    # same fact as the substitution having happened, so assert the stronger one.
+    if ! sed -i.bak "s|^PERL_BIN |${perl_bin} |" "$dir/timeout"; then
+        echo "write_fake_timeout: sed failed to bake the perl path into $dir/timeout" >&2
+        return 1
+    fi
+    rm -f "$dir/timeout.bak"
+    if grep -q '^PERL_BIN ' "$dir/timeout"; then
+        echo "write_fake_timeout: PERL_BIN placeholder survived substitution in $dir/timeout" >&2
+        return 1
+    fi
+    chmod +x "$dir/timeout"
+}
+
 write_fake_bd() {
     local dir="$1"
     mkdir -p "$dir/fake-bd-state"
@@ -154,6 +268,11 @@ case "$1" in
       exit 0
     fi
     printf '[]'
+    exit 0
+    ;;
+  hooks)
+    # `bd hooks run <hook>`, chained from .githooks. Model a beads install that
+    # accepts the hook and does nothing, so these tests stay about the guard.
     exit 0
     ;;
   *)
@@ -488,6 +607,118 @@ test_retry_recovers_then_still_blocks_on_real_ownership_change() {
     rm -rf "$repo" "$fbd"
 }
 
+# ga-grenu: when EVERY attempt expired on the clock and none reported an
+# error, the store is slow, not absent. The message must say so and name the
+# budget knob, because the old wording ("unreachable ... bd/Dolt needs
+# attention" + "--no-verify") pointed at the wrong subsystem and offered
+# disarming the guard as the remedy -- which is how a load spike turns into a
+# bypassed ownership check.
+test_timeout_message_names_the_budget_not_an_outage() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    write_fake_timeout "$fbd"
+    mkdir -p "$fbd/fake-bd-state"
+    echo 3 > "$fbd/fake-bd-state/show-sleep"   # healthy but slower than the budget
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 1 2>&1)"; rc=$?  # budget 1s < 3s sleep
+    if [[ $rc -ne 0 ]] \
+        && grep -q "exceeded POG_TIMEOUT_SECONDS" <<<"$out" \
+        && grep -q "POG_TIMEOUT_SECONDS=60 git push" <<<"$out" \
+        && ! grep -q "bd/Dolt needs attention" <<<"$out"; then
+        record_pass "timeout/message-names-budget-not-outage (rc=$rc)"
+    else
+        record_fail "timeout/message-names-budget-not-outage" "expected a timeout-specific message naming the budget and a larger-budget retry, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# ga-grenu: a store that ERRORS (rather than hanging) must still produce the
+# outage-flavoured wording. The two failure modes must not collapse back into
+# one message -- that collapse is the defect.
+test_error_message_still_reports_unreachable() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    write_fake_timeout "$fbd"
+    mkdir -p "$fbd/fake-bd-state"
+    echo 1 > "$fbd/fake-bd-state/show-exit"    # errors immediately, never hangs
+    out="$(POG_READ_ATTEMPTS=2 run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] \
+        && grep -q "unreachable after" <<<"$out" \
+        && ! grep -q "exceeded POG_TIMEOUT_SECONDS" <<<"$out"; then
+        record_pass "timeout/error-path-keeps-unreachable-wording (rc=$rc)"
+    else
+        record_fail "timeout/error-path-keeps-unreachable-wording" "expected unreachable wording (not the timeout wording) when bd errors, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# ga-6kev4: stock macOS ships neither `timeout` nor `gtimeout` (both are GNU
+# coreutils), and _pog_timeout then runs the read UNBOUNDED. Two things follow
+# that are invisible on any host that has them installed: POG_TIMEOUT_SECONDS
+# enforces nothing, and rc is never 124 so the timeout-specific wording added
+# for ga-grenu can never fire -- the operator sees the outage wording that
+# recommends --no-verify, which is precisely what that change existed to stop.
+#
+# This test removes both binaries from PATH and asserts the guard SAYS so,
+# rather than silently degrading. It is the only coverage of that host, because
+# every machine that runs this suite today has coreutils.
+#
+# It asserts BOTH messages, and the distinction is one character of tense:
+#   load-time warning : "... POG_TIMEOUT_SECONDS=Ns enforces nothing"   (present)
+#   block message     : "... POG_TIMEOUT_SECONDS enforced nothing"      (past)
+# An earlier version grepped only the past-tense string, which appears solely in
+# the block message — so deleting the entire load-time `echo WARNING` line left
+# this test green. A test for a guard that silently does nothing was itself
+# silently not testing the announcement.
+test_unbounded_without_coreutils_announces_itself() {
+    local repo fbd out rc bin stripped
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/var/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    mkdir -p "$fbd/fake-bd-state"
+    echo 1 > "$fbd/fake-bd-state/show-exit"
+
+    # Build a PATH containing ONLY the binaries the guard needs, deliberately
+    # omitting timeout/gtimeout, so the bounding tool is the single variable.
+    #
+    # An earlier version removed every PATH DIRECTORY that provided
+    # timeout/gtimeout. That is platform-dependent and broke on Linux CI: there
+    # `timeout` lives in /usr/bin alongside git, jq, grep and cat, so stripping
+    # it took the guard's whole toolchain with it and the run died rc=127 --
+    # a command-not-found, which proves nothing about the unbounded path. It
+    # passed on macOS only because Homebrew puts timeout in /opt/homebrew/bin
+    # and leaves /usr/bin intact.
+    local shimdir="$fbd/nobound-bin"
+    mkdir -p "$shimdir"
+    local tool resolved
+    for tool in bash git jq grep cat sed head tail awk cut tr wc sort uniq date mktemp rm sleep printf; do
+        resolved="$(command -v "$tool" 2>/dev/null || true)"
+        if [[ -z "$resolved" ]]; then
+            record_fail "coreutils/unbounded-fallback-announces-itself" "cannot build a bounded-tool-free PATH: required tool '$tool' not found on this host"
+            rm -rf "$repo" "$fbd"
+            return
+        fi
+        ln -sf "$resolved" "$shimdir/$tool"
+    done
+    stripped="$shimdir"
+
+    out="$(PATH="$stripped" run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] \
+        && grep -q "WARNING — neither" <<<"$out" \
+        && grep -q "enforces nothing" <<<"$out" \
+        && grep -q "enforced nothing" <<<"$out" \
+        && grep -q "ga-6kev4" <<<"$out" \
+        && ! grep -q "timed out at" <<<"$out"; then
+        record_pass "coreutils/unbounded-fallback-announces-itself (rc=$rc)"
+    else
+        record_fail "coreutils/unbounded-fallback-announces-itself" "expected the guard to say the budget enforced nothing and cite ga-6kev4, and NOT to report a timeout tally, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
 test_retry_unreachable_message_mentions_retry_before_no_verify() {
     local repo fbd out rc before_noverify
     repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
@@ -539,6 +770,72 @@ test_bead_id_branch_wins_and_warns_on_disagreement() {
         record_pass "resolve/branch-wins-warns-on-disagreement (rc=0, warning names both ids)"
     else
         record_fail "resolve/branch-wins-warns-on-disagreement" "expected rc=0 with both ids mentioned, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# Regression: real bead ids are NOT six characters wide, and the resolver's
+# regex was `ga-[0-9a-z]{6}`. Of 649 open beads on 2026-09-06, 581 were FIVE
+# characters, 41 six, 26 four, 1 three -- so ~89% of branches resolved to
+# NOTHING, the guard took its "no bead to check" branch, and every such push
+# was allowed unguarded. Every live worktree branch in the repo was affected.
+#
+# It survived because every id this suite exercised was six characters
+# (ga-fip9ps, ga-abc123, ga-cand01, ga-fallbk, ga-held01): the guard was
+# verified only against inputs selected to match its own regex, so it could
+# not fail. These cases use the widths that actually occur.
+#
+# The fix is `{3,}` and not a wider fixed width: `{6}` also TRUNCATES a 7-char
+# id (ga-abcdefg -> ga-abcdef), silently resolving a DIFFERENT bead, which the
+# seven-char case below pins.
+test_bead_id_resolves_five_char_id() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "fix/ga-elgvf-trivy-waiver-cliff")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    printf '[{"id":"ga-other01.9"}]' > "$fbd/fake-bd-state/list-json"
+    write_show_json "$fbd" "ga-elgvf" "in_progress" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && grep -q "ga-elgvf" <<<"$out"; then
+        record_pass "resolve/five-char-id (the 89% case)"
+    else
+        record_fail "resolve/five-char-id" "expected the branch id ga-elgvf to resolve, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# A four-character id (26 of 649) must resolve too.
+test_bead_id_resolves_four_char_id() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "fix/ga-9wsr-local-only-dolt")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    printf '[{"id":"ga-other01.9"}]' > "$fbd/fake-bd-state/list-json"
+    write_show_json "$fbd" "ga-9wsr" "in_progress" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && grep -q "ga-9wsr" <<<"$out"; then
+        record_pass "resolve/four-char-id"
+    else
+        record_fail "resolve/four-char-id" "expected ga-9wsr to resolve, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# A SEVEN-character id must resolve WHOLE. This is why the fix is a lower
+# bound: under {6} this branch resolved to ga-abcdef -- a different bead --
+# rather than failing to resolve, which is the worse of the two failures.
+test_bead_id_does_not_truncate_seven_char_id() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "fix/ga-abcdefg-seven-char")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    printf '[{"id":"ga-other01.9"}]' > "$fbd/fake-bd-state/list-json"
+    write_show_json "$fbd" "ga-abcdefg" "in_progress" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && grep -q "ga-abcdefg" <<<"$out" && ! grep -qE 'ga-abcdef([^g]|$)' <<<"$out"; then
+        record_pass "resolve/seven-char-id-not-truncated"
+    else
+        record_fail "resolve/seven-char-id-not-truncated" "expected ga-abcdefg whole, got rc=$rc, output: $out"
     fi
     rm -rf "$repo" "$fbd"
 }
@@ -1137,10 +1434,15 @@ test_fallback_cannot_detect_staleness_after_status_leaves_in_progress() {
 
 install_guard_hook() {
     local repo="$1"
-    mkdir -p "$repo/scripts" "$repo/.githooks"
+    mkdir -p "$repo/scripts" "$repo/.githooks/lib"
     cp "$LIB" "$repo/scripts/push-ownership-guard.sh"
     cp "$REPO_ROOT/.githooks/pre-push" "$repo/.githooks/pre-push"
     chmod +x "$repo/.githooks/pre-push"
+    # .githooks owns core.hooksPath, so pre-push forwards to beads through this
+    # helper before the guard runs. Copy the real one for the same reason the
+    # hook itself is copied rather than re-implemented.
+    cp "$REPO_ROOT/.githooks/lib/beads-chain.sh" "$repo/.githooks/lib/beads-chain.sh"
+    chmod +x "$repo/.githooks/lib/beads-chain.sh"
     printf 'test-fast-parallel:\n\t@true\n' > "$repo/Makefile"
     git -C "$repo" config core.hooksPath .githooks
 }
@@ -1256,9 +1558,15 @@ run_all() {
     test_retry_recovers_from_transient_failure
     test_retry_exhausted_still_blocks
     test_retry_recovers_then_still_blocks_on_real_ownership_change
+    test_timeout_message_names_the_budget_not_an_outage
+    test_unbounded_without_coreutils_announces_itself
+    test_error_message_still_reports_unreachable
     test_retry_unreachable_message_mentions_retry_before_no_verify
     test_retry_parse_failure_message_mentions_retry_before_no_verify
     test_bead_id_branch_wins_and_warns_on_disagreement
+    test_bead_id_resolves_five_char_id
+    test_bead_id_resolves_four_char_id
+    test_bead_id_does_not_truncate_seven_char_id
     test_bead_id_branch_resolves_multi_level_subbead_id
     test_bead_id_fallback_used_when_branch_no_match
     test_bead_id_branch_reused_prefers_open_successor_when_branch_bead_closed

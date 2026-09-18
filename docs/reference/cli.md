@@ -437,7 +437,7 @@ gc beads list --status open --format=json
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--all` | bool |  | include closed beads (default: open only) |
+| `--all` | bool |  | include closed beads (default: all nonclosed statuses) |
 | `--format` | string | `text` | output format: text or json |
 | `--label` | string |  | filter to beads carrying this label |
 | `--status` | string |  | filter to beads in this status |
@@ -1426,6 +1426,16 @@ deprecations such as legacy [formulas].dir, and per-rig health. Use
 --fix for the canonical remediation path, including any safe mechanical
 legacy-to-current pack rewrites that are available on this branch.
 
+--check runs only the checks you name, so a caller after one verdict does
+not pay for the whole sweep. It is repeatable and also accepts a comma
+list, results keep their normal run order rather than the order you asked
+for, and the exit code reflects the selected checks alone. A name that no
+registered check matches fails the run: an empty result set would read as
+a clean bill of health to a caller filtering by name. Which names exist
+depends on the workspace, because doctor registers checks conditionally —
+run without --check to see them, or name a nonexistent check to have them
+listed.
+
 ```
 gc doctor [flags]
 ```
@@ -1437,10 +1447,14 @@ gc doctor
 gc doctor --fix
 gc doctor --verbose
 gc doctor --json
+gc doctor --check controller
+gc doctor --check controller --check events-log
+gc doctor --check controller,events-log --json
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--check` | stringArray |  | run only the named check(s); repeatable and comma-separated. A name matching no registered check fails the run rather than reporting an empty result |
 | `--check-timeout` | duration | `1m0s` | per-check time budget; a check or its --fix remediation exceeding it is abandoned and reported as timed out (0 disables) |
 | `--fix` | bool |  | attempt automatic repairs and safe mechanical migrations |
 | `--json` | bool |  | emit structured JSON instead of human-readable output |
@@ -1472,7 +1486,8 @@ always protected, and any process whose state cannot be determined degrades to
 protected. A dolt sql-server is reaped only when its scope is provably gone —
 its working directory is an unlinked inode (the kernel "(deleted)" cwd marker),
 or its --config path is on the test-config-path allowlist (/tmp/Test*,
-os.TempDir()/Test*, known Gas City test prefixes, ~/.gotmp/Test*). A server
+os.TempDir()/Test*, known Gas City test prefixes, ~/.gotmp/Test*,
+/var/tmp/gotmp/Test*, $GOTMPDIR/Test*). A server
 whose --config has merely vanished while its working directory is still live is
 protected, not reaped, until an operator confirms; a lone missing-config
 observation is not proof of scope deletion. See the PROTECTED section of the
@@ -2015,7 +2030,7 @@ gc hook [agent] [flags]
 | `--claim` | bool |  | atomically claim one routed work item for the current session |
 | `--drain-ack` | bool |  | with --claim, acknowledge runtime drain when no work is available |
 | `--inject` | bool |  | silent legacy Stop-hook compatibility; skip work query and exit 0 |
-| `--json` | bool |  | with --claim, emit a JSON protocol result |
+| `--json` | bool |  | emit a JSON protocol result (always with --claim; on the discovery door only for a drain refusal) |
 
 | Subcommand | Description |
 |------------|-------------|
@@ -3437,8 +3452,36 @@ gc provider
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc provider credentials](#gc-provider-credentials) | Show which environment variable holds a provider's credentials |
 | [gc provider quota](#gc-provider-quota) | Show Claude account quota states and per-tier provider decisions |
-| [gc provider rotate-key](#gc-provider-rotate-key) | Rotate a provider API key across tmux global env and live sessions |
+
+## gc provider credentials
+
+Report which environment variable holds each of a provider's credentials, and
+what stands between changing it and the fleet using it.
+
+Which variable that is, is not obvious. A provider declares its credential
+env-var names through its upstream_env binding (api_key and auth_token; never
+base_url), those names resolve through the provider's inheritance chain, and
+each one's value may interpolate a different variable again. This command
+performs that resolution and reports, naming the reason, wherever no single
+variable holds the credential.
+
+It also reports what would stop a change from taking effect: a variable the
+supervisor does not forward into its service environment, a later config layer
+that overrides the credential for particular agents, and whether this city's
+supervisor reads the machine-local secrets file at all.
+
+Changing a credential does not apply itself. A credential change moves no
+config fingerprint, so no agent restarts on its own, and the supervisor
+resolves session environment from its own environment, fixed when it exec'd.
+Applying a new value means: write it where the supervisor reads it, regenerate
+the service file so the supervisor re-execs with it, then cycle the agents.
+Until the supervisor re-execs, every running session keeps the old credential.
+
+```
+gc provider credentials <provider>
+```
 
 ## gc provider quota
 
@@ -3458,23 +3501,6 @@ gc provider quota [flags]
 | `--overflow` | stringSlice |  | overflow vendor pool in priority order (e.g. zai,openrouter) |
 | `--poll` | bool |  | keep polling on an interval, recording provider.* events to the city event log |
 | `--timeout` | duration | `10s` | per-account usage request timeout |
-
-## gc provider rotate-key
-
-Propagate a new API key into the tmux server global env and every live session
-that uses the named provider, without requiring a tmux kill-server.
-
-Running agent processes that already hold the old key in-process will pick up
-the new key on their next natural restart (drain/respawn), not immediately.
-Use --dry-run to preview what would change before writing.
-
-```
-gc provider rotate-key <provider> <newkey> [flags]
-```
-
-| Flag | Type | Default | Description |
-|------|------|---------|-------------|
-| `--dry-run` | bool |  | Print what would change without writing to tmux |
 
 ## gc ready
 
@@ -4682,6 +4708,7 @@ gc storage
 | Subcommand | Description |
 |------------|-------------|
 | [gc storage migrate](#gc-storage-migrate) | Migrate this city's infrastructure classes onto their configured binding |
+| [gc storage preflight](#gc-storage-preflight) | Report what the migration would refuse, without migrating (read-only) |
 | [gc storage recover-stranded](#gc-storage-recover-stranded) | Copy stranded infrastructure beads from the retained work store into the converged binding |
 | [gc storage status](#gc-storage-status) | Report this city's storage-class layout (read-only) |
 
@@ -4708,6 +4735,33 @@ gc storage migrate [flags]
 |------|------|---------|-------------|
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--from-work` | bool |  | migrate the infrastructure classes out of this city's work store |
+
+## gc storage preflight
+
+Run every check gc storage migrate --from-work runs and report what it
+finds — without copying anything, creating anything, taking the migration guard,
+or publishing any event.
+
+This is for deciding whether the window you are about to take will be spent
+migrating or spent reading a refusal. It runs against a LIVE city: a controller
+serving this city is reported by PID rather than refused, because stopping it is
+the next thing you were going to do anyway.
+
+It resolves its destination from [storage.classes], so it has nothing to check
+until that section names a binding. On a city with no infrastructure split it
+reports exactly that and exits non-zero — author the split first.
+
+It exits non-zero when the migration would refuse for a reason you have to go
+and fix first. That is a different question from gc storage status,
+which exits non-zero whenever the city is not yet serving from its binding — the
+ordinary state of every city with a cutover still ahead of it.
+
+One condition is never checked here, because no process can check it:
+--fleet-stopped attests that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own.
+
+```
+gc storage preflight
+```
 
 ## gc storage recover-stranded
 
@@ -4748,7 +4802,11 @@ open the binding's engine unless that database already exists, because opening
 it would create the very database the report is being asked about.
 
 It exits non-zero when the city is configured for a binding it has not
-converged on, so a deployment script can gate on it.
+converged on, so a deployment script can gate on it. That is the ordinary state
+of every city with a cutover still ahead of it, and it is NOT a fault report: a
+non-zero status here says the migration has not run, not that it would fail. To
+find out whether it would fail, run `gc storage preflight`, which rehearses
+every check the migration makes without migrating.
 
 ```
 gc storage status
@@ -4879,6 +4937,15 @@ until the supervisor socket is no longer answering, which is what
 most callers that need deterministic cleanup want (e.g., integration
 tests that then expect to remove temp directories without racing
 against lingering supervisor / controller subprocesses).
+
+Stopping the supervisor also stops the platform service that manages
+it, and stop exits non-zero when that fails; with --wait, gc further
+verifies on macOS that the launchd job is really gone before
+returning, sharing the same --wait-timeout deadline as the socket
+wait, and fails when it cannot confirm that. An operator stop also
+disables the launchd job, so it will not come back at the next login
+until 'gc supervisor install' — or 'gc start', which routes through
+install — re-enables it.
 
 When GC_SUPERVISOR_SYSTEMD_UNIT is set, stop is delegated to
 'systemctl [--user] stop &lt;unit&gt;' instead of the control-socket stop.

@@ -219,7 +219,9 @@
               "beads-state",
               "config-lint",
               "provider-quota",
-              "provider-rotate-key"
+              "provider-rotate-key",
+              "provider-credentials",
+              "storage-preflight"
             ]
           },
           "event_id": {

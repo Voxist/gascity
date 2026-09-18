@@ -12,3 +12,28 @@ internal/api/dashboardspa/dist/** -diff linguist-generated
 # to authored complexity. Drift is still caught by content-based build/regeneration
 # gates, since a blob-hash change is detected even with -diff.
 internal/api/genclient/client_gen.go -diff linguist-generated
+
+# The typed TS client under internal/api/dashboardspa/web/shared/src/generated
+# is emitted the same way as client_gen.go above (openapi-typescript/similar
+# codegen from the OpenAPI spec) and gets the same treatment.
+internal/api/dashboardspa/web/shared/src/generated/** -diff linguist-generated
+
+# Remaining generated artifacts from AGENTS.md "Resync conventions" rule 1
+# ("Generated artifacts are regenerated, never merged"): scripts/check-resync-
+# loss.sh's Gate 1 (ga-d32bn) derives its exemption list from the
+# linguist-generated attribute via `git check-attr`, so this file is now the
+# single source of truth shared by that gate, the docs-drift check
+# (scripts/check-generated-docs-drift.sh), and GitHub's diff collapsing —
+# adding a path to one without the other is the bug this replaces.
+internal/api/openapi.json -diff linguist-generated
+docs/reference/schema/openapi.* -diff linguist-generated
+docs/reference/schema/city-schema.* -diff linguist-generated
+docs/reference/schema/pack-schema.* -diff linguist-generated
+docs/reference/cli.md -diff linguist-generated
+docs/reference/config.md -diff linguist-generated
+cmd/gc/productmetrics_command_census.json -diff linguist-generated
+cmd/gc/metrics_census_gen.go -diff linguist-generated
+internal/testpolicy/resourcecensus/census.go -diff linguist-generated
+internal/testenv/testdata/*.golden -diff linguist-generated
+scripts/*baseline* -diff linguist-generated
+scripts/*manifest* -diff linguist-generated

@@ -159,15 +159,27 @@ resolution and predicates: `bdReadyPoolDemandShell(limitFlag)` reads the
 canonical `gc.routed_to=<target>` route with `--include-ephemeral`, and
 the temporary migration predicate reads `gc.run_target=<target>` only on
 `gc.kind=workflow` roots that predate root `gc.routed_to` stamping. The
-work-query form appends `--sort hybrid --limit=20` to the canonical probe
-and prints the first match, then filters the migration probe to roots with
-empty `gc.routed_to`. The `hybrid` sort is the routed-queue ordering policy
-(ADR-0035): fresh work (`< 48h`) is ordered by bead priority, so a newly
-routed P1 is claimed ahead of an older P2/P3, while work `>= 48h` old drains
-strictly oldest-first, preserving the age-based anti-starvation drain the
-prior `--sort oldest` was chosen for. `--limit=20` is an anti-self-block
-lookahead (a self-blocked head falls through to ready work behind it), not a
-priority window. The count form unions canonical and migration probes and
+work-query form serves the UNION of two reads on the canonical probe
+(ADR-0076 D4, vp-d1kjk): a small best-by-priority read
+(`--sort priority --limit=5`) first, then the `--sort hybrid --limit=20`
+lookahead, deduplicated by bead ID. It then filters the migration probe to
+roots with empty `gc.routed_to`. The `hybrid` sort is the routed-queue
+ordering policy (ADR-0035): fresh work (`< 48h`) is ordered by bead priority,
+so a newly routed P1 is claimed ahead of an older P2/P3, while work `>= 48h`
+old drains strictly oldest-first, preserving the age-based anti-starvation
+drain the prior `--sort oldest` was chosen for. `--limit=20` is an
+anti-self-block lookahead (a self-blocked head falls through to ready work
+behind it), not a priority window — which is why the priority read is unioned
+in: past hybrid's 48h seam the lookahead degenerates to oldest-first, and a
+routed P0 behind more than 20 older aged rows would otherwise never be served
+at all (measured upstream on a live 14-seat city: 13 P0 rows unreachable
+behind 34 older rows for hours). Upstream closes the same gap by dropping the
+sort flag entirely so the tier rides the reader's canonical
+`(priority, created_at, id)` default order; this fork unions instead, because
+the flagless form also drops ADR-0035's aged-tail drain. The migration
+fallback and the assigned graph-anchor probe keep `--sort oldest` for their
+own reasons (a retirement window, and ordering the steps of one already
+assigned workflow). The count form unions canonical and migration probes and
 deduplicates by bead ID before piping through `jq 'length'`; it passes no
 `--sort` (order is irrelevant to a length), so the worker-claim ordering does
 not perturb the reconciler's spawn count.
@@ -264,8 +276,9 @@ regressions.
     `bdReadyPoolDemandShell` helper in `internal/config/config.go`. The
     worker and reconciler must also share the temporary migration predicate
     for `gc.run_target=<target>` on `gc.kind=workflow` roots with empty
-    `gc.routed_to`; only the worker's first-row form adds native
-    `bd ready --sort hybrid --limit=20` selection to the canonical probe.
+    `gc.routed_to`; only the worker's first-row form adds native selection to
+    the canonical probe — the union of `bd ready --sort priority --limit=5`
+    and `bd ready --sort hybrid --limit=20`.
     Any pool-demand predicate change to one (added filter, modified target
     resolution, new state) MUST be reflected in the other. Diverging the two
     re-introduces the protocol-mismatch class — the reconciler
@@ -377,8 +390,9 @@ name = "coder"
 pool = { min = 1, max = 3, check = "echo 2" }
 # Default sling_query: bd update {} --set-metadata gc.routed_to=coder
 # Default work_query: bd ready --include-ephemeral --metadata-field gc.routed_to=coder
-#   --unassigned --exclude-type=epic --json --sort hybrid --limit=20,
-#   then a temporary gc.run_target workflow-root migration fallback
+#   --unassigned --exclude-type=epic --json, served as the union of
+#   --sort priority --limit=5 and --sort hybrid --limit=20, then a temporary
+#   gc.run_target workflow-root migration fallback
 ```
 
 System formulas are embedded in the `gc` binary and materialized to

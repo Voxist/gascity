@@ -523,6 +523,14 @@ func (c *CachingStore) mergeSnapshotLocked(
 
 	res := mergeSectionResult{notifications: make([]cacheNotification, 0, len(freshByID))}
 	nextDepsComplete := useFreshDeps
+	// Which cause folded nextDepsComplete false, for the D6 gauge's driver
+	// field. Resolved up front: the dep fetch is the store-wide cause, so a
+	// per-row degradation is only the attributable one when the fetch itself
+	// came back whole. Unused when nextDepsComplete stays true.
+	depsDegradeDriver := "reconcile-dep-fetch-incomplete"
+	if useFreshDeps {
+		depsDegradeDriver = "reconcile-row-degraded"
+	}
 
 	// 1. Absorb loop — over freshByID. Classification reads pre-absorb state.
 	for id, freshBead := range freshByID {
@@ -620,7 +628,7 @@ func (c *CachingStore) mergeSnapshotLocked(
 		res.removes++
 		if d.notification == "bead.closed" {
 			closed := cloneBead(cached)
-			closed.Status = "closed"
+			setBeadStatus(&closed, "closed")
 			if freshClosed, ok := confirmedClosed[id]; ok {
 				closed = cloneBead(freshClosed)
 			}
@@ -659,7 +667,7 @@ func (c *CachingStore) mergeSnapshotLocked(
 
 	// 4. Shared tail (was duplicated per branch).
 	c.syncFailures = 0
-	c.depsComplete = nextDepsComplete
+	c.setDepsCompleteLocked(nextDepsComplete, depsDegradeDriver)
 	c.primePartialErr = nil
 	c.advanceObservationLocked()
 	c.promoteLiveLocked()
@@ -720,6 +728,10 @@ func (c *CachingStore) orphanFenceIDsLocked(freshByID map[string]Bead) []string 
 // hold c.mu (write lock).
 func (c *CachingStore) promoteLiveLocked() {
 	c.state = cacheLive
+	// The full scan that earned the promotion loaded the complete nonclosed
+	// set, so the snapshot's scope is now full and stays full even if a later
+	// failure pushes c.state to cacheDegraded.
+	c.fullScopeSnapshot = true
 	// Re-arm the one-shot circuit-breaker signal. promoteLiveLocked is the single
 	// live-promotion point — both prime() and the reconcile success paths route
 	// through it — so resetting here ensures a store that recovers via reconcile
@@ -752,9 +764,31 @@ func (c *CachingStore) reconcileSuccessLogLocked(now time.Time, elapsed time.Dur
 	if cadence == "" {
 		cadence = "default"
 	}
+	// deps=... is the ADR-0094 D6 gauge on the operator's existing heartbeat.
+	// It rides this line rather than a new endpoint because the trigger
+	// condition is a DWELL ("latched false for > 1h"), and a dwell needs a
+	// series: this line is already emitted once a minute per store and is
+	// already the instrument operators grep. mergeSnapshotLocked has already
+	// run by the time this is composed, so the value reported is the
+	// post-reconcile one.
+	depsField := "deps=complete"
+	if !c.depsComplete {
+		depsField = "deps=incomplete"
+		if !c.depsIncompleteSince.IsZero() {
+			// depsClock(), not the reconcile pass's `now`: this is the same dwell
+			// Stats() reports, and a log that disagrees with the gauge it mirrors is
+			// worse than no log. Identical in production (both are time.Now); they
+			// diverge only under a stubbed clock, which is exactly when someone is
+			// reading both to compare them.
+			depsField += fmt.Sprintf(" deps_for=%s", depsClock().Sub(c.depsIncompleteSince).Round(time.Second))
+		}
+		if c.depsIncompleteDriver != "" {
+			depsField += " deps_driver=" + c.depsIncompleteDriver
+		}
+	}
 	return fmt.Sprintf(
-		"beads cache: reconciled rig=%s beads=%d adds=%d updates=%d removes=%d took=%s cadence=%s",
-		rig, len(c.beads), adds, updates, removes, elapsed.Round(time.Millisecond), cadence,
+		"beads cache: reconciled rig=%s beads=%d adds=%d updates=%d removes=%d took=%s cadence=%s %s deps_wipes=%d",
+		rig, len(c.beads), adds, updates, removes, elapsed.Round(time.Millisecond), cadence, depsField, c.depsWholeCacheWipes,
 	), true
 }
 

@@ -22,6 +22,13 @@ type SessionCommandTemplateContext struct {
 	CityName  string // workspace name
 	WorkDir   string // agent working directory
 	ConfigDir string // directory the agent config was defined in
+	// DefaultBranch mirrors workdir.PathContext.DefaultBranch: the rig's
+	// configured mainline branch, empty for city-scoped agents and for rigs
+	// with no default_branch. Configured value only — prompts'
+	// {{.DefaultBranch}} additionally falls back to a live origin/HEAD probe,
+	// but setup-command expansion runs on reconciler hot paths and must not
+	// spawn git. Setup scripts should keep their own probe fallback.
+	DefaultBranch string
 }
 
 // sessionCommandTemplateSamples are the contexts validation expands every
@@ -32,13 +39,13 @@ type SessionCommandTemplateContext struct {
 // A placeholder hidden behind a comparison that neither sample satisfies is
 // caught at session start, which fails closed on the same expander.
 var sessionCommandTemplateSamples = []SessionCommandTemplateContext{
-	{Session: "s", Agent: "a", AgentBase: "b", Rig: "r", RigRoot: "/r", CityRoot: "/c", CityName: "n", WorkDir: "/w", ConfigDir: "/d"},
-	{Session: "s", Agent: "a", AgentBase: "b", Rig: "", RigRoot: "", CityRoot: "/c", CityName: "n", WorkDir: "/w", ConfigDir: "/d"},
+	{Session: "s", Agent: "a", AgentBase: "b", Rig: "r", RigRoot: "/r", CityRoot: "/c", CityName: "n", WorkDir: "/w", ConfigDir: "/d", DefaultBranch: "m"},
+	{Session: "s", Agent: "a", AgentBase: "b", Rig: "", RigRoot: "", CityRoot: "/c", CityName: "n", WorkDir: "/w", ConfigDir: "/d", DefaultBranch: ""},
 }
 
 // sessionCommandTemplatePlaceholders is the "{{.Session}}, {{.Agent}}, ..."
 // list printed in validation errors.
-const sessionCommandTemplatePlaceholders = "{{.Session}}, {{.Agent}}, {{.AgentBase}}, {{.Rig}}, {{.RigRoot}}, {{.CityRoot}}, {{.CityName}}, {{.WorkDir}}, {{.ConfigDir}}"
+const sessionCommandTemplatePlaceholders = "{{.Session}}, {{.Agent}}, {{.AgentBase}}, {{.Rig}}, {{.RigRoot}}, {{.CityRoot}}, {{.CityName}}, {{.WorkDir}}, {{.ConfigDir}}, {{.DefaultBranch}}"
 
 // ExpandSessionCommandTemplate expands one command string against ctx.
 // field and index name the config entry in the error. A command without

@@ -37,12 +37,40 @@ var (
 	ensureSupervisorRunningHook              = ensureSupervisorRunning
 	reloadSupervisorHook                     = reloadSupervisor
 	supervisorAliveHook                      = supervisorAlive
+	unloadSupervisorServiceHook              = unloadSupervisorService
+	verifySupervisorServiceStoppedHook       = verifySupervisorServiceStopped
 	supervisorReadyTimeout                   = 15 * time.Second
 	supervisorReadyPollInterval              = 100 * time.Millisecond
 	supervisorSystemdWarmRefreshStopTimeout  = 5 * time.Second
 	supervisorSystemdWarmRefreshPollInterval = 100 * time.Millisecond
-	supervisorLaunchctlRun                   = func(args ...string) error {
+	// supervisorLaunchdStopTimeout is how long launchd typically needs to
+	// drop a booted-out job. The absence poll honors the caller's
+	// --wait-timeout deadline rather than this value; it documents the
+	// expected budget and is what tests pin when they exercise caller
+	// deadlines shorter than it.
+	supervisorLaunchdStopTimeout      = 45 * time.Second
+	supervisorLaunchdStopPollInterval = 250 * time.Millisecond
+	supervisorLaunchctlRun            = func(args ...string) error {
 		return exec.Command("launchctl", args...).Run()
+	}
+	// startSupervisorChild spawns the detached `gc supervisor run` child of
+	// `gc supervisor start`. It is a seam so a test can observe the
+	// environment that child is handed — the property that separates
+	// `gc supervisor start` from `gc supervisor install` as an apply step —
+	// without launching a real supervisor.
+	startSupervisorChild = func(cmd *exec.Cmd) error { return cmd.Start() }
+	// supervisorLaunchdLoaded probes whether a launchd job is still
+	// registered. It is deliberately tri-state: a failing `launchctl
+	// print` is not proof the job is gone. Absence is reported only on a
+	// positive not-found signal; any other failure returns
+	// (false, false), meaning "unknown".
+	supervisorLaunchdLoaded = func(label string) (loaded bool, absent bool, detail string) {
+		out, err := exec.Command("launchctl", "print", supervisorLaunchdServiceTarget(label)).CombinedOutput()
+		detail = strings.TrimSpace(string(out))
+		if err == nil {
+			return true, false, detail
+		}
+		return false, launchdPrintReportsNotFound(err, detail), detail
 	}
 	supervisorLaunchdActive = func(label string) bool {
 		out, err := exec.Command("launchctl", "print", supervisorLaunchdServiceTarget(label)).Output()
@@ -186,6 +214,28 @@ type supervisorWorkspaceServiceProcess struct {
 type supervisorWorkspaceServiceCleanupScope struct {
 	gcHome    string
 	cityPaths map[string]string
+}
+
+// launchdPrintNotFoundExitCode is the status `launchctl print` exits
+// with when the requested service does not exist in the domain.
+const launchdPrintNotFoundExitCode = 113
+
+// exitCoder is any error carrying a process exit status. *exec.ExitError
+// satisfies it, so classifying through the interface keeps the real
+// launchctl path unchanged while letting tests supply an exit status
+// without spawning a subprocess.
+type exitCoder interface{ ExitCode() int }
+
+// launchdPrintReportsNotFound reports whether a failed `launchctl print`
+// positively proves the service is absent, rather than having failed for
+// an unrelated reason (no Aqua session, permission denied, launchctl
+// unavailable). Only a not-found signal counts as proof of absence.
+func launchdPrintReportsNotFound(err error, detail string) bool {
+	var ec exitCoder
+	if errors.As(err, &ec) && ec.ExitCode() == launchdPrintNotFoundExitCode {
+		return true
+	}
+	return strings.Contains(detail, "Could not find service")
 }
 
 func launchdPrintReportsRunning(out []byte) bool {
@@ -543,7 +593,7 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 	child.Env = os.Environ()
 	disableProductMetricsForChild(child)
 
-	if err := child.Start(); err != nil {
+	if err := startSupervisorChild(child); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -757,21 +807,102 @@ func waitForSupervisorReady(stderr io.Writer) int {
 // the unit file, so gc start can reload it later. It is a no-op when
 // the platform unit/plist is not installed — this keeps unit tests that
 // invoke the stop helper hermetic on machines where the service has
-// never been registered.
-func unloadSupervisorService() {
+// never been registered. It reports command failures only; confirming
+// the service actually went away is verifySupervisorServiceStopped's
+// job, because launchd drops the job only once the process has exited.
+func unloadSupervisorService() error {
+	var errs []error
 	switch goruntime.GOOS {
 	case "darwin":
 		path := supervisorLaunchdPlistPath()
-		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-			_ = supervisorLaunchctlRun("unload", path)
+		if _, err := os.Stat(path); err == nil {
+			errs = append(errs, durablyStopSupervisorLaunchd(supervisorLaunchdLabel(), path)...)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("stat launchd plist %s: %w", path, err))
 		}
 		_ = unloadLegacySupervisorLaunchd(false)
 	case "linux":
 		service := supervisorSystemdServiceName()
-		if _, err := os.Stat(supervisorSystemdServicePath()); !errors.Is(err, os.ErrNotExist) {
-			_ = supervisorSystemctlRun("--user", "stop", service)
+		path := supervisorSystemdServicePath()
+		if _, err := os.Stat(path); err == nil {
+			// A stop failure is only evidence of a stuck service when a
+			// user manager is reachable at all. Without one the unit was
+			// never running, so reporting failure would turn a no-op into
+			// a spurious non-zero exit.
+			if err := supervisorSystemctlRun("--user", "stop", service); err != nil && supervisorSystemctlUserAvailable() {
+				errs = append(errs, fmt.Errorf("systemctl --user stop %s: %w", service, err))
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("stat systemd unit %s: %w", path, err))
 		}
 		_ = unloadLegacySupervisorSystemd(false)
+	}
+	return errors.Join(errs...)
+}
+
+func durablyStopSupervisorLaunchd(label, plistPath string) []error {
+	target := supervisorLaunchdServiceTarget(label)
+	var errs []error
+	if err := supervisorLaunchctlRun("disable", target); err != nil {
+		errs = append(errs, fmt.Errorf("launchctl disable %s: %w", target, err))
+	}
+	if err := supervisorLaunchctlRun("bootout", target); err != nil {
+		if unloadErr := supervisorLaunchctlRun("unload", plistPath); unloadErr != nil {
+			errs = append(errs, fmt.Errorf("launchctl bootout %s: %w", target, err))
+			errs = append(errs, fmt.Errorf("launchctl unload %s: %w", plistPath, unloadErr))
+		}
+	}
+	return errs
+}
+
+// verifySupervisorServiceStopped confirms the platform service is really
+// gone after unloadSupervisorService ran. Callers pass their own deadline
+// (the --wait-timeout budget) so the check shares that budget instead of
+// adding a hidden one.
+func verifySupervisorServiceStopped(deadline time.Time) error {
+	if goruntime.GOOS != "darwin" {
+		return nil
+	}
+	path := supervisorLaunchdPlistPath()
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("stat launchd plist %s: %w", path, err)
+	}
+	label := supervisorLaunchdLabel()
+	return waitForSupervisorLaunchdAbsent(label, supervisorLaunchdServiceTarget(label), deadline)
+}
+
+// waitForSupervisorLaunchdAbsent polls until launchd positively reports
+// the target is gone. A probe that merely fails is "unknown", not proof
+// of absence, so it keeps polling and times out with the reason it could
+// not confirm — an unverifiable teardown must never read as success.
+func waitForSupervisorLaunchdAbsent(label, target string, deadline time.Time) error {
+	var lastDetail string
+	var lastLoaded bool
+	for {
+		loaded, absent, detail := supervisorLaunchdLoaded(label)
+		if absent {
+			return nil
+		}
+		lastLoaded = loaded
+		if detail != "" {
+			lastDetail = detail
+		}
+		if !time.Now().Before(deadline) {
+			var err error
+			if lastLoaded {
+				err = fmt.Errorf("launchd target %s is still loaded after stop", target)
+			} else {
+				err = fmt.Errorf("launchd target %s could not be confirmed unloaded after stop", target)
+			}
+			if lastDetail != "" {
+				err = fmt.Errorf("%w: %s", err, lastDetail)
+			}
+			return err
+		}
+		time.Sleep(supervisorLaunchdStopPollInterval)
 	}
 }
 
@@ -1145,7 +1276,7 @@ func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 	// perpetual "run gc import install" loop (vp-gny3). A GC_SUPERVISOR_ENV
 	// opt-in for the same key still overrides this default below.
 	env := map[string]string{"PYTHONDONTWRITEBYTECODE": "1"}
-	explicitEnvKeys := supervisorServiceExplicitEnvKeys(os.Getenv("GC_SUPERVISOR_ENV"))
+	explicitEnvKeys := supervisorServiceExplicitEnvKeys(os.Getenv(supervisorEnvOptInVar))
 	explicitEnvKeySet := make(map[string]bool, len(explicitEnvKeys))
 	for _, key := range explicitEnvKeys {
 		explicitEnvKeySet[key] = true
@@ -1180,7 +1311,7 @@ func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 		if _, ok := env[key]; ok {
 			continue
 		}
-		if !shouldPersistSupervisorEnv(key) && !explicitEnvKeySet[key] {
+		if !supervisorForwardsEnvKey(key, explicitEnvKeySet) {
 			continue
 		}
 		env[key] = val
@@ -1265,20 +1396,52 @@ func supervisorSecretsEnvFilePath() string {
 // gates whatever is returned on the persist allowlist or an explicit
 // GC_SUPERVISOR_ENV opt-in.
 func supervisorSecretsEnvFileEntries() map[string]string {
-	path := supervisorSecretsEnvFilePath()
-	data, err := os.ReadFile(path)
+	entries, err := readSupervisorSecretsEnvFile()
 	if err != nil {
-		if !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "gc: reading supervisor secrets file %q: %v\n", path, err)
-		}
-		return nil
-	}
-	entries, err := processenv.ParseEnvFile(string(data))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "gc: parsing supervisor secrets file %q: %v\n", path, err)
+		fmt.Fprintf(os.Stderr, "gc: %v\n", err)
 		return nil
 	}
 	return entries
+}
+
+// readSupervisorSecretsEnvFile is the shared core of the secrets-file read. A
+// missing file is the normal case and yields no entries and no error;
+// anything else is returned so a caller that reports rather than starts a
+// supervisor can say what install would silently ignore. Note that a parse
+// failure costs the WHOLE file, not the offending line.
+func readSupervisorSecretsEnvFile() (map[string]string, error) {
+	path := supervisorSecretsEnvFilePath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading supervisor secrets file %q: %w", path, err)
+	}
+	entries, err := processenv.ParseEnvFile(string(data))
+	if err != nil {
+		return nil, fmt.Errorf("%s does not parse as dotenv, so the supervisor drops every entry in it: %w", path, err)
+	}
+	return entries, nil
+}
+
+// supervisorExplicitEnvKeySet returns the GC_SUPERVISOR_ENV opt-in set.
+func supervisorExplicitEnvKeySet() map[string]bool {
+	keys := supervisorServiceExplicitEnvKeys(os.Getenv(supervisorEnvOptInVar))
+	set := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		set[key] = true
+	}
+	return set
+}
+
+// supervisorForwardsEnvKey reports whether the generated service file will
+// carry key into the supervisor's environment: either it clears the persist
+// allow-list, or it is an explicit GC_SUPERVISOR_ENV opt-in. This is the one
+// predicate supervisorServiceExtraEnv gates on; callers that describe what the
+// supervisor will forward must use it rather than half of it.
+func supervisorForwardsEnvKey(key string, explicit map[string]bool) bool {
+	return shouldPersistSupervisorEnv(key) || explicit[key]
 }
 
 func supervisorServiceExplicitEnvKeys(raw string) []string {
@@ -1475,9 +1638,28 @@ func writeSupervisorServiceFile(path string, content []byte) error {
 	return os.Chmod(path, supervisorServiceFileMode)
 }
 
-func supervisorLaunchdPlistPath() string {
+// supervisorLaunchAgentsDirEnv overrides the directory gc writes its launchd
+// plists into and sweeps for stale isolated supervisors. Unset, it is the
+// user's ~/Library/LaunchAgents. Test harnesses point it at a temp dir:
+// isolating GC_HOME alone does not isolate launchd, and a plist left in the
+// real LaunchAgents is reloaded at login against a GC_HOME that no longer
+// holds a supervisor.toml, so it binds the default API port (ga-32bb2).
+const supervisorLaunchAgentsDirEnv = "GC_SUPERVISOR_LAUNCH_AGENTS_DIR"
+
+// supervisorLaunchAgentsDir is a seam so the cmd/gc test binary can pin every
+// launchd path under its temp root without mutating the process environment.
+var supervisorLaunchAgentsDir = defaultSupervisorLaunchAgentsDir
+
+func defaultSupervisorLaunchAgentsDir() string {
+	if dir := strings.TrimSpace(os.Getenv(supervisorLaunchAgentsDirEnv)); dir != "" {
+		return dir
+	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Library", "LaunchAgents", supervisorLaunchdLabel()+".plist")
+	return filepath.Join(home, "Library", "LaunchAgents")
+}
+
+func supervisorLaunchdPlistPath() string {
+	return filepath.Join(supervisorLaunchAgentsDir(), supervisorLaunchdLabel()+".plist")
 }
 
 func supervisorLaunchdServiceTarget(label string) string {
@@ -1488,12 +1670,12 @@ func supervisorLaunchdServiceTarget(label string) string {
 }
 
 func loadAndStartSupervisorLaunchd(path, label string) error {
-	if err := supervisorLaunchctlRun("load", path); err != nil {
-		return fmt.Errorf("load %s: %w", path, err)
-	}
 	target := supervisorLaunchdServiceTarget(label)
 	if err := supervisorLaunchctlRun("enable", target); err != nil {
 		return fmt.Errorf("enable %s: %w", target, err)
+	}
+	if err := supervisorLaunchctlRun("load", path); err != nil {
+		return fmt.Errorf("load %s: %w", path, err)
 	}
 	if err := supervisorLaunchctlRun("kickstart", "-p", target); err != nil {
 		return fmt.Errorf("kickstart -p %s: %w", target, err)
@@ -1502,12 +1684,12 @@ func loadAndStartSupervisorLaunchd(path, label string) error {
 }
 
 func loadAndStartSupervisorLaunchdForRollback(path, label string, stderr io.Writer) error {
-	if err := supervisorLaunchctlRun("load", path); err != nil {
-		return fmt.Errorf("load %s: %w", path, err)
-	}
 	target := supervisorLaunchdServiceTarget(label)
 	if err := supervisorLaunchctlRun("enable", target); err != nil {
 		warnSupervisorLaunchdRollback(stderr, "enable %s: %v", target, err)
+	}
+	if err := supervisorLaunchctlRun("load", path); err != nil {
+		return fmt.Errorf("load %s: %w", path, err)
 	}
 	if err := supervisorLaunchctlRun("kickstart", "-p", target); err != nil {
 		warnSupervisorLaunchdRollback(stderr, "kickstart -p %s: %v", target, err)
@@ -1523,8 +1705,7 @@ func warnSupervisorLaunchdRollback(stderr io.Writer, format string, args ...any)
 }
 
 func legacySupervisorLaunchdPlistPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Library", "LaunchAgents", defaultSupervisorLaunchdLabel+".plist")
+	return filepath.Join(supervisorLaunchAgentsDir(), defaultSupervisorLaunchdLabel+".plist")
 }
 
 func supervisorSystemdServicePath() string {
