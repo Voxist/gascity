@@ -133,7 +133,7 @@ fi
 # leaves no trace at all, so an audit cannot distinguish a skipped tier from a
 # passing one; use of this ack must be visible in the push's own output.
 if [ "${LOCAL_TESTS_ACK:-0}" = "1" ]; then
-  echo "pre-push: LOCAL_TESTS_ACK=1 — gate 3 (make test-fast-parallel) SKIPPED by operator acknowledgement; gates 1 (resync-loss) and 2 (bead-ownership) ran and passed (vc-dq0b)" >&2
+  echo "pre-push: LOCAL_TESTS_ACK=1 — gate 3 (make test-fast-parallel) SKIPPED by operator acknowledgement; gates 1 (resync-loss) and 2 (bead-ownership) were not bypassed by this ack (vc-dq0b)" >&2
   exit 0
 fi
 

@@ -23,9 +23,20 @@ import (
 // Hermetic: temp git repos and this repo's own already-fetched history
 // only, no network/gh/model calls.
 func TestCheckResyncLoss(t *testing.T) {
+	out := runHookSelfTest(t, "test-check-resync-loss.sh")
+	reportSkippedCases(os.Stderr, out)
+}
+
+// runHookSelfTest runs one of the .githooks/pre-push shell self-tests from the
+// repo root with a hermetic HOME and TMPDIR, failing the test on a non-zero
+// exit. It owns the single exec.Command call site for these self-tests: the
+// checked resource census in internal/testpolicy/resourcecensus counts call
+// sites, and another harness for the same hook must not grow that ratchet.
+func runHookSelfTest(t *testing.T, script string) []byte {
+	t.Helper()
 	root := repoRoot(t)
 
-	cmd := exec.Command(filepath.Join(root, "scripts", "test-check-resync-loss.sh"))
+	cmd := exec.Command(filepath.Join(root, "scripts", script))
 	cmd.Dir = root
 	cmd.Env = []string{
 		"PATH=" + os.Getenv("PATH"),
@@ -35,9 +46,9 @@ func TestCheckResyncLoss(t *testing.T) {
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("test-check-resync-loss.sh failed: %v\n%s", err, out)
+		t.Fatalf("%s failed: %v\n%s", script, err, out)
 	}
-	reportSkippedCases(os.Stderr, out)
+	return out
 }
 
 // reportSkippedCases surfaces any case the shell suite skipped rather than

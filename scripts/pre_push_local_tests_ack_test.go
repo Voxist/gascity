@@ -1,11 +1,6 @@
 package scripts_test
 
-import (
-	"os"
-	"os/exec"
-	"path/filepath"
-	"testing"
-)
+import "testing"
 
 // TestPrePushLocalTestsAck runs the shell self-test for the LOCAL_TESTS_ACK
 // escape on gate 3 of .githooks/pre-push (bead vc-dq0b).
@@ -21,18 +16,5 @@ import (
 // simulated failure. It never invokes the real Go suite and asserts no
 // wall-clock budget.
 func TestPrePushLocalTestsAck(t *testing.T) {
-	root := repoRoot(t)
-
-	cmd := exec.Command(filepath.Join(root, "scripts", "test-pre-push-local-tests-ack.sh"))
-	cmd.Dir = root
-	cmd.Env = []string{
-		"PATH=" + os.Getenv("PATH"),
-		"HOME=" + t.TempDir(),
-		"TMPDIR=" + t.TempDir(),
-	}
-
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("test-pre-push-local-tests-ack.sh failed: %v\n%s", err, out)
-	}
+	runHookSelfTest(t, "test-pre-push-local-tests-ack.sh")
 }

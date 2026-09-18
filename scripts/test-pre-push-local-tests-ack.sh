@@ -58,9 +58,16 @@ setup_repo() {
 		cd "$work"
 		git config user.email test@example.invalid
 		git config user.name "pre-push ack test"
-		mkdir -p scripts .githooks
+		mkdir -p scripts .githooks/lib
 		cp "$REPO_ROOT/.githooks/pre-push" .githooks/pre-push
 		chmod +x .githooks/pre-push
+		# The hook's first action is chaining to beads through this script.
+		# Without it every push dies on "No such file or directory" before any
+		# gate runs, which case A would misread as gate 3 blocking. The real
+		# script exits 0 without bd and swallows `bd hooks run`'s exit 3 for a
+		# repo with no beads database, so it is safe to install as-is.
+		cp "$REPO_ROOT/.githooks/lib/beads-chain.sh" .githooks/lib/beads-chain.sh
+		chmod +x .githooks/lib/beads-chain.sh
 		cp "$REPO_ROOT/scripts/push-ownership-guard.sh" scripts/push-ownership-guard.sh
 		printf '#!/usr/bin/env bash\nexit 0\n' >scripts/check-resync-loss.sh
 		chmod +x scripts/check-resync-loss.sh
@@ -100,8 +107,11 @@ read -r remA workA <<<"$(setup_repo)"
 outA="$(mktemp "$tmp_root/outA.XXXXXX")"
 (cd "$workA" && GIT_TERMINAL_PROMPT=0 git push origin ours) >"$outA" 2>&1
 rcA=$?
-if [ "$rcA" -ne 0 ] && [ -z "$(remote_sha "$remA" refs/heads/ours)" ]; then
-	record_pass "no-ack/tier-failure-blocks-push (rejected, remote untouched)"
+# The simulated-tier line must be present: a push rejected for any other
+# reason (a hook dying before gate 3) proves nothing about gate 3.
+if [ "$rcA" -ne 0 ] && [ -z "$(remote_sha "$remA" refs/heads/ours)" ] &&
+	grep -q 'SIMULATED gate-3 tier failure' "$outA"; then
+	record_pass "no-ack/tier-failure-blocks-push (rejected by gate 3, remote untouched)"
 else
 	record_fail "no-ack/tier-failure-blocks-push" "rc=$rcA remote_sha=$(remote_sha "$remA" refs/heads/ours)"
 	sed 's/^/    /' "$outA"
