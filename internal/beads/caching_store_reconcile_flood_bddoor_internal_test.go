@@ -16,8 +16,10 @@ package beads
 // silent. The red is fatal under VC_VLYK_ENFORCE=1 (see the guard comment at
 // the assertion); ungated, the fixture runs and SKIPS with the recorded
 // verdict, because a permanently-failing test cannot ride the shared push
-// gate or merge through PR CI. NO production code change rides on this bead;
-// the repair is downstream of the red, and the repair bead deletes the
+// gate or merge through PR CI. The gate is a strict expected-failure: if the
+// flood stops reproducing while the gate stands, the ungated run FAILS, so the
+// guard can never go quietly green. NO production code change rides on this
+// bead; the repair is downstream of the red, and the repair bead deletes the
 // enforcement gate.
 //
 // Mechanism under test (ADR-0094 A1 D10 lead, pa-1 2026-09-04): the differ's
@@ -91,6 +93,15 @@ package beads
 // not the flood, and no ledger repair would (or should) silence them. The
 // repair this guard awaits targets the R rows; they have no fixture-induced
 // reason to emit on a healthy differ.
+//
+// The R-row emissions are NOT one population. Each is classified by the row's
+// cached state before the pass that emitted it (floodPopulation): the OFF-tick
+// verdict->nil half comes from the preservation decline itself and touches no
+// ledger; the ON-tick nil->verdict half splits into lost-ledger rows (the
+// substitution reads the wrong ledger) and unmarked rows installed verdict-less
+// by the mid-window prime (which empties both ledgers). A ledger-only repair
+// silences only the lost-ledger half, so the verdict reports every population
+// with its own mechanism rather than blaming the ledger for the whole count.
 
 import (
 	"context"
@@ -145,8 +156,6 @@ type floodRow struct {
 	typ    string
 	deps   []map[string]string
 	status func(tick int) string
-	// exempt rows are the Type=="message" control population.
-	exempt bool
 }
 
 // floodBdRunner serves every bd subprocess a BdStore-backed cache primes,
@@ -158,8 +167,10 @@ type floodBdRunner struct {
 
 	rows map[string]*floodRow
 
-	// coverage probes (non-vacuity):
-	sqlCalls     int // every call answered the WHOLE row set
+	// coverage probes (non-vacuity), counted per door call. The door answers
+	// the whole row set; which ids the client keeps is decided client-side
+	// (enrichReadyProjectionForCache's wanted set), invisible to this fake.
+	sqlCalls     int // every SQL door call
 	sqlSetCalls  int // calls answering is_blocked:false (verdict present)
 	sqlNullCalls int // calls answering is_blocked:null (verdict absent)
 }
@@ -181,26 +192,27 @@ func (r *floodBdRunner) serve(_ string, name string, args ...string) ([]byte, er
 	case "list":
 		return json.Marshal(r.listRows())
 	case "show":
-		if len(args) < 2 {
-			return []byte("[]"), nil
-		}
-		row, ok := r.rows[args[1]]
+		// BdStore.Get runs `bd show --json <id>` and parses a JSON array.
+		row, ok := r.rows[args[len(args)-1]]
 		if !ok {
 			return []byte("[]"), nil
 		}
-		return json.Marshal(r.rowJSON(row))
+		return json.Marshal([]map[string]any{r.rowJSON(row)})
 	case "sql":
 		// Gate 2: the SQL door (the live Dolt city scope's door). A null
 		// column drops the row from the result map entirely — the exact
 		// absence shape enrichReadyProjectionForCache's `ok` miss leaves nil.
 		r.sqlCalls++
+		if r.doorOn {
+			r.sqlSetCalls++
+		} else {
+			r.sqlNullCalls++
+		}
 		out := make([]map[string]any, 0, len(r.rows))
 		for id := range r.rows {
 			if r.doorOn {
-				r.sqlSetCalls++
 				out = append(out, map[string]any{"id": id, "is_blocked": false})
 			} else {
-				r.sqlNullCalls++
 				out = append(out, map[string]any{"id": id, "is_blocked": nil})
 			}
 		}
@@ -280,7 +292,6 @@ func newFloodBdDoorFixture(t *testing.T) (*CachingStore, *floodBdRunner, *floodE
 		rows[id] = &floodRow{
 			id: id, title: "message " + id, typ: "message",
 			status: func(int) string { return "open" },
-			exempt: true,
 		}
 	}
 	// T: cached closed by the warmup write-through; listed open/in_progress
@@ -392,12 +403,83 @@ func floodOccupancyOf(c *CachingStore, isFloodRow func(string) bool) floodOccupa
 	return occ
 }
 
+// floodPopulation names the mechanism behind one flood-row emission, decided
+// from the row's cached state immediately BEFORE the pass that emitted it.
+// The populations need different repairs, so the guard counts and reports them
+// separately: a repair aimed at one leaves the others red, and the verdict must
+// say which half is still flooding instead of blaming a ledger for all of it.
+type floodPopulation int
+
+const (
+	// floodDecline: the row held a verdict and the pass nil'd it — the fresh
+	// row was verdict-less (door null) and preserveCachedReadyProjectionLocked
+	// declined to carry the cached verdict across (T's cached-vs-fresh status
+	// mismatch). No mark ledger is involved; the verdict->nil diff is
+	// manufactured by the decline itself.
+	floodDecline floodPopulation = iota
+	// floodLostLedger: the row was nil and marked ONLY in readyProjectionLost,
+	// and the pass emitted nil->verdict. The differ substitution reads only
+	// readyProjectionInvalid, so it cannot fire for these rows.
+	floodLostLedger
+	// floodInvalidLedger: the row was nil and marked in readyProjectionInvalid
+	// — the substitution's own precondition — and still emitted. On the
+	// deployed build this population is silent (the tick-1 control).
+	floodInvalidLedger
+	// floodUnmarkedNil: the row was nil with NO mark in either ledger and the
+	// pass emitted nil->verdict. Prime rebuilds both ledgers empty, so rows it
+	// installs verdict-less land here; no ledger repair can reach them.
+	floodUnmarkedNil
+	floodPopulationCount
+)
+
+func (p floodPopulation) String() string {
+	switch p {
+	case floodDecline:
+		return "decline(verdict->nil)"
+	case floodLostLedger:
+		return "lost-ledger(nil->verdict)"
+	case floodInvalidLedger:
+		return "invalid-ledger(nil->verdict)"
+	case floodUnmarkedNil:
+		return "unmarked-nil(nil->verdict)"
+	default:
+		return fmt.Sprintf("floodPopulation(%d)", int(p))
+	}
+}
+
+// floodPrePass records, per flood row, which population an emission from the
+// coming pass would belong to.
+func floodPrePass(c *CachingStore, isFloodRow func(string) bool) map[string]floodPopulation {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make(map[string]floodPopulation)
+	for id, bead := range c.beads {
+		if !isFloodRow(id) {
+			continue
+		}
+		_, lost := c.readyProjectionLost[id]
+		_, invalid := c.readyProjectionInvalid[id]
+		switch {
+		case bead.IsBlocked != nil:
+			out[id] = floodDecline
+		case invalid:
+			out[id] = floodInvalidLedger
+		case lost:
+			out[id] = floodLostLedger
+		default:
+			out[id] = floodUnmarkedNil
+		}
+	}
+	return out
+}
+
 // TestBdStoreBackedFloodReproduction is the vc-vlyk deliverable: a guard that
 // FAILS on the deployed build because non-exempt rows re-emit bead.updated
-// across >= 10 zero-write ticks while the exempt control stays silent. On a
-// build where the lost path records into the ledger the differ actually
-// reads — or where a "no answer this cycle" never manufactures a diff in
-// either direction — this goes green without weakening any D4 guard.
+// across >= 10 zero-write ticks while the exempt control stays silent. It goes
+// green only when EVERY flood population is silent — the ADR-0094 invariant is
+// "an unwritten row never emits", not "one mechanism stops emitting" — and its
+// verdict reports each population with its own mechanism, so a repair that
+// silences one half is told exactly which half is still red.
 func TestBdStoreBackedFloodReproduction(t *testing.T) {
 	t.Parallel()
 
@@ -418,15 +500,19 @@ func TestBdStoreBackedFloodReproduction(t *testing.T) {
 	// flood sustains itself across.
 	const windowTicks = 12
 	const primeAtTick = 6
-	emissions := make(map[string]map[string]int) // tick -> id -> count
 	occLog := make([]string, 0, windowTicks)
-	floodedByTick := make(map[int]int)
+	var byPopulation [floodPopulationCount]int
+	// presented counts nil flood rows that faced a returning verdict (door on)
+	// per ledger state — the denominator that makes a silent population a
+	// measurement rather than an absence of opportunity.
+	var presented [floodPopulationCount]int
 
 	windowStart := log.mark()
 	for tick := 1; tick <= windowTicks; tick++ {
+		doorOn := tick%2 == 1 // odd ticks answer, even ticks null
 		runner.mu.Lock()
 		runner.tick = tick
-		runner.doorOn = tick%2 == 1 // odd ticks answer, even ticks null
+		runner.doorOn = doorOn
 		runner.mu.Unlock()
 
 		if tick == primeAtTick {
@@ -440,29 +526,55 @@ func TestBdStoreBackedFloodReproduction(t *testing.T) {
 			if err := cache.Prime(context.Background()); err != nil {
 				t.Fatalf("mid-window prime: %v", err)
 			}
+			runner.mu.Lock()
+			runner.doorOn = doorOn
+			runner.mu.Unlock()
 		}
 
+		pre := floodPrePass(cache, isFloodRow)
+		if doorOn {
+			for _, pop := range pre {
+				if pop != floodDecline {
+					presented[pop]++
+				}
+			}
+		}
 		passStart := log.mark()
 		cache.runReconciliation()
-		tickEm := map[string]int{}
+		flooded := 0
+		var tickPop [floodPopulationCount]int
 		for _, ev := range log.since(passStart) {
-			if ev.eventType != "bead.updated" {
+			if ev.eventType != "bead.updated" || !isFloodRow(ev.beadID) {
 				continue
 			}
-			tickEm[ev.beadID]++
-		}
-		flooded := 0
-		for id, n := range tickEm {
-			if isFloodRow(id) {
-				flooded += n
+			pop, ok := pre[ev.beadID]
+			if !ok {
+				t.Fatalf("tick %d: flood row %s emitted but was not cached before the pass", tick, ev.beadID)
 			}
+			byPopulation[pop]++
+			tickPop[pop]++
+			flooded++
 		}
-		floodedByTick[tick] = flooded
-		emissions[fmt.Sprintf("%d", tick)] = tickEm
+
+		// The whole reproduction rests on the recentLocalMutation fence keeping
+		// T cached closed: that is what makes preservation decline. If the
+		// fence ever lapses (a loaded box stretching the window past its 5s),
+		// T is absorbed, the decline stops, and the flood rows fall silent for
+		// a reason that has nothing to do with a repair. Fail loudly instead of
+		// reporting that silence as the green future.
+		cache.mu.RLock()
+		target, ok := cache.beads[floodTargetID]
+		cache.mu.RUnlock()
+		if !ok || target.Status != "closed" {
+			t.Fatalf("fixture precondition lost at tick %d: %s cached status=%q (present=%v), want \"closed\" — the recency fence lapsed, so preservation no longer declines and flood silence here would be vacuous", tick, floodTargetID, target.Status, ok)
+		}
+
 		occ := floodOccupancyOf(cache, isFloodRow)
 		occLog = append(occLog, fmt.Sprintf(
-			"tick %2d: door=%v flood-emissions=%2d lost=%2d invalid=%2d nil-verdict=%2d depsComplete=%v",
-			tick, tick%2 == 1, flooded, occ.lost, occ.invalid, occ.nilVerdict, occ.depsComplete))
+			"tick %2d: door=%-5v flood-emissions=%2d [decline=%2d lost-ledger=%2d invalid-ledger=%2d unmarked-nil=%2d] after: lost=%2d invalid=%2d nil-verdict=%2d depsComplete=%v",
+			tick, doorOn, flooded,
+			tickPop[floodDecline], tickPop[floodLostLedger], tickPop[floodInvalidLedger], tickPop[floodUnmarkedNil],
+			occ.lost, occ.invalid, occ.nilVerdict, occ.depsComplete))
 	}
 	windowEvents := log.since(windowStart)
 
@@ -470,15 +582,11 @@ func TestBdStoreBackedFloodReproduction(t *testing.T) {
 	runner.mu.Lock()
 	sqlCalls, sqlSet, sqlNull := runner.sqlCalls, runner.sqlSetCalls, runner.sqlNullCalls
 	runner.mu.Unlock()
-	// One SQL call per reconcile pass, plus the prime's own pass. The exempt
-	// rows ride EVERY answer (102 rows per call) — their silence is the
-	// client-side exemption, never the door omitting them.
-	if sqlCalls == 0 || sqlSet == 0 || sqlNull == 0 {
-		t.Fatalf("fixture non-vacuity failed: sql calls=%d (verdict-set=%d, null=%d); the door never flapped and this guard would pass vacuously", sqlCalls, sqlSet, sqlNull)
-	}
-	perCall := floodExemptRows + floodRows + 2 // messages + flood rows + T + W
-	if sqlCalls*(floodExemptRows+floodRows+2) != sqlSet+sqlNull {
-		t.Fatalf("fixture non-vacuity failed: sql answered %d+%d verdict slots across %d calls, want %d rows per call (the door must cover BOTH sub-populations)", sqlSet, sqlNull, sqlCalls, perCall)
+	// The door must have been consulted on every reconcile pass and in BOTH
+	// states: a guard whose door never flapped, or that stopped being asked,
+	// would pass vacuously.
+	if sqlCalls < windowTicks || sqlSet == 0 || sqlNull == 0 {
+		t.Fatalf("fixture non-vacuity failed: sql door calls=%d over %d passes (verdict-set=%d, null=%d); the door was not consulted every pass in both states and this guard would pass vacuously", sqlCalls, windowTicks, sqlSet, sqlNull)
 	}
 
 	cache.mu.RLock()
@@ -546,50 +654,86 @@ func TestBdStoreBackedFloodReproduction(t *testing.T) {
 	// gate (.githooks/pre-push execs `make test-fast-parallel` over ~190
 	// packages — a deterministically red test here blocks EVERY push touching
 	// a .go file, the ga-at7jv0 P0 shape) and cannot merge (PR CI runs the
-	// same suite). So the fixture runs on every pass and, while it observes
-	// the flood, SKIPS with the verdict — unless VC_VLYK_ENFORCE=1, in which
-	// case the red is fatal:
+	// same suite). The gate is a STRICT expected-failure, not an off switch:
+	//
+	//   - flood present, ungated: SKIP with the per-population verdict (the
+	//     known red, recorded on every run);
+	//   - flood present, VC_VLYK_ENFORCE=1: FAIL (certify the red);
+	//   - flood ABSENT, ungated: FAIL — the expected red vanished while the
+	//     gate still stands, so either the repair landed (delete the gate) or
+	//     the fixture rotted (fix it). Silence is never accepted unreviewed;
+	//   - flood absent, VC_VLYK_ENFORCE=1: PASS.
 	//
 	//	VC_VLYK_ENFORCE=1 go test ./internal/beads/ -run TestBdStoreBackedFloodReproduction
 	//
-	// FAILS on 9f27db196 (certified on a detached worktree at that commit,
-	// bead vc-vlyk) and PASSES on the repaired build. The repair bead deletes
-	// this gate, making the silence assertion unconditional.
+	// The repair bead deletes this gate, making the silence assertion
+	// unconditional.
 	totalFlood := 0
-	for _, n := range perID {
+	for _, n := range byPopulation {
 		totalFlood += n
 	}
-	if totalFlood != 0 {
-		ids := make([]string, 0, len(perID))
-		for id := range perID {
-			ids = append(ids, id)
+	enforce := os.Getenv("VC_VLYK_ENFORCE") == "1"
+	if totalFlood == 0 {
+		// Reached only when every flood population is silent. Vacuity of that
+		// green is ruled out above: the door flapped and was consulted every
+		// pass, and T stayed cached closed on every tick, so preservation kept
+		// declining. Ledger occupancy is deliberately NOT a vacuity signal: a
+		// repair that preserves verdicts through the decline leaves no marks
+		// behind, and demanding residual marks would false-positive it.
+		if !enforce {
+			t.Fatalf("expected-red XPASS: the ADR-0094 flood no longer reproduces (0 flood-row emissions over %d zero-write ticks) while the VC_VLYK_ENFORCE gate still stands. If the repair landed, delete the gate so this silence assertion is unconditional; otherwise the fixture has stopped exercising the mechanism.\n\nPer-tick instrument:\n  %s",
+				windowTicks, strings.Join(occLog, "\n  "))
 		}
-		sort.Strings(ids)
-		devices := make([]string, 0, len(deviceEmissions))
-		for id, n := range deviceEmissions {
-			devices = append(devices, fmt.Sprintf("%s=%d", id, n))
-		}
-		sort.Strings(devices)
-		identity := 0.0
-		if bytePairs > 0 {
-			identity = float64(byteIdentical) / float64(bytePairs)
-		}
-		verdict := fmt.Sprintf("ADR-0094 flood REPRODUCED on this build: %d bead.updated emissions across %d unwritten flood rows in %d zero-write ticks (types present: live proportions decision/molecule/task/bug/convoy; exempt control silent; consecutive-payload byte-identity %.1f%% over %d pairs — live measured 99.3%%, here the two flap halves alternate within each row; device rows logged, not asserted: [%s]).\n\nPer-tick instrument (acceptance 2):\n  %s\n\nAttribution: rows nil'd through the preservation-decline path land in readyProjectionLost (end-of-window: lost=%d, invalid=%d, nil-verdict=%d among flood rows; flooded ids: %v). The differ substitution (caching_store_reconcile.go:545) reads ONLY readyProjectionInvalid, so for lost-path rows it can NEVER fire — the nil->verdict half re-emits every cycle. THE SUBSTITUTION READS THE WRONG LEDGER; the lost path bypasses the invalid ledger (hypothesis (i) variant, invisible to the at-rest invariant test). If marks were present but vanishing between recording and diff, lost would be 0 here and invalid >0 — that is hypothesis (ii) and it is NOT what the instrument shows.",
-			totalFlood, len(perID), windowTicks, identity*100, bytePairs, strings.Join(devices, " "),
-			strings.Join(occLog, "\n  "),
-			endOcc.lost, endOcc.invalid, endOcc.nilVerdict, ids)
-		if os.Getenv("VC_VLYK_ENFORCE") != "1" {
-			t.Skipf("%s\n\n[gated] A permanently-red test cannot ride the shared push gate (ga-at7jv0 precedent); certify the red with: VC_VLYK_ENFORCE=1 go test ./internal/beads/ -run TestBdStoreBackedFloodReproduction — FAILS on 9f27db196, PASSES on the repaired build. The repair bead removes this gate.", verdict)
-		}
-		t.Fatal(verdict)
+		return
 	}
 
-	// Reached only when the flood population is silent — the green future.
-	// Vacuity of that green is already ruled out above: the door-flap
-	// non-vacuity check demanded verdict-present AND verdict-less service
-	// across the whole row set, so silence cannot mean the fixture stopped
-	// exercising the mechanism. Ledger occupancy is deliberately NOT used as
-	// the vacuity signal here: a repair that silences the flood by preserving
-	// verdicts through the decline leaves no marks behind, and demanding
-	// residual marks would false-positive that legitimate repair.
+	ids := make([]string, 0, len(perID))
+	for id := range perID {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	devices := make([]string, 0, len(deviceEmissions))
+	for id, n := range deviceEmissions {
+		devices = append(devices, fmt.Sprintf("%s=%d", id, n))
+	}
+	sort.Strings(devices)
+	identity := 0.0
+	if bytePairs > 0 {
+		identity = float64(byteIdentical) / float64(bytePairs)
+	}
+	var breakdown []string
+	for pop := floodPopulation(0); pop < floodPopulationCount; pop++ {
+		line := fmt.Sprintf("%-30s emissions=%3d", pop, byPopulation[pop])
+		if pop != floodDecline {
+			line += fmt.Sprintf(" (nil rows facing a returning verdict: %d)", presented[pop])
+		}
+		breakdown = append(breakdown, line)
+	}
+	var attribution []string
+	if n := byPopulation[floodDecline]; n > 0 {
+		attribution = append(attribution, fmt.Sprintf(
+			"- decline (%d): on null-door ticks preserveCachedReadyProjectionLocked declines to carry the cached verdict across (T's cached status differs from its fresh one) and the absorb installs nil — a verdict->nil diff on a row nothing wrote. No mark ledger is consulted on this half; changing which ledger the substitution reads cannot silence it.", n))
+	}
+	if n := byPopulation[floodLostLedger]; n > 0 {
+		attribution = append(attribution, fmt.Sprintf(
+			"- lost-ledger (%d): rows nil'd by that decline are marked ONLY in readyProjectionLost (absorbReadyProjectionLocked, readyFromFresh mode), but the differ substitution (caching_store_reconcile.go, the cached-nil/fresh-verdict arm) reads ONLY readyProjectionInvalid, so the returning verdict re-emits. Control: rows marked in readyProjectionInvalid facing the same returning verdict emitted %d times over %d presentations.", n, byPopulation[floodInvalidLedger], presented[floodInvalidLedger]))
+	}
+	if n := byPopulation[floodInvalidLedger]; n > 0 {
+		attribution = append(attribution, fmt.Sprintf(
+			"- invalid-ledger (%d): rows marked in readyProjectionInvalid emitted nil->verdict anyway — the substitution's own precondition held and it did not fire. This is a defect in the substitution itself, not in which ledger it reads.", n))
+	}
+	if n := byPopulation[floodUnmarkedNil]; n > 0 {
+		attribution = append(attribution, fmt.Sprintf(
+			"- unmarked-nil (%d): rows installed verdict-less with NO mark in either ledger (Prime rebuilds both ledgers empty) emitted nil->verdict when the door answered. No ledger-reading repair reaches this half.", n))
+	}
+	verdict := fmt.Sprintf("ADR-0094 flood REPRODUCED on this build: %d bead.updated emissions across %d unwritten flood rows (%v) in %d zero-write ticks; exempt control silent; consecutive-payload byte-identity %.1f%% over %d pairs (live measured 99.3%%; here the two flap halves alternate within each row); device rows logged, not asserted: [%s].\n\nBy population (each needs its own repair; the guard goes green only when ALL are zero):\n  %s\n\nAttribution:\n%s\n\nEnd of window among flood rows: lost=%d invalid=%d nil-verdict=%d.\n\nPer-tick instrument (acceptance 2):\n  %s",
+		totalFlood, len(perID), ids, windowTicks, identity*100, bytePairs, strings.Join(devices, " "),
+		strings.Join(breakdown, "\n  "),
+		strings.Join(attribution, "\n"),
+		endOcc.lost, endOcc.invalid, endOcc.nilVerdict,
+		strings.Join(occLog, "\n  "))
+	if !enforce {
+		t.Skipf("%s\n\n[gated, strict expected-red] A permanently-red test cannot ride the shared push gate (ga-at7jv0 precedent); certify the red with: VC_VLYK_ENFORCE=1 go test ./internal/beads/ -run TestBdStoreBackedFloodReproduction. When the flood stops reproducing this test FAILS until the gate is deleted.", verdict)
+	}
+	t.Fatal(verdict)
 }
