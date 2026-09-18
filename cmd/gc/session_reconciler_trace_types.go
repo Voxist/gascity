@@ -247,16 +247,21 @@ const (
 	TraceOutcomeCancelPending       TraceOutcomeCode = "cancel_pending"
 	TraceOutcomeCancelAssignedWork  TraceOutcomeCode = "cancel_assigned_work"
 	TraceOutcomeCancelReconcilerAck TraceOutcomeCode = "cancel_reconciler_ack"
-	TraceOutcomeStopPending         TraceOutcomeCode = "stop_pending"
-	TraceOutcomeDeferredConfirm     TraceOutcomeCode = "deferred_confirm"
-	TraceOutcomeExempt              TraceOutcomeCode = "exempt"
-	TraceOutcomeDeferredMinFloor    TraceOutcomeCode = "deferred_min_floor"
-	TraceOutcomeRestartInPlace      TraceOutcomeCode = "restart_in_place"
-	TraceOutcomeDeferredPending     TraceOutcomeCode = "deferred_pending"
-	TraceOutcomeRepairInPlace       TraceOutcomeCode = "repair_in_place"
-	TraceOutcomeFailedCreate        TraceOutcomeCode = "failed_create"
-	TraceOutcomeStartInFlight       TraceOutcomeCode = "start_in_flight"
-	TraceOutcomeRespawnSkipped      TraceOutcomeCode = "respawn_skipped"
+	// TraceOutcomeCancelMinFloor: a self-initiated drain-ack was canceled
+	// because honoring it would have stranded the template's
+	// min_active_sessions floor empty (sc-j27j0d). The seat stays warm and
+	// idles under idle_timeout instead of being destroyed and recreated.
+	TraceOutcomeCancelMinFloor   TraceOutcomeCode = "cancel_min_floor"
+	TraceOutcomeStopPending      TraceOutcomeCode = "stop_pending"
+	TraceOutcomeDeferredConfirm  TraceOutcomeCode = "deferred_confirm"
+	TraceOutcomeExempt           TraceOutcomeCode = "exempt"
+	TraceOutcomeDeferredMinFloor TraceOutcomeCode = "deferred_min_floor"
+	TraceOutcomeRestartInPlace   TraceOutcomeCode = "restart_in_place"
+	TraceOutcomeDeferredPending  TraceOutcomeCode = "deferred_pending"
+	TraceOutcomeRepairInPlace    TraceOutcomeCode = "repair_in_place"
+	TraceOutcomeFailedCreate     TraceOutcomeCode = "failed_create"
+	TraceOutcomeStartInFlight    TraceOutcomeCode = "start_in_flight"
+	TraceOutcomeRespawnSkipped   TraceOutcomeCode = "respawn_skipped"
 	// TraceOutcomeChainWalk marks the provider-health gate failing over to an
 	// alternate provider from the configured failover_chain (vp #55), as opposed
 	// to skipping respawn when no healthy alternate exists.
@@ -280,13 +285,12 @@ const (
 	TraceOutcomeDeferredBusy        TraceOutcomeCode = "deferred_busy"
 	TraceOutcomeStopDeferExhausted  TraceOutcomeCode = "stop_defer_exhausted"
 
-	// TraceOutcomeSkippedLivenessError marks a destructive reconciler action
-	// (pending-create rollback, failed-create close, drain-ack finalize, or
-	// orphan close) skipped this tick because the runtime liveness probe
-	// returned an observation error. providerAlive=false then means
-	// "observation unavailable", not "confirmed dead", so the level-triggered
-	// loop fails closed and re-observes next tick rather than orphaning a
-	// possibly-live session (#3872-family).
+	// TraceOutcomeSkippedLivenessError marks absence-derived reconciliation
+	// skipped this tick because the runtime liveness probe returned an
+	// observation error. providerAlive=false then means "observation
+	// unavailable", not "confirmed dead", so the level-triggered loop preserves
+	// lifecycle metadata and re-observes next tick rather than healing, rolling
+	// back, or closing a possibly-live session (#3872-family).
 	TraceOutcomeSkippedLivenessError TraceOutcomeCode = "skipped_liveness_error"
 )
 

@@ -18,6 +18,7 @@ deprecated-attachment-fields
 dolt-topology
 dolt-drift
 port-file-consistency
+dolt-listener-deadline
 config-valid
 legacy-suspended-field
 rollout:beads.conditional_writes
@@ -38,6 +39,7 @@ skill-collision
 skill-dangling-sink
 order-firing-current
 order-outcome-healthy
+order-run-on-role
 codex-hooks-drift
 beads-proxied-capability
 beads-expected-build
@@ -67,6 +69,7 @@ orphan-sessions
 bd-split-store
 beads-store
 v2-routed-to-namespace
+executor-identity-residue
 census-owner-liveness
 run-target-routed-to-backfill
 route-recovery-quarantine
@@ -77,6 +80,7 @@ backlog-depth
 order-tracking-retention
 session-model
 pr-delivery
+startup-health-episodes
 dolt-server
 fork-rate
 dolt-noms-size

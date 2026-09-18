@@ -65,8 +65,24 @@
 # harnesses that want to exercise a specific attempt count without eating
 # the real sleep/timeout cost of the production default.
 
-POG_TIMEOUT_SECONDS="${POG_TIMEOUT_SECONDS:-5}"
+# 20s, not 5s: the budget must exceed how long a healthy-but-loaded store
+# actually takes, or the guard blocks every push during a build wave and
+# reports it as an outage. Measured 2026-09-11 on the 16-core fleet host at
+# load 199: `bd show <id> --json` took 5.86s / 5.86s / 5.82s on three
+# consecutive runs -- over the old 5s budget every time, so all three attempts
+# "timed out" against a store that was answering correctly. 20s is ~3.4x that
+# observation. Raising it does not weaken fail-closed semantics: a genuinely
+# unreachable bd still exhausts every attempt and still blocks, just later
+# (worst case POG_READ_ATTEMPTS * this + backoff). Blocking late is a cost;
+# blocking wrongly is a correctness bug, because the message this guard prints
+# on exhaustion offers `--no-verify` as the remedy -- so a guard that fires on
+# load trains operators to disarm it. (ga-grenu)
+POG_TIMEOUT_SECONDS="${POG_TIMEOUT_SECONDS:-20}"
 POG_READ_ATTEMPTS="${POG_READ_ATTEMPTS:-3}"
+
+# Side channel for _pog_read_with_retry's failure tally. A file rather than a
+# variable because that helper always runs inside `$( )` -- see its comment.
+POG_READ_STATE_FILE="${POG_READ_STATE_FILE:-${TMPDIR:-/tmp}/pog-read-state.$$}"
 
 # Sentinel emitted by _pog_resolve_bead_id when it cannot resolve an id
 # *and* the failure is ambiguous (a failed bd read) rather than a clean
@@ -78,13 +94,34 @@ POG_AMBIGUOUS_SENTINEL="__pog_unresolved_ambiguous__"
 # test/agents/graph-dispatch.sh (the only bounded-exec precedent in this
 # repo). Falls back to unbounded passthrough when neither is available
 # rather than failing the whole guard open or closed on a missing dev tool.
+# POG_TIMEOUT_BIN is resolved ONCE, at load, in the guard's own shell -- not
+# per call inside _pog_timeout, which every caller reaches through $( ) and so
+# runs in a subshell whose variables die with it. Empty means no bounding tool
+# was found and reads run UNBOUNDED (ga-6kev4).
+#
+# This matters more than it looks: stock macOS ships neither `timeout` nor
+# `gtimeout` (both are GNU coreutils). On such a host POG_TIMEOUT_SECONDS bounds
+# nothing, so raising its default is inert, a hung bd hangs the push with no
+# diagnostic, and -- because rc is then never 124 -- the timeout-specific
+# message below can never fire and the operator sees the outage wording that
+# recommends --no-verify. That is the exact failure this guard's message was
+# changed to stop. A guard that silently stops bounding anything is worse than
+# one that never bounded, so the fallback stays (failing the push on a missing
+# dev tool would be worse still) but it announces itself.
+POG_TIMEOUT_BIN=""
+if command -v timeout >/dev/null 2>&1; then
+    POG_TIMEOUT_BIN="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+    POG_TIMEOUT_BIN="gtimeout"
+else
+    echo "push-ownership-guard: WARNING — neither \`timeout\` nor \`gtimeout\` is on PATH, so bd reads run UNBOUNDED and POG_TIMEOUT_SECONDS=${POG_TIMEOUT_SECONDS}s enforces nothing. A hung bd will hang this push. Install GNU coreutils (\`brew install coreutils\`) to restore the bound. (ga-6kev4)" >&2
+fi
+
 _pog_timeout() {
     local bound="$1"
     shift
-    if command -v timeout >/dev/null 2>&1; then
-        timeout "$bound" "$@"
-    elif command -v gtimeout >/dev/null 2>&1; then
-        gtimeout "$bound" "$@"
+    if [[ -n "$POG_TIMEOUT_BIN" ]]; then
+        "$POG_TIMEOUT_BIN" "$bound" "$@"
     else
         "$@"
     fi
@@ -102,18 +139,50 @@ _pog_timeout() {
 # retrying cannot mask a genuine ownership change.
 _pog_read_with_retry() {
     local attempt=1
-    local out
+    local out rc
+    # Distinguish HOW the reads failed so the caller can say so. `timeout`
+    # exits 124 on expiry, which is the difference between "the store is slow"
+    # and "the store is down" -- collapsing both into "unreachable" is what
+    # sent an operator hunting a Dolt outage that did not exist (ga-grenu).
+    #
+    # The counts go to a FILE, not to shell variables: every caller invokes
+    # this function inside `$( )` to capture its stdout, so it runs in a
+    # subshell and any variable it sets dies with that subshell. (Caught by
+    # the ga-grenu test, which saw "0 timed out, 0 errored" after three real
+    # timeouts.)
+    local timeouts=0 failures=0
     while (( attempt <= POG_READ_ATTEMPTS )); do
-        if out="$(_pog_timeout "$POG_TIMEOUT_SECONDS" "$@" 2>/dev/null)" && [[ -n "$out" ]]; then
+        out="$(_pog_timeout "$POG_TIMEOUT_SECONDS" "$@" 2>/dev/null)"
+        rc=$?
+        if (( rc == 0 )) && [[ -n "$out" ]]; then
             printf '%s' "$out"
             return 0
+        fi
+        if (( rc == 124 )); then
+            timeouts=$((timeouts + 1))
+        else
+            failures=$((failures + 1))
         fi
         if (( attempt < POG_READ_ATTEMPTS )); then
             sleep "$attempt"
         fi
         attempt=$((attempt + 1))
     done
+    if [[ -n "${POG_READ_STATE_FILE:-}" ]]; then
+        printf '%s %s\n' "$timeouts" "$failures" >"$POG_READ_STATE_FILE" 2>/dev/null || true
+    fi
     return 1
+}
+
+# _pog_read_failure_tally: echo "<timeouts> <failures>" from the last exhausted
+# _pog_read_with_retry, or "0 0" when nothing was recorded. Reads the state
+# file because the retry helper runs in a command-substitution subshell.
+_pog_read_failure_tally() {
+    if [[ -n "${POG_READ_STATE_FILE:-}" && -s "${POG_READ_STATE_FILE:-}" ]]; then
+        cat "$POG_READ_STATE_FILE"
+        return 0
+    fi
+    echo "0 0"
 }
 
 # _pog_branch_id_bead_inactive <id>: true (rc 0) only if a FRESH bd show
@@ -198,9 +267,18 @@ _pog_ownership_violation() {
 
 # _pog_resolve_bead_id: prints the bead id this push should be checked
 # against; prints nothing if none can be resolved. Resolution order:
-#   1. The current branch name, matched against ga-[0-9a-z]{6}(\.[0-9]+)* —
-#      the bead's own id format, extended with zero or more repeated
-#      sub-bead suffixes because this repo's real branch convention is
+#   1. The current branch name, matched against ga-[0-9a-z]{3,}(\.[0-9]+)* —
+#      {3,} and NOT {6}. Real bead ids are not fixed-width: of 649 open beads
+#      on 2026-09-06, 581 are 5 characters, 41 are 6, 26 are 4 and 1 is 3. The
+#      original {6} therefore resolved NOTHING on ~89% of branches, and this
+#      guard silently took its "no bead to check" branch and allowed the push.
+#      A bare lower bound is required rather than a wider exact width: {6}
+#      also TRUNCATES a 7-char id (ga-abcdefg -> ga-abcdef), resolving a
+#      different bead. {3,} is greedy and stops at the first character outside
+#      the class, so it reads the whole id out of fix/ga-elgvf-some-slug.
+#
+#      The pattern is the bead's own id format, extended with zero or more
+#      repeated sub-bead suffixes because this repo's real branch convention is
 #      builder/<bead-id>-<slug> and sub-beads are routine at any nesting
 #      depth: a single-level sub-bead (e.g. ga-fip9ps.1) as well as a
 #      grandchild (e.g. ga-o3ko1j.4.3). The suffix group must repeat (`*`),
@@ -277,7 +355,7 @@ _pog_resolve_bead_id() {
 
     local branch_id=""
     if [[ -n "$branch" ]]; then
-        branch_id="$(grep -oE 'ga-[0-9a-z]{6}(\.[0-9]+)*' <<<"$branch" | head -1 || true)"
+        branch_id="$(grep -oE 'ga-[0-9a-z]{3,}(\.[0-9]+)*' <<<"$branch" | head -1 || true)"
     fi
 
     # assignee_read_failed distinguishes "the read failed" (ambiguity) from
@@ -432,7 +510,23 @@ assert_bead_still_claimed() {
 
     local json
     if ! json="$(_pog_read_with_retry bd show "$id" --json)" || [[ -z "$json" ]]; then
-        echo "push-ownership-guard: BLOCKED — bd show $id unreachable after $POG_READ_ATTEMPTS attempts; re-run the push first — if it keeps failing, bd/Dolt needs attention. Last resort: git push --no-verify" >&2
+        local _pog_t _pog_f
+        read -r _pog_t _pog_f <<<"$(_pog_read_failure_tally)"
+        if (( ${_pog_t:-0} == POG_READ_ATTEMPTS )); then
+            # Every attempt hit the clock, none reported an error. That is a
+            # slow store, not an absent one -- say so, and name the knob,
+            # rather than pointing at bd/Dolt and offering --no-verify.
+            echo "push-ownership-guard: BLOCKED — bd show $id exceeded POG_TIMEOUT_SECONDS=${POG_TIMEOUT_SECONDS}s on all $POG_READ_ATTEMPTS attempts (no attempt reported an error). The store is answering too slowly for the budget, which usually means the box is loaded — it is NOT necessarily down. Re-run with a larger budget first: POG_TIMEOUT_SECONDS=60 git push ... . Last resort: git push --no-verify" >&2
+        else
+            if [[ -z "$POG_TIMEOUT_BIN" ]]; then
+                # No bounding tool, so "0 timed out" is a property of this host,
+                # not evidence the store was responsive. Say so rather than let
+                # the tally imply a budget was applied.
+                echo "push-ownership-guard: BLOCKED — bd show $id failed on all $POG_READ_ATTEMPTS attempts (${_pog_f:-0} errored). NOTE: neither \`timeout\` nor \`gtimeout\` is on PATH, so POG_TIMEOUT_SECONDS enforced nothing and a slow store is indistinguishable from a failing one here — install GNU coreutils to get that distinction back (ga-6kev4). Re-run the push first; if it keeps failing, bd/Dolt needs attention. Last resort: git push --no-verify" >&2
+            else
+                echo "push-ownership-guard: BLOCKED — bd show $id unreachable after $POG_READ_ATTEMPTS attempts (${_pog_t:-0} timed out at ${POG_TIMEOUT_SECONDS}s, ${_pog_f:-0} errored); re-run the push first — if it keeps failing, bd/Dolt needs attention. Last resort: git push --no-verify" >&2
+            fi
+        fi
         return 1
     fi
     if ! jq -e '.' <<<"$json" >/dev/null 2>&1; then

@@ -33,6 +33,19 @@ type Order struct {
 	// import the pack; "rig" (the default when empty) registers it once per
 	// importing rig. Mirrors [[named_session]].scope.
 	Scope string `toml:"scope,omitempty"`
+	// RunOn restricts which fleet role dispatches this order:
+	// "fleet-host" runs it only on the city that declares `[city] role =
+	// "fleet-host"`, "seat" runs it only on cities that do not, and "any"
+	// (the default when empty) runs it everywhere. It answers a different
+	// question from Scope: Scope decides how many copies of the order pack
+	// expansion registers WITHIN one city, RunOn decides which cities in a
+	// fleet dispatch it at all. A fleet-singleton order — a merge sweep, a
+	// review gate, a delivery warden — shipped in a shared pack otherwise
+	// runs once per city that installs the pack, so a developer seat becomes
+	// a competing instance with its own credentials and pack version
+	// (voxist vp-sgxy5). The city's role comes from `[city] role` or, when
+	// that is unset, the VOXIST_FLEET_ROLE environment variable.
+	RunOn string `toml:"run_on,omitempty"`
 	// Trigger is the order scheduler selector: "cooldown", "cron",
 	// "condition", "event", or "manual". This is distinct from the
 	// separate "gate" concepts used elsewhere in the system.
@@ -85,6 +98,21 @@ type Order struct {
 	// is the author's responsibility: the order must be self-idempotent
 	// or interval-bounded, since no gate prevents an overlapping re-run.
 	NoWorkGate bool `toml:"no_work_gate,omitempty"`
+	// ReservedDispatch opts an order into the dispatcher's bounded
+	// reserved-capacity lane: a small, capped budget of dispatch slots set
+	// aside so core fleet-health orders (beads-health, gate-sweep,
+	// dolt-health) always get to run even when general dispatch capacity is
+	// saturated. Declaring this in TOML is the only way to grant reserved
+	// eligibility — the dispatcher must never name-match specific order
+	// names or maintain a multi-level priority system in Go. Defaults to
+	// false: every order is opted out unless it explicitly sets
+	// reserved_dispatch = true. A higher-priority formula layer that
+	// redefines an order by name replaces it wholesale (see scanner.go),
+	// so reserved eligibility is inherited only by explicit redeclaration,
+	// never implicitly by name. The actual capped-budget dispatch behavior
+	// is implemented separately (gastownhall/gascity ga-1ocm3f); this field
+	// only declares eligibility.
+	ReservedDispatch bool `toml:"reserved_dispatch,omitempty"`
 	// Env is a map of environment variables exported into an exec
 	// order's child process. Use the `[order.env]` TOML table to
 	// override thresholds (e.g. GC_DOCTOR_LATENCY_WARN_S) without
@@ -125,26 +153,28 @@ func (a *Order) ScopedName() string {
 }
 
 type orderDecode struct {
-	Description  string                `toml:"description,omitempty"`
-	Formula      string                `toml:"formula,omitempty"`
-	Exec         string                `toml:"exec,omitempty"`
-	Scope        string                `toml:"scope,omitempty"`
-	Trigger      string                `toml:"trigger,omitempty"`
-	Gate         string                `toml:"gate,omitempty"`
-	Interval     string                `toml:"interval,omitempty"`
-	Schedule     string                `toml:"schedule,omitempty"`
-	TZ           string                `toml:"tz,omitempty"`
-	Check        string                `toml:"check,omitempty"`
-	On           string                `toml:"on,omitempty"`
-	Pool         string                `toml:"pool,omitempty"`
-	Timeout      string                `toml:"timeout,omitempty"`
-	CheckTimeout string                `toml:"check_timeout,omitempty"`
-	Enabled      *bool                 `toml:"enabled,omitempty"`
-	Idempotent   bool                  `toml:"idempotent,omitempty"`
-	NoWorkGate   bool                  `toml:"no_work_gate,omitempty"`
-	Env          map[string]string     `toml:"env,omitempty"`
-	Params       map[string]OrderParam `toml:"params,omitempty"`
-	SkipAliases  []string              `toml:"skip_aliases,omitempty"`
+	Description      string                `toml:"description,omitempty"`
+	Formula          string                `toml:"formula,omitempty"`
+	Exec             string                `toml:"exec,omitempty"`
+	Scope            string                `toml:"scope,omitempty"`
+	RunOn            string                `toml:"run_on,omitempty"`
+	Trigger          string                `toml:"trigger,omitempty"`
+	Gate             string                `toml:"gate,omitempty"`
+	Interval         string                `toml:"interval,omitempty"`
+	Schedule         string                `toml:"schedule,omitempty"`
+	TZ               string                `toml:"tz,omitempty"`
+	Check            string                `toml:"check,omitempty"`
+	On               string                `toml:"on,omitempty"`
+	Pool             string                `toml:"pool,omitempty"`
+	Timeout          string                `toml:"timeout,omitempty"`
+	CheckTimeout     string                `toml:"check_timeout,omitempty"`
+	Enabled          *bool                 `toml:"enabled,omitempty"`
+	Idempotent       bool                  `toml:"idempotent,omitempty"`
+	NoWorkGate       bool                  `toml:"no_work_gate,omitempty"`
+	ReservedDispatch bool                  `toml:"reserved_dispatch,omitempty"`
+	Env              map[string]string     `toml:"env,omitempty"`
+	Params           map[string]OrderParam `toml:"params,omitempty"`
+	SkipAliases      []string              `toml:"skip_aliases,omitempty"`
 }
 
 func (d orderDecode) normalized() Order {
@@ -153,25 +183,27 @@ func (d orderDecode) normalized() Order {
 		trigger = d.Gate
 	}
 	return Order{
-		Description:  d.Description,
-		Formula:      d.Formula,
-		Exec:         d.Exec,
-		Scope:        d.Scope,
-		Trigger:      trigger,
-		Interval:     d.Interval,
-		Schedule:     d.Schedule,
-		TZ:           d.TZ,
-		Check:        d.Check,
-		On:           d.On,
-		Pool:         d.Pool,
-		Timeout:      d.Timeout,
-		CheckTimeout: d.CheckTimeout,
-		Enabled:      d.Enabled,
-		Idempotent:   d.Idempotent,
-		NoWorkGate:   d.NoWorkGate,
-		Env:          d.Env,
-		Params:       d.Params,
-		skipAliases:  d.SkipAliases,
+		Description:      d.Description,
+		Formula:          d.Formula,
+		Exec:             d.Exec,
+		Scope:            d.Scope,
+		RunOn:            d.RunOn,
+		Trigger:          trigger,
+		Interval:         d.Interval,
+		Schedule:         d.Schedule,
+		TZ:               d.TZ,
+		Check:            d.Check,
+		On:               d.On,
+		Pool:             d.Pool,
+		Timeout:          d.Timeout,
+		CheckTimeout:     d.CheckTimeout,
+		Enabled:          d.Enabled,
+		Idempotent:       d.Idempotent,
+		NoWorkGate:       d.NoWorkGate,
+		ReservedDispatch: d.ReservedDispatch,
+		Env:              d.Env,
+		Params:           d.Params,
+		skipAliases:      d.SkipAliases,
 	}
 }
 
@@ -277,6 +309,11 @@ func Validate(a Order) error {
 	case "", "city", "rig":
 	default:
 		return fmt.Errorf("order %q: unknown scope %q (want \"city\" or \"rig\")", a.Name, a.Scope)
+	}
+	// run_on, if set, must be a known value. Empty defaults to RunOnAny, so
+	// an order authored before this field existed keeps running everywhere.
+	if !IsValidRunOn(a.RunOn) {
+		return fmt.Errorf("order %q: unknown run_on %q (want %s)", a.Name, a.RunOn, strings.Join(quoteAll(ValidRunOn), ", "))
 	}
 	// Validate timeout if set.
 	if a.Timeout != "" {

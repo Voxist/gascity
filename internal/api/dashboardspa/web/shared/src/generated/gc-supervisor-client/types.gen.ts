@@ -675,6 +675,15 @@ export type ConfigValidateOutputBody = {
     warnings: Array<string> | null;
 };
 
+export type ControlRootSettleFailedPayload = {
+    error: string;
+    error_class: string;
+    finalizer_bead_id: string;
+    follow_up_bead_id?: string;
+    root_bead_id: string;
+    store_path?: string;
+};
+
 export type ControlStalledPayload = {
     attempts: number;
     bead_id: string;
@@ -946,7 +955,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | BreakerStateChangedPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlStalledPayload | ControllerTickCompletedPayload | DoctorAlertPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderGateTimeoutFailOpenPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | ProxyReapedPayload | QuotaObservedPayload | QuotaPollFailedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDegradedPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | StoreProbeFailedPayload | StoreRecoveredPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | BreakerStateChangedPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ControllerTickCompletedPayload | DoctorAlertPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderGateTimeoutFailOpenPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | ProxyReapedPayload | QuotaObservedPayload | QuotaPollFailedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDegradedPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | StoreProbeFailedPayload | StoreRecoveredPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -5028,7 +5037,7 @@ export type StatusStoreHealth = {
      */
     last_gc_status?: string;
     /**
-     * Retained bead row count used as the denominator, including open and closed beads.
+     * Retained bead row count used as the denominator, including open and closed beads. Meaningless unless rows_measured is true.
      */
     live_rows: number;
     /**
@@ -5036,9 +5045,13 @@ export type StatusStoreHealth = {
      */
     path: string;
     /**
-     * Derived megabytes per retained row, including open and closed beads.
+     * Derived megabytes per retained row, including open and closed beads. Zero and meaningless unless rows_measured is true.
      */
     ratio_mb_per_row: number;
+    /**
+     * True when live_rows is a real count. False means the count failed, timed out, or was never taken, and both live_rows and ratio_mb_per_row are meaningless.
+     */
+    rows_measured: boolean;
     /**
      * Total bytes of the store directory.
      */
@@ -5048,7 +5061,7 @@ export type StatusStoreHealth = {
      */
     threshold_mb_per_row: number;
     /**
-     * True when maintenance is overdue.
+     * True when maintenance is overdue. Meaningless unless rows_measured is true.
      */
     warning: boolean;
 };
@@ -5073,6 +5086,7 @@ export type StorageBindingOutcomePayload = {
     database: string;
     invariant: string;
     outcome: string;
+    proven_beads: number;
 };
 
 export type StoreDegradedPayload = {
@@ -5383,6 +5397,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeCitySuspended) | ({
     type: 'city.unregister_requested';
 } & TypedEventStreamEnvelopeCityUnregisterRequested) | ({
+    type: 'control.root_settle_failed';
+} & TypedEventStreamEnvelopeControlRootSettleFailed) | ({
     type: 'control.stalled';
 } & TypedEventStreamEnvelopeControlStalled) | ({
     type: 'controller.started';
@@ -5535,6 +5551,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeStorageBindingConverged) | ({
     type: 'storage.binding.genesis';
 } & TypedEventStreamEnvelopeStorageBindingGenesis) | ({
+    type: 'storage.binding.not_configured';
+} & TypedEventStreamEnvelopeStorageBindingNotConfigured) | ({
     type: 'storage.binding.uncheckable';
 } & TypedEventStreamEnvelopeStorageBindingUncheckable) | ({
     type: 'storage.binding.unconverged';
@@ -5847,6 +5865,24 @@ export type TypedEventStreamEnvelopeCityUnregisterRequested = {
     subject?: string;
     ts: string;
     type: 'city.unregister_requested';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope control.root_settle_failed
+ */
+export type TypedEventStreamEnvelopeControlRootSettleFailed = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: ControlRootSettleFailedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'control.root_settle_failed';
     workflow?: WorkflowEventProjection;
 };
 
@@ -7237,6 +7273,24 @@ export type TypedEventStreamEnvelopeStorageBindingGenesis = {
 };
 
 /**
+ * TypedEventStreamEnvelope storage.binding.not_configured
+ */
+export type TypedEventStreamEnvelopeStorageBindingNotConfigured = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: StorageBindingOutcomePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'storage.binding.not_configured';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope storage.binding.uncheckable
  */
 export type TypedEventStreamEnvelopeStorageBindingUncheckable = {
@@ -7490,6 +7544,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeCitySuspended) | ({
     type: 'city.unregister_requested';
 } & TypedTaggedEventStreamEnvelopeCityUnregisterRequested) | ({
+    type: 'control.root_settle_failed';
+} & TypedTaggedEventStreamEnvelopeControlRootSettleFailed) | ({
     type: 'control.stalled';
 } & TypedTaggedEventStreamEnvelopeControlStalled) | ({
     type: 'controller.started';
@@ -7642,6 +7698,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeStorageBindingConverged) | ({
     type: 'storage.binding.genesis';
 } & TypedTaggedEventStreamEnvelopeStorageBindingGenesis) | ({
+    type: 'storage.binding.not_configured';
+} & TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured) | ({
     type: 'storage.binding.uncheckable';
 } & TypedTaggedEventStreamEnvelopeStorageBindingUncheckable) | ({
     type: 'storage.binding.unconverged';
@@ -7970,6 +8028,25 @@ export type TypedTaggedEventStreamEnvelopeCityUnregisterRequested = {
     subject?: string;
     ts: string;
     type: 'city.unregister_requested';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope control.root_settle_failed
+ */
+export type TypedTaggedEventStreamEnvelopeControlRootSettleFailed = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: ControlRootSettleFailedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'control.root_settle_failed';
     workflow?: WorkflowEventProjection;
 };
 
@@ -9433,6 +9510,25 @@ export type TypedTaggedEventStreamEnvelopeStorageBindingGenesis = {
     subject?: string;
     ts: string;
     type: 'storage.binding.genesis';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope storage.binding.not_configured
+ */
+export type TypedTaggedEventStreamEnvelopeStorageBindingNotConfigured = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: StorageBindingOutcomePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'storage.binding.not_configured';
     workflow?: WorkflowEventProjection;
 };
 
@@ -17561,6 +17657,10 @@ export type GetV0CityByCityNameSessionByIdData = {
          * Number of lines to include in the last output preview when peek=true. Defaults to 5.
          */
         peek_lines?: number;
+        /**
+         * Resolve {id} as an exact session bead id only: a single point read that also finds closed sessions and answers 404 when no bead has that id. Skips the alias, runtime session_name, configured-name and closed-session name lookups. For callers holding a durable id.
+         */
+        exact_id?: boolean;
     };
     url: '/v0/city/{cityName}/session/{id}';
 };
