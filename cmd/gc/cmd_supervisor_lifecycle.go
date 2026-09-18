@@ -1751,9 +1751,28 @@ func writeSupervisorServiceFile(path string, content []byte) error {
 	return os.Chmod(path, supervisorServiceFileMode)
 }
 
-func supervisorLaunchdPlistPath() string {
+// supervisorLaunchAgentsDirEnv overrides the directory gc writes its launchd
+// plists into and sweeps for stale isolated supervisors. Unset, it is the
+// user's ~/Library/LaunchAgents. Test harnesses point it at a temp dir:
+// isolating GC_HOME alone does not isolate launchd, and a plist left in the
+// real LaunchAgents is reloaded at login against a GC_HOME that no longer
+// holds a supervisor.toml, so it binds the default API port (ga-32bb2).
+const supervisorLaunchAgentsDirEnv = "GC_SUPERVISOR_LAUNCH_AGENTS_DIR"
+
+// supervisorLaunchAgentsDir is a seam so the cmd/gc test binary can pin every
+// launchd path under its temp root without mutating the process environment.
+var supervisorLaunchAgentsDir = defaultSupervisorLaunchAgentsDir
+
+func defaultSupervisorLaunchAgentsDir() string {
+	if dir := strings.TrimSpace(os.Getenv(supervisorLaunchAgentsDirEnv)); dir != "" {
+		return dir
+	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Library", "LaunchAgents", supervisorLaunchdLabel()+".plist")
+	return filepath.Join(home, "Library", "LaunchAgents")
+}
+
+func supervisorLaunchdPlistPath() string {
+	return filepath.Join(supervisorLaunchAgentsDir(), supervisorLaunchdLabel()+".plist")
 }
 
 func supervisorLaunchdServiceTarget(label string) string {
@@ -1799,8 +1818,7 @@ func warnSupervisorLaunchdRollback(stderr io.Writer, format string, args ...any)
 }
 
 func legacySupervisorLaunchdPlistPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Library", "LaunchAgents", defaultSupervisorLaunchdLabel+".plist")
+	return filepath.Join(supervisorLaunchAgentsDir(), defaultSupervisorLaunchdLabel+".plist")
 }
 
 func supervisorSystemdServicePath() string {
