@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/webhookverify"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // extmsgNotifyTimeout bounds fire-and-forget goroutines spawned from
@@ -86,6 +87,13 @@ type Server struct {
 	// repeated filesystem scans on every GET /v0/agents request.
 	lookPathMu      sync.Mutex
 	lookPathEntries map[string]lookPathEntry
+
+	// activityMemo memoizes the whole-mirror activity derivation zcode
+	// sessions need on every State poll. workerFactory builds a fresh
+	// worker.Factory per request, so the memo lives here — one per Server —
+	// and is threaded into each factory; otherwise every poll re-parses an
+	// unchanged mirror.
+	activityMemo *worker.DerivedActivityMemo
 
 	// agentVisibilityWaitTimeout overrides the POST /agents visibility wait
 	// in tests. Zero uses defaultAgentVisibilityWaitTimeout.
@@ -279,6 +287,7 @@ func newServer(state State, readOnly bool) *Server {
 		rigIdem:        newRigIdemIndex(),
 		webhookDedup:   newWebhookDedupCache(defaultWebhookDedupTTL),
 		webhookLimiter: newWebhookRateLimiter(),
+		activityMemo:   worker.NewDerivedActivityMemo(),
 	}
 	// Latch the rollout snapshot once: prefer the State's boot latch (the
 	// production controllerState); fall back to resolving from Config() for

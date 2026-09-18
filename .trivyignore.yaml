@@ -1,29 +1,51 @@
 # Container image scan waivers (trivy, HIGH+CRITICAL, --ignore-unfixed,
 # --exit-code 1). Consumed by .github/workflows/container-scan.yml.
 #
-# THIS LIST IS EMPTY, AND THAT IS THE INTENDED STEADY STATE.
+# THIS LIST IS SHORT ON PURPOSE, AND SHRINKING IS THE INTENDED DIRECTION.
 #
-# Every finding the file used to waive is now fixed at the source rather than
-# suppressed. The four images carry exactly five binaries that trivy analyses:
+# Almost every finding the file used to waive is now fixed at the source rather
+# than suppressed. The four images carry exactly five binaries that trivy
+# analyses:
 #
 #   bd, gh, dolt  rebuilt from pinned source (Dockerfile.base, Dockerfile.agent)
 #                 with the Go 1.26.8 toolchain and explicit module floors --
-#                 grpc, x/text, x/crypto, x/mod, thrift -- each ASSERTED on the
-#                 produced artifact with `go version -m`. A regressed rebuild
-#                 fails the image build, loudly, instead of being waived.
+#                 grpc, x/text, x/crypto, x/net, x/mod, thrift -- each ASSERTED
+#                 on the produced artifact with `go version -m`. A regressed
+#                 rebuild fails the image build, loudly, instead of being waived.
 #   gc            built from this module; go.mod pins the fixed x/net,
 #                 x/crypto, x/text and x/mod (guarded by
 #                 TestTrivyIgnoreDropsGCModuleWaiversPastThreshold).
 #   kubectl       the only PREBUILT binary left, pinned in Dockerfile.controller
 #                 and remedied by bumping that pin (guarded by
-#                 TestTrivyIgnoreDropsKubectlWaiversPastPinnedVersion).
+#                 TestTrivyIgnoreDropsKubectlWaiversPastPinnedVersion). At
+#                 v1.37.0 it carries go1.26.6, x/net 0.57.0 and x/text 0.40.0,
+#                 which is why it appears nowhere below.
 #
 # usr/local/bin/br is NOT in that list: br is the beads_rust CLI, a Rust binary
 # with no Go build info, so trivy's gobinary analyser skips it entirely and no
 # Go CVE can be attributed to it. It may never be waived
 # (TestTrivyIgnoreCarriesNoBRWaiver).
 #
-# WHY THE FILE IS EMPTY RATHER THAN EXTENDED (ga-elgvf)
+# WHAT IS LEFT, AND WHY (ga-elgvf, #5885)
+#
+# Four entries, all on the 2026-09-21 bridge horizon, each held to its exact
+# paths/purls and statement by TestTrivyIgnoreKeepsReviewedBridgeEntries:
+#
+#   CVE-2026-84445  grpc, fixed in 1.83.2. The durable fix LANDED in #186:
+#                   go.mod, Dockerfile.base and Dockerfile.agent all pin
+#                   1.83.2 now, so the gc path was dropped from this entry --
+#                   TestTrivyIgnoreDropsGCModuleWaiversPastThreshold encodes
+#                   that threshold and fires the moment go.mod passes it.
+#                   The gh/dolt/bd paths REMAIN only because
+#                   TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools still
+#                   asserts their retention; with GRPC_VERSION at 1.83.2 those
+#                   rebuilds should be clean too, so this entry is a candidate
+#                   for deletion once that assertion is revisited.
+#   CVE-2026-78675  GitPython, in the gc-mcp-mail image's own requirements. No
+#   CVE-2026-78676  rebuild touches that file, so the fix is a pinned-dependency
+#   CVE-2026-78677  bump to 3.1.59.
+#
+# WHY THE LIST IS NOT LONGER
 #
 # This file reached 41 entries that all expired on the same day, 2026-09-07,
 # because each horizon was reached by bulk-extending every entry at once
@@ -60,4 +82,26 @@
 #    and delete the ones that no longer apply.
 # 5. Cite a bead id that resolves via `bd show`.
 
-vulnerabilities: []
+vulnerabilities:
+  - id: CVE-2026-84445
+    paths:
+      - "usr/bin/gh"
+      - "usr/local/bin/dolt"
+      - "usr/local/bin/bd"
+    expired_at: 2026-09-21
+    statement: google.golang.org/grpc xDS CVE, fixed in 1.82.2 and 1.83.2. The gh and Dolt rebuilds pin grpc 1.83.1 (GRPC_VERSION in contrib/k8s/Dockerfile.base), the bd rebuild pins 1.83.1 (GRPC_VERSION in contrib/k8s/Dockerfile.agent), and gc takes 1.83.1 from go.mod. Those pins already clear CVE-2026-84304, which 1.83.1 fixes; this one needs 1.83.2 on the 1.83 line. Durable fix is raising each of those pins to 1.83.2 or later. Remove each path once its pin moves.
+  - id: CVE-2026-78676
+    purls:
+      - "pkg:pypi/gitpython"
+    expired_at: 2026-09-21
+    statement: GitPython CRITICAL remote-code-execution CVE; gc-mcp-mail pins GitPython 3.1.58, fixed in 3.1.59. Tracked in ga-dkgeoi; remove once the image bumps the pinned dependency. This purl appears only in gc-mcp-mail's own package set, which confines the waiver without a paths entry.
+  - id: CVE-2026-78675
+    purls:
+      - "pkg:pypi/gitpython"
+    expired_at: 2026-09-21
+    statement: GitPython CVE; gc-mcp-mail pins GitPython 3.1.58, fixed in 3.1.59. Tracked in ga-dkgeoi; remove once the image bumps the pinned dependency. This purl appears only in gc-mcp-mail's own package set, which confines the waiver without a paths entry.
+  - id: CVE-2026-78677
+    purls:
+      - "pkg:pypi/gitpython"
+    expired_at: 2026-09-21
+    statement: GitPython CVE; gc-mcp-mail pins GitPython 3.1.58, fixed in 3.1.59. Tracked in ga-dkgeoi; remove once the image bumps the pinned dependency. This purl appears only in gc-mcp-mail's own package set, which confines the waiver without a paths entry.

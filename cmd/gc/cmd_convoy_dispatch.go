@@ -145,6 +145,12 @@ func runControlDispatcher(beadID string, stdout, stderr io.Writer) error {
 	return runControlDispatcherWithStore(cityPath, storePath, store, beadID, stdout, stderr)
 }
 
+// openControlStoreForDispatch is the test seam for the scope-store open in
+// runControlDispatcherInStore, following the package's var-seam idiom (cf.
+// controlDispatcherServe, dispatch_runtime.go). Production always uses
+// openControlStoreAtForCity.
+var openControlStoreForDispatch = openControlStoreAtForCity
+
 func runControlDispatcherInStore(cityPath, storePath, beadID string, stdout, stderr io.Writer) error {
 	if cityPath == "" {
 		var err error
@@ -162,10 +168,28 @@ func runControlDispatcherInStore(cityPath, storePath, beadID string, stdout, std
 		return err
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
-	store, err := openControlStoreAtForCity(storePath, cityPath, cfg)
+	store, err := openControlStoreForDispatch(storePath, cityPath, cfg)
 	if err != nil {
 		return fmt.Errorf("opening scoped control store %q: %w", storePath, err)
 	}
+	// The whole dispatch below is synchronous — ProcessControl consumes its
+	// store-bearing options (RecycleSession, MemberStores) before it returns, the
+	// caller's own EmitCurrent step runs inline after it, and nothing retains
+	// store past this call — so releasing the scope handle we just opened at
+	// return is safe and stops leaking one bd/Dolt store (and its connections)
+	// per control bead processed by the serve loop. When the graph class
+	// relocated, the graph store is a different, process-shared value that
+	// controlBeadLedger resolves separately; we close only store, the work leg we
+	// opened here. Sibling handles this pipeline opens elsewhere —
+	// findBeadScopeAcrossStores' scan stores, makeSourceWorkflowStoresLister's
+	// per-scope opens, and the makeStoreRefResolver handles walkSourceBeadChain
+	// memoizes — stay unclosed: a deliberate scope boundary for this targeted WAL
+	// fix, tracked in ga-6fur2, not an oversight.
+	defer func() {
+		if cerr := closeBeadStoreHandle(store); cerr != nil {
+			fmt.Fprintf(stderr, "warning: control dispatch: closing scope store %q: %v\n", storePath, cerr) //nolint:errcheck // dispatch outcome is preserved
+		}
+	}()
 
 	return runControlDispatcherWithStoreAndConfig(cityPath, storePath, store, beadID, cfg, stdout, stderr)
 }
@@ -270,6 +294,15 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 				opts.MemberStores = []beads.Store{store}
 			}
 		case "retry-eval":
+			// A retry-eval validating a required artifact resolves the
+			// artifact worktree through the workflow's source bead or input
+			// convoy, which are work class; when the graph class relocated,
+			// supply the work leg as the member tail so that read crosses the
+			// class boundary. Route-gated exactly like the drain: on every
+			// other city graphStore IS store and the tail stays empty.
+			if graphStore != store {
+				opts.MemberStores = []beads.Store{store} // residency:allow route-gated work-leg tail for the retry lane's cross-store required-artifact source read; same shape as the drain arm above
+			}
 			sp, err := dispatchControlSessionProvider()
 			if err != nil {
 				return err
@@ -282,6 +315,11 @@ func runControlDispatcherWithStoreAndConfig(cityPath, storePath string, store be
 			}
 		case "retry", "ralph":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
+			// Same cross-store required-artifact source resolution as
+			// retry-eval above.
+			if graphStore != store {
+				opts.MemberStores = []beads.Store{store} // residency:allow route-gated work-leg tail for the retry lane's cross-store required-artifact source read; same shape as the drain arm above
+			}
 			sp, err := dispatchControlSessionProvider()
 			if err != nil {
 				return err
@@ -370,8 +408,15 @@ func handleControlDispatchError(cityPath, storePath string, graphStore beads.Sto
 	// because RecordSemanticControlRetry already persisted first_seen/count/error
 	// on the bead, so `bd show` still explains the stall even when the event is
 	// lost.
-	if quarantineErr := quarantineControlFailureBead(graphStore, beadID, cause); quarantineErr != nil {
+	settleFailure, quarantineErr := quarantineControlFailureBead(graphStore, bead, cause)
+	if quarantineErr != nil {
 		return errors.Join(cause, quarantineErr)
+	}
+	if settleFailure != nil {
+		emitControlRootSettleFailed(cityPath, storePath, *settleFailure, stderr)
+		_, _ = fmt.Fprintf(stderr,
+			"control dispatch: root=%s failed to settle after finalizer=%s quarantined reason=%v\n",
+			settleFailure.RootBeadID, settleFailure.FinalizerBeadID, cause)
 	}
 	if stalled != nil {
 		emitControlStalled(cityPath, storePath, graphStore, bead, cause, *stalled, stderr)
@@ -457,7 +502,63 @@ func emitControlStalled(cityPath, storePath string, store beads.Store, bead bead
 	}
 }
 
-func quarantineControlFailureBead(store beads.Store, beadID string, cause error) error {
+// emitControlRootSettleFailed publishes the control.root_settle_failed record
+// for a workflow root that a quarantined finalizer could not close, mirroring
+// emitControlStalled's pattern above. The marker write onto the root
+// (recordRootSettleFailure) already made the failure durable in the store;
+// this makes it observable from the event bus too, so a stranded root shows
+// up next to control.stalled instead of only in a trace line. See ga-li4qa4.
+func emitControlRootSettleFailed(cityPath, storePath string, failure rootSettleFailure, stderr io.Writer) {
+	payload := events.ControlRootSettleFailedPayload{
+		RootBeadID:      failure.RootBeadID,
+		FinalizerBeadID: failure.FinalizerBeadID,
+		StorePath:       storePath,
+		ErrorClass:      failure.ErrorClass,
+		Error:           failure.Error,
+		FollowUpBeadID:  failure.FollowUpBeadID,
+	}
+
+	rec := openCityRecorderAt(cityPath, stderr)
+	rec.Record(events.Event{
+		Type:    events.ControlRootSettleFailed,
+		Actor:   "controller",
+		Subject: failure.RootBeadID,
+		Message: fmt.Sprintf("workflow root %s failed to settle after finalizer %s was quarantined: %s",
+			failure.RootBeadID, failure.FinalizerBeadID, failure.Error),
+		Payload: events.ControlRootSettleFailedPayloadJSON(payload),
+		RunID:   failure.RootBeadID,
+	})
+	if closer, ok := rec.(io.Closer); ok {
+		if err := closer.Close(); err != nil {
+			fmt.Fprintf(stderr, "warning: control dispatch: closing event recorder for %s: %v\n", failure.RootBeadID, err) //nolint:errcheck // the settle-failure marker already succeeded
+		}
+	}
+}
+
+// rootSettleFailure records a workflow root that failed to settle after its
+// workflow-finalize control bead was quarantined. quarantineControlFailureBead
+// hands one back (non-nil) whenever settleRootForQuarantinedFinalizer's close
+// attempt fails, so the caller can make the failure durably visible instead of
+// letting it vanish into a trace line. See ga-li4qa4.
+type rootSettleFailure struct {
+	RootBeadID      string
+	FinalizerBeadID string
+	// ErrorClass names the failure tier, mirroring beadmeta.ControllerErrorClassMetadataKey.
+	ErrorClass string
+	// Error is the store's refusal, truncated the same way controlQuarantineReason
+	// truncates the control bead's own reason.
+	Error string
+	// FollowUpBeadID is the reconciliation bead filed for this settle failure,
+	// when bead creation itself succeeded.
+	FollowUpBeadID string
+}
+
+// quarantineControlFailureBead closes and labels a control bead that cannot
+// make progress. When the bead is a workflow-finalize control whose workflow
+// root fails to settle behind it, the returned *rootSettleFailure is non-nil
+// so the caller can surface the stranded root instead of it going silent.
+func quarantineControlFailureBead(store beads.Store, bead beads.Bead, cause error) (*rootSettleFailure, error) {
+	beadID := bead.ID
 	failureReason := "control_dispatch_error"
 	if errors.Is(cause, dispatch.ErrControlGraphMalformed) {
 		failureReason = "malformed_control_graph"
@@ -480,9 +581,108 @@ func quarantineControlFailureBead(store beads.Store, beadID string, cause error)
 			beadmeta.ControlQuarantinedAtMetadataKey:    workflowTraceNow().UTC().Format(time.RFC3339),
 		},
 	}); err != nil {
-		return err
+		return nil, err
 	}
 	_, _ = dispatch.ReconcileClosedScopeMember(store, beadID)
+
+	if strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindWorkflowFinalize {
+		// Best-effort, like the ReconcileClosedScopeMember call above: the
+		// finalizer's own quarantine (closed + labeled, just above) is the
+		// load-bearing action and must stand regardless of what happens next.
+		// A close failure here is expected transiently -- the store may not
+		// yet reflect the finalizer close this root's "blocked by" edge is
+		// waiting on. There is no later reconciliation pass that retries this,
+		// so instead of letting the stranded root go silent, record the
+		// failure durably on the root and hand it back to the caller. See
+		// ga-li4qa4.
+		if settleErr := settleRootForQuarantinedFinalizer(store, bead); settleErr != nil {
+			workflowTracef("control-quarantine bead=%s: closing root for quarantined finalizer failed err=%v", beadID, settleErr)
+			rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
+			return recordRootSettleFailure(store, rootID, beadID, settleErr), nil
+		}
+	}
+	return nil, nil
+}
+
+// recordRootSettleFailure makes a stranded workflow root durably visible when
+// settleRootForQuarantinedFinalizer could not close it: it marks the root
+// with the same controller-error vocabulary a quarantined control bead
+// carries, and files a follow-up reconciliation bead linking the root and the
+// quarantined finalizer. Both the marker write and the bead creation are
+// best-effort -- the finalizer's own quarantine already succeeded and must
+// stand regardless of whether either of these persists. See ga-li4qa4.
+func recordRootSettleFailure(store beads.Store, rootID, finalizerBeadID string, settleErr error) *rootSettleFailure {
+	reason := controlQuarantineReason(settleErr, "root_settle_failed")
+	failure := &rootSettleFailure{
+		RootBeadID:      rootID,
+		FinalizerBeadID: finalizerBeadID,
+		ErrorClass:      beadmeta.FailureClassHard,
+		Error:           reason,
+	}
+	if rootID != "" {
+		if err := store.Update(rootID, beads.UpdateOpts{
+			Metadata: map[string]string{
+				beadmeta.ControllerErrorMetadataKey:      reason,
+				beadmeta.ControllerErrorClassMetadataKey: beadmeta.FailureClassHard,
+				beadmeta.RootSettleFailedMetadataKey:     "true",
+				beadmeta.RootSettleFailedAtMetadataKey:   workflowTraceNow().UTC().Format(time.RFC3339),
+			},
+		}); err != nil {
+			workflowTracef("control-quarantine root=%s: recording settle-failure marker failed err=%v", rootID, err)
+		}
+	}
+	followUp, err := store.Create(beads.Bead{
+		Title: fmt.Sprintf("Reconcile stranded workflow root %s (finalizer %s quarantined)", rootID, finalizerBeadID),
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey:      rootID,
+			beadmeta.FinalizerBeadIDMetadataKey: finalizerBeadID,
+		},
+	})
+	if err != nil {
+		workflowTracef("control-quarantine root=%s: filing reconciliation follow-up bead failed err=%v", rootID, err)
+		return failure
+	}
+	failure.FollowUpBeadID = followUp.ID
+	return failure
+}
+
+// settleRootForQuarantinedFinalizer closes a workflow root whose
+// workflow-finalize control bead was just quarantined. Quarantine short-
+// circuits the normal finalize path (processWorkflowFinalize closes the root
+// via setOutcomeAndClose before closing the finalizer itself), so without
+// this the root never reaches Status=="closed" and survives every
+// rootSettled-gated check forever even though its finalizer is dead. See
+// ga-japz50 / ga-xn8ml8.
+func settleRootForQuarantinedFinalizer(store beads.Store, finalizer beads.Bead) error {
+	rootID := strings.TrimSpace(finalizer.Metadata[beadmeta.RootBeadIDMetadataKey])
+	if rootID == "" || rootID == finalizer.ID {
+		return nil
+	}
+	root, err := store.Get(rootID)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if root.Status == "closed" {
+		// Already settled elsewhere -- never downgrade a real outcome.
+		return nil
+	}
+	status := "closed"
+	if err := store.Update(rootID, beads.UpdateOpts{
+		Status: &status,
+		Metadata: map[string]string{
+			beadmeta.OutcomeMetadataKey:          beadmeta.OutcomeFail,
+			beadmeta.FailureClassMetadataKey:     beadmeta.FailureClassHard,
+			beadmeta.FailureReasonMetadataKey:    "finalizer_control_quarantined",
+			beadmeta.FinalDispositionMetadataKey: beadmeta.DispositionControlQuarantine,
+		},
+	}); err != nil {
+		return err
+	}
+	_, _ = dispatch.ReconcileClosedScopeMember(store, rootID)
 	return nil
 }
 
@@ -525,7 +725,11 @@ func makeStoreRefResolver(cityPath string, cfg *config.City) func(string) (beads
 			// older callers stamp ambiguous refs and the only reachable city
 			// from a control-dispatcher is the one it was launched in.
 			if name != "" && cityName != "" && name != cityName {
-				return nil, fmt.Errorf("city ref %q does not match this city %q", ref, cityName)
+				// Same config-drift class as the removed rig below: a city
+				// renamed mid-flight leaves in-flight workflows stamped with
+				// the old name, and restoring the name heals the finalize.
+				// Pending, not terminal.
+				return nil, fmt.Errorf("%w: city ref %q does not match this city %q (renamed mid-flight? finalizer retries until the name is restored)", dispatch.ErrControlPending, ref, cityName)
 			}
 			return openStoreAtForCity(cityPath, cityPath)
 		case strings.HasPrefix(ref, "rig:"):
@@ -542,7 +746,19 @@ func makeStoreRefResolver(cityPath string, cfg *config.City) func(string) (beads
 				}
 				return openControlStoreAtForCity(rig.Path, cityPath, cfg)
 			}
-			return nil, fmt.Errorf("rig %q not found in city config", name)
+			// A rig entry can be removed from city.toml while its workflows
+			// are still in flight. A hard error here falls into the cmd-layer
+			// quarantine catch-all, which terminally closes the finalizer AND
+			// settles the workflow root — stranding the domain parent open
+			// forever with no retry handle, even after the rig is re-added.
+			// Classify as pending instead: the finalizer stays open,
+			// gc.last_finalize_error records the reason, and the next sweep
+			// completes the finalize once the rig is restored via
+			// `gc rig add`. Fail loud, not terminal. Malformed refs (the
+			// default arm below) stay hard: no config change can ever make
+			// them resolve, and pending there would be unbounded retry of a
+			// permanent error.
+			return nil, fmt.Errorf("%w: rig %q not found in city config (removed from city.toml? finalizer retries until the rig is restored)", dispatch.ErrControlPending, name)
 		default:
 			return nil, fmt.Errorf("unsupported store ref scheme: %q", ref)
 		}
@@ -1915,7 +2131,7 @@ func cmdWorkflowDeleteSource(sourceBeadID string, selector sourceWorkflowStoreSe
 			cleared := false
 			if apply {
 				var clearErr error
-				cleared, clearErr = clearSourceWorkflowMetadata(cfg, cityPath, target)
+				cleared, clearErr = clearSourceWorkflowMetadata(cfg, cityPath, target, stderr)
 				if clearErr != nil {
 					return clearErr
 				}
@@ -1973,7 +2189,7 @@ func cmdWorkflowDeleteSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		cleared := false
 		if !incomplete {
 			var clearErr error
-			cleared, clearErr = clearSourceWorkflowMetadata(cfg, cityPath, target)
+			cleared, clearErr = clearSourceWorkflowMetadata(cfg, cityPath, target, stderr)
 			if clearErr != nil {
 				return clearErr
 			}
@@ -2071,13 +2287,25 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 			resultCode = 3
 			return nil
 		}
-		currentSource, err := target.storeView.store.Get(target.sourceBead.ID)
+		// The copy the residency contract owns, not the one the selector named —
+		// see sourceWorkflowWriteTarget. reopen-source is the other command that
+		// writes the source bead's metadata, and reopening the frozen twin would
+		// leave the binding's live row closed and still bound to its workflow, so
+		// the bead the city actually reads is neither reopened nor released.
+		write, err := resolveSourceWorkflowWriteTarget(cfg, cityPath, target, stderr)
+		if err != nil {
+			return err
+		}
+		if write.owning.store == nil {
+			return fmt.Errorf("getting bead %q: %w", sourceBeadID, beads.ErrNotFound)
+		}
+		currentSource, err := write.owning.store.Get(target.sourceBead.ID)
 		if err != nil {
 			return err
 		}
 		open := "open"
 		unassigned := ""
-		if err := target.storeView.store.SetMetadata(currentSource.ID, "workflow_id", ""); err != nil {
+		if err := write.owning.store.SetMetadata(currentSource.ID, "workflow_id", ""); err != nil {
 			return err
 		}
 		// Pre-route so the bead is never left unrouted between the reopen and
@@ -2107,18 +2335,24 @@ func cmdWorkflowReopenSource(sourceBeadID string, selector sourceWorkflowStoreSe
 		if nextRoute == "" {
 			nextRoute = strings.TrimSpace(currentSource.Metadata[beadmeta.RoutedToMetadataKey])
 		}
-		if err := target.storeView.store.SetMetadata(currentSource.ID, beadmeta.RoutedToMetadataKey, nextRoute); err != nil {
+		if err := write.owning.store.SetMetadata(currentSource.ID, beadmeta.RoutedToMetadataKey, nextRoute); err != nil {
 			return err
 		}
-		if err := clearSessionAffinityMetadataOnBead(target.storeView.store, currentSource.ID); err != nil {
+		if err := clearSessionAffinityMetadataOnBead(write.owning.store, currentSource.ID); err != nil {
 			return err
 		}
-		if err := target.storeView.store.Update(currentSource.ID, beads.UpdateOpts{
+		if err := write.owning.store.Update(currentSource.ID, beads.UpdateOpts{
 			Status:   &open,
 			Assignee: &unassigned,
 		}); err != nil {
 			return err
 		}
+		// Only workflow_id travels to the other copies. The reopen itself is the
+		// owning copy's — a frozen twin restored to open would be a row the
+		// migration retired walking back into the ready frontier — but a twin
+		// still naming the released workflow is the disagreement this command
+		// exists to end.
+		clearSourceWorkflowTwins(cfg, cityPath, write, target.sourceBeadID, stderr)
 		_, _ = fmt.Fprintf(stdout, "result=reopened source_bead_id=%s\n", sourceBeadID)
 		return nil
 	})
@@ -2661,33 +2895,180 @@ func openSourceWorkflowStoresWithProvider(cfg *config.City, cityPath, beadID str
 	return nil, skips, fmt.Errorf("no source workflow stores available")
 }
 
-func clearSourceWorkflowMetadata(cfg *config.City, cityPath string, target resolvedSourceWorkflowTarget) (bool, error) {
-	bead := target.sourceBead
-	storeView := target.storeView
-	if storeView.store == nil || strings.TrimSpace(storeView.path) == "" {
-		if target.storeRef == "" {
-			return false, nil
+// sourceWorkflowWriteTarget names the copy of a source bead that delete-source
+// and reopen-source write, and the other copies of it that must not be left
+// naming a workflow the owning copy has released.
+//
+// The selector (--rig / --store-ref) says which store's workflow is being SWEPT.
+// It does not say which copy of the source bead the next reader consults: that
+// is the residency contract's answer, and on a converged city — infrastructure
+// classes relocated into the class binding with ids preserved, the pre-migration
+// copies retained and frozen at cutover — the two are different stores. Writing
+// the selector's copy clears workflow_id on the frozen twin while the binding's
+// live row goes on pointing at the workflow that was just swept, so the next
+// resolve answers from the binding, still sees a workflow, and refuses the
+// re-sling as already-running against a tree that no longer exists (ga-4kivg).
+type sourceWorkflowWriteTarget struct {
+	// owning is the copy every later reader consults. Its write is the one that
+	// decides whether the command succeeded.
+	owning convoyStoreView
+	// others are the remaining resident copies of the same id. Their stale
+	// workflow_id is cleared best-effort: it is invisible to a binding-first
+	// read, but leaving the two copies disagreeing is how a later reader that
+	// reaches for the twin — an operator naming the city, a store-scoped
+	// report — is told the workflow is still running.
+	others []convoyStoreView
+}
+
+// resolveSourceWorkflowWriteTarget answers which copy of the source bead owns
+// the id, by running the by-id residency walk the rest of the CLI already runs.
+//
+// A binding that could not answer comes back as an ERROR, never as "no binding
+// owns this". Reading a fault as absence would send the write to the frozen twin
+// with nothing said about it, which is the same wrong copy this resolution
+// exists to stop — arrived at silently instead of by the selector.
+//
+// The walk carries no rig legs (see cliByIDBindingOwner), so a rig-owned source
+// bead has no binding answer and the owning copy is the store the selector
+// named. That is what keeps every unsplit city, and every --rig run, on exactly
+// the store it wrote before.
+//
+// Opening the retained twin is best-effort for the same reason writing it is
+// (see clearSourceWorkflowTwins): a converged city whose retained ledger has
+// gone read-only or been dropped is a normal end state for the migration, and
+// refusing to resolve the owning copy over it would take both commands away
+// from that city. The open failure is reported on stderr and the run continues
+// with no twin.
+func resolveSourceWorkflowWriteTarget(cfg *config.City, cityPath string, target resolvedSourceWorkflowTarget, stderr io.Writer) (sourceWorkflowWriteTarget, error) {
+	selected := target.storeView
+	if selected.store == nil || strings.TrimSpace(selected.path) == "" {
+		if strings.TrimSpace(target.storeRef) == "" {
+			return sourceWorkflowWriteTarget{}, nil
 		}
-		var err error
-		storeView, _, err = openSourceWorkflowStoreRef(cfg, cityPath, target.storeRef)
+		view, _, err := openSourceWorkflowStoreRef(cfg, cityPath, target.storeRef)
 		if err != nil {
-			return false, err
+			return sourceWorkflowWriteTarget{}, err
+		}
+		selected = view
+	}
+	owner, ownedByBinding, err := cliByIDBindingOwner(cityPath, target.sourceBeadID)
+	if err != nil {
+		return sourceWorkflowWriteTarget{}, err
+	}
+	if !ownedByBinding {
+		return sourceWorkflowWriteTarget{owning: selected}, nil
+	}
+	write := sourceWorkflowWriteTarget{owning: convoyStoreView{
+		path:  convoyBindingViewPath,
+		store: owner.Store,
+		role:  convoyViewClassBinding,
+	}}
+	write.others = appendSourceWorkflowCopy(write.others, write.owning, selected)
+	// The migration copied OUT of the city work ledger and deleted nothing, so
+	// the frozen twin of a binding-owned id is there whether or not the operator
+	// named it. Reaching it here is what makes the unscoped run and the
+	// --store-ref city run end in the same state.
+	if !slices.ContainsFunc(write.others, func(view convoyStoreView) bool { return samePath(view.path, cityPath) }) {
+		cityView, _, err := openSourceWorkflowStoreRef(cfg, cityPath, "city")
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "store=city workflow_id_clear_error=%v\n", err)
+		} else {
+			write.others = appendSourceWorkflowCopy(write.others, write.owning, cityView)
 		}
 	}
-	if strings.TrimSpace(bead.ID) == "" {
-		current, err := storeView.store.Get(target.sourceBeadID)
-		if err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
-				return false, nil
-			}
-			return false, err
+	return write, nil
+}
+
+// appendSourceWorkflowCopy adds candidate to copies unless it is the owning copy
+// or one already listed.
+func appendSourceWorkflowCopy(copies []convoyStoreView, owning, candidate convoyStoreView) []convoyStoreView {
+	if candidate.store == nil {
+		return copies
+	}
+	if sameSourceWorkflowCopy(owning, candidate) {
+		return copies
+	}
+	if slices.ContainsFunc(copies, func(existing convoyStoreView) bool { return sameSourceWorkflowCopy(existing, candidate) }) {
+		return copies
+	}
+	return append(copies, candidate)
+}
+
+// sameSourceWorkflowCopy reports whether two views hold the same copy of a bead.
+//
+// It compares PATHS, not scopes. A relocated binding's rows belong to the city
+// scope — that is what scopePath says, and what the lock and the multi-store
+// guard need — but the binding and the city work ledger are still two stores
+// holding two copies of the same id, which is the entire situation here. The
+// binding's path is a label no directory can equal, so the comparison separates
+// them, and a city serving its classes from more than one binding is a topology
+// this build already refuses.
+func sameSourceWorkflowCopy(a, b convoyStoreView) bool {
+	if a.isClassBinding() || b.isClassBinding() {
+		return a.isClassBinding() && b.isClassBinding()
+	}
+	return samePath(a.path, b.path)
+}
+
+// clearSourceWorkflowMetadata releases the source bead from its workflow on the
+// copy the residency contract owns, then on every other resident copy.
+//
+// The reported bool is the OWNING copy's, because that is the copy the operator
+// is being told about: a run that cleared only a frozen twin has changed nothing
+// any reader will see.
+func clearSourceWorkflowMetadata(cfg *config.City, cityPath string, target resolvedSourceWorkflowTarget, stderr io.Writer) (bool, error) {
+	write, err := resolveSourceWorkflowWriteTarget(cfg, cityPath, target, stderr)
+	if err != nil {
+		return false, err
+	}
+	if write.owning.store == nil {
+		return false, nil
+	}
+	cleared, err := clearWorkflowIDOnCopy(write.owning.store, target.sourceBeadID)
+	if err != nil {
+		return false, err
+	}
+	clearSourceWorkflowTwins(cfg, cityPath, write, target.sourceBeadID, stderr)
+	return cleared, nil
+}
+
+// clearSourceWorkflowTwins clears workflow_id on every copy but the owning one,
+// reporting failures without failing the command.
+//
+// Best-effort is the right policy for exactly these copies and no others. The
+// owning copy is what every reader consults, so its write is the command's
+// verdict; a frozen twin that keeps a stale workflow_id is invisible to a
+// binding-first read and costs nothing until something reaches past the contract
+// for it. Failing the command over one would take delete-source away from a
+// converged city whose retained ledger has gone read-only — which is a normal
+// end state for a migration, not a fault the operator can act on here.
+func clearSourceWorkflowTwins(cfg *config.City, cityPath string, write sourceWorkflowWriteTarget, sourceBeadID string, stderr io.Writer) {
+	for _, view := range write.others {
+		if _, err := clearWorkflowIDOnCopy(view.store, sourceBeadID); err != nil {
+			_, _ = fmt.Fprintf(stderr, "store=%s workflow_id_clear_error=%v\n", workflowDeleteStoreLabelForView(cfg, cityPath, view), err)
 		}
-		bead = current
+	}
+}
+
+// clearWorkflowIDOnCopy clears one copy's workflow_id and reports whether it was
+// carrying one.
+//
+// The row is read here rather than reused from the resolution that found it: the
+// sweep runs in between, and a clear planned off a pre-sweep read would decide
+// from metadata that is one command old. A copy this store does not hold is not
+// an error — the migration only left a twin where there was a row to retain.
+func clearWorkflowIDOnCopy(store beads.Store, sourceBeadID string) (bool, error) {
+	bead, err := store.Get(sourceBeadID)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
 	}
 	if strings.TrimSpace(bead.Metadata["workflow_id"]) == "" {
 		return false, nil
 	}
-	if err := storeView.store.SetMetadata(bead.ID, "workflow_id", ""); err != nil {
+	if err := store.SetMetadata(bead.ID, "workflow_id", ""); err != nil {
 		return false, err
 	}
 	return true, nil

@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+repo_root="$(git rev-parse --show-toplevel)"
+
+# Beads runs first so a bead-validation rejection short-circuits before the
+# expensive codegen below. .githooks owns core.hooksPath, so this call is the
+# only thing keeping beads' own pre-commit alive.
+"$repo_root/.githooks/lib/beads-chain.sh" pre-commit ${1+"$@"}
+
 # `go clean -cache` guard (AGENTS.md "Build Cache Conventions"; bead vp-g96b).
 # Runs BEFORE the four-category early exit below, because the files most likely
 # to acquire the command -- a shell script, a Makefile recipe, a CI step, an
@@ -30,7 +37,6 @@ fi
 if ! "$gcc_guard" --staged; then
   exit 1
 fi
-
 staged_go_files=$(git diff --cached --name-only --diff-filter=ACM -- '*.go' || true)
 staged_web_src=$(git diff --cached --name-only --diff-filter=ACM -- 'internal/api/dashboardspa/web/shared/src/' 'internal/api/dashboardspa/web/frontend/src/' 'internal/api/dashboardspa/web/frontend/index.html' 'internal/api/dashboardspa/web/frontend/public/' 'internal/api/dashboardspa/web/package.json' 'internal/api/dashboardspa/web/shared/package.json' 'internal/api/dashboardspa/web/frontend/package.json' 'internal/api/dashboardspa/web/frontend/vite.config.ts' 'internal/api/dashboardspa/web/frontend/tsconfig.json' 'internal/api/dashboardspa/web/shared/tsconfig.json' || true)
 staged_docs=$(git diff --cached --name-only --diff-filter=ACM -- '*.md' 'docs/**' 'engdocs/**' 'plans/**' 'specs/**' 'AGENTS.md' 'CONTRIBUTING.md' 'README.md' 'TESTING.md' || true)

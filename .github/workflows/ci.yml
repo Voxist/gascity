@@ -301,7 +301,7 @@ jobs:
       DOLT_VERSION: "2.1.7"
       BD_VERSION: "v1.2.2" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
       BD_REPO: "Voxist/beads"
-      BD_SOURCE_REF: "3e03250ee1675ebcd63ca3f5d1660560947eab7c" # fork-tip bd commit (schema 0066) — built from BD_REPO source by install-bd-archive.sh
+      BD_SOURCE_REF: "73a5bdc65b5fa9cb384683a47e579efa61bd999b" # fork-tip bd commit (schema 0067) — built from BD_REPO source by install-bd-archive.sh
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -332,7 +332,7 @@ jobs:
       DOLT_VERSION: "2.1.7"
       BD_VERSION: "v1.2.2" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
       BD_REPO: "Voxist/beads"
-      BD_SOURCE_REF: "3e03250ee1675ebcd63ca3f5d1660560947eab7c" # fork-tip bd commit (schema 0066) — built from BD_REPO source by install-bd-archive.sh
+      BD_SOURCE_REF: "73a5bdc65b5fa9cb384683a47e579efa61bd999b" # fork-tip bd commit (schema 0067) — built from BD_REPO source by install-bd-archive.sh
     strategy:
       fail-fast: false
       matrix:
@@ -402,7 +402,7 @@ jobs:
   # Cross-version contract gate: the "current" cell of the bd matrix. The
   # "prev" cell is contract-acceptance-previous above (the min-supported
   # release). This cell builds bd from gastownhall/beads source at
-  # BD_CURRENT_REF (deps.env) — the bleeding-edge rc has no release tarball —
+  # BD_CURRENT_REF (deps.env) — a commit, which need not be a tagged release —
   # and runs the same focused CLI contract, so a bd change that breaks gc's
   # decoder/classifier surface against the newer bd is caught before merge.
   # Path-gated on the beads filter; tolerated as a skip by the Check gate.
@@ -443,11 +443,13 @@ jobs:
         run: bd version
       - name: bd CLI contract (current)
         run: make test-bd-cli-contract
-      # The conditional-release CAS is the one bd contract only this cell can
-      # run: BdStore.ReleaseIfCurrent prefers bd's --if-assignee/--if-status verb
-      # (a rejected precondition is exit 13), and BD_VERSION — every other job's
-      # bd — is a published release that predates it, so the row skips there and
-      # the wisp-tier fix rides unguarded. The target refuses to skip.
+      # The conditional-release CAS contract is wired only on this cell, but that
+      # is now a choice, not a capability limit: BdStore.ReleaseIfCurrent prefers
+      # bd's --if-assignee/--if-status verb (a rejected precondition is exit 13),
+      # and BD_VERSION — every other job's bd — carries those flags as of
+      # v1.3.0-rc.2, so the row would run there too. It stays here as the single
+      # home for the one contract that needs a real CAS-capable bd, and
+      # BD_PREV_VERSION (v1.0.4) still cannot run it. The target refuses to skip.
       - name: bd conditional-release CAS contract (current)
         run: make test-bd-conditional-release-contract
 
@@ -606,7 +608,7 @@ jobs:
       DOLT_VERSION: "2.1.7"
       BD_VERSION: "v1.2.2" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
       BD_REPO: "Voxist/beads"
-      BD_SOURCE_REF: "3e03250ee1675ebcd63ca3f5d1660560947eab7c" # fork-tip bd commit (schema 0066) — built from BD_REPO source by install-bd-archive.sh
+      BD_SOURCE_REF: "73a5bdc65b5fa9cb384683a47e579efa61bd999b" # fork-tip bd commit (schema 0067) — built from BD_REPO source by install-bd-archive.sh
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -766,7 +768,7 @@ jobs:
       DOLT_VERSION: "2.1.7"
       BD_VERSION: "v1.2.2" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
       BD_REPO: "Voxist/beads"
-      BD_SOURCE_REF: "3e03250ee1675ebcd63ca3f5d1660560947eab7c" # fork-tip bd commit (schema 0066) — built from BD_REPO source by install-bd-archive.sh
+      BD_SOURCE_REF: "73a5bdc65b5fa9cb384683a47e579efa61bd999b" # fork-tip bd commit (schema 0067) — built from BD_REPO source by install-bd-archive.sh
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -795,7 +797,7 @@ jobs:
       DOLT_VERSION: "2.1.7"
       BD_VERSION: "v1.2.2" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
       BD_REPO: "Voxist/beads"
-      BD_SOURCE_REF: "3e03250ee1675ebcd63ca3f5d1660560947eab7c" # fork-tip bd commit (schema 0066) — built from BD_REPO source by install-bd-archive.sh
+      BD_SOURCE_REF: "73a5bdc65b5fa9cb384683a47e579efa61bd999b" # fork-tip bd commit (schema 0067) — built from BD_REPO source by install-bd-archive.sh
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -1448,8 +1450,9 @@ jobs:
       - name: Install Playwright Chromium
         timeout-minutes: 12
         run: |
+          echo 'Acquire::http::Timeout "15";' | sudo tee /etc/apt/apt.conf.d/99-ci-apt-timeout >/dev/null
           for attempt in 1 2 3; do
-            if npm run test:e2e:install:ci; then
+            if timeout 240 npm run test:e2e:install:ci; then
               exit 0
             fi
             if [ "$attempt" = "3" ]; then
@@ -1664,6 +1667,8 @@ jobs:
       - cmd-gc-process
       - cmd-gc-productmetrics-testhook
       - credential-provider-windows
+      - preflight-unit-cover-noncmdgc
+      - preflight-unit-cover-cmdgc
       - worker-core-summary
       - worker-core-phase2-summary
       - pack-gate
@@ -1687,6 +1692,8 @@ jobs:
               "cmd-gc-process",
               "cmd-gc-productmetrics-testhook",
               "credential-provider-windows",
+              "preflight-unit-cover-noncmdgc",
+              "preflight-unit-cover-cmdgc",
               "pack-gate",
               "docker-session",
               "k8s-session",

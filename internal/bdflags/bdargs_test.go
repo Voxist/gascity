@@ -65,15 +65,22 @@ func TestSplitGlobalFlagsSkipsGlobalFlagValues(t *testing.T) {
 // -h/--help) is boolean and consumes nothing. -V/--version is root-LOCAL, not
 // persistent, and is in neither table — see TestVersionFlagNeedsNoGlobalEntry.
 //
-// Upstream #5601 moved --profile here and added --server-url; the 2026-09-05
-// resync kept this table instead. See globalValueFlags in bdflags.go for the
-// beads-source evidence that both of those are wrong across the supported bd
-// range, and that --format (which #5601 drops) is real.
+// Sourced from `bd --help` and from beads cmd/bd/main.go across deps.env's
+// supported range. bd declares exactly seven persistent flags that consume the
+// next argument; -C and --directory are the two spellings of one of them.
+// --format is a HIDDEN alias for --json and still takes a value, so it belongs
+// here, not in the boolean half — upstream #5601 dropped it and the 2026-09-05
+// resync put it back (see globalValueFlags in bdflags.go for the evidence).
+//
+// Two flags this table used to carry must not come back: --profile (a BOOL on
+// v1.0.4/v1.1.0, renamed --cpu-profile and still a bool on v1.3.0-rc.2 — never
+// value-taking on any bd) and --server-url, which bd no longer registers
+// anywhere. Filing either as a value flag opens a real bypass.
 func TestGlobalValueFlagsIsComplete(t *testing.T) {
 	want := map[string]bool{
-		"--actor": true, "--db": true, "-C": true, "--directory": true,
-		"--dolt-auto-commit": true, "--database": true,
-		"--mem-profile": true, "--format": true,
+		"--actor": true, "--database": true, "--db": true, "-C": true,
+		"--directory": true, "--dolt-auto-commit": true, "--format": true,
+		"--mem-profile": true,
 	}
 	if got := GlobalValueFlags(); !reflect.DeepEqual(got, want) {
 		t.Errorf("GlobalValueFlags() = %v, want %v; re-check `bd --help` persistent flags", got, want)
@@ -89,9 +96,10 @@ func TestGlobalValueFlagsIsComplete(t *testing.T) {
 // Same provenance as the value-flag table above. This half is a SUPERSET
 // allowlist over the supported bd range, so it is not expected to match any one
 // binary exactly: --profile is the pre-rename spelling of --cpu-profile, real
-// on v1.0.4/v1.0.5/the released v1.1.0 tag CI installs and rejected by the
-// newer build the fleet runs. Both stay. Dropping --profile because the local
-// bd rejects it has already broken CI once (3289b5673, reverted by 570e38be5).
+// on v1.0.4/v1.0.5/the released v1.1.0 tag CI installs, and rejected by both
+// the newer build the fleet runs and upstream's v1.3.0-rc.2 (bd renamed it with
+// no alias). Both spellings stay. Dropping --profile because the local bd
+// rejects it has already broken CI once (3289b5673, reverted by 570e38be5).
 func TestGlobalBoolFlagsIsComplete(t *testing.T) {
 	want := map[string]bool{
 		"--global": true, "--ignore-schema-skew": true, "--json": true,

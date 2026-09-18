@@ -122,6 +122,10 @@ func configureSupervisorHooksForTests() {
 	// linger tests override these locally.
 	supervisorLoginctlRun = func(_ ...string) error { return nil }
 	supervisorLingerEnabled = func(_ string) bool { return true }
+	// Never load, enable, or kickstart a job in the operator's real launchd
+	// domain (ga-32bb2): a loaded KeepAlive job outlives the test that
+	// installed it. Tests that assert launchctl calls override this locally.
+	supervisorLaunchctlRun = func(_ ...string) error { return nil }
 	startNudgePoller = func(string, string, string) error { return nil }
 	initLookPath = func(file string) (string, error) { return file, nil }
 	initProbeProvidersReadiness = func(_ context.Context, providers []string, _ bool) (map[string]api.ReadinessItem, error) {
@@ -295,6 +299,13 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("XDG_RUNTIME_DIR", runtimeDir); err != nil {
 		panic(err)
 	}
+	// GC_HOME does not isolate launchd: without this, a test that pins the
+	// real HOME and reaches the install path writes its plist into the
+	// operator's ~/Library/LaunchAgents, where launchd reloads it at login
+	// (ga-32bb2). Tests that exercise the $HOME-derived default restore it
+	// with useDefaultSupervisorLaunchAgentsDir.
+	testLaunchAgentsDir := filepath.Join(testTempRoot, "LaunchAgents")
+	supervisorLaunchAgentsDir = func() string { return testLaunchAgentsDir }
 	providerStubDir, err := installTestProviderStubs()
 	if err != nil {
 		panic(err)
@@ -5532,6 +5543,8 @@ func TestInitFromSkip(t *testing.T) {
 		{filepath.Join(".gc", "agents", "mayor.json"), false, true},
 		{filepath.Join(".gc", "prompts"), true, true},
 		{filepath.Join(".gc", "prompts", "mayor.md"), false, true},
+		{".beads", true, true},
+		{filepath.Join(".beads", "metadata.json"), false, true},
 		{"gastown_test.go", false, true},
 		{filepath.Join("sub", "foo_test.go"), false, true},
 		{"city.toml", false, false},
@@ -5545,6 +5558,36 @@ func TestInitFromSkip(t *testing.T) {
 				t.Errorf("initFromSkip(%q, %v) = %v, want %v", tt.relPath, tt.isDir, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDoInitFromDirExcludesProviderOwnedBeadsState(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	parent := t.TempDir()
+	srcDir := filepath.Join(parent, "template")
+	if err := os.MkdirAll(filepath.Join(srcDir, ".beads", "provider-runtime"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"), []byte("[workspace]\nname = \"template\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, ".beads", "metadata.json"), []byte(`{"backend":"dolt","dolt_mode":"proxied-server"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, ".beads", "provider-runtime", "state"), []byte("provider-owned"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cityPath := filepath.Join(parent, "city")
+	var stdout, stderr bytes.Buffer
+	if code := doInitFromDir(srcDir, cityPath, &stdout, &stderr); code != 0 {
+		t.Fatalf("doInitFromDir = %d; stderr: %s", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".beads")); !os.IsNotExist(err) {
+		t.Fatalf("provider-owned .beads state was copied, stat err = %v", err)
 	}
 }
 
