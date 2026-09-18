@@ -22,29 +22,30 @@ FROM golang:1.26.8-bookworm@sha256:9fdc884aacc3bec89b20ffc69f4bb369c78210e3e4f60
 # FORK-FIRST BRIDGE (supersedes the ADR-0026 C5 upstream bridge; ga-zzcjs) —
 # keep in lockstep with deps.env. BD_VERSION is the version string the pinned
 # source declares; BD_SOURCE_REF is the commit built from. No published
-# upstream release carries schema 0066 yet, so this image builds bd from the
+# upstream release carries schema 0067 yet, so this image builds bd from the
 # Voxist/beads fork tip, whose newest upstream ancestor (BD_LIB_REF
-# d530cddfa64b) is the commit gc's go.mod links — same schema, no skew.
-# Retire the bridge once a release >= 0066 exists on a module-resolvable repo:
+# a690b0a8c4d1) is the commit gc's go.mod links — same schema, no skew.
+# Retire the bridge once a release >= 0067 exists on a module-resolvable repo:
 # set BD_VERSION to that tag and drop BD_SOURCE_REF/BD_SOURCE_SHA256.
 ARG BD_VERSION=v1.2.2
 ARG BD_REPO=Voxist/beads
-ARG BD_SOURCE_REF=3e03250ee1675ebcd63ca3f5d1660560947eab7c
-ARG BD_SOURCE_SHA256=587ad18b765d90e75b64ca4bb57c12520befd8bece96545d48e98add26bc8f0f
-ARG BD_BUILD=3e03250ee
+ARG BD_SOURCE_REF=73a5bdc65b5fa9cb384683a47e579efa61bd999b
+ARG BD_SOURCE_SHA256=f572a92ebaf5d0acde21e685fcafe0178e7f5a158b56e437f161a65bdcb52fdb
+ARG BD_BUILD=73a5bdc65
 ARG BD_BRANCH=HEAD
-# 1.83.1, not 1.83.0: CVE-2026-84304 (HIGH) is in 1.83.0 and fixed in 1.83.1.
-ARG GRPC_VERSION=1.83.1
+# 1.83.2, not 1.83.1: CVE-2026-84445 (HIGH) covers <=1.83.1. The pinned
+# source declares 1.83.2, so this is a match, not an override.
+ARG GRPC_VERSION=1.83.2
 # x/text 0.41.0, not 0.40.0: the x/crypto floor below drags x/text to 0.41.0,
 # and pinning BELOW what the module graph then selects is a silent downgrade
 # (ga-0emb8). Every override here must be >= what the pinned source resolves.
 ARG XTEXT_VERSION=0.41.0
-# The pinned beads source declares x/crypto 0.54.0 (CVE-2026-56854, CRITICAL,
-# fixed 0.55.0) and x/mod 0.37.0 (CVE-2026-56864, HIGH, fixed 0.40.0). The
-# image scan gates HIGH+CRITICAL with --exit-code 1, so both floors are needed
-# for a green scan; verified against the exact pinned source: all upgrades, no
-# downgrades, bd builds.
-ARG XCRYPTO_VERSION=0.55.0
+# The pinned beads source declares x/crypto 0.56.0 and x/mod 0.40.0, which
+# already clear CVE-2026-56854 (CRITICAL, fixed 0.55.0) and CVE-2026-56864
+# (HIGH, fixed 0.40.0). The image scan gates HIGH+CRITICAL with --exit-code 1.
+# These now match the source rather than lifting it; holding them at the old
+# 0.55.0/0.40.0 would have silently downgraded x/crypto (ga-0emb8).
+ARG XCRYPTO_VERSION=0.56.0
 ARG XMOD_VERSION=0.40.0
 # bd embeds dolt as a library, so it reaches github.com/apache/thrift through
 # the parquet writer. The pinned source resolves thrift 0.23.0, which carries
@@ -56,9 +57,10 @@ ARG THRIFT_VERSION=0.24.0
 # required. Both must be >= what the pinned source already declares — pinning
 # BELOW it silently downgrades the shipped binary (and drags x/net and x/crypto
 # back with it), which neither post-build assertion would catch. At
-# BD_SOURCE_REF 3e03250ee the source resolves grpc 1.83.0 and x/text 0.40.0;
-# the floors below sit above both (grpc 1.83.1 for CVE-2026-84304, and x/text
-# 0.41.0 because the x/crypto floor drags it there).
+# BD_SOURCE_REF 73a5bdc65 the source resolves grpc 1.83.2, x/text 0.41.0,
+# x/crypto 0.56.0 and x/mod 0.40.0 on its own; the only remaining lift is
+# thrift 0.24.0. The rest are held at parity so a later source bump that
+# regresses one of them is caught here rather than shipped.
 #
 # Rebuild the pinned fork source with its production CGO/pure-Go-regex
 # configuration and release identity, changing only the patched dependency

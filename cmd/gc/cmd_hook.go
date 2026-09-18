@@ -374,6 +374,19 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	topo := cityQueryTopology(cityPath, cfg)
 	warnFederationBlindOverrides(stderr, &a, topo)
 	workQuery := a.EffectiveWorkQueryFor(topo)
+	// ADR-0076 D1 (vp-d1kjk): rank each federated store on a per-store
+	// priority probe rather than the work query's oldest-first 20-row window,
+	// which on a backlogged store is not priority-representative — the busiest
+	// store advertised the worst rank. A custom work_query is the caller-owned
+	// discovery contract with no probe equivalent, so it keeps the window rank
+	// (pre-D1 behavior) rather than being ranked against the default
+	// predicate.
+	var rankOpts []hookStoreRankOptions
+	if strings.TrimSpace(a.WorkQuery) == "" {
+		rankOpts = append(rankOpts, hookStoreRankOptions{
+			RankProbeCommand: a.EffectiveRoutedRankProbeQueryFor(topo),
+		})
+	}
 	// Expand {{.Rig}}/{{.AgentBase}} in user-supplied work_query so agent-side
 	// hook invocation sees the same rig substitution as the controller-side
 	// probes in build_desired_state.go / session_reconcile.go. #793.
@@ -444,7 +457,21 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// queue. The claim path below binds the same runner.
 	queryRunner := hookWorkQueryRunner(stderr)
 	runner := func(command, _ string) (string, error) {
-		out, _, err := bestStoreWithWork(command, stores, stores[0], queryRunner)
+		// ADR-0076 D3: collect what the front door actually showed. The stats
+		// are stderr, not stdout — stdout's shape is the bead rows agents and
+		// the claim path parse, and appending an object to it would break every
+		// consumer that expects a JSON array. Emitted once per invocation from
+		// the selection that produced the answer.
+		opts := rankOpts
+		if len(opts) == 1 {
+			withStats := opts[0]
+			withStats.Stats = &hookSelectionStats{}
+			opts = []hookStoreRankOptions{withStats}
+		}
+		out, _, err := bestStoreWithWork(command, stores, stores[0], queryRunner, opts...)
+		if len(opts) == 1 && opts[0].Stats != nil {
+			emitHookSelectionStats(stderr, *opts[0].Stats)
+		}
 		emitQueryFailure(command, err)
 		return out, err
 	}
@@ -484,7 +511,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			DrainAck:           opts.DrainAck,
 			JSON:               opts.JSON,
 		}
-		return claimHookWork(cityPath, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
+		return claimHookWork(cityPath, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr, rankOpts...)
 	}
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
@@ -496,6 +523,24 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		Identities:   identityCandidates,
 		RouteTargets: routeTargets,
 	})
+}
+
+// emitHookSelectionStats prints the ADR-0076 D3 selection telemetry as one
+// JSON line on stderr. Stdout stays the bead-row array every consumer parses;
+// stderr carries the "what did the front door show" assertion so "5 of 140
+// routed beads" is a greppable recorded fact instead of something a session
+// reverse-engineers from Go source. best-effort.
+func emitHookSelectionStats(stderr io.Writer, stats hookSelectionStats) {
+	payload := struct {
+		StoresWithReadyWork  int    `json:"stores_with_ready_work"`
+		TotalReadyCandidates int    `json:"total_ready_candidates"`
+		SelectedStore        string `json:"selected_store"`
+	}{stats.StoresWithReadyWork, stats.TotalReadyCandidates, stats.SelectedStore}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(stderr, "gc hook selection: %s\n", encoded) //nolint:errcheck // best-effort stderr
 }
 
 // hookClaimSessionVerdict classifies a runtime session's fitness to claim routed
@@ -629,7 +674,7 @@ func hookClaimSessionEligibility(info session.Info, instanceToken string) (hookC
 // one, so the binding is reached through the ops rather than through a leg. On a
 // city that relocates nothing the route is nil and the ops value is the one this
 // function has always passed.
-func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer, rankOpts ...hookStoreRankOptions) int {
 	// The city relocates a class and its front door could not be projected.
 	// Claiming through the work store anyway would write ownership into a
 	// ledger that does not hold the bead, which is the wrong-answer lane this
@@ -645,7 +690,7 @@ func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, store
 	// hookWorkQueryRunner, not the bare shell runner: the work_query's stderr
 	// carries the origin gate's refusal (vc-ozanp5), and a refusal nobody can
 	// read is the silent-failure mode ADR-0043 names.
-	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, hookWorkQueryRunner(stderr), emitFailure, stdout, stderr)
+	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, hookWorkQueryRunner(stderr), emitFailure, stdout, stderr, rankOpts...)
 }
 
 // claimHookWorkWithRunner is claimHookWork with the work-query runner and claim
@@ -671,9 +716,25 @@ func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, store
 // the whole fan-out so it can prove "no WORK store holds this bead" before it
 // writes ownership into the binding (claim_class_route.go). Nil on a city that
 // relocates nothing.
-func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, ops hookClaimOps, run hookStoreRunner, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, ops hookClaimOps, run hookStoreRunner, emitFailure func(command string, err error), stdout, stderr io.Writer, rankOpts ...hookStoreRankOptions) int {
 	ops.applyDefaults()
 	ops.ClassRoute.observeWorkLegs(stores)
+	// ADR-0076 D3: the claim path shares this telemetry with the read-only
+	// path (cmdHookWithOptions's runner closure) instead of leaving --claim a
+	// visibility blind spot — "what did the front door show" matters exactly
+	// as much for the invocation that actually dispatches work as for the one
+	// that only displays it. opts (not the rankOpts parameter) carries the
+	// Stats pointer into every selection below, including any reselection
+	// after a lost claim race, so the emitted numbers cover everything THIS
+	// claim attempt saw. Deferred so it fires on every exit path — error,
+	// no-work, and a successful claim alike.
+	opts := rankOpts
+	if len(opts) == 1 {
+		withStats := opts[0]
+		withStats.Stats = &hookSelectionStats{}
+		opts = []hookStoreRankOptions{withStats}
+		defer func() { emitHookSelectionStats(stderr, *opts[0].Stats) }()
+	}
 	// primary is the agent's own store (the first entry). It is captured once
 	// here, before the loop shrinks remaining: only the primary may surface a
 	// work-query error as a fatal claim failure. Once the primary loses its
@@ -689,7 +750,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	// report claims_errored instead of laundering a write failure into no_work.
 	claimsErrored := false
 	for len(remaining) > 0 {
-		discovered, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, run)
+		discovered, selected, err := selectStoreWithWorkRetrying(workQuery, remaining, primary, run, opts...)
 		if err != nil {
 			emitFailure(workQuery, err)
 			return reportClaimWorkQueryFailure(err, stderr)
@@ -701,7 +762,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		// mutation, and a primary-leg failure there is surfaced exactly like a
 		// discovery failure: it is the same read of the same store, moments
 		// later, so it gets the same classification.
-		claimOutput, claimStore, err := claimStoreWithFallback(workQuery, remaining, selected, primary, discovered, run)
+		claimOutput, claimStore, err := claimStoreWithFallback(workQuery, remaining, selected, primary, discovered, run, opts...)
 		if err != nil {
 			emitFailure(workQuery, err)
 			return reportClaimWorkQueryFailure(err, stderr)
@@ -800,12 +861,13 @@ var (
 
 // selectStoreWithWorkRetrying is bestStoreWithWork with a bounded retry around
 // the ERROR case only. It returns the first successful selection, or the last
-// error once the budget is spent.
-func selectStoreWithWorkRetrying(workQuery string, stores []hookStore, primary hookStore, run hookStoreRunner) (string, hookStore, error) {
-	out, selected, err := bestStoreWithWork(workQuery, stores, primary, run)
+// error once the budget is spent. The variadic options (ADR-0076 D1 rank
+// probe) forward to every bestStoreWithWork attempt unchanged.
+func selectStoreWithWorkRetrying(workQuery string, stores []hookStore, primary hookStore, run hookStoreRunner, opts ...hookStoreRankOptions) (string, hookStore, error) {
+	out, selected, err := bestStoreWithWork(workQuery, stores, primary, run, opts...)
 	for attempt := 0; err != nil && attempt < hookClaimQueryRetryAttempts; attempt++ {
 		time.Sleep(hookClaimQueryRetryInterval)
-		out, selected, err = bestStoreWithWork(workQuery, stores, primary, run)
+		out, selected, err = bestStoreWithWork(workQuery, stores, primary, run, opts...)
 	}
 	return out, selected, err
 }

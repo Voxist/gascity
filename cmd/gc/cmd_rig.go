@@ -563,15 +563,6 @@ var rigListAPIClient = func(cityPath string) (*api.Client, string) {
 	return nil, apiClientFallbackReason(cityPath)
 }
 
-// rigListHQRunning reports whether the city's controller is running, for the
-// HQ row of the API-render rig list. Indirected through a var so tests pin both
-// outcomes without a live controller. controllerStatusForCity (not bare
-// controllerAlive) is supervisor-aware: on the supervisor sub-lane
-// controllerAlive==0 by construction while the city IS running.
-var rigListHQRunning = func(cityPath string) bool {
-	return controllerStatusForCity(cityPath).Running
-}
-
 // routeRigList dispatches the `rig list` read to the supervisor API when
 // available, falling back to doRigList when the controller is down, the
 // escape hatch is set, or the API returns a fallbackable error. Emits
@@ -615,16 +606,17 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 		rigsByName[cfg.Rigs[i].Name] = cfg.Rigs[i]
 	}
 
-	// HQ running is derived from controllerStatusForCity (supervisor-aware),
-	// not a hardcoded true — it flips to false only if the controller actually
-	// died between the ListRigs fetch and this render. Computed for --json only:
-	// renderRigListText ignores Running and the probe costs a socket/supervisor
-	// dial (mirrors doRigList's guard). No wire field — rig list is not
-	// remote-wired, and "the server handling the request IS the controller".
+	// HQ running is derived from the API read that already succeeded. This
+	// render is reached only after c.ListRigs() returned a body, and the
+	// server that answered IS the controller, so "controller running" is
+	// established by the response in hand. The previous
+	// controllerStatusForCity(cityPath) probe re-asked the supervisor over
+	// HTTP (ListCities) and could fall through to a controller-identity
+	// socket dial for a fact the successful read already proved, buying a
+	// fixed round-trip on every --json listing and none on the human one
+	// (vp-zdp6e). renderRigListText ignores Running, so the human lane never
+	// needed the probe either — both lanes now cost the same.
 	hqRunning := true
-	if jsonOutput {
-		hqRunning = rigListHQRunning(cityPath)
-	}
 	cacheAgeS := cr.AgeSeconds
 	result := RigListJSON{
 		SchemaVersion: "1",
@@ -820,12 +812,27 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 		Running: hqRunning,
 		Beads:   rigBeadsStatus(fs, cityPath),
 	})
+	// A suspended rig reports running=false without asking the provider.
+	// Suspension state is the authority both rig-list lanes consult first,
+	// so probing sessions for a suspended rig buys a guaranteed-false answer
+	// with a subprocess. Skipping it also means an all-suspended fleet never
+	// constructs the session provider at all — its bead-store session
+	// snapshot alone cost ~1s on the fleet host (vp-zdp6e).
+	needsRunningProbe := false
+	if jsonOutput {
+		for i := range cfg.Rigs {
+			if !suspNames[cfg.Rigs[i].Name] {
+				needsRunningProbe = true
+				break
+			}
+		}
+	}
 	// Build the session provider once and share it across rigs:
 	// constructing it per rig reopened the session store and re-forked
 	// tmux probes, making --json scale O(rigs) in subprocesses (~7x
 	// slower than the text path, which skips running-status detection).
 	var sp runtime.Provider
-	if jsonOutput && len(cfg.Rigs) > 0 {
+	if needsRunningProbe {
 		sp, err = rigListSessionProvider()
 		if err != nil {
 			return writeJSONError(stdout, stderr, "session_provider_failed", fmt.Sprintf("gc rig list: %v", err), 1)
@@ -833,7 +840,7 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 	}
 	for i := range cfg.Rigs {
 		running := false
-		if jsonOutput {
+		if jsonOutput && !suspNames[cfg.Rigs[i].Name] {
 			running = rigHasRunningAgent(cfg, cfg.Rigs[i].Name, sp)
 		}
 		result.Rigs = append(result.Rigs, RigListItem{

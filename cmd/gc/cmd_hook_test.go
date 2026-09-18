@@ -722,7 +722,7 @@ func TestDoHookClaimEmitsRejectedOnLostClaim(t *testing.T) {
 		EmitClaimRejected: func(beadID, existing, attempted string) {
 			rejected = append(rejected, rejection{beadID, existing, attempted})
 		},
-		ResolveWorkBranch: func(string) string { return "" }, // suppress stamp noise
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" }, // suppress stamp noise
 	}
 	opts := hookClaimOptions{
 		Assignee:           "worker-1",
@@ -761,9 +761,14 @@ func TestDoHookClaimStampsWorkBranch(t *testing.T) {
 	ops := hookClaimOps{
 		Runner: runner,
 		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
-			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
+			// gc.work_dir is what gc.work_branch is resolved from; the "/tmp/work"
+			// store dir this test passes to doHookClaim is deliberately not it (gc-j4sr).
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{
+				"gc.routed_to": "worker",
+				"gc.work_dir":  "/worktrees/hw-stamp",
+			}}, true, nil
 		},
-		ResolveWorkBranch: func(string) string { return "bd-hw-stamp" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "bd-hw-stamp" },
 		StampWorkMeta: func(_ context.Context, _ string, _ []string, beadID, assignee string, patch map[string]string) error {
 			stampedBead, stampedAssignee, stampedBranch = beadID, assignee, patch["gc.work_branch"]
 			return nil
@@ -801,7 +806,7 @@ func TestDoHookClaimSkipsStampWhenBranchUnchanged(t *testing.T) {
 		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker", "gc.work_branch": "bd-hw-idem", "gc.claimed_at": "2026-01-01T00:00:00Z"}}, true, nil
 		},
-		ResolveWorkBranch: func(string) string { return "bd-hw-idem" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "bd-hw-idem" },
 		StampWorkMeta: func(_ context.Context, _ string, _ []string, _, _ string, _ map[string]string) error {
 			stampCalls++
 			return nil
@@ -1079,8 +1084,8 @@ func TestClaimHookWorkRetriesLaterStoreWhenSelectedStoreLosesClaimRace(t *testin
 			claimDir = dir
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
 		},
-		EmitClaimRejected: func(string, string, string) {},   // suppress event side effect
-		ResolveWorkBranch: func(string) string { return "" }, // suppress stamp noise
+		EmitClaimRejected: func(string, string, string) {},              // suppress event side effect
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" }, // suppress stamp noise
 	}
 	opts := hookClaimOptions{
 		Assignee:           "worker-1",
@@ -1138,7 +1143,7 @@ func TestClaimHookWorkDrainsWhenPrimaryLosesRaceThenFederatedStoreErrors(t *test
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: "worker-2", Metadata: map[string]string{"gc.routed_to": "worker"}}, false, nil
 		},
 		EmitClaimRejected: func(string, string, string) {},
-		ResolveWorkBranch: func(string) string { return "" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
 		DrainAck:          func(io.Writer) error { return nil },
 	}
 	opts := hookClaimOptions{
@@ -1202,7 +1207,7 @@ func TestClaimHookWorkUsesFallbackStoreDirEnvAndOutput(t *testing.T) {
 			claimDir, claimEnv = dir, env
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
 		},
-		ResolveWorkBranch: func(string) string { return "" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
 	}
 	opts := hookClaimOptions{
 		Assignee:           "worker-1",
@@ -1228,6 +1233,93 @@ func TestClaimHookWorkUsesFallbackStoreDirEnvAndOutput(t *testing.T) {
 	}
 	if len(claimEnv) != 1 || claimEnv[0] != "GC_STORE=riga" {
 		t.Fatalf("claim ran with env %v, want [GC_STORE=riga] (fallback store env)", claimEnv)
+	}
+}
+
+// TestClaimHookWorkEmitsSelectionStats is ADR-0076 D3's claim-path wiring
+// (vp-d1kjk): before this fix, emitHookSelectionStats was only reachable from
+// cmdHookWithOptions's read-only runner closure — a claim invocation, which is
+// the one that actually dispatches work, was a silent visibility blind spot
+// relative to a plain `gc hook` call. bestStoreWithWork always populates
+// hookSelectionStats correctly when a Stats pointer is supplied; what this
+// test pins is that claimHookWorkWithRunner now supplies one (from the SAME
+// hookStoreRankOptions D1 already threads through) and emits it exactly once
+// on the successful-claim exit path.
+func TestClaimHookWorkEmitsSelectionStats(t *testing.T) {
+	stores := []hookStore{
+		{dir: "city", env: []string{"GC_STORE=city"}},
+		{dir: "riga", env: []string{"GC_STORE=riga"}},
+	}
+	run := func(_, dir string, _ []string) (string, error) {
+		switch dir {
+		case "city":
+			// The created_at pair is load-bearing: with no parseable age the
+			// equal-(tier, priority) tie stays UNRESOLVED (tieWith reports true
+			// when either side lacks an age) and bestStoreWithWork rotates the
+			// winner on the nanosecond clock (hookTieBreakIndex over
+			// UnixNano), so "own store wins" would be a coin flip per process —
+			// which is exactly how this test failed on CI with riga selected
+			// (2026-09-09, shard 3) while passing locally. Pinning city as the
+			// strictly older candidate routes the tie through the D2 age
+			// tiebreak instead, and the expected winner is clock-independent.
+			return `[{"id":"hw-city","status":"open","priority":1,"created_at":"2026-08-20T00:00:00Z","metadata":{"gc.routed_to":"worker"}}]`, nil
+		case "riga":
+			return `[{"id":"hw-riga","status":"open","priority":1,"created_at":"2026-08-21T00:00:00Z","metadata":{"gc.routed_to":"worker"}}]`, nil
+		default:
+			t.Fatalf("unexpected store dir %q", dir)
+			return "", nil
+		}
+	}
+	ops := hookClaimOps{
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{"gc.routed_to": "worker"}}, true, nil
+		},
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
+	}
+	claimOpts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	// A bare hookStoreRankOptions{} (no RankProbeCommand) is enough to trigger
+	// the Stats attachment — D3's emission does not depend on D1's probe.
+	code := claimHookWorkWithRunner("bd ready --json", "city", stores[0].env, stores, claimOpts, ops, run, func(string, error) {}, &stdout, &stderr, hookStoreRankOptions{})
+	if code != 0 {
+		t.Fatalf("claimHookWorkWithRunner = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	const prefix = "gc hook selection: "
+	idx := strings.Index(stderr.String(), prefix)
+	if idx < 0 {
+		t.Fatalf("stderr missing %q line: %s", prefix, stderr.String())
+	}
+	line := stderr.String()[idx+len(prefix):]
+	if nl := strings.IndexByte(line, '\n'); nl >= 0 {
+		line = line[:nl]
+	}
+	var stats struct {
+		StoresWithReadyWork  int    `json:"stores_with_ready_work"`
+		TotalReadyCandidates int    `json:"total_ready_candidates"`
+		SelectedStore        string `json:"selected_store"`
+	}
+	if err := json.Unmarshal([]byte(line), &stats); err != nil {
+		t.Fatalf("selection stats line is not JSON: %v\nline=%s", err, line)
+	}
+	if stats.StoresWithReadyWork != 2 {
+		t.Fatalf("stats.StoresWithReadyWork = %d, want 2 (both stores had ready work)", stats.StoresWithReadyWork)
+	}
+	if stats.TotalReadyCandidates != 2 {
+		t.Fatalf("stats.TotalReadyCandidates = %d, want 2 (one row per store)", stats.TotalReadyCandidates)
+	}
+	if stats.SelectedStore != "city" {
+		t.Fatalf("stats.SelectedStore = %q, want %q (own store, older on the D2 age tiebreak)", stats.SelectedStore, "city")
+	}
+	// Emitted exactly once for this single-attempt claim — not once per
+	// internal bestStoreWithWork call in the loop.
+	if n := strings.Count(stderr.String(), prefix); n != 1 {
+		t.Fatalf("selection stats emitted %d times, want 1: %s", n, stderr.String())
 	}
 }
 
@@ -1943,6 +2035,103 @@ esac
 	}
 	if !strings.Contains(stdout.String(), `"graph-root"`) {
 		t.Fatalf("gc hook did not surface the routed_to graph root: stdout=%q", stdout.String())
+	}
+}
+
+func TestCmdHookPoolDemandOriginGate(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+	cityDir := t.TempDir()
+	fakeBin := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+max_active_sessions = 3
+
+[[named_session]]
+template = "worker"
+mode = "on_demand"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+case "$*" in
+  *"--metadata-field gc.routed_to=worker"*) printf '[{"id":"pool-work","title":"routed work"}]' ;;
+  *) printf '[]' ;;
+esac
+`, logPath)
+	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		origin     string
+		alias      string
+		session    string
+		wantCode   int
+		wantRouted bool
+	}{
+		// Ephemeral pool seat: the routed tier runs unconditionally (unchanged).
+		{name: "demand-created pool", origin: "ephemeral", alias: "worker-1", session: "test-city--worker-1", wantCode: 0, wantRouted: true},
+		// Manual session whose probe target (poolDemandTarget() == "worker") is NOT
+		// its own alias: the origin gate keeps it out of another queue's generic
+		// routed demand. Self-target admit does not fire ("worker" != alias).
+		{name: "manual", origin: "manual", alias: "worker-adhoc-manual", session: "worker-adhoc-manual", wantCode: 1},
+		// Named session probing its OWN claim identity (GC_ALIAS == poolDemandTarget()
+		// == "worker"): the gate admits self-routed discovery so the session can
+		// claim work routed to itself. This is the C2 fix (ga-6wkhl) and the direct
+		// analog of the live olivia specimen (origin=named, alias=olivia,
+		// routed_to=olivia); before the fix the gate exit-0'd here and the named
+		// session deadlocked on its own frontier bead.
+		{name: "named", origin: "named", alias: "worker", session: "test-city--worker", wantCode: 0, wantRouted: true},
+		// Manual session an operator deliberately aliased as the queue identity
+		// (`gc session new worker --alias worker`; a user-supplied alias forces
+		// origin=manual, sessionOriginForConfiguredNamed). Admission is keyed on
+		// claim identity, not origin: GC_ALIAS == poolDemandTarget(), so the same
+		// self-target admit fires and the routed tier runs. This row pins the
+		// widened population as intent — a future tightening scoped to
+		// origin=named would redden here instead of silently regressing.
+		{name: "manual self-target", origin: "manual", alias: "worker", session: "worker", wantCode: 0, wantRouted: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			clearInheritedCityRoutingEnv(t)
+			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("GC_BEADS", "exec:"+filepath.Join(fakeBin, "bd"))
+			t.Setenv("GC_CITY", cityDir)
+			t.Setenv("GC_TEMPLATE", "worker")
+			t.Setenv("GC_ALIAS", tc.alias)
+			t.Setenv("GC_SESSION_ID", "session-"+strings.ReplaceAll(tc.name, " ", "-"))
+			t.Setenv("GC_SESSION_NAME", tc.session)
+			t.Setenv("GC_SESSION_ORIGIN", tc.origin)
+			if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := cmdHook(nil, &stdout, &stderr)
+			if code != tc.wantCode {
+				t.Fatalf("cmdHook() = %d, want %d; stdout=%q stderr=%s", code, tc.wantCode, stdout.String(), stderr.String())
+			}
+			if got := strings.Contains(stdout.String(), `"pool-work"`); got != tc.wantRouted {
+				t.Fatalf("routed work visible = %v, want %v; stdout=%q", got, tc.wantRouted, stdout.String())
+			}
+			logData, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Contains(string(logData), "--metadata-field gc.routed_to=worker"); got != tc.wantRouted {
+				t.Fatalf("routed query executed = %v, want %v; bd log:\n%s", got, tc.wantRouted, logData)
+			}
+		})
 	}
 }
 
@@ -2991,7 +3180,7 @@ func TestClaimHookWorkDrainsClaimsErroredWhenEveryCandidateErrors(t *testing.T) 
 			return beads.Bead{}, false, fmt.Errorf("claiming %s: store write timeout", beadID)
 		},
 		EmitClaimRejected: func(string, string, string) {},
-		ResolveWorkBranch: func(string) string { return "" },
+		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
 		DrainAck:          func(io.Writer) error { return nil },
 	}
 	opts := hookClaimOptions{

@@ -333,6 +333,7 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 		`target="$1"; ` +
 		`[ -z "$target" ] && return 1; ` +
 		`r=$(` + routedReadyTierCommand(topo) + `)` + readyReaderFailurePropagation(fed) + `; ` +
+		preferExecutablePoolDemandScript() +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", topo) + readyReaderStderrSink(fed) + `)` + readyReaderFailurePropagation(fed) + `; ` +
 		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); ` +
@@ -344,6 +345,56 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 		`}; `
 }
 
+// routedReadyPriorityWindowLimit is ADR-0076 D4's small top-K read (vp-d1kjk):
+// how many best-by-priority rows are unioned into the routed tier's SERVED
+// set alongside the existing --limit=20 oldest-first lookahead. Kept small on
+// purpose — D4 reasons this as one additive, indexed read whose cost must stay
+// bounded (constraint C1); it is not a replacement for the lookahead and must
+// not grow to try to replace it (that is the rejected "raise --limit"
+// alternative, which scales the wrong quantity and still leaves a cliff).
+const routedReadyPriorityWindowLimit = 5
+
+// routedReadyTierCommand is the routed tier's work query. ADR-0076 D1 (below,
+// routedReadyRankTierCommand) fixed cross-store RANKING by probing each
+// store's best priority separately, but deliberately left this function's
+// SERVED rows as the bare --sort oldest --limit=20 lookahead — and on a store
+// whose >=48h backlog exceeds 20 rows, oldest-first is priority-blind past the
+// 48h seam, so the window fills entirely with the oldest aged rows and any
+// higher-priority row outside it is unreachable. A store could therefore
+// correctly ADVERTISE P0 (via the D1 probe) and then SERVE a window
+// containing zero P0s: claimFirstReadyHookAssignment (cmd/gc/cmd_hook_claim.go)
+// walks the served rows in order and would starve on the very P0 the probe
+// found. Escalated to P0 and amended as ADR-0076 D4 on 2026-08-28 after
+// measuring exactly that on this bead's own store: 8 ready P0s, all outside
+// the window, masked behind a P3 created 2026-07-23.
+//
+// D4's fix: the served set is the UNION of (a) a small best-by-priority read
+// (routedReadyPriorityWindowLimit rows, priority first in the output) and (b)
+// the unchanged oldest-first lookahead, deduped by id. (a) guarantees the
+// store's best available priority is always reachable; (b) is untouched, so
+// ADR-0035's anti-starvation drain of the aged tail survives exactly as
+// before (constraint C2) — it is no longer the only thing served, but nothing
+// is removed from it. The self-blocked-head reasoning that motivated
+// limit=20 in the first place — filterUnreadyHookCandidates strips a blocked
+// head and needs Ready routed work behind it to fall through to — applies
+// unchanged to the lookahead half of the union.
+//
+// Upstream #5629 (2026-09-11) fixed the same class of starvation by DELETING
+// the sort flag so the tier rides the reader's canonical
+// (priority, created_at, id) order. That is leg (a) of this union without a
+// cap — it reaches upstream's goal, but it also drops ADR-0035's 48h aging
+// drain, which upstream declines on purpose ("no aging term is added") and
+// this fork does not. The union keeps both: leg (a) is the canonical
+// priority order upstream now rides (capped at routedReadyPriorityWindowLimit
+// rows), leg (b) is ADR-0035's hybrid lookahead, unchanged.
+// Both reads share the federated reader / stderr-sink / failure-propagation
+// contract every tier in this file uses (see readyReaderCommand and
+// siblings): each is captured independently and each independently
+// propagates a federated-reader failure, so a dead leg on EITHER read still
+// aborts the tier loud rather than silently degrading to the other read's
+// rows (constraint C3). jq runs last and inherits the same stderr sink, so a
+// merge failure is exactly as quiet (single-store) or exactly as loud
+// (federated) as a bare read failure already was.
 func routedReadyTierCommand(topo QueryTopology) string {
 	// Pool dispatch ordering policy (ADR-0035, vc-zv4y). The worker first-row
 	// path asks bd for candidates under `--sort hybrid`, so routed pool work
@@ -364,7 +415,87 @@ func routedReadyTierCommand(topo QueryTopology) string {
 	// behind it to fall through to instead of idle-exiting; the hook layer
 	// (filterUnreadyHookCandidates) strips the blocked head from the result.
 	// --limit=20 is an anti-self-block lookahead, NOT a priority window.
-	return bdReadyPoolDemandShell("--sort hybrid --limit=20", topo) + readyReaderStderrSink(topo.FederatedReady)
+	//
+	// ADR-0076 D4 (vp-d1kjk) closes the residual gap: hybrid still degenerates
+	// to strictly oldest-first past its 48h seam, so a store whose single best
+	// ready row is AGED can fill all 20 slots with older P2/P3 rows and never
+	// serve its true priority. The served set is therefore a UNION — every row
+	// of a best-by-priority read first (so the store's true priority is always
+	// reachable and, via claimFirstReadyHookAssignment's in-order walk, is
+	// tried first), then any row of the hybrid lookahead not already present,
+	// deduped by id. For fresh rows the union is order-identical to hybrid
+	// alone (the priority side wins every duplicate in the dedup); for aged
+	// rows hybrid IS oldest-first past the seam — so the lookahead side keeps
+	// exactly the drain order the pre-D4 tier had.
+	fed := topo.FederatedReady
+	fail := readyReaderFailurePropagation(fed)
+	sink := readyReaderStderrSink(fed)
+	priority := bdReadyPoolDemandShell(fmt.Sprintf("--sort priority --limit=%d", routedReadyPriorityWindowLimit), topo) + sink
+	window := bdReadyPoolDemandShell("--sort hybrid --limit=20", topo) + sink
+	return `p=$(` + priority + `)` + fail + `; h=$(` + window + `)` + fail +
+		`; jq -nc --argjson p "${p:-[]}" --argjson h "${h:-[]}" ` +
+		shellquote.Quote(routedReadyPriorityRepresentativeMergeJQ()) + sink
+}
+
+// routedReadyPriorityRepresentativeMergeJQ is ADR-0076 D4's union filter: every
+// row from the best-by-priority read first (so the store's true priority is
+// always reachable and, via claimFirstReadyHookAssignment's in-order walk, is
+// tried first), then any row from the hybrid lookahead not already
+// present, deduped by id. A row with no id (defensively; every bd row carries
+// one) is never treated as a duplicate of another id-less row — the same rule
+// hookTiedIDSeen applies on the Go side, kept consistent here so the two
+// layers cannot disagree about what counts as "the same bead". -nc keeps the
+// merged output compact on one line, matching bd's own --json shape: the
+// tier's callers compare it against the literal string "[]" to decide
+// fallthrough, and that comparison must not see a pretty-printed empty array
+// as non-empty.
+func routedReadyPriorityRepresentativeMergeJQ() string {
+	return `($p + $h) | reduce .[] as $x ([]; if (($x.id // "") != "") and any(.[]; (.id // "") == ($x.id // "")) then . else . + [$x] end)`
+}
+
+// routedReadyRankTierCommand is the D1 priority probe of ADR-0076 (vp-d1kjk):
+// the SAME routed predicate as routedReadyTierCommand, but asking the reader
+// for the single best-by-priority row instead of the tier's full served set.
+//
+// The hook's cross-store selection ranks each federated store on the best
+// candidate inside its returned window. Before D4 that window was ordered
+// oldest-first alone (the work tier's --sort oldest; ADR-0035's hybrid
+// behaves the same past its 48h seam) — so a store with a deep aged backlog
+// filled all 20 slots with P2/P3 while its ready P1s sat outside the window,
+// and the busiest store advertised the WORST rank. Ranking on this probe
+// makes the advertised rank a property of the store's best available work
+// independent of what the window happened to contain.
+//
+// D4 has since made routedReadyTierCommand's OWN served set
+// priority-representative too (it unions in the same best-by-priority read
+// this probe performs), so this probe's rank and a rank read directly off the
+// D4 window now agree in the common case — this function is not strictly
+// load-bearing for ranking accuracy any more. It stays: it is the cheaper of
+// the two reads (limit=1 vs D4's limit=5+20), it is the belt-and-braces
+// ranking signal if the D4 window's own priority read ever fails and
+// silently degrades to the lookahead alone (non-federated mode swallows that
+// per-read failure by design), and removing it would be a second, unrelated
+// change with no correctness upside. The probe is one indexed --limit=1 read
+// per store (constraint C1).
+//
+// It deliberately carries none of the migration/ephemeral fallbacks of the
+// work tier: its only consumer treats a probe miss as "keep the window's
+// rank", never as an absence of work.
+func routedReadyRankTierCommand(topo QueryTopology) string {
+	return bdReadyPoolDemandShell("--sort priority --limit=1", topo) + readyReaderStderrSink(topo.FederatedReady)
+}
+
+// preferExecutablePoolDemandScript keeps graph-v2 workflow roots available as
+// launch fallbacks, but moves them behind executable routed work in the same
+// ready result. The claim hook consumes candidates in order; without this
+// preference an older root can be returned forever while its ready child waits
+// behind it. A malformed reader payload is preserved for the hook's existing
+// fail-open handling rather than being converted into false-empty demand.
+func preferExecutablePoolDemandScript() string {
+	predicate := graphWorkflowAnchorJQPredicate()
+	preferJQ := `[.[] | select((` + predicate + `) | not)] + [.[] | select(` + predicate + `)]`
+	return `gc_preferred_pool_demand=$(printf "%s" "$r" | jq -c ` + shellquote.Quote(preferJQ) + ` 2>/dev/null); ` +
+		`[ -n "$gc_preferred_pool_demand" ] && r="$gc_preferred_pool_demand"; `
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
@@ -399,8 +530,35 @@ func (a *Agent) poolDemandTarget() string {
 }
 
 func standardAssignedWorkQueryScript(topo QueryTopology) string {
-	return standardAssignedInProgressWorkQueryScript(topo) +
+	return standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo) +
 		standardAssignedReadyWorkQueryScript(topo)
+}
+
+// standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor is the
+// combined work query's crash-recovery tier. An assigned graph.v2 workflow
+// root is the session's launch/continuation anchor, so remember it while the
+// ready tiers look for executable work. If no ready work exists, buildWorkQuery
+// emits the remembered root as the compatibility fallback.
+//
+// The assigned-in-progress-only query deliberately keeps the original
+// standardAssignedInProgressWorkQueryScript behavior: callers asking for that
+// tier alone still receive the anchor.
+func standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTopology) string {
+	return `gc_assigned_workflow_anchor_json=""; ` +
+		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`[ -z "$id" ] && continue; ` +
+		assignedInProgressTierCommand("id", topo) +
+		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(topo.FederatedReady, true) +
+		`fi; ` +
+		`if [ -n "$gc_assigned_workflow_anchor_json" ]; then ` +
+		assignedInProgressCandidatesTierCommand("id", topo) +
+		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+		serveOrdinaryInProgressCandidateScript(topo.FederatedReady, true) +
+		`fi; ` +
+		`fi; ` +
+		ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor("id", topo) +
+		`done; `
 }
 
 // assignedInProgressTierCommand is the crash-recovery read for one identity.
@@ -428,12 +586,24 @@ func standardAssignedWorkQueryScript(topo QueryTopology) string {
 //     the claim-time metadata stamp already routes through the binding.
 //     on_death/on_boot stay single-store; those remain ga-601v2's slice.
 func assignedInProgressTierCommand(shellVar string, topo QueryTopology) string {
+	return assignedInProgressTierCommandWithLimit(shellVar, topo, 1)
+}
+
+// assignedInProgressCandidatesTierCommand is the bounded second read used only
+// after the stock one-row recovery tier has identified a graph workflow root.
+// This preserves that tier's byte and fail-open contracts while preventing the
+// root from hiding another in-progress step owned by the same session.
+func assignedInProgressCandidatesTierCommand(shellVar string, topo QueryTopology) string {
+	return assignedInProgressTierCommandWithLimit(shellVar, topo, 20)
+}
+
+func assignedInProgressTierCommandWithLimit(shellVar string, topo QueryTopology, limit int) string {
 	fed := topo.FederatedReady
 	reader := bdListInProgressCommand
 	if fed {
 		reader = gcReadyCommand + ` --status in_progress`
 	}
-	return `r=$(` + reader + ` --assignee="$` + shellVar + `" --json --limit=1` +
+	return `r=$(` + reader + ` --assignee="$` + shellVar + `" --json --limit=` + strconv.Itoa(limit) +
 		readyReaderStderrSink(fed) + `)` + readyReaderFailurePropagation(fed) + `; `
 }
 
@@ -512,6 +682,41 @@ func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 // deployment runs, for zero behavior change. Same zero-risk scoping the ready
 // tiers used for their own swap.
 func inProgressBlockedByEnrichmentScript(federated bool, checkHold bool) string {
+	return inProgressBlockedByEnrichmentScriptWithServeAction(
+		federated,
+		checkHold,
+		`printf "%s" "$r" && exit 0; `,
+	)
+}
+
+func inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(federated bool, checkHold bool) string {
+	graphAnchorJQ := `.[0] | select(` + graphWorkflowAnchorJQPredicate() + `) | .id // empty`
+	serveAction := `graph_anchor_id=$(printf "%s" "$r" | jq -r ` +
+		shellquote.Quote(graphAnchorJQ) + ` 2>/dev/null); ` +
+		`if [ -n "$graph_anchor_id" ]; then ` +
+		`[ -n "$gc_assigned_workflow_anchor_json" ] || gc_assigned_workflow_anchor_json="$r"; ` +
+		`else printf "%s" "$r" && exit 0; fi; `
+	return inProgressBlockedByEnrichmentScriptWithServeAction(federated, checkHold, serveAction)
+}
+
+func graphWorkflowAnchorJQPredicate() string {
+	return `(` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `") and (` +
+		jqMeta(beadmeta.FormulaContractMetadataKey) + ` == "graph.v2")`
+}
+
+// serveOrdinaryInProgressCandidateScript selects the first non-anchor row from
+// the bounded second read, then applies the unchanged crash-recovery gates.
+func serveOrdinaryInProgressCandidateScript(federated bool, checkHold bool) string {
+	predicate := graphWorkflowAnchorJQPredicate()
+	nonAnchorJQ := `[.[] | select((` + predicate + `) | not)] | .[:1]`
+	return `gc_assigned_in_progress_candidates_json="$r"; ` +
+		`r=$(printf "%s" "$gc_assigned_in_progress_candidates_json" | jq -c ` + shellquote.Quote(nonAnchorJQ) + ` 2>/dev/null); ` +
+		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+		inProgressBlockedByEnrichmentScript(federated, checkHold) +
+		`fi; `
+}
+
+func inProgressBlockedByEnrichmentScriptWithServeAction(federated bool, checkHold bool, serveAction string) string {
 	// The tier stores its candidate row in $r and its enriched copy in
 	// $r_enriched; both callers use those names.
 	const shellVar = "r"
@@ -561,7 +766,7 @@ func inProgressBlockedByEnrichmentScript(federated bool, checkHold bool) string 
 		enrichedVar + `=$(printf "%s" "` + v + `" | jq -c --argjson bb "$bb" ` +
 		shellquote.Quote(enrichJQ) + ` 2>/dev/null); ` +
 		`[ -n "` + e + `" ] && [ "` + e + `" != "[]" ] && ` + shellVar + `="` + e + `"; ` +
-		`printf "%s" "` + v + `" && exit 0; ` +
+		serveAction +
 		`fi; `
 }
 
@@ -585,8 +790,30 @@ func standardAssignedReadyWorkQueryScript(topo QueryTopology) string {
 }
 
 func legacyControlAssignedWorkQueryScript(topo QueryTopology) string {
-	return legacyControlAssignedInProgressWorkQueryScript(topo) +
+	return legacyControlAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo) +
 		legacyControlAssignedReadyWorkQueryScript(topo)
+}
+
+func legacyControlAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTopology) string {
+	return `gc_assigned_workflow_anchor_json=""; ` +
+		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
+		`for cand in "$id" "$legacy"; do ` +
+		`[ -z "$cand" ] && continue; ` +
+		assignedInProgressTierCommand("cand", topo) +
+		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(topo.FederatedReady, true) +
+		`fi; ` +
+		`if [ -n "$gc_assigned_workflow_anchor_json" ]; then ` +
+		assignedInProgressCandidatesTierCommand("cand", topo) +
+		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+		serveOrdinaryInProgressCandidateScript(topo.FederatedReady, true) +
+		`fi; ` +
+		`fi; ` +
+		ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor("cand", topo) +
+		`done; ` +
+		`done; `
 }
 
 func legacyControlAssignedInProgressWorkQueryScript(topo QueryTopology) string {
@@ -652,6 +879,23 @@ func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology)
 		`fi; `
 }
 
+func ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor(shellVar string, topo QueryTopology) string {
+	_ = topo
+	baseFilter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + `]`
+	query := bdQueryEphemeralStatusQuietShell("in_progress")
+	return `gc_open_ephemeral_in_progress=$(` + query + `); ` +
+		`r=$(printf "%s" "$gc_open_ephemeral_in_progress" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(baseFilter+` | .[:1]`) + ` 2>/dev/null); ` +
+		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(false, false) +
+		`fi; ` +
+		`if [ -n "$gc_assigned_workflow_anchor_json" ]; then ` +
+		`r=$(printf "%s" "$gc_open_ephemeral_in_progress" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(baseFilter+` | .[:20]`) + ` 2>/dev/null); ` +
+		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+		serveOrdinaryInProgressCandidateScript(false, false) +
+		`fi; ` +
+		`fi; `
+}
+
 // ephemeralAssignedReadyProbeScript is the bd-1.0.4 wisp tier. It stays on
 // `bd query` because there is no federated form of it and it needs none: a
 // relocated class store has no bead-policy layer, so an orchestration wisp lands
@@ -693,6 +937,32 @@ func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) stri
 // and its consumers cannot drift apart.
 const PoolDemandOriginGateRefusalPrefix = "gc: work_query pool tier not probed:"
 
+// namedSelfTargetAdmit is the origin-gate condition that lets a non-ephemeral
+// session continue to the routed (pool-demand) tier instead of short-circuiting.
+// It is true only when the session carries a claim alias (GC_ALIAS) and the probe
+// target ($1) is exactly that alias.
+//
+// The identities line up by construction: poolDemandTarget() (baked in as $1),
+// RoutedToIdentity() (the claim-match primary route target the hook checks), and
+// GC_ALIAS all resolve to the same raw QualifiedName() for a plain named session
+// (cfg.NamedSessions[i].QualifiedName() flows into GC_ALIAS alongside
+// GC_SESSION_ORIGIN=named). So admitting on this condition surfaces exactly the
+// work the session itself can claim — routed_to=<self>, assignee="" — and nothing
+// routed elsewhere. A named+pool hybrid probes its PoolName, which is != GC_ALIAS,
+// so it stays gated and cannot over-claim its pool's routed work; an empty alias
+// fails closed.
+//
+// Beyond the ephemeral|"" fall-through arm the condition deliberately ignores the
+// origin value: admission is keyed on claim identity, not on origin. Any
+// non-ephemeral session whose GC_ALIAS equals its probe target is admitted,
+// including a manual session an operator deliberately aliased as the queue
+// identity (`gc session new <agent> --alias <that identity>` forces
+// origin=manual). That is the same identity coincidence proved above, so the
+// admitted work stays exactly the work the claim path already accepts. It is NOT
+// a general widening to manual sessions: an unaliased one carries GC_ALIAS="" and
+// fails closed on the first test.
+const namedSelfTargetAdmit = `[ -n "$GC_ALIAS" ] && [ "$1" = "$GC_ALIAS" ]`
+
 // poolDemandOriginGateScript refuses the pool tier for a non-ephemeral session
 // AUDIBLY (vc-ozanp5): it prints the refusal on stderr, the empty result on
 // stdout, and exits 0 — the same stdout/exit contract as an empty tier, so the
@@ -700,11 +970,56 @@ const PoolDemandOriginGateRefusalPrefix = "gc: work_query pool tier not probed:"
 // work" from "routed work was not even considered". Exiting silently was this
 // fleet's dominant failure mode (ADR-0043). One case arm, no shell state: every
 // probe that follows runs only because the gate did not exit.
+//
+// namedSelfTargetAdmit (upstream #6180) runs FIRST: a session admitted there
+// is not refused at all, so the refusal line still means exactly "the routed
+// tier was skipped". It is valid only at `sh -c` script top level, where $1 is
+// the probe target baked in after `--`.
 func poolDemandOriginGateScript() string {
 	return `case "$GC_SESSION_ORIGIN" in ` +
 		`ephemeral|"") ;; ` +
-		`*) printf "` + PoolDemandOriginGateRefusalPrefix + ` origin=%s is not ephemeral; routed pool work (if any) was NOT considered\n" "$GC_SESSION_ORIGIN" >&2; printf "[]"; exit 0 ;; ` +
+		`*) ` + namedSelfTargetAdmit + ` || { ` +
+		`printf "` + PoolDemandOriginGateRefusalPrefix + ` origin=%s is not ephemeral; routed pool work (if any) was NOT considered\n" "$GC_SESSION_ORIGIN" >&2; ` +
+		`printf "[]"; exit 0; } ;; ` +
 		`esac; `
+}
+
+// poolDemandOriginGateScriptWithGraphAnchorFallback emits the origin gate used by
+// the combined work query, which flushes a remembered assigned workflow anchor
+// before short-circuiting. Like the plain gate it is valid only at `sh -c` script
+// top level, where $1 is the probe target baked in after `--`.
+func poolDemandOriginGateScriptWithGraphAnchorFallback() string {
+	return `case "$GC_SESSION_ORIGIN" in ` +
+		`ephemeral|"") ;; ` +
+		`*) ` + namedSelfTargetAdmit + ` || { ` +
+		`if [ -n "$gc_assigned_workflow_anchor_json" ]; then printf "%s" "$gc_assigned_workflow_anchor_json"; exit 0; fi; ` +
+		`printf "` + PoolDemandOriginGateRefusalPrefix + ` origin=%s is not ephemeral; routed pool work (if any) was NOT considered\n" "$GC_SESSION_ORIGIN" >&2; ` +
+		`printf "[]"; exit 0; } ;; ` +
+		`esac; `
+}
+
+func assignedGraphWorkflowAnchorReadyFunctionScript(topo QueryTopology) string {
+	fed := topo.FederatedReady
+	readyCommand := readyReaderCommand(fed) + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) +
+		` --metadata-field "` + beadmeta.RootBeadIDMetadataKey + `=$graph_anchor_id"` +
+		` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$target"` +
+		PoolDemandServeRulesForQuery().ShellArgs() + ` --json --sort oldest --limit=20` +
+		readyReaderStderrSink(fed)
+	return `probe_assigned_graph_anchor_ready() { ` +
+		`target="$1"; ` +
+		`[ -z "$target" ] && return 1; ` +
+		`[ -z "$gc_assigned_workflow_anchor_json" ] && return 1; ` +
+		`graph_anchor_id=$(printf "%s" "$gc_assigned_workflow_anchor_json" | jq -r ".[0].id // empty" 2>/dev/null); ` +
+		`[ -z "$graph_anchor_id" ] && return 1; ` +
+		`r=$(` + readyCommand + `)` + readyReaderFailurePropagation(fed) + `; ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`return 1; ` +
+		`}; `
+}
+
+func graphWorkflowAnchorFallbackBeforeFreshPoolScript() string {
+	return `if [ -n "$gc_assigned_workflow_anchor_json" ]; then ` +
+		`printf "%s" "$gc_assigned_workflow_anchor_json"; exit 0; fi; `
 }
 
 func routedPoolWorkQueryProbeScript(topo QueryTopology, targetCount int) string {
@@ -715,10 +1030,74 @@ func routedPoolWorkQueryProbeScript(topo QueryTopology, targetCount int) string 
 	return script + `printf "[]"`
 }
 
+// routedPoolWorkQueryProbeScriptWithGraphAnchor is the combined work query's
+// routed section: routedPoolWorkQueryProbeScript plus the graph.v2 anchor
+// handling upstream added in #5474. A graph-v2 workflow anchor the session is
+// already assigned is remembered rather than served, its ready children are
+// probed first, and the anchor is flushed only if nothing executable turned
+// up — so a worker never sits on a root while its child waits behind it.
+// The gate is the anchor-flushing variant, which still emits the vc-ozanp5
+// refusal when there is no anchor to flush.
+func routedPoolWorkQueryProbeScriptWithGraphAnchor(topo QueryTopology, targetCount int) string {
+	script := poolDemandOriginGateScriptWithGraphAnchorFallback() +
+		// Define the ordinary pool reader before the narrower anchor reader.
+		// Besides keeping the generated tiers easy to identify mechanically,
+		// function definition order does not change their invocation order:
+		// the anchor probe below still runs first.
+		poolDemandFirstRowFunctionScript(topo) +
+		assignedGraphWorkflowAnchorReadyFunctionScript(topo)
+	for i := 1; i <= targetCount; i++ {
+		script += fmt.Sprintf(`probe_assigned_graph_anchor_ready "$%d"; `, i)
+	}
+	script += graphWorkflowAnchorFallbackBeforeFreshPoolScript()
+	for i := 1; i <= targetCount; i++ {
+		script += fmt.Sprintf(`probe_pool_demand "$%d"; `, i)
+	}
+	return script + `printf "[]"`
+}
+
 func routedPoolWorkQueryCommand(topo QueryTopology, targets ...string) string {
 	args := []string{"sh", "-c", routedPoolWorkQueryProbeScript(topo, len(targets)), "--"}
 	args = append(args, targets...)
 	return shellquote.Join(args)
+}
+
+// routedPoolRankProbeCommand is the ADR-0076 D1 per-store ranking probe: for
+// each target in turn it prints the target's single best-by-priority routed
+// row and exits, mirroring routedPoolWorkQueryProbeScript's shape (same origin
+// gate, same failure propagation) so the probe sees exactly the population the
+// work tier's routed leg would serve — no more, no less. Used only for RANKING
+// a store; never for selecting or claiming a bead.
+func routedPoolRankProbeCommand(topo QueryTopology, targets ...string) string {
+	fed := topo.FederatedReady
+	script := poolDemandOriginGateScript() +
+		`probe_pool_rank() { ` +
+		`target="$1"; ` +
+		`[ -z "$target" ] && return 1; ` +
+		`r=$(` + routedReadyRankTierCommand(topo) + `)` + readyReaderFailurePropagation(fed) + `; ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`return 1; ` +
+		`}; `
+	for i := 1; i <= len(targets); i++ {
+		script += fmt.Sprintf(`probe_pool_rank "$%d"; `, i)
+	}
+	args := []string{"sh", "-c", script + `printf "[]"`, "--"}
+	args = append(args, targets...)
+	return shellquote.Join(args)
+}
+
+// EffectiveRoutedRankProbeQueryFor returns the ADR-0076 D1 rank probe for this
+// agent's routed tier, built for a city topology. Unlike the Effective*Query
+// accessors it NEVER honors a custom WorkQuery: a custom query is the
+// caller-owned discovery contract and has no probe equivalent, so the caller
+// (cmd/gc's hook) gates on WorkQuery itself and passes no probe at all rather
+// than ranking a custom query against the default predicate.
+func (a *Agent) EffectiveRoutedRankProbeQueryFor(topo QueryTopology) string {
+	target := a.poolDemandTarget()
+	if legacyTarget := legacyWorkflowControlQualifiedName(target); legacyTarget != "" {
+		return routedPoolRankProbeCommand(topo, target, legacyTarget)
+	}
+	return routedPoolRankProbeCommand(topo, target)
 }
 
 // queryKind names one of the built-in agent query shapes.
@@ -825,11 +1204,11 @@ func buildWorkQuery(a *Agent, topo QueryTopology) string {
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
 		script := standardAssignedWorkQueryScript(topo) +
-			routedPoolWorkQueryProbeScript(topo, 1)
+			routedPoolWorkQueryProbeScriptWithGraphAnchor(topo, 1)
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
 	script := legacyControlAssignedWorkQueryScript(topo) +
-		routedPoolWorkQueryProbeScript(topo, 2)
+		routedPoolWorkQueryProbeScriptWithGraphAnchor(topo, 2)
 	return shellquote.Join([]string{"sh", "-c", script, "--", target, legacyTarget})
 }
 
