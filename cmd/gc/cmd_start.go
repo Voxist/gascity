@@ -1081,8 +1081,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		nil, cityName,
 		nil, clock.Real{}, recorder, cfg.Session.StartupTimeoutDuration(), 0,
 		stdout, stderr,
-		withReadyAssignedFlags(readyAssignedFlagsForBeads(dsResult.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
-		withAssignedWorkStores(awakeAssignedStores),
+		oneShotReconcileStartOptions(dsResult, awakeAssignedWorkBeads, awakeAssignedStoreRefs, awakeAssignedStores)...,
 	)
 
 	// Post-reconcile sync: update bead state to reflect post-start reality.
@@ -1725,4 +1724,17 @@ func buildFingerprintExtra(a *config.Agent) map[string]string {
 		return nil
 	}
 	return m
+}
+
+// oneShotReconcileStartOptions is the option set for the one-shot reconcile
+// that `gc start` runs without a controller. It carries the same desired-state
+// facts the controller tick passes, so a configured agent whose provider cannot
+// be resolved keeps its sessions here too instead of reading as orphaned
+// (ga-8a8fq).
+func oneShotReconcileStartOptions(dsResult DesiredStateResult, awakeAssignedWorkBeads []beads.Bead, awakeAssignedStoreRefs []string, awakeAssignedStores []beads.Store) []startExecutionOption {
+	return []startExecutionOption{
+		withReadyAssignedFlags(readyAssignedFlagsForBeads(dsResult.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
+		withAssignedWorkStores(awakeAssignedStores),
+		withUnresolvedTemplates(dsResult.UnresolvedTemplates),
+	}
 }

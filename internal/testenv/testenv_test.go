@@ -626,3 +626,28 @@ func exitStderr(err error) string {
 	}
 	return ""
 }
+
+// TestDoltRuntimeLayoutVarsAreLeakVectors pins the managed-Dolt runtime layout
+// into LeakVectorVars (ga-cflrh). Fleet agent shells export the live city's
+// pid, lock, state and data paths; a test binary that inherits them treats the
+// live Dolt server as its own and can stop it or rewrite its state. As with the
+// metrics opt-outs, TestInitScrubsLeakVectors cannot catch a dropped name, so
+// membership is asserted directly.
+func TestDoltRuntimeLayoutVarsAreLeakVectors(t *testing.T) {
+	for _, name := range []string{
+		"GC_PACK_STATE_DIR",
+		"GC_DOLT_CONFIG_FILE",
+		"GC_DOLT_DATA_DIR",
+		"GC_DOLT_PID_FILE",
+		"GC_DOLT_STATE_FILE",
+		"GC_DOLT_LOCK_FILE",
+		"GC_DOLT_LOG_FILE",
+		"GC_DOLT_MANAGED_LOCAL",
+		"GC_RIG",
+		"GC_RIG_ROOT",
+	} {
+		if !slices.Contains(testenv.LeakVectorVars, name) {
+			t.Errorf("%s missing from LeakVectorVars; a fleet shell's live value would reach test code and point it at the live Dolt server", name)
+		}
+	}
+}
