@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -271,5 +272,57 @@ func TestDeliveryWindowEnvFallbacks(t *testing.T) {
 	t.Setenv("GC_DOLT_DELIVERY_WINDOW_READ_TIMEOUT_MILLIS", "0")
 	if got := deliveryWindowReadTimeoutMillis(); got != defaultDeliveryWindowReadTimeoutMillis {
 		t.Errorf("readtimeout(0) = %d, want default", got)
+	}
+}
+
+// TestDeliveryWindowDrainRunsGCBinNotTheTestExecutable pins ga-ynsmt. Under
+// the cmd/gc test harness this process's os.Executable() is the test binary,
+// and on Linux it stays that way even when the binary was entered through the
+// "gc" symlink the provider lifecycle exports as GC_BIN. Draining through
+// os.Executable() therefore ran `cmd/gc.test dolt sync --drain`: the whole
+// cmd/gc suite, recursively, standing in for the drain. The drain must invoke
+// GC_BIN whenever it is set.
+func TestDeliveryWindowDrainRunsGCBinNotTheTestExecutable(t *testing.T) {
+	dir := t.TempDir()
+	argsLog := filepath.Join(dir, "args.log")
+	stub := filepath.Join(dir, "gc")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"" + argsLog + "\"\nprintf '%s\\n' \"$GC_DOLT_PORT\" >> \"" + argsLog + "\"\n"
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BIN", stub)
+
+	// Resolve first and stop here on a mismatch: running the drain against
+	// the wrong binary IS the bug, and under this harness that binary is the
+	// test executable, which would re-run the suite.
+	if got, err := deliveryWindowDrainGCBinary(); err != nil || got != stub {
+		t.Fatalf("deliveryWindowDrainGCBinary() = %q, %v; want GC_BIN %q", got, err, stub)
+	}
+	if err := runDeliveryWindowDrain(dir, "31234", "root", 30*time.Second); err != nil {
+		t.Fatalf("runDeliveryWindowDrain: %v", err)
+	}
+	got, err := os.ReadFile(argsLog)
+	if err != nil {
+		t.Fatalf("GC_BIN stub never ran, so the drain executed something else (the test binary?): %v", err)
+	}
+	if want := "dolt sync --drain\n31234\n"; string(got) != want {
+		t.Fatalf("GC_BIN stub saw %q, want %q", got, want)
+	}
+}
+
+// TestDeliveryWindowDrainGCBinaryFallsBackToExecutable keeps the deployed
+// path unchanged: with no GC_BIN the drain re-invokes this binary.
+func TestDeliveryWindowDrainGCBinaryFallsBackToExecutable(t *testing.T) {
+	t.Setenv("GC_BIN", "")
+	got, err := deliveryWindowDrainGCBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("deliveryWindowDrainGCBinary() = %q, want os.Executable() %q", got, want)
 	}
 }
