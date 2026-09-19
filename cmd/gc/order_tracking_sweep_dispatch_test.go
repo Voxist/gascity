@@ -10,22 +10,18 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
-// AC2 of the vc-ny00 store-warming plan, asserted directly on the tick path
-// rather than argued from its parts.
-//
-// The plan's AC2 says: with one store answering slower than the wall, orders
-// for unaffected stores still dispatch on cadence — the dispatcher stays
-// alive. The 2026-09-06 incident is the counterexample: dispatchOrders runs
+// vc-ny00, asserted directly on the tick path rather than argued from its
+// parts: with one store that cannot answer, orders for unaffected stores still
+// dispatch — the dispatcher stays alive. The 2026-09-06 incident is the counterexample: dispatchOrders runs
 // inside the single serial tick body, ahead of the session reconcile, and
 // when the order-tracking sweep serialized behind a store that had stopped
 // answering, every one of 20 checked cooldown orders went stale at once.
 //
-// The earlier tests in this suite establish the PARTS — a tick-bound read
-// timeout trips the scope's transport breaker
-// (TestTickBoundReadTimeoutCountsAgainstTheScopeBreaker), the sweep drops a
-// degraded store (TestDegradedStoresAreDroppedFromTheTickSweep), and the
-// worst-case tick is bounded (TestWorstCaseTickCostIsBoundedByTheTickRead).
-// This test asserts the CONCLUSION those parts are meant to add up to, on the
+// The PARTS are established elsewhere — a timed-out bd call trips the scope's
+// transport breaker (TestWedgedBackendTripsTheBreakerThroughTheRealRunner),
+// and the sweep drops a degraded store
+// (TestDegradedStoresAreDroppedFromTheTickSweep). This test asserts the
+// CONCLUSION those parts are meant to add up to, on the
 // real dispatchOrders path, because an argument that the tick cannot
 // serialize is not the same as a demonstration that dispatch still fires.
 
@@ -114,7 +110,7 @@ func TestDegradedStoreDoesNotStallOrderDispatch(t *testing.T) {
 
 	if !od.called.Load() {
 		t.Fatal("the order dispatcher never ran; a degraded store must not stop " +
-			"dispatch for the stores that are healthy (vc-ny00 AC2)")
+			"dispatch for the stores that are healthy (vc-ny00)")
 	}
 	if wedged.wasTouched() {
 		t.Error("the degraded store was read during the tick; the sweep must " +

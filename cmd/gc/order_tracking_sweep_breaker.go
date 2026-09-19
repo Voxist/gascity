@@ -8,21 +8,20 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// L1's tick-path isolation for the vc-ny00 store-warming plan.
+// Tick-path isolation for the order-tracking sweep (vc-ny00).
 //
 // THE BREAKER IS THE SCOPE'S TRANSPORT BREAKER. There is one per scope
 // (bdScopeBreaker, configured by [beads.resilience]); the bd runner records
 // every invocation's outcome into it — a bd call killed at its per-command
-// deadline, including a tick-context read killed at L1's bound, counts as a
-// transport failure — and the scope's CachingStore reads it as its
-// availability gate, so the reconciler already skips a scope it holds open.
+// deadline counts as a transport failure (ga-2bo4m) — and the scope's
+// CachingStore reads it as its availability gate, so the reconciler already
+// skips a scope it holds open.
 //
 // The order-tracking sweep watchdogs need their own check. They run inside
-// the SERIAL TICK and open a fresh beads.Store per scope on every pass; left
-// unfiltered, they would walk into a scope the breaker has already declared
-// unavailable. dispatchOrders runs in the same serial tick body, and the
-// whole point of bounding the tick is that order dispatch stays alive while a
-// store is degraded.
+// the SERIAL TICK and may open a fresh beads.Store per scope on every pass;
+// left unfiltered, they would walk into a scope the breaker has already
+// declared unavailable. dispatchOrders runs in the same serial tick body, and
+// order dispatch must stay alive while a store is degraded.
 //
 // WHY SKIPPING IS SAFE HERE. Both watchdogs are best-effort recovery passes
 // that run on a cadence (stale-tracking close and closed-tracking
@@ -30,7 +29,7 @@ import (
 // pass after the breaker closes; it never loses work, because the stale
 // tracking beads it would have closed are still stale on the next pass. The
 // alternative — blocking the tick on a store that cannot answer — is the
-// outage this plan exists to convert into a degradation.
+// 2026-09-06 outage (vc-5gui).
 
 // residency:allow — a caller's own list, filtered. It takes the []beads.Store
 // the sweep already resolved and returns a SUBSET of it; it enumerates
@@ -62,7 +61,7 @@ func filterDegradedSweepStores(cityPath string, stores []beads.Store, stderr io.
 		// moving", which a per-pass line answers and a once-per-episode
 		// line does not.
 		msg := fmt.Sprintf("%s: order tracking sweep: skipping degraded store(s) %v "+
-			"(scope circuit breaker open); serving the rest of the sweep (vc-ny00 L1)\n", logPrefix, skipped)
+			"(scope circuit breaker open); serving the rest of the sweep (vc-ny00)\n", logPrefix, skipped)
 		fmt.Fprint(stderr, msg) //nolint:errcheck // best-effort stderr
 	}
 	return kept

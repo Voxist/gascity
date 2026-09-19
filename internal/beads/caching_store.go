@@ -61,12 +61,6 @@ type CachingStore struct {
 	// as distinct from the flag's own state.
 	depsWholeCacheWipes int64
 
-	// warm is this store's warming state machine (vc-ny00 L2). It carries
-	// its own mutex and is deliberately NOT guarded by c.mu: the durable
-	// record renders every store's tracker on any one store's transition,
-	// and that render must not queue behind this cache's work.
-	warm *storeWarmingTracker
-
 	// readyProjectionInvalid holds, per bead id, the is_blocked verdict this
 	// cache has invalidated and not yet re-observed (ADR-0094, vc-493m3j).
 	//
@@ -444,12 +438,6 @@ func newCachingStore(backing Store, idPrefix string, onChange func(eventType, be
 		},
 		primeRetryDelay: defaultCachePrimeRetryDelay,
 		stopCh:          make(chan struct{}),
-		// A cache that has not yet completed a sub-wall probe starts
-		// WARMING, not healthy — see newStoreWarmingTracker. The tracker
-		// comes from the process-global registry rather than being owned
-		// here, so the durable record can render every store at once (see
-		// store_warming.go).
-		warm: storeWarmingTrackerFor(idPrefix),
 	}
 }
 

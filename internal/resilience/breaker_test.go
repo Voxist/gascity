@@ -456,26 +456,3 @@ func TestStateString(t *testing.T) {
 		}
 	}
 }
-
-// TestBreakerOpenUntilReportsTheOpenDeadlineOnly pins the read-only deadline
-// accessor the store-warming record publishes as degraded_until: the backoff
-// deadline while open, and zero while closed or half-open.
-func TestBreakerOpenUntilReportsTheOpenDeadlineOnly(t *testing.T) {
-	clock := newTestClock()
-	b := newTestBreaker(t, Settings{Enabled: true, ConsecutiveFailures: 1, OpenBase: time.Minute, OpenMax: time.Minute}, clock, nil)
-
-	if got := b.OpenUntil(); !got.IsZero() {
-		t.Fatalf("OpenUntil() on a closed breaker = %v, want zero", got)
-	}
-	b.RecordFailure()
-	if got, want := b.OpenUntil(), clock.Now().Add(time.Minute); !got.Equal(want) {
-		t.Fatalf("OpenUntil() while open = %v, want %v", got, want)
-	}
-	clock.Advance(time.Minute)
-	if !b.Allow() {
-		t.Fatal("Allow() after the deadline = false, want the half-open probe admitted")
-	}
-	if got := b.OpenUntil(); !got.IsZero() {
-		t.Fatalf("OpenUntil() while half-open = %v, want zero", got)
-	}
-}

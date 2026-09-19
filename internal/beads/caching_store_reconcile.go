@@ -297,11 +297,6 @@ func (c *CachingStore) runReconciliation() {
 	// Breaker open: skip the cycle cheaply (one problem entry per episode)
 	// unless a recovery probe is due, in which case the scan below doubles
 	// as the probe.
-	// vc-ny00 L2: publish the transport breaker's verdict on every cycle,
-	// the skipped ones included — they are the only cycles of an outage
-	// that run no probe, so without this the record would never say
-	// degraded while the store is being skipped.
-	c.observeStoreAvailability()
 	if c.reconcileUnavailableSkip() {
 		return
 	}
@@ -311,22 +306,10 @@ func (c *CachingStore) runReconciliation() {
 	startSeq := c.mutationSeq
 	c.mu.RUnlock()
 
-	// Capture the client deadline that applies to THIS read before issuing
-	// it. Inside a tick frame that bound is below the listener wall (L1),
-	// and it is what reaps a hung read — so it, not the wall, is what a
-	// timeout must be judged against. The tick-context trigger is
-	// process-global and best-effort, so reading it after the fact could
-	// observe a different frame than the one the read ran in.
-	readBound := bdTickReadBound()
 	bdStart := time.Now()
 	fresh, err := c.backing.List(cacheFullScanQuery())
 	if err != nil {
 		bdLatency := time.Since(bdStart)
-		// vc-ny00 L2: the failing read is a probe too, and it is the ONLY
-		// probe during an episode — the success heartbeat below never runs
-		// while the store cannot answer. Recording here is what puts
-		// `store=warming` in the log within one window of onset (AC3).
-		c.recordStoreProbe(storeWarmingNow(), bdLatency, true, readBound)
 		c.mu.Lock()
 		c.syncFailures++
 		if (IsPartialResult(err) || c.syncFailures >= maxCacheSyncFailures) && (c.state == cacheLive || c.state == cachePartial) {
@@ -341,11 +324,7 @@ func (c *CachingStore) runReconciliation() {
 		c.recordReconcileLatencyLocked(bdLatency)
 		c.recomputeCadenceLocked()
 		c.updateStatsLocked()
-		degradedLine, emitDegraded := c.reconcileDegradedLogLocked(time.Now(), bdLatency)
 		c.mu.Unlock()
-		if emitDegraded {
-			log.Print(degradedLine)
-		}
 		return
 	}
 	if len(fresh) >= cacheReconcileScanWarnThreshold {
@@ -371,8 +350,6 @@ func (c *CachingStore) runReconciliation() {
 		c.recordProblem("refresh dep cache during reconcile", depErr)
 	}
 	useFreshDeps := depsComplete && depErr == nil
-
-	c.recordStoreProbe(storeWarmingNow(), bdLatency, false, readBound)
 
 	c.mu.Lock()
 	now := time.Now()
@@ -809,49 +786,10 @@ func (c *CachingStore) reconcileSuccessLogLocked(now time.Time, elapsed time.Dur
 			depsField += " deps_driver=" + c.depsIncompleteDriver
 		}
 	}
-	line := fmt.Sprintf(
+	return fmt.Sprintf(
 		"beads cache: reconciled rig=%s beads=%d adds=%d updates=%d removes=%d took=%s cadence=%s %s deps_wipes=%d",
 		rig, len(c.beads), adds, updates, removes, elapsed.Round(time.Millisecond), cadence, depsField, c.depsWholeCacheWipes,
-	)
-	// vc-ny00 L2 gauge, appended for the same reason deps= rides this line
-	// (PR #166): the trigger condition is a DWELL and a dwell needs a
-	// series. Appended at the END so every existing grep on the fields
-	// before it keeps matching, and omitted entirely when the layer is
-	// switched off, which is what makes the kill switch byte-identical to
-	// the pre-plan line (AC7).
-	if storeWarmingEnabled() {
-		if field := c.warm.heartbeatField(); field != "" {
-			line += " " + field
-		}
-	}
-	return line, true
-}
-
-// reconcileDegradedLogLocked composes the heartbeat for a cycle whose read
-// FAILED, rate-limited on the same window as the success line.
-//
-// Without it the L2 gauge would be emitted only by successful reconciles —
-// that is, everywhere except during the episode it exists to describe. The
-// vc-5gui incident is precisely a store answering nothing for 15 minutes;
-// a warming gauge that goes silent exactly then would reproduce the
-// vp-cblo shape (a quiet skip reading as health) with store data. Caller
-// must hold c.mu.
-func (c *CachingStore) reconcileDegradedLogLocked(now time.Time, elapsed time.Duration) (string, bool) {
-	if !storeWarmingEnabled() {
-		return "", false
-	}
-	if !c.lastReconcileLogAt.IsZero() && now.Sub(c.lastReconcileLogAt) < cacheReconcileSuccessLogWindow {
-		return "", false
-	}
-	c.lastReconcileLogAt = now
-	rig := c.idPrefix
-	if rig == "" {
-		rig = storeWarmingNoPrefix
-	}
-	field := c.warm.heartbeatField()
-	return fmt.Sprintf(
-		"beads cache: reconcile failed rig=%s took=%s sync_failures=%d %s",
-		rig, elapsed.Round(time.Millisecond), c.syncFailures, field), true
+	), true
 }
 
 func (c *CachingStore) depsForReconcileLocked(id string, freshBead Bead, depMap map[string][]Dep, useFreshDeps bool) []Dep {
