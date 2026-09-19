@@ -418,3 +418,46 @@ func TestMarkReadyProjectionInvalidOnZeroValueStore(t *testing.T) {
 		t.Fatalf("readyProjectionInvalid[gc-1] = %v, %v; want true, true", v, ok)
 	}
 }
+
+// TestAnsweringPrimeDischargesTheRecordedVerdict pins the other half of the
+// prime's ledger contract (ga-xqc6b): a degraded prime records the disowned
+// verdict, and the next prime whose projection ANSWERS re-observes the row, so
+// the entry must be gone. Carrying it past an answering row would let the
+// reconcile differ substitute a stale value for a fresh verdict.
+func TestAnsweringPrimeDischargesTheRecordedVerdict(t *testing.T) {
+	backing := NewMemStore()
+	b, err := backing.Create(Bead{Type: "task", Status: "open", Title: "re-observed verdict"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	blocked := true
+	store := &verdictFlipStore{Store: backing, verdict: &blocked}
+	cache := NewCachingStoreForTest(store, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("answered Prime: %v", err)
+	}
+
+	store.verdict = nil
+	store.projectionErr = unsupportedProjectionCause()
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("degraded Prime: %v", err)
+	}
+	cache.mu.RLock()
+	_, recorded := cache.readyProjectionInvalid[b.ID]
+	cache.mu.RUnlock()
+	if !recorded {
+		t.Fatal("precondition: the degraded prime did not record the disowned verdict")
+	}
+
+	store.verdict = &blocked
+	store.projectionErr = nil
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("second answered Prime: %v", err)
+	}
+
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	if v, ok := cache.readyProjectionInvalid[b.ID]; ok {
+		t.Fatalf("readyProjectionInvalid[%s] = %v after an answering prime, want absent: the fresh verdict discharges the entry", b.ID, v)
+	}
+}
