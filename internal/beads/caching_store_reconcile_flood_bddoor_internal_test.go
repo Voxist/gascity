@@ -22,16 +22,20 @@ package beads
 // bead; the repair is downstream of the red, and the repair bead deletes the
 // enforcement gate.
 //
-// Mechanism under test (ADR-0094 A1 D10 lead, pa-1 2026-09-04): the differ's
-// anti-flood substitution (caching_store_reconcile.go:545) consults ONLY
-// readyProjectionInvalid, but the verdict-nil'ing path a preservation decline
-// routes through — absorbReadyProjectionLocked (caching_store.go:607) under
-// the reconcile absorb's readyFromFresh mode (:595) — marks ONLY
-// readyProjectionLost (:627). A row nil'd through the lost path therefore
-// re-floods once per flap cycle with the substitution structurally unable to
-// fire, forever. The at-rest invalidation-invariant test cannot see this: the
-// row's Lost mark is correct per ITS ledger; the defect is that the two
-// ledgers diverge.
+// Mechanism under test (ADR-0094 A1 D10 lead, pa-1 2026-09-04). As
+// certified on 9f27db196 the flood had two ledger-side causes on top of the
+// decline: the verdict-nil'ing path a preservation decline routes through
+// (absorbReadyProjectionLocked under the reconcile absorb's readyFromFresh
+// mode) marked only readyProjectionLost, which the differ's anti-flood
+// substitution never reads, and Prime rebuilt both ledgers empty. #173
+// (vc-u2n6) paired every verdict-nil'ing site with the disowned-value ledger,
+// so on current main both of those are closed: the returning verdict finds its
+// readyProjectionInvalid mark and the nil->verdict half is silent. What
+// remains is the decline half — preserveCachedReadyProjectionLocked declining
+// to carry a cached verdict across a verdict-less fresh row manufactures a
+// verdict->nil diff on a row nothing wrote. The guard keeps classifying every
+// population (floodPopulation) so a regression in the ledger pairing shows up
+// as its own named population rather than folded into the decline count.
 //
 // The three harness-v1 gate questions, resolved against 9f27db196..main
 // (791b82ad9; reconcile paths unchanged from the deployed build — only
@@ -64,27 +68,21 @@ package beads
 //	          (:885-890) — T is held frozen by a warmup write-through (cached
 //	          closed) while its listed status alternates open/in_progress, so
 //	          the cached-vs-fresh mismatch the decline arm needs is permanent.
-//	          R emits bead.updated (verdict -> nil) and its absorb marks
-//	          readyProjectionLost.
+//	          R emits bead.updated (verdict -> nil); since #173 its absorb
+//	          marks readyProjectionInvalid as well as readyProjectionLost.
 //	ON  tick: the door answers R's verdict again. Cached nil vs fresh verdict
-//	          reaches the substitution, which needs readyProjectionInvalid and
-//	          finds none -> R emits AGAIN (nil -> verdict), byte-identical
-//	          payload family, on a row nothing wrote.
-//	A mid-window prime (caching_store.go:1149-1193) rebuilds nextReadyInvalid
-//	empty and replaces non-kept rows wholesale, so marks for rebuilt rows are
-//	wiped either way — the amplifier that makes the nil installs universal.
+//	          reaches the substitution, which finds the readyProjectionInvalid
+//	          mark and stays silent. (On 9f27db196 the mark sat only in
+//	          readyProjectionLost and R emitted AGAIN, nil -> verdict.)
+//	A mid-window prime (caching_store.go) replaces non-kept rows wholesale
+//	against a null column, installing nil verdicts; since #173 the rebuilt
+//	rows keep their disowned-value marks, so the following ON tick is silent.
 //
 // The warmup write-through (closing T) takes clearDependentReadyProjectionsLocked's
-// whole-cache branch and records readyProjectionInvalid per row — marks in the
-// ledger the substitution DOES read. They survive only until the first pass:
-// tick 1's fresh verdicts are absorbed as observed, which discharges them, and
-// tick 1 stays silent. That silence is the CONTROL for the attribution below:
-// with marks in readyProjectionInvalid, a nil'd row facing a returning verdict
-// does not emit. From tick 3 onward every ON tick presents the substitution
-// its exact precondition — cached nil, fresh verdict, prior invalidation —
-// except the mark now sits in readyProjectionLost, where the substitution
-// never looks, and the row emits. Same precondition, other ledger, opposite
-// outcome: that contrast is the discriminating measurement.
+// whole-cache branch and records readyProjectionInvalid per row. Tick 1's
+// fresh verdicts meet those marks and stay silent: the CONTROL for the ledger
+// populations — a nil'd row whose mark is in readyProjectionInvalid, facing a
+// returning verdict, does not emit.
 //
 // Asserted population: the ten R rows only. T and W also appear in the
 // emission log — T because its frozen-vs-listed status flap is a legitimate
@@ -97,11 +95,18 @@ package beads
 // The R-row emissions are NOT one population. Each is classified by the row's
 // cached state before the pass that emitted it (floodPopulation): the OFF-tick
 // verdict->nil half comes from the preservation decline itself and touches no
-// ledger; the ON-tick nil->verdict half splits into lost-ledger rows (the
-// substitution reads the wrong ledger) and unmarked rows installed verdict-less
-// by the mid-window prime (which empties both ledgers). A ledger-only repair
-// silences only the lost-ledger half, so the verdict reports every population
-// with its own mechanism rather than blaming the ledger for the whole count.
+// ledger; an ON-tick nil->verdict emission is classified by which ledger (if
+// any) held the row's mark — lost-ledger (the pre-#173 divergence), invalid-
+// ledger (the substitution failing its own precondition) or unmarked (a nil
+// installed with no mark at all). On current main only the decline half
+// emits; the others are kept as named populations so a ledger regression is
+// reported as itself rather than blamed on, or hidden inside, the decline
+// half.
+//
+// Classification assumes a stable verdict VALUE: the fixture's door always
+// answers is_blocked:false, so every verdict-bearing emission is a presence
+// flip (verdict<->nil), never a false<->true change. A fixture that varied the
+// value would need a fifth population for verdict->verdict diffs.
 
 import (
 	"context"
@@ -418,16 +423,20 @@ const (
 	// manufactured by the decline itself.
 	floodDecline floodPopulation = iota
 	// floodLostLedger: the row was nil and marked ONLY in readyProjectionLost,
-	// and the pass emitted nil->verdict. The differ substitution reads only
-	// readyProjectionInvalid, so it cannot fire for these rows.
+	// and the pass emitted nil->verdict. The differ substitution reads
+	// readyProjectionInvalid, so it cannot fire for these rows. This was the
+	// ON-tick half on 9f27db196; #173 pairs every nil'ing site with the
+	// invalid ledger, so a nonzero count here is a regression of that pairing.
 	floodLostLedger
 	// floodInvalidLedger: the row was nil and marked in readyProjectionInvalid
 	// — the substitution's own precondition — and still emitted. On the
 	// deployed build this population is silent (the tick-1 control).
 	floodInvalidLedger
 	// floodUnmarkedNil: the row was nil with NO mark in either ledger and the
-	// pass emitted nil->verdict. Prime rebuilds both ledgers empty, so rows it
-	// installs verdict-less land here; no ledger repair can reach them.
+	// pass emitted nil->verdict. Before #173 the mid-window prime rebuilt both
+	// ledgers empty and its verdict-less installs landed here; since #173 they
+	// keep their marks, so a nonzero count means some path again installs a
+	// nil verdict without recording the disowned value.
 	floodUnmarkedNil
 	floodPopulationCount
 )
@@ -518,10 +527,10 @@ func TestBdStoreBackedFloodReproduction(t *testing.T) {
 		if tick == primeAtTick {
 			// The per-request rebuild cadence (cmd/gc rebuilds per request;
 			// the control dispatcher per controlReadyCacheTTL). A read, not a
-			// write: it wipes the mark ledgers for rebuilt rows and installs
-			// whatever the door answered THIS pass.
+			// write: it rebuilds rows and installs whatever the door answered
+			// THIS pass (since #173 the rebuilt rows keep their marks).
 			runner.mu.Lock()
-			runner.doorOn = false // prime against a null column: nil installs, marks wiped
+			runner.doorOn = false // prime against a null column: nil installs
 			runner.mu.Unlock()
 			if err := cache.Prime(context.Background()); err != nil {
 				t.Fatalf("mid-window prime: %v", err)
@@ -570,6 +579,14 @@ func TestBdStoreBackedFloodReproduction(t *testing.T) {
 		}
 
 		occ := floodOccupancyOf(cache, isFloodRow)
+		// Non-vacuity of the flood rows themselves: after every door-on pass
+		// each flood row must hold a verdict. Without this, a door that never
+		// answered for the flood rows (always null for them) leaves them nil
+		// throughout — nothing to decline, nothing to flip — and the silence
+		// would read as a repair, even under VC_VLYK_ENFORCE=1.
+		if doorOn && occ.nilVerdict != 0 {
+			t.Fatalf("fixture non-vacuity failed at tick %d: %d/%d flood rows hold no verdict after a door-on pass; the door never gave them a verdict to lose, so flood silence here would be vacuous", tick, occ.nilVerdict, floodRows)
+		}
 		occLog = append(occLog, fmt.Sprintf(
 			"tick %2d: door=%-5v flood-emissions=%2d [decline=%2d lost-ledger=%2d invalid-ledger=%2d unmarked-nil=%2d] after: lost=%2d invalid=%2d nil-verdict=%2d depsComplete=%v",
 			tick, doorOn, flooded,
@@ -676,8 +693,9 @@ func TestBdStoreBackedFloodReproduction(t *testing.T) {
 	if totalFlood == 0 {
 		// Reached only when every flood population is silent. Vacuity of that
 		// green is ruled out above: the door flapped and was consulted every
-		// pass, and T stayed cached closed on every tick, so preservation kept
-		// declining. Ledger occupancy is deliberately NOT a vacuity signal: a
+		// pass, every flood row held a verdict after every door-on pass (so
+		// each null tick had a verdict to lose), and T stayed cached closed on
+		// every tick, so preservation's decline arm stayed armed. Ledger occupancy is deliberately NOT a vacuity signal: a
 		// repair that preserves verdicts through the decline leaves no marks
 		// behind, and demanding residual marks would false-positive it.
 		if !enforce {
@@ -716,7 +734,7 @@ func TestBdStoreBackedFloodReproduction(t *testing.T) {
 	}
 	if n := byPopulation[floodLostLedger]; n > 0 {
 		attribution = append(attribution, fmt.Sprintf(
-			"- lost-ledger (%d): rows nil'd by that decline are marked ONLY in readyProjectionLost (absorbReadyProjectionLocked, readyFromFresh mode), but the differ substitution (caching_store_reconcile.go, the cached-nil/fresh-verdict arm) reads ONLY readyProjectionInvalid, so the returning verdict re-emits. Control: rows marked in readyProjectionInvalid facing the same returning verdict emitted %d times over %d presentations.", n, byPopulation[floodInvalidLedger], presented[floodInvalidLedger]))
+			"- lost-ledger (%d): rows nil'd by that decline carried a mark in readyProjectionLost but NOT in readyProjectionInvalid, the ledger the differ substitution (caching_store_reconcile.go, the cached-nil/fresh-verdict arm) reads, so the returning verdict re-emitted. #173 (vc-u2n6) paired every verdict-nil'ing site with the invalid ledger; this population means that pairing regressed. Control: rows marked in readyProjectionInvalid facing the same returning verdict emitted %d times over %d presentations.", n, byPopulation[floodInvalidLedger], presented[floodInvalidLedger]))
 	}
 	if n := byPopulation[floodInvalidLedger]; n > 0 {
 		attribution = append(attribution, fmt.Sprintf(
@@ -724,7 +742,7 @@ func TestBdStoreBackedFloodReproduction(t *testing.T) {
 	}
 	if n := byPopulation[floodUnmarkedNil]; n > 0 {
 		attribution = append(attribution, fmt.Sprintf(
-			"- unmarked-nil (%d): rows installed verdict-less with NO mark in either ledger (Prime rebuilds both ledgers empty) emitted nil->verdict when the door answered. No ledger-reading repair reaches this half.", n))
+			"- unmarked-nil (%d): rows installed verdict-less with NO mark in either ledger emitted nil->verdict when the door answered. Before #173 the mid-window Prime produced these by rebuilding both ledgers empty; this population means some path again installs a nil verdict without recording the disowned value.", n))
 	}
 	verdict := fmt.Sprintf("ADR-0094 flood REPRODUCED on this build: %d bead.updated emissions across %d unwritten flood rows (%v) in %d zero-write ticks; exempt control silent; consecutive-payload byte-identity %.1f%% over %d pairs (live measured 99.3%%; here the two flap halves alternate within each row); device rows logged, not asserted: [%s].\n\nBy population (each needs its own repair; the guard goes green only when ALL are zero):\n  %s\n\nAttribution:\n%s\n\nEnd of window among flood rows: lost=%d invalid=%d nil-verdict=%d.\n\nPer-tick instrument (acceptance 2):\n  %s",
 		totalFlood, len(perID), ids, windowTicks, identity*100, bytePairs, strings.Join(devices, " "),
