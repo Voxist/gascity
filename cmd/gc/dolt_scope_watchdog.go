@@ -37,6 +37,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -306,7 +308,7 @@ func terminateManagedDoltScopeWatchdogChild(cityPath string, pid int, startTicks
 // what tells an operator whose session it was in and who its parent was
 // (ga-fjr5f). The signal's sender is not observable from signal.Notify.
 func managedDoltScopeWatchdogProcessIdentity() string {
-	sid, err := syscall.Getsid(0)
+	sid, err := unix.Getsid(0)
 	sidText := strconv.Itoa(sid)
 	if err != nil {
 		sidText = "unknown"

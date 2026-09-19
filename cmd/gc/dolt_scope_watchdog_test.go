@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestManagedDoltScopeGone(t *testing.T) {
@@ -289,11 +291,11 @@ func TestManagedDoltScopeWatchdogReportsStartIdentity(t *testing.T) {
 	// exits. The watchdog must lead a NEW session with no controlling
 	// terminal, with its server inside that session, so tearing down the
 	// caller's session cannot signal either.
-	callerSID, err := syscall.Getsid(0)
+	callerSID, err := unix.Getsid(0)
 	if err != nil {
 		t.Fatalf("getsid(self): %v", err)
 	}
-	watchdogSID, err := syscall.Getsid(watchdogPID)
+	watchdogSID, err := unix.Getsid(watchdogPID)
 	if err != nil {
 		t.Fatalf("getsid(watchdog %d): %v", watchdogPID, err)
 	}
@@ -304,7 +306,7 @@ func TestManagedDoltScopeWatchdogReportsStartIdentity(t *testing.T) {
 	if watchdogSID != watchdogPID {
 		t.Fatalf("watchdog pid %d is in session %d, want it to lead its own session", watchdogPID, watchdogSID)
 	}
-	if doltSID, err := syscall.Getsid(doltPID); err != nil || doltSID != watchdogSID {
+	if doltSID, err := unix.Getsid(doltPID); err != nil || doltSID != watchdogSID {
 		t.Fatalf("dolt pid %d session = %d (err %v), want the watchdog's session %d", doltPID, doltSID, err, watchdogSID)
 	}
 
