@@ -1507,6 +1507,43 @@ test_hook_allows_push_on_clean_claim() {
     rm -rf "$remote" "$work" "$fbd"
 }
 
+# test_hook_runs_gate3_on_large_go_diff (ga-gvag6): the hook decides whether
+# gate 3 (make test-fast-parallel) runs from the Go names in the pushed range.
+# It used to pipe that listing into `grep -q .` under `set -o pipefail`: grep
+# exits on the first name, git diff takes SIGPIPE writing the rest, the
+# pipeline reads as false, and the suite was skipped with no output at all.
+# Only a listing larger than the pipe buffer trips it, so this pushes an
+# UPDATE (a real remote_sha to diff against — a brand-new branch bypasses the
+# diff entirely) of several thousand long-named .go files, and asserts the
+# tier actually ran. The ownership guard is disabled: gate 3 is under test.
+test_hook_runs_gate3_on_large_go_diff() {
+    local remote work branch="feature/large-go-diff" out rc i
+    remote="$(new_bare_remote)"
+    work="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-hookwork.XXXXXX")"
+    git clone -q "$remote" "$work" 2>/dev/null
+    (
+        cd "$work" || exit 1
+        git config commit.gpgsign false
+        install_guard_hook "$work"
+        printf 'test-fast-parallel:\n\t@echo GATE3-RAN-MARKER >&2\n' > Makefile
+        printf 'base\n' > f.txt; git add -A; git commit -qm base
+        git checkout -q -b "$branch"
+        POG_DISABLE=1 GIT_TERMINAL_PROMPT=0 git push -q origin "$branch" >/dev/null 2>&1
+        mkdir -p pkg
+        for ((i = 0; i < 4000; i++)); do
+            printf 'package pkg\n' > "pkg/large_go_diff_file_name_padded_past_the_pipe_buffer_$i.go"
+        done
+        git add -A; git commit -qm "large go diff"
+    )
+    out="$(cd "$work" && POG_DISABLE=1 GIT_TERMINAL_PROMPT=0 git push origin "$branch" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && grep -q 'GATE3-RAN-MARKER' <<<"$out"; then
+        record_pass "hook/runs-gate3-on-large-go-diff (4000-file update push reached make test-fast-parallel)"
+    else
+        record_fail "hook/runs-gate3-on-large-go-diff" "expected gate 3 to run, got rc=$rc output=$(tail -5 <<<"$out")"
+    fi
+    rm -rf "$remote" "$work"
+}
+
 # ---------------------------------------------------------------------------
 # Static wiring checks — mirrors test-rebase-resolve.sh's style of grepping
 # the real source files rather than re-deriving their behavior.
@@ -1587,6 +1624,7 @@ run_all() {
     test_hook_blocks_push_on_stale_claim
     test_hook_no_verify_bypasses_guard
     test_hook_allows_push_on_clean_claim
+    test_hook_runs_gate3_on_large_go_diff
     test_pre_push_hook_sources_and_calls_guard
     test_rebase_lib_calls_guard_before_force_with_lease
 

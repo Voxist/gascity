@@ -299,3 +299,122 @@ func equalIDs(got, want []string) bool {
 	}
 	return true
 }
+
+// verdictFlipStore stamps a chosen is_blocked verdict on every row while
+// verdict is set, and returns the rows verdict-less under projectionErr
+// otherwise — a projection that answered one prime and went dark for the next.
+type verdictFlipStore struct {
+	Store
+	verdict       *bool
+	projectionErr error
+}
+
+func (v *verdictFlipStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, error) {
+	if v.verdict == nil {
+		return items, v.projectionErr
+	}
+	for i := range items {
+		blocked := *v.verdict
+		items[i].IsBlocked = &blocked
+	}
+	return items, nil
+}
+
+// TestDegradedPrimeRecordsTheVerdictItDisowns pins the prime rebuild as a
+// verdict-nil'ing site (vc-u2n6). A full prime taken while the projection is
+// dark replaces a row that held a verdict with one that holds none; unless the
+// disowned value lands in readyProjectionInvalid, the reconcile differ has
+// nothing to substitute when the projection answers again and the restoration
+// re-emits bead.updated (the ADR-0094 flood).
+func TestDegradedPrimeRecordsTheVerdictItDisowns(t *testing.T) {
+	backing := NewMemStore()
+	b, err := backing.Create(Bead{Type: "task", Status: "open", Title: "held verdict"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	blocked := true
+	store := &verdictFlipStore{Store: backing, verdict: &blocked}
+	cache := NewCachingStoreForTest(store, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("first Prime: %v", err)
+	}
+	cache.mu.RLock()
+	held := cache.beads[b.ID].IsBlocked
+	cache.mu.RUnlock()
+	if held == nil || !*held {
+		t.Fatalf("after the answered prime IsBlocked = %v, want true", held)
+	}
+
+	store.verdict = nil
+	store.projectionErr = unsupportedProjectionCause()
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("degraded Prime: %v", err)
+	}
+
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	if got := cache.beads[b.ID].IsBlocked; got != nil {
+		t.Fatalf("after the degraded prime IsBlocked = %v, want nil (the prime must replace the row)", *got)
+	}
+	v, ok := cache.readyProjectionInvalid[b.ID]
+	if !ok {
+		t.Fatal("readyProjectionInvalid has no entry for the row the degraded prime nil'd: the differ cannot substitute the disowned verdict")
+	}
+	if !v {
+		t.Fatalf("readyProjectionInvalid[%s] = false, want the disowned value true", b.ID)
+	}
+}
+
+// TestDegradedPrimeCarriesAnAlreadyRecordedVerdict covers the other way a
+// degraded prime can drop the ledger: the cached row is ALREADY verdict-less
+// because clearReadyProjectionLocked nil'd it and recorded the value. The
+// degraded prime's fresh row has no newer verdict to offer, so the recorded
+// value must carry forward; dropping it lets the next answering tick emit a
+// spurious bead.updated (vc-u2n6 review).
+func TestDegradedPrimeCarriesAnAlreadyRecordedVerdict(t *testing.T) {
+	backing := NewMemStore()
+	b, err := backing.Create(Bead{Type: "task", Status: "open", Title: "cleared verdict"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	blocked := true
+	store := &verdictFlipStore{Store: backing, verdict: &blocked}
+	cache := NewCachingStoreForTest(store, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("first Prime: %v", err)
+	}
+
+	cache.mu.Lock()
+	cleared := cache.clearReadyProjectionLocked(b.ID)
+	cache.mu.Unlock()
+	if !cleared {
+		t.Fatal("clearReadyProjectionLocked = false, want the held verdict nil'd")
+	}
+
+	store.verdict = nil
+	store.projectionErr = unsupportedProjectionCause()
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("degraded Prime: %v", err)
+	}
+
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	v, ok := cache.readyProjectionInvalid[b.ID]
+	if !ok {
+		t.Fatal("readyProjectionInvalid lost the entry clearReadyProjectionLocked recorded: a degraded prime must not discharge it")
+	}
+	if !v {
+		t.Fatalf("readyProjectionInvalid[%s] = false, want the recorded value true", b.ID)
+	}
+}
+
+// TestMarkReadyProjectionInvalidOnZeroValueStore pins the nil-map guard: a
+// zero-value CachingStore has no ledger map, and recording into it must
+// allocate rather than panic, as markReadyProjectionLostLocked already does.
+func TestMarkReadyProjectionInvalidOnZeroValueStore(t *testing.T) {
+	c := &CachingStore{}
+	c.markReadyProjectionInvalidLocked("gc-1", true)
+	if v, ok := c.readyProjectionInvalid["gc-1"]; !ok || !v {
+		t.Fatalf("readyProjectionInvalid[gc-1] = %v, %v; want true, true", v, ok)
+	}
+}
