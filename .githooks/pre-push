@@ -56,7 +56,13 @@ while read -r local_ref local_sha _remote_ref remote_sha; do
       resync_loss_merges+=("$local_sha")
     fi
   else
-    if git diff --name-only "$remote_sha" "$local_sha" -- '*.go' 2>/dev/null | grep -q .; then
+    # Captured, never piped into `grep -q` (ga-gvag6): under pipefail, grep
+    # exits on the first name, git diff takes SIGPIPE writing the rest, and
+    # the pipeline reads as false — so a large Go diff skipped the suite
+    # silently. A diff that cannot be computed (remote tip not present
+    # locally) fails closed and runs the suite.
+    if ! go_diff="$(git diff --name-only "$remote_sha" "$local_sha" -- '*.go' 2>/dev/null)" ||
+      [ -n "$go_diff" ]; then
       go_changed=1
     fi
     # Category-A resync-loss gate (ga-d32bn; AGENTS.md "Resync conventions"

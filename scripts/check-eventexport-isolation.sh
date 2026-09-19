@@ -52,8 +52,14 @@ for sym in 'allowedTypes = map' 'func ActorHash' 'func CityHash' 'func safeRef';
 done
 
 # 3. Module boundary: the published package must not import internal/.
-if go list -deps ./pkg/eventexport 2>/dev/null | grep -q 'gastownhall/gascity/internal'; then
-  go list -deps ./pkg/eventexport | grep 'gastownhall/gascity/internal' >&2
+# Captured, never piped into `grep -q` (ga-gvag6): under pipefail an early grep
+# exit SIGPIPEs go list and the pipeline reads as "no internal import", hiding
+# exactly the violation this check exists for. A go list failure is itself a
+# failure, not a pass.
+deps="$(go list -deps ./pkg/eventexport)" || fail "go list -deps ./pkg/eventexport failed"
+internal_deps="$(printf '%s\n' "$deps" | grep 'gastownhall/gascity/internal' || true)"
+if [ -n "$internal_deps" ]; then
+  printf '%s\n' "$internal_deps" >&2
   fail "pkg/eventexport must import nothing from internal/ (see above)"
 fi
 
