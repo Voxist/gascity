@@ -183,15 +183,28 @@ func TestBuildAndStoreStatusEscapesWedgedBuild(t *testing.T) {
 	// build goroutine exists, and never touch it again: reassigning it mid-test
 	// would race that goroutine's own read of it. One fixed value has to serve
 	// both builds, so it must be generous enough for a real (non-wedged) build
-	// — including the synchronous version-probe subprocess call buildStatusBody
-	// makes — to finish comfortably under -race/CI load, while still keeping
-	// the test itself fast.
+	// to finish comfortably under -race/CI load, while still keeping the test
+	// itself fast. That is only a safe bet because the version-probe subprocess
+	// is stubbed out below — see the componentVersionsProbe note (vc-uguq).
 	oldTimeout := statusWarmBuildTimeout
 	statusWarmBuildTimeout = 500 * time.Millisecond
 	t.Cleanup(func() { statusWarmBuildTimeout = oldTimeout })
 
 	state := newFakeState(t)
-	s := &Server{state: state}
+	// Stub the version probe, for the same reason handler_status_bench_test.go
+	// stubs it: buildStatusBody calls resolveComponentVersions (which forks
+	// `dolt version` and `bd version` SEQUENTIALLY under a sync.Once) at
+	// handler_status.go:427 — BEFORE the cachedStoreHealth call at :434 that
+	// this test wedges. Left real, those two subprocesses cost 1.0–2.1s on a
+	// loaded fleet host, 2–4x the budget above, so BOTH builds time out, the
+	// second returns the warm body, and the test fails without ever reaching
+	// the wedged leader it exists to pin (vc-uguq). Worse, it fails that way
+	// while the FIRST assertion still passes — for the wrong reason. sync.Once
+	// is uncancellable, so the second call cannot escape the first call's probe
+	// on its own deadline; this is deterministic on any host slower than the
+	// budget, not a flake. Stubbed, the budget covers in-memory work only and
+	// the singleflight recovery this test names is actually exercised.
+	s := &Server{state: state, componentVersionsProbe: func() componentVersions { return componentVersions{} }}
 
 	// unblock is closed in t.Cleanup, not inline: the first build stays
 	// wedged for the lifetime of the test, exactly like the leaked
