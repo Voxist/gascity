@@ -168,18 +168,76 @@ func TestSharedUnresolvableProviderKeepsEverySession(t *testing.T) {
 	}
 }
 
-// TestRemovedAgentSessionStillDrainsAsOrphaned is the control: the fail-closed
-// guard is scoped to agents that are still configured but unresolvable. A
-// session whose agent was removed from config keeps draining as orphaned.
+// TestRemovedAgentSessionStillDrainsAsOrphaned is the control, run with the
+// guard armed: in the same tick one agent is unresolvable AND another has been
+// removed from config. The unresolvable agent's session is kept; the removed
+// agent's session still drains as orphaned. With the unresolved map empty this
+// case could not tell a scoped guard from one that keeps every undesired
+// session.
 func TestRemovedAgentSessionStillDrainsAsOrphaned(t *testing.T) {
-	env := newUnresolvedProviderEnv(t, "true")
+	env := newUnresolvedProviderEnv(t, "gc-ga-8a8fq-no-such-provider-binary")
+	env.cfg.Agents[0].Provider = "unresolved"
 	env.cfg.Agents = env.cfg.Agents[:1]
 
-	cr, _, stderr := env.tick(t)
+	cr, result, stderr := env.tick(t)
 
+	if _, ok := result.UnresolvedTemplates[unresolvedGoodTemplate]; !ok {
+		t.Fatalf("UnresolvedTemplates = %v, want %q recorded so the guard is armed; stderr:\n%s", result.UnresolvedTemplates, unresolvedGoodTemplate, stderr)
+	}
+	if ds := cr.sessionDrains.get(env.good.ID); ds != nil {
+		t.Fatalf("unresolvable agent's session is draining (reason %q); stderr:\n%s", ds.reason, stderr)
+	}
 	ds := cr.sessionDrains.get(env.broken.ID)
 	if ds == nil || ds.reason != "orphaned" {
 		t.Fatalf("removed agent's session drain = %+v, want an orphaned drain; stderr:\n%s", ds, stderr)
+	}
+}
+
+// TestSuspendedUnresolvableAgentStillDrains: suspension is decided before
+// provider resolution matters. A suspended agent whose provider cannot be
+// resolved is not recorded as unresolved, so its session drains exactly as a
+// suspended agent's session always has.
+func TestSuspendedUnresolvableAgentStillDrains(t *testing.T) {
+	env := newUnresolvedProviderEnv(t, "gc-ga-8a8fq-no-such-provider-binary")
+	env.cfg.Agents[1].Suspended = true
+
+	cr, result, stderr := env.tick(t)
+
+	if _, ok := result.UnresolvedTemplates[unresolvedBrokenTemplate]; ok {
+		t.Fatalf("suspended agent recorded as unresolved: %v", result.UnresolvedTemplates)
+	}
+	if ds := cr.sessionDrains.get(env.broken.ID); ds == nil {
+		t.Fatalf("suspended agent's session is not draining; stderr:\n%s", stderr)
+	}
+}
+
+// TestSuspendedRigUnresolvableAgentStillDrains is the rig-level twin: an agent
+// in a suspended rig whose provider cannot be resolved still drains.
+func TestSuspendedRigUnresolvableAgentStillDrains(t *testing.T) {
+	env := newUnresolvedProviderEnv(t, "gc-ga-8a8fq-no-such-provider-binary")
+	env.cfg.Rigs[1].Suspended = true
+
+	cr, result, stderr := env.tick(t)
+
+	if _, ok := result.UnresolvedTemplates[unresolvedBrokenTemplate]; ok {
+		t.Fatalf("agent in a suspended rig recorded as unresolved: %v", result.UnresolvedTemplates)
+	}
+	if ds := cr.sessionDrains.get(env.broken.ID); ds == nil {
+		t.Fatalf("session of an agent in a suspended rig is not draining; stderr:\n%s", stderr)
+	}
+}
+
+// TestOneShotStartReconcileCarriesUnresolvedTemplates pins the `gc start`
+// one-shot reconcile: it must hand the reconciler the same unresolved set the
+// controller tick does, or a standalone start drains those sessions.
+func TestOneShotStartReconcileCarriesUnresolvedTemplates(t *testing.T) {
+	want := map[string]string{unresolvedBrokenTemplate: "provider not found in PATH"}
+	var opts startExecutionOptions
+	for _, apply := range oneShotReconcileStartOptions(DesiredStateResult{UnresolvedTemplates: want}, nil, nil, nil) {
+		apply(&opts)
+	}
+	if got := opts.unresolvedTemplates[unresolvedBrokenTemplate]; got != want[unresolvedBrokenTemplate] {
+		t.Fatalf("one-shot reconcile unresolvedTemplates = %v, want %v", opts.unresolvedTemplates, want)
 	}
 }
 

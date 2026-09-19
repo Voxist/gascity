@@ -6449,7 +6449,7 @@ func unresolvedAgentTemplates(bp *agentBuildParams, cfg *config.City, suspendedR
 		if agent.Suspended {
 			continue
 		}
-		if rigName := configuredRigName(bp.cityPath, agent, cfg.Rigs); rigName != "" && suspendedRigPaths[filepath.Clean(rigRootForName(rigName, cfg.Rigs))] {
+		if agentInSuspendedRig(bp.cityPath, agent, cfg.Rigs, suspendedRigPaths) {
 			continue
 		}
 		template := agent.QualifiedName()
