@@ -106,6 +106,14 @@ const PassthroughVar = "GC_TESTENV_PASSTHROUGH"
 // EnvOverride names) DO belong here: a developer's shell value must not leak in
 // and non-deterministically flip a gate's resolved mode during a test.
 //
+// The managed-Dolt runtime layout (GC_PACK_STATE_DIR and the GC_DOLT_*_FILE /
+// GC_DOLT_DATA_DIR paths), its tuning knobs, and GC_RIG/GC_RIG_ROOT belong here
+// too (ga-cflrh). Fleet agent shells carry the LIVE city's values; a test
+// that inherits them resolves the live server's pid, lock and state files as
+// its own, passes the managed-Dolt ownership check against the live server,
+// and can stop it or rewrite its state. cmd/gc's TestMain already scrubs every
+// GC_* var; this list is what every other test binary gets.
+//
 // Process-level opt-out vars belong here for the same reason. DO_NOT_TRACK and
 // GC_DISABLE_USAGE_METRICS gate internal/productmetrics, and agent fleets that
 // export GC_DISABLE_USAGE_METRICS=1 into every session leak it into bare
@@ -127,6 +135,7 @@ var LeakVectorVars = []string{
 	"GC_AGENT",
 	"GC_ALIAS",
 	"GC_BEADS",
+	"GC_BEADS_BACKEND",
 	"GC_BEADS_CONDITIONAL_WRITES",
 	"GC_BEADS_GUARDED_RELEASE",
 	"GC_BEADS_SCOPE_ROOT",
@@ -139,11 +148,27 @@ var LeakVectorVars = []string{
 	"GC_DIR",
 	"GC_DISABLE_USAGE_METRICS",
 	"GC_DOLT",
+	"GC_DOLT_ARCHIVE_LEVEL",
+	"GC_DOLT_AUTO_GC_ENABLED",
+	"GC_DOLT_CONFIG_FILE",
+	"GC_DOLT_DATA_DIR",
 	"GC_DOLT_HOST",
+	"GC_DOLT_LOCK_FILE",
+	"GC_DOLT_LOCK_RELEASE_TIMEOUT_MS",
+	"GC_DOLT_LOG_FILE",
+	"GC_DOLT_MANAGED_LOCAL",
+	"GC_DOLT_MAX_CONNECTIONS",
 	"GC_DOLT_PASSWORD",
+	"GC_DOLT_PID_FILE",
 	"GC_DOLT_PORT",
+	"GC_DOLT_READ_TIMEOUT_MILLIS",
+	"GC_DOLT_STATE_FILE",
 	"GC_DOLT_USER",
+	"GC_DOLT_WRITE_TIMEOUT_MILLIS",
 	"GC_HOME",
+	"GC_PACK_STATE_DIR",
+	"GC_RIG",
+	"GC_RIG_ROOT",
 	"GC_SESSION_ID",
 	"GC_SESSION_NAME",
 	"GC_TMUX_SESSION",
