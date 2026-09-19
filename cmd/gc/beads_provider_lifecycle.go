@@ -1344,12 +1344,13 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 				if !owned {
 					return err
 				}
-				// Only the lifecycle owner restarts the managed server
-				// (ga-fjr5f): a restart from any other process — an agent's
-				// hook above all — would run in that process's session and
-				// die with it.
-				if !managedDoltImplicitRecoveryAllowed() {
-					return fmt.Errorf("unhealthy (%w): %w", err, errManagedDoltLifecycleNotOwned)
+				// Only the lifecycle owner restarts the managed server, and
+				// never a live one that is merely slow (ga-fjr5f): a restart
+				// from any other process — an agent's hook above all — runs in
+				// that process's session and dies with it, and replacing a
+				// slow server turns a slow store into a dead one.
+				if declined := managedDoltImplicitRecoveryDecision(cityPath); declined != nil {
+					return fmt.Errorf("unhealthy (%w): %w", err, declined)
 				}
 				// Breaker-aware preflight: if the bd circuit breaker is
 				// open, a recovery is already in flight (#2533 clears the

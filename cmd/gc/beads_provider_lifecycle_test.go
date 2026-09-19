@@ -5256,6 +5256,9 @@ func TestHealthBeadsProviderWaitsForStorePingAfterRecovery(t *testing.T) {
 	ownManagedDoltLifecycleForTest(t, true)
 	cityPath := t.TempDir()
 	writeMinimalCityToml(t, cityPath)
+	// The fake server is a live listener; this test is about the wait after
+	// recovery, so the unresponsiveness is already past the grace.
+	sustainManagedDoltUnresponsiveForTest(t, cityPath)
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads", "dolt"), 0o755); err != nil {
 		t.Fatal(err)
 	}

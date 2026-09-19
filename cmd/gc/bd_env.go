@@ -1605,17 +1605,18 @@ func bdCommandRunnerWithManagedRetryFor(cityPath string, envFn bdManagedEnvFn) b
 			recordBdBreakerOutcome(breaker, bdInvocationTimedOut(name, err))
 			return out, err
 		}
-		recoveryNotOwned := false
+		var recoveryDeclined error
 		if bdTransportRecoverableError(cityPath, dir, env, err) {
-			// Only the lifecycle owner restarts the server (ga-fjr5f). Any
-			// other process skips the restart but still retries once — the
-			// controller may already have recovered it — and reports a
-			// second failure as the controller's to fix.
-			if !managedDoltImplicitRecoveryAllowed() {
-				recoveryNotOwned = true
-			} else if recErr := recoverManagedBDCommand(cityPath); recErr != nil {
-				recordBdBreakerOutcome(breaker, true)
-				return out, err
+			// Only the lifecycle owner restarts the server, and never a live
+			// one that is merely slow (ga-fjr5f). A declined restart still
+			// retries once — the controller may already have recovered the
+			// server — and reports a second failure with the reason.
+			recoveryDeclined = managedDoltImplicitRecoveryDecision(cityPath)
+			if recoveryDeclined == nil {
+				if recErr := recoverManagedBDCommand(cityPath); recErr != nil {
+					recordBdBreakerOutcome(breaker, true)
+					return out, err
+				}
 			}
 		}
 		bdCommandRetrySleep(bdCommandRetryBaseDelay)
@@ -1633,8 +1634,8 @@ func bdCommandRunnerWithManagedRetryFor(cityPath string, envFn bdManagedEnvFn) b
 		// transport failure counts one consecutive failure toward the
 		// trip threshold; recovery resets the count.
 		recordBdBreakerOutcome(breaker, bdTransportRetryableError(cityPath, dir, retryEnv, retryErr))
-		if retryErr != nil && recoveryNotOwned {
-			retryErr = fmt.Errorf("%w: %w", retryErr, errManagedDoltLifecycleNotOwned)
+		if retryErr != nil && recoveryDeclined != nil {
+			retryErr = fmt.Errorf("%w: %w", retryErr, recoveryDeclined)
 		}
 		return retryOut, retryErr
 	}
