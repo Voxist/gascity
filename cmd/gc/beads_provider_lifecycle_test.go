@@ -5253,6 +5253,7 @@ esac
 }
 
 func TestHealthBeadsProviderWaitsForStorePingAfterRecovery(t *testing.T) {
+	ownManagedDoltLifecycleForTest(t, true)
 	cityPath := t.TempDir()
 	writeMinimalCityToml(t, cityPath)
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads", "dolt"), 0o755); err != nil {

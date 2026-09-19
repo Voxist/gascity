@@ -16,6 +16,7 @@ import (
 // cmd/gc provider-store wiring re-resolves a managed Dolt endpoint after the
 // original process is killed and its port is made unavailable.
 func TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind(t *testing.T) {
+	ownManagedDoltLifecycleForTest(t, true)
 	cityPath, rigPath := setupManagedBdWaitTestCity(t)
 	bdPath := waitTestRealBDPath(t)
 	rawDir := filepath.Join(rigPath, "provider-rebind")
