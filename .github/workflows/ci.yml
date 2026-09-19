@@ -724,10 +724,10 @@ jobs:
         include:
           - shard_name: packages-cmd-gc-integration
             timeout_minutes: 15
-            command: GC_DIAG_LEAK=1 ./scripts/test-integration-shard packages-cmd-gc-integration
+            command: DIAGLEAK=1 ./scripts/test-integration-shard packages-cmd-gc-integration
           - shard_name: packages-cmd-gc-integration-window-off
             timeout_minutes: 15
-            command: GC_DIAG_LEAK=1 GC_DOLT_DELIVERY_WINDOW=0 ./scripts/test-integration-shard packages-cmd-gc-integration
+            command: DIAGLEAK=1 DIAGLEAK_WINDOW_OFF=1 ./scripts/test-integration-shard packages-cmd-gc-integration
     env:
       DOLT_VERSION: "2.1.7"
       BD_VERSION: "v1.2.2" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)

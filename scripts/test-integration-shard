@@ -68,8 +68,8 @@ run_go() {
     GOWORK="${GOWORK-}" \
     GC_BEADS="${GC_BEADS-}" \
     GC_FAST_UNIT=0 \
-    GC_DOLT_DELIVERY_WINDOW="${GC_DOLT_DELIVERY_WINDOW-}" \
-    GC_DIAG_LEAK="${GC_DIAG_LEAK-}" \
+    DIAGLEAK_WINDOW_OFF="${DIAGLEAK_WINDOW_OFF-}" \
+    DIAGLEAK="${DIAGLEAK-}" \
     CGO_CPPFLAGS="${cgo_cppflags}" \
     CGO_LDFLAGS="${cgo_ldflags}" \
     go "$@"
@@ -147,7 +147,7 @@ run_pkg_tests() {
   regex="^($(join_regex "${tests[@]}"))$"
   echo "Running shard ${shard} against ${test_pkg} (${#tests[@]} tests)"
   go_test_args=(-tags integration -timeout "$timeout")
-  if [[ -n "${GC_DIAG_LEAK:-}" ]]; then
+  if [[ -n "${DIAGLEAK:-}" ]]; then
     go_test_args+=(-v)
   fi
   if [[ -n "${GO_TEST_COVERPROFILE:-}" ]]; then

@@ -3420,6 +3420,9 @@ func setupFreshManagedBdWaitTestCity(t *testing.T) string {
 	t.Setenv("GC_CITY", cityPath)
 	t.Setenv("GC_CITY_PATH", cityPath)
 	materializeBuiltinPacksForTest(t, cityPath)
+	if os.Getenv("DIAGLEAK_WINDOW_OFF") == "1" {
+		t.Setenv("GC_DOLT_DELIVERY_WINDOW", "0")
+	}
 	t.Cleanup(func() {
 		diagLeakDump(t, cityPath, "after-shutdown")
 		time.Sleep(3 * time.Second)

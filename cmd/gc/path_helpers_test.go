@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -573,6 +575,16 @@ func diffDoltProcessSnapshots(initial, final map[int]DoltProcInfo) []DoltProcInf
 func writeDoltLeakReport(w io.Writer, leaked []DoltProcInfo) {
 	for _, proc := range leaked {
 		fmt.Fprintf(w, "  pid=%d argv=%q\n", proc.PID, strings.Join(proc.Argv, " ")) //nolint:errcheck
+		if out, err := exec.Command("ps", "-o", "pid,ppid,pgid,sid,lstart,etime,args", "-p", strconv.Itoa(proc.PID)).CombinedOutput(); err == nil {
+			fmt.Fprintf(w, "    DIAG ps: %s\n", strings.ReplaceAll(strings.TrimSpace(string(out)), "\n", " | ")) //nolint:errcheck
+		}
+		if env, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", proc.PID)); err == nil {
+			for _, kv := range strings.Split(string(env), "\x00") {
+				if strings.HasPrefix(kv, "GC_") || strings.HasPrefix(kv, "BEADS_") {
+					fmt.Fprintf(w, "    DIAG env: %s\n", kv) //nolint:errcheck
+				}
+			}
+		}
 	}
 }
 

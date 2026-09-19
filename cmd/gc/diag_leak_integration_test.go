@@ -16,7 +16,7 @@ import (
 // the managed-bd test city teardown. Never merged.
 func diagLeakDump(t *testing.T, cityPath, label string) {
 	t.Helper()
-	if os.Getenv("GC_DIAG_LEAK") == "" {
+	if os.Getenv("DIAGLEAK") == "" {
 		return
 	}
 	var b strings.Builder
