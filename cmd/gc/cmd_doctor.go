@@ -191,9 +191,9 @@ func (c *doltTopologyCheck) CanFix() bool { return false }
 func (c *doltTopologyCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
 type buildDoctorChecksOpts struct {
-	Stderr                  io.Writer
-	ControllerRunning       bool
-	SupervisorRunning       bool
+	Stderr            io.Writer
+	ControllerRunning bool
+	SupervisorRunning bool
 	// SupervisorPID is the running supervisor's pid, 0 when the liveness
 	// probe established that none is running, and
 	// doctor.SupervisorPIDUnknown when the probe did not settle it.
