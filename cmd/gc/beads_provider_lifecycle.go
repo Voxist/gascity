@@ -900,7 +900,11 @@ func ensureBeadsProvider(cityPath string) error {
 		if envErr != nil {
 			return envErr
 		}
+		diagStart := time.Now()
 		if err := runProviderOpWithEnv(script, providerEnv, "start"); err != nil {
+			if os.Getenv("GC_DIAG_LEAK") != "" {
+				fmt.Fprintf(os.Stderr, "=== DIAG provider start failed after %s: %v\n", time.Since(diagStart), err) //nolint:errcheck
+			}
 			// Managed bd startup occasionally reports a start error even though
 			// the Dolt server is already live. If the follow-up health probe
 			// succeeds, prefer the actual server state over the start error.
@@ -2614,6 +2618,9 @@ func runProviderOpWithEnvContext(parent context.Context, script string, environ 
 	err := cmd.Run()
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
+			if os.Getenv("GC_DIAG_LEAK") != "" {
+				fmt.Fprintf(os.Stderr, "=== DIAG provider op %s ctx error %v; op stderr:\n%s\n=== DIAG end op stderr\n", args[0], ctxErr, stderr.String()) //nolint:errcheck
+			}
 			return fmt.Errorf("exec beads %s: %w", args[0], ctxErr)
 		}
 		var exitErr *exec.ExitError

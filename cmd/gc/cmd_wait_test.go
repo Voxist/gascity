@@ -3420,11 +3420,22 @@ func setupFreshManagedBdWaitTestCity(t *testing.T) string {
 	t.Setenv("GC_CITY", cityPath)
 	t.Setenv("GC_CITY_PATH", cityPath)
 	materializeBuiltinPacksForTest(t, cityPath)
-	if err := ensureBeadsProvider(cityPath); err != nil {
-		t.Fatalf("ensureBeadsProvider: %v", err)
+	t.Cleanup(func() {
+		diagLeakDump(t, cityPath, "after-shutdown")
+		time.Sleep(3 * time.Second)
+		diagLeakDump(t, cityPath, "after-shutdown+3s")
+	})
+	startedAt := time.Now()
+	ensureErr := ensureBeadsProvider(cityPath)
+	fmt.Fprintf(os.Stderr, "=== DIAG ensureBeadsProvider took %s err=%v\n", time.Since(startedAt), ensureErr)
+	diagLeakDump(t, cityPath, "after-ensure")
+	if ensureErr != nil {
+		t.Fatalf("ensureBeadsProvider: %v", ensureErr)
 	}
 	t.Cleanup(func() {
-		_ = shutdownBeadsProvider(cityPath)
+		diagLeakDump(t, cityPath, "before-shutdown")
+		shutErr := shutdownBeadsProvider(cityPath)
+		fmt.Fprintf(os.Stderr, "=== DIAG shutdownBeadsProvider err=%v\n", shutErr)
 	})
 	if err := initAndHookDir(cityPath, cityPath, "gc"); err != nil {
 		t.Fatalf("initAndHookDir(city): %v", err)
