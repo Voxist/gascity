@@ -6,7 +6,7 @@
 # The pre-push hook runs three gates in order:
 #   1. check-resync-loss  (ga-d32bn)     — ack: RESYNC_LOSS_ACK=1
 #   2. bead-ownership     (ga-fip9ps.1)  — fail-closed, no scoped ack
-#   3. make test-fast-parallel           — ack: LOCAL_TESTS_ACK=1  <- under test
+#   3. make test-fast-parallel           — ack: LOCAL_TESTS_ACK=<pushed sha>  <- under test
 #
 # Before vc-dq0b, gate 3's only bypass was `git push --no-verify`, which
 # disarms all three. The property these cases pin is therefore NOT "the ack
@@ -14,7 +14,8 @@
 # everything) but "the ack is SCOPED": it skips gate 3 and leaves gates 1
 # and 2 armed. Cases C and D are the load-bearing ones — they must fail if
 # the ack is ever moved earlier in the hook or widened into a --no-verify
-# equivalent.
+# equivalent. Cases E-H pin that the ack is BOUND to the pushed commit: any
+# other value (0, 1, a stale SHA, a too-short prefix) must still run gate 3.
 #
 # Hermetic: temp git repos, a stub bd, and a Makefile whose tier target is a
 # simulated failure. Never runs the real Go suite (that is the tier this bead
@@ -122,7 +123,7 @@ fi
 # line on stderr). The audit line is asserted by content, not merely by rc:
 # a silent skip is the failure mode today's --no-verify bypass already has.
 # ---------------------------------------------------------------------------
-echo "-- LOCAL_TESTS_ACK=1 skips gate 3 and emits a named line --"
+echo "-- LOCAL_TESTS_ACK=<pushed sha> skips gate 3 and emits a named line --"
 read -r remB workB <<<"$(setup_repo)"
 (
 	set -e
@@ -133,10 +134,12 @@ read -r remB workB <<<"$(setup_repo)"
 	git commit -qm "go change"
 ) >/dev/null 2>&1
 outB="$(mktemp "$tmp_root/outB.XXXXXX")"
-(cd "$workB" && GIT_TERMINAL_PROMPT=0 LOCAL_TESTS_ACK=1 git push origin ours) >"$outB" 2>&1
+shaB="$(git -C "$workB" rev-parse HEAD)"
+(cd "$workB" && GIT_TERMINAL_PROMPT=0 LOCAL_TESTS_ACK="$shaB" git push origin ours) >"$outB" 2>&1
 rcB=$?
 if [ "$rcB" -eq 0 ] && [ -n "$(remote_sha "$remB" refs/heads/ours)" ]; then
-	if grep -q 'LOCAL_TESTS_ACK=1' "$outB" && grep -q 'gate 3' "$outB"; then
+	# The notice must name the acked commit and the ref it covers.
+	if grep -q "LOCAL_TESTS_ACK=$shaB — gate 3 .* SKIPPED .*commit $shaB (refs: refs/heads/ours)" "$outB"; then
 		record_pass "ack/skips-gate-3-and-emits-named-line"
 	else
 		record_fail "ack/skips-gate-3-and-emits-named-line" "push succeeded but no greppable notice"
@@ -147,6 +150,27 @@ else
 	sed 's/^/    /' "$outB"
 fi
 
+# B2 — a 7-character prefix of the pushed commit is accepted too.
+echo "-- a 7-character prefix of the pushed commit is accepted --"
+read -r remB2 workB2 <<<"$(setup_repo)"
+(
+	set -e
+	cd "$workB2"
+	git checkout -q -b ours
+	echo "package main" >a.go
+	git add -A
+	git commit -qm "go change"
+) >/dev/null 2>&1
+outB2="$(mktemp "$tmp_root/outB2.XXXXXX")"
+(cd "$workB2" && GIT_TERMINAL_PROMPT=0 LOCAL_TESTS_ACK="$(git rev-parse --short=7 HEAD)" git push origin ours) >"$outB2" 2>&1
+rcB2=$?
+if [ "$rcB2" -eq 0 ] && [ -n "$(remote_sha "$remB2" refs/heads/ours)" ] && grep -q 'SKIPPED' "$outB2"; then
+	record_pass "ack/seven-char-prefix-skips-gate-3"
+else
+	record_fail "ack/seven-char-prefix-skips-gate-3" "rc=$rcB2"
+	sed 's/^/    /' "$outB2"
+fi
+
 # ---------------------------------------------------------------------------
 # C — LOAD-BEARING. The ack must NOT disarm gate 2. A bead that reads back as
 # claimed by a different session is exactly the ownership violation gate 2
@@ -154,7 +178,7 @@ fi
 # tier still failing, the push must STILL be blocked — by gate 2, not gate 3.
 # This is the case that fails if the ack is ever hoisted above gate 2.
 # ---------------------------------------------------------------------------
-echo "-- LOCAL_TESTS_ACK=1 leaves the bead-ownership guard armed --"
+echo "-- a valid LOCAL_TESTS_ACK leaves the bead-ownership guard armed --"
 read -r remC workC <<<"$(setup_repo)"
 binC="$(mktemp -d "$tmp_root/binC.XXXXXX")"
 cat >"$binC/bd" <<'BDSTUB'
@@ -177,7 +201,7 @@ chmod +x "$binC/bd"
 ) >/dev/null 2>&1
 outC="$(mktemp "$tmp_root/outC.XXXXXX")"
 (cd "$workC" && GIT_TERMINAL_PROMPT=0 PATH="$binC:$PATH" GC_SESSION_NAME="pushing-session" \
-	LOCAL_TESTS_ACK=1 git push origin builder/ga-zzzzzz-ack-test) >"$outC" 2>&1
+	LOCAL_TESTS_ACK="$(git rev-parse HEAD)" git push origin builder/ga-zzzzzz-ack-test) >"$outC" 2>&1
 rcC=$?
 if [ "$rcC" -ne 0 ] && [ -z "$(remote_sha "$remC" refs/heads/builder/ga-zzzzzz-ack-test)" ] &&
 	grep -q 'push-ownership-guard: BLOCKED' "$outC"; then
@@ -192,7 +216,7 @@ fi
 # the pushed tip with a failing check-resync-loss must still block under the
 # ack. Fails if the ack is hoisted above the resync-loss gate.
 # ---------------------------------------------------------------------------
-echo "-- LOCAL_TESTS_ACK=1 leaves the resync-loss gate armed --"
+echo "-- a valid LOCAL_TESTS_ACK leaves the resync-loss gate armed --"
 read -r remD workD <<<"$(setup_repo)"
 (
 	set -e
@@ -213,7 +237,7 @@ read -r remD workD <<<"$(setup_repo)"
 	git merge -q --no-edit theirs >/dev/null
 ) >/dev/null 2>&1
 outD="$(mktemp "$tmp_root/outD.XXXXXX")"
-(cd "$workD" && GIT_TERMINAL_PROMPT=0 LOCAL_TESTS_ACK=1 git push origin ours) >"$outD" 2>&1
+(cd "$workD" && GIT_TERMINAL_PROMPT=0 LOCAL_TESTS_ACK="$(git rev-parse HEAD)" git push origin ours) >"$outD" 2>&1
 rcD=$?
 if [ "$rcD" -ne 0 ] && [ -z "$(remote_sha "$remD" refs/heads/ours)" ] &&
 	grep -q 'check-resync-loss failed' "$outD"; then
@@ -222,6 +246,48 @@ else
 	record_fail "ack/does-not-disarm-resync-loss-gate" "rc=$rcD"
 	sed 's/^/    /' "$outD"
 fi
+
+# ---------------------------------------------------------------------------
+# E-H — THE ACK IS BOUND TO THE PUSH. Any value that is not the pushed commit
+# must leave gate 3 armed: the push is still blocked by the failing tier, and
+# the hook says why it ignored the ack. These fail if the check is widened
+# back to "any non-empty value" or loosened to accept a non-matching SHA.
+# ---------------------------------------------------------------------------
+# assert_ack_ignored <case-name> <ack-value|STALE|SHORT>: a Go change pushed
+# with that ack must be rejected by gate 3 with an IGNORED notice.
+assert_ack_ignored() {
+	local name="$1" value="$2" rem work out rc
+	read -r rem work <<<"$(setup_repo)"
+	(
+		set -e
+		cd "$work"
+		git checkout -q -b ours
+		echo "package main" >a.go
+		git add -A
+		git commit -qm "go change"
+	) >/dev/null 2>&1
+	case "$value" in
+	STALE) value="$(git -C "$work" rev-parse HEAD~1)" ;;
+	SHORT) value="$(git -C "$work" rev-parse --short=6 HEAD)" ;;
+	esac
+	out="$(mktemp "$tmp_root/out.XXXXXX")"
+	(cd "$work" && GIT_TERMINAL_PROMPT=0 LOCAL_TESTS_ACK="$value" git push origin ours) >"$out" 2>&1
+	rc=$?
+	if [ "$rc" -ne 0 ] && [ -z "$(remote_sha "$rem" refs/heads/ours)" ] &&
+		grep -q "LOCAL_TESTS_ACK=$value IGNORED" "$out" &&
+		grep -q 'SIMULATED gate-3 tier failure' "$out"; then
+		record_pass "$name (ignored, gate 3 ran and blocked)"
+	else
+		record_fail "$name" "rc=$rc"
+		sed 's/^/    /' "$out"
+	fi
+}
+
+echo "-- LOCAL_TESTS_ACK values other than the pushed commit still run gate 3 --"
+assert_ack_ignored "ack/value-1-runs-gate-3" 1
+assert_ack_ignored "ack/value-0-runs-gate-3" 0
+assert_ack_ignored "ack/stale-sha-runs-gate-3" STALE
+assert_ack_ignored "ack/six-char-prefix-runs-gate-3" SHORT
 
 echo
 echo "== $pass passed, $fail failed =="
