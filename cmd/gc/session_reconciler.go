@@ -1970,6 +1970,22 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Handle BEFORE heal/stability to avoid false crash detection —
 		// a running session that leaves the desired set is not a crash.
 		if !desired {
+			// A configured agent whose provider could not be resolved this tick
+			// is absent from the desired set for a reason that says nothing about
+			// whether it is still wanted. Keep its sessions untouched — no drain,
+			// no close — until it resolves again (ga-8a8fq).
+			if template, resolveErr, unresolved := unresolvedSessionTemplate(infoByID[id], cfg, reconcileOpts.unresolvedTemplates); unresolved {
+				fmt.Fprintf(stdout, "Keeping session '%s': template %q is configured but its provider cannot be resolved: %s\n", name, template, resolveErr) //nolint:errcheck
+				if trace != nil {
+					trace.RecordDecision(TraceSiteReconcilerOrphaned, TraceReasonProviderUnresolved, TraceOutcomeKeptOpen, template, name, traceRecordPayload{
+						"error": resolveErr,
+					})
+				}
+				if shadowTick != nil {
+					shadowTick.markSkip(id, skipEarlyContinue)
+				}
+				continue
+			}
 			var providerAlive bool
 			var livenessErr error
 			// A preserved configured named session never takes the fast path.
@@ -6996,4 +7012,19 @@ func resolveResumeCommand(command, sessionKey string, rp *config.ResolvedProvide
 	default: // "flag"
 		return command + " " + rp.ResumeFlag + " " + sessionKey
 	}
+}
+
+// unresolvedSessionTemplate reports whether a session belongs to a configured
+// template whose provider could not be resolved this tick, returning the
+// template and the resolution error.
+func unresolvedSessionTemplate(info sessionpkg.Info, cfg *config.City, unresolved map[string]string) (string, string, bool) {
+	if len(unresolved) == 0 {
+		return "", "", false
+	}
+	template := normalizedSessionTemplateInfo(info, cfg)
+	if template == "" {
+		template = strings.TrimSpace(info.Template)
+	}
+	resolveErr, ok := unresolved[template]
+	return template, resolveErr, ok
 }

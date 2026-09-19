@@ -73,9 +73,17 @@ type DesiredStateResult struct {
 	PoolScaleCheckPartialTemplates  map[string]bool
 	PoolPartialRetentionTemplates   map[string]bool
 	NamedScaleCheckPartialTemplates map[string]bool
-	PoolDesiredCounts               map[string]int // runtime-owned demand snapshot; reused on stable patrol ticks when still fresh
-	WorkSet                         map[string]bool
-	AssignedWorkBeads               []beads.Bead // actionable assigned work, plus stranded pool work that needs release
+	// UnresolvedTemplates maps each configured, runnable agent template whose
+	// provider could not be resolved this tick to the resolution error. Such an
+	// agent is absent from State for a reason that says nothing about whether
+	// it is still wanted, so the reconciler keeps its existing sessions (fail
+	// closed for that agent) instead of draining them as orphaned. The provider
+	// catalog is city-wide, so without this one unresolvable entry emptied the
+	// desired set for every agent naming it, in every rig (ga-8a8fq).
+	UnresolvedTemplates map[string]string
+	PoolDesiredCounts   map[string]int // runtime-owned demand snapshot; reused on stable patrol ticks when still fresh
+	WorkSet             map[string]bool
+	AssignedWorkBeads   []beads.Bead // actionable assigned work, plus stranded pool work that needs release
 	// AssignedWorkStores is aligned by index with AssignedWorkBeads, so later
 	// mutation paths update rig-owned work in the right store even when
 	// independent stores produce overlapping bead IDs.
@@ -1171,6 +1179,8 @@ func buildDesiredStateWithSessionBeadsAt(
 		)
 	}
 
+	unresolvedTemplates := unresolvedAgentTemplates(bp, cfg, suspendedRigPaths, stderr)
+
 	sessionSnapshotComplete := bp.hasCompleteSessionSnapshot()
 	sessionOccupancyInfos := make([]session.Info, len(allOpenSessionInfos))
 	copy(sessionOccupancyInfos, allOpenSessionInfos)
@@ -1182,6 +1192,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		PoolScaleCheckPartialTemplates:     poolScaleCheckPartialTemplates,
 		PoolPartialRetentionTemplates:      poolPartialRetentionTemplates,
 		NamedScaleCheckPartialTemplates:    namedScaleCheckPartialTemplates,
+		UnresolvedTemplates:                unresolvedTemplates,
 		AssignedWorkBeads:                  assignedWorkBeads,
 		AssignedWorkStores:                 assignedWorkStores,
 		AssignedWorkStoreRefs:              assignedWorkStoreRefs,
@@ -6425,6 +6436,32 @@ func resolveTemplatePrepared(bp *agentBuildParams, cfgAgent *config.Agent, quali
 	}
 	prepareTemplateResolution(bp, cfgAgent, qualifiedName, bp.stderr)
 	return resolveTemplate(bp, cfgAgent, qualifiedName, fpExtra)
+}
+
+// unresolvedAgentTemplates returns the configured, runnable agent templates
+// whose provider cannot be resolved this tick, keyed to the error. Suspended
+// agents and agents in suspended rigs are left out: their sessions are already
+// accounted for as suspended, and resolution says nothing new about them.
+func unresolvedAgentTemplates(bp *agentBuildParams, cfg *config.City, suspendedRigPaths map[string]bool, stderr io.Writer) map[string]string {
+	var out map[string]string
+	for i := range cfg.Agents {
+		agent := &cfg.Agents[i]
+		if agent.Suspended {
+			continue
+		}
+		if rigName := configuredRigName(bp.cityPath, agent, cfg.Rigs); rigName != "" && suspendedRigPaths[filepath.Clean(rigRootForName(rigName, cfg.Rigs))] {
+			continue
+		}
+		template := agent.QualifiedName()
+		if err := validateAgentSessionTransportForBuild(bp, agent, template); err != nil {
+			if out == nil {
+				out = make(map[string]string)
+			}
+			out[template] = err.Error()
+			fmt.Fprintf(stderr, "buildDesiredState: %v (keeping existing sessions of %q until it resolves)\n", err, template) //nolint:errcheck
+		}
+	}
+	return out
 }
 
 func validateAgentSessionTransportForBuild(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string) error {
