@@ -136,6 +136,28 @@ var (
 	deliveryWindowNowFn = time.Now
 )
 
+// deliveryWindowDrainGCBinary resolves the gc binary the drain re-invokes.
+// GC_BIN wins when set: it is the binary the provider lifecycle chose and
+// exported to gc-beads-bd.sh, which is what invoked this `gc dolt start` in
+// the first place, so the drain runs the same gc its caller did.
+//
+// os.Executable() is only the fallback, because it is not the same thing
+// under every launcher. On Linux it reads /proc/self/exe and so resolves
+// through symlinks. The cmd/gc test harness runs gc as a symlink named "gc"
+// to the test binary (reexecGCTestBinaryForTests), and the test binary only
+// behaves as gc when argv[0] says so. Resolving through the symlink therefore
+// executed the test binary itself as `cmd/gc.test dolt sync --drain`, which
+// ran the whole cmd/gc suite as the "drain". That outlived the provider's
+// start deadline, stranded the window server, and leaked every managed dolt
+// the recursive run started (ga-ynsmt). A deployed gc resolves the same either
+// way.
+func deliveryWindowDrainGCBinary() (string, error) {
+	if bin := strings.TrimSpace(os.Getenv("GC_BIN")); bin != "" {
+		return bin, nil
+	}
+	return os.Executable()
+}
+
 // runDeliveryWindowDrain shells the gc binary's own pack command
 // `dolt sync --drain` against the window server. The drain's env contract
 // (examples/bd/dolt/commands/sync/run.sh): GC_CITY_PATH + GC_DOLT_PORT
@@ -143,7 +165,7 @@ var (
 // drain exits non-zero when it cannot PROVE zero backlog (vp-p8tze D3) —
 // that is the terminal record the caller reports, never a silent pass.
 func runDeliveryWindowDrain(cityPath, port, user string, budget time.Duration) error {
-	gcBin, err := os.Executable()
+	gcBin, err := deliveryWindowDrainGCBinary()
 	if err != nil {
 		return fmt.Errorf("resolve gc binary for drain: %w", err)
 	}

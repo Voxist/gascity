@@ -447,7 +447,7 @@ jobs:
       # is now a choice, not a capability limit: BdStore.ReleaseIfCurrent prefers
       # bd's --if-assignee/--if-status verb (a rejected precondition is exit 13),
       # and BD_VERSION — every other job's bd — carries those flags as of
-      # v1.3.0-rc.2, so the row would run there too. It stays here as the single
+      # v1.3.0, so the row would run there too. It stays here as the single
       # home for the one contract that needs a real CAS-capable bd, and
       # BD_PREV_VERSION (v1.0.4) still cannot run it. The target refuses to skip.
       - name: bd conditional-release CAS contract (current)
