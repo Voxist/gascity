@@ -1472,7 +1472,8 @@ cleanup tool. It resolves the Dolt server port via the AD-04 chain
 (--port &gt; city dolt.port &gt; live managed dolt [runtime handle, then
 process table] &gt; 3307); .beads/dolt-server.port is a bd compatibility
 status file and is never consulted for endpoint selection (it is read
-protect-only, to fence a recorded port). It drops stale test/agent
+protect-only, to fence a recorded port, when live resolution is
+unavailable). It drops stale test/agent
 databases, calls DOLT_PURGE_DROPPED_DATABASES to reclaim disk, and
 reaps orphaned dolt sql-server processes left over from leaked test
 harnesses. Invalid explicit ports, invalid city port settings, and
