@@ -785,6 +785,10 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	ensureInitArtifacts(cityPath, stderr, "gc start")
 
+	// gc start is the explicit lifecycle command: it owns the managed Dolt
+	// lifecycle for the rest of this process (ga-fjr5f).
+	claimManagedDoltLifecycle()
+
 	// Resolve rig paths and run the full bead store lifecycle:
 	// probe → init+hooks(city) → init+hooks(rigs) → routes.
 	resolveRigPaths(cityPath, cfg.Rigs)

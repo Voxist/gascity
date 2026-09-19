@@ -5253,6 +5253,7 @@ esac
 }
 
 func TestHealthBeadsProviderWaitsForStorePingAfterRecovery(t *testing.T) {
+	ownManagedDoltLifecycleForTest(t, true)
 	cityPath := t.TempDir()
 	writeMinimalCityToml(t, cityPath)
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads", "dolt"), 0o755); err != nil {
@@ -12869,6 +12870,7 @@ func TestHealthBeadsProviderSkipsRecoverWhenBreakerOpen(t *testing.T) {
 }
 
 func TestHealthBeadsProviderBacksOffSecondRecoverWithinCooldown(t *testing.T) {
+	ownManagedDoltLifecycleForTest(t, true)
 	cityPath := t.TempDir()
 	writeMinimalCityToml(t, cityPath)
 	opsFile := writeBreakerAwarePreflightFakes(t, cityPath, "unhealthy")
@@ -12909,6 +12911,7 @@ func TestHealthBeadsProviderBacksOffSecondRecoverWithinCooldown(t *testing.T) {
 }
 
 func TestHealthBeadsProviderAllowsRecoverAfterCooldown(t *testing.T) {
+	ownManagedDoltLifecycleForTest(t, true)
 	cityPath := t.TempDir()
 	writeMinimalCityToml(t, cityPath)
 	opsFile := writeBreakerAwarePreflightFakes(t, cityPath, "unhealthy")

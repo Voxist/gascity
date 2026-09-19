@@ -768,7 +768,18 @@ func managedDoltSQLServerSysProcAttr() *syscall.SysProcAttr {
 	if managedDoltTestModeEnabled() {
 		return nil
 	}
-	return &syscall.SysProcAttr{Setpgid: true}
+	return managedDoltDetachedSysProcAttr()
+}
+
+// managedDoltDetachedSysProcAttr starts a managed-Dolt process in a new
+// session (ga-fjr5f). Setsid, not just Setpgid: a new process group still
+// belongs to the caller's session and controlling terminal, so a server or
+// scope watchdog started from an agent session was signaled when that
+// session was torn down, and the server died with it. A new session has no
+// controlling terminal and outlives the caller's. Setsid also makes the child
+// its own process-group leader, so group semantics are unchanged.
+func managedDoltDetachedSysProcAttr() *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{Setsid: true}
 }
 
 func managedDoltTestWatchdogEnabled() bool {

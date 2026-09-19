@@ -1486,6 +1486,7 @@ func testHarnessDefaultPortError(s supervisor.Section) error {
 // starts a control socket, reads the registry, starts CityRuntimes,
 // and runs until canceled.
 func runSupervisor(stdout, stderr io.Writer) int {
+	claimManagedDoltLifecycle()
 	configureSupervisorRuntime()
 
 	if pid := supervisorAlive(); pid != 0 {

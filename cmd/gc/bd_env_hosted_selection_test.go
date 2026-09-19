@@ -52,6 +52,7 @@ func installFakeHostedBdExec(t *testing.T, fn func(dir, name string, args ...str
 // env, the runner choice, again on the managed retry — so a single ready
 // read loaded the city config two to four times.
 func TestBdRunnersLoadConfigOncePerInvocation(t *testing.T) {
+	ownManagedDoltLifecycleForTest(t, true)
 	t.Run("managed runner", func(t *testing.T) {
 		t.Setenv("GC_BEADS", "bd")
 		disableManagedDoltRecoveryForTest(t)
