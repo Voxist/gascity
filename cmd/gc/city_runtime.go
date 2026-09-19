@@ -531,6 +531,7 @@ func (cr *CityRuntime) crashTrack() crashTracker {
 // the per-city main loop — it watches config, reconciles agents, runs
 // wisp GC, and dispatches orders.
 func (cr *CityRuntime) run(ctx context.Context) {
+	claimManagedDoltLifecycle()
 	// Reaching run() means every init-failure/discard point is behind us:
 	// this runtime is the live owner of the city, so its shutdown() is the
 	// one allowed to tear the provider's shared server down.

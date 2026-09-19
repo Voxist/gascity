@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -239,6 +240,10 @@ func readManagedDoltScopeIdentityState(t *testing.T, path string) (uint64, strin
 // before it can reap the child. Without it the startup-failure cleanup guard
 // (terminateManagedDoltStartedProcess) falls through to unconditional bare-PID
 // signaling and can kill an unrelated process that reused the numeric PID.
+//
+// The same spawn also pins the watchdog's process placement (ga-fjr5f): it
+// leads its own session, detached from the process that started it, and logs
+// that placement at start and when signaled.
 func TestManagedDoltScopeWatchdogReportsStartIdentity(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX process semantics required")
@@ -277,6 +282,56 @@ func TestManagedDoltScopeWatchdogReportsStartIdentity(t *testing.T) {
 	if ticks == 0 && identity == "" {
 		logData, _ := os.ReadFile(logPath)
 		t.Fatalf("scope watchdog reported no start identity (ticks=%d identity=%q); PID-reuse guard disabled; log:\n%s", ticks, identity, logData)
+	}
+
+	// ga-fjr5f: the helper stands in for an agent's SessionStart hook — it
+	// shares this test's session, starts the server under the watchdog, and
+	// exits. The watchdog must lead a NEW session with no controlling
+	// terminal, with its server inside that session, so tearing down the
+	// caller's session cannot signal either.
+	callerSID, err := syscall.Getsid(0)
+	if err != nil {
+		t.Fatalf("getsid(self): %v", err)
+	}
+	watchdogSID, err := syscall.Getsid(watchdogPID)
+	if err != nil {
+		t.Fatalf("getsid(watchdog %d): %v", watchdogPID, err)
+	}
+	if watchdogSID == callerSID {
+		t.Fatalf("watchdog pid %d is in the caller's session %d; tearing that session down "+
+			"would signal it and kill the managed server (ga-fjr5f)", watchdogPID, callerSID)
+	}
+	if watchdogSID != watchdogPID {
+		t.Fatalf("watchdog pid %d is in session %d, want it to lead its own session", watchdogPID, watchdogSID)
+	}
+	if doltSID, err := syscall.Getsid(doltPID); err != nil || doltSID != watchdogSID {
+		t.Fatalf("dolt pid %d session = %d (err %v), want the watchdog's session %d", doltPID, doltSID, err, watchdogSID)
+	}
+
+	// Its log must say where it runs, at start and again when signaled.
+	if err := syscall.Kill(watchdogPID, syscall.SIGTERM); err != nil {
+		t.Fatalf("signal watchdog: %v", err)
+	}
+	// The watchdog leads its own process group, so the group emptying is its
+	// exit; it logs the signal before it terminates the server.
+	if err := waitForProcessGroupExit(watchdogPID, 15*time.Second); err != nil {
+		t.Fatalf("watchdog did not exit after SIGTERM: %v", err)
+	}
+	logData, _ := os.ReadFile(logPath)
+	placement := fmt.Sprintf("watchdog pid=%d ppid=", watchdogPID)
+	detached := fmt.Sprintf("sid=%d tty=none", watchdogPID)
+	for _, event := range []string{"supervising dolt sql-server", "received terminated"} {
+		found := false
+		for _, line := range strings.Split(string(logData), "\n") {
+			if strings.Contains(line, event) && strings.Contains(line, placement) && strings.Contains(line, detached) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("no %q log line carries the watchdog's placement (%q ... %q); log:\n%s",
+				event, placement, detached, logData)
+		}
 	}
 }
 

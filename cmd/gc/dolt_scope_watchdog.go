@@ -137,7 +137,10 @@ func startManagedDoltSQLServerWithScopeWatchdog(cityPath, configFile, logFilePat
 	cmd := exec.Command(watchdogExecutable, managedDoltScopeWatchdogArg, configFile, logFilePath, cityPath)
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
-	cmd.SysProcAttr = managedDoltSQLServerSysProcAttr()
+	// Always its own session, test mode included: the watchdog outlives its
+	// spawner by design, so it must never share the spawner's session or
+	// controlling terminal (ga-fjr5f).
+	cmd.SysProcAttr = managedDoltDetachedSysProcAttr()
 	cmd.Env = doltServerEnv(cityPath, os.Environ())
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -234,8 +237,8 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 	fmt.Fprintln(stdout, formatManagedDoltWatchdogStartLine(startPID, startTicks, startIdentity)) //nolint:errcheck
 
 	interval := managedDoltScopeWatchdogInterval()
-	fmt.Fprintf(logFile, "gc scope watchdog: supervising dolt sql-server pid %d (config %s, poll interval %s)\n", //nolint:errcheck
-		cmd.Process.Pid, configFile, interval)
+	fmt.Fprintf(logFile, "gc scope watchdog: supervising dolt sql-server pid %d (config %s, poll interval %s; watchdog %s)\n", //nolint:errcheck
+		cmd.Process.Pid, configFile, interval, managedDoltScopeWatchdogProcessIdentity())
 
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -250,7 +253,8 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 	for {
 		select {
 		case sig := <-signals:
-			fmt.Fprintf(logFile, "gc scope watchdog: received %v; terminating dolt sql-server pid %d\n", sig, cmd.Process.Pid) //nolint:errcheck
+			fmt.Fprintf(logFile, "gc scope watchdog: received %v (watchdog %s); terminating dolt sql-server pid %d\n", //nolint:errcheck
+				sig, managedDoltScopeWatchdogProcessIdentity(), cmd.Process.Pid)
 			_ = terminateManagedDoltScopeWatchdogChild(cityPath, cmd.Process.Pid, startTicks, startIdentity)
 			<-done
 			return 0
@@ -294,4 +298,31 @@ func terminateManagedDoltScopeWatchdogChild(cityPath string, pid int, startTicks
 	return terminateManagedDoltPIDGuarded(cityPath, pid, func() bool {
 		return managedDoltPIDStartIdentityMatches(pid, startTicks, startIdentity)
 	})
+}
+
+// managedDoltScopeWatchdogProcessIdentity renders the watchdog's own process
+// placement — pid, ppid, process group, session and whether it has a
+// controlling terminal — for its log. When a watchdog is signaled, this is
+// what tells an operator whose session it was in and who its parent was
+// (ga-fjr5f). The signal's sender is not observable from signal.Notify.
+func managedDoltScopeWatchdogProcessIdentity() string {
+	sid, err := syscall.Getsid(0)
+	sidText := strconv.Itoa(sid)
+	if err != nil {
+		sidText = "unknown"
+	}
+	return fmt.Sprintf("pid=%d ppid=%d pgid=%d sid=%s tty=%s",
+		os.Getpid(), os.Getppid(), syscall.Getpgrp(), sidText, managedDoltControllingTTY())
+}
+
+// managedDoltControllingTTY reports whether this process has a controlling
+// terminal: opening /dev/tty succeeds only when it does. A detached watchdog
+// must report "none".
+func managedDoltControllingTTY() string {
+	f, err := os.Open("/dev/tty")
+	if err != nil {
+		return "none"
+	}
+	_ = f.Close()
+	return "present"
 }
