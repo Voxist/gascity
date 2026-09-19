@@ -218,6 +218,7 @@ type CityRuntime struct {
 	convergenceReqCh    chan convergenceRequest      // receives CLI commands from controller.sock
 	reloadReqCh         chan reloadRequest           // receives structured reload requests from controller.sock
 	pokeCh              chan struct{}                // non-blocking signal to trigger immediate reconciler tick
+	sessionEvents       *sessionEventPump            // provider event stream → pokeCh bridge; wired by run()
 	controlDispatcherCh chan struct{}                // non-blocking signal for control-dispatcher-only reconcile
 	nudgeWakeCh         chan struct{}                // signal to dispatch queued nudges; fed by wake socket listener
 	reloadMu            sync.Mutex                   // guards activeReload
@@ -868,6 +869,13 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		}
 	}
 
+	// Bridge the provider's push session-event stream (if it has one) into
+	// pokeCh: a session death pokes the reconciler within seconds instead of
+	// surfacing at the next patrol scan. Config reload re-points the pump
+	// when it swaps the provider.
+	cr.sessionEvents = newSessionEventPump(ctx, cr.pokeCh, cr.stderr, cr.logPrefix)
+	cr.sessionEvents.restart(cr.sp)
+
 	// Reload acceptance runs on its own goroutine so that a slow tick
 	// body (e.g., a session-start wave that waits for startup_timeout)
 	// does not block reload request acceptance. The accept path
@@ -1239,6 +1247,8 @@ func (cr *CityRuntime) tick(
 			trace.end(completion, traceRecordPayload{"phase": "tick", "trigger": traceTrigger})
 		}
 	}()
+	// Detect pool instance deaths since last tick. Ordered ahead of the config
+	// reload so it compares against the config the deaths happened under.
 	cr.reconcilePoolDeaths(prevPoolRunning)
 
 	var manualReload *reloadRequest
@@ -1365,6 +1375,8 @@ func (cr *CityRuntime) tick(
 		return
 	}
 
+	// Session-management phases: snapshot, corpse sweeps, drain finalization,
+	// demand/desired state, bead-driven reconcile.
 	phaseStart = time.Now()
 	sessionBeads := cr.loadSessionBeadSnapshot()
 	recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.initial", phaseStart, traceSessionSnapshotFields(sessionBeads))
@@ -1926,6 +1938,11 @@ func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, []orderTrackin
 	// opened at boot, never a second resolution, so nothing here is closed by
 	// closeOpened — the runtime owns that handle for its whole life.
 	stores = appendOrdersSweepStore(stores, cr.relocatedOrdersStore())
+	// vc-ny00: never serialize the tick behind a store whose scope
+	// transport breaker is already open. Filtered AFTER the opens above so
+	// closeOpened still releases every handle this call created, degraded
+	// or not.
+	stores = filterDegradedSweepStores(cr.cityPath, stores, cr.stderr, cr.logPrefix)
 	closeOpened := func() {
 		for _, s := range freshlyOpened {
 			_ = closeBeadStoreHandle(s) //nolint:errcheck // best-effort
@@ -2363,6 +2380,13 @@ func (cr *CityRuntime) reloadConfigTraced(
 	cr.dops = nextDops
 	cr.serviceStateMu.Unlock()
 	cr.demandSnapshot = nil
+
+	// Re-point the session-event pump at the new provider's stream (or
+	// deactivate it when the new provider has none). Nil until run() wires
+	// it — startup one-shot reloads happen before the pump exists.
+	if providerChanged && cr.sessionEvents != nil {
+		cr.sessionEvents.restart(nextSp)
+	}
 
 	if cr.cs != nil {
 		cr.cs.updateFromRuntime(nextCfg, nextSp, result.Revision)
@@ -2943,6 +2967,31 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 			time.Now(),
 			cr.rec,
 			cr.requestExecutionStalledDrain,
+			cr.stdout,
+		)
+		// The never-claimed lane (ga-evxqd). The three above key on a bead the
+		// seat was BOUND to, on one preassigned successor, or on an in_progress
+		// claim; this one keys on the seat's own OPEN ready work — assigned to
+		// it or merely routed to its identity — which is the residual none of
+		// them can see. It reads the BROAD open-routed view rather than the
+		// pool-demand-narrowed one because it settles readiness itself, from
+		// each row's own dependency edges: a named seat's routed work is not
+		// pool demand, so the narrowed view can be silent on exactly the rows
+		// this lane exists for. It nudges and reports; it never drains.
+		nudgeStalledSeatClaims(
+			cr.sp,
+			cr.cfg,
+			sessStore,
+			stalledPoolBeads,
+			result.AssignedWorkBeads,
+			result.AssignedWorkStores,
+			result.AssignedWorkStoreRefs,
+			result.OpenRoutedWorkBeads,
+			result.OpenRoutedWorkStores,
+			result.OpenRoutedWorkStoreRefs,
+			result.StoreQueryPartial || result.SessionQueryPartial || result.OpenRoutedWorkQueryPartial,
+			time.Now(),
+			cr.rec,
 			cr.stdout,
 		)
 	}
