@@ -307,6 +307,7 @@ func writeFakeDoltSQLServer(t *testing.T) string {
 		"  echo \"unexpected dolt args: $*\" >&2\n" +
 		"  exit 2\n" +
 		"fi\n" +
+		"if [ -n \"$GC_TEST_FAKE_DOLT_ENV_FILE\" ]; then env > \"$GC_TEST_FAKE_DOLT_ENV_FILE\"; fi\n" +
 		"exec sleep 60\n"
 	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
 		t.Fatalf("write fake dolt: %v", err)

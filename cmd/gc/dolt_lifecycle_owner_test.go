@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // ownManagedDoltLifecycleForTest sets whether this test process owns the
@@ -319,6 +321,35 @@ func TestManagedDoltIdentityStopCallSitesAreAnEnumeratedSet(t *testing.T) {
 	for name, n := range want {
 		if got[name] == 0 {
 			t.Errorf("%s: enumerated %d call site(s) but found none; update this list", name, n)
+		}
+	}
+}
+
+// TestManagedDoltEnvCarriesNoSessionIdentity pins the source half of the
+// ga-fjr5f teardown fix: whatever session environment the spawner runs in,
+// the managed server's environment carries none of its per-incarnation keys,
+// so the runtime's orphan sweep can never mistake the server for a session's
+// leftover process.
+func TestManagedDoltEnvCarriesNoSessionIdentity(t *testing.T) {
+	parent := []string{"PATH=/usr/bin", "HOME=/home/x"}
+	for key, value := range session.RuntimeEnvWithAlias("gc-deacon", "gastown__deacon", "deacon", 3, 1, "token") {
+		parent = append(parent, key+"="+value)
+	}
+	env := doltServerEnv("", parent)
+	for key := range session.RuntimeEnvWithAlias("", "", "", 0, 0, "") {
+		for _, entry := range env {
+			if strings.HasPrefix(entry, key+"=") {
+				t.Fatalf("doltServerEnv kept the session key %q: %v", key, env)
+			}
+		}
+	}
+	for _, keep := range []string{"PATH=/usr/bin", "HOME=/home/x"} {
+		found := false
+		for _, entry := range env {
+			found = found || entry == keep
+		}
+		if !found {
+			t.Fatalf("doltServerEnv dropped %q, which is not session identity: %v", keep, env)
 		}
 	}
 }

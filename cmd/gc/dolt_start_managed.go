@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 type managedDoltStartReport struct {
@@ -1349,6 +1350,16 @@ func managedDoltTestParentDone(rawFD string) (<-chan struct{}, func(), error) {
 // sql-server we launch.
 func doltServerEnv(cityPath string, parent []string) []string {
 	env := removeEnvKey(parent, "DOLT_DISABLE_EVENT_FLUSH")
+	// The managed server and its scope watchdog are city infrastructure, never
+	// part of a session incarnation (ga-fjr5f). Started from inside an agent
+	// session — a SessionStart hook, or a shell that inherited the session's
+	// environment — they would otherwise carry its GC_SESSION_ID. Once their
+	// spawner exits they are orphans with that id, which is exactly what the
+	// runtime's orphan sweep (proctable.ScanBySessionID) kills when the session
+	// is torn down or replaced — taking the city's managed Dolt with it.
+	for key := range session.RuntimeEnvWithAlias("", "", "", 0, 0, "") {
+		env = removeEnvKey(env, key)
+	}
 	if managedDoltDisableEventFlush(cityPath) {
 		// Disable Dolt usage telemetry for managed servers by default. The
 		// `dolt send-metrics` event-flush reporter spawns transient

@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func TestManagedDoltScopeGone(t *testing.T) {
@@ -184,6 +186,14 @@ func TestManagedDoltScopeWatchdogHelper(t *testing.T) {
 	if interval := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_SCOPE_WD_INTERVAL_MS")); interval != "" {
 		t.Setenv(managedDoltScopeWatchdogIntervalEnv, interval)
 	}
+	// Opt-in: start the server from inside an agent session's environment, the
+	// way a SessionStart hook (or a shell that inherited the session) does.
+	// TestMain scrubs GC_* keys, so the id rides a GC_TEST_ control var.
+	if sessionID := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_SESSION_ID")); sessionID != "" {
+		for key, value := range session.RuntimeEnvWithAlias(sessionID, "gastown__deacon", "deacon", 3, 1, "token") {
+			t.Setenv(key, value)
+		}
+	}
 	statePath := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_STATE"))
 	configPath := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_CONFIG"))
 	logPath := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_LOG"))
@@ -254,6 +264,7 @@ func TestManagedDoltScopeWatchdogReportsStartIdentity(t *testing.T) {
 	fakeDoltDir := writeFakeDoltSQLServer(t)
 	statePath := filepath.Join(dir, "state")
 	identityPath := filepath.Join(dir, "identity")
+	doltEnvPath := filepath.Join(dir, "dolt-env")
 	configPath := filepath.Join(dir, "dolt-config.yaml")
 	logPath := filepath.Join(dir, "dolt.log")
 	if err := os.WriteFile(configPath, []byte("log_level: debug\n"), 0o644); err != nil {
@@ -265,6 +276,8 @@ func TestManagedDoltScopeWatchdogReportsStartIdentity(t *testing.T) {
 		"GC_TEST_MANAGED_DOLT_HELPER=scope-watchdog",
 		"GC_TEST_MANAGED_DOLT_HELPER_STATE="+statePath,
 		"GC_TEST_MANAGED_DOLT_HELPER_IDENTITY="+identityPath,
+		"GC_TEST_MANAGED_DOLT_HELPER_SESSION_ID=gc-deacon-session",
+		"GC_TEST_FAKE_DOLT_ENV_FILE="+doltEnvPath,
 		"GC_TEST_MANAGED_DOLT_HELPER_CONFIG="+configPath,
 		"GC_TEST_MANAGED_DOLT_HELPER_LOG="+logPath,
 		"GC_TEST_MANAGED_DOLT_HELPER_FAKE_DOLT_DIR="+fakeDoltDir,
@@ -333,6 +346,27 @@ func TestManagedDoltScopeWatchdogReportsStartIdentity(t *testing.T) {
 		if !found {
 			t.Fatalf("no %q log line carries the watchdog's placement (%q ... %q); log:\n%s",
 				event, placement, detached, logData)
+		}
+	}
+
+	// ga-fjr5f: started from inside an agent session, the server must carry
+	// none of that session's identity. With GC_SESSION_ID and an exited
+	// spawner, the runtime's orphan sweep (proctable.ScanBySessionID) treats it
+	// as the session's leftover root and kills it when the session is torn
+	// down or replaced.
+	doltEnv, err := os.ReadFile(doltEnvPath)
+	if err != nil {
+		t.Fatalf("read fake dolt env: %v", err)
+	}
+	if !strings.Contains(string(doltEnv), "GC_TEST_FAKE_DOLT_ENV_FILE=") {
+		t.Fatalf("fake dolt env dump does not reflect the spawner's environment; dump:\n%s", doltEnv)
+	}
+	for key := range session.RuntimeEnvWithAlias("", "", "", 0, 0, "") {
+		for _, line := range strings.Split(string(doltEnv), "\n") {
+			if strings.HasPrefix(line, key+"=") {
+				t.Fatalf("managed dolt inherited the agent session's %s; the orphan sweep would "+
+					"kill it with the session (ga-fjr5f); env:\n%s", key, doltEnv)
+			}
 		}
 	}
 }
