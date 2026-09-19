@@ -15,7 +15,8 @@
 # and 2 armed. Cases C and D are the load-bearing ones — they must fail if
 # the ack is ever moved earlier in the hook or widened into a --no-verify
 # equivalent. Cases E-H pin that the ack is BOUND to the pushed commit: any
-# other value (0, 1, a stale SHA, a too-short prefix) must still run gate 3.
+# other value (0, 1, a stale SHA, a too-short prefix) must still run gate 3,
+# and so must an ack for one of several different commits in one push (I).
 #
 # Hermetic: temp git repos, a stub bd, and a Makefile whose tier target is a
 # simulated failure. Never runs the real Go suite (that is the tier this bead
@@ -288,6 +289,82 @@ assert_ack_ignored "ack/value-1-runs-gate-3" 1
 assert_ack_ignored "ack/value-0-runs-gate-3" 0
 assert_ack_ignored "ack/stale-sha-runs-gate-3" STALE
 assert_ack_ignored "ack/six-char-prefix-runs-gate-3" SHORT
+
+# ---------------------------------------------------------------------------
+# I-K — MULTI-REF PUSHES AND CASE. The SHA match is a prefix strip over the
+# pushed commits, so without the one-commit rule an ack for one commit would
+# also skip gate 3 for every other commit in the same push.
+# ---------------------------------------------------------------------------
+# setup_two_branches <same|different>: work clone with branches ours and other
+# each carrying a Go change — on the same commit, or on two different commits.
+# Echoes "<remote> <work> <sha-of-ours> <sha-of-other>".
+setup_two_branches() {
+	local mode="$1" rem work
+	read -r rem work <<<"$(setup_repo)"
+	(
+		set -e
+		cd "$work"
+		git checkout -q -b ours
+		echo "package main" >a.go
+		git add -A
+		git commit -qm "go change"
+		if [ "$mode" = same ]; then
+			git branch other
+		else
+			git checkout -q -b other main
+			echo "package other" >b.go
+			git add -A
+			git commit -qm "other go change"
+		fi
+	) >/dev/null 2>&1
+	printf '%s %s %s %s' "$rem" "$work" "$(git -C "$work" rev-parse ours)" "$(git -C "$work" rev-parse other)"
+}
+
+echo "-- an ack for one of two different pushed commits is ignored --"
+read -r remI workI shaI1 shaI2 <<<"$(setup_two_branches different)"
+# Ack the commit that sorts FIRST: the prefix strip over the sorted list would
+# match it, so only the one-commit rule can refuse this ack.
+ackI="$(printf '%s\n' "$shaI1" "$shaI2" | sort | head -n 1)"
+outI="$(mktemp "$tmp_root/outI.XXXXXX")"
+(cd "$workI" && GIT_TERMINAL_PROMPT=0 LOCAL_TESTS_ACK="$ackI" git push origin ours other) >"$outI" 2>&1
+rcI=$?
+if [ "$rcI" -ne 0 ] && [ -z "$(remote_sha "$remI" refs/heads/ours)" ] &&
+	[ -z "$(remote_sha "$remI" refs/heads/other)" ] &&
+	grep -q "LOCAL_TESTS_ACK=$ackI IGNORED — this push carries more than one commit" "$outI" &&
+	grep -q 'SIMULATED gate-3 tier failure' "$outI"; then
+	record_pass "ack/two-commits-one-acked-runs-gate-3 (ignored, gate 3 ran and blocked)"
+else
+	record_fail "ack/two-commits-one-acked-runs-gate-3" "rc=$rcI"
+	sed 's/^/    /' "$outI"
+fi
+
+echo "-- an ack covers two refs carrying the same commit --"
+read -r remJ workJ shaJ _ <<<"$(setup_two_branches same)"
+outJ="$(mktemp "$tmp_root/outJ.XXXXXX")"
+(cd "$workJ" && GIT_TERMINAL_PROMPT=0 LOCAL_TESTS_ACK="$shaJ" git push origin ours other) >"$outJ" 2>&1
+rcJ=$?
+if [ "$rcJ" -eq 0 ] && [ "$(remote_sha "$remJ" refs/heads/ours)" = "$shaJ" ] &&
+	[ "$(remote_sha "$remJ" refs/heads/other)" = "$shaJ" ] &&
+	grep -q "SKIPPED .*commit $shaJ (refs: refs/heads/ours refs/heads/other)" "$outJ"; then
+	record_pass "ack/two-refs-same-commit-skips-gate-3"
+else
+	record_fail "ack/two-refs-same-commit-skips-gate-3" "rc=$rcJ"
+	sed 's/^/    /' "$outJ"
+fi
+
+echo "-- an uppercase SHA ack is accepted --"
+read -r remK workK shaK _ <<<"$(setup_two_branches same)"
+ackK="$(printf '%s' "$shaK" | tr 'a-f' 'A-F')"
+outK="$(mktemp "$tmp_root/outK.XXXXXX")"
+(cd "$workK" && GIT_TERMINAL_PROMPT=0 LOCAL_TESTS_ACK="$ackK" git push origin ours) >"$outK" 2>&1
+rcK=$?
+if [ "$rcK" -eq 0 ] && [ "$(remote_sha "$remK" refs/heads/ours)" = "$shaK" ] &&
+	grep -q "SKIPPED .*commit $shaK" "$outK"; then
+	record_pass "ack/uppercase-sha-skips-gate-3"
+else
+	record_fail "ack/uppercase-sha-skips-gate-3" "rc=$rcK"
+	sed 's/^/    /' "$outK"
+fi
 
 echo
 echo "== $pass passed, $fail failed =="
