@@ -1523,12 +1523,22 @@ wait_deleted_data_inodes() {
     return 1
 }
 
-# kill_imposter kills a process that isn't our dolt server.
+# kill_imposter kills a stale dolt server of OURS that is holding DOLT_PORT
+# (e.g. one still serving deleted data inodes). It never kills a process that
+# verify_our_server cannot identify as this city's server: a foreign holder of
+# the port — another city's live dolt, or anything else — is out of this
+# script's root, and killing it takes that owner down (ga-cflrh). In that case
+# it refuses, says why, and returns 1 so the caller fails the start instead.
 kill_imposter() {
     local pid="$1"
     [ -n "$pid" ] || return 0
 
-    echo "killing imposter dolt server (PID $pid) on port $DOLT_PORT" >&2
+    if ! verify_our_server "$pid"; then
+        echo "refusing to kill PID $pid holding port $DOLT_PORT: it is not this city's dolt server (data dir $DATA_DIR)" >&2
+        return 1
+    fi
+
+    echo "killing stale dolt server (PID $pid) on port $DOLT_PORT" >&2
     kill "$pid" 2>/dev/null || return 0
 
     # Wait up to 5s for graceful shutdown.
@@ -2712,7 +2722,8 @@ op_start() {
                     die "could not stop dolt server (PID $holder) holding port $DOLT_PORT without risking journal corruption (check $LOG_FILE)"
             else
                 if [ -z "$gc_helper_bin" ]; then
-                    kill_imposter "$holder"
+                    kill_imposter "$holder" || \
+                        die "port $DOLT_PORT is held by PID $holder, which is not this city's dolt server; stop it or configure a different port"
                     sleep 1
                 fi
             fi
@@ -2743,7 +2754,8 @@ op_start() {
             else
                 # Imposter or stale local server on our port — kill it.
                 if [ -z "$gc_helper_bin" ]; then
-                    kill_imposter "$holder"
+                    kill_imposter "$holder" || \
+                        die "port $DOLT_PORT is held by PID $holder, which is not this city's dolt server; stop it or configure a different port"
                     sleep 1
                 fi
             fi

@@ -1428,19 +1428,6 @@ func findModuleRoot() string {
 	}
 }
 
-// filterEnv returns env with the named variable removed.
-func filterEnv(env []string, name string) []string {
-	prefix := name + "="
-	result := make([]string, 0, len(env))
-	for _, e := range env {
-		if len(e) >= len(prefix) && e[:len(prefix)] == prefix {
-			continue
-		}
-		result = append(result, e)
-	}
-	return result
-}
-
 func integrationEnv() []string {
 	return integrationEnvFor(testGCHome, testRuntimeDir, false)
 }
@@ -1450,51 +1437,12 @@ func integrationEnvDolt() []string {
 }
 
 func integrationEnvFor(gcHome, runtimeDir string, useDolt bool) []string {
-	env := filterEnv(os.Environ(), "GC_BEADS")
-	env = filterEnv(env, "BEADS_DIR")
-	env = filterEnv(env, "GC_BEADS_SCOPE_ROOT")
-	env = filterEnv(env, "GC_DOLT")
-	env = filterEnv(env, "PATH")
-	env = filterEnv(env, "GC_HOME")
-	env = filterEnv(env, "GC_DIR")
-	env = filterEnv(env, "GC_CITY")
-	env = filterEnv(env, "GC_CITY_PATH")
-	env = filterEnv(env, "GC_CITY_ROOT")
-	env = filterEnv(env, "GC_CITY_RUNTIME_DIR")
-	env = filterEnv(env, "GC_AGENT")
-	env = filterEnv(env, "GC_RIG")
-	env = filterEnv(env, "GC_RIG_ROOT")
-	env = filterEnv(env, "GC_TEMPLATE")
-	env = filterEnv(env, "GC_SESSION_NAME")
-	env = filterEnv(env, "XDG_RUNTIME_DIR")
+	env := scrubInheritedEnv(os.Environ())
 	env = filterEnv(env, integrationRealBDBinaryEnv)
-	env = filterEnv(env, "DOLT_ROOT_PATH")
-	env = filterEnv(env, "BEADS_ACTOR")
-	env = filterEnv(env, "GC_DOLT_HOST")
-	env = filterEnv(env, "GC_DOLT_PORT")
-	env = filterEnv(env, "GC_DOLT_USER")
-	env = filterEnv(env, "GC_DOLT_PASSWORD")
 	env = filterEnv(env, managedDoltTestModeEnv)
 	env = filterEnv(env, managedDoltTestParentEnv)
-	env = filterEnv(env, "BEADS_DOLT_SERVER_HOST")
-	env = filterEnv(env, "BEADS_DOLT_SERVER_PORT")
-	env = filterEnv(env, "BEADS_DOLT_SERVER_USER")
-	env = filterEnv(env, "BEADS_DOLT_HOST")
-	env = filterEnv(env, "BEADS_DOLT_PORT")
-	env = filterEnv(env, "BEADS_DOLT_USER")
-	env = filterEnv(env, "BEADS_DOLT_DATABASE")
-	env = filterEnv(env, "BEADS_DOLT_DATA_DIR")
-	env = filterEnv(env, "BEADS_DOLT_PASSWORD")
-	env = filterEnv(env, "GC_SUPERVISOR_ENV")
-	env = filterEnv(env, "GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL")
-	env = filterEnv(env, "GC_SUPERVISOR_LOG_TEE")
-	env = filterEnv(env, "DOLT_HOST")
-	env = filterEnv(env, "DOLT_PORT")
-	env = filterEnv(env, "DOLT_USER")
-	env = filterEnv(env, "DOLT_PASSWORD")
 	env = filterEnv(env, integrationGCBinaryEnv)
 	env = filterEnv(env, integrationDoltBinaryEnv)
-	env = filterEnv(env, "BEADS_DOLT_AUTO_START")
 	env = filterEnv(env, launchAgentsDirEnv)
 	if !useDolt {
 		env = append(env, "GC_DOLT=skip")
