@@ -34,12 +34,16 @@ replay_refs() {
 go_changed=0
 any_non_deletion=0
 resync_loss_merges=()
-while read -r _local_ref local_sha _remote_ref remote_sha; do
+pushed_shas=()
+pushed_refs=()
+while read -r local_ref local_sha _remote_ref remote_sha; do
   # Branch deletion — nothing to test, nothing to guard.
   if [ "$local_sha" = "$zero" ]; then
     continue
   fi
   any_non_deletion=1
+  pushed_shas+=("$local_sha")
+  pushed_refs+=("$local_ref")
   # New remote branch: no cheap base to diff against — run the suite.
   if [ "$remote_sha" = "$zero" ]; then
     go_changed=1
@@ -118,6 +122,44 @@ fi
 
 if [ "$go_changed" -eq 0 ]; then
   exit 0
+fi
+
+# Gate 3 (fast test tier) escape hatch: LOCAL_TESTS_ACK=<sha>, for the same
+# reason RESYNC_LOSS_ACK exists above (vc-dq0b). `git push --no-verify` is the
+# only other bypass this gate has, and it disarms all three gates at once —
+# including the ga-fip9ps.1 bead-ownership guard, which is fail-closed precisely
+# because a stale push already clobbered another agent's base (PR #4243). A
+# host-dependent tier failure should not cost that guard.
+#
+# Scoped by position: gates 1 and 2 have already run and passed by the time
+# control reaches here, so this ack can only skip the tier below it.
+#
+# Bound to the push: the value must be the commit being pushed — its full SHA
+# or a prefix of at least 7 hex characters — and every ref in this push must
+# carry that one commit. `1`, a stale SHA left exported from an earlier push, or
+# a push of several different commits does NOT skip the tier; the hook says why
+# and runs it. An ack therefore covers exactly the commit its operator looked
+# at, never a later one.
+#
+# The notice is deliberately named and greppable, and names the acked commit
+# and refs: --no-verify leaves no trace at all, so an audit cannot distinguish a
+# skipped tier from a passing one.
+if [ -n "${LOCAL_TESTS_ACK:-}" ]; then
+  ack="$(printf '%s' "$LOCAL_TESTS_ACK" | tr 'A-F' 'a-f')"
+  ack_reason=""
+  distinct_shas="$(printf '%s\n' "${pushed_shas[@]}" | sort -u)"
+  if ! [[ "$ack" =~ ^[0-9a-f]{7,40}$ ]]; then
+    ack_reason="it is not a commit SHA (need the pushed commit's full SHA or a prefix of at least 7 hex characters)"
+  elif [ "$(printf '%s\n' "$distinct_shas" | grep -c .)" -ne 1 ]; then
+    ack_reason="this push carries more than one commit; push them separately"
+  elif [ "${distinct_shas#"$ack"}" = "$distinct_shas" ]; then
+    ack_reason="it does not match the pushed commit $distinct_shas (stale ack?)"
+  fi
+  if [ -z "$ack_reason" ]; then
+    echo "pre-push: LOCAL_TESTS_ACK=$LOCAL_TESTS_ACK — gate 3 (make test-fast-parallel) SKIPPED by operator acknowledgement for commit $distinct_shas (refs: ${pushed_refs[*]}); gates 1 (resync-loss) and 2 (bead-ownership) were not bypassed by this ack (vc-dq0b)" >&2
+    exit 0
+  fi
+  echo "pre-push: LOCAL_TESTS_ACK=$LOCAL_TESTS_ACK IGNORED — $ack_reason. Running gate 3. To skip it for this push: LOCAL_TESTS_ACK=\$(git rev-parse <pushed-ref>) git push ..." >&2
 fi
 
 # The Makefile and direct sharded runner share scripts/test-local-job-count as
