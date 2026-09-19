@@ -111,3 +111,18 @@ func TestSupervisorUnitOwnershipCheckRun(t *testing.T) {
 		})
 	}
 }
+
+// TestSupervisorUnitOwnershipCheckRunUnknownLiveness pins the tri-state
+// probe's unknown case: cmd/gc passes SupervisorPIDUnknown with
+// supervisorRunning=false when the liveness probe did not settle. The check
+// must stay non-failing but must not claim the supervisor is not running.
+func TestSupervisorUnitOwnershipCheckRunUnknownLiveness(t *testing.T) {
+	c := NewSupervisorUnitOwnershipCheck(false, SupervisorPIDUnknown, SupervisorUnitOwnership{})
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %v, want StatusOK (unknown liveness must not fail doctor)", r.Status)
+	}
+	if !strings.Contains(r.Message, "unknown") || strings.Contains(r.Message, "not running") {
+		t.Fatalf("message = %q, want an unknown-liveness message, not \"not running\"", r.Message)
+	}
+}

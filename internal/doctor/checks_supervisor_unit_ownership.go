@@ -61,6 +61,13 @@ func (c *SupervisorUnitOwnershipCheck) Run(_ *CheckContext) *CheckResult {
 	if !c.supervisorRunning {
 		r.Status = StatusOK
 		r.Message = "supervisor is not running"
+		if c.supervisorPID == SupervisorPIDUnknown {
+			// The liveness probe did not settle (e.g. a control socket that
+			// accepted and went quiet), so "not running" would be a guess.
+			// Stay non-failing: binary-divergence owns the unknown-liveness
+			// verdict, and this check has no PID to compare.
+			r.Message = "supervisor liveness unknown; unit ownership not checked"
+		}
 		return r
 	}
 	switch c.ownership.Status {
