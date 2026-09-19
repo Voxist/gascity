@@ -190,3 +190,104 @@ func keysOf(m map[string]TemplateParams) []string {
 	}
 	return out
 }
+
+// TestProviderAbsentFromCatalogKeepsItsSessions covers the portharbour shape as
+// it reaches the build: an agent whose provider NAME is not in the city's
+// [providers.*] catalog at all (a pack default that was never patched), as
+// opposed to a cataloged provider whose binary is missing. Its sessions must
+// be kept, and an attached session must never be drained on this path.
+func TestProviderAbsentFromCatalogKeepsItsSessions(t *testing.T) {
+	env := newUnresolvedProviderEnv(t, "true")
+	env.cfg.Agents[1].Provider = "zai"
+	env.sp.SetAttached("s-rig-b-worker", true)
+
+	cr, result, stderr := env.tick(t)
+
+	if _, ok := result.UnresolvedTemplates[unresolvedBrokenTemplate]; !ok {
+		t.Fatalf("UnresolvedTemplates = %v, want %q recorded; stderr:\n%s", result.UnresolvedTemplates, unresolvedBrokenTemplate, stderr)
+	}
+	if ds := cr.sessionDrains.get(env.broken.ID); ds != nil {
+		t.Fatalf("attached session of an agent whose provider is absent from the catalog is draining (reason %q); stderr:\n%s", ds.reason, stderr)
+	}
+	if !env.sp.IsRunning("s-rig-b-worker") {
+		t.Fatal("attached session of the uncataloged-provider agent was stopped")
+	}
+	if ds := cr.sessionDrains.get(env.good.ID); ds != nil {
+		t.Fatalf("healthy rig session is draining (reason %q); stderr:\n%s", ds.reason, stderr)
+	}
+}
+
+// TestReloadWithUncataloguedPackDefaultProviderKeepsLastGoodConfig pins the
+// load-time half of the same failure. A pack whose agent defaults to a provider
+// the city does not declare fails config composition as a whole, city-wide.
+// That error must never become "desired = empty": the controller keeps the
+// last good config, so the next build still wants every session it wanted.
+func TestReloadWithUncataloguedPackDefaultProviderKeepsLastGoodConfig(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := runtime.NewFake()
+	var stderr bytes.Buffer
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:  cityPath,
+		CityName:  "test-city",
+		TomlPath:  tomlPath,
+		LogPrefix: "gc reload",
+		Cfg:       cfg,
+		SP:        sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: &stderr,
+	})
+	oldCfg := cr.cfg
+
+	packDir := filepath.Join(cityPath, "packs", "fleet")
+	if err := os.MkdirAll(packDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(packDir, "pack.toml"), []byte(`[pack]
+name = "fleet"
+schema = 2
+
+[[agent]]
+name = "executor"
+provider = "zai"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tomlPath, []byte(`[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[session]
+provider = "fake"
+
+[imports.fleet]
+source = "packs/fleet"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	lastProviderName := "fake"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual)
+
+	if reply.Outcome != reloadOutcomeFailed {
+		t.Fatalf("reply.Outcome = %q, want %q (error %q)", reply.Outcome, reloadOutcomeFailed, reply.Error)
+	}
+	if !strings.Contains(reply.Error, `"zai"`) {
+		t.Fatalf("reply.Error = %q, want the uncataloged provider named", reply.Error)
+	}
+	if cr.cfg != oldCfg {
+		t.Fatal("config replaced by one that failed provider-catalog validation; the last good config must stay in force")
+	}
+}
