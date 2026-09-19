@@ -353,6 +353,10 @@ type startExecutionOptions struct {
 	// deferred under storeQueryPartial today.
 	deferSessionClosesOnBoot bool
 	readyAssignedFlags       []bool
+	// unresolvedTemplates is DesiredStateResult.UnresolvedTemplates: configured
+	// templates whose provider could not be resolved this tick. Their sessions
+	// are kept rather than drained or closed as orphaned (ga-8a8fq).
+	unresolvedTemplates map[string]string
 	// assignedWorkStores is index-aligned with the assignedWorkBeads passed to
 	// the same reconcile pass: the store each row was read through. The
 	// orphan-close tie-break releases through it instead of re-deriving an owner
@@ -459,6 +463,16 @@ func withWarmClaimProbe(probe warmClaimTriggerProbe) startExecutionOption {
 func withDeferSessionClosesOnBoot() startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.deferSessionClosesOnBoot = true
+	}
+}
+
+// withUnresolvedTemplates installs the configured templates whose provider
+// could not be resolved this tick (DesiredStateResult.UnresolvedTemplates). The
+// reconciler keeps their sessions instead of treating absence from the desired
+// set as orphaned, so a provider failure costs only the agents that use it.
+func withUnresolvedTemplates(templates map[string]string) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.unresolvedTemplates = templates
 	}
 }
 
