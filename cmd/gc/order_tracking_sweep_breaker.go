@@ -47,8 +47,8 @@ func filterDegradedSweepStores(cityPath string, stores []beads.Store, stderr io.
 	var skipped []string
 	for _, store := range stores {
 		scoped, ok := store.(orderTrackingSweepScopedStore)
-		if !ok || strings.TrimSpace(scoped.scopeRoot) == "" ||
-			bdScopeBreaker(cityPath, scoped.scopeRoot).Available() {
+		if !ok || strings.TrimSpace(scoped.breakerScope) == "" ||
+			bdScopeBreaker(cityPath, scoped.breakerScope).Available() {
 			kept = append(kept, store)
 			continue
 		}
