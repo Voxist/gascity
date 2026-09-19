@@ -68,6 +68,13 @@ func rawOrderStores(stores []beads.OrdersStore) []beads.Store {
 type orderTrackingSweepTarget struct {
 	target execStoreTarget
 	label  string
+	// breakerScope is the key this scope's transport breaker is registered
+	// under — the same path the scope's cache gate and bd runner use, so the
+	// sweep filter reads the breaker that actually trips. Rigs resolve it the
+	// way buildStores does (resolveStoreScopeRoot: symlinks and the darwin
+	// /private alias collapsed); the city uses its path as given, as the city
+	// cache gate and bdStoreForCity do.
+	breakerScope string
 }
 
 // orderTrackingSweepScopedStore wraps one store in the multi-scope order-tracking
@@ -84,6 +91,10 @@ type orderTrackingSweepScopedStore struct {
 	beads.Store
 	label string
 	key   string
+	// breakerScope is the key of the transport breaker that governs this
+	// store (see orderTrackingSweepTarget.breakerScope); empty for a store
+	// that serves no single scope (the orders binding).
+	breakerScope string
 }
 
 func (s orderTrackingSweepScopedStore) orderTrackingSweepLabel() string {
@@ -578,8 +589,9 @@ func cachedOrderStoresResolver(cityPath string, cfg *config.City) orderStoresRes
 
 func orderTrackingSweepTargetsForConfig(cityPath string, cfg *config.City) []orderTrackingSweepTarget {
 	targets := []orderTrackingSweepTarget{{
-		target: legacyOrderCityTarget(cityPath, cfg),
-		label:  "city",
+		target:       legacyOrderCityTarget(cityPath, cfg),
+		label:        "city",
+		breakerScope: cityPath,
 	}}
 	if cfg != nil {
 		resolveRigPaths(cityPath, cfg.Rigs)
@@ -594,7 +606,8 @@ func orderTrackingSweepTargetsForConfig(cityPath string, cfg *config.City) []ord
 					Prefix:    rig.EffectivePrefix(),
 					RigName:   rig.Name,
 				},
-				label: fmt.Sprintf("rig %q", rig.Name),
+				label:        fmt.Sprintf("rig %q", rig.Name),
+				breakerScope: resolveStoreScopeRoot(cityPath, rig.Path),
 			})
 		}
 	}
@@ -758,9 +771,10 @@ func orderTrackingSweepStoresFromTargets(targets []orderTrackingSweepTarget, ope
 			continue
 		}
 		stores = append(stores, orderTrackingSweepScopedStore{
-			Store: store,
-			label: sweepTarget.label,
-			key:   key,
+			Store:        store,
+			label:        sweepTarget.label,
+			key:          key,
+			breakerScope: sweepTarget.breakerScope,
 		})
 	}
 	return stores, errors.Join(errs...)

@@ -406,6 +406,7 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 		}
 		store = cs.openRigStore(scopeProvider, rig.Name, scopeRoot, rig.EffectivePrefix(), cfg)
 		stores[rig.Name] = wrapWithCachingStore(cs.cacheCtx, store, cs.eventProv, rigStoreBackgroundRefresh(suspState, rig))
+		wireStoreAvailabilityGate(stores[rig.Name], cs.cityPath, scopeRoot)
 	}
 	return stores
 }
