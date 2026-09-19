@@ -1588,6 +1588,7 @@ func bdCommandRunnerWithManagedRetryFor(cityPath string, envFn bdManagedEnvFn) b
 		if name != "bd" {
 			return out, err
 		}
+		err = withManagedDoltNotOwnedHint(cityPath, dir, env, err)
 		if !bdTransportRetryableError(cityPath, dir, env, err) {
 			// bd reached the store and answered (success or an
 			// application-class failure), so the transport is healthy —
@@ -2532,4 +2533,33 @@ func containsString(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+// withManagedDoltNotOwnedHint attaches the actionable lifecycle refusal to a
+// failed bd call that ran with no managed Dolt target in a process that does
+// not own the lifecycle (ga-fjr5f). The env resolution cannot restart the
+// server from such a process, so it leaves the target empty and bd fails with
+// a message about a missing server; the hint says who restarts it and what to
+// run instead. It is attached only to that failure, never to the env
+// resolution itself, which non-bd consumers (scale checks, agent env) share.
+func withManagedDoltNotOwnedHint(cityPath, scopeRoot string, env map[string]string, err error) error {
+	if err == nil || managedDoltImplicitRecoveryAllowed() || errors.Is(err, errManagedDoltLifecycleNotOwned) {
+		return err
+	}
+	if strings.TrimSpace(env["GC_DOLT_PORT"]) != "" || strings.TrimSpace(env["BEADS_DOLT_SERVER_PORT"]) != "" {
+		return err
+	}
+	// gc must own this scope's Dolt: not an externally bound store, and the
+	// city's lifecycle is gc-managed. (bdScopeDoltIsGcManaged cannot answer
+	// this here — it needs the resolved target that is missing.)
+	if scopeRoot == "" {
+		scopeRoot = cityPath
+	}
+	if bound, boundErr := scopeStoreIsExternallyBound(cityPath, scopeRoot); boundErr != nil || bound {
+		return err
+	}
+	if owned, ownedErr := managedDoltLifecycleOwned(cityPath); ownedErr != nil || !owned {
+		return err
+	}
+	return fmt.Errorf("%w: %w", err, errManagedDoltLifecycleNotOwned)
 }

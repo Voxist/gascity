@@ -22,10 +22,18 @@ import (
 //
 // Implicit recovery is now reserved for processes that have claimed the
 // lifecycle: the supervisor, a controller's city runtime, and the explicit
-// `gc start` lifecycle command. Every other process reports the store
-// unavailable; the controller's own next read recovers it. Explicit lifecycle
-// commands (`gc dolt-state start-managed` / `recover-managed`, which the
-// provider script runs as the controller's child) are not gated.
+// `gc start` lifecycle command (not `gc start --dry-run`, which any caller may
+// run). Every other process reports the store unavailable; the controller's
+// own next read recovers it. That includes `gc beads health`, and so the
+// beads-health order, which the controller runs as a separate process: it
+// reports, it does not restart. Explicit lifecycle commands
+// (`gc dolt-state start-managed` / `recover-managed`, which the provider
+// script runs as the controller's child) are not gated.
+//
+// Even the owner never replaces a live server that is merely slow until it has
+// stayed unresponsive for managedDoltLiveUnresponsiveGrace; and the server
+// and its scope watchdog never carry a session's identity (doltServerEnv), so
+// no session's orphan sweep can reap them.
 
 // managedDoltLifecycleOwner is set once a process claims the lifecycle. It is
 // never cleared: a process that owns the lifecycle owns it for its life.
@@ -34,7 +42,7 @@ var managedDoltLifecycleOwner atomic.Bool
 // errManagedDoltLifecycleNotOwned is returned instead of implicitly recovering
 // the managed Dolt server from a process that does not own its lifecycle.
 var errManagedDoltLifecycleNotOwned = errors.New(
-	"managed dolt is unavailable and only the controller restarts it: run `gc start` (or wait for the controller to recover it) (ga-fjr5f)")
+	"managed dolt is unavailable; the controller recovers it — wait, or if no controller is running use `gc start` (check with `gc supervisor status`) (ga-fjr5f)")
 
 // errManagedDoltAliveButUnresponsive is returned instead of replacing a
 // managed Dolt server whose process is alive and whose port accepts

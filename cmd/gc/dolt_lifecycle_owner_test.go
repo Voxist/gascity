@@ -251,7 +251,7 @@ func TestHealthCheckDoesNotReplaceALiveButSlowManagedDolt(t *testing.T) {
 // operator what to do rather than only what went wrong.
 func TestManagedDoltNotOwnedErrorIsActionable(t *testing.T) {
 	msg := errManagedDoltLifecycleNotOwned.Error()
-	for _, want := range []string{"`gc start`", "controller"} {
+	for _, want := range []string{"`gc start`", "`gc supervisor status`", "controller"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("errManagedDoltLifecycleNotOwned = %q, want it to mention %s", msg, want)
 		}
@@ -351,5 +351,55 @@ func TestManagedDoltEnvCarriesNoSessionIdentity(t *testing.T) {
 		if !found {
 			t.Fatalf("doltServerEnv dropped %q, which is not session identity: %v", keep, env)
 		}
+	}
+}
+
+// TestNonOwnerBdFailureWithoutATargetCarriesTheLifecycleHint pins review
+// finding F5: a bd call that a non-owner makes with no managed Dolt target —
+// the env resolution could not restart the server — fails with the
+// actionable refusal rather than bd's bare "no server" message. An owner, or
+// a call that had a target, is left alone.
+func TestNonOwnerBdFailureWithoutATargetCarriesTheLifecycleHint(t *testing.T) {
+	cityPath := t.TempDir()
+	writeMinimalCityToml(t, cityPath)
+	bdErr := errors.New("bd list: dolt server unreachable")
+	noTarget := map[string]string{"GC_DOLT_PORT": "", "BEADS_DOLT_SERVER_PORT": ""}
+	withTarget := map[string]string{"GC_DOLT_PORT": "3307"}
+
+	ownManagedDoltLifecycleForTest(t, false)
+	if owned, err := managedDoltLifecycleOwned(cityPath); err != nil || !owned {
+		t.Fatalf("precondition: fixture city's dolt lifecycle is not gc-managed (owned=%v err=%v)", owned, err)
+	}
+	if err := withManagedDoltNotOwnedHint(cityPath, cityPath, noTarget, bdErr); !errors.Is(err, errManagedDoltLifecycleNotOwned) || !errors.Is(err, bdErr) {
+		t.Fatalf("non-owner, no target: err = %v, want bd's error wrapped with errManagedDoltLifecycleNotOwned", err)
+	}
+	if err := withManagedDoltNotOwnedHint(cityPath, cityPath, withTarget, bdErr); errors.Is(err, errManagedDoltLifecycleNotOwned) {
+		t.Fatalf("non-owner with a target: err = %v, want bd's error unchanged", err)
+	}
+	if err := withManagedDoltNotOwnedHint(cityPath, cityPath, noTarget, nil); err != nil {
+		t.Fatalf("success: err = %v, want nil", err)
+	}
+
+	ownManagedDoltLifecycleForTest(t, true)
+	if err := withManagedDoltNotOwnedHint(cityPath, cityPath, noTarget, bdErr); errors.Is(err, errManagedDoltLifecycleNotOwned) {
+		t.Fatalf("owner: err = %v, want bd's error unchanged", err)
+	}
+}
+
+// TestNonOwnerBdRunnerWithoutATargetReportsTheLifecycleHint drives F5 through
+// the real bd runner: env resolution left no target, bd failed, and the
+// caller sees who restarts the server and what to run.
+func TestNonOwnerBdRunnerWithoutATargetReportsTheLifecycleHint(t *testing.T) {
+	ownManagedDoltLifecycleForTest(t, false)
+	t.Setenv("GC_BEADS", "bd")
+	cityPath := writeBreakerTestCity(t, "")
+	installFakeBdExec(t, func(_, _ string, _ ...string) ([]byte, error) {
+		return nil, errors.New("Error: no dolt server is running for this database")
+	})
+	runner := bdCommandRunnerWithManagedRetry(cityPath, func(string) map[string]string { return map[string]string{} })
+
+	_, err := runner(cityPath, "bd", "list", "--json")
+	if !errors.Is(err, errManagedDoltLifecycleNotOwned) {
+		t.Fatalf("err = %v, want the bd failure to carry errManagedDoltLifecycleNotOwned", err)
 	}
 }

@@ -785,25 +785,30 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	ensureInitArtifacts(cityPath, stderr, "gc start")
 
-	// gc start is the explicit lifecycle command: it owns the managed Dolt
-	// lifecycle for the rest of this process (ga-fjr5f).
-	claimManagedDoltLifecycle()
-
-	// Resolve rig paths and run the full bead store lifecycle:
-	// probe → init+hooks(city) → init+hooks(rigs) → routes.
 	resolveRigPaths(cityPath, cfg.Rigs)
-	if err := startBeadsLifecycle(cityPath, cityName, cfg, stderr); err != nil {
-		fmt.Fprintf(stderr, "gc start: %v\n", err)                      //nolint:errcheck // best-effort stderr
-		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
-		return 1
-	}
+	// --dry-run previews and promises no side effects, and any caller — an
+	// agent included — may run it, so it neither claims the managed Dolt
+	// lifecycle nor starts the bead store (ga-fjr5f).
+	if !dryRunMode {
+		// gc start is the explicit lifecycle command: it owns the managed Dolt
+		// lifecycle for the rest of this process (ga-fjr5f).
+		claimManagedDoltLifecycle()
 
-	// Post-startup health check: baseline probe of the beads provider.
-	// The gc-beads-bd script's health operation validates server liveness
-	// (TCP + query probe). Recovery is attempted on failure.
-	if err := healthBeadsProvider(cityPath); err != nil {
-		fmt.Fprintf(stderr, "gc start: beads health check: %v\n", err) //nolint:errcheck // best-effort stderr
-		// Non-fatal warning — server may recover by the time agents need it.
+		// Run the full bead store lifecycle:
+		// probe → init+hooks(city) → init+hooks(rigs) → routes.
+		if err := startBeadsLifecycle(cityPath, cityName, cfg, stderr); err != nil {
+			fmt.Fprintf(stderr, "gc start: %v\n", err)                      //nolint:errcheck // best-effort stderr
+			fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+			return 1
+		}
+
+		// Post-startup health check: baseline probe of the beads provider.
+		// The gc-beads-bd script's health operation validates server liveness
+		// (TCP + query probe). Recovery is attempted on failure.
+		if err := healthBeadsProvider(cityPath); err != nil {
+			fmt.Fprintf(stderr, "gc start: beads health check: %v\n", err) //nolint:errcheck // best-effort stderr
+			// Non-fatal warning — server may recover by the time agents need it.
+		}
 	}
 
 	// Warm-up doctor scan. Fail-open: startup continues regardless of check,
