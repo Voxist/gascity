@@ -2678,7 +2678,7 @@ func providerOpExitCode(err error) (int, bool) {
 	if !errors.As(err, &exitErr) {
 		return 0, false
 	}
-	if exitErr.ProcessState == nil || exitErr.ProcessState.Exited() != true {
+	if exitErr.ProcessState == nil || !exitErr.Exited() {
 		return 0, false
 	}
 	return exitErr.ExitCode(), true
