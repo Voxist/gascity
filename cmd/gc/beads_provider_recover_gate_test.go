@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -49,20 +50,36 @@ func stubRecoverLiveness(t *testing.T, liveness managedDoltLiveness) {
 
 // countRecoverRuns replaces the provider recover runner with a counter,
 // so a test observes whether the guard let the op through without ever
-// executing a provider script.
+// executing a provider script. It also asserts the script it was handed
+// is inside the test sandbox, which fails loudly if provider-script
+// resolution ever escapes it.
 //
-// Load-bearing, do not remove: the bd-runner tests below drive the REAL
-// recoverManagedBDCommand, whose script path resolves to the bundled
-// provider pack. Without this stub they start actual dolt sql-servers —
-// observed while mutation-checking the funnel, where bypassing the guard
-// leaked two of them and tripped the suite's dolt leak guard.
+// LOAD-BEARING, do not remove. The bd-runner tests below drive the REAL
+// recoverManagedBDCommand; with this stub gone they start actual dolt
+// sql-servers, observed twice while mutation-checking the funnel.
+//
+// Pre-writing an inert script at gcBeadsBdScriptPath does NOT prevent
+// that — tried, and measured not to work: ensureGcBeadsBdShim
+// materializes the real shim over it while the recover env is built, and
+// the shim execs the bundled pack script. The backstop is therefore the
+// suite-wide dolt leak guard in TestMain, which caught both leaks by pid
+// and config path and reaped them. That guard, not anything in this
+// file, is what makes removing this stub a loud failure rather than a
+// silent one.
 func countRecoverRuns(t *testing.T) *int {
 	t.Helper()
 	orig := managedDoltRecoverRunner
 	t.Cleanup(func() { managedDoltRecoverRunner = orig })
 	runs := new(int)
-	managedDoltRecoverRunner = func(context.Context, string, []string) error {
+	sandbox := filepath.Dir(t.TempDir())
+	managedDoltRecoverRunner = func(_ context.Context, script string, _ []string) error {
 		*runs++
+		// A real resolved provider script is always an absolute path
+		// under the test's city; the guard tests pass a bare placeholder
+		// that is never exec'd, so only absolute paths are checked.
+		if filepath.IsAbs(script) && !strings.HasPrefix(script, sandbox) && !strings.HasPrefix(script, os.TempDir()) {
+			t.Errorf("provider recover script resolved OUTSIDE the test sandbox: %q; running it could start a real dolt server on this host", script)
+		}
 		return nil
 	}
 	return runs

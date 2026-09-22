@@ -347,3 +347,54 @@ func callsGuard(n ast.Node) bool {
 	})
 	return found
 }
+
+// F6 from the #212 review: resolvedRuntimeCityDoltTargetContext
+// (cmd/gc/bd_env.go) calls healthBeadsProviderContext under allowRecovery,
+// which is a route from a BD CALL into the HEALTH-path recover. Before the
+// choke point it passed the cooldown but not the liveness guard.
+//
+// It is covered now because it reaches the recover op only through
+// healthBeadsProviderContext, which goes through the guard like everything
+// else. This pins that indirection by name: the route must NOT acquire a
+// direct call to the recover runner, and must keep going through the
+// health path.
+func TestEnvResolutionRouteReachesRecoverOnlyThroughTheGuardedHealthPath(t *testing.T) {
+	fset, files := parseNonTestCmdGC(t)
+
+	const route = "resolvedRuntimeCityDoltTargetContext"
+	found := false
+	callsHealthPath := false
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil || fn.Name.Name != route {
+				continue
+			}
+			found = true
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				id, ok := call.Fun.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				switch id.Name {
+				case "healthBeadsProviderContext":
+					callsHealthPath = true
+				case "managedDoltRecoverRunner", "recoverManagedBDCommand":
+					t.Errorf("%s: %s calls %s directly, bypassing runGuardedManagedDoltRecover (ga-amol9 F6)",
+						fset.Position(call.Pos()), route, id.Name)
+				}
+				return true
+			})
+		}
+	}
+	if !found {
+		t.Fatalf("%s not found in cmd/gc; if it was renamed, re-point this test at the env-resolution recovery route", route)
+	}
+	if !callsHealthPath {
+		t.Fatalf("%s no longer reaches recovery through healthBeadsProviderContext; re-check that its recovery route is still guarded", route)
+	}
+}
