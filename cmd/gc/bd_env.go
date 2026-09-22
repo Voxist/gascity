@@ -1605,7 +1605,14 @@ func bdCommandRunnerWithManagedRetryFor(cityPath string, envFn bdManagedEnvFn) b
 			recordBdBreakerOutcome(breaker, bdInvocationTimedOut(name, err))
 			return out, err
 		}
-		if bdTransportRecoverableError(cityPath, dir, env, err) {
+		// admitTransportManagedDoltRecover is the throttle this path used
+		// to lack entirely: it refuses to replace a managed dolt that is
+		// still alive on its port, and otherwise admits at most one
+		// recover per city per providerRecoverCooldown — the same window
+		// the health patrol uses (ga-amol9). A refused recover still
+		// falls through to the retry below, which is the cheap half of
+		// this path and the half that fixes a merely stale port.
+		if bdTransportRecoverableError(cityPath, dir, env, err) && admitTransportManagedDoltRecover(cityPath) {
 			if recErr := recoverManagedBDCommand(cityPath); recErr != nil {
 				recordBdBreakerOutcome(breaker, true)
 				return out, err
