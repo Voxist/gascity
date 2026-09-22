@@ -13104,3 +13104,104 @@ provider = "bd"
 		t.Fatalf("commit rounds = %d, want 1", commits)
 	}
 }
+
+// TestSyncConfiguredDoltPortFilesReconcilesEveryRigAfterPortFallback pins the
+// fallback-restart regression from ga-2598s: when the managed server binds a
+// different port than the one it last held, every rig's raw-bd port mirror has
+// to land on the live port, even if reconciling some other scope fails.
+//
+// The live incident's signature was an asymmetry, not a total failure: the city
+// mirror moved (currentDoltPort rewrites it as a side effect of resolving the
+// port) while every rig mirror kept the dead port, so gc kept working and bd
+// answered "database not found" in each rig. That asymmetry is structural — any
+// error raised after the port is resolved used to abort the fan-out — so the
+// regression is reproduced here by failing one scope's classification rather
+// than by driving a real dolt restart.
+func TestSyncConfiguredDoltPortFilesReconcilesEveryRigAfterPortFallback(t *testing.T) {
+	cityDir := t.TempDir()
+	rigRoot := t.TempDir()
+	brokenRig := filepath.Join(rigRoot, "broken")
+	healthyRigA := filepath.Join(rigRoot, "healthy-a")
+	healthyRigB := filepath.Join(rigRoot, "healthy-b")
+
+	for _, dir := range []string{cityDir, brokenRig, healthyRigA, healthyRigB} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("dolt.auto-start: true\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The broken rig is listed FIRST so that an aborting fan-out never reaches
+	// the healthy ones — the shape the live city was left in.
+	rigs := []config.Rig{
+		{Name: "broken", Path: brokenRig},
+		{Name: "healthy-a", Path: healthyRigA},
+		{Name: "healthy-b", Path: healthyRigB},
+	}
+
+	publish := func(port int) {
+		t.Helper()
+		if err := writeDoltState(cityDir, doltRuntimeState{
+			Running:   true,
+			PID:       os.Getpid(),
+			Port:      port,
+			DataDir:   filepath.Join(cityDir, ".beads", "dolt"),
+			StartedAt: time.Now().UTC().Format(time.RFC3339),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	readPort := func(dir string) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(dir, ".beads", "dolt-server.port"))
+		if err != nil {
+			t.Fatalf("read port file for %s: %v", dir, err)
+		}
+		return strings.TrimSpace(string(data))
+	}
+
+	// Round 1: the managed server holds its original port and every scope is
+	// reconciled onto it.
+	first := listenOnRandomPort(t)
+	firstPort := strconv.Itoa(first.Addr().(*net.TCPAddr).Port)
+	publish(first.Addr().(*net.TCPAddr).Port)
+	requireSyncConfiguredDoltPortFiles(t, cityDir, "bd", config.DoltConfig{}, "gc", rigs)
+	for _, dir := range []string{cityDir, brokenRig, healthyRigA, healthyRigB} {
+		if got := readPort(dir); got != firstPort {
+			t.Fatalf("setup: %s port file = %q, want %q", dir, got, firstPort)
+		}
+	}
+
+	// Round 2: the restart could not reclaim the old port and fell back to the
+	// next one, while one rig's storage binding became unclassifiable.
+	second := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = second.Close() })
+	secondPort := strconv.Itoa(second.Addr().(*net.TCPAddr).Port)
+	if secondPort == firstPort {
+		t.Fatalf("fallback port %q must differ from the original", secondPort)
+	}
+	_ = first.Close()
+	publish(second.Addr().(*net.TCPAddr).Port)
+	if err := os.WriteFile(filepath.Join(brokenRig, ".beads", "metadata.json"),
+		[]byte(`{"backend":"dolt","storage_database":"broken"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := syncConfiguredDoltPortFiles(cityDir, config.DoltConfig{}, "gc", rigs, io.Discard)
+	if err == nil {
+		t.Fatal("want the unclassifiable rig reported, got nil error")
+	}
+	if !strings.Contains(err.Error(), "broken") {
+		t.Errorf("error must name the failing scope, got: %v", err)
+	}
+
+	// Every scope gc can still classify must resolve the live port. A rig left
+	// on the dead port is the ga-2598s outage.
+	for _, dir := range []string{cityDir, healthyRigA, healthyRigB} {
+		if got := readPort(dir); got != secondPort {
+			t.Errorf("%s port file = %q, want live port %q", dir, got, secondPort)
+		}
+	}
+}
