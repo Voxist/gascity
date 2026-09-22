@@ -1981,14 +1981,24 @@ func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...
 //
 // The fan-out is exhaustive: once the managed port has been resolved, every
 // scope is reconciled and per-scope failures are collected and returned
-// together rather than aborting the remaining scopes (ga-2598s). Resolving the
-// port is itself what rewrites the CITY mirror — currentDoltPort writes it as a
-// side effect — so an early return past that point could only ever leave the
-// city on the live port and every rig behind on the dead one. That is not a
-// smaller failure than doing nothing: gc keeps working off runtime state while
-// raw bd, which has only the mirror, answers "database not found" in each rig.
-// It is the shape the live city was left in after a fallback restart bumped
-// 48770 -> 48771, and seven rig mirrors had to be realigned by hand.
+// together rather than aborting the remaining scopes (ga-2598s).
+//
+// Resolving the port is itself what moves the CITY mirror: currentDoltPort
+// writes it (:1534) when it resolves a port and REMOVES it (:1540) when it
+// cannot. So an early return past that point splits the city from its rigs, and
+// because rigs are reconciled in slice order it splits them from each other
+// too. The reachable shapes are: city reconciled plus a PREFIX of rigs on the
+// live port, with the remaining suffix left on the dead one — for any prefix
+// length, including zero — or, when the port could not be resolved at all, the
+// city mirror absent while rigs still hold a dead port. Do not read the
+// all-rigs-stale case as the only one; it is just the prefix-length-zero shape,
+// and a split with some rigs already moved is equally reachable.
+//
+// Any of those is worse than doing nothing: gc keeps working off runtime state
+// while raw bd, which has only the mirror, answers "database not found" in
+// every scope left behind. The live city hit the zero-length case after a
+// fallback restart bumped 48770 -> 48771, and seven rig mirrors had to be
+// realigned by hand.
 //
 // Errors still surface, so a caller that treats reconciliation as a
 // precondition keeps failing; what changes is that the scopes gc can still

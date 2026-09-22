@@ -13193,8 +13193,11 @@ func TestSyncConfiguredDoltPortFilesReconcilesEveryRigAfterPortFallback(t *testi
 	if err == nil {
 		t.Fatal("want the unclassifiable rig reported, got nil error")
 	}
-	if !strings.Contains(err.Error(), "broken") {
-		t.Errorf("error must name the failing scope, got: %v", err)
+	// Assert on the wrapper, not on the rig name alone: the rig's temp path
+	// ends in "broken", so the underlying error already contains that word and
+	// a name-only check would pass with the wrapping removed.
+	if !strings.Contains(err.Error(), `reconciling rig "broken"`) {
+		t.Errorf("error must be wrapped and name the failing scope, got: %v", err)
 	}
 
 	// Every scope gc can still classify must resolve the live port. A rig left
@@ -13203,5 +13206,100 @@ func TestSyncConfiguredDoltPortFilesReconcilesEveryRigAfterPortFallback(t *testi
 		if got := readPort(dir); got != secondPort {
 			t.Errorf("%s port file = %q, want live port %q", dir, got, secondPort)
 		}
+	}
+}
+
+// TestSyncConfiguredDoltPortFilesReconcilesRigsWhenCityScopeFails covers the
+// other half of ga-2598s: a failure reconciling the CITY scope used to abort
+// before the rig loop began, leaving every rig on the dead port while the city
+// mirror had already moved — currentDoltPort rewrites it while resolving the
+// live port, several statements earlier.
+//
+// The injection has to separate the config read from the config write. Making
+// .beads/config.yaml a directory breaks both, so the sync aborts earlier, in
+// syncDesiredCityDoltConfigState, which runs before the port is resolved and is
+// deliberately still fatal. A read-only file separates them: the desired-state
+// read succeeds and only EnsureCanonicalConfig's write fails, landing exactly
+// on normalizeScopeDoltConfig(cityPath, cityState).
+func TestSyncConfiguredDoltPortFilesReconcilesRigsWhenCityScopeFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file permission bits, so the write would succeed and the test would pass for the wrong reason")
+	}
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(t.TempDir(), "stranded")
+	for _, dir := range []string{cityDir, rigDir} {
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("dolt.auto-start: true\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rigs := []config.Rig{{Name: "stranded", Path: rigDir}}
+
+	publishState := func(port int) {
+		t.Helper()
+		if err := writeDoltState(cityDir, doltRuntimeState{
+			Running:   true,
+			PID:       os.Getpid(),
+			Port:      port,
+			DataDir:   filepath.Join(cityDir, ".beads", "dolt"),
+			StartedAt: time.Now().UTC().Format(time.RFC3339),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	readPort := func(dir string) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(dir, ".beads", "dolt-server.port"))
+		if err != nil {
+			t.Fatalf("read port file for %s: %v", dir, err)
+		}
+		return strings.TrimSpace(string(data))
+	}
+
+	first := listenOnRandomPort(t)
+	firstPort := strconv.Itoa(first.Addr().(*net.TCPAddr).Port)
+	publishState(first.Addr().(*net.TCPAddr).Port)
+	requireSyncConfiguredDoltPortFiles(t, cityDir, "bd", config.DoltConfig{}, "gc", rigs)
+	if got := readPort(rigDir); got != firstPort {
+		t.Fatalf("setup: rig port file = %q, want %q", got, firstPort)
+	}
+
+	// The restart could not reclaim the old port and fell back to the next one,
+	// while the city's own config.yaml became unwritable.
+	second := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = second.Close() })
+	secondPort := strconv.Itoa(second.Addr().(*net.TCPAddr).Port)
+	if secondPort == firstPort {
+		t.Fatalf("fallback port %q must differ from the original", secondPort)
+	}
+	_ = first.Close()
+	publishState(second.Addr().(*net.TCPAddr).Port)
+
+	cityConfig := filepath.Join(cityDir, ".beads", "config.yaml")
+	// Dirty it first so the canonical write is actually attempted rather than
+	// skipped as already-canonical, then drop write permission.
+	if err := os.WriteFile(cityConfig, []byte("dolt.auto-start: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(cityConfig, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(cityConfig, 0o644) })
+
+	syncErr := syncConfiguredDoltPortFiles(cityDir, config.DoltConfig{}, "gc", rigs, io.Discard)
+	if syncErr == nil {
+		t.Fatal("want the city scope failure reported, got nil error")
+	}
+	if !strings.Contains(syncErr.Error(), "reconciling city scope") {
+		t.Errorf("want the failure attributed to the city scope, got: %v", syncErr)
+	}
+
+	// The rig must reach the live port regardless. A rig stranded by a city
+	// scope failure is the ga-2598s outage through the city branch.
+	if got := readPort(rigDir); got != secondPort {
+		t.Errorf("rig port file = %q, want live port %q", got, secondPort)
 	}
 }
