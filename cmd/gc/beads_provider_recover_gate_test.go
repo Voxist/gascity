@@ -734,9 +734,13 @@ func TestProviderOpExitTwoStillMeansNotNeeded(t *testing.T) {
 // emits it, and a test that only exercises a throwaway script would not
 // notice op_health being changed back.
 func TestBundledProviderScriptExitsUnobservableWhenTCPCheckFails(t *testing.T) {
+	// t.Fatal, not t.Skip: this test's whole job is to fail when someone
+	// edits the shell out from under the Go classifier, and a skip is the
+	// one branch that would hide exactly that. The path is always present
+	// in the repo, so there is nothing legitimate to skip for.
 	script := filepath.Join("..", "..", "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
 	if _, err := os.Stat(script); err != nil {
-		t.Skipf("bundled provider script not present: %v", err)
+		t.Fatalf("bundled provider script not found at %s: %v", script, err)
 	}
 	src, err := os.ReadFile(script)
 	if err != nil {
