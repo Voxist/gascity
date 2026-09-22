@@ -17,7 +17,6 @@ import (
 // original process is killed and its port is made unavailable.
 func TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind(t *testing.T) {
 	cityPath, rigPath := setupManagedBdWaitTestCity(t)
-	ownManagedDoltLifecycleForTest(t, cityPath)
 	bdPath := waitTestRealBDPath(t)
 	rawDir := filepath.Join(rigPath, "provider-rebind")
 	if err := os.MkdirAll(rawDir, 0o755); err != nil {

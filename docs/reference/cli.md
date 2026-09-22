@@ -392,16 +392,11 @@ gc beads city use-managed [flags]
 
 ## gc beads health
 
-Check beads provider health, and attempt recovery on failure only when
-this process owns the managed Dolt lifecycle.
+Check beads provider health and attempt recovery on failure.
 
 Delegates to the provider's lifecycle health operation. For exec
-providers (including bd/dolt), the script handles multi-tier checking.
-Only the lifecycle owner — the supervisor, a controller's city runtime,
-or `gc start` — restarts a managed Dolt server, and never a live one
-that is merely slow; from any other process this command reports the
-failure and leaves recovery to the controller. For the file provider,
-always succeeds (no-op).
+providers (including bd/dolt), the script handles multi-tier checking
+and recovery internally. For the file provider, always succeeds (no-op).
 
 Also used by the beads-health system order for periodic monitoring.
 

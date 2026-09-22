@@ -536,11 +536,6 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// this runtime is the live owner of the city, so its shutdown() is the
 	// one allowed to tear the provider's shared server down.
 	cr.ownedCity.Store(true)
-	// Owning the city is what licenses implicitly restarting ITS managed Dolt
-	// server (ga-fjr5f). Claimed here, after ownedCity and never before, so a
-	// runtime that failed init leaves this process unable to restart the
-	// server of a city it does not own.
-	claimManagedDoltLifecycle(cr.cityPath)
 	defer cr.shutdown()
 
 	// configDirty is normally non-nil (newCityRuntime substitutes a fresh

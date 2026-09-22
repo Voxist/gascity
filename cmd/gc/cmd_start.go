@@ -787,13 +787,9 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	resolveRigPaths(cityPath, cfg.Rigs)
 	// --dry-run previews and promises no side effects, and any caller — an
-	// agent included — may run it, so it neither claims the managed Dolt
-	// lifecycle nor starts the bead store (ga-fjr5f).
+	// agent included — may run it, so it does not start the bead store it
+	// only describes (ga-fjr5f).
 	if !dryRunMode {
-		// gc start is the explicit lifecycle command: it owns this city's
-		// managed Dolt lifecycle for the rest of this process (ga-fjr5f).
-		claimManagedDoltLifecycle(cityPath)
-
 		// Run the full bead store lifecycle:
 		// probe → init+hooks(city) → init+hooks(rigs) → routes.
 		if err := startBeadsLifecycle(cityPath, cityName, cfg, stderr); err != nil {

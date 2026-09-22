@@ -2960,10 +2960,6 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 	// Install local agent hooks after builtin packs are refreshed.
 	ensureInitArtifacts(cityPath, stderr, "gc supervisor")
 
-	// Booting this city's bead store is what licenses implicitly restarting
-	// ITS managed Dolt server for the rest of this process (ga-fjr5f).
-	claimManagedDoltLifecycle(cityPath)
-
 	// Resolve rig paths and start bead store lifecycle.
 	resolveRigPaths(cityPath, cfg.Rigs)
 	// Retry the bead-store start with backoff before giving up. A transient

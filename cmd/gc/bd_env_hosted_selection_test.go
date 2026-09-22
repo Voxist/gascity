@@ -57,7 +57,6 @@ func TestBdRunnersLoadConfigOncePerInvocation(t *testing.T) {
 		disableManagedDoltRecoveryForTest(t)
 		clearInheritedCityRoutingEnv(t)
 		cityPath := writeBreakerTestCity(t, "")
-		ownManagedDoltLifecycleForTest(t, cityPath)
 		installFakeBdExec(t, func(_, _ string, _ ...string) ([]byte, error) { return []byte("[]"), nil })
 		loads := countHostedBeadsSelectionLoads(t)
 

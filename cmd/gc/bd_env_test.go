@@ -4136,9 +4136,7 @@ func TestBdCommandRunnerWithManagedRetryRecoversFromAutoImportFallback(t *testin
 		return nil
 	}
 
-	cityPath := t.TempDir()
-	ownManagedDoltLifecycleForTest(t, cityPath)
-	runner := bdCommandRunnerWithManagedRetry(cityPath, func(_ string) map[string]string {
+	runner := bdCommandRunnerWithManagedRetry(t.TempDir(), func(_ string) map[string]string {
 		return map[string]string{"GC_DOLT_PORT": port}
 	})
 
