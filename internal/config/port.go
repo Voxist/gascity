@@ -8,8 +8,8 @@ import (
 
 // PortString is a TCP port number carried as a string.
 //
-// The string representation is what every consumer wants: the value is spliced
-// into `BEADS_DOLT_SERVER_PORT=<port>` shell prefixes, joined with
+// The string representation is what every consumer wants: the value is
+// projected into the probe env as `GC_DOLT_PORT`, joined with
 // net.JoinHostPort, and compared against other string-typed port fields such as
 // contract.ConfigState.DoltPort. An int would force a conversion at each of
 // those sites and lose the "unset" signal that the empty string carries.

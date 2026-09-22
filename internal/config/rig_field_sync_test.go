@@ -269,3 +269,27 @@ func TestRigDoltPortRejectsNonNumeric(t *testing.T) {
 		t.Errorf("error = %q, want it to name the rejected value", err)
 	}
 }
+
+// TestRigDoltPortRejectsOutOfRange pins the range check itself (ga-0chrk):
+// UnmarshalText is reachable only through encoding.TextUnmarshaler, so the
+// repo's dead-knob scanner flags it, and the standard way to confirm a live
+// knob is to mutate the line and watch a test fail. Before this test existed,
+// deleting the `n < 1 || n > 65535` branch left every test in this package
+// green, so the range check looked dead when it was not exercised.
+func TestRigDoltPortRejectsOutOfRange(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		toml string
+	}{
+		{"zero", "dolt_port = 0"},
+		{"too large", "dolt_port = 70000"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var rig Rig
+			_, err := toml.Decode(tc.toml, &rig)
+			if err == nil {
+				t.Fatalf("decoding %s succeeded, want an error", tc.toml)
+			}
+		})
+	}
+}
