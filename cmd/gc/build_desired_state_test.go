@@ -2441,7 +2441,7 @@ func TestReadyAssignedWorkAssigneesExcludeBroadIdentities(t *testing.T) {
 			{Template: "mayor", Mode: "always"},
 			{Dir: "repo", Template: "named-worker", Mode: "on_demand"},
 		},
-	}, nil, nil)
+	}, nil, nil, nil)
 
 	for _, disallowed := range []string{"repo/worker", "mayor"} {
 		for _, value := range got {
@@ -2511,7 +2511,7 @@ func TestCollectAssignedWorkBeads_ReadyProbeExcludesFutureNamedSessionRuntimeAss
 	// set is the partition set, so assert it where it now lives — the
 	// assignee set the scope read is partitioned over. The exclusion half is
 	// additionally proven end-to-end by len(got) == 0 above.
-	assignees := readyAssignedWorkAssignees(cfg, nil, nil)
+	assignees := readyAssignedWorkAssignees(cfg, nil, nil, nil)
 	inSet := make(map[string]bool, len(assignees))
 	for _, a := range assignees {
 		inSet[a] = true
