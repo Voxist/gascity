@@ -13105,7 +13105,7 @@ provider = "bd"
 	}
 }
 
-// TestSyncConfiguredDoltPortFilesReconcilesEveryRigAfterPortFallback pins the
+// TestSyncConfiguredDoltPortFiles_FanOutIsExhaustiveAfterPortResolution pins the
 // fallback-restart regression from ga-2598s: when the managed server binds a
 // different port than the one it last held, every rig's raw-bd port mirror has
 // to land on the live port, even if reconciling some other scope fails.
@@ -13117,7 +13117,7 @@ provider = "bd"
 // error raised after the port is resolved used to abort the fan-out — so the
 // regression is reproduced here by failing one scope's classification rather
 // than by driving a real dolt restart.
-func TestSyncConfiguredDoltPortFilesReconcilesEveryRigAfterPortFallback(t *testing.T) {
+func TestSyncConfiguredDoltPortFiles_FanOutIsExhaustiveAfterPortResolution(t *testing.T) {
 	cityDir := t.TempDir()
 	rigRoot := t.TempDir()
 	brokenRig := filepath.Join(rigRoot, "broken")
@@ -13209,7 +13209,7 @@ func TestSyncConfiguredDoltPortFilesReconcilesEveryRigAfterPortFallback(t *testi
 	}
 }
 
-// TestSyncConfiguredDoltPortFilesReconcilesRigsWhenCityScopeFails covers the
+// TestSyncConfiguredDoltPortFiles_FanOutIsExhaustiveWhenCityScopeFails covers the
 // other half of ga-2598s: a failure reconciling the CITY scope used to abort
 // before the rig loop began, leaving every rig on the dead port while the city
 // mirror had already moved — currentDoltPort rewrites it while resolving the
@@ -13221,7 +13221,7 @@ func TestSyncConfiguredDoltPortFilesReconcilesEveryRigAfterPortFallback(t *testi
 // deliberately still fatal. A read-only file separates them: the desired-state
 // read succeeds and only EnsureCanonicalConfig's write fails, landing exactly
 // on normalizeScopeDoltConfig(cityPath, cityState).
-func TestSyncConfiguredDoltPortFilesReconcilesRigsWhenCityScopeFails(t *testing.T) {
+func TestSyncConfiguredDoltPortFiles_FanOutIsExhaustiveWhenCityScopeFails(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores file permission bits, so the write would succeed and the test would pass for the wrong reason")
 	}

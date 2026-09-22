@@ -2061,8 +2061,12 @@ func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...
 // together rather than aborting the remaining scopes (ga-2598s).
 //
 // Resolving the port is itself what moves the CITY mirror: currentDoltPort
-// writes it (:1534) when it resolves a port and REMOVES it (:1540) when it
-// cannot. So an early return past that point splits the city from its rigs, and
+// writes it when it resolves a port and REMOVES it when it cannot — deliberately
+// named rather than cited by line, because a line number is a claim about a file
+// that edits elsewhere silently invalidate (this comment's own citations went
+// stale one merge after they were written).
+//
+// So an early return past that point splits the city from its rigs, and
 // because rigs are reconciled in slice order it splits them from each other
 // too. The reachable shapes are: city reconciled plus a PREFIX of rigs on the
 // live port, with the remaining suffix left on the dead one — for any prefix
