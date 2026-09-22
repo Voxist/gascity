@@ -2825,7 +2825,7 @@
         },
         "dolt_port": {
           "type": "string",
-          "description": "DoltPort overrides the city-level Dolt port for this rig's beads.\nWhen set, controller commands (scale_check, work_query) prefix their\nshell invocations with BEADS_DOLT_SERVER_PORT=\u003cport\u003e so bd connects to the\ncorrect server instead of the city-level default.\nAccepts both TOML spellings: `dolt_port = 9876` and `dolt_port = \"9876\"`."
+          "description": "DoltPort overrides the city-level Dolt port for this rig's beads.\nWhen set, controller probes (scale_check, work_query) are given the\nrig's Dolt connection coordinates so bd connects to the correct server\ninstead of the city-level default.\nAccepts both TOML spellings: `dolt_port = 9876` and `dolt_port = \"9876\"`."
         },
         "formula_vars": {
           "additionalProperties": {
