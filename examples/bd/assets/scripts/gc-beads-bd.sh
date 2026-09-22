@@ -78,6 +78,28 @@ die() {
     exit 1
 }
 
+# die_unobservable reports that this script COULD NOT OBSERVE the server,
+# as distinct from die(), which reports that it observed the server and
+# the server is bad. gc classifies the two differently: an observation
+# licenses replacing a live server, a failure to observe never does
+# (ga-amol9).
+#
+# The distinction is load-bearing because every probe here can fail for
+# reasons that have nothing to do with the store. On 2026-09-22 the host
+# reached load 95 while dolt answered `select 1` in 58ms; a freshly
+# forked `nc -z -w 2` can burn its whole 2s budget waiting for CPU before
+# it ever dials, and gc's own 30s deadline is nowhere near expired, so
+# that starvation used to present as a clean "the server is unreachable"
+# verdict and got a healthy server replaced.
+#
+# Exit 3 is the code for it. Exit 1 stays "observed and bad", exit 2
+# stays "not needed"; both are consumed by
+# runProviderOpWithEnvContext and must not be disturbed.
+die_unobservable() {
+    echo "$@" >&2
+    exit 3
+}
+
 resolve_gc_helper_bin() {
     if [ -n "${GC_BIN:-}" ]; then
         printf '%s\n' "$GC_BIN"
@@ -3677,9 +3699,12 @@ op_store_bridge() {
 op_health() {
     local conn_count="" read_only_status
 
-    # TCP check.
+    # TCP check. A failure here is "I could not reach it", which on a
+    # loaded host is far more often a starved `nc` than a dead server --
+    # see die_unobservable. The probes below DO observe the server, so
+    # they keep die().
     if ! tcp_check; then
-        die "dolt server not reachable on $(connect_host):$DOLT_PORT"
+        die_unobservable "dolt server not reachable on $(connect_host):$DOLT_PORT"
     fi
 
     if load_health_check_from_gc; then
