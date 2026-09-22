@@ -753,7 +753,7 @@ func syncRigEndpointCompatConfig(fs fsys.FS, cityPath string, cfg *config.City, 
 			cfg.Rigs[i].DoltPort = ""
 		} else {
 			cfg.Rigs[i].DoltHost = strings.TrimSpace(state.DoltHost)
-			cfg.Rigs[i].DoltPort = strings.TrimSpace(state.DoltPort)
+			cfg.Rigs[i].DoltPort = config.PortString(strings.TrimSpace(state.DoltPort))
 		}
 		return writeCityConfigForEditFS(fs, filepath.Join(cityPath, "city.toml"), cfg)
 	}

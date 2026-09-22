@@ -805,7 +805,7 @@ Rig defines an external project registered in the city.
 | `default_sling_targets` | []string |  |  | DefaultSlingTargets is the plural form of DefaultSlingTarget. When set, targetless gc sling picks one entry at random each dispatch. Takes precedence over DefaultSlingTarget when non-empty. Each entry is resolved the same way as DefaultSlingTarget. Example:   default_sling_targets = ["rig/polecat-a", "rig/polecat-b"] |
 | `session_sleep` | SessionSleepConfig |  |  | SessionSleep overrides workspace-level idle sleep defaults for agents in this rig. |
 | `dolt_host` | string |  |  | DoltHost overrides the city-level Dolt host for this rig's beads. Use when the rig's database lives on a different Dolt server (e.g., shared from another city). |
-| `dolt_port` | string |  |  | DoltPort overrides the city-level Dolt port for this rig's beads. When set, controller commands (scale_check, work_query) prefix their shell invocations with BEADS_DOLT_SERVER_PORT=&lt;port&gt; so bd connects to the correct server instead of the city-level default. |
+| `dolt_port` | string |  |  | DoltPort overrides the city-level Dolt port for this rig's beads. When set, controller commands (scale_check, work_query) prefix their shell invocations with BEADS_DOLT_SERVER_PORT=&lt;port&gt; so bd connects to the correct server instead of the city-level default. Accepts both TOML spellings: `dolt_port = 9876` and `dolt_port = "9876"`. |
 | `formula_vars` | map[string]string |  |  | FormulaVars provides rig-scoped defaults for formula vars. Keys match var names declared in formula `[vars.&lt;name&gt;]` blocks. Values are used when a formula runs in this rig and the caller did not pass an explicit --var override. Takes precedence over formula-level defaults but loses to --var flags. |
 
 ## RigPatch
@@ -820,6 +820,13 @@ RigPatch modifies an existing rig identified by Name.
 | `default_branch` | string |  |  | DefaultBranch overrides the rig's recorded mainline branch. |
 | `suspended` | boolean |  |  | Suspended is the deprecated, pre-runtime-state suspension override. Parsed for backwards compatibility; `gc doctor` surfaces it as a warning and recommends the rename to SuspendedOnStart. No behavioral code path reads it. |
 | `suspended_on_start` | boolean |  |  | SuspendedOnStart overrides the rig's desired suspension state at city start. Mirrors Rig.SuspendedOnStart. |
+| `formulas_dir` | string |  |  | FormulasDir overrides the rig-local formula directory (see Rig.FormulasDir for resolution order). |
+| `max_active_sessions` | integer |  |  | MaxActiveSessions overrides the rig-level cap on concurrent sessions across all agents in the rig. Mirrors Rig.MaxActiveSessions. |
+| `default_sling_target` | string |  |  | DefaultSlingTarget overrides the agent a targetless gc sling picks. |
+| `default_sling_targets` | []string |  |  | DefaultSlingTargets overrides the plural sling target list. Set to an empty list to clear it; leave unset to keep the rig's list. |
+| `session_sleep` | SessionSleepConfig |  |  | SessionSleep overrides the rig's idle-sleep defaults. Merged per class: a patch that sets only one class leaves the others alone. |
+| `dolt_host` | string |  |  | DoltHost overrides the rig's Dolt host. Deprecated alongside Rig.DoltHost; the canonical endpoint lives in the rig's scope config. |
+| `dolt_port` | string |  |  | DoltPort overrides the rig's Dolt port. Deprecated alongside Rig.DoltPort; accepts both TOML spellings (see PortString). |
 | `formula_vars` | map[string]string |  |  | FormulaVars adds or overrides rig-scoped formula var defaults. Additive merge: patch keys win over existing rig keys, unspecified keys are preserved. |
 
 ## Service

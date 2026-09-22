@@ -459,8 +459,8 @@ func cityEndpointCompatEdits(cityPath string, cfg *config.City, targetState cont
 				cfg.Rigs[i].DoltHost = host
 				edits = append(edits, rigEndpointCompatEdit(cfg.Rigs[i].Name, "dolt_host", host))
 			}
-			if cfg.Rigs[i].DoltPort != port {
-				cfg.Rigs[i].DoltPort = port
+			if cfg.Rigs[i].DoltPort.String() != port {
+				cfg.Rigs[i].DoltPort = config.PortString(port)
 				edits = append(edits, rigEndpointCompatEdit(cfg.Rigs[i].Name, "dolt_port", port))
 			}
 			break

@@ -2238,7 +2238,7 @@ func configuredExternalDoltTargetForCity(dc config.DoltConfig) (string, string) 
 }
 
 func configuredExternalDoltTargetForRig(rig config.Rig) (string, string) {
-	port := strings.TrimSpace(rig.DoltPort)
+	port := strings.TrimSpace(rig.DoltPort.String())
 	return canonicalExternalHost(rig.DoltHost, port), port
 }
 

@@ -660,7 +660,8 @@ type Rig struct {
 	// When set, controller commands (scale_check, work_query) prefix their
 	// shell invocations with BEADS_DOLT_SERVER_PORT=<port> so bd connects to the
 	// correct server instead of the city-level default.
-	DoltPort string `toml:"dolt_port,omitempty"`
+	// Accepts both TOML spellings: `dolt_port = 9876` and `dolt_port = "9876"`.
+	DoltPort PortString `toml:"dolt_port,omitempty"`
 	// FormulaVars provides rig-scoped defaults for formula vars. Keys match
 	// var names declared in formula `[vars.<name>]` blocks. Values are used
 	// when a formula runs in this rig and the caller did not pass an

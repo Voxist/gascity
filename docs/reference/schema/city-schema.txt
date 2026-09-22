@@ -2825,7 +2825,7 @@
         },
         "dolt_port": {
           "type": "string",
-          "description": "DoltPort overrides the city-level Dolt port for this rig's beads.\nWhen set, controller commands (scale_check, work_query) prefix their\nshell invocations with BEADS_DOLT_SERVER_PORT=\u003cport\u003e so bd connects to the\ncorrect server instead of the city-level default."
+          "description": "DoltPort overrides the city-level Dolt port for this rig's beads.\nWhen set, controller commands (scale_check, work_query) prefix their\nshell invocations with BEADS_DOLT_SERVER_PORT=\u003cport\u003e so bd connects to the\ncorrect server instead of the city-level default.\nAccepts both TOML spellings: `dolt_port = 9876` and `dolt_port = \"9876\"`."
         },
         "formula_vars": {
           "additionalProperties": {
@@ -2867,6 +2867,37 @@
         "suspended_on_start": {
           "type": "boolean",
           "description": "SuspendedOnStart overrides the rig's desired suspension state at\ncity start. Mirrors Rig.SuspendedOnStart."
+        },
+        "formulas_dir": {
+          "type": "string",
+          "description": "FormulasDir overrides the rig-local formula directory\n(see Rig.FormulasDir for resolution order)."
+        },
+        "max_active_sessions": {
+          "type": "integer",
+          "description": "MaxActiveSessions overrides the rig-level cap on concurrent sessions\nacross all agents in the rig. Mirrors Rig.MaxActiveSessions."
+        },
+        "default_sling_target": {
+          "type": "string",
+          "description": "DefaultSlingTarget overrides the agent a targetless gc sling picks."
+        },
+        "default_sling_targets": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "DefaultSlingTargets overrides the plural sling target list. Set to an\nempty list to clear it; leave unset to keep the rig's list."
+        },
+        "session_sleep": {
+          "$ref": "#/$defs/SessionSleepConfig",
+          "description": "SessionSleep overrides the rig's idle-sleep defaults. Merged per\nclass: a patch that sets only one class leaves the others alone."
+        },
+        "dolt_host": {
+          "type": "string",
+          "description": "DoltHost overrides the rig's Dolt host. Deprecated alongside\nRig.DoltHost; the canonical endpoint lives in the rig's scope config."
+        },
+        "dolt_port": {
+          "type": "string",
+          "description": "DoltPort overrides the rig's Dolt port. Deprecated alongside\nRig.DoltPort; accepts both TOML spellings (see PortString)."
         },
         "formula_vars": {
           "additionalProperties": {
