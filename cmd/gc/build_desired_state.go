@@ -193,6 +193,29 @@ type poolEvalWork struct {
 	newDemand bool
 }
 
+// pendingPoolWithProbeEnv builds a poolEvalWork carrying the agent's resolved
+// controller store env. Every producer of a poolEvalWork goes through here so
+// that none can be written without one.
+//
+// A missing env is not a benign default. evaluatePendingPools hands env to the
+// runner as the subprocess environment, and mergeRuntimeEnv STRIPS inherited
+// GC_DOLT_*/BEADS_* keys before applying the overrides — so a pool appended
+// with a nil env probes with no store coordinates at all, rather than falling
+// back to the controller's ambient ones. A rig-scoped agent then cannot reach
+// its rig's Dolt server, and the count its scale_check reports is not a count
+// of that rig's queue (ga-7nwnh).
+//
+// Reporting and returning false mirrors the skip the generic-pool path already
+// performed: an agent whose store env will not resolve is not probed this tick.
+func pendingPoolWithProbeEnv(cityPath string, cfg *config.City, agentIdx int, sp scaleParams, poolDir string, newDemand bool, stderr io.Writer) (poolEvalWork, bool) {
+	env, err := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[agentIdx])
+	if err != nil {
+		fmt.Fprintf(stderr, "scaleCheck: building env for %s: %v\n", cfg.Agents[agentIdx].QualifiedName(), err) //nolint:errcheck
+		return poolEvalWork{}, false
+	}
+	return poolEvalWork{agentIdx: agentIdx, sp: sp, poolDir: poolDir, env: env, newDemand: newDemand}, true
+}
+
 type defaultScaleCheckTarget struct {
 	template string
 	storeKey string
@@ -283,8 +306,16 @@ func evaluatePendingPools(
 	for j, pw := range pendingPools {
 		wg.Add(1)
 		sp := pw.sp
+		// probeEnv reaches the check structurally, through the runner's
+		// cmd.Env (runShellCommand -> mergeRuntimeEnv). It is deliberately NOT
+		// also glued onto sp.Check as a textual `KEY=value cmd` prefix: a POSIX
+		// assignment prefix binds to the one simple command that follows it, so
+		// on a check that opens with a keyword (if/while/for/case) it is a
+		// syntax error, and the pool would collapse to min on every tick. The
+		// structural env is a superset of anything a prefix could carry, and it
+		// keeps connection coordinates out of a command string that a process
+		// listing exposes (ga-7nwnh).
 		probeEnv := pw.env
-		sp.Check = prefixShellEnv(controllerQueryPrefixEnv(probeEnv), sp.Check)
 		template := cfg.Agents[pw.agentIdx].QualifiedName()
 		agentName := cfg.Agents[pw.agentIdx].Name
 		agentIndex := pw.agentIdx
@@ -677,7 +708,9 @@ func buildDesiredStateWithSessionBeadsAt(
 					coldWakeTemplates[template] = true
 				}
 			}
-			pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, newDemand: store != nil})
+			if pw, ok := pendingPoolWithProbeEnv(cityPath, cfg, i, sp, poolDir, store != nil, stderr); ok {
+				pendingPools = append(pendingPools, pw)
+			}
 			continue
 		}
 
@@ -761,12 +794,9 @@ func buildDesiredStateWithSessionBeadsAt(
 			}
 			coldWakeTemplates[template] = true
 		}
-		env, err := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[i])
-		if err != nil {
-			fmt.Fprintf(stderr, "scaleCheck: building env for %s: %v\n", cfg.Agents[i].QualifiedName(), err) //nolint:errcheck
-			continue
+		if pw, ok := pendingPoolWithProbeEnv(cityPath, cfg, i, sp, poolDir, store != nil, stderr); ok {
+			pendingPools = append(pendingPools, pw)
 		}
-		pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, env: env, newDemand: store != nil})
 	}
 
 	// Collect work beads with assignees — used for both pool demand and
@@ -1641,7 +1671,7 @@ func collectAssignedWorkBeadsWithStores(
 	// suppress the Ready probe for a same-ID assignee in another store.
 	skipReadyAssignees := readyCapturedAssigneeSet(result, resultStoreRefs, readyAssigned)
 	expandSkipAssigneesWithSessionIdentities(skipReadyAssignees, sessionBeads)
-	assignees := readyAssignedWorkAssignees(cfg, sessionBeads, skipReadyAssignees)
+	assignees := readyAssignedWorkAssignees(cfg, cityStore, sessionBeads, skipReadyAssignees)
 	if len(skipReadyAssignees) > 0 && len(assignees) == 0 {
 		return result, resultStores, resultStoreRefs, readyAssigned, partial
 	}
@@ -1788,7 +1818,7 @@ func expandSkipAssigneesWithSessionIdentities(skip map[string]struct{}, sessionB
 	}
 }
 
-func readyAssignedWorkAssignees(cfg *config.City, sessionBeads *sessionBeadSnapshot, skip map[string]struct{}) []string {
+func readyAssignedWorkAssignees(cfg *config.City, cityStore beads.Store, sessionBeads *sessionBeadSnapshot, skip map[string]struct{}) []string {
 	seen := make(map[string]struct{})
 	var result []string
 	add := func(value string) {
@@ -1816,12 +1846,21 @@ func readyAssignedWorkAssignees(cfg *config.City, sessionBeads *sessionBeadSnaps
 		}
 	}
 	if cfg != nil {
+		cityName := config.EffectiveCityName(cfg, "")
 		for i := range cfg.NamedSessions {
 			if cfg.NamedSessions[i].Mode != "on_demand" {
 				continue
 			}
 			identity := cfg.NamedSessions[i].QualifiedName()
 			add(identity)
+			// A closed phantom session bead for this identity means the
+			// on-demand session's own ready-assigned work is now filed under
+			// its runtime session name (#5231's assignee form), not the
+			// qualified identity above — enumerate that form too, or it is
+			// never queried and the work never re-materializes a session.
+			if _, ok := findClosedNamedSessionBead(cityStore, identity); ok {
+				add(config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity))
+			}
 		}
 	}
 	return result
