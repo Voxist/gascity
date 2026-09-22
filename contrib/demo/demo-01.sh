@@ -54,9 +54,12 @@ cleanup() {
     if [ -d "$DEMO_CITY" ]; then
         (cd "$DEMO_CITY" && gc stop 2>/dev/null) || true
     fi
-    # Kill all non-system dolt servers (system dolt runs on port 3307).
-    ps aux | grep "dolt sql-server" | grep -v grep | grep -v "port=3307" \
-        | awk '{print $2}' | xargs -r kill -9 2>/dev/null || true
+    # Kill only dolt servers left over from THIS demo city: a managed server's
+    # --config / --data-dir lives under $DEMO_CITY. Never touch any other dolt
+    # server on the machine — another city's live server included (ga-cflrh).
+    if [ -n "$DEMO_CITY" ]; then
+        pkill -9 -f "dolt sql-server.*${DEMO_CITY}/" 2>/dev/null || true
+    fi
     rm -rf "$DEMO_CITY"
     # Restart supervisor under isolated GC_HOME with current binary.
     local pid

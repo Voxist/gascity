@@ -68,6 +68,10 @@ var providerOpSemaphores sync.Map // cityPath → chan struct{}
 // with the breaker-aware skip, this breaks the low-RSS restart-loop
 // where each patrol tick re-trips the bd circuit breaker and
 // re-desyncs the managed-dolt PID.
+//
+// Read and written only through admitManagedDoltRecover (declared in
+// dolt_recover_gate.go), which is the single throttle for the recover
+// op: every caller reaches it through runGuardedManagedDoltRecover.
 var lastBeadsProviderRecover sync.Map // cityPath → time.Time
 
 // providerRecoverCooldown is the minimum interval between consecutive
@@ -1351,20 +1355,24 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 				if isBreakerOpenError(err) {
 					return err
 				}
-				// Recover backoff: refuse a 2nd recover within
-				// providerRecoverCooldown of the prior one, keyed per
-				// city. This alone breaks the low-RSS restart-loop where
-				// each tick (~60-110s apart) starts a fresh recover.
-				cityKey := normalizePathForCompare(cityPath)
-				now := providerRecoverNow()
-				if v, loaded := lastBeadsProviderRecover.Load(cityKey); loaded {
-					if last, ok := v.(time.Time); ok && now.Sub(last) < providerRecoverCooldown() {
-						return err
-					}
-				}
-				lastBeadsProviderRecover.Store(cityKey, now)
 			}
-			if recErr := runProviderOpWithEnvContext(ctx, script, providerEnv, "recover"); recErr != nil {
+			// The recover backoff and the liveness check both live in
+			// runGuardedManagedDoltRecover, which is the one route to
+			// the recover op — see dolt_recover_gate.go.
+			//
+			// managedDoltHealthOpEvidence decides which of the two rules
+			// applies. A health op that RAN and reported the server
+			// unhealthy is positive evidence a live pid holding its port
+			// does not refute, and may replace it: that is the only
+			// observer that can still see a wedged-but-listening Dolt
+			// (ga-fkidk). A health op that was KILLED at its deadline
+			// observed nothing, and on a saturated host that is the
+			// common case — it is treated exactly like a bd transport
+			// timeout and may only start a server that is not there.
+			if recErr := runGuardedManagedDoltRecover(ctx, cityPath, script, providerEnv, managedDoltHealthOpEvidence(ctx, err)); recErr != nil {
+				if errors.Is(recErr, errManagedDoltRecoverDeclined) {
+					return fmt.Errorf("unhealthy (%w): %w", err, recErr)
+				}
 				return fmt.Errorf("unhealthy (%w) and recovery failed: %w", err, recErr)
 			}
 			if pubErr := publishManagedDoltRuntimeStateIfOwned(cityPath); pubErr != nil {
@@ -2575,7 +2583,14 @@ var providerOpTimeout = func(op string) time.Duration {
 
 // runProviderOp runs a lifecycle operation against an exec beads script.
 // Exit 2 = not needed (treated as success, no-op). Used for start,
-// init, health, recover, and stop operations.
+// init, health and stop operations.
+//
+// NOT for the recover operation: that one op stops a running server and
+// starts a replacement, and every route to it must pass the cooldown and
+// the liveness check in runGuardedManagedDoltRecover (ga-amol9). This
+// function forwards its caller's op verbatim, so it cannot enforce
+// that; it has no production callers today and
+// TestProviderOpForwardersAreNotARouteToRecover keeps it that way.
 // cityPath is exported via the canonical city runtime env so scripts can
 // locate the city root and runtime directories.
 func runProviderOp(script, cityPath string, args ...string) error {
@@ -2628,7 +2643,43 @@ func runProviderOpWithEnvContext(parent context.Context, script string, environ 
 		if msg == "" {
 			msg = err.Error()
 		}
-		return fmt.Errorf("exec beads %s: %s", args[0], msg)
+		// Wrap rather than format: the provider's EXIT CODE is evidence
+		// gc classifies on (managedDoltHealthOpEvidence reads exit 3,
+		// "I could not observe the server", from op_health's tcp_check).
+		// The previous fmt.Errorf("%s") dropped the *exec.ExitError, so
+		// errors.As could not reach it. Error() is byte-identical to
+		// what that produced.
+		return &providerOpError{op: args[0], msg: msg, err: err}
 	}
 	return nil
+}
+
+// providerOpError carries a failed provider operation's underlying error
+// -- crucially an *exec.ExitError, and with it the script's exit code --
+// while rendering exactly the message the previous fmt.Errorf produced.
+type providerOpError struct {
+	op  string
+	msg string
+	err error
+}
+
+func (e *providerOpError) Error() string {
+	return fmt.Sprintf("exec beads %s: %s", e.op, e.msg)
+}
+
+func (e *providerOpError) Unwrap() error { return e.err }
+
+// providerOpExitCode returns the exit code a provider script exited
+// with, and whether one was available. A script killed by a signal, or
+// an error that never reached a script at all, has no exit code to
+// report and must not be read as one.
+func providerOpExitCode(err error) (int, bool) {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return 0, false
+	}
+	if exitErr.ProcessState == nil || !exitErr.Exited() {
+		return 0, false
+	}
+	return exitErr.ExitCode(), true
 }

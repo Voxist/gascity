@@ -1145,7 +1145,12 @@ var recoverManagedBDCommand = func(cityPath string) error {
 		environ = removeEnvKey(environ, "GC_BIN")
 		environ = append(environ, "GC_BIN="+gcBin)
 	}
-	return runProviderOpWithEnv(script, environ, "recover")
+	// Every route to the recover op goes through the one guard: the
+	// cooldown, and the rule that a failure to observe is never
+	// sufficient evidence to destroy a running server. The bd runner
+	// carries recoverEvidenceCallFailed because all it knows is that its
+	// own call did not come back. See dolt_recover_gate.go.
+	return runGuardedManagedDoltRecover(context.Background(), cityPath, script, environ, recoverEvidenceCallFailed)
 }
 
 func setProjectedDoltEnvEmpty(env map[string]string) {
@@ -1605,8 +1610,19 @@ func bdCommandRunnerWithManagedRetryFor(cityPath string, envFn bdManagedEnvFn) b
 			recordBdBreakerOutcome(breaker, bdInvocationTimedOut(name, err))
 			return out, err
 		}
+		// This path used to call the recover op on EVERY recoverable
+		// transport error, with no rate limit and no check that the
+		// server it was replacing was dead (ga-amol9). The guard now
+		// lives inside recoverManagedBDCommand, at the one choke point
+		// every caller shares.
+		//
+		// A DECLINED recover is not a transport fault, so it must not
+		// count toward the breaker, and it still falls through to the
+		// retry below — the cheap half of this path, and the half that
+		// fixes a merely stale port without touching the server.
 		if bdTransportRecoverableError(cityPath, dir, env, err) {
-			if recErr := recoverManagedBDCommand(cityPath); recErr != nil {
+			recErr := recoverManagedBDCommand(cityPath)
+			if recErr != nil && !errors.Is(recErr, errManagedDoltRecoverDeclined) {
 				recordBdBreakerOutcome(breaker, true)
 				return out, err
 			}

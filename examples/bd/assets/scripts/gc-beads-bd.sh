@@ -78,6 +78,28 @@ die() {
     exit 1
 }
 
+# die_unobservable reports that this script COULD NOT OBSERVE the server,
+# as distinct from die(), which reports that it observed the server and
+# the server is bad. gc classifies the two differently: an observation
+# licenses replacing a live server, a failure to observe never does
+# (ga-amol9).
+#
+# The distinction is load-bearing because every probe here can fail for
+# reasons that have nothing to do with the store. On 2026-09-22 the host
+# reached load 95 while dolt answered `select 1` in 58ms; a freshly
+# forked `nc -z -w 2` can burn its whole 2s budget waiting for CPU before
+# it ever dials, and gc's own 30s deadline is nowhere near expired, so
+# that starvation used to present as a clean "the server is unreachable"
+# verdict and got a healthy server replaced.
+#
+# Exit 3 is the code for it. Exit 1 stays "observed and bad", exit 2
+# stays "not needed"; both are consumed by
+# runProviderOpWithEnvContext and must not be disturbed.
+die_unobservable() {
+    echo "$@" >&2
+    exit 3
+}
+
 resolve_gc_helper_bin() {
     if [ -n "${GC_BIN:-}" ]; then
         printf '%s\n' "$GC_BIN"
@@ -1523,12 +1545,22 @@ wait_deleted_data_inodes() {
     return 1
 }
 
-# kill_imposter kills a process that isn't our dolt server.
+# kill_imposter kills a stale dolt server of OURS that is holding DOLT_PORT
+# (e.g. one still serving deleted data inodes). It never kills a process that
+# verify_our_server cannot identify as this city's server: a foreign holder of
+# the port — another city's live dolt, or anything else — is out of this
+# script's root, and killing it takes that owner down (ga-cflrh). In that case
+# it refuses, says why, and returns 1 so the caller fails the start instead.
 kill_imposter() {
     local pid="$1"
     [ -n "$pid" ] || return 0
 
-    echo "killing imposter dolt server (PID $pid) on port $DOLT_PORT" >&2
+    if ! verify_our_server "$pid"; then
+        echo "refusing to kill PID $pid holding port $DOLT_PORT: it is not this city's dolt server (data dir $DATA_DIR)" >&2
+        return 1
+    fi
+
+    echo "killing stale dolt server (PID $pid) on port $DOLT_PORT" >&2
     kill "$pid" 2>/dev/null || return 0
 
     # Wait up to 5s for graceful shutdown.
@@ -2712,7 +2744,8 @@ op_start() {
                     die "could not stop dolt server (PID $holder) holding port $DOLT_PORT without risking journal corruption (check $LOG_FILE)"
             else
                 if [ -z "$gc_helper_bin" ]; then
-                    kill_imposter "$holder"
+                    kill_imposter "$holder" || \
+                        die "port $DOLT_PORT is held by PID $holder, which is not this city's dolt server; stop it or configure a different port"
                     sleep 1
                 fi
             fi
@@ -2743,7 +2776,8 @@ op_start() {
             else
                 # Imposter or stale local server on our port — kill it.
                 if [ -z "$gc_helper_bin" ]; then
-                    kill_imposter "$holder"
+                    kill_imposter "$holder" || \
+                        die "port $DOLT_PORT is held by PID $holder, which is not this city's dolt server; stop it or configure a different port"
                     sleep 1
                 fi
             fi
@@ -3665,9 +3699,12 @@ op_store_bridge() {
 op_health() {
     local conn_count="" read_only_status
 
-    # TCP check.
+    # TCP check. A failure here is "I could not reach it", which on a
+    # loaded host is far more often a starved `nc` than a dead server --
+    # see die_unobservable. The probes below DO observe the server, so
+    # they keep die().
     if ! tcp_check; then
-        die "dolt server not reachable on $(connect_host):$DOLT_PORT"
+        die_unobservable "dolt server not reachable on $(connect_host):$DOLT_PORT"
     fi
 
     if load_health_check_from_gc; then
