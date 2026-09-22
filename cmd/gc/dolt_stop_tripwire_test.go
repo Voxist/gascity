@@ -73,13 +73,14 @@ var managedDoltIdentityStopDefinition = regexp.MustCompile(
 // Both are review's job; this test only makes the diff impossible to miss.
 func TestManagedDoltStopCallSiteTripwire(t *testing.T) {
 	want := map[string]int{
-		"bd_env.go":                   2,  // recoverManagedBDCommand: the provider op inside its definition, and the bd runner's transport-recovery call
-		"beads_provider_lifecycle.go": 9,  // the provider lifecycle itself: start/health/ensure-ready/stop/shutdown, plus the health path's recover op
+		"bd_env.go":                   1,  // recoverManagedBDCommand's own definition no longer counts: its body now calls runGuardedManagedDoltRecover (ga-amol9's #212 choke point), not the primitive directly; the bd runner's transport-recovery call at its use site is the one that remains
+		"beads_provider_lifecycle.go": 8,  // the provider lifecycle itself: start/health/ensure-ready/stop/shutdown; the health path's former direct recover call now routes through runGuardedManagedDoltRecover instead, so it no longer counts here
 		"cmd_beads_city.go":           1,  // `gc beads city` endpoint change: explicit operator command
 		"cmd_dolt_state.go":           2,  // `gc dolt-state stop-managed` / `recover-managed`: explicit, run by the provider script
 		"cmd_stop.go":                 3,  // `gc stop`: explicit city shutdown
 		"cmd_supervisor.go":           3,  // the supervisor stopping a city, or cleaning up a failed start
 		"dolt_delivery_window.go":     2,  // the controller's own start-up delivery window
+		"dolt_recover_gate.go":        1,  // managedDoltRecoverRunner's own provider-op call: the ONE remaining primitive call site for recovery, reachable only via runGuardedManagedDoltRecover's liveness check and cooldown (ga-amol9's #212 choke point, landed here by merge)
 		"dolt_recover_managed.go":     2,  // recoverManagedDoltProcess's stop step and its failed-recovery cleanup, reached only through the gated paths above
 		"dolt_scope_watchdog.go":      4,  // the scope watchdog reaping the server it supervises
 		"dolt_start_managed.go":       13, // start-path cleanup, the test watchdog and the stop helpers
