@@ -1202,7 +1202,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		)
 	}
 
-	unresolvedTemplates := unresolvedAgentTemplates(bp, cfg, suspendedRigPaths, stderr)
+	unresolvedTemplates := unresolvedAgentTemplates(bp, cfg, suspendedRigPaths, nil, stderr)
 
 	sessionSnapshotComplete := bp.hasCompleteSessionSnapshot()
 	sessionOccupancyInfos := make([]session.Info, len(allOpenSessionInfos))
@@ -1466,7 +1466,7 @@ func refreshDesiredStateWithSessionBeads(
 	// refreshed desired set just as it would in the full build, so the refresh
 	// carries its own failures forward on top of the build's rather than
 	// re-opening the drain the build closed (ga-c8rck).
-	refreshed.UnresolvedTemplates = mergeUnresolvedTemplates(result.UnresolvedTemplates, unresolvedAgentTemplates(bp, cfg, suspendedRigPaths, stderr))
+	refreshed.UnresolvedTemplates = mergeUnresolvedTemplates(result.UnresolvedTemplates, unresolvedAgentTemplates(bp, cfg, suspendedRigPaths, result.UnresolvedTemplates, stderr))
 	return refreshed
 }
 
@@ -6522,7 +6522,9 @@ type unresolvedTemplate struct {
 }
 
 // unresolvedAgentTemplates returns the configured, runnable agent templates the
-// build could not produce desired state for this tick, keyed to why. Two
+// build could not produce desired state for this tick, keyed to why. Entries
+// already present in reported are still returned but not logged again, so the
+// post-tick refresh pass does not repeat what the build pass already said. Two
 // classes reach it: the agent's provider cannot be resolved (ga-8a8fq), and any
 // other per-agent build step failed for it and left it out of the desired set
 // (ga-c8rck) — the build records those through agentBuildParams.buildFailures
@@ -6533,13 +6535,16 @@ type unresolvedTemplate struct {
 // for as suspended and a build failure says nothing new about them. An agent
 // removed from config cannot appear here at all — it is not in cfg.Agents — so
 // its sessions still drain as orphaned.
-func unresolvedAgentTemplates(bp *agentBuildParams, cfg *config.City, suspendedRigPaths map[string]bool, stderr io.Writer) map[string]unresolvedTemplate {
+func unresolvedAgentTemplates(bp *agentBuildParams, cfg *config.City, suspendedRigPaths map[string]bool, reported map[string]unresolvedTemplate, stderr io.Writer) map[string]unresolvedTemplate {
 	var out map[string]unresolvedTemplate
 	record := func(template string, reason TraceReasonCode, cause string) {
 		if out == nil {
 			out = make(map[string]unresolvedTemplate)
 		}
 		out[template] = unresolvedTemplate{Reason: reason, Cause: cause}
+		if _, already := reported[template]; already {
+			return
+		}
 		fmt.Fprintf(stderr, "buildDesiredState: %s (keeping existing sessions of %q until it builds again)\n", cause, template) //nolint:errcheck
 	}
 	for i := range cfg.Agents {

@@ -199,3 +199,28 @@ func TestSuspendedRigAttachedSessionStillDrains(t *testing.T) {
 		t.Fatalf("attached session of an agent in a suspended rig is not draining; stderr:\n%s", stderr)
 	}
 }
+
+// TestPoollessTemplateResolveFailureDoesNotDrainItsSessions reaches the same
+// resolveTemplate failure through the OTHER build path. With no pool config the
+// pool realizer never runs for this agent, so its live session is re-resolved
+// by the session-bead overlay — the seam that keeps `gc session new` sessions
+// and dependency floors in the desired set — and a failure there drops the
+// session just as squarely.
+func TestPoollessTemplateResolveFailureDoesNotDrainItsSessions(t *testing.T) {
+	env := newUnresolvedProviderEnv(t, "true")
+	env.cfg.Agents[1].MaxActiveSessions = nil
+	env.cfg.Agents[1].ScaleCheck = ""
+	breakWorkDirTemplate(&env.cfg.Agents[1])
+
+	cr, _, stderr := env.tick(t)
+
+	if !strings.Contains(stderr, "buildDesiredState: bead ") {
+		t.Fatalf("session-bead overlay resolve failure not reported; the fixture no longer reaches the overlay; stderr:\n%s", stderr)
+	}
+	if ds := cr.sessionDrains.get(env.broken.ID); ds != nil {
+		t.Fatalf("poolless session whose template could not be resolved is draining (reason %q); stderr:\n%s", ds.reason, stderr)
+	}
+	if !env.sp.IsRunning("s-rig-b-worker") {
+		t.Fatalf("poolless session whose template failed to resolve was stopped; stderr:\n%s", stderr)
+	}
+}
