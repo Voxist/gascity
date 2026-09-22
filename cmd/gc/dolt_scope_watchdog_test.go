@@ -193,6 +193,12 @@ func TestManagedDoltScopeWatchdogHelper(t *testing.T) {
 		for key, value := range session.RuntimeEnvWithAlias(sessionID, "gastown__deacon", "deacon", 3, 1, "token") {
 			t.Setenv(key, value)
 		}
+		// ...and the order-subprocess markers of the 16:13Z case, where the
+		// launcher was the core health order rather than a hook. They are not
+		// identity and are deliberately NOT stripped; the assertions check
+		// that they still reach dolt.
+		t.Setenv("ORDER_DIR", "/city/.gc/orders/beads-health")
+		t.Setenv("GC_PACK_NAME", "core")
 	}
 	statePath := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_STATE"))
 	configPath := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_CONFIG"))
@@ -354,6 +360,13 @@ func TestManagedDoltScopeWatchdogReportsStartIdentity(t *testing.T) {
 	// spawner, the runtime's orphan sweep (proctable.ScanBySessionID) treats it
 	// as the session's leftover root and kills it when the session is torn
 	// down or replaced.
+	//
+	// The helper's environment here is the union of the two live cases: the
+	// 01:54Z one, where an in-flight process inside the deacon's session did
+	// the work (so the server carried GC_SESSION_NAME=gastown__deacon even
+	// though the operator's own shell was clean), and the 16:13Z one, where
+	// the launcher was a core health-order subprocess carrying ORDER_DIR and
+	// GC_PACK_NAME. Identity is stripped; the order markers are not.
 	doltEnv, err := os.ReadFile(doltEnvPath)
 	if err != nil {
 		t.Fatalf("read fake dolt env: %v", err)
@@ -367,6 +380,14 @@ func TestManagedDoltScopeWatchdogReportsStartIdentity(t *testing.T) {
 				t.Fatalf("managed dolt inherited the agent session's %s; the orphan sweep would "+
 					"kill it with the session (ga-fjr5f); env:\n%s", key, doltEnv)
 			}
+		}
+	}
+	// The strip is identity-only: an order subprocess's own markers are not
+	// session identity, nothing selects processes on them, and a server that
+	// lost its whole environment would be a different bug.
+	for _, keep := range []string{"ORDER_DIR=", "GC_PACK_NAME=core"} {
+		if !strings.Contains(string(doltEnv), keep) {
+			t.Fatalf("managed dolt lost %q, which is not session identity; env:\n%s", keep, doltEnv)
 		}
 	}
 }

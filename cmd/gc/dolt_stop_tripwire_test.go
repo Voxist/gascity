@@ -1,6 +1,9 @@
 package main
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -144,5 +147,103 @@ func TestManagedDoltEnvCarriesNoSessionIdentity(t *testing.T) {
 		if !found {
 			t.Fatalf("doltServerEnv dropped %q, which is not session identity: %v", keep, env)
 		}
+	}
+}
+
+// managedDoltServerSpawn matches an exec.Command that starts a managed Dolt
+// server or the watchdog process that supervises one.
+var managedDoltServerSpawn = regexp.MustCompile(`exec\.Command\((watchdogExecutable|"dolt", "sql-server")`)
+
+// TestEveryManagedDoltSpawnStripsSessionIdentity is the structural half of the
+// ga-fjr5f env proof: EVERY path that starts a managed Dolt server or its
+// watchdog takes its environment from doltServerEnv, which is where the
+// session keys are stripped.
+//
+// It exists because the end-to-end tests can only drive the production
+// scope-watchdog path. The other spawns — the direct spawn when the scope
+// watchdog is switched off, the test watchdog and its child — are proven here
+// by construction instead: the spawn site and its `cmd.Env = doltServerEnv(...)`
+// must sit in the same function. A new spawn that builds its own environment
+// fails this test.
+//
+// Note what this does NOT cover: `gc dolt sync --drain`
+// (dolt_delivery_window.go) passes os.Environ() through, deliberately. It is a
+// short-lived drain command, not a server, so no orphan sweep outlives it.
+func TestEveryManagedDoltSpawnStripsSessionIdentity(t *testing.T) {
+	t.Parallel()
+
+	// Every spawn site, and the function it must draw its environment in.
+	want := map[string][]string{
+		"dolt_start_managed.go": {
+			"startManagedDoltSQLServer",                 // direct spawn (GC_DOLT_SCOPE_WATCHDOG=0)
+			"startManagedDoltSQLServerWithTestWatchdog", // test watchdog re-exec
+			"runManagedDoltTestWatchdog",                // that watchdog's own dolt child
+		},
+		"dolt_scope_watchdog.go": {
+			"startManagedDoltSQLServerWithScopeWatchdog", // production watchdog re-exec
+			"runManagedDoltScopeWatchdog",                // the watchdog's own dolt child
+		},
+	}
+	fset := token.NewFileSet()
+	found := 0
+	for file, fns := range want {
+		parsed, err := parser.ParseFile(fset, file, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", file, err)
+		}
+		bodies := map[string]string{}
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		src := string(raw)
+		for _, decl := range parsed.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			bodies[fn.Name.Name] = src[fset.Position(fn.Body.Pos()).Offset:fset.Position(fn.Body.End()).Offset]
+		}
+		for _, name := range fns {
+			body, ok := bodies[name]
+			if !ok {
+				t.Errorf("%s: %s not found; update this list if the spawn moved", file, name)
+				continue
+			}
+			if !managedDoltServerSpawn.MatchString(body) {
+				t.Errorf("%s: %s no longer spawns a managed Dolt server or watchdog; update this list", file, name)
+				continue
+			}
+			found++
+			if !strings.Contains(body, "cmd.Env = doltServerEnv(") {
+				t.Errorf("%s: %s spawns a managed Dolt server or watchdog without doltServerEnv; it would "+
+					"inherit the caller's session identity and a session teardown would reap it (ga-fjr5f)", file, name)
+			}
+		}
+	}
+
+	// Any spawn site outside the list is unreviewed.
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spawns := 0
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		raw, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range strings.Split(string(raw), "\n") {
+			if !strings.HasPrefix(strings.TrimSpace(line), "//") && managedDoltServerSpawn.MatchString(line) {
+				spawns++
+			}
+		}
+	}
+	if spawns != found {
+		t.Errorf("found %d managed Dolt spawn site(s) in cmd/gc but %d are enumerated; a new spawn must "+
+			"draw its environment from doltServerEnv (ga-fjr5f)", spawns, found)
 	}
 }
