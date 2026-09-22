@@ -98,13 +98,13 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		// upstream ancestor — because fork commits do not resolve on the
 		// module path. These values move together with deps.env and go.mod;
 		// a published release >= 0067 on a module-resolvable repo retires
-		// the bridge (one change: BD_VERSION=tag, drop the refs). Note the
-		// existing upstream v1.2.2 TAG is not such a release: it sits on a
-		// different lineage at schema 0053.
-		// BD_VERSION itself is NOT diverged — the pinned commit declares 1.2.2.
-		bdSourceRef    = "73a5bdc65b5fa9cb384683a47e579efa61bd999b"
-		bdSourceSHA256 = "f572a92ebaf5d0acde21e685fcafe0178e7f5a158b56e437f161a65bdcb52fdb"
-		bdBuild        = "73a5bdc65"
+		// the bridge (one change: BD_VERSION=tag, drop the refs). Upstream
+		// v1.3.0 is not such a release: it tops out at schema 0066.
+		// BD_VERSION is the string the pinned commit declares (1.91.0), and
+		// the fork's v1.91.0 tag names that same commit; see deps.env.
+		bdSourceRef    = "2498618eb3ee39ec4c13ec0899995d42663ce073"
+		bdSourceSHA256 = "4be3104525b4afb324de817ace97bf5bcc9b8482a9f51464d8ec3ce7ef7010db"
+		bdBuild        = "2498618eb"
 		bdBranch       = "HEAD"
 		grpcVersion    = "1.83.2"
 		// Floors, not exact pins: each must be >= what the pinned source
@@ -147,9 +147,21 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	// source declares. So BD_VERSION is this fork's correct anchor for exactly
 	// upstream's reason: anchor on whatever names the version the pinned
 	// SOURCE declares. Re-anchor on BD_CURRENT_VERSION when the bridge exits.
+	// deps.env's source pins must name the same tarball the image verifies.
+	// CI's install-bd-archive.sh builds from BD_SOURCE_REF without reading
+	// BD_SOURCE_SHA256, so without this a stale deps.env hash would surface
+	// only in the network-bound integration harness.
+	for key, want := range map[string]string{
+		"BD_SOURCE_REF":    bdSourceRef,
+		"BD_SOURCE_SHA256": bdSourceSHA256,
+	} {
+		if got := env[key]; got != want {
+			t.Errorf("deps.env %s = %q, want %q to match contrib/k8s/Dockerfile.agent", key, got, want)
+		}
+	}
 	bdVersion := env["BD_VERSION"]
-	if bdVersion != "v1.2.2" {
-		t.Fatalf("deps.env BD_VERSION = %q, want v1.2.2 for the pinned source build", bdVersion)
+	if bdVersion != "v1.91.0" {
+		t.Fatalf("deps.env BD_VERSION = %q, want v1.91.0 for the pinned source build", bdVersion)
 	}
 
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")

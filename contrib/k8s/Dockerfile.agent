@@ -24,14 +24,15 @@ FROM golang:1.26.8-bookworm@sha256:9fdc884aacc3bec89b20ffc69f4bb369c78210e3e4f60
 # source declares; BD_SOURCE_REF is the commit built from. No published
 # upstream release carries schema 0067 yet, so this image builds bd from the
 # Voxist/beads fork tip, whose newest upstream ancestor (BD_LIB_REF
-# a690b0a8c4d1) is the commit gc's go.mod links — same schema, no skew.
+# 71c4cd08b999) is the commit gc's go.mod links — same schema, no skew.
+# BD_SOURCE_REF is the commit the fork's v1.91.0 tag names (see deps.env).
 # Retire the bridge once a release >= 0067 exists on a module-resolvable repo:
 # set BD_VERSION to that tag and drop BD_SOURCE_REF/BD_SOURCE_SHA256.
-ARG BD_VERSION=v1.2.2
+ARG BD_VERSION=v1.91.0
 ARG BD_REPO=Voxist/beads
-ARG BD_SOURCE_REF=73a5bdc65b5fa9cb384683a47e579efa61bd999b
-ARG BD_SOURCE_SHA256=f572a92ebaf5d0acde21e685fcafe0178e7f5a158b56e437f161a65bdcb52fdb
-ARG BD_BUILD=73a5bdc65
+ARG BD_SOURCE_REF=2498618eb3ee39ec4c13ec0899995d42663ce073
+ARG BD_SOURCE_SHA256=4be3104525b4afb324de817ace97bf5bcc9b8482a9f51464d8ec3ce7ef7010db
+ARG BD_BUILD=2498618eb
 ARG BD_BRANCH=HEAD
 # 1.83.2, not 1.83.1: CVE-2026-84445 (HIGH) covers <=1.83.1. The pinned
 # source declares 1.83.2, so this is a match, not an override.
@@ -57,9 +58,9 @@ ARG THRIFT_VERSION=0.24.0
 # required. Both must be >= what the pinned source already declares — pinning
 # BELOW it silently downgrades the shipped binary (and drags x/net and x/crypto
 # back with it), which neither post-build assertion would catch. At
-# BD_SOURCE_REF 73a5bdc65 the source resolves grpc 1.83.2, x/text 0.41.0,
-# x/crypto 0.56.0 and x/mod 0.40.0 on its own; the only remaining lift is
-# thrift 0.24.0. The rest are held at parity so a later source bump that
+# BD_SOURCE_REF 2498618eb (unchanged from 73a5bdc65) the source resolves grpc
+# 1.83.2, x/text 0.41.0, x/crypto 0.56.0 and x/mod 0.40.0 on its own; the only
+# remaining lift is thrift 0.24.0. The rest are held at parity so a later source bump that
 # regresses one of them is caught here rather than shipped.
 #
 # Rebuild the pinned fork source with its production CGO/pure-Go-regex
