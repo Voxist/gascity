@@ -1486,7 +1486,6 @@ func testHarnessDefaultPortError(s supervisor.Section) error {
 // starts a control socket, reads the registry, starts CityRuntimes,
 // and runs until canceled.
 func runSupervisor(stdout, stderr io.Writer) int {
-	claimManagedDoltLifecycle()
 	configureSupervisorRuntime()
 
 	if pid := supervisorAlive(); pid != 0 {
@@ -2960,6 +2959,10 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 
 	// Install local agent hooks after builtin packs are refreshed.
 	ensureInitArtifacts(cityPath, stderr, "gc supervisor")
+
+	// Booting this city's bead store is what licenses implicitly restarting
+	// ITS managed Dolt server for the rest of this process (ga-fjr5f).
+	claimManagedDoltLifecycle(cityPath)
 
 	// Resolve rig paths and start bead store lifecycle.
 	resolveRigPaths(cityPath, cfg.Rigs)

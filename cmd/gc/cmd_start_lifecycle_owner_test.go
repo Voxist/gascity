@@ -39,14 +39,14 @@ func startLifecycleOwnerTestCity(t *testing.T) string {
 // the explicit lifecycle command, so the process running it must be allowed to
 // recover the server it starts.
 func TestStartStandaloneClaimsTheManagedDoltLifecycle(t *testing.T) {
-	ownManagedDoltLifecycleForTest(t, false)
 	cityPath := startLifecycleOwnerTestCity(t)
+	t.Cleanup(func() { managedDoltLifecycleClaims.Delete(normalizePathForCompare(cityPath)) })
 
 	var stdout, stderr bytes.Buffer
 	if code := doStartStandalone([]string{cityPath}, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("doStartStandalone exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
 	}
-	if !managedDoltImplicitRecoveryAllowed() {
+	if !managedDoltImplicitRecoveryAllowed(cityPath) {
 		t.Fatal("gc start did not claim the managed Dolt lifecycle; the process that starts the " +
 			"server could not recover it (ga-fjr5f)")
 	}
@@ -57,8 +57,8 @@ func TestStartStandaloneClaimsTheManagedDoltLifecycle(t *testing.T) {
 // so it must not claim the managed Dolt lifecycle, and it must not start the
 // bead store it only describes.
 func TestStartDryRunNeitherClaimsNorStartsTheBeadStore(t *testing.T) {
-	ownManagedDoltLifecycleForTest(t, false)
 	cityPath := startLifecycleOwnerTestCity(t)
+	t.Cleanup(func() { managedDoltLifecycleClaims.Delete(normalizePathForCompare(cityPath)) })
 	prevDryRun := dryRunMode
 	dryRunMode = true
 	t.Cleanup(func() { dryRunMode = prevDryRun })
@@ -67,7 +67,7 @@ func TestStartDryRunNeitherClaimsNorStartsTheBeadStore(t *testing.T) {
 	if code := doStartStandalone([]string{cityPath}, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("doStartStandalone --dry-run exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
 	}
-	if managedDoltImplicitRecoveryAllowed() {
+	if managedDoltImplicitRecoveryAllowed(cityPath) {
 		t.Fatal("gc start --dry-run claimed the managed Dolt lifecycle; an agent running a preview " +
 			"would become able to restart the city's server in its own session (ga-fjr5f)")
 	}

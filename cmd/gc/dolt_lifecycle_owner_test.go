@@ -7,20 +7,18 @@ import (
 	"regexp"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// ownManagedDoltLifecycleForTest sets whether this test process owns the
-// managed Dolt lifecycle, restoring the previous mark on cleanup. The mark is
-// process-global, so a test that depends on it must set it explicitly rather
-// than inherit whatever an earlier test left behind.
-func ownManagedDoltLifecycleForTest(t *testing.T, owner bool) {
+// ownManagedDoltLifecycleForTest claims one city's managed Dolt lifecycle for
+// this test process and releases it on cleanup. Claims are per city, so a test
+// whose city is a fresh directory is unaffected by every other test; a test
+// that wants the non-owner path simply does not call this.
+func ownManagedDoltLifecycleForTest(t *testing.T, cityPath string) {
 	t.Helper()
-	prev := managedDoltLifecycleOwner.Load()
-	managedDoltLifecycleOwner.Store(owner)
-	t.Cleanup(func() { managedDoltLifecycleOwner.Store(prev) })
+	claimManagedDoltLifecycle(cityPath)
+	t.Cleanup(func() { managedDoltLifecycleClaims.Delete(normalizePathForCompare(cityPath)) })
 }
 
 // TestNonOwnerBdRunnerNeverRecoversManagedDolt is the ga-fjr5f regression on
@@ -37,9 +35,11 @@ func TestNonOwnerBdRunnerNeverRecoversManagedDolt(t *testing.T) {
 		{"owner recovers", true, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ownManagedDoltLifecycleForTest(t, tc.owner)
 			t.Setenv("GC_BEADS", "bd")
 			cityPath := writeBreakerTestCity(t, "")
+			if tc.owner {
+				ownManagedDoltLifecycleForTest(t, cityPath)
+			}
 			installFakeBdExec(t, func(_, _ string, _ ...string) ([]byte, error) {
 				return nil, errors.New("dial tcp 127.0.0.1:3307: connection refused")
 			})
@@ -74,8 +74,10 @@ func TestNonOwnerHealthCheckNeverRecoversManagedDolt(t *testing.T) {
 		{"owner recovers", true, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ownManagedDoltLifecycleForTest(t, tc.owner)
 			cityPath := t.TempDir()
+			if tc.owner {
+				ownManagedDoltLifecycleForTest(t, cityPath)
+			}
 			writeMinimalCityToml(t, cityPath)
 			opsFile := writeBreakerAwarePreflightFakes(t, cityPath, "unhealthy")
 			cityKey := normalizePathForCompare(cityPath)
@@ -98,152 +100,49 @@ func TestNonOwnerHealthCheckNeverRecoversManagedDolt(t *testing.T) {
 	}
 }
 
-// TestControllerEntryPointsClaimTheManagedDoltLifecycle pins that the
-// processes that must keep recovering the server — the supervisor and a
-// controller's city runtime — claim ownership before they read any store.
-// Without the claim, the gate above would leave a down server down for good.
-func TestControllerEntryPointsClaimTheManagedDoltLifecycle(t *testing.T) {
-	for _, tc := range []struct{ file, fn string }{
-		{"cmd_supervisor.go", "func runSupervisor(stdout, stderr io.Writer) int {"},
-		{"city_runtime.go", "func (cr *CityRuntime) run(ctx context.Context) {"},
+// TestControllerEntryPointsClaimTheirCitysManagedDoltLifecycle pins where a
+// city's lifecycle is claimed (ga-fjr5f). The claim is per city, so each site
+// must pass the city it brought up, and CityRuntime.run must claim only AFTER
+// ownedCity: a runtime that failed init owns nothing, and in a multi-city
+// supervisor the process must not become able to restart the server of a city
+// it never brought up.
+//
+// This reads source text, so it is a tripwire on the three known sites rather
+// than a proof that no other site claims: `gc start --dry-run` not claiming is
+// pinned behaviourally in cmd_start_lifecycle_owner_test.go.
+func TestControllerEntryPointsClaimTheirCitysManagedDoltLifecycle(t *testing.T) {
+	for _, tc := range []struct{ file, claim string }{
+		// The supervisor's per-city boot, which starts that city's bead store.
+		{"cmd_supervisor.go", "claimManagedDoltLifecycle(cityPath)"},
+		// The city's own runtime, after it takes ownership of the city.
+		{"city_runtime.go", "claimManagedDoltLifecycle(cr.cityPath)"},
+		// The explicit lifecycle command.
+		{"cmd_start.go", "claimManagedDoltLifecycle(cityPath)"},
 	} {
 		raw, err := os.ReadFile(tc.file)
 		if err != nil {
 			t.Fatal(err)
 		}
 		src := string(raw)
-		i := strings.Index(src, tc.fn)
-		if i < 0 {
-			t.Fatalf("%s: %q not found; update this test if the entry point moved", tc.file, tc.fn)
+		if !strings.Contains(src, tc.claim) {
+			t.Errorf("%s: no %s; this city's managed Dolt could never be recovered by the "+
+				"process that brought it up (ga-fjr5f)", tc.file, tc.claim)
 		}
-		body := src[i+len(tc.fn):]
-		if first := strings.TrimSpace(strings.SplitN(body, "\n", 3)[1]); first != "claimManagedDoltLifecycle()" {
-			t.Fatalf("%s: first statement of %q is %q, want claimManagedDoltLifecycle()", tc.file, tc.fn, first)
-		}
-	}
-}
-
-// sustainManagedDoltUnresponsiveForTest records that the city's live managed
-// server has already been unresponsive for longer than the grace, so the next
-// recovery decision escalates. For tests about what happens once recovery
-// runs, not about when it may.
-func sustainManagedDoltUnresponsiveForTest(t *testing.T, cityPath string) {
-	t.Helper()
-	key := normalizePathForCompare(cityPath)
-	now := managedDoltRecoveryNow()
-	managedDoltUnresponsiveMu.Lock()
-	managedDoltUnresponsiveEpisodes[key] = managedDoltUnresponsiveEpisode{
-		first: now.Add(-managedDoltLiveUnresponsiveGrace - time.Second),
-		last:  now.Add(-time.Second),
-	}
-	managedDoltUnresponsiveMu.Unlock()
-	t.Cleanup(func() {
-		managedDoltUnresponsiveMu.Lock()
-		delete(managedDoltUnresponsiveEpisodes, key)
-		managedDoltUnresponsiveMu.Unlock()
-	})
-}
-
-// fakeManagedDoltClockForTest pins the recovery decision's clock and reports
-// the city's managed server as alive (or not), returning a function that
-// advances the clock.
-func fakeManagedDoltClockForTest(t *testing.T, alive *bool) func(time.Duration) {
-	t.Helper()
-	now := time.Date(2026, 9, 19, 2, 0, 0, 0, time.UTC)
-	prevNow, prevAlive := managedDoltRecoveryNow, managedDoltServerAliveFn
-	managedDoltRecoveryNow = func() time.Time { return now }
-	managedDoltServerAliveFn = func(string) bool { return *alive }
-	t.Cleanup(func() { managedDoltRecoveryNow, managedDoltServerAliveFn = prevNow, prevAlive })
-	return func(d time.Duration) { now = now.Add(d) }
-}
-
-// TestOwnerNeverReplacesALiveButSlowManagedDolt pins the ga-fjr5f trigger:
-// under host saturation a live managed server (process alive, port open)
-// answered slowly, a caller decided it was down, and a new one replaced it.
-// Even the lifecycle owner waits out managedDoltLiveUnresponsiveGrace before
-// replacing a live server, and replaces a dead one at once.
-func TestOwnerNeverReplacesALiveButSlowManagedDolt(t *testing.T) {
-	ownManagedDoltLifecycleForTest(t, true)
-	cityPath := t.TempDir()
-	t.Cleanup(func() {
-		managedDoltUnresponsiveMu.Lock()
-		delete(managedDoltUnresponsiveEpisodes, normalizePathForCompare(cityPath))
-		managedDoltUnresponsiveMu.Unlock()
-	})
-	alive := true
-	advance := fakeManagedDoltClockForTest(t, &alive)
-
-	step := managedDoltLiveUnresponsiveGrace / 4
-	for i := 0; i < 3; i++ {
-		if err := managedDoltImplicitRecoveryDecision(cityPath); !errors.Is(err, errManagedDoltAliveButUnresponsive) {
-			t.Fatalf("observation %d inside the grace: err = %v, want errManagedDoltAliveButUnresponsive", i+1, err)
-		}
-		advance(step)
-	}
-	advance(step)
-	if err := managedDoltImplicitRecoveryDecision(cityPath); err != nil {
-		t.Fatalf("after a sustained %s the owner must escalate: err = %v", managedDoltLiveUnresponsiveGrace, err)
-	}
-	if err := managedDoltImplicitRecoveryDecision(cityPath); err != nil {
-		t.Fatalf("a sustained episode must stay escalated for the recovery's own follow-up reads: err = %v", err)
-	}
-
-	// A lapse longer than the grace means the server answered in between:
-	// the next slow answer starts a new episode rather than a replacement.
-	advance(managedDoltLiveUnresponsiveGrace + time.Second)
-	if err := managedDoltImplicitRecoveryDecision(cityPath); !errors.Is(err, errManagedDoltAliveButUnresponsive) {
-		t.Fatalf("after a lapse the episode must restart: err = %v", err)
-	}
-
-	// A server that is gone is replaced at once.
-	alive = false
-	if err := managedDoltImplicitRecoveryDecision(cityPath); err != nil {
-		t.Fatalf("a dead server must be recoverable at once: err = %v", err)
-	}
-}
-
-// TestNonOwnerNeverReplacesManagedDoltAliveOrNot pins that the grace is no
-// back door: a process that does not own the lifecycle never recovers.
-func TestNonOwnerNeverReplacesManagedDoltAliveOrNot(t *testing.T) {
-	ownManagedDoltLifecycleForTest(t, false)
-	for _, isAlive := range []bool{true, false} {
-		alive := isAlive
-		advance := fakeManagedDoltClockForTest(t, &alive)
-		advance(10 * managedDoltLiveUnresponsiveGrace)
-		if err := managedDoltImplicitRecoveryDecision(t.TempDir()); !errors.Is(err, errManagedDoltLifecycleNotOwned) {
-			t.Fatalf("alive=%v: err = %v, want errManagedDoltLifecycleNotOwned", isAlive, err)
+		if strings.Contains(src, "claimManagedDoltLifecycle()") {
+			t.Errorf("%s: claims the lifecycle process-wide; the claim is per city", tc.file)
 		}
 	}
-}
 
-// TestHealthCheckDoesNotReplaceALiveButSlowManagedDolt drives the same rule
-// through the controller's health path: an unhealthy report about a server
-// that is alive does not run the provider "recover" op inside the grace.
-func TestHealthCheckDoesNotReplaceALiveButSlowManagedDolt(t *testing.T) {
-	ownManagedDoltLifecycleForTest(t, true)
-	cityPath := t.TempDir()
-	writeMinimalCityToml(t, cityPath)
-	opsFile := writeBreakerAwarePreflightFakes(t, cityPath, "unhealthy")
-	t.Cleanup(func() {
-		lastBeadsProviderRecover.Delete(normalizePathForCompare(cityPath))
-		managedDoltUnresponsiveMu.Lock()
-		delete(managedDoltUnresponsiveEpisodes, normalizePathForCompare(cityPath))
-		managedDoltUnresponsiveMu.Unlock()
-	})
-	alive := true
-	fakeManagedDoltClockForTest(t, &alive)
-
-	err := healthBeadsProvider(cityPath)
-
-	ops, readErr := os.ReadFile(opsFile)
-	if readErr != nil {
-		t.Fatalf("read provider ops: %v", readErr)
+	raw, err := os.ReadFile("city_runtime.go")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, r := countOps(strings.Fields(strings.TrimSpace(string(ops))), "health", "recover"); r != 0 {
-		t.Fatalf("provider ops = %q; a live server was replaced on its first unhealthy report", ops)
-	}
-	if !errors.Is(err, errManagedDoltAliveButUnresponsive) {
-		t.Fatalf("err = %v, want errManagedDoltAliveButUnresponsive", err)
+	src := string(raw)
+	owned := strings.Index(src, "cr.ownedCity.Store(true)")
+	claim := strings.Index(src, "claimManagedDoltLifecycle(cr.cityPath)")
+	if owned < 0 || claim < 0 || claim < owned {
+		t.Fatalf("city_runtime.go: claim at %d must come after cr.ownedCity.Store(true) at %d; a runtime "+
+			"that fails init must leave this process unable to restart that city's server", claim, owned)
 	}
 }
 
@@ -261,33 +160,56 @@ func TestManagedDoltNotOwnedErrorIsActionable(t *testing.T) {
 // managedDoltIdentityStopCall matches every call that can stop or replace the
 // city's managed Dolt server by identity (pid file, port, config): the stop
 // and shutdown helpers, the recovery helpers (recovery stops the running
-// server before starting a new one), and the provider stop/shutdown/recover
-// ops.
+// server before starting a new one), the PID terminators the watchdog and the
+// start/cleanup paths use, and EVERY provider-op call.
+//
+// Provider ops are matched whatever their operation argument, not only a
+// "stop"/"shutdown"/"recover" literal, because an op held in a variable
+// (`op := "stop"; runProviderOp(..., op)`) defeats a literal match. The cost
+// is that unrelated ops ("health", "probe", "ensure-ready") are counted too,
+// so the expected counts move when those change; that is the price of closing
+// the variable-op hole.
 var managedDoltIdentityStopCall = regexp.MustCompile(
-	`\b(stopManagedDoltProcess|stopManagedDoltProcessWithOptions|shutdownBeadsProvider|shutdownBeadsProviderForStop|recoverManagedDoltProcess|recoverManagedBDCommand)\(|runProviderOp\w*\([^)]*"(stop|shutdown|recover)"`)
+	`\b(stopManagedDoltProcess|stopManagedDoltProcessWithOptions|shutdownBeadsProvider|shutdownBeadsProviderForStop|recoverManagedDoltProcess|recoverManagedBDCommand|terminateManagedDoltPID|terminateManagedDoltPIDGuarded|terminateManagedDoltStartedProcess|terminateManagedDoltScopeWatchdogChild)\(|runProviderOp\w*\(`)
 
 // managedDoltIdentityStopDefinition matches the definition line of one of the
 // helpers above, which is not a call site. Only the definition is excluded: a
 // one-line function whose body calls a helper is still counted.
 var managedDoltIdentityStopDefinition = regexp.MustCompile(
-	`^func (stopManagedDoltProcess|stopManagedDoltProcessWithOptions|shutdownBeadsProvider|shutdownBeadsProviderForStop|recoverManagedDoltProcess)\(`)
+	`^func (\([^)]*\) )?(stopManagedDoltProcess|stopManagedDoltProcessWithOptions|shutdownBeadsProvider|shutdownBeadsProviderForStop|recoverManagedDoltProcess|terminateManagedDoltPID|terminateManagedDoltPIDGuarded|terminateManagedDoltStartedProcess|terminateManagedDoltScopeWatchdogChild|runProviderOp\w*)\(`)
 
-// TestManagedDoltIdentityStopCallSitesAreAnEnumeratedSet is the ga-fjr5f
-// guarantee that no session lifecycle event — the tmux or worker stop, a
-// drain-ack, a SessionEnd/Stop hook, `gc prime` — can stop the city's managed
-// Dolt by identity. Every such call site is listed here with why it may. A new
-// one fails this test until it is reviewed: a session path must not be added.
-func TestManagedDoltIdentityStopCallSitesAreAnEnumeratedSet(t *testing.T) {
+// TestManagedDoltStopCallSiteTripwire is a REVIEW TRIPWIRE, not a guarantee.
+//
+// What it does guarantee: no file outside this list gains a call that can stop
+// or replace the city's managed Dolt server by identity. That is the ga-fjr5f
+// property that matters — no session lifecycle event (the tmux or worker stop,
+// a drain-ack, a SessionEnd/Stop hook, `gc prime`) may reach one. `gc doctor`
+// is absent on purpose: its checks only open a store and Ping, so it reaches
+// managed Dolt through the gated env-resolution route and calls none of these
+// helpers itself. The session path that DID reach managed Dolt was not a call
+// at all — it was the runtime's orphan sweep matching a session's
+// GC_SESSION_ID in the server's environment, which doltServerEnv now strips.
+//
+// What it cannot catch, because it counts per file rather than resolving the
+// call graph:
+//   - substituting one enumerated call for another INSIDE an already-listed
+//     file (the count is unchanged), and
+//   - a listed file growing a call in a newly session-reachable function.
+//
+// Both are review's job; this test only makes the diff impossible to miss.
+func TestManagedDoltStopCallSiteTripwire(t *testing.T) {
 	want := map[string]int{
-		"bd_env.go":                   2, // recoverManagedBDCommand: its definition, and the runner call gated by managedDoltImplicitRecoveryDecision
-		"beads_provider_lifecycle.go": 2, // shutdownBeadsProvider's stop op; the health path's recover op, gated by managedDoltImplicitRecoveryDecision
-		"cmd_beads_city.go":           1, // `gc beads city` endpoint change: explicit operator command
-		"cmd_dolt_state.go":           2, // `gc dolt-state stop-managed` / `recover-managed`: explicit, run by the provider script
-		"cmd_stop.go":                 3, // `gc stop`: explicit city shutdown
-		"cmd_supervisor.go":           3, // the supervisor stopping a city, or cleaning up a failed start
-		"dolt_delivery_window.go":     2, // the controller's own start-up delivery window
-		"dolt_recover_managed.go":     1, // recoverManagedDoltProcess's stop step, reached only through the gated paths above
-		"dolt_stop_managed.go":        1, // stopManagedDoltProcess itself
+		"bd_env.go":                   2,  // recoverManagedBDCommand: its definition's provider op, and the runner call gated by managedDoltImplicitRecoveryDecision
+		"beads_provider_lifecycle.go": 9,  // the provider lifecycle itself: start/health/ensure-ready/stop/shutdown, plus the health path's recover op, gated
+		"cmd_beads_city.go":           1,  // `gc beads city` endpoint change: explicit operator command
+		"cmd_dolt_state.go":           2,  // `gc dolt-state stop-managed` / `recover-managed`: explicit, run by the provider script
+		"cmd_stop.go":                 3,  // `gc stop`: explicit city shutdown
+		"cmd_supervisor.go":           3,  // the supervisor stopping a city, or cleaning up a failed start
+		"dolt_delivery_window.go":     2,  // the controller's own start-up delivery window
+		"dolt_recover_managed.go":     2,  // recoverManagedDoltProcess's stop step and its failed-recovery cleanup, reached only through the gated paths above
+		"dolt_scope_watchdog.go":      4,  // the scope watchdog reaping the server it supervises
+		"dolt_start_managed.go":       13, // start-path cleanup, the test watchdog and the stop helpers
+		"dolt_stop_managed.go":        1,  // stopManagedDoltProcess itself
 	}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -314,7 +236,7 @@ func TestManagedDoltIdentityStopCallSitesAreAnEnumeratedSet(t *testing.T) {
 	}
 	for name, n := range got {
 		if want[name] != n {
-			t.Errorf("%s: %d managed-dolt stop/recover call site(s), enumerated %d. A new call site "+
+			t.Errorf("%s: %d managed-dolt stop/recover/terminate call site(s), enumerated %d. A new call site "+
 				"must not be reachable from a session lifecycle event (ga-fjr5f); review it and update this list.", name, n, want[name])
 		}
 	}
@@ -366,7 +288,6 @@ func TestNonOwnerBdFailureWithoutATargetCarriesTheLifecycleHint(t *testing.T) {
 	noTarget := map[string]string{"GC_DOLT_PORT": "", "BEADS_DOLT_SERVER_PORT": ""}
 	withTarget := map[string]string{"GC_DOLT_PORT": "3307"}
 
-	ownManagedDoltLifecycleForTest(t, false)
 	if owned, err := managedDoltLifecycleOwned(cityPath); err != nil || !owned {
 		t.Fatalf("precondition: fixture city's dolt lifecycle is not gc-managed (owned=%v err=%v)", owned, err)
 	}
@@ -380,7 +301,7 @@ func TestNonOwnerBdFailureWithoutATargetCarriesTheLifecycleHint(t *testing.T) {
 		t.Fatalf("success: err = %v, want nil", err)
 	}
 
-	ownManagedDoltLifecycleForTest(t, true)
+	ownManagedDoltLifecycleForTest(t, cityPath)
 	if err := withManagedDoltNotOwnedHint(cityPath, cityPath, noTarget, bdErr); errors.Is(err, errManagedDoltLifecycleNotOwned) {
 		t.Fatalf("owner: err = %v, want bd's error unchanged", err)
 	}
@@ -390,7 +311,6 @@ func TestNonOwnerBdFailureWithoutATargetCarriesTheLifecycleHint(t *testing.T) {
 // the real bd runner: env resolution left no target, bd failed, and the
 // caller sees who restarts the server and what to run.
 func TestNonOwnerBdRunnerWithoutATargetReportsTheLifecycleHint(t *testing.T) {
-	ownManagedDoltLifecycleForTest(t, false)
 	t.Setenv("GC_BEADS", "bd")
 	cityPath := writeBreakerTestCity(t, "")
 	installFakeBdExec(t, func(_, _ string, _ ...string) ([]byte, error) {

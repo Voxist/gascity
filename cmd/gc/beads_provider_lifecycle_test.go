@@ -5253,12 +5253,9 @@ esac
 }
 
 func TestHealthBeadsProviderWaitsForStorePingAfterRecovery(t *testing.T) {
-	ownManagedDoltLifecycleForTest(t, true)
 	cityPath := t.TempDir()
+	ownManagedDoltLifecycleForTest(t, cityPath)
 	writeMinimalCityToml(t, cityPath)
-	// The fake server is a live listener; this test is about the wait after
-	// recovery, so the unresponsiveness is already past the grace.
-	sustainManagedDoltUnresponsiveForTest(t, cityPath)
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads", "dolt"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -12873,8 +12870,8 @@ func TestHealthBeadsProviderSkipsRecoverWhenBreakerOpen(t *testing.T) {
 }
 
 func TestHealthBeadsProviderBacksOffSecondRecoverWithinCooldown(t *testing.T) {
-	ownManagedDoltLifecycleForTest(t, true)
 	cityPath := t.TempDir()
+	ownManagedDoltLifecycleForTest(t, cityPath)
 	writeMinimalCityToml(t, cityPath)
 	opsFile := writeBreakerAwarePreflightFakes(t, cityPath, "unhealthy")
 
@@ -12914,8 +12911,8 @@ func TestHealthBeadsProviderBacksOffSecondRecoverWithinCooldown(t *testing.T) {
 }
 
 func TestHealthBeadsProviderAllowsRecoverAfterCooldown(t *testing.T) {
-	ownManagedDoltLifecycleForTest(t, true)
 	cityPath := t.TempDir()
+	ownManagedDoltLifecycleForTest(t, cityPath)
 	writeMinimalCityToml(t, cityPath)
 	opsFile := writeBreakerAwarePreflightFakes(t, cityPath, "unhealthy")
 

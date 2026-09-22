@@ -4103,7 +4103,6 @@ dolt.auto-start: false
 // on-disk store and triggers a JSONL auto-import, the managed-retry path must
 // republish the Dolt port and rerun the command.
 func TestBdCommandRunnerWithManagedRetryRecoversFromAutoImportFallback(t *testing.T) {
-	ownManagedDoltLifecycleForTest(t, true)
 	t.Setenv("GC_BEADS", "bd")
 
 	origRunner := beadsExecCommandRunnerWithEnv
@@ -4137,7 +4136,9 @@ func TestBdCommandRunnerWithManagedRetryRecoversFromAutoImportFallback(t *testin
 		return nil
 	}
 
-	runner := bdCommandRunnerWithManagedRetry(t.TempDir(), func(_ string) map[string]string {
+	cityPath := t.TempDir()
+	ownManagedDoltLifecycleForTest(t, cityPath)
+	runner := bdCommandRunnerWithManagedRetry(cityPath, func(_ string) map[string]string {
 		return map[string]string{"GC_DOLT_PORT": port}
 	})
 
@@ -4157,7 +4158,6 @@ func TestBdCommandRunnerWithManagedRetryRecoversFromAutoImportFallback(t *testin
 }
 
 func TestBdStoreGetWithManagedRetryReopensAfterConnectionGenerationChanges(t *testing.T) {
-	ownManagedDoltLifecycleForTest(t, true)
 	t.Setenv("GC_BEADS", "bd")
 
 	origRunner := beadsExecCommandRunnerWithEnv

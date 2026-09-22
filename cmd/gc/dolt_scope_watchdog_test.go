@@ -371,8 +371,14 @@ func TestManagedDoltScopeWatchdogReportsStartIdentity(t *testing.T) {
 	}
 }
 
-// TestManagedDoltScopeWatchdogServerSurvivesScopePresent asserts the
-// watchdog never reaps a server whose scope stays on disk, and exits
+// TestManagedDoltScopeWatchdogServerSurvivesScopePresent also carries the
+// clean-env direction of ga-fjr5f: a server started from a spawner with NO
+// session environment must reach dolt with no session keys either, so an
+// unrelated session's teardown — whose orphan sweep selects on GC_SESSION_ID
+// in the environment — can never select it. The session-env direction is
+// pinned by TestManagedDoltScopeWatchdogReportsStartIdentity.
+//
+// It asserts the watchdog never reaps a server whose scope stays on disk, and exits
 // cleanly when the server itself goes away.
 func TestManagedDoltScopeWatchdogServerSurvivesScopePresent(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -383,10 +389,13 @@ func TestManagedDoltScopeWatchdogServerSurvivesScopePresent(t *testing.T) {
 	statePath := filepath.Join(dir, "state")
 	configPath := filepath.Join(dir, "dolt-config.yaml")
 	logPath := filepath.Join(dir, "dolt.log")
+	doltEnvPath := filepath.Join(dir, "dolt-env")
 	if err := os.WriteFile(configPath, []byte("log_level: debug\n"), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
+	// No GC_TEST_MANAGED_DOLT_HELPER_SESSION_ID here: the spawner's
+	// environment is clean, the clean-env direction of ga-fjr5f.
 	cmd := exec.Command(os.Args[0], "-test.run=TestManagedDoltScopeWatchdogHelper", "-test.v")
 	cmd.Env = sanitizedBaseEnv(
 		"GC_TEST_MANAGED_DOLT_HELPER=scope-watchdog",
@@ -394,6 +403,7 @@ func TestManagedDoltScopeWatchdogServerSurvivesScopePresent(t *testing.T) {
 		"GC_TEST_MANAGED_DOLT_HELPER_CONFIG="+configPath,
 		"GC_TEST_MANAGED_DOLT_HELPER_LOG="+logPath,
 		"GC_TEST_MANAGED_DOLT_HELPER_FAKE_DOLT_DIR="+fakeDoltDir,
+		"GC_TEST_FAKE_DOLT_ENV_FILE="+doltEnvPath,
 		"GC_TEST_MANAGED_DOLT_HELPER_SCOPE_WD_INTERVAL_MS=50",
 	)
 	output, err := cmd.CombinedOutput()
@@ -407,6 +417,20 @@ func TestManagedDoltScopeWatchdogServerSurvivesScopePresent(t *testing.T) {
 	})
 
 	time.Sleep(300 * time.Millisecond)
+
+	// Clean spawner in, clean server out: nothing an orphan sweep could
+	// select on, so an unrelated session's teardown cannot reap this server.
+	doltEnv, err := os.ReadFile(doltEnvPath)
+	if err != nil {
+		t.Fatalf("read fake dolt env: %v", err)
+	}
+	for key := range session.RuntimeEnvWithAlias("", "", "", 0, 0, "") {
+		for _, line := range strings.Split(string(doltEnv), "\n") {
+			if strings.HasPrefix(line, key+"=") {
+				t.Fatalf("managed dolt carries %s though its spawner had a clean environment; env:\n%s", key, doltEnv)
+			}
+		}
+	}
 	if !pidAlive(doltPID) {
 		logData, _ := os.ReadFile(logPath)
 		t.Fatalf("fake dolt pid %d reaped while scope present; watchdog log:\n%s", doltPID, logData)

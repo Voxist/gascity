@@ -2543,7 +2543,7 @@ func containsString(values []string, target string) bool {
 // run instead. It is attached only to that failure, never to the env
 // resolution itself, which non-bd consumers (scale checks, agent env) share.
 func withManagedDoltNotOwnedHint(cityPath, scopeRoot string, env map[string]string, err error) error {
-	if err == nil || managedDoltImplicitRecoveryAllowed() || errors.Is(err, errManagedDoltLifecycleNotOwned) {
+	if err == nil || managedDoltImplicitRecoveryAllowed(cityPath) || errors.Is(err, errManagedDoltLifecycleNotOwned) {
 		return err
 	}
 	if strings.TrimSpace(env["GC_DOLT_PORT"]) != "" || strings.TrimSpace(env["BEADS_DOLT_SERVER_PORT"]) != "" {
