@@ -57,11 +57,11 @@ func supervisorServiceGCHomeMissing(gcHome string) bool {
 // com.gascity.supervisor.* launch agents whose GC_HOME no longer
 // exists.
 func sweepStaleIsolatedSupervisorLaunchd(stderr io.Writer) {
-	home, err := os.UserHomeDir()
-	if err != nil || strings.TrimSpace(home) == "" {
+	dir := supervisorLaunchAgentsDir()
+	if !filepath.IsAbs(dir) {
+		// No resolvable home and no override: nothing to sweep.
 		return
 	}
-	dir := filepath.Join(home, "Library", "LaunchAgents")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		// Missing or unreadable LaunchAgents dir: nothing to sweep.

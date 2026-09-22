@@ -510,33 +510,38 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 // protectedDoltPortsForReap builds the reaper's protected port set from live
 // state (city-scale plan P1.7): the managed city dolt resolved via the live
 // chain, the ports of every discovered dolt process whose --config/--data-dir
-// argv sits under a registered rig root, and the resolved cleanup port. It
-// deliberately does NOT read <rigRoot>/.beads/dolt-server.port: that status
-// file has lied in production, and a lying file fails to protect the REAL
-// listener — live state cannot.
+// argv sits under a registered rig root, and the resolved cleanup port.
+//
+// <rigRoot>/.beads/dolt-server.port is never used for TARGET SELECTION: that
+// status file has lied in production, and a lying file fails to protect the
+// REAL listener — live state cannot. It is read PROTECT-ONLY, and only when
+// live resolution is unavailable, so a degraded host still fences the
+// recorded port (see the else branch below).
 func protectedDoltPortsForReap(opts cleanupOptions, procs []DoltProcInfo) map[int]string {
-	// MERGE INTENT (v1.4.0 resync): protect on the UNION of both sources.
-	//
-	// The fork replaced upstream's file-based port set (loadRigDoltPorts) with
-	// live-state detection, which is the better default and matches the "no
-	// status files — query live state" principle. But dropping the file-based
-	// seed opened a real gap in a DESTRUCTIVE path: a port recorded in a rig's
-	// dolt-server.port that is not attributable to a live rig-owned process was
-	// no longer protected, so the reaper would SIGKILL it and remove its
-	// DataDir. The asymmetry is decisive — over-protecting costs a skipped reap,
-	// under-protecting costs a data directory.
-	//
-	// Seed from the recorded ports, then let live state overlay/refine them.
-	ports := loadRigDoltPorts(opts.Rigs, opts.FS)
-	if ports == nil {
-		ports = map[int]string{}
-	}
+	ports := map[int]string{}
 	liveResolve := opts.LiveResolve
 	if liveResolve == nil {
-		liveResolve = newLiveDoltPortResolver().resolve
+		liveResolve = newLiveDoltPortResolverForExplicitCity().resolve
 	}
 	if live, err := liveResolve(opts.CityPath); err == nil && validDoltPort(live.Port) {
 		ports[live.Port] = "managed city dolt"
+	} else {
+		// Live resolution is unavailable (no runtime handle, unreadable process
+		// table, permissions). The rationale above — a lying status file fails to
+		// protect the REAL listener — compares a stale file against WORKING live
+		// state. It does not cover ABSENT live state, where the file is the only
+		// signal left, and where the managed city port would otherwise be in the
+		// reap set with a live server still on it.
+		//
+		// Read the recorded ports as a PROTECT-ONLY fallback: they can add a port
+		// to the protected set, never select a reap target and never override a
+		// live answer. A stale entry costs a skipped reap; the miss it covers
+		// costs a DataDir. These are exactly the conditions under which an
+		// operator reaches for `gc dolt cleanup`, so the degraded path is the one
+		// that most needs the guard.
+		for port, rig := range recordedScopeDoltPorts(opts.Rigs, opts.FS) {
+			ports[port] = rig + " (recorded port; live resolution unavailable)"
+		}
 	}
 	for _, proc := range procs {
 		owner, ok := doltProcRigOwner(proc, opts.Rigs)
@@ -950,7 +955,9 @@ func newDoltCleanupCmd(stdout, stderr io.Writer) *cobra.Command {
 cleanup tool. It resolves the Dolt server port via the AD-04 chain
 (--port > city dolt.port > live managed dolt [runtime handle, then
 process table] > 3307); .beads/dolt-server.port is a bd compatibility
-status file and is never consulted. It drops stale test/agent
+status file and is never consulted for endpoint selection (it is read
+protect-only, to fence a recorded port, when live resolution is
+unavailable). It drops stale test/agent
 databases, calls DOLT_PURGE_DROPPED_DATABASES to reclaim disk, and
 reaps orphaned dolt sql-server processes left over from leaked test
 harnesses. Invalid explicit ports, invalid city port settings, and

@@ -122,6 +122,10 @@ func configureSupervisorHooksForTests() {
 	// linger tests override these locally.
 	supervisorLoginctlRun = func(_ ...string) error { return nil }
 	supervisorLingerEnabled = func(_ string) bool { return true }
+	// Never load, enable, or kickstart a job in the operator's real launchd
+	// domain (ga-32bb2): a loaded KeepAlive job outlives the test that
+	// installed it. Tests that assert launchctl calls override this locally.
+	supervisorLaunchctlRun = func(_ ...string) error { return nil }
 	startNudgePoller = func(string, string, string) error { return nil }
 	initLookPath = func(file string) (string, error) { return file, nil }
 	initProbeProvidersReadiness = func(_ context.Context, providers []string, _ bool) (map[string]api.ReadinessItem, error) {
@@ -246,7 +250,8 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	testTempRootAliveSentinel = sentinel
-	if err := os.Setenv("TMPDIR", testTempRoot); err != nil {
+	hostTmpRoot, err := adoptPerRunTMPDIR(testTempRoot)
+	if err != nil {
 		panic(err)
 	}
 	tmuxSocketParentRoot := os.Getenv(testTmuxSocketParentRootEnv)
@@ -273,12 +278,7 @@ func TestMain(m *testing.M) {
 	if err := tmuxtest.ConfigureProcessEnv(tmuxSocketRoot); err != nil {
 		panic(err)
 	}
-	tmpRoot := os.TempDir()
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testGCHomeDirPrefix)
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testRuntimeDirPrefix)
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testProviderStubDirPrefix)
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testSlingFormulaDirPrefix)
-	sweepOrphanPIDPrefixedDirs(tmpRoot, testSlingCityDirPrefix)
+	sweepLegacyCmdGCFixtureDirs(hostTmpRoot)
 	initSharedSlingTestFixtures(testTempRoot)
 
 	gcHome, err := os.MkdirTemp("", pidPrefixedTempPattern(testGCHomeDirPrefix))
@@ -295,6 +295,13 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("XDG_RUNTIME_DIR", runtimeDir); err != nil {
 		panic(err)
 	}
+	// GC_HOME does not isolate launchd: without this, a test that pins the
+	// real HOME and reaches the install path writes its plist into the
+	// operator's ~/Library/LaunchAgents, where launchd reloads it at login
+	// (ga-32bb2). Tests that exercise the $HOME-derived default restore it
+	// with useDefaultSupervisorLaunchAgentsDir.
+	testLaunchAgentsDir := filepath.Join(testTempRoot, "LaunchAgents")
+	supervisorLaunchAgentsDir = func() string { return testLaunchAgentsDir }
 	providerStubDir, err := installTestProviderStubs()
 	if err != nil {
 		panic(err)

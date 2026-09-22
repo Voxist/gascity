@@ -91,6 +91,7 @@ const (
 	TraceSiteReconcilerUnknownState         TraceSiteCode = "reconciler.session.skip_unknown_state"
 	TraceSiteReconcilerOrphaned             TraceSiteCode = "reconciler.session.orphan_or_suspended"
 	TraceSiteReconcilerCloseOrphan          TraceSiteCode = "reconciler.session.close_orphan"
+	TraceSiteReconcilerRecycleNamedPhantom  TraceSiteCode = "reconciler.session.recycle_named_phantom"
 	TraceSiteReconcilerPendingCreate        TraceSiteCode = "reconciler.session.rollback_pending_create"
 	TraceSiteReconcilerConfigDrift          TraceSiteCode = "reconciler.session.config_drift"
 	TraceSiteReconcilerIdleDrain            TraceSiteCode = "reconciler.session.idle_drain"
@@ -181,6 +182,7 @@ const (
 	TraceReasonCircuitOpen                   TraceReasonCode = "circuit_open"
 	TraceReasonCircuitTrip                   TraceReasonCode = "circuit_trip"
 	TraceReasonProviderRed                   TraceReasonCode = "provider_red"
+	TraceReasonProviderUnresolved            TraceReasonCode = "provider_unresolved"
 	TraceReasonHealClearedStaleLease         TraceReasonCode = "heal_cleared_stale_lease"
 	TraceReasonPendingCreateRecoveryInFlight TraceReasonCode = "pending_create_recovery_in_flight"
 	TraceReasonPendingCreateRebuildFailed    TraceReasonCode = "pending_create_rebuild_failed"
@@ -224,6 +226,7 @@ const (
 	TraceOutcomeSkipped                 TraceOutcomeCode = "skipped"
 	TraceOutcomeDrain                   TraceOutcomeCode = "drain"
 	TraceOutcomeClosed                  TraceOutcomeCode = "closed"
+	TraceOutcomeRecycled                TraceOutcomeCode = "recycled"
 	TraceOutcomeRollback                TraceOutcomeCode = "rollback"
 	TraceOutcomeDeferredAttached        TraceOutcomeCode = "deferred_attached"
 	TraceOutcomeDeferredActive          TraceOutcomeCode = "deferred_active"
@@ -241,7 +244,6 @@ const (
 	// event.
 	TraceOutcomeRebaselinedVersionMismatch TraceOutcomeCode = "rebaselined_version_mismatch"
 
-	TraceOutcomeRollbackDeferred    TraceOutcomeCode = "rollback_deferred"
 	TraceOutcomeKeptOpen            TraceOutcomeCode = "kept_open"
 	TraceOutcomeDeferred            TraceOutcomeCode = "deferred"
 	TraceOutcomeCancelPending       TraceOutcomeCode = "cancel_pending"

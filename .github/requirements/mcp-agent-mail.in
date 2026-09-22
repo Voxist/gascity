@@ -64,6 +64,12 @@ joserfc>=1.6.8
 # once fastmcp-slim's transitive constraint carries the patched version itself.
 mcp>=1.28.1
 
+# Security floor: CVE-2026-63374 (CRITICAL, TLSStream encodes host names with
+# IDNA 2003) in anyio < 4.14.2. anyio arrives transitively (httpx, mcp,
+# openai, sse-starlette, ...); floor at 4.14.2 until those transitive
+# constraints carry the patched version themselves.
+anyio>=4.14.2
+
 # Authlib and FastMCP security floors live in
 # .github/requirements/mcp-agent-mail.overrides.txt because mcp-agent-mail
 # v0.3.2 still caps Authlib below the fixed release.

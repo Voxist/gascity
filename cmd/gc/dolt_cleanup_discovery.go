@@ -13,6 +13,40 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
+// recordedScopeDoltPorts reads each scope's .beads/dolt-server.port. It exists
+// solely as the degraded-mode fallback in protectedDoltPortsForReap, for the
+// window where live resolution returns nothing at all.
+//
+// Deliberately NOT a second source of truth. Live state wins whenever it has an
+// answer; this never selects a reap target, never overrides a live attribution,
+// and is not consulted when liveResolve succeeds. The file is a managed-local
+// compatibility mirror of the canonical managed port (writeDoltPortFile), so on
+// a healthy city it merely restates what live resolution already reported.
+//
+// Unparseable or malformed files are skipped: they contribute nothing, which
+// leaves the reaper exactly where it would be without this fallback. If two
+// scopes claim the same port (operator misconfiguration), the later-listed one
+// wins the label — harmless, since any match protects regardless of which name
+// is attributed.
+func recordedScopeDoltPorts(rigs []resolverRig, fs fsys.FS) map[int]string {
+	out := map[int]string{}
+	if fs == nil {
+		return out
+	}
+	for _, rig := range rigs {
+		data, err := fs.ReadFile(filepath.Join(rig.Path, ".beads", "dolt-server.port"))
+		if err != nil {
+			continue
+		}
+		port, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil || !validDoltPort(port) {
+			continue
+		}
+		out[port] = rig.Name
+	}
+	return out
+}
+
 // doltProcRigOwner reports which registered rig owns a discovered dolt
 // sql-server process, matched by the process's --data-dir or --config argv
 // path sitting under the rig root. This is the live-state replacement for
@@ -50,6 +84,15 @@ func doltProcRigOwner(p DoltProcInfo, rigs []resolverRig) (string, bool) {
 
 // pathUnderRoot reports whether path equals root or sits underneath it,
 // using the same normalization as samePath.
+//
+// PRECONDITION: root must already be normalized by the caller via
+// normalizePathForCompare; only path is normalized here. This is deliberate,
+// not an oversight — pathUnderRoot is called in the inner loop of a
+// process x rig cross product (doltProcRigOwner), where each rig root is
+// otherwise re-normalized once per candidate path of every discovered
+// process. Callers normalize the root once per rig instead. Passing a raw,
+// unnormalized root silently under-matches (protecting nothing), so any new
+// caller must normalize first.
 func pathUnderRoot(path, root string) bool {
 	normalized := normalizePathForCompare(path)
 	if normalized == "" {
@@ -465,10 +508,20 @@ func readDoltSQLServerArgv(pid int) ([]string, bool) {
 	return argv, true
 }
 
+// psOutputFormat is the -o field spec passed to `ps` for process discovery.
+// Deliberately excludes rss=: some macOS hosts require an entitlement to
+// report resource-usage fields (%mem/vsz/rss/time) for processes outside the
+// caller's own session, and ps exits non-zero for the *entire* invocation
+// when it can't — turning a clean, zero-orphan scan into a reported
+// dolt-cleanup reap-stage error (gastownhall/gascity#5201). RSSBytes is
+// cosmetic-only downstream (planOrphanReap classifies purely on
+// ConfigPath/DataDir/CWDState, never on RSS), so it is not worth requesting.
+const psOutputFormat = "pid=,lstart=,command="
+
 func psLStartCommandLines() ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), psEnumerationTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "ps", "-ax", "-o", "pid=,rss=,lstart=,command=")
+	cmd := exec.CommandContext(ctx, "ps", "-ax", "-o", psOutputFormat)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
@@ -483,17 +536,13 @@ func psLStartCommandLines() ([]string, error) {
 }
 
 func parseDoltPSLine(line string, pidPorts map[int][]int) (DoltProcInfo, bool) {
-	fields, command := consumeLeadingFields(line, 7)
-	if len(fields) != 7 || command == "" {
+	fields, command := consumeLeadingFields(line, 6)
+	if len(fields) != 6 || command == "" {
 		return DoltProcInfo{}, false
 	}
 	pid, err := strconv.Atoi(fields[0])
 	if err != nil || pid <= 0 {
 		return DoltProcInfo{}, false
-	}
-	rssKB, err := strconv.ParseInt(fields[1], 10, 64)
-	if err != nil || rssKB < 0 {
-		rssKB = 0
 	}
 	argv := parseDoltPSCommandLine(command)
 	if !looksLikeDoltSQLServer(argv) {
@@ -503,13 +552,12 @@ func parseDoltPSLine(line string, pidPorts map[int][]int) (DoltProcInfo, bool) {
 		PID:           pid,
 		Argv:          argv,
 		Ports:         pidPorts[pid],
-		RSSBytes:      rssKB * 1024,
-		StartIdentity: strings.Join(fields[2:7], " "),
+		StartIdentity: strings.Join(fields[1:6], " "),
 	}, true
 }
 
 func argvFromPSLine(line string) ([]string, bool) {
-	_, command := consumeLeadingFields(line, 7)
+	_, command := consumeLeadingFields(line, 6)
 	if command == "" {
 		return nil, false
 	}
@@ -824,34 +872,4 @@ func readWithTimeout(path string) ([]byte, error) {
 // process) is the caller's responsibility to interpret as "already gone".
 func killProcess(pid int, sig syscall.Signal) error {
 	return syscall.Kill(pid, sig)
-}
-
-// loadRigDoltPorts reads each rig's recorded dolt-server.port.
-//
-// MERGE INTENT (v1.4.0 resync): restored from upstream. The fork replaced this
-// file-based port set with live-state detection (doltProcRigOwner + the live
-// resolver), which is the better primary signal. But the reaper's protected-port
-// set feeds a DESTRUCTIVE path — SIGKILL plus DataDir removal — and dropping the
-// recorded ports left a port with no attributable live process unprotected.
-// protectedDoltPortsForReap now seeds from this and lets live state overlay it,
-// so protection is the union of both rather than either alone.
-func loadRigDoltPorts(rigs []resolverRig, fs fsys.FS) map[int]string {
-	out := map[int]string{}
-	for _, rig := range rigs {
-		path := filepath.Join(rig.Path, ".beads", "dolt-server.port")
-		data, err := fs.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		text := strings.TrimSpace(string(data))
-		if text == "" {
-			continue
-		}
-		port, err := strconv.Atoi(text)
-		if err != nil || !validDoltPort(port) {
-			continue
-		}
-		out[port] = rig.Name
-	}
-	return out
 }

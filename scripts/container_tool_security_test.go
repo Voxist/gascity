@@ -289,6 +289,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"gitpython>=3.1.59",
 		"pillow>=12.3.0",
 		"aiohttp>=3.14.3",
+		"anyio>=4.14.2",
 	} {
 		if !strings.Contains(input, want) {
 			t.Errorf("mcp-agent-mail input requirements missing security floor %q", want)
@@ -320,6 +321,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		{"pillow", "12.3.0"},
 		{"aiohttp", "3.14.3"},
 		{"cryptography", "50.0.0"},
+		{"anyio", "4.14.2"},
 	} {
 		locked, ok := lockedVersion(lock, dep.name)
 		if !ok {
