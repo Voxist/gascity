@@ -283,8 +283,16 @@ func evaluatePendingPools(
 	for j, pw := range pendingPools {
 		wg.Add(1)
 		sp := pw.sp
+		// probeEnv reaches the check structurally, through the runner's
+		// cmd.Env (runShellCommand -> mergeRuntimeEnv). It is deliberately NOT
+		// also glued onto sp.Check as a textual `KEY=value cmd` prefix: a POSIX
+		// assignment prefix binds to the one simple command that follows it, so
+		// on a check that opens with a keyword (if/while/for/case) it is a
+		// syntax error, and the pool would collapse to min on every tick. The
+		// structural env is a superset of anything a prefix could carry, and it
+		// keeps connection coordinates out of a command string that a process
+		// listing exposes (ga-7nwnh).
 		probeEnv := pw.env
-		sp.Check = prefixShellEnv(controllerQueryPrefixEnv(probeEnv), sp.Check)
 		template := cfg.Agents[pw.agentIdx].QualifiedName()
 		agentName := cfg.Agents[pw.agentIdx].Name
 		agentIndex := pw.agentIdx
