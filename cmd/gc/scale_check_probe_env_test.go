@@ -2,10 +2,16 @@ package main
 
 import (
 	"bytes"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // scaleCheckProbeEnv is the connection-coordinate env the controller threads
@@ -146,5 +152,87 @@ func TestEvaluatePendingPoolsScaleCheckCommandIsVerbatim(t *testing.T) {
 		if strings.Contains(got.command, secret) {
 			t.Fatalf("scale_check command %q leaked probe env %q into the command string", got.command, secret)
 		}
+	}
+}
+
+// TestShellScaleCheckNilEnvHasNoStoreCoordinates pins why a poolEvalWork must
+// never be built without a probe env. mergeRuntimeEnv strips the inherited
+// GC_DOLT_*/BEADS_* keys before applying overrides, so a nil env does not mean
+// "fall back to the controller's ambient coordinates" — it means the probe runs
+// with no coordinates at all.
+func TestShellScaleCheckNilEnvHasNoStoreCoordinates(t *testing.T) {
+	t.Setenv("GC_DOLT_HOST", "ambient.example.com")
+	t.Setenv("GC_DOLT_PORT", "1234")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "5678")
+	out, err := shellScaleCheck(`printf '%s/%s/%s' "${GC_DOLT_HOST:-unset}" "${GC_DOLT_PORT:-unset}" "${BEADS_DOLT_SERVER_PORT:-unset}"`, "", nil)
+	if err != nil {
+		t.Fatalf("shellScaleCheck: %v", err)
+	}
+	if got := strings.TrimSpace(out); got != "unset/unset/unset" {
+		t.Fatalf("nil-env probe coordinates = %q, want %q", got, "unset/unset/unset")
+	}
+}
+
+// TestBuildDesiredStateNamedBackingPoolProbeCarriesRigEnv covers the pool
+// producer that used to append a poolEvalWork with no env: a rig-scoped
+// template that backs a named session and carries a custom scale_check. Its
+// probe must see the rig's own Dolt host and port, not the city's and not
+// nothing at all.
+func TestBuildDesiredStateNamedBackingPoolProbeCarriesRigEnv(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT_HOST", "city-db.example.com")
+	t.Setenv("GC_DOLT_PORT", "3306")
+	t.Setenv("GC_DOLT_USER", "")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+	t.Setenv("BEADS_CREDENTIALS_FILE", "")
+
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "demo")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRigEndpointCanonicalConfig(t, rigPath, contract.ConfigState{
+		IssuePrefix:    "dm",
+		EndpointOrigin: contract.EndpointOriginExplicit,
+		EndpointStatus: contract.EndpointStatusVerified,
+		DoltHost:       "rig-db.example.com",
+		DoltPort:       "3308",
+		DoltUser:       "rig-user",
+	})
+
+	// Counts 2 only when the probe holds the RIG's coordinates. The ambient
+	// process env above holds the city's, so a stripped or inherited env both
+	// score 0 and the assertion cannot pass by accident.
+	checkCmd := `sh -c 'test "$GC_DOLT_HOST" = "rig-db.example.com" && test "$GC_DOLT_PORT" = "3308" && printf 2 || printf 0'`
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "demo", Path: rigPath}},
+		NamedSessions: []config.NamedSession{{
+			Name:     "demo-lead",
+			Template: "worker",
+			Dir:      "demo",
+			Mode:     "on_demand",
+		}},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "demo",
+			StartCommand:      "true",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(5),
+			ScaleCheck:        checkCmd,
+		}},
+	}
+
+	desired := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), nil, io.Discard)
+	slots := 0
+	for _, tp := range desired.State {
+		if tp.TemplateName == "demo/worker" {
+			slots++
+		}
+	}
+	if slots != 2 {
+		t.Fatalf("named-backing pool desired slots = %d, want 2 (probe must carry the rig's Dolt host and port)", slots)
 	}
 }
