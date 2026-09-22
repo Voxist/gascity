@@ -73,14 +73,16 @@ type DesiredStateResult struct {
 	PoolScaleCheckPartialTemplates  map[string]bool
 	PoolPartialRetentionTemplates   map[string]bool
 	NamedScaleCheckPartialTemplates map[string]bool
-	// UnresolvedTemplates maps each configured, runnable agent template whose
-	// provider could not be resolved this tick to the resolution error. Such an
-	// agent is absent from State for a reason that says nothing about whether
-	// it is still wanted, so the reconciler keeps its existing sessions (fail
-	// closed for that agent) instead of draining them as orphaned. The provider
+	// UnresolvedTemplates maps each configured, runnable agent template the
+	// build could not produce desired state for this tick to why. Such an agent
+	// is absent from State for a reason that says nothing about whether it is
+	// still wanted, so the reconciler keeps its existing sessions (fail closed
+	// for that agent) instead of draining them as orphaned. The provider
 	// catalog is city-wide, so without this one unresolvable entry emptied the
-	// desired set for every agent naming it, in every rig (ga-8a8fq).
-	UnresolvedTemplates map[string]string
+	// desired set for every agent naming it, in every rig (ga-8a8fq); every
+	// other per-agent build failure drops exactly one agent the same way
+	// (ga-c8rck).
+	UnresolvedTemplates map[string]unresolvedTemplate
 	PoolDesiredCounts   map[string]int // runtime-owned demand snapshot; reused on stable patrol ticks when still fresh
 	WorkSet             map[string]bool
 	AssignedWorkBeads   []beads.Bead // actionable assigned work, plus stranded pool work that needs release
@@ -764,6 +766,10 @@ func buildDesiredStateWithSessionBeadsAt(
 		env, err := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[i])
 		if err != nil {
 			fmt.Fprintf(stderr, "scaleCheck: building env for %s: %v\n", cfg.Agents[i].QualifiedName(), err) //nolint:errcheck
+			// This pool contributes no desired sessions now, for a reason that
+			// is about the probe and not about demand. Record it so the
+			// reconciler keeps the pool's live sessions (ga-c8rck).
+			bp.recordBuildFailure(&cfg.Agents[i], fmt.Errorf("scale_check env for %s: %w", cfg.Agents[i].QualifiedName(), err))
 			continue
 		}
 		pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, env: env, newDemand: store != nil})
@@ -1002,6 +1008,7 @@ func buildDesiredStateWithSessionBeadsAt(
 				tp, err := resolveTemplatePrepared(bp, instanceAgent, qualifiedInstance, fpExtra)
 				if err != nil {
 					fmt.Fprintf(stderr, "buildDesiredState: pool instance %q: %v (skipping)\n", qualifiedInstance, err) //nolint:errcheck
+					bp.recordBuildFailure(cfgAgent, err)
 					continue
 				}
 				tp.PoolSlot = poolSlot
@@ -1145,6 +1152,7 @@ func buildDesiredStateWithSessionBeadsAt(
 		tp, err := resolveTemplatePrepared(bp, spec.Agent, identity, fpExtra)
 		if err != nil {
 			fmt.Fprintf(stderr, "buildDesiredState: named session %q: %v (skipping)\n", identity, err) //nolint:errcheck
+			bp.recordBuildFailure(spec.Agent, err)
 			continue
 		}
 		tp.Alias = identity
@@ -1451,8 +1459,32 @@ func refreshDesiredStateWithSessionBeads(
 	bp.sessionSnapshotCompletenessKnown = true
 	bp.sessionSnapshotComplete = false
 	bp.sessionOccupancyInfos = sessionOccupancyInfosForRefresh(result, sessionBeads)
-	applySessionBeadDesiredOverlay(bp, cfg, refreshed.State, buildSuspendedRigPathsForCity(cfg, cityPath), effectivePoolPartialRetentionTemplates(result), result.NamedScaleCheckPartialTemplates, stderr)
+	suspendedRigPaths := buildSuspendedRigPathsForCity(cfg, cityPath)
+	applySessionBeadDesiredOverlay(bp, cfg, refreshed.State, suspendedRigPaths, effectivePoolPartialRetentionTemplates(result), result.NamedScaleCheckPartialTemplates, stderr)
+	// The refresh rebuilds State from BaseState and re-resolves every session
+	// bead's template. A resolve that fails only here drops the session from the
+	// refreshed desired set just as it would in the full build, so the refresh
+	// carries its own failures forward on top of the build's rather than
+	// re-opening the drain the build closed (ga-c8rck).
+	refreshed.UnresolvedTemplates = mergeUnresolvedTemplates(result.UnresolvedTemplates, unresolvedAgentTemplates(bp, cfg, suspendedRigPaths, stderr))
 	return refreshed
+}
+
+// mergeUnresolvedTemplates unions two unresolved-template sets, preferring the
+// entry already in base so the first explanation of an absence is the one the
+// reconciler reports.
+func mergeUnresolvedTemplates(base, extra map[string]unresolvedTemplate) map[string]unresolvedTemplate {
+	if len(extra) == 0 {
+		return base
+	}
+	out := make(map[string]unresolvedTemplate, len(base)+len(extra))
+	for template, u := range extra {
+		out[template] = u
+	}
+	for template, u := range base {
+		out[template] = u
+	}
+	return out
 }
 
 // sessionOccupancyInfosForRefresh carries the original cross-store census through
@@ -3069,6 +3101,7 @@ func discoverSessionBeadsWithRoots(
 		tp, err := resolveTemplateForSessionBeadInfo(bp, resolveAgent, sessionQualifiedName, fpExtra, bInfo)
 		if err != nil {
 			fmt.Fprintf(stderr, "buildDesiredState: bead %s template %q: %v (skipping)\n", info.ID, template, err) //nolint:errcheck
+			bp.recordBuildFailure(cfgAgent, err)
 			continue
 		}
 		tp.ManualSession = isManualSessionInfoForAgent(info, cfgAgent)
@@ -3483,6 +3516,7 @@ func realizePoolDesiredSessionsAt(
 		tp, err := resolveTemplateForSessionBeadInfo(bp, resolveAgent, qualifiedInstance, fpExtra, sbInfo)
 		if err != nil {
 			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s: %v (skipping)\n", qualifiedName, sbInfo.ID, err) //nolint:errcheck
+			bp.recordBuildFailure(cfgAgent, err)
 			continue
 		}
 		if manualSession {
@@ -6478,12 +6512,36 @@ func resolveTemplatePrepared(bp *agentBuildParams, cfgAgent *config.Agent, quali
 	return resolveTemplate(bp, cfgAgent, qualifiedName, fpExtra)
 }
 
-// unresolvedAgentTemplates returns the configured, runnable agent templates
-// whose provider cannot be resolved this tick, keyed to the error. Suspended
-// agents and agents in suspended rigs are left out: their sessions are already
-// accounted for as suspended, and resolution says nothing new about them.
-func unresolvedAgentTemplates(bp *agentBuildParams, cfg *config.City, suspendedRigPaths map[string]bool, stderr io.Writer) map[string]string {
-	var out map[string]string
+// unresolvedTemplate explains why the build could not produce desired state for
+// a configured agent template this tick. Reason is the trace reason code the
+// reconciler records when it keeps that template's sessions; Cause is the build
+// error, verbatim.
+type unresolvedTemplate struct {
+	Reason TraceReasonCode
+	Cause  string
+}
+
+// unresolvedAgentTemplates returns the configured, runnable agent templates the
+// build could not produce desired state for this tick, keyed to why. Two
+// classes reach it: the agent's provider cannot be resolved (ga-8a8fq), and any
+// other per-agent build step failed for it and left it out of the desired set
+// (ga-c8rck) — the build records those through agentBuildParams.buildFailures
+// as it goes, and this is where they are read back.
+//
+// Both classes pass the SAME filters, in one place: suspended agents and agents
+// in suspended rigs are left out, because their sessions are already accounted
+// for as suspended and a build failure says nothing new about them. An agent
+// removed from config cannot appear here at all — it is not in cfg.Agents — so
+// its sessions still drain as orphaned.
+func unresolvedAgentTemplates(bp *agentBuildParams, cfg *config.City, suspendedRigPaths map[string]bool, stderr io.Writer) map[string]unresolvedTemplate {
+	var out map[string]unresolvedTemplate
+	record := func(template string, reason TraceReasonCode, cause string) {
+		if out == nil {
+			out = make(map[string]unresolvedTemplate)
+		}
+		out[template] = unresolvedTemplate{Reason: reason, Cause: cause}
+		fmt.Fprintf(stderr, "buildDesiredState: %s (keeping existing sessions of %q until it builds again)\n", cause, template) //nolint:errcheck
+	}
 	for i := range cfg.Agents {
 		agent := &cfg.Agents[i]
 		if agent.Suspended {
@@ -6494,11 +6552,11 @@ func unresolvedAgentTemplates(bp *agentBuildParams, cfg *config.City, suspendedR
 		}
 		template := agent.QualifiedName()
 		if err := validateAgentSessionTransportForBuild(bp, agent, template); err != nil {
-			if out == nil {
-				out = make(map[string]string)
-			}
-			out[template] = err.Error()
-			fmt.Fprintf(stderr, "buildDesiredState: %v (keeping existing sessions of %q until it resolves)\n", err, template) //nolint:errcheck
+			record(template, TraceReasonProviderUnresolved, err.Error())
+			continue
+		}
+		if cause, failed := bp.buildFailure(template); failed {
+			record(template, TraceReasonBuildFailed, cause)
 		}
 	}
 	return out
