@@ -264,12 +264,19 @@ func TestManagedDoltReplaceLivenessIsAliveForARealListenerWithRealProbes(t *test
 func TestManagedDoltReplaceLivenessIsUnknownWhenStateFileIsUnreadable(t *testing.T) {
 	cityPath := livenessCity(t, doltRuntimeState{Running: true, PID: os.Getpid(), Port: 34567})
 	statePath := managedDoltStatePath(cityPath)
-	if err := os.Chmod(statePath, 0o000); err != nil {
+
+	// A directory where the state file belongs, rather than chmod 0000.
+	// Reading a directory fails for every uid, so this branch keeps its
+	// coverage on a CI job that happens to run as root — a chmod-based
+	// version silently skipped there, which is a check that cannot fail.
+	if err := os.Remove(statePath); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(statePath, 0o644) })
+	if err := os.Mkdir(statePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.ReadFile(statePath); err == nil {
-		t.Skip("runtime state is still readable (running as root?); cannot drive the unreadable branch")
+		t.Fatal("runtime state unexpectedly readable; cannot drive the unreadable branch")
 	}
 
 	got, reason := managedDoltReplaceLivenessWith(cityPath, ownedProbes())
@@ -411,6 +418,23 @@ func TestManagedDoltHealthOpEvidence(t *testing.T) {
 			ctx:  context.Background(),
 			err:  errors.New("exec beads health: signal: killed"),
 			want: recoverEvidenceCallFailed,
+		},
+		{
+			// The branch that was missing, and the most load-sensitive
+			// one in op_health: tcp_check is `nc -z -w 2`, and a starved
+			// nc exits cleanly long before gc's 30s budget. Classified
+			// on the exit code now, not on the message.
+			name: "tcp_check could not reach the server",
+			ctx:  context.Background(),
+			err:  providerOpExitErrorForTest(t, providerOpExitUnobservable, "dolt server not reachable on 127.0.0.1:48770"),
+			want: recoverEvidenceCallFailed,
+		},
+		{
+			// Exit 1 from the same script is still an observation.
+			name: "script observed a bad server and exited 1",
+			ctx:  context.Background(),
+			err:  providerOpExitErrorForTest(t, 1, "dolt query probe failed (information_schema.SCHEMATA)"),
+			want: recoverEvidenceHealthOpAnswered,
 		},
 	}
 	for _, tc := range cases {
@@ -649,5 +673,114 @@ func TestBdTransportRecoverSkippedWhileManagedDoltIsLive(t *testing.T) {
 	// through to the retry.
 	if want := reads * 2; *attempts != want {
 		t.Fatalf("bd attempts = %d, want %d (each read still retried once)", *attempts, want)
+	}
+}
+
+// providerOpExitErrorForTest runs a throwaway provider script that exits
+// with the given code, through the real runProviderOpWithEnvContext, and
+// returns the error it produces.
+//
+// It deliberately does NOT fabricate an error value. The join under test
+// is whether the *exec.ExitError survives that function's wrapping well
+// enough for errors.As to reach the code — the previous fmt.Errorf("%s")
+// dropped it — so a hand-built error would test the classifier against a
+// shape production never produces.
+func providerOpExitErrorForTest(t *testing.T, code int, msg string) error {
+	t.Helper()
+	script := filepath.Join(t.TempDir(), "provider.sh")
+	body := fmt.Sprintf("#!/bin/sh\necho %q >&2\nexit %d\n", msg, code)
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := runProviderOpWithEnvContext(context.Background(), script, nil, "health")
+	if err == nil {
+		t.Fatalf("provider script exiting %d produced no error", code)
+	}
+	return err
+}
+
+// The exit code must survive runProviderOpWithEnvContext's wrapping, and
+// the rendered message must not change while it does. rev212 flagged
+// this join as the one most likely to be got wrong.
+func TestProviderOpErrorCarriesTheScriptExitCode(t *testing.T) {
+	err := providerOpExitErrorForTest(t, providerOpExitUnobservable, "dolt server not reachable on 127.0.0.1:48770")
+
+	code, ok := providerOpExitCode(err)
+	if !ok {
+		t.Fatalf("no exit code recoverable from %v; errors.As cannot reach the *exec.ExitError", err)
+	}
+	if code != providerOpExitUnobservable {
+		t.Fatalf("exit code = %d, want %d", code, providerOpExitUnobservable)
+	}
+	if got, want := err.Error(), "exec beads health: dolt server not reachable on 127.0.0.1:48770"; got != want {
+		t.Fatalf("error message = %q, want %q (the message must not change while the code is preserved)", got, want)
+	}
+}
+
+// Exit 2 keeps meaning "not needed" (treated as success), and exit 3
+// must not have disturbed it.
+func TestProviderOpExitTwoStillMeansNotNeeded(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "provider.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := runProviderOpWithEnvContext(context.Background(), script, nil, "health"); err != nil {
+		t.Fatalf("exit 2 should still be treated as success, got %v", err)
+	}
+}
+
+// The real bundled script must actually produce exit 3 when its TCP
+// check fails. The classifier reading exit 3 is worthless if nothing
+// emits it, and a test that only exercises a throwaway script would not
+// notice op_health being changed back.
+func TestBundledProviderScriptExitsUnobservableWhenTCPCheckFails(t *testing.T) {
+	script := filepath.Join("..", "..", "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
+	if _, err := os.Stat(script); err != nil {
+		t.Skipf("bundled provider script not present: %v", err)
+	}
+	src, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(src)
+	if !strings.Contains(text, "die_unobservable() {") {
+		t.Fatal("bundled script no longer defines die_unobservable; the exit-3 contract has been removed")
+	}
+	if !strings.Contains(text, `die_unobservable "dolt server not reachable on`) {
+		t.Fatal("op_health's tcp_check failure no longer uses die_unobservable; a starved nc would again read as an observation that the server is bad (ga-amol9 HIGH-1)")
+	}
+	if !strings.Contains(text, "    exit 3\n") {
+		t.Fatal("die_unobservable no longer exits 3")
+	}
+}
+
+// MEDIUM-1: the liveness probe is managed-dolt-shaped, so it must not
+// gate a city whose beads lifecycle gc does not run. Such a city has no
+// managed dolt for a recover to destroy, and declining because gc could
+// not prove one dead would make a provider-agnostic op depend on a
+// specific provider.
+func TestGuardedRecoverDoesNotApplyManagedDoltLivenessToOtherProviders(t *testing.T) {
+	cityPath := t.TempDir()
+	stubRecoverGateClock(t)
+	stubRecoverLiveness(t, managedDoltLivenessUnknown)
+	runs := countRecoverRuns(t)
+
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+name = "custom"
+
+[beads]
+provider = "exec:/opt/custom/beads-provider.sh"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if cityUsesManagedDoltBeadsLifecycle(cityPath) {
+		t.Fatal("fixture city should not use the managed-dolt beads lifecycle")
+	}
+
+	if err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed); err != nil {
+		t.Fatalf("err = %v, want the recover to run: a managed-dolt liveness verdict must not gate a city gc runs no managed dolt for", err)
+	}
+	if *runs != 1 {
+		t.Fatalf("recover runs = %d, want 1", *runs)
 	}
 }

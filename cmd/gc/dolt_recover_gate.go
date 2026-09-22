@@ -85,15 +85,34 @@ func (e managedDoltRecoverEvidence) mustProveDeath() bool {
 	return e != recoverEvidenceHealthOpAnswered
 }
 
+// providerOpExitUnobservable is the provider script's exit code for "I
+// could not observe the server", as distinct from exit 1 ("I observed it
+// and it is bad") and exit 2 ("not needed"). op_health's die_unobservable
+// produces it; see the comment there.
+const providerOpExitUnobservable = 3
+
 // managedDoltHealthOpEvidence classifies what a FAILED provider health
 // op actually proves.
 //
-// runProviderOpWithEnvContext wraps context.DeadlineExceeded when the op
-// is killed at its deadline and otherwise reports the script's own
-// stderr, so the two cases are cleanly separable. A health op that was
-// killed observed nothing at all — on a saturated host that is the
-// common case, not the rare one — and must not be read as a verdict on
-// the server.
+// It classifies on the EXIT CODE, not on stderr prose. An earlier
+// version keyed off gc's own deadline and the string "signal: killed"
+// and treated every other script exit as an observation — which was
+// wrong in the most load-sensitive case there is. op_health's first act
+// is tcp_check, which is `nc -z -w 2`: on a loaded host a freshly forked
+// nc can burn its whole 2s waiting for CPU before it dials, exiting
+// cleanly long before gc's 30s budget. That produced a tidy "the server
+// is unreachable" verdict, which the old classifier read as
+// answered-unhealthy, which skipped the liveness check — reintroducing
+// the 2026-09-22 failure through a branch the cooldown-only fix did not
+// have. Measured that day: load 95, ten orders dead on context deadline,
+// and the store answering `select 1` in 58ms throughout.
+//
+// The fix DISCRIMINATES rather than demotes. Demoting every script exit
+// to call-failed would also close the answered-unhealthy branch, which
+// is the escape hatch that lets a wedged-but-listening server be
+// replaced at all. So only the probe that reports our own inability to
+// look — exit 3 — is call-failed; the query-probe failure and the
+// read-only verdict remain observations.
 func managedDoltHealthOpEvidence(ctx context.Context, err error) managedDoltRecoverEvidence {
 	if err == nil {
 		return recoverEvidenceCallFailed
@@ -105,6 +124,9 @@ func managedDoltHealthOpEvidence(ctx context.Context, err error) managedDoltReco
 		return recoverEvidenceCallFailed
 	}
 	if strings.Contains(err.Error(), "signal: killed") {
+		return recoverEvidenceCallFailed
+	}
+	if code, ok := providerOpExitCode(err); ok && code == providerOpExitUnobservable {
 		return recoverEvidenceCallFailed
 	}
 	return recoverEvidenceHealthOpAnswered
@@ -206,7 +228,21 @@ var managedDoltRecoverRunner = func(ctx context.Context, script string, environ 
 // process made it — which, on 2026-09-22, was an order process nobody
 // expected to be restarting servers at all.
 func runGuardedManagedDoltRecover(ctx context.Context, cityPath, script string, environ []string, evidence managedDoltRecoverEvidence) error {
-	if evidence.mustProveDeath() {
+	// The liveness check is a MANAGED-DOLT probe, so it may only gate a
+	// city whose beads lifecycle gc actually runs. Without this scope,
+	// a city on a custom exec provider and no managed dolt at all could
+	// have its recover DECLINED because gc failed to parse that city's
+	// TOML — managedDoltLifecycleOwned answers unknown on a load error,
+	// and unknown declines. Refusing a provider-agnostic op on the
+	// grounds that gc could not prove dead a dolt it does not run is
+	// exactly the "no SDK mechanism may depend on a configured
+	// provider" rule in AGENTS.md, and it would fire only once things
+	// were already degraded.
+	//
+	// Scoping here rather than carving an exception into the liveness
+	// function keeps "unknown declines" absolute inside that function,
+	// and makes the scope legible at the decision point.
+	if evidence.mustProveDeath() && cityUsesManagedDoltBeadsLifecycle(cityPath) {
 		liveness, reason := managedDoltReplaceLiveness(cityPath)
 		if liveness != managedDoltLivenessConfirmedDead {
 			log.Printf("gc: declining managed dolt recover for %s: liveness %s (%s)", cityPath, liveness, reason)

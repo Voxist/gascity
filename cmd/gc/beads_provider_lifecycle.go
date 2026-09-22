@@ -2643,7 +2643,43 @@ func runProviderOpWithEnvContext(parent context.Context, script string, environ 
 		if msg == "" {
 			msg = err.Error()
 		}
-		return fmt.Errorf("exec beads %s: %s", args[0], msg)
+		// Wrap rather than format: the provider's EXIT CODE is evidence
+		// gc classifies on (managedDoltHealthOpEvidence reads exit 3,
+		// "I could not observe the server", from op_health's tcp_check).
+		// The previous fmt.Errorf("%s") dropped the *exec.ExitError, so
+		// errors.As could not reach it. Error() is byte-identical to
+		// what that produced.
+		return &providerOpError{op: args[0], msg: msg, err: err}
 	}
 	return nil
+}
+
+// providerOpError carries a failed provider operation's underlying error
+// -- crucially an *exec.ExitError, and with it the script's exit code --
+// while rendering exactly the message the previous fmt.Errorf produced.
+type providerOpError struct {
+	op  string
+	msg string
+	err error
+}
+
+func (e *providerOpError) Error() string {
+	return fmt.Sprintf("exec beads %s: %s", e.op, e.msg)
+}
+
+func (e *providerOpError) Unwrap() error { return e.err }
+
+// providerOpExitCode returns the exit code a provider script exited
+// with, and whether one was available. A script killed by a signal, or
+// an error that never reached a script at all, has no exit code to
+// report and must not be read as one.
+func providerOpExitCode(err error) (int, bool) {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return 0, false
+	}
+	if exitErr.ProcessState == nil || exitErr.ProcessState.Exited() != true {
+		return 0, false
+	}
+	return exitErr.ExitCode(), true
 }
