@@ -769,7 +769,12 @@ func pseudoVersionCommit(pinned string) (string, bool) {
 // newest upstream ancestor of the fork build commit) is what go.mod must
 // match — fork commits do not resolve on the module path. When BD_LIB_REF is
 // absent (upstream's one-commit shape), BD_SOURCE_REF plays both roles.
-func depsEnvBDPins(t *testing.T) (bdVersion, sourceRef string) {
+//
+// bridged reports whether BD_LIB_REF names a different commit than
+// BD_SOURCE_REF. BD_VERSION is the version string BD_SOURCE_REF declares
+// (Dockerfile.agent greps for it), so when the two refs differ it says
+// nothing about what the go.mod commit declares.
+func depsEnvBDPins(t *testing.T) (bdVersion, sourceRef string, bridged bool) {
 	t.Helper()
 	// Walk up to the module root rather than shelling out to `git rev-parse`:
 	// a subprocess here would be a new call site against the resource-census
@@ -790,23 +795,27 @@ func depsEnvBDPins(t *testing.T) (bdVersion, sourceRef string) {
 		}
 		dir = parent
 	}
+	var buildRef, libRef string
 	for _, line := range strings.Split(string(raw), "\n") {
 		line = strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(line, "BD_VERSION="):
 			bdVersion = strings.TrimPrefix(line, "BD_VERSION=")
 		case strings.HasPrefix(line, "BD_SOURCE_REF="):
-			if sourceRef == "" {
-				sourceRef = strings.TrimPrefix(line, "BD_SOURCE_REF=")
-			}
+			buildRef = strings.TrimPrefix(line, "BD_SOURCE_REF=")
 		case strings.HasPrefix(line, "BD_LIB_REF="):
-			sourceRef = strings.TrimPrefix(line, "BD_LIB_REF=")
+			libRef = strings.TrimPrefix(line, "BD_LIB_REF=")
 		}
+	}
+	sourceRef = buildRef
+	if libRef != "" {
+		sourceRef = libRef
+		bridged = libRef != buildRef
 	}
 	if bdVersion == "" || sourceRef == "" {
 		t.Fatalf("deps.env missing BD_VERSION (%q) or BD_SOURCE_REF (%q)", bdVersion, sourceRef)
 	}
-	return bdVersion, sourceRef
+	return bdVersion, sourceRef, bridged
 }
 
 func TestBuildPinnedBDBinaryForTestsUsesGoModSource(t *testing.T) {
@@ -841,12 +850,20 @@ func TestBuildPinnedBDBinaryForTestsUsesGoModSource(t *testing.T) {
 	// comments promise and which nothing else checks.
 	wantVersion := strings.TrimPrefix(pinned, "v")
 	if commit, ok := pseudoVersionCommit(pinned); ok {
-		declared, sourceRef := depsEnvBDPins(t)
+		declared, sourceRef, bridged := depsEnvBDPins(t)
 		if !strings.HasPrefix(sourceRef, commit) {
 			t.Fatalf("go.mod pins beads commit %s but deps.env BD_SOURCE_REF is %s; "+
 				"the pseudo-version and the source ref must name the same commit", commit, sourceRef)
 		}
 		wantVersion = strings.TrimPrefix(declared, "v")
+		if bridged {
+			// Under the fork-first bridge BD_VERSION describes the fork build
+			// commit, not this upstream library commit, so the two declared
+			// versions legitimately differ (fork 1.91.0 vs upstream 1.3.0 at
+			// the v1.3.0 repin). The exact-commit guarantee is the module
+			// metadata check below; only the version-string equality is moot.
+			wantVersion = ""
+		}
 	}
 
 	out, err := exec.Command(bdPath, "version").CombinedOutput()
@@ -864,7 +881,7 @@ func TestBuildPinnedBDBinaryForTestsUsesGoModSource(t *testing.T) {
 	if len(fields) < 3 || !semver.IsValid("v"+fields[2]) {
 		t.Fatalf("%s version output %q does not report a declared Beads release version", bdPath, out)
 	}
-	if fields[2] != wantVersion {
+	if wantVersion != "" && fields[2] != wantVersion {
 		t.Fatalf("%s reports version %q, want %q — the version deps.env says the pinned commit declares (for a pseudo-version pin) or the pinned release itself", bdPath, fields[2], wantVersion)
 	}
 	metadata, err := exec.Command("go", "version", "-m", bdPath).CombinedOutput()
