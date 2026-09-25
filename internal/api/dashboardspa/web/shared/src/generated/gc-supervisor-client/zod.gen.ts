@@ -1460,24 +1460,6 @@ export const zRigCreateSucceededPayload = z.object({
     rig: z.string()
 });
 
-export const zRigPatch = z.object({
-    DefaultBranch: z.string().nullable(),
-    FormulaVars: z.record(z.string(), z.string()),
-    Name: z.string(),
-    Path: z.string().nullable(),
-    Prefix: z.string().nullable(),
-    Suspended: z.boolean().nullable(),
-    SuspendedOnStart: z.boolean().nullable()
-});
-
-export const zListBodyRigPatch = z.object({
-    items: z.array(zRigPatch).nullable(),
-    next_cursor: z.string().optional(),
-    partial: z.boolean().optional(),
-    partial_errors: z.array(z.string()).nullish(),
-    total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
-});
-
 export const zRigPatchSetInputBody = z.object({
     default_branch: z.string().optional(),
     name: z.string().optional(),
@@ -1799,6 +1781,37 @@ export const zSessionRespondInputBody = z.object({
 export const zSessionRespondOutputBody = z.object({
     id: z.string(),
     status: z.string()
+});
+
+export const zSessionSleepConfig = z.object({
+    InteractiveFresh: z.string(),
+    InteractiveResume: z.string(),
+    NonInteractive: z.string()
+});
+
+export const zRigPatch = z.object({
+    DefaultBranch: z.string().nullable(),
+    DefaultSlingTarget: z.string().nullable(),
+    DefaultSlingTargets: z.array(z.string()).nullable(),
+    DoltHost: z.string().nullable(),
+    DoltPort: z.string().nullable(),
+    FormulaVars: z.record(z.string(), z.string()),
+    FormulasDir: z.string().nullable(),
+    MaxActiveSessions: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).nullable(),
+    Name: z.string(),
+    Path: z.string().nullable(),
+    Prefix: z.string().nullable(),
+    SessionSleep: zSessionSleepConfig,
+    Suspended: z.boolean().nullable(),
+    SuspendedOnStart: z.boolean().nullable()
+});
+
+export const zListBodyRigPatch = z.object({
+    items: z.array(zRigPatch).nullable(),
+    next_cursor: z.string().optional(),
+    partial: z.boolean().optional(),
+    partial_errors: z.array(z.string()).nullish(),
+    total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 
 export const zSessionStrandedPayload = z.object({

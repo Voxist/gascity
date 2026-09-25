@@ -1986,6 +1986,35 @@ func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...
 // non-nil, a WARN line is emitted for every port file whose prior non-empty
 // contents disagreed with the canonical port (operator-visible signal that gc
 // is overriding a rig-local or stale port). Pass io.Discard to suppress.
+//
+// The fan-out is exhaustive: once the managed port has been resolved, every
+// scope is reconciled and per-scope failures are collected and returned
+// together rather than aborting the remaining scopes (ga-2598s).
+//
+// Resolving the port is itself what moves the CITY mirror: currentDoltPort
+// writes it when it resolves a port and REMOVES it when it cannot — deliberately
+// named rather than cited by line, because a line number is a claim about a file
+// that edits elsewhere silently invalidate (this comment's own citations went
+// stale one merge after they were written).
+//
+// So an early return past that point splits the city from its rigs, and
+// because rigs are reconciled in slice order it splits them from each other
+// too. The reachable shapes are: city reconciled plus a PREFIX of rigs on the
+// live port, with the remaining suffix left on the dead one — for any prefix
+// length, including zero — or, when the port could not be resolved at all, the
+// city mirror absent while rigs still hold a dead port. Do not read the
+// all-rigs-stale case as the only one; it is just the prefix-length-zero shape,
+// and a split with some rigs already moved is equally reachable.
+//
+// Any of those is worse than doing nothing: gc keeps working off runtime state
+// while raw bd, which has only the mirror, answers "database not found" in
+// every scope left behind. The live city hit the zero-length case after a
+// fallback restart bumped 48770 -> 48771, and seven rig mirrors had to be
+// realigned by hand.
+//
+// Errors still surface, so a caller that treats reconciliation as a
+// precondition keeps failing; what changes is that the scopes gc can still
+// reconcile are never stranded by a scope it cannot.
 func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, cityPrefix string, rigs []config.Rig, warn io.Writer) error {
 	if warn == nil {
 		warn = io.Discard
@@ -2028,9 +2057,12 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 	if cityState.EndpointOrigin == contract.EndpointOriginManagedCity && !cityHasCompleteStorageBinding {
 		managedPort = currentDoltPort(cityPath)
 	}
+	// Past this point the city mirror may already have moved, so failures are
+	// collected and the fan-out runs to completion.
+	var scopeErrs []error
 	if cityUsesBd && !cityHasCompleteStorageBinding {
 		if err := normalizeScopeDoltConfig(cityPath, cityState); err != nil {
-			return err
+			scopeErrs = append(scopeErrs, fmt.Errorf("reconciling city scope: %w", err))
 		}
 		if managedPort != "" {
 			writeDoltPortFile(cityPath, managedPort, "city", warn)
@@ -2052,14 +2084,16 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 		}
 		rigHasCompleteStorageBinding, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(rig.Path))
 		if err != nil {
-			return err
+			scopeErrs = append(scopeErrs, fmt.Errorf("reconciling rig %q: %w", rig.Name, err))
+			continue
 		}
 		if rigHasCompleteStorageBinding {
 			continue
 		}
 		rigState, err := syncDesiredRigDoltConfigState(cityPath, rig, cityState)
 		if err != nil {
-			return err
+			scopeErrs = append(scopeErrs, fmt.Errorf("reconciling rig %q: %w", rig.Name, err))
+			continue
 		}
 		if cityHasCompleteStorageBinding && rigState.EndpointOrigin == contract.EndpointOriginInheritedCity {
 			continue
@@ -2069,15 +2103,18 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 			rigManagedPort = managedPort
 		}
 		if err := normalizeScopeDoltConfig(rig.Path, rigState); err != nil {
-			return err
+			scopeErrs = append(scopeErrs, fmt.Errorf("reconciling rig %q: %w", rig.Name, err))
 		}
+		// The port mirror is reconciled even when the rig's config.yaml could
+		// not be: the two are separate artifacts, and the live port in the
+		// mirror is never worse for raw bd than the dead one it replaces.
 		if rigManagedPort != "" {
 			writeDoltPortFile(rig.Path, rigManagedPort, "rig "+rig.Name, warn)
 		} else {
 			removeDoltPortFile(rig.Path)
 		}
 	}
-	return nil
+	return errors.Join(scopeErrs...)
 }
 
 func syncDesiredCityDoltConfigState(cityPath string, cityDolt config.DoltConfig, cityPrefix string) (contract.ConfigState, error) {
@@ -2246,7 +2283,7 @@ func configuredExternalDoltTargetForCity(dc config.DoltConfig) (string, string) 
 }
 
 func configuredExternalDoltTargetForRig(rig config.Rig) (string, string) {
-	port := strings.TrimSpace(rig.DoltPort)
+	port := strings.TrimSpace(rig.DoltPort.String())
 	return canonicalExternalHost(rig.DoltHost, port), port
 }
 
