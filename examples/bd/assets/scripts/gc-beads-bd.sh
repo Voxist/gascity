@@ -3292,8 +3292,10 @@ ensure_current_era_version_witness() {
     # v-prefixed value (release tooling can stamp `v1.2.2`), so a digit-only
     # pattern would yield empty and silently skip the stamp -- leaving the
     # opaque "legacy Dolt server workspace" failure with nothing explaining it.
-    local version
-    version=$(bd version 2>/dev/null | sed -n 's/^bd version \([0-9v][^ ]*\).*/\1/p')
+    local version raw
+    trace_bd_argv version
+    raw=$("${BD_BIN:-bd}" version 2>/dev/null)
+    version=$(printf '%s\n' "$raw" | sed -n 's/^bd version \([0-9v][^ ]*\).*/\1/p')
     case "$version" in
         "")
             echo "warning: could not parse a version from 'bd version'; not stamping ${witness}. If bd init now fails with 'legacy Dolt server workspace detected', that is why." >&2

@@ -12536,6 +12536,13 @@ YAML
 	echo "unexpected bd command: $*" >&2
 	exit 64
 	;;
+  version)
+	# ensure_current_era_version_witness (gc-beads-bd.sh) runs bd version
+	# to stamp .local_version before its first real bd command; the parser
+	# there wants the literal "bd version <ver>" prefix.
+	echo "bd version 1.91.0 (test)"
+	exit 0
+	;;
   *)
 	echo "unexpected bd command: $*" >&2
 	exit 64
