@@ -29,11 +29,25 @@ func readScopeMetadataJSON(t *testing.T, scopeRoot string) string {
 // proxy over the same data dir the managed server holds.
 func TestCanonicalConfigNeverPersistsProxiedDoltMode(t *testing.T) {
 	for _, tt := range []struct {
-		name     string
-		metadata string
+		name           string
+		metadata       string
+		wantMode       string
+		wantConfigMode string
 	}{
-		{name: "fresh scope", metadata: ""},
-		{name: "already proxied", metadata: `{"backend":"dolt","database":"dolt","dolt_mode":"proxied-server","dolt_database":"hq"}`},
+		// ga-m07q9: this fork does not default a fresh scope to proxied, so
+		// the fresh-scope case resolves "server" (2026-09-25 resync, adapted
+		// from origin's "proxied-server"). The "already proxied" case has an
+		// explicit persisted dolt_mode and is unaffected by that policy --
+		// resolution reads it back verbatim, still "proxied-server".
+		//
+		// wantConfigMode differs from wantMode because canonicalConfigDoltMode
+		// only scrubs "proxied-server" before the config.yaml write (bd's own
+		// validator there accepts "server"|"embedded" but not "proxied-server",
+		// D1) -- "server" passes through unchanged. The test's real invariant,
+		// per its name, is that config.yaml never carries "proxied-server", not
+		// that dolt.mode is always unset.
+		{name: "fresh scope", metadata: "", wantMode: "server", wantConfigMode: "server"},
+		{name: "already proxied", metadata: `{"backend":"dolt","database":"dolt","dolt_mode":"proxied-server","dolt_database":"hq"}`, wantMode: "proxied-server", wantConfigMode: ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			scope := t.TempDir()
@@ -44,8 +58,8 @@ func TestCanonicalConfigNeverPersistsProxiedDoltMode(t *testing.T) {
 			// fresh-scope default reaches scopeUsesProxiedDoltMode — but the
 			// file must not.
 			state := desiredCityDoltConfigState(scope, config.DoltConfig{}, "hq")
-			if got := strings.TrimSpace(state.DoltMode); got != "proxied-server" {
-				t.Fatalf("resolved dolt mode = %q, want proxied-server", got)
+			if got := strings.TrimSpace(state.DoltMode); got != tt.wantMode {
+				t.Fatalf("resolved dolt mode = %q, want %s", got, tt.wantMode)
 			}
 			if err := ensureCanonicalScopeConfigState(fsys.OSFS{}, scope, state); err != nil {
 				t.Fatalf("ensureCanonicalScopeConfigState: %v", err)
@@ -54,10 +68,16 @@ func TestCanonicalConfigNeverPersistsProxiedDoltMode(t *testing.T) {
 			if strings.Contains(written, "proxied-server") {
 				t.Fatalf("canonical config persisted a proxied dolt.mode:\n%s", written)
 			}
-			if mode, ok, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(scope, ".beads", "config.yaml")); err != nil {
+			mode, ok, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(scope, ".beads", "config.yaml"))
+			if err != nil {
 				t.Fatalf("ReadConfigState: %v", err)
-			} else if ok && strings.TrimSpace(mode.DoltMode) != "" {
-				t.Fatalf("canonical config dolt.mode = %q, want unset", mode.DoltMode)
+			}
+			got := ""
+			if ok {
+				got = strings.TrimSpace(mode.DoltMode)
+			}
+			if got != tt.wantConfigMode {
+				t.Fatalf("canonical config dolt.mode = %q, want %q", got, tt.wantConfigMode)
 			}
 		})
 	}

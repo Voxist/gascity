@@ -4584,8 +4584,11 @@ esac
 	if got := strings.TrimSpace(fmt.Sprint(meta["backend"])); got != "dolt" {
 		t.Fatalf("metadata backend = %q, want dolt", got)
 	}
-	if got := strings.TrimSpace(fmt.Sprint(meta["dolt_mode"])); got != "proxied-server" {
-		t.Fatalf("metadata dolt_mode = %q, want proxied-server", got)
+	// ga-m07q9: this fork does not adopt af7ad8a0f's proxied-by-default
+	// topology flip. Restored to fork/main's original expectation (2026-09-25
+	// resync) after the merge silently took origin's flipped assertion.
+	if got := strings.TrimSpace(fmt.Sprint(meta["dolt_mode"])); got != "server" {
+		t.Fatalf("metadata dolt_mode = %q, want server", got)
 	}
 	if got := strings.TrimSpace(fmt.Sprint(meta["dolt_database"])); got != "hq" {
 		t.Fatalf("metadata dolt_database = %q, want hq", got)

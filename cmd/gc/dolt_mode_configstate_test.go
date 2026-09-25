@@ -19,13 +19,14 @@ func TestConfigStateConstructorsSelectDoltModes(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "rig")
 
-	// Fresh managed city defaults to Beads' proxied-local lifecycle. The
-	// resolved state carries it; ensureCanonicalScopeConfigState is what drops
-	// it before the write, because the mode belongs in metadata.json (D1) — see
-	// TestCanonicalConfigNeverPersistsProxiedDoltMode.
+	// ga-m07q9: this fork does not adopt af7ad8a0f's proxied-by-default
+	// topology flip, so a fresh managed city with no persisted dolt_mode and
+	// no other signal resolves to an ordinary gc-managed Dolt server, not
+	// Beads' proxied-local lifecycle. Adapted from "proxied-server" (2026-09-25
+	// resync) after the merge silently took origin's flipped expectation.
 	managedCity := desiredCityDoltConfigState(cityPath, config.DoltConfig{}, "gc")
-	if managedCity.DoltMode != "proxied-server" {
-		t.Errorf("desiredCityDoltConfigState (managed city): DoltMode = %q, want %q", managedCity.DoltMode, "proxied-server")
+	if managedCity.DoltMode != "server" {
+		t.Errorf("desiredCityDoltConfigState (managed city): DoltMode = %q, want %q", managedCity.DoltMode, "server")
 	}
 	// External city (explicit host/port endpoint).
 	externalCity := desiredCityDoltConfigState(cityPath, config.DoltConfig{Host: "db.example.com", Port: 3306}, "gc")
@@ -118,8 +119,10 @@ func TestCanonicalBdScopeInitPersistsDefaultDoltMode(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("ReadDoltMode: mode=%q ok=%v err=%v", mode, ok, err)
 	}
-	if mode != "proxied-server" {
-		t.Fatalf("metadata dolt_mode = %q, want proxied-server", mode)
+	// ga-m07q9: adapted from "proxied-server" (2026-09-25 resync) — this fork
+	// does not default a fresh scope's persisted dolt_mode to proxied.
+	if mode != "server" {
+		t.Fatalf("metadata dolt_mode = %q, want server", mode)
 	}
 }
 
