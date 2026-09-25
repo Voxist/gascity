@@ -1504,15 +1504,16 @@ func supervisorSecretsEnvFilePath() string {
 
 // supervisorSecretsEnvFileEntries reads ${GC_HOME}/secrets.env and returns its
 // parsed key/value pairs. A missing file is the normal case and yields nil. A
-// present-but-unreadable file is logged to stderr and ignored so a bad
-// secrets file never blocks supervisor install/start. A malformed line is
-// logged to stderr individually and skipped; every other, validly-parsed
-// entry in the file is still returned. The caller still gates whatever is
-// returned on the persist allowlist or an explicit GC_SUPERVISOR_ENV opt-in.
+// present-but-unreadable or unparseable file is logged to stderr and ignored
+// so a bad secrets file never blocks supervisor install/start; a parse
+// failure costs the whole file, not just the offending line (see
+// readSupervisorSecretsEnvFile). The caller still gates whatever is returned
+// on the persist allowlist or an explicit GC_SUPERVISOR_ENV opt-in.
 func supervisorSecretsEnvFileEntries() map[string]string {
 	entries, err := readSupervisorSecretsEnvFile()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gc: %v\n", err)
+		return nil
 	}
 	return entries
 }
@@ -1520,8 +1521,13 @@ func supervisorSecretsEnvFileEntries() map[string]string {
 // readSupervisorSecretsEnvFile is the shared core of the secrets-file read. A
 // missing file is the normal case and yields no entries and no error;
 // anything else is returned so a caller that reports rather than starts a
-// supervisor can say what install would silently ignore. Note that a parse
-// failure costs the WHOLE file, not the offending line.
+// supervisor can say what install would silently ignore. A parse failure
+// costs the WHOLE file, not the offending line: ParseEnvFile itself is
+// line-tolerant (it returns every successfully-parsed entry alongside one
+// error per malformed line), but a caller here cannot tell the operator
+// which of the returned entries came from a file it already knows is
+// malformed, so any parse error discards the partial map rather than
+// reporting it as trustworthy.
 func readSupervisorSecretsEnvFile() (map[string]string, error) {
 	path := supervisorSecretsEnvFilePath()
 	data, err := os.ReadFile(path)
@@ -1533,7 +1539,7 @@ func readSupervisorSecretsEnvFile() (map[string]string, error) {
 	}
 	entries, errs := processenv.ParseEnvFile(string(data))
 	if len(errs) > 0 {
-		return entries, fmt.Errorf("%s has %d malformed line(s), skipped (every other entry still applies): %w", path, len(errs), errors.Join(errs...))
+		return nil, fmt.Errorf("%s does not parse as dotenv, so the supervisor drops every entry in it: %w", path, errors.Join(errs...))
 	}
 	return entries, nil
 }

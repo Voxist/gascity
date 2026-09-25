@@ -819,6 +819,18 @@ func TestBuildSupervisorServiceDataMissingSecretsFileIsNotAnError(t *testing.T) 
 // service file generation (no error) and does not wipe out the entries that
 // parsed cleanly — only the malformed line itself is skipped, the good entry
 // still reaches ExtraEnv.
+// TestBuildSupervisorServiceDataMalformedSecretsFileDegradesGracefully
+// asserts the supervisor never fails to start over a bad secrets file
+// (buildSupervisorServiceData must not error), not that a malformed file's
+// good entries survive. readSupervisorSecretsEnvFile deliberately discards
+// the WHOLE file on any parse error, not just the offending line (fork
+// hardening 2026-09-03, TestProviderCredentialsSurfacesUnparseableSecretsFile
+// in cmd_provider_credentials_test.go is the canonical test for that
+// contract): a caller here cannot tell the operator which of the returned
+// entries came from a file it already knows is malformed, so trusting the
+// good-looking ones is exactly the failure mode the hardening closed.
+// "Degrades gracefully" means the supervisor still starts with that entry
+// simply absent, not that it recovers the entry.
 func TestBuildSupervisorServiceDataMalformedSecretsFileDegradesGracefully(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
@@ -832,19 +844,21 @@ func TestBuildSupervisorServiceDataMalformedSecretsFileDegradesGracefully(t *tes
 	if err != nil {
 		t.Fatalf("buildSupervisorServiceData with malformed secrets file: %v", err)
 	}
-	if got := supervisorServiceEnvMap(data.ExtraEnv)["ANTHROPIC_AUTH_TOKEN"]; got != "sk-from-file" {
-		t.Fatalf("ExtraEnv[ANTHROPIC_AUTH_TOKEN] = %q, want %q (a malformed later line must not drop a good earlier entry)",
-			got, "sk-from-file")
+	if got := supervisorServiceEnvMap(data.ExtraEnv)["ANTHROPIC_AUTH_TOKEN"]; got != "" {
+		t.Fatalf("ExtraEnv[ANTHROPIC_AUTH_TOKEN] = %q, want empty (a malformed line discards the whole file, not just its own line)", got)
 	}
 }
 
 // TestBuildSupervisorServiceDataMultiLineQuotedSecretSkipsBlock is the
 // end-to-end check for #6022 (plus #5982): the issue's multi-line quoted
-// script is skipped as one block, even with both the script key and the
+// script is rejected as unparseable, even with both the script key and the
 // continuation-line key opted in via GC_SUPERVISOR_ENV, so neither a truncated
 // GC_NOMAD_AGENT_LAUNCH_SCRIPT nor a stray CODEX_HOME reaches the service env.
-// The valid entry after the block still does, and the stderr diagnostic names
-// the key and line range without echoing any value.
+// Under the fork's 2026-09-03 whole-file-discard hardening (see
+// TestBuildSupervisorServiceDataMalformedSecretsFileDegradesGracefully), the
+// entry after the block no longer survives either -- a parse error costs the
+// whole file, not just the offending block -- but the stderr diagnostic still
+// names the key and line range without echoing any value.
 func TestBuildSupervisorServiceDataMultiLineQuotedSecretSkipsBlock(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
@@ -871,8 +885,8 @@ ANTHROPIC_AUTH_TOKEN=sk-from-file
 		t.Fatalf("buildSupervisorServiceData: %v", err)
 	}
 	got := supervisorServiceEnvMap(data.ExtraEnv)
-	if got["ANTHROPIC_AUTH_TOKEN"] != "sk-from-file" {
-		t.Fatalf("ExtraEnv[ANTHROPIC_AUTH_TOKEN] = %q, want %q (all env: %#v)", got["ANTHROPIC_AUTH_TOKEN"], "sk-from-file", got)
+	if v, ok := got["ANTHROPIC_AUTH_TOKEN"]; ok {
+		t.Fatalf("ExtraEnv[ANTHROPIC_AUTH_TOKEN] = %q, want absent (the multi-line quoted block makes the whole file unparseable, so even the entry after it is discarded)", v)
 	}
 	for _, key := range []string{"GC_NOMAD_AGENT_LAUNCH_SCRIPT", "CODEX_HOME"} {
 		if v, ok := got[key]; ok {
