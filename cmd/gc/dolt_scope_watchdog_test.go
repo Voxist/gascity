@@ -8,8 +8,13 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
+
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func TestManagedDoltScopeGone(t *testing.T) {
@@ -181,6 +186,20 @@ func TestManagedDoltScopeWatchdogHelper(t *testing.T) {
 	if interval := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_SCOPE_WD_INTERVAL_MS")); interval != "" {
 		t.Setenv(managedDoltScopeWatchdogIntervalEnv, interval)
 	}
+	// Opt-in: start the server from inside an agent session's environment, the
+	// way a SessionStart hook (or a shell that inherited the session) does.
+	// TestMain scrubs GC_* keys, so the id rides a GC_TEST_ control var.
+	if sessionID := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_SESSION_ID")); sessionID != "" {
+		for key, value := range session.RuntimeEnvWithAlias(sessionID, "gastown__deacon", "deacon", 3, 1, "token") {
+			t.Setenv(key, value)
+		}
+		// ...and the order-subprocess markers of the 16:13Z case, where the
+		// launcher was the core health order rather than a hook. They are not
+		// identity and are deliberately NOT stripped; the assertions check
+		// that they still reach dolt.
+		t.Setenv("ORDER_DIR", "/city/.gc/orders/beads-health")
+		t.Setenv("GC_PACK_NAME", "core")
+	}
 	statePath := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_STATE"))
 	configPath := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_CONFIG"))
 	logPath := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_LOG"))
@@ -239,6 +258,10 @@ func readManagedDoltScopeIdentityState(t *testing.T, path string) (uint64, strin
 // before it can reap the child. Without it the startup-failure cleanup guard
 // (terminateManagedDoltStartedProcess) falls through to unconditional bare-PID
 // signaling and can kill an unrelated process that reused the numeric PID.
+//
+// The same spawn also pins the watchdog's process placement (ga-fjr5f): it
+// leads its own session, detached from the process that started it, and logs
+// that placement at start and when signaled.
 func TestManagedDoltScopeWatchdogReportsStartIdentity(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX process semantics required")
@@ -247,6 +270,7 @@ func TestManagedDoltScopeWatchdogReportsStartIdentity(t *testing.T) {
 	fakeDoltDir := writeFakeDoltSQLServer(t)
 	statePath := filepath.Join(dir, "state")
 	identityPath := filepath.Join(dir, "identity")
+	doltEnvPath := filepath.Join(dir, "dolt-env")
 	configPath := filepath.Join(dir, "dolt-config.yaml")
 	logPath := filepath.Join(dir, "dolt.log")
 	if err := os.WriteFile(configPath, []byte("log_level: debug\n"), 0o644); err != nil {
@@ -258,6 +282,8 @@ func TestManagedDoltScopeWatchdogReportsStartIdentity(t *testing.T) {
 		"GC_TEST_MANAGED_DOLT_HELPER=scope-watchdog",
 		"GC_TEST_MANAGED_DOLT_HELPER_STATE="+statePath,
 		"GC_TEST_MANAGED_DOLT_HELPER_IDENTITY="+identityPath,
+		"GC_TEST_MANAGED_DOLT_HELPER_SESSION_ID=gc-deacon-session",
+		"GC_TEST_FAKE_DOLT_ENV_FILE="+doltEnvPath,
 		"GC_TEST_MANAGED_DOLT_HELPER_CONFIG="+configPath,
 		"GC_TEST_MANAGED_DOLT_HELPER_LOG="+logPath,
 		"GC_TEST_MANAGED_DOLT_HELPER_FAKE_DOLT_DIR="+fakeDoltDir,
@@ -278,10 +304,102 @@ func TestManagedDoltScopeWatchdogReportsStartIdentity(t *testing.T) {
 		logData, _ := os.ReadFile(logPath)
 		t.Fatalf("scope watchdog reported no start identity (ticks=%d identity=%q); PID-reuse guard disabled; log:\n%s", ticks, identity, logData)
 	}
+
+	// ga-fjr5f: the helper stands in for an agent's SessionStart hook — it
+	// shares this test's session, starts the server under the watchdog, and
+	// exits. The watchdog must lead a NEW session with no controlling
+	// terminal, with its server inside that session, so tearing down the
+	// caller's session cannot signal either.
+	callerSID, err := unix.Getsid(0)
+	if err != nil {
+		t.Fatalf("getsid(self): %v", err)
+	}
+	watchdogSID, err := unix.Getsid(watchdogPID)
+	if err != nil {
+		t.Fatalf("getsid(watchdog %d): %v", watchdogPID, err)
+	}
+	if watchdogSID == callerSID {
+		t.Fatalf("watchdog pid %d is in the caller's session %d; tearing that session down "+
+			"would signal it and kill the managed server (ga-fjr5f)", watchdogPID, callerSID)
+	}
+	if watchdogSID != watchdogPID {
+		t.Fatalf("watchdog pid %d is in session %d, want it to lead its own session", watchdogPID, watchdogSID)
+	}
+	if doltSID, err := unix.Getsid(doltPID); err != nil || doltSID != watchdogSID {
+		t.Fatalf("dolt pid %d session = %d (err %v), want the watchdog's session %d", doltPID, doltSID, err, watchdogSID)
+	}
+
+	// Its log must say where it runs, at start and again when signaled.
+	if err := syscall.Kill(watchdogPID, syscall.SIGTERM); err != nil {
+		t.Fatalf("signal watchdog: %v", err)
+	}
+	// The watchdog leads its own process group, so the group emptying is its
+	// exit; it logs the signal before it terminates the server.
+	if err := waitForProcessGroupExit(watchdogPID, 15*time.Second); err != nil {
+		t.Fatalf("watchdog did not exit after SIGTERM: %v", err)
+	}
+	logData, _ := os.ReadFile(logPath)
+	placement := fmt.Sprintf("watchdog pid=%d ppid=", watchdogPID)
+	detached := fmt.Sprintf("sid=%d tty=none", watchdogPID)
+	for _, event := range []string{"supervising dolt sql-server", "received terminated"} {
+		found := false
+		for _, line := range strings.Split(string(logData), "\n") {
+			if strings.Contains(line, event) && strings.Contains(line, placement) && strings.Contains(line, detached) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("no %q log line carries the watchdog's placement (%q ... %q); log:\n%s",
+				event, placement, detached, logData)
+		}
+	}
+
+	// ga-fjr5f: started from inside an agent session, the server must carry
+	// none of that session's identity. With GC_SESSION_ID and an exited
+	// spawner, the runtime's orphan sweep (proctable.ScanBySessionID) treats it
+	// as the session's leftover root and kills it when the session is torn
+	// down or replaced.
+	//
+	// The helper's environment here is the union of the two live cases: the
+	// 01:54Z one, where an in-flight process inside the deacon's session did
+	// the work (so the server carried GC_SESSION_NAME=gastown__deacon even
+	// though the operator's own shell was clean), and the 16:13Z one, where
+	// the launcher was a core health-order subprocess carrying ORDER_DIR and
+	// GC_PACK_NAME. Identity is stripped; the order markers are not.
+	doltEnv, err := os.ReadFile(doltEnvPath)
+	if err != nil {
+		t.Fatalf("read fake dolt env: %v", err)
+	}
+	if !strings.Contains(string(doltEnv), "GC_TEST_FAKE_DOLT_ENV_FILE=") {
+		t.Fatalf("fake dolt env dump does not reflect the spawner's environment; dump:\n%s", doltEnv)
+	}
+	for key := range session.RuntimeEnvWithAlias("", "", "", 0, 0, "") {
+		for _, line := range strings.Split(string(doltEnv), "\n") {
+			if strings.HasPrefix(line, key+"=") {
+				t.Fatalf("managed dolt inherited the agent session's %s; the orphan sweep would "+
+					"kill it with the session (ga-fjr5f); env:\n%s", key, doltEnv)
+			}
+		}
+	}
+	// The strip is identity-only: an order subprocess's own markers are not
+	// session identity, nothing selects processes on them, and a server that
+	// lost its whole environment would be a different bug.
+	for _, keep := range []string{"ORDER_DIR=", "GC_PACK_NAME=core"} {
+		if !strings.Contains(string(doltEnv), keep) {
+			t.Fatalf("managed dolt lost %q, which is not session identity; env:\n%s", keep, doltEnv)
+		}
+	}
 }
 
-// TestManagedDoltScopeWatchdogServerSurvivesScopePresent asserts the
-// watchdog never reaps a server whose scope stays on disk, and exits
+// TestManagedDoltScopeWatchdogServerSurvivesScopePresent also carries the
+// clean-env direction of ga-fjr5f: a server started from a spawner with NO
+// session environment must reach dolt with no session keys either, so an
+// unrelated session's teardown — whose orphan sweep selects on GC_SESSION_ID
+// in the environment — can never select it. The session-env direction is
+// pinned by TestManagedDoltScopeWatchdogReportsStartIdentity.
+//
+// It asserts the watchdog never reaps a server whose scope stays on disk, and exits
 // cleanly when the server itself goes away.
 func TestManagedDoltScopeWatchdogServerSurvivesScopePresent(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -292,10 +410,13 @@ func TestManagedDoltScopeWatchdogServerSurvivesScopePresent(t *testing.T) {
 	statePath := filepath.Join(dir, "state")
 	configPath := filepath.Join(dir, "dolt-config.yaml")
 	logPath := filepath.Join(dir, "dolt.log")
+	doltEnvPath := filepath.Join(dir, "dolt-env")
 	if err := os.WriteFile(configPath, []byte("log_level: debug\n"), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
+	// No GC_TEST_MANAGED_DOLT_HELPER_SESSION_ID here: the spawner's
+	// environment is clean, the clean-env direction of ga-fjr5f.
 	cmd := exec.Command(os.Args[0], "-test.run=TestManagedDoltScopeWatchdogHelper", "-test.v")
 	cmd.Env = sanitizedBaseEnv(
 		"GC_TEST_MANAGED_DOLT_HELPER=scope-watchdog",
@@ -303,6 +424,7 @@ func TestManagedDoltScopeWatchdogServerSurvivesScopePresent(t *testing.T) {
 		"GC_TEST_MANAGED_DOLT_HELPER_CONFIG="+configPath,
 		"GC_TEST_MANAGED_DOLT_HELPER_LOG="+logPath,
 		"GC_TEST_MANAGED_DOLT_HELPER_FAKE_DOLT_DIR="+fakeDoltDir,
+		"GC_TEST_FAKE_DOLT_ENV_FILE="+doltEnvPath,
 		"GC_TEST_MANAGED_DOLT_HELPER_SCOPE_WD_INTERVAL_MS=50",
 	)
 	output, err := cmd.CombinedOutput()
@@ -316,6 +438,20 @@ func TestManagedDoltScopeWatchdogServerSurvivesScopePresent(t *testing.T) {
 	})
 
 	time.Sleep(300 * time.Millisecond)
+
+	// Clean spawner in, clean server out: nothing an orphan sweep could
+	// select on, so an unrelated session's teardown cannot reap this server.
+	doltEnv, err := os.ReadFile(doltEnvPath)
+	if err != nil {
+		t.Fatalf("read fake dolt env: %v", err)
+	}
+	for key := range session.RuntimeEnvWithAlias("", "", "", 0, 0, "") {
+		for _, line := range strings.Split(string(doltEnv), "\n") {
+			if strings.HasPrefix(line, key+"=") {
+				t.Fatalf("managed dolt carries %s though its spawner had a clean environment; env:\n%s", key, doltEnv)
+			}
+		}
+	}
 	if !pidAlive(doltPID) {
 		logData, _ := os.ReadFile(logPath)
 		t.Fatalf("fake dolt pid %d reaped while scope present; watchdog log:\n%s", doltPID, logData)

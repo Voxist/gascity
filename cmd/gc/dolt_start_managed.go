@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 type managedDoltStartReport struct {
@@ -768,7 +769,18 @@ func managedDoltSQLServerSysProcAttr() *syscall.SysProcAttr {
 	if managedDoltTestModeEnabled() {
 		return nil
 	}
-	return &syscall.SysProcAttr{Setpgid: true}
+	return managedDoltDetachedSysProcAttr()
+}
+
+// managedDoltDetachedSysProcAttr starts a managed-Dolt process in a new
+// session (ga-fjr5f). Setsid, not just Setpgid: a new process group still
+// belongs to the caller's session and controlling terminal, so a server or
+// scope watchdog started from an agent session was signaled when that
+// session was torn down, and the server died with it. A new session has no
+// controlling terminal and outlives the caller's. Setsid also makes the child
+// its own process-group leader, so group semantics are unchanged.
+func managedDoltDetachedSysProcAttr() *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{Setsid: true}
 }
 
 func managedDoltTestWatchdogEnabled() bool {
@@ -1338,6 +1350,16 @@ func managedDoltTestParentDone(rawFD string) (<-chan struct{}, func(), error) {
 // sql-server we launch.
 func doltServerEnv(cityPath string, parent []string) []string {
 	env := removeEnvKey(parent, "DOLT_DISABLE_EVENT_FLUSH")
+	// The managed server and its scope watchdog are city infrastructure, never
+	// part of a session incarnation (ga-fjr5f). Started from inside an agent
+	// session — a SessionStart hook, or a shell that inherited the session's
+	// environment — they would otherwise carry its GC_SESSION_ID. Once their
+	// spawner exits they are orphans with that id, which is exactly what the
+	// runtime's orphan sweep (proctable.ScanBySessionID) kills when the session
+	// is torn down or replaced — taking the city's managed Dolt with it.
+	for key := range session.RuntimeEnvWithAlias("", "", "", 0, 0, "") {
+		env = removeEnvKey(env, key)
+	}
 	if managedDoltDisableEventFlush(cityPath) {
 		// Disable Dolt usage telemetry for managed servers by default. The
 		// `dolt send-metrics` event-flush reporter spawns transient
