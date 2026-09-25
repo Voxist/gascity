@@ -544,8 +544,17 @@ becoming more useful as models improve — it becomes LESS useful instead.
 - **Adding rig config fields:** When adding a field to `config.Rig`, also
   add the corresponding optional field to `RigPatch` and wire the merge
   into `applyRigPatch` so layered configs (fragments, patches) can
-  override it. No field-sync test exists for Rig today; the patch path
-  must be checked manually.
+  override it. Both halves are test-guarded, so a missed field fails the
+  build: `TestRigFieldSync` (struct field sets) and
+  `TestApplyRigPatchCoversAllFields` (merge completeness), both in
+  `internal/config/rig_field_sync_test.go`. A field that genuinely must
+  not be patchable goes in `TestRigFieldSync`'s `excluded` map with a
+  written justification — the ones there today are pack-composition
+  inputs (`Includes`, `Imports`, `Overrides`, `RigPatches`) that
+  `LoadWithIncludesOptions` resolves *before* `ApplyPatches` runs, so
+  patching them would be a silent no-op. `Rig` has no `Clone` method, so
+  there is no deep-copy guard to mirror `TestAgentCloneIsDeep`; add one
+  with the clone if that changes.
 
 - `TESTING.md` — testing philosophy, tier boundaries, and sharded local
   runners. Read before writing any test. For broad local sweeps, prefer the

@@ -3396,13 +3396,20 @@ type RigCreateSucceededPayload struct {
 
 // RigPatch defines model for RigPatch.
 type RigPatch struct {
-	DefaultBranch    *string           `json:"DefaultBranch"`
-	FormulaVars      map[string]string `json:"FormulaVars"`
-	Name             string            `json:"Name"`
-	Path             *string           `json:"Path"`
-	Prefix           *string           `json:"Prefix"`
-	Suspended        *bool             `json:"Suspended"`
-	SuspendedOnStart *bool             `json:"SuspendedOnStart"`
+	DefaultBranch       *string            `json:"DefaultBranch"`
+	DefaultSlingTarget  *string            `json:"DefaultSlingTarget"`
+	DefaultSlingTargets *[]string          `json:"DefaultSlingTargets"`
+	DoltHost            *string            `json:"DoltHost"`
+	DoltPort            *string            `json:"DoltPort"`
+	FormulaVars         map[string]string  `json:"FormulaVars"`
+	FormulasDir         *string            `json:"FormulasDir"`
+	MaxActiveSessions   *int64             `json:"MaxActiveSessions"`
+	Name                string             `json:"Name"`
+	Path                *string            `json:"Path"`
+	Prefix              *string            `json:"Prefix"`
+	SessionSleep        SessionSleepConfig `json:"SessionSleep"`
+	Suspended           *bool              `json:"Suspended"`
+	SuspendedOnStart    *bool              `json:"SuspendedOnStart"`
 }
 
 // RigPatchSetInputBody defines model for RigPatchSetInputBody.
@@ -3877,6 +3884,13 @@ type SessionResponse struct {
 	Template               string                  `json:"template"`
 	Title                  string                  `json:"title"`
 	WorkDir                *string                 `json:"work_dir,omitempty"`
+}
+
+// SessionSleepConfig defines model for SessionSleepConfig.
+type SessionSleepConfig struct {
+	InteractiveFresh  string `json:"InteractiveFresh"`
+	InteractiveResume string `json:"InteractiveResume"`
+	NonInteractive    string `json:"NonInteractive"`
 }
 
 // SessionStrandedPayload defines model for SessionStrandedPayload.

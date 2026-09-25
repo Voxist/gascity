@@ -2867,12 +2867,19 @@ export type RigCreateSucceededPayload = {
 
 export type RigPatch = {
     DefaultBranch: string | null;
+    DefaultSlingTarget: string | null;
+    DefaultSlingTargets: Array<string> | null;
+    DoltHost: string | null;
+    DoltPort: string | null;
     FormulaVars: {
         [key: string]: string;
     };
+    FormulasDir: string | null;
+    MaxActiveSessions: number | null;
     Name: string;
     Path: string | null;
     Prefix: string | null;
+    SessionSleep: SessionSleepConfig;
     Suspended: boolean | null;
     SuspendedOnStart: boolean | null;
 };
@@ -3455,6 +3462,12 @@ export type SessionResponse = {
     template: string;
     title: string;
     work_dir?: string;
+};
+
+export type SessionSleepConfig = {
+    InteractiveFresh: string;
+    InteractiveResume: string;
+    NonInteractive: string;
 };
 
 export type SessionStrandedPayload = {

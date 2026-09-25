@@ -228,6 +228,26 @@ type RigPatch struct {
 	// SuspendedOnStart overrides the rig's desired suspension state at
 	// city start. Mirrors Rig.SuspendedOnStart.
 	SuspendedOnStart *bool `toml:"suspended_on_start,omitempty"`
+	// FormulasDir overrides the rig-local formula directory
+	// (see Rig.FormulasDir for resolution order).
+	FormulasDir *string `toml:"formulas_dir,omitempty"`
+	// MaxActiveSessions overrides the rig-level cap on concurrent sessions
+	// across all agents in the rig. Mirrors Rig.MaxActiveSessions.
+	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
+	// DefaultSlingTarget overrides the agent a targetless gc sling picks.
+	DefaultSlingTarget *string `toml:"default_sling_target,omitempty"`
+	// DefaultSlingTargets overrides the plural sling target list. Set to an
+	// empty list to clear it; leave unset to keep the rig's list.
+	DefaultSlingTargets *[]string `toml:"default_sling_targets,omitempty"`
+	// SessionSleep overrides the rig's idle-sleep defaults. Merged per
+	// class: a patch that sets only one class leaves the others alone.
+	SessionSleep *SessionSleepConfig `toml:"session_sleep,omitempty"`
+	// DoltHost overrides the rig's Dolt host. Deprecated alongside
+	// Rig.DoltHost; the canonical endpoint lives in the rig's scope config.
+	DoltHost *string `toml:"dolt_host,omitempty"`
+	// DoltPort overrides the rig's Dolt port. Deprecated alongside
+	// Rig.DoltPort; accepts both TOML spellings (see PortString).
+	DoltPort *PortString `toml:"dolt_port,omitempty"`
 	// FormulaVars adds or overrides rig-scoped formula var defaults.
 	// Additive merge: patch keys win over existing rig keys, unspecified
 	// keys are preserved.
@@ -771,6 +791,38 @@ func applyRigPatch(cfg *City, patch *RigPatch) error {
 			}
 			if patch.SuspendedOnStart != nil {
 				r.SuspendedOnStart = *patch.SuspendedOnStart
+			}
+			if patch.FormulasDir != nil {
+				r.FormulasDir = *patch.FormulasDir
+			}
+			if patch.MaxActiveSessions != nil {
+				n := *patch.MaxActiveSessions
+				r.MaxActiveSessions = &n
+			}
+			if patch.DefaultSlingTarget != nil {
+				r.DefaultSlingTarget = *patch.DefaultSlingTarget
+			}
+			if patch.DefaultSlingTargets != nil {
+				r.DefaultSlingTargets = append([]string(nil), (*patch.DefaultSlingTargets)...)
+			}
+			if patch.SessionSleep != nil {
+				// Per-class merge: an unset class in the patch must not
+				// erase the rig's value for that class.
+				if patch.SessionSleep.InteractiveResume != "" {
+					r.SessionSleep.InteractiveResume = patch.SessionSleep.InteractiveResume
+				}
+				if patch.SessionSleep.InteractiveFresh != "" {
+					r.SessionSleep.InteractiveFresh = patch.SessionSleep.InteractiveFresh
+				}
+				if patch.SessionSleep.NonInteractive != "" {
+					r.SessionSleep.NonInteractive = patch.SessionSleep.NonInteractive
+				}
+			}
+			if patch.DoltHost != nil {
+				r.DoltHost = *patch.DoltHost
+			}
+			if patch.DoltPort != nil {
+				r.DoltPort = *patch.DoltPort
 			}
 			if len(patch.FormulaVars) > 0 {
 				if r.FormulaVars == nil {

@@ -144,7 +144,7 @@ func applyEndpointKeyEditsToConfig(cfg *City, edits []CityEndpointKeyEdit) bool 
 		case "dolt_host":
 			rig.DoltHost = value
 		case "dolt_port":
-			rig.DoltPort = value
+			rig.DoltPort = PortString(value)
 		default:
 			return false
 		}

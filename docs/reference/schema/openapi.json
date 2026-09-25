@@ -7039,11 +7039,51 @@
               "null"
             ]
           },
+          "DefaultSlingTarget": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "DefaultSlingTargets": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "DoltHost": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "DoltPort": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "FormulaVars": {
             "additionalProperties": {
               "type": "string"
             },
             "type": "object"
+          },
+          "FormulasDir": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "MaxActiveSessions": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "Name": {
             "type": "string"
@@ -7059,6 +7099,9 @@
               "string",
               "null"
             ]
+          },
+          "SessionSleep": {
+            "$ref": "#/components/schemas/SessionSleepConfig"
           },
           "Suspended": {
             "type": [
@@ -7080,6 +7123,13 @@
           "DefaultBranch",
           "Suspended",
           "SuspendedOnStart",
+          "FormulasDir",
+          "MaxActiveSessions",
+          "DefaultSlingTarget",
+          "DefaultSlingTargets",
+          "SessionSleep",
+          "DoltHost",
+          "DoltPort",
           "FormulaVars"
         ],
         "type": "object"
@@ -8167,6 +8217,26 @@
           "created_at",
           "attached",
           "running"
+        ],
+        "type": "object"
+      },
+      "SessionSleepConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "InteractiveFresh": {
+            "type": "string"
+          },
+          "InteractiveResume": {
+            "type": "string"
+          },
+          "NonInteractive": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "InteractiveResume",
+          "InteractiveFresh",
+          "NonInteractive"
         ],
         "type": "object"
       },
