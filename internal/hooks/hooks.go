@@ -332,10 +332,15 @@ func classifyGCManagedOverlayCommands(v any, isManaged func(command, token strin
 
 // isManagedOverlayCommand reports whether command is exactly one of the
 // managed shell hook commands gc emits for the write-once overlay providers
-// that still carry it (copilot, kiro), spelled with the given invocation token and
-// carrying the exact canonical PATH-export prefix.
+// that still carry it (copilot, kiro), spelled with the given invocation
+// token and carrying the canonical PATH-export prefix in either shape
+// (prepend or append — vp-7mjx moved the shipped overlays to append, but a
+// file materialized before that change still carries prepend).
 func isManagedOverlayCommand(command, token string) bool {
-	body := commandBodyAfterCanonicalPrefix(command)
+	body := strings.TrimPrefix(command, canonicalGCPathPrefixAppend)
+	if body == command {
+		body = commandBodyAfterCanonicalPrefix(command)
+	}
 	if body == command {
 		// No canonical PATH-export prefix — user-authored.
 		return false
@@ -1103,8 +1108,15 @@ func codexHookCommandLooksManaged(event, command string) bool {
 	}
 }
 
+// upgradeCodexHookCommand upgrades an EXISTING managed entry to the current
+// form. Unlike addCodexPreCompactHook's shape-preserving synthesis (which
+// borrows a sibling's already-established prefix/token so a fresh entry
+// matches the file it is joining), an active upgrade always targets the
+// canonical gcInvocationToken: a bare `gc` invocation is exactly the vp-7mjx
+// defect this upgrade path exists to clear, so preserving it here would
+// upgrade the argument shape while leaving the invocation token stale.
 func upgradeCodexHookCommand(event, command, cityDir string) (string, bool) {
-	prefix, gcToken, env, args, ok := parseManagedGCCommand(command)
+	prefix, _, env, args, ok := parseManagedGCCommand(command)
 	if !ok {
 		return "", false
 	}
@@ -1113,13 +1125,13 @@ func upgradeCodexHookCommand(event, command, cityDir string) (string, bool) {
 		if !codexSessionStartArgsMatch(env, args) && !codexLegacySessionStartRunArgsMatch(args) {
 			return "", false
 		}
-		desired := sessionStartCurrentFormBody(cityDir, gcToken)
+		desired := sessionStartCurrentFormBody(cityDir, gcInvocationToken)
 		return prefix + desired, strings.TrimPrefix(command, prefix) != desired
 	case "PreCompact":
 		if !codexPreCompactArgsMatch(args) {
 			return "", false
 		}
-		desired := preCompactCurrentFormBody(cityDir, gcToken)
+		desired := preCompactCurrentFormBody(cityDir, gcInvocationToken)
 		return prefix + desired, strings.TrimPrefix(command, prefix) != desired
 	case "UserPromptSubmit":
 		return upgradeManagedPromptHookCommand(command, "codex", cityDir)
@@ -1128,11 +1140,11 @@ func upgradeCodexHookCommand(event, command, cityDir string) (string, bool) {
 			return upgraded, true
 		}
 		if codexSessionStartArgsMatch(env, args) || codexLegacySessionStartRunArgsMatch(args) {
-			desired := sessionStartCurrentFormBody(cityDir, gcToken)
+			desired := sessionStartCurrentFormBody(cityDir, gcInvocationToken)
 			return prefix + desired, strings.TrimPrefix(command, prefix) != desired
 		}
 		if codexPreCompactArgsMatch(args) {
-			desired := preCompactCurrentFormBody(cityDir, gcToken)
+			desired := preCompactCurrentFormBody(cityDir, gcInvocationToken)
 			return prefix + desired, strings.TrimPrefix(command, prefix) != desired
 		}
 		return "", false
@@ -1143,8 +1155,12 @@ func managedPromptHookRunPrefix(cityDir, gcToken string) string {
 	return gcToken + ` ` + codexCityFlag(cityDir) + `hook run --timeout 15s --timeout-exit-code 0 -- `
 }
 
+// upgradeManagedPromptHookCommand upgrades an EXISTING UserPromptSubmit entry
+// to the current form, always targeting gcInvocationToken — see
+// upgradeCodexHookCommand's doc comment for why an active upgrade never
+// preserves a bare `gc` token.
 func upgradeManagedPromptHookCommand(command, hookFormat, cityDir string) (string, bool) {
-	prefix, gcToken, _, args, ok := parseManagedGCCommand(command)
+	prefix, _, _, args, ok := parseManagedGCCommand(command)
 	if !ok {
 		return "", false
 	}
@@ -1152,7 +1168,7 @@ func upgradeManagedPromptHookCommand(command, hookFormat, cityDir string) (strin
 	if !ok {
 		return "", false
 	}
-	desired := managedPromptHookRunPrefix(cityDir, gcToken) + target
+	desired := managedPromptHookRunPrefix(cityDir, gcInvocationToken) + target
 	return prefix + desired, strings.TrimPrefix(command, prefix) != desired
 }
 
@@ -1912,20 +1928,17 @@ func upgradeClaudeHookCommand(event, command string) (string, bool) {
 	case "SessionStart":
 		// Legacy: bare `gc prime --hook` without the
 		// GC_MANAGED_SESSION_HOOK / GC_HOOK_EVENT_NAME env vars the
-		// current managed form expects; the env-prefixed previous
-		// form; and the pre-GC_BIN spelling of the current form
-		// (bare `gc` invocation token — see sessionStartBareGCFormBody).
+		// current managed form expects; the env-prefixed previous form;
+		// and the pre-GC_BIN spelling of the current form (bare `gc`
+		// invocation token — see sessionStartBareGCFormBody). Every one of
+		// these upgrades to the GC_BIN-honoring form (vp-7mjx): an active
+		// upgrade never preserves a bare `gc` token, unlike
+		// addCodexPreCompactHook's shape-preserving synthesis of a NEW
+		// sibling entry from an already-established one.
 		if equalsLegacyCommandBody(body, `gc prime --hook`) ||
 			equalsLegacyCommandBody(body, `gc prime --hook --hook-format codex`) ||
-			equalsLegacyCommandBody(body, sessionStartPreviousManagedFormBody) {
-			return prefix + sessionStartCurrentFormBody("", "gc"), true
-		}
-		// sessionStartBareGCFormBody already has the current-form argument
-		// shape; the only thing wrong with it is the invocation token
-		// (vp-7mjx), so — unlike the shape-preserving cases above — this one
-		// deliberately flips to the GC_BIN-honoring form rather than
-		// preserving bare `gc`.
-		if equalsLegacyCommandBody(body, sessionStartBareGCFormBody) {
+			equalsLegacyCommandBody(body, sessionStartPreviousManagedFormBody) ||
+			equalsLegacyCommandBody(body, sessionStartBareGCFormBody) {
 			return prefix + sessionStartCurrentFormBody("", gcInvocationToken), true
 		}
 	case "UserPromptSubmit":

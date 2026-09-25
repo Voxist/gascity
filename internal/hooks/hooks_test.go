@@ -275,7 +275,7 @@ func TestInstallClaudeUpgradesPreviousCanonicalSessionStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readEmbedded: %v", err)
 	}
-	stale := strings.Replace(string(current), jsonEscaped(sessionStartCurrentFormBody("", "gc")), jsonEscaped(sessionStartPreviousManagedFormBody), 1)
+	stale := strings.Replace(string(current), jsonEscaped(sessionStartCurrentFormBody("", gcInvocationToken)), jsonEscaped(sessionStartPreviousManagedFormBody), 1)
 	if stale == string(current) {
 		t.Fatal("stale fixture did not diverge from current embedded config — check previous SessionStart pattern")
 	}
@@ -289,8 +289,8 @@ func TestInstallClaudeUpgradesPreviousCanonicalSessionStart(t *testing.T) {
 	hookData := fs.Files["/city/hooks/claude.json"]
 	runtimeData := fs.Files["/city/.gc/settings.json"]
 	sessionStartCommand := claudeHookCommand(t, hookData, "SessionStart")
-	if got := commandBodyAfterCanonicalPrefix(sessionStartCommand); got != sessionStartCurrentFormBody("", "gc") {
-		t.Fatalf("upgraded SessionStart body = %q, want %q", got, sessionStartCurrentFormBody("", "gc"))
+	if got := commandBodyAfterCanonicalPrefix(sessionStartCommand); got != sessionStartCurrentFormBody("", gcInvocationToken) {
+		t.Fatalf("upgraded SessionStart body = %q, want %q", got, sessionStartCurrentFormBody("", gcInvocationToken))
 	}
 	if string(runtimeData) != string(hookData) {
 		t.Fatalf("runtime Claude settings should mirror upgraded hook settings:\n%s", string(runtimeData))
@@ -803,11 +803,17 @@ func TestUpgradeCodexHooksPreservesLegacyShapeWhenAddingPreCompact(t *testing.T)
 		forbidSubstring string
 	}{
 		{
+			// The PATH-prefix shape is preserved (prepend, not switched to
+			// append), but the invocation token is NOT: an active upgrade
+			// always flips a bare `gc` to the GC_BIN-honoring form (vp-7mjx),
+			// including when the upgrade is "just" adding a PreCompact
+			// sibling to an existing file — see upgradeCodexHookCommand's
+			// doc comment.
 			name:            "legacy prepend and bare gc",
 			sessionStart:    canonicalGCPathPrefix + `gc prime --hook --hook-format codex`,
 			wantPrefix:      canonicalGCPathPrefix,
-			wantGCToken:     "gc",
-			forbidSubstring: "${GC_BIN",
+			wantGCToken:     managedGCBinInvocation,
+			forbidSubstring: canonicalGCPathPrefixAppend,
 		},
 		{
 			name:            "current append and GC_BIN",
