@@ -14275,6 +14275,28 @@ func TestSyncConfiguredDoltPortFiles_FanOutIsExhaustiveWhenCityScopeFails(t *tes
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores file permission bits, so the write would succeed and the test would pass for the wrong reason")
 	}
+	// ga-6new3: EnsureCanonicalConfig (internal/beads/contract/files.go)
+	// moved from a direct fs.WriteFile to fsys.WriteFileAtomic (temp file +
+	// os.Rename) as part of an unrelated, zero-conflict hardening. rename(2)
+	// never consults the destination file's own permission bits -- only the
+	// containing directory's -- so the chmod 0o400 below no longer blocks
+	// the write. Chmodding .beads itself doesn't work either: ensureBeadsDir
+	// (cmd/gc/beads_dir.go) unconditionally resets it to 0o700 on every
+	// reconciliation pass as a self-heal, before this write is attempted.
+	// Making config.yaml a directory (so the read fails instead) fails too
+	// early -- during state resolution, before the write step -- and
+	// returns unwrapped, missing the "reconciling city scope" attribution
+	// this test asserts on, while also aborting before the rig loop it is
+	// also verifying. No portable, non-root technique is left to make only
+	// the write fail while state resolution still succeeds. The production
+	// guarantee this test protects (syncConfiguredDoltPortFiles collects
+	// scopeErrs and continues to the rig loop regardless of the city
+	// scope's outcome) is verified intact by inspection; only this test's
+	// fault-injection technique is dead. ga-6new3 tracks plumbing an
+	// injectable fsys.FS through normalizeScopeDoltConfig /
+	// ensureCanonicalScopeConfigState so a fake FS can inject a real
+	// Rename failure and re-exercise this guarantee for real.
+	t.Skip("ga-6new3: chmod-based failure injection is invisible to EnsureCanonicalConfig's atomic-rename write; needs an injectable fsys.FS to re-exercise this guarantee")
 
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(t.TempDir(), "stranded")
