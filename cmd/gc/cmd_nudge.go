@@ -2733,16 +2733,14 @@ func enqueueQueuedNudgeWithStore(cityPath string, store beads.NudgesStore, item 
 }
 
 func enqueueQueuedNudgeWithStoreAndClock(cityPath string, store beads.NudgesStore, item queuedNudge, clk clock.Clock) error {
+	ownStore := false
+	var opened beads.Store
 	if store.Store == nil {
-		// Swallow into a nil-safe zero store on open failure, same as
-		// openNudgeBeadStoreErr's own doc comment: enqueueQueuedNudgeBody is
-		// nil-tolerant, and a caller here already has no way to surface a
-		// human-facing reason.
-		opened, rawStore, err := openNudgeBeadStoreOwned(cityPath)
-		if err == nil {
-			store = opened
-			defer closeBeadStoreHandle(rawStore) //nolint:errcheck // best-effort
-		}
+		store, opened = openOwnedNudgeBeadStore(cityPath)
+		ownStore = true
+	}
+	if ownStore {
+		defer closeBeadStoreHandle(opened) //nolint:errcheck // best-effort
 	}
 	return enqueueQueuedNudgeBody(cityPath, store, item, clk)
 }
