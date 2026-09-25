@@ -836,23 +836,17 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	}
 	// Waivers that survive, checked as present so an entry cannot be dropped without
 	// a deliberate edit here, and as the only rebuilt-path entries allowed, so the set
-	// cannot grow without one either. The gc path of the grpc entry is governed by
-	// TestTrivyIgnoreDropsGCModuleWaiversPastThreshold instead, so it is not listed.
+	// cannot grow without one either.
 	//
-	// Only CVE-2026-84445 is left. grpc fixes it in 1.82.2 and 1.83.2, and every pin
-	// here is 1.83.1 -- past CVE-2026-84304, which 1.83.1 does fix, but short of the
-	// 1.83 line's fix for this one. CVE-2026-84304 (grpc 1.83.1), CVE-2026-43871
-	// (thrift 0.24.0 in Dockerfile.base and Dockerfile.agent) and CVE-2026-56852
-	// (kubectl v1.37.0, x/text 0.40.0) are cleared by the pins and must stay unwaived;
+	// Empty: CVE-2026-84445 (grpc) was the last rebuilt-path entry, and it is
+	// gone now that GRPC_VERSION reached 1.83.2 in both Dockerfile.base and
+	// Dockerfile.agent (see TestTrivyIgnoreKeepsReviewedBridgeEntries).
+	// CVE-2026-84304 (grpc 1.83.1), CVE-2026-43871 (thrift 0.24.0 in
+	// Dockerfile.base and Dockerfile.agent) and CVE-2026-56852 (kubectl
+	// v1.37.0, x/text 0.40.0) are cleared by the pins and must stay unwaived;
 	// TestTrivyIgnoreCarriesNoThriftWaiver and
 	// TestTrivyIgnoreDropsKubectlWaiversPastPinnedVersion enforce two of those.
-	reviewedWaivers := map[string]map[string]bool{
-		"CVE-2026-84445": {
-			"usr/bin/gh":         true,
-			"usr/local/bin/dolt": true,
-			"usr/local/bin/bd":   true,
-		},
-	}
+	reviewedWaivers := map[string]map[string]bool{}
 	foundReviewed := map[string]map[string]bool{}
 
 	for _, v := range doc.Vulnerabilities {
@@ -1034,127 +1028,45 @@ func TestGoModPinsXModPastGCFinding(t *testing.T) {
 // pins cleared -- CVE-2026-84304 by grpc 1.83.1, CVE-2026-43871 by thrift 0.24.0,
 // CVE-2026-56852 by kubectl v1.37.0 -- and the rebuilt-path guard above, the thrift
 // guard and the kubectl guard are what keep them from coming back.
+// TestTrivyIgnoreKeepsReviewedBridgeEntries holds main's time-boxed waiver
+// bridge (#5885) retired. The bridge carried four reviewed entries on the
+// 2026-09-21 horizon: CVE-2026-84445 (grpc, fixed 1.83.2) and
+// CVE-2026-78675/78676/78677 (GitPython, fixed 3.1.59). Each one's own
+// statement named its removal condition, and both are now met -- go.mod,
+// Dockerfile.base and Dockerfile.agent all pin grpc 1.83.2, and
+// .github/requirements/mcp-agent-mail.in floors GitPython at 3.1.59 (the
+// regenerated lock resolves to 3.1.62) -- so the bridge is empty rather than
+// re-dated.
+//
+// The guard is the absence of the bridge: no entry may carry a horizon at or
+// behind it, because such an entry is either the bridge coming back under a
+// new statement or a waiver Trivy already treats as expired, and an expired
+// waiver fails the scan gate at the next run rather than at review time.
+// Re-dating one of these forward is a deliberate decision that belongs in
+// this file's own horizon with a statement to match, which is exactly the
+// edit this test forces.
 func TestTrivyIgnoreKeepsReviewedBridgeEntries(t *testing.T) {
 	root := repoRoot(t)
 
 	var doc struct {
 		Vulnerabilities []struct {
-			ID        string   `yaml:"id"`
-			Paths     []string `yaml:"paths"`
-			Purls     []string `yaml:"purls"`
-			ExpiredAt string   `yaml:"expired_at"`
-			Statement string   `yaml:"statement"`
+			ID        string `yaml:"id"`
+			ExpiredAt string `yaml:"expired_at"`
 		} `yaml:"vulnerabilities"`
 	}
 	if err := yaml.Unmarshal([]byte(readFile(t, root, ".trivyignore.yaml")), &doc); err != nil {
 		t.Fatalf("parsing .trivyignore.yaml: %v", err)
 	}
-	if len(doc.Vulnerabilities) == 0 {
-		t.Fatal(".trivyignore.yaml parsed to no entries; the guard below would pass vacuously")
-	}
 
 	// ISO-8601 dates compare correctly as strings, so <= is "at or behind".
 	const bridgeHorizon = "2026-09-21"
-
-	toSet := func(vals ...string) map[string]bool {
-		m := make(map[string]bool, len(vals))
-		for _, v := range vals {
-			m[v] = true
-		}
-		return m
-	}
-
-	type wantEntry struct {
-		id         string
-		paths      map[string]bool
-		purls      map[string]bool
-		substrings []string
-	}
-	wantEntries := []wantEntry{
-		{
-			id: "CVE-2026-84445",
-			// usr/local/bin/gc is deliberately ABSENT. #186 raised go.mod's
-			// google.golang.org/grpc to 1.83.2, which fixes this CVE, and
-			// TestTrivyIgnoreDropsGCModuleWaiversPastThreshold -- which derives
-			// the threshold from go.mod rather than hardcoding it -- then
-			// requires the gc path be dropped. That derived assertion is the
-			// authoritative one; this list is a snapshot, so it follows.
-			// The three rebuilt-tool paths stay only because
-			// TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools still asserts
-			// their retention; with GRPC_VERSION now 1.83.2 in both Dockerfiles
-			// those rebuilds should be clean too, which makes this whole entry a
-			// deletion candidate once that assertion is revisited.
-			paths:      toSet("usr/bin/gh", "usr/local/bin/dolt", "usr/local/bin/bd"),
-			substrings: []string{"grpc", "1.83.2", "GRPC_VERSION", "go.mod"},
-		},
-		{id: "CVE-2026-78676", purls: toSet("pkg:pypi/gitpython"), substrings: []string{"gitpython", "3.1.59", "critical"}},
-		{id: "CVE-2026-78675", purls: toSet("pkg:pypi/gitpython"), substrings: []string{"gitpython", "3.1.59"}},
-		{id: "CVE-2026-78677", purls: toSet("pkg:pypi/gitpython"), substrings: []string{"gitpython", "3.1.59"}},
-	}
-
-	byID := map[string][]int{}
-	for i, v := range doc.Vulnerabilities {
-		byID[v.ID] = append(byID[v.ID], i)
-	}
-
-	reviewed := map[string]bool{}
-	for _, want := range wantEntries {
-		reviewed[want.id] = true
-		idxs := byID[want.id]
-		if len(idxs) != 1 {
-			t.Errorf("%s appears in %d entries, want exactly 1", want.id, len(idxs))
+	for _, v := range doc.Vulnerabilities {
+		if v.ExpiredAt == "" {
+			t.Errorf("%s has no expired_at; every waiver in this file is time-boxed", v.ID)
 			continue
 		}
-		v := doc.Vulnerabilities[idxs[0]]
-		if v.ExpiredAt != bridgeHorizon {
-			t.Errorf("%s expired_at = %q, want the bridge horizon %q it was carried over on", v.ID, v.ExpiredAt, bridgeHorizon)
-		}
-		if want.paths != nil {
-			gotPaths := toSet(v.Paths...)
-			for p := range want.paths {
-				if !gotPaths[p] {
-					t.Errorf("%s missing required path %q", v.ID, p)
-				}
-			}
-			for p := range gotPaths {
-				if !want.paths[p] {
-					t.Errorf("%s waives unexpected path %q", v.ID, p)
-				}
-			}
-			if len(v.Purls) != 0 {
-				t.Errorf("%s sets purls %v on a path-scoped binary finding; want no purls", v.ID, v.Purls)
-			}
-		}
-		if want.purls != nil {
-			gotPurls := toSet(v.Purls...)
-			for p := range want.purls {
-				if !gotPurls[p] {
-					t.Errorf("%s missing required purl %q", v.ID, p)
-				}
-			}
-			for p := range gotPurls {
-				if !want.purls[p] {
-					t.Errorf("%s waives unexpected purl %q", v.ID, p)
-				}
-			}
-			if len(v.Paths) != 0 {
-				t.Errorf("%s sets paths %v on a purl-scoped package finding; want no paths, so the purl match alone confines it to gc-mcp-mail", v.ID, v.Paths)
-			}
-		}
-		statement := strings.ToLower(v.Statement)
-		for _, sub := range want.substrings {
-			if !strings.Contains(statement, strings.ToLower(sub)) {
-				t.Errorf("%s statement %q does not name %q", v.ID, v.Statement, sub)
-			}
-		}
-	}
-
-	// An entry that borrows the bridge's date without being listed above skipped this
-	// review, so it is a waiver nobody re-measured -- exactly what the 2026-09-07
-	// expiry cliff was made of (ga-elgvf).
-	for _, v := range doc.Vulnerabilities {
-		if !reviewed[v.ID] && v.ExpiredAt == bridgeHorizon {
-			t.Errorf("%s expires on the bridge horizon %s but is not a reviewed bridge entry; list it above or give it this file's own horizon", v.ID, bridgeHorizon)
+		if v.ExpiredAt <= bridgeHorizon {
+			t.Errorf("%s expires %s, at or behind the retired bridge horizon %s; fix the finding as the bridge's own entries were, or move it to this file's horizon with a statement saying why", v.ID, v.ExpiredAt, bridgeHorizon)
 		}
 	}
 }
