@@ -121,10 +121,9 @@ const (
 	//
 	// Re-derived again at the 2026-09-25 resync: this merge also carries
 	// origin's beads-topology-acceptance job, so the merged ci.yml hashes to
-	// neither side's prior pin. PLACEHOLDER — re-derive from
-	// TestCurrentWorkflowsMatchPolicy's candidate digest once ci.yml's own
-	// conflict is resolved.
-	expectedCIExecutionHash     = "61b7de469d0f35806bde6e49082c40336c276a6774ec86cb28acc682caed1475"
+	// neither side's prior pin. Taken from the candidate digest
+	// TestCurrentWorkflowsMatchPolicy printed for the merged workflow.
+	expectedCIExecutionHash     = "1968f7a23880e4c2ff5e368b267204dbd0448045eff41fea81a3f5a8bac34b84"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
@@ -150,9 +149,9 @@ const (
 	// keys, nothing else.
 	//
 	// Bumped again (origin/main, merged at this resync): the
-	// beads-proxied-perf job (see above). PLACEHOLDER — re-derive alongside
-	// expectedCIExecutionHash above.
-	expectedNightlyExecutionHash = "ff702fc4e0aec70e0caba25b6a5c0084e57f6835d5f5bdf3a1ec2cb52dd6536f"
+	// beads-proxied-perf job (see above). Taken from the candidate digest
+	// TestCurrentWorkflowsMatchPolicy printed for the merged workflow.
+	expectedNightlyExecutionHash = "9b1d408a481c580ae51c4564b7a0358ef2e59778b70551de2b451b429a900941"
 	// Re-derived at the 2026-08-31 resync: the composite setup actions under
 	// .github/actions/setup-gascity-* auto-merged both sides as well, moving
 	// this pin along with the two workflow execution pins above.
