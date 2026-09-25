@@ -579,6 +579,12 @@ func pinnedIntegrationBeadsModuleVersion() (string, error) {
 	return version, nil
 }
 
+// wantPinnedBeadsModuleVersion is the beads module version this suite expects
+// go.mod to pin. TestBDVersionPins in scripts/bd_version_pin_test.go reads it
+// by name out of this file and asserts it matches go.mod — see
+// TestPinnedIntegrationBeadsModuleVersion for why it is a literal.
+const wantPinnedBeadsModuleVersion = "v1.3.0"
+
 func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
 	version, err := pinnedIntegrationBeadsModuleVersion()
 	if err != nil {
@@ -589,7 +595,10 @@ func TestPinnedIntegrationBeadsModuleVersion(t *testing.T) {
 	// newest upstream ancestor); with no bridge, BD_SOURCE_REF plays both
 	// roles. A literal here rotted silently once already — it lives in a
 	// shard tier ordinary PRs skip, so a stale value surfaces only in
-	// nightly/rest-full runs.
+	// nightly/rest-full runs. See ga-s9s7h: this deliberately does not
+	// compare against wantPinnedBeadsModuleVersion; that const is read by
+	// name out of this file by TestBDVersionPins in
+	// scripts/bd_version_pin_test.go, which anchors go.mod's pin instead.
 	raw, err := os.ReadFile(filepath.Join(findModuleRoot(), "deps.env"))
 	if err != nil {
 		t.Fatalf("read deps.env: %v", err)

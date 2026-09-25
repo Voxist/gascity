@@ -36,8 +36,12 @@ func inspectManagedDoltProcess(cityPath, port string) (managedDoltProcessInspect
 	if err != nil {
 		return managedDoltProcessInspection{}, err
 	}
+	return inspectManagedDoltProcessWithLayout(layout, port, true), nil
+}
+
+func inspectManagedDoltProcessWithLayout(layout managedDoltRuntimeLayout, port string, removeStalePIDFile bool) managedDoltProcessInspection {
 	info := managedDoltProcessInspection{}
-	info.ManagedPID, info.ManagedSource = findManagedDoltPID(layout, port)
+	info.ManagedPID, info.ManagedSource = findManagedDoltPIDWithOptions(layout, port, removeStalePIDFile)
 	if info.ManagedPID > 0 {
 		info.ManagedOwned, info.ManagedDeletedInodes = inspectManagedDoltOwnership(info.ManagedPID, layout)
 	}
@@ -69,11 +73,15 @@ func inspectManagedDoltProcess(cityPath, port string) (managedDoltProcessInspect
 		info.PortHolderPID = chosen
 		info.PortHolderOwned, info.PortHolderDeletedInodes = inspectManagedDoltOwnership(chosen, layout)
 	}
-	return info, nil
+	return info
 }
 
 func findManagedDoltPID(layout managedDoltRuntimeLayout, port string) (int, string) {
-	if pid := managedPIDFromPIDFile(layout.PIDFile); pid > 0 {
+	return findManagedDoltPIDWithOptions(layout, port, true)
+}
+
+func findManagedDoltPIDWithOptions(layout managedDoltRuntimeLayout, port string, removeStalePIDFile bool) (int, string) {
+	if pid := managedPIDFromPIDFileWithOptions(layout.PIDFile, removeStalePIDFile); pid > 0 {
 		return pid, "pid-file"
 	}
 	// Only an OWNED holder counts as the managed pid. An arbitrary holder with
@@ -104,14 +112,16 @@ func findManagedDoltPID(layout managedDoltRuntimeLayout, port string) (int, stri
 	return 0, ""
 }
 
-func managedPIDFromPIDFile(pidFile string) int {
+func managedPIDFromPIDFileWithOptions(pidFile string, removeStale bool) int {
 	data, err := os.ReadFile(pidFile)
 	if err != nil {
 		return 0
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil || !pidAlive(pid) {
-		_ = os.Remove(pidFile)
+		if removeStale {
+			_ = os.Remove(pidFile)
+		}
 		return 0
 	}
 	return pid

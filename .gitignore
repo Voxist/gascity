@@ -99,3 +99,8 @@ __pycache__/
 
 # bd gate lock — local runtime state, zero bytes, left behind on unclean exit
 .beads.gate.lock
+
+# Bazel convenience symlinks
+/bazel-bin
+/bazel-out
+/bazel-testlogs

@@ -1504,15 +1504,15 @@ func supervisorSecretsEnvFilePath() string {
 
 // supervisorSecretsEnvFileEntries reads ${GC_HOME}/secrets.env and returns its
 // parsed key/value pairs. A missing file is the normal case and yields nil. A
-// present-but-unreadable or malformed file is logged to stderr and ignored so
-// a bad secrets file never blocks supervisor install/start; the caller still
-// gates whatever is returned on the persist allowlist or an explicit
-// GC_SUPERVISOR_ENV opt-in.
+// present-but-unreadable file is logged to stderr and ignored so a bad
+// secrets file never blocks supervisor install/start. A malformed line is
+// logged to stderr individually and skipped; every other, validly-parsed
+// entry in the file is still returned. The caller still gates whatever is
+// returned on the persist allowlist or an explicit GC_SUPERVISOR_ENV opt-in.
 func supervisorSecretsEnvFileEntries() map[string]string {
 	entries, err := readSupervisorSecretsEnvFile()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gc: %v\n", err)
-		return nil
 	}
 	return entries
 }
@@ -1531,9 +1531,9 @@ func readSupervisorSecretsEnvFile() (map[string]string, error) {
 		}
 		return nil, fmt.Errorf("reading supervisor secrets file %q: %w", path, err)
 	}
-	entries, err := processenv.ParseEnvFile(string(data))
-	if err != nil {
-		return nil, fmt.Errorf("%s does not parse as dotenv, so the supervisor drops every entry in it: %w", path, err)
+	entries, errs := processenv.ParseEnvFile(string(data))
+	if len(errs) > 0 {
+		return entries, fmt.Errorf("%s has %d malformed line(s), skipped (every other entry still applies): %w", path, len(errs), errors.Join(errs...))
 	}
 	return entries, nil
 }
