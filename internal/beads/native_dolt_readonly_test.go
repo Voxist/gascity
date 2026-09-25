@@ -72,6 +72,7 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"ApplyGraphPlan":              nativeStoreMutation,
 	"ApplyGraphPlanWithStorage":   nativeStoreMutation,
 	"CreateWithForeignID":         nativeStoreMutation,
+	"CreateWithStorage":           nativeStoreMutation,
 	"CloseIfMatch":                nativeStoreMutation,
 	"CloseWithMetadataIfMatch":    nativeStoreMutation,
 	"CompareAndSetMetadataKey":    nativeStoreMutation,
@@ -87,6 +88,11 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"SupportsEphemeralGraphApply": nativeStoreLifecycle,
 	"CloseStore":                  nativeStoreLifecycle,
 	"ReadOnly":                    nativeStoreLifecycle,
+
+	// Identity introspection: pure reads of already-opened state, never
+	// touching storage.
+	"OpenedIdentity":       nativeStoreLifecycle,
+	"AssertOpenedIdentity": nativeStoreLifecycle,
 }
 
 // countingStorageSpy fails the test if the store reaches storage at all.
