@@ -73,6 +73,84 @@ dolt.auto-start: false
 	}
 }
 
+// TestNamedBackingScaleCheckEnvFailureDoesNotDrainItsSessions is the
+// named-session-backing twin of TestScaleCheckEnvFailureDoesNotDrainItsSessions.
+// A pool that ALSO backs a configured named session reaches
+// pendingPoolWithProbeEnv through the separate backsNamedSession call site in
+// buildDesiredState (cmd/gc/build_desired_state.go), not the generic-pool call
+// site the sibling test exercises. After #209 moved the
+// controllerQueryRuntimeEnv call from the generic branch into
+// pendingPoolWithProbeEnv, that one helper gained two producers in the same
+// `for i := range cfg.Agents` loop; a guard folded into only one of them (or
+// left as a standalone call-site check) silently drops this half's failures
+// from UnresolvedTemplates and drains its sessions as orphaned — the exact
+// ga-c8rck outage, reintroduced at the OTHER call site by a merge that never
+// touches it.
+func TestNamedBackingScaleCheckEnvFailureDoesNotDrainItsSessions(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	env := newUnresolvedProviderEnv(t, "true")
+	// Name deliberately differs from Template: TemplateQualifiedName() (what
+	// the pool loop's backsNamedSession match uses) still resolves to
+	// "rig-b/worker" and activates the pool-loop branch under test, but
+	// QualifiedName() (what the SEPARATE named-session materialization pass
+	// keys namedSpecs by) resolves to "rig-b/custom-alias" instead — an
+	// identity the existing "s-rig-b-worker" bead does not match by identity,
+	// session name, or alias. hasCanonical is therefore false for it, and with
+	// mode="on_demand" and no ready assigned work, the named-session
+	// materialization pass (build_desired_state.go's separate `for identity,
+	// spec := range namedSpecs` loop) skips this identity outright — it never
+	// calls resolveTemplatePrepared and so never reaches ITS OWN, unrelated
+	// bp.recordBuildFailure call. Without this split, that other pass's guard
+	// independently protects the same session for the same underlying
+	// failure and masks whether the pool loop's own guard did anything at
+	// all; this fixture isolates the one guard actually under test.
+	env.cfg.NamedSessions = []config.NamedSession{
+		{Name: "custom-alias", Template: "worker", Dir: "rig-b", Mode: "on_demand"},
+	}
+	brokenRig := env.cfg.Rigs[1].Path
+	writeUnregisteredBackendMetadata(t, brokenRig)
+	if err := os.WriteFile(filepath.Join(brokenRig, ".beads", "config.yaml"), []byte(`issue_prefix: rigb
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Prove the fixture still reaches the guarded branch, and only for the one
+	// agent — otherwise this test silently stops exercising it.
+	if _, err := controllerQueryRuntimeEnv(env.cityPath, env.cfg, &env.cfg.Agents[1]); err == nil {
+		t.Fatal("fixture did not produce a scale_check env error; the guarded branch is no longer reachable from this test")
+	}
+	if _, err := controllerQueryRuntimeEnv(env.cityPath, env.cfg, &env.cfg.Agents[0]); err != nil {
+		t.Fatalf("fixture broke the healthy agent's env too: %v", err)
+	}
+
+	cr, result, stderr := env.tick(t)
+
+	if !strings.Contains(stderr, "scaleCheck: building env for "+unresolvedBrokenTemplate) {
+		t.Fatalf("scale_check env failure not reported; stderr:\n%s", stderr)
+	}
+	// This is the assertion the generic-only guard cannot make: the
+	// named-backing call site must record its OWN build failure, not rely on
+	// the generic call site having already recorded one for the same template.
+	if _, ok := result.UnresolvedTemplates[unresolvedBrokenTemplate]; !ok {
+		t.Fatalf("UnresolvedTemplates = %v, want %q recorded: the named-backing pendingPoolWithProbeEnv call site must record its build failure too; stderr:\n%s", result.UnresolvedTemplates, unresolvedBrokenTemplate, stderr)
+	}
+	if ds := cr.sessionDrains.get(env.broken.ID); ds != nil {
+		t.Fatalf("session of a named-backing pool whose scale_check env could not be built is draining (reason %q): a failed demand probe is not zero demand; stderr:\n%s", ds.reason, stderr)
+	}
+	if !env.sp.IsRunning("s-rig-b-worker") {
+		t.Fatalf("session of the named-backing agent whose scale_check env failed was stopped; stderr:\n%s", stderr)
+	}
+	if ds := cr.sessionDrains.get(env.good.ID); ds != nil {
+		t.Fatalf("healthy rig session is draining (reason %q): the failure must stay with the failing agent; stderr:\n%s", ds.reason, stderr)
+	}
+	if !env.sp.IsRunning("s-rig-a-worker") {
+		t.Fatalf("healthy rig session was stopped; stderr:\n%s", stderr)
+	}
+}
+
 // TestTemplateResolveFailureDoesNotDrainItsSessions covers a resolveTemplate
 // failure that survives provider validation: the agent resolves its provider
 // fine and is still dropped from the desired set, so the ga-8a8fq guard alone
