@@ -231,7 +231,9 @@ func TestSuspendedRigUnresolvableAgentStillDrains(t *testing.T) {
 // one-shot reconcile: it must hand the reconciler the same unresolved set the
 // controller tick does, or a standalone start drains those sessions.
 func TestOneShotStartReconcileCarriesUnresolvedTemplates(t *testing.T) {
-	want := map[string]string{unresolvedBrokenTemplate: "provider not found in PATH"}
+	want := map[string]unresolvedTemplate{
+		unresolvedBrokenTemplate: {Reason: TraceReasonProviderUnresolved, Cause: "provider not found in PATH"},
+	}
 	var opts startExecutionOptions
 	for _, apply := range oneShotReconcileStartOptions(DesiredStateResult{UnresolvedTemplates: want}, nil, nil, nil) {
 		apply(&opts)

@@ -32,6 +32,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
@@ -1397,9 +1398,14 @@ func wakeDemandOverridesSleepSuppression(
 // desiredState maps sessionName → TemplateParams for all agents that should
 // be running. Built by buildDesiredState from config + scale_check results.
 //
-// configuredNames is the set of ALL configured agent session names (including
-// suspended agents). Used to distinguish "orphaned" (removed from config)
-// from "suspended" (still in config, not runnable) when closing beads.
+// configuredNames is, despite its name, only the set of configured
+// named-session runtime names — configuredSessionNamesWithSnapshot
+// (session_beads.go) iterates cfg.NamedSessions, never cfg.Agents. It is
+// used to distinguish "orphaned" (removed from config) from "suspended"
+// (still in config, not runnable) when closing beads, but a suspended POOL
+// agent's session is never in this set and so is always labeled "orphaned"
+// here, not "suspended" (pre-existing; tracked as ga-z9nzk). See the same
+// caveat noted where the generic orphan drain reads this map below.
 //
 // Returns the number of start attempts issued or enqueued this tick.
 //
@@ -1951,15 +1957,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// Handle BEFORE heal/stability to avoid false crash detection —
 		// a running session that leaves the desired set is not a crash.
 		if !desired {
-			// A configured agent whose provider could not be resolved this tick
-			// is absent from the desired set for a reason that says nothing about
-			// whether it is still wanted. Keep its sessions untouched — no drain,
-			// no close — until it resolves again (ga-8a8fq).
-			if template, resolveErr, unresolved := unresolvedSessionTemplate(infoByID[id], cfg, reconcileOpts.unresolvedTemplates); unresolved {
-				fmt.Fprintf(stdout, "Keeping session '%s': template %q is configured but its provider cannot be resolved: %s\n", name, template, resolveErr) //nolint:errcheck
+			// A configured agent the build could not produce desired state for
+			// this tick is absent from the desired set for a reason that says
+			// nothing about whether it is still wanted — an unresolvable
+			// provider (ga-8a8fq), or any other per-agent build failure
+			// (ga-c8rck). Keep its sessions untouched — no drain, no close —
+			// until the build succeeds again.
+			if template, unresolved, ok := unresolvedSessionTemplate(infoByID[id], cfg, reconcileOpts.unresolvedTemplates); ok {
+				fmt.Fprintf(stdout, "Keeping session '%s': template %q is configured but the build could not resolve it: %s\n", name, template, unresolved.Cause) //nolint:errcheck
 				if trace != nil {
-					trace.RecordDecision(TraceSiteReconcilerOrphaned, TraceReasonProviderUnresolved, TraceOutcomeKeptOpen, template, name, traceRecordPayload{
-						"error": resolveErr,
+					trace.RecordDecision(TraceSiteReconcilerOrphaned, unresolved.Reason, TraceOutcomeKeptOpen, template, name, traceRecordPayload{
+						"error": unresolved.Cause,
 					})
 				}
 				if shadowTick != nil {
@@ -2423,6 +2431,60 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					reason := "orphaned"
 					if configuredNames[name] {
 						reason = "suspended"
+					}
+					// A human is attached to this session's terminal. Being
+					// undesired is a verdict about controller ownership, not
+					// about whether the session is in use, and the drain below
+					// sends Ctrl-C into the terminal the operator is typing in
+					// and then tears the session down under them. Keep it; the
+					// level-triggered loop reconsiders once they detach. Only the
+					// config-drift path guarded attachment before this (ga-c8rck).
+					//
+					// This guard deliberately lives inside the `if providerAlive`
+					// arm above, not ahead of it: that placement is WHY it cannot
+					// strand a session. A provider that has gone away for good is
+					// handled by the !providerAlive branch instead, which drains
+					// through its own path regardless of attachment — so an
+					// attached session under a persistently dead runtime still
+					// gets torn down, it just doesn't route through here. Moving
+					// this block out of the providerAlive arm (e.g. hoisting it
+					// above the branch to cover both) would silently make a dead,
+					// unreachable provider's attached session un-drainable too.
+					//
+					// Suspension is exempt: it is an explicit operator
+					// instruction about this very agent, so a suspended agent, an
+					// agent in a suspended rig, and a suspended city all drain
+					// exactly as before, attached or not. The `reason` string
+					// cannot carry that distinction — configuredNames holds only
+					// named-session runtime names, so a suspended POOL agent
+					// reaches here as "orphaned" — so read suspension directly.
+					//
+					// sessionAttachedForConfigDrift is the shared attachment
+					// probe (worker-handle observation, then the provider's own
+					// IsAttached); its name records where it was first needed.
+					if !sessionAgentSuspended(infoPostHeal, cfg, cityPath, suspState) {
+						attached, attachErr := sessionAttachedForConfigDrift(id, sp, cityPath, store, cfg, name)
+						if attachErr != nil {
+							fmt.Fprintf(stderr, "session reconciler: observing attachment before %s drain for %s: %v\n", reason, name, attachErr) //nolint:errcheck
+						}
+						// Fail CLOSED on an unreachable runtime: "not observed
+						// attached" is then "could not look", not "nobody is
+						// there", and this drain is destructive.
+						if attached || errors.Is(attachErr, runtime.ErrRuntimeUnavailable) {
+							if trace != nil {
+								template := normalizedSessionTemplateInfo(infoPostHeal, cfg)
+								if template == "" {
+									template = infoPostHeal.Template
+								}
+								payload := traceRecordPayload{"attached": attached}
+								if attachErr != nil {
+									payload["error"] = attachErr.Error()
+								}
+								trace.RecordDecision(TraceSiteReconcilerOrphaned, TraceReasonOrphanAttached, TraceOutcomeKeptOpen, template, name, payload)
+							}
+							fmt.Fprintf(stdout, "Skipping drain for '%s': a terminal is attached\n", name) //nolint:errcheck
+							continue
+						}
 					}
 					hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForConfigInfo(cityPath, cfg, store, rigStores, infoByID[id])
 					if assignedErr != nil {
@@ -5966,7 +6028,8 @@ func recentlyDeferredSessionAttachedConfigDrift(info sessionpkg.Info, clk clock.
 // sessionAttachedForConfigDrift reports whether a session is currently
 // attached (a user terminal is connected) and should skip config-drift
 // handling. It checks worker-handle observation first and falls back to the
-// provider's direct attachment probe.
+// provider's direct attachment probe. The generic orphan drain uses it as the
+// same shared probe (ga-c8rck); the name records where it was first needed.
 func sessionAttachedForConfigDrift(id string, sp runtime.Provider, cityPath string, store beads.Store, cfg *config.City, name string) (bool, error) {
 	if sp == nil {
 		return false, nil
@@ -7041,17 +7104,48 @@ func resolveResumeCommand(command, sessionKey string, rp *config.ResolvedProvide
 	}
 }
 
-// unresolvedSessionTemplate reports whether a session belongs to a configured
-// template whose provider could not be resolved this tick, returning the
-// template and the resolution error.
-func unresolvedSessionTemplate(info sessionpkg.Info, cfg *config.City, unresolved map[string]string) (string, string, bool) {
-	if len(unresolved) == 0 {
-		return "", "", false
+// sessionAgentSuspended reports whether a session's configured agent is
+// suspended right now — itself, through its rig, or through the city. It is the
+// carve-out for the attached-session guard on the orphan drain: suspension is
+// an explicit operator instruction about that agent, so it is honored even
+// while a terminal is attached. An agent that is simply absent from config is
+// not suspended; that is the case the attached guard defers.
+func sessionAgentSuspended(info sessionpkg.Info, cfg *config.City, cityPath string, suspState suspensionstate.State) bool {
+	if cfg == nil {
+		return false
+	}
+	if citySuspendedWithState(cfg, suspState) {
+		return true
 	}
 	template := normalizedSessionTemplateInfo(info, cfg)
 	if template == "" {
 		template = strings.TrimSpace(info.Template)
 	}
-	resolveErr, ok := unresolved[template]
-	return template, resolveErr, ok
+	agent := findAgentByTemplate(cfg, template)
+	if agent == nil {
+		return false
+	}
+	if agent.Suspended {
+		return true
+	}
+	rigName := configuredRigName(cityPath, agent, cfg.Rigs)
+	if rigName == "" {
+		return false
+	}
+	return buildEffectiveSuspendedRigNames(cfg, suspState)[rigName]
+}
+
+// unresolvedSessionTemplate reports whether a session belongs to a configured
+// template the build could not produce desired state for this tick, returning
+// the template and the recorded explanation.
+func unresolvedSessionTemplate(info sessionpkg.Info, cfg *config.City, unresolved map[string]unresolvedTemplate) (string, unresolvedTemplate, bool) {
+	if len(unresolved) == 0 {
+		return "", unresolvedTemplate{}, false
+	}
+	template := normalizedSessionTemplateInfo(info, cfg)
+	if template == "" {
+		template = strings.TrimSpace(info.Template)
+	}
+	entry, ok := unresolved[template]
+	return template, entry, ok
 }

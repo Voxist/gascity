@@ -354,9 +354,10 @@ type startExecutionOptions struct {
 	deferSessionClosesOnBoot bool
 	readyAssignedFlags       []bool
 	// unresolvedTemplates is DesiredStateResult.UnresolvedTemplates: configured
-	// templates whose provider could not be resolved this tick. Their sessions
-	// are kept rather than drained or closed as orphaned (ga-8a8fq).
-	unresolvedTemplates map[string]string
+	// templates the build could not produce desired state for this tick. Their
+	// sessions are kept rather than drained or closed as orphaned (ga-8a8fq,
+	// ga-c8rck).
+	unresolvedTemplates map[string]unresolvedTemplate
 	// assignedWorkStores is index-aligned with the assignedWorkBeads passed to
 	// the same reconcile pass: the store each row was read through. The
 	// orphan-close tie-break releases through it instead of re-deriving an owner
@@ -466,11 +467,11 @@ func withDeferSessionClosesOnBoot() startExecutionOption {
 	}
 }
 
-// withUnresolvedTemplates installs the configured templates whose provider
-// could not be resolved this tick (DesiredStateResult.UnresolvedTemplates). The
-// reconciler keeps their sessions instead of treating absence from the desired
-// set as orphaned, so a provider failure costs only the agents that use it.
-func withUnresolvedTemplates(templates map[string]string) startExecutionOption {
+// withUnresolvedTemplates installs the configured templates the build could not
+// produce desired state for this tick (DesiredStateResult.UnresolvedTemplates).
+// The reconciler keeps their sessions instead of treating absence from the
+// desired set as orphaned, so a build failure costs only the agents it hit.
+func withUnresolvedTemplates(templates map[string]unresolvedTemplate) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.unresolvedTemplates = templates
 	}

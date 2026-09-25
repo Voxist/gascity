@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
@@ -127,6 +128,81 @@ type agentBuildParams struct {
 	// etc.). Used by the skill materialization integration to decide
 	// stage-2 eligibility.
 	sessionProvider string
+
+	// buildFailures collects the per-agent build errors that dropped a
+	// configured agent from the desired set this tick. It is a POINTER because
+	// buildFailureLog embeds a sync.Mutex, and go vet's copylocks check refuses
+	// a value field here ("assignment copies lock value to local:
+	// agentBuildParams contains buildFailureLog contains sync.Mutex") — every
+	// `local := *bp` copy (resolveTemplateForSessionBeadInfo) would otherwise
+	// fail to build. As it happens every recordBuildFailure call site holds the
+	// original *agentBuildParams, not a copy, so copy-safety was never
+	// load-bearing here; the pointer earns its keep solely by satisfying copylocks.
+	// unresolvedAgentTemplates drains it. May be nil in focused unit fixtures;
+	// every access is nil-safe.
+	buildFailures *buildFailureLog
+}
+
+// buildFailureLog records, keyed by configured agent template, why a per-agent
+// desired-state build step failed this tick. A step that fails for one agent —
+// its scale_check env, its template resolution — leaves that agent out of the
+// desired set for a reason that says nothing about whether it is still wanted,
+// so the reconciler keeps its sessions rather than draining them as orphaned
+// (ga-c8rck). First writer per template wins: the earliest failure is the one
+// that explains the absence.
+type buildFailureLog struct {
+	mu      sync.Mutex
+	entries map[string]string
+}
+
+// record files err against the agent's configured template. Nil receivers,
+// agents and errors are no-ops so call sites stay a single unconditional line.
+func (l *buildFailureLog) record(cfgAgent *config.Agent, err error) {
+	if l == nil || cfgAgent == nil || err == nil {
+		return
+	}
+	template := cfgAgent.QualifiedName()
+	if template == "" {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.entries == nil {
+		l.entries = make(map[string]string)
+	}
+	if _, seen := l.entries[template]; seen {
+		return
+	}
+	l.entries[template] = err.Error()
+}
+
+// get returns the recorded failure for a template, if any.
+func (l *buildFailureLog) get(template string) (string, bool) {
+	if l == nil {
+		return "", false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	cause, ok := l.entries[template]
+	return cause, ok
+}
+
+// recordBuildFailure files a per-agent build failure for this tick. See
+// buildFailureLog.
+func (p *agentBuildParams) recordBuildFailure(cfgAgent *config.Agent, err error) {
+	if p == nil {
+		return
+	}
+	p.buildFailures.record(cfgAgent, err)
+}
+
+// buildFailure reports the per-agent build failure recorded for a configured
+// template this tick, if any.
+func (p *agentBuildParams) buildFailure(template string) (string, bool) {
+	if p == nil {
+		return "", false
+	}
+	return p.buildFailures.get(template)
 }
 
 // hasCompleteSessionSnapshot reports whether a store-backed build has a
@@ -171,6 +247,7 @@ func newAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtime
 		beadNames:       make(map[string]string),
 		stderr:          stderr,
 		sessionProvider: cfg.Session.Provider,
+		buildFailures:   &buildFailureLog{},
 	}
 	if store != nil {
 		params.poolSessionCreateBudget = poolplan.NewCreateBudget(cfg.Daemon.MaxWakesPerTickOrDefault())
