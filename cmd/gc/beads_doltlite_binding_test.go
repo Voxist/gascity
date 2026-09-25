@@ -189,3 +189,107 @@ func TestNormalizeCanonicalBdScopeFilesDefaultsFreshDoltCityToDirectServer(t *te
 		t.Errorf("rig config.yaml dolt.mode = %q, want anything but proxied-server", cfgState.DoltMode)
 	}
 }
+
+// TestPreAndPostInitScopeDoltModeHonorExplicitProxiedOptIn is ga-m07q9's other
+// half: an explicit --beads-transport=proxied opt-in must still resolve to
+// "proxied-server", for both a city and a rig, at both the pre-init and
+// post-init metadata writes.
+//
+// The fix above (defaultFreshScopeDoltMode: "proxied-server" -> "server")
+// went further than the no-signal case it targeted. preInitScopeDoltMode and
+// postInitScopeDoltMode both read that same constant in their PROXIED
+// branches -- reached only once scopeUsesProxiedDoltMode /
+// scopeInitUsesProxiedDoltMode has already classified the scope as proxied
+// by an explicit signal, never the ambient default -- so flipping the
+// constant's value silently broke both call sites: they started reporting
+// "server" for a scope this same init pass had just told bd to create with
+// --proxied-server. Neither the per-hunk conflict screen nor the file audit
+// caught this; only re-tracing every reader of the constant did. The durable
+// fix is a second constant, explicitProxiedDoltMode, dedicated to the
+// already-classified-proxied branches so a future edit to the no-signal
+// default cannot silently retake this path -- this test pins that split the
+// way TestNormalizeCanonicalBdScopeFilesDefaultsFreshDoltCityToDirectServer
+// pins the no-signal default: on the actual functions and the actual
+// written artifact, not on either constant.
+//
+// This reproduces the regression: temporarily changing
+// preInitScopeDoltMode's and postInitScopeDoltMode's proxied branches back
+// to `return defaultFreshScopeDoltMode` (reverting explicitProxiedDoltMode)
+// makes every assertion below fail with "server" instead of
+// "proxied-server" -- verified by hand before this test was written, and the
+// mechanism this test exists to catch if it ever recurs.
+func TestPreAndPostInitScopeDoltModeHonorExplicitProxiedOptIn(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"dolt-city\"\nprefix = \"gc\"\n\n[[rigs]]\nname = \"frontend\"\npath = \"rigs/frontend\"\nprefix = \"fe\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigPath := filepath.Join(cityPath, "rigs", "frontend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// An explicit --beads-transport=proxied opt-in journals a pending scope
+	// in the providerScopeInitializing state with Intent.Transport ==
+	// "proxied" -- the real signal scopeUsesProxiedDoltMode's FIRST check
+	// reads (beads_provider_lifecycle.go:474), before the ambient default is
+	// ever consulted. This is what `gc init --beads-transport proxied` and
+	// `gc rig add --beads-transport proxied` actually record, and it holds
+	// (state stays providerScopeInitializing) across exactly the window both
+	// preInitScopeDoltMode and postInitScopeDoltMode run in.
+	for _, scope := range []string{cityPath, rigPath} {
+		if err := persistProviderScopeOwnership(cityPath, scope, providerScopeIntent{Transport: "proxied", Target: "local"}); err != nil {
+			t.Fatalf("persistProviderScopeOwnership(%s): %v", scope, err)
+		}
+	}
+
+	for _, tc := range []struct {
+		scope string
+		label string
+	}{
+		{cityPath, "city"},
+		{rigPath, "rig"},
+	} {
+		// Pure function-level checks first, with no metadata written yet:
+		// both the pre-init stamp (initAndHookDir's caller,
+		// beads_provider_lifecycle.go:889/891) and the post-init stamp
+		// (finalizeCanonicalBdScopeInit, beads_provider_lifecycle.go:2132)
+		// must independently resolve the opt-in to proxied.
+		preMode := preInitScopeDoltMode(cityPath, tc.scope)
+		if preMode != "proxied-server" {
+			t.Errorf("%s: preInitScopeDoltMode = %q, want proxied-server", tc.label, preMode)
+		}
+		postMode := postInitScopeDoltMode(cityPath, tc.scope)
+		if postMode != "proxied-server" {
+			t.Errorf("%s: postInitScopeDoltMode = %q, want proxied-server", tc.label, postMode)
+		}
+
+		// Artifact-level: the ACTUAL write finalizeCanonicalBdScopeInit makes
+		// once bd init has completed (enforceCanonicalScopeMetadataForInit,
+		// fed by postInitScopeDoltMode) must persist "proxied-server" to
+		// metadata.json, not silently downgrade to the no-signal default.
+		if err := enforceCanonicalScopeMetadataForInit(fsys.OSFS{}, tc.scope, "hq", postMode); err != nil {
+			t.Fatalf("%s: enforceCanonicalScopeMetadataForInit: %v", tc.label, err)
+		}
+		if got := readScopeMetadata(t, tc.scope).DoltMode; !strings.EqualFold(got, "proxied-server") {
+			t.Errorf("%s metadata.json dolt_mode = %q, want proxied-server", tc.label, got)
+		}
+
+		// config.yaml must still never carry "proxied-server" literally (D1:
+		// bd records the proxied binding in metadata.json only, and
+		// canonicalConfigDoltMode is what scrubs it before any config.yaml
+		// write) -- but the RESOLVED mode a later reconciliation pass would
+		// compute from what was just persisted must say proxied, not the
+		// no-signal default. persistedScopeDoltMode is exactly what
+		// scopeUsesProxiedDoltMode itself consults first.
+		if got := persistedScopeDoltMode(tc.scope); got != "proxied-server" {
+			t.Errorf("%s: persistedScopeDoltMode after write = %q, want proxied-server", tc.label, got)
+		}
+		if got := canonicalConfigDoltMode(persistedScopeDoltMode(tc.scope)); got != "" {
+			t.Errorf("%s: canonicalConfigDoltMode(persisted) = %q, want empty (never written to config.yaml literally)", tc.label, got)
+		}
+	}
+}
