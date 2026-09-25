@@ -130,12 +130,16 @@ type agentBuildParams struct {
 	sessionProvider string
 
 	// buildFailures collects the per-agent build errors that dropped a
-	// configured agent from the desired set this tick. It is a POINTER so the
-	// `local := *bp` copies taken by resolveTemplateForSessionBeadInfo and the
-	// pool realizer still record into the one log the build reads back from
-	// (and so agentBuildParams stays copyable — a sync.Mutex field would not
-	// survive that copy). unresolvedAgentTemplates drains it. May be nil in
-	// focused unit fixtures; every access is nil-safe.
+	// configured agent from the desired set this tick. It is a POINTER because
+	// buildFailureLog embeds a sync.Mutex, and go vet's copylocks check refuses
+	// a value field here ("assignment copies lock value to local:
+	// agentBuildParams contains buildFailureLog contains sync.Mutex") — every
+	// `local := *bp` copy (resolveTemplateForSessionBeadInfo) would otherwise
+	// fail to build. As it happens every recordBuildFailure call site holds the
+	// original *agentBuildParams, not a copy, so copy-safety was never
+	// load-bearing here; the pointer earns its keep solely by satisfying copylocks.
+	// unresolvedAgentTemplates drains it. May be nil in focused unit fixtures;
+	// every access is nil-safe.
 	buildFailures *buildFailureLog
 }
 

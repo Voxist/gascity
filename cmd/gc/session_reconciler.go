@@ -1398,9 +1398,14 @@ func wakeDemandOverridesSleepSuppression(
 // desiredState maps sessionName → TemplateParams for all agents that should
 // be running. Built by buildDesiredState from config + scale_check results.
 //
-// configuredNames is the set of ALL configured agent session names (including
-// suspended agents). Used to distinguish "orphaned" (removed from config)
-// from "suspended" (still in config, not runnable) when closing beads.
+// configuredNames is, despite its name, only the set of configured
+// named-session runtime names — configuredSessionNamesWithSnapshot
+// (session_beads.go) iterates cfg.NamedSessions, never cfg.Agents. It is
+// used to distinguish "orphaned" (removed from config) from "suspended"
+// (still in config, not runnable) when closing beads, but a suspended POOL
+// agent's session is never in this set and so is always labeled "orphaned"
+// here, not "suspended" (pre-existing; tracked as ga-z9nzk). See the same
+// caveat noted where the generic orphan drain reads this map below.
 //
 // Returns the number of start attempts issued or enqueued this tick.
 //
@@ -2434,6 +2439,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// and then tears the session down under them. Keep it; the
 					// level-triggered loop reconsiders once they detach. Only the
 					// config-drift path guarded attachment before this (ga-c8rck).
+					//
+					// This guard deliberately lives inside the `if providerAlive`
+					// arm above, not ahead of it: that placement is WHY it cannot
+					// strand a session. A provider that has gone away for good is
+					// handled by the !providerAlive branch instead, which drains
+					// through its own path regardless of attachment — so an
+					// attached session under a persistently dead runtime still
+					// gets torn down, it just doesn't route through here. Moving
+					// this block out of the providerAlive arm (e.g. hoisting it
+					// above the branch to cover both) would silently make a dead,
+					// unreachable provider's attached session un-drainable too.
 					//
 					// Suspension is exempt: it is an explicit operator
 					// instruction about this very agent, so a suspended agent, an
