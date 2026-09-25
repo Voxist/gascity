@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,7 +55,18 @@ func TestFreshScopeCanonicalDoltModeKeepsDoltliteOffTheProxiedDefault(t *testing
 	}
 }
 
-func TestFreshScopeCanonicalDoltModeStillDefaultsDoltCitiesToProxied(t *testing.T) {
+// TestFreshScopeCanonicalDoltModeDefaultsDoltCitiesToDirectServer was
+// TestFreshScopeCanonicalDoltModeStillDefaultsDoltCitiesToProxied, asserting
+// origin's af7ad8a0f default ("proxied-local bd-owned Dolt by default on
+// beads v1.3.0-rc.2"). This fork does not adopt that default (ga-m07q9):
+// config.Proxied stays defaulting false, and a scope with no persisted
+// dolt_mode and no other signal resolves to an ordinary gc-managed Dolt
+// server. Adapted (2026-09-25 resync) rather than dropped -- a direct,
+// function-level assertion on freshScopeCanonicalDoltMode for a plain
+// non-doltlite dolt city is still worth having alongside its sibling
+// TestFreshScopeCanonicalDoltModeKeepsDoltliteOffTheProxiedDefault, just
+// with the correct expectation.
+func TestFreshScopeCanonicalDoltModeDefaultsDoltCitiesToDirectServer(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
@@ -63,8 +75,8 @@ func TestFreshScopeCanonicalDoltModeStillDefaultsDoltCitiesToProxied(t *testing.
 		t.Fatal(err)
 	}
 
-	if got := freshScopeCanonicalDoltMode(cityPath); got != "proxied-server" {
-		t.Fatalf("freshScopeCanonicalDoltMode(fresh dolt city) = %q, want proxied-server", got)
+	if got := freshScopeCanonicalDoltMode(cityPath); got != "server" {
+		t.Fatalf("freshScopeCanonicalDoltMode(fresh dolt city) = %q, want server", got)
 	}
 }
 
@@ -115,5 +127,65 @@ func TestDoltliteScopeIsNotProviderOwnedProxied(t *testing.T) {
 	}
 	if owned {
 		t.Fatal("a doltlite city classified as a bd-owned proxied scope")
+	}
+}
+
+// TestNormalizeCanonicalBdScopeFilesDefaultsFreshDoltCityToDirectServer is
+// the ga-m07q9 invariant, asserted on disk rather than on any one constant
+// or function: a freshly initialized scope's persisted dolt_mode is
+// "server", not "proxied-server", unless the scope is explicitly marked
+// proxied. This fork does not adopt beads v1.3.0-rc.2's proxied-by-default
+// topology (af7ad8a0f) -- config.Proxied stays defaulting false, and a scope
+// with no persisted dolt_mode and no other signal must resolve to an
+// ordinary gc-managed Dolt server.
+//
+// freshScopeCanonicalDoltMode governs config.yaml's dolt.mode mirror;
+// defaultFreshScopeDoltMode governs metadata.json's dolt_mode field written
+// directly at scope-canonicalization time. Two artifacts, one policy, and a
+// fix to one does not imply the other is fixed -- this asserts both, through
+// normalizeCanonicalBdScopeFiles, the reconciliation path gc start/reload
+// and `gc rig add` actually run (cmd/gc/beads_provider_lifecycle.go:315,
+// cmd/gc/api_state.go:2590, cmd/gc/cmd_rig.go:340), not through
+// normalizeCanonicalBdScopeFilesForInit (a different, already-gated path
+// used by `gc init` directly).
+func TestNormalizeCanonicalBdScopeFilesDefaultsFreshDoltCityToDirectServer(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"dolt-city\"\nprefix = \"gc\"\n\n[[rigs]]\nname = \"frontend\"\npath = \"rigs/frontend\"\nprefix = \"fe\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigPath := filepath.Join(cityPath, "rigs", "frontend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	if err := normalizeCanonicalBdScopeFiles(cityPath, cfg, io.Discard); err != nil {
+		t.Fatalf("normalizeCanonicalBdScopeFiles: %v", err)
+	}
+
+	if got := readScopeMetadata(t, cityPath).DoltMode; !strings.EqualFold(got, "server") {
+		t.Errorf("city metadata.json dolt_mode = %q, want server", got)
+	}
+	if cfgState, ok, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "config.yaml")); err != nil {
+		t.Errorf("read city config.yaml: %v", err)
+	} else if ok && strings.EqualFold(cfgState.DoltMode, "proxied-server") {
+		t.Errorf("city config.yaml dolt.mode = %q, want anything but proxied-server", cfgState.DoltMode)
+	}
+
+	if got := readScopeMetadata(t, rigPath).DoltMode; !strings.EqualFold(got, "server") {
+		t.Errorf("rig metadata.json dolt_mode = %q, want server", got)
+	}
+	if cfgState, ok, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(rigPath, ".beads", "config.yaml")); err != nil {
+		t.Errorf("read rig config.yaml: %v", err)
+	} else if ok && strings.EqualFold(cfgState.DoltMode, "proxied-server") {
+		t.Errorf("rig config.yaml dolt.mode = %q, want anything but proxied-server", cfgState.DoltMode)
 	}
 }

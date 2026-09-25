@@ -2059,17 +2059,21 @@ func scopeInitUsesProxiedDoltMode(cityPath, dir string) bool {
 // itself what makes a scope provider-owned, and every later lifecycle op then
 // demands a proxy nobody ever started.
 //
-// The question is settled by the city's provider rather than by re-reading the
-// scope: on a city that is not bd-contract the proxied path is unavailable end
-// to end, so initDefaultRigBdStore created this store with `--server`. Every
-// other scope keeps the fresh proxied default — including one whose provider
-// just wrote metadata naming some other backend, which this same pass is in the
-// middle of canonicalising.
-func postInitScopeDoltMode(cityPath string) string {
-	if !providerUsesBdStoreContract(beadsProvider(cityPath)) {
-		return "server"
+// The question is settled the same way initDefaultRigBdStore decided which
+// flag to pass bd, not by the coarser "can this provider ever use the proxied
+// lane at all" check: providerUsesBdStoreContract is true for every bd-contract
+// city regardless of whether THIS scope actually opted into --proxied-server,
+// and reporting explicitProxiedDoltMode for all of them (as this function did
+// before this fix, via defaultFreshScopeDoltMode) claims a store is proxied
+// when initDefaultRigBdStore in fact passed it `--server` — the ordinary,
+// unsignaled case on this fork (ga-m07q9). scopeInitUsesProxiedDoltMode is the
+// exact predicate initDefaultRigBdStore itself branches on, so mirroring it
+// here is what keeps the two in agreement.
+func postInitScopeDoltMode(cityPath, dir string) string {
+	if scopeInitUsesProxiedDoltMode(cityPath, dir) {
+		return explicitProxiedDoltMode
 	}
-	return defaultFreshScopeDoltMode
+	return "server"
 }
 
 func initDefaultRigBdStore(cityPath, dir, prefix, doltDatabase string) error {
@@ -2125,7 +2129,7 @@ func finalizeCanonicalBdScopeInit(cityPath, dir, prefix, doltDatabase string) er
 	if strings.TrimSpace(doltDatabase) == "" {
 		doltDatabase = defaultScopeDoltDatabase(cityPath, dir, prefix)
 	}
-	freshDoltMode := postInitScopeDoltMode(cityPath)
+	freshDoltMode := postInitScopeDoltMode(cityPath, dir)
 	if isReservedManagedDoltDatabase(doltDatabase) {
 		if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase, freshDoltMode); err != nil {
 			return err
@@ -2997,10 +3001,40 @@ func enforceCanonicalScopeMetadataForInit(fs fsys.FS, scopeRoot, doltDatabase, f
 }
 
 // defaultFreshScopeDoltMode is the mode a genuinely fresh scope is initialized
-// into: bd's proxied-local UOW. Callers that run after bd init, or that are
-// themselves the init, pass this — the store they just created is proxied, so
-// the marker they write is a true statement about it.
-const defaultFreshScopeDoltMode = "proxied-server"
+// into. Callers that run after bd init, or that are themselves the init, pass
+// this so the marker they write is a true statement about the store they just
+// created.
+//
+// Upstream's origin (af7ad8a0f) sets this to "proxied-server": on
+// gastownhall/beads v1.3.0-rc.2+, a fresh bd init defaults to the
+// proxied-local UOW, so upstream's marker is a true statement about upstream.
+// This fork does not adopt that default (ga-m07q9): it pins a different
+// beads fork (Voxist/beads) with its own, pre-existing proxied-server
+// architecture, and config.Proxied stays defaulting false. A fresh bd init on
+// this fork's pinned beads does not default to proxied, so "proxied-server"
+// here would not be a true statement about what was just created — it would
+// be the same topology flip ga-m07q9 rejects, just written to metadata.json
+// instead of config.yaml (freshScopeCanonicalDoltMode is the config.yaml
+// mirror's equivalent guard). See
+// TestNormalizeCanonicalBdScopeFilesDefaultsFreshDoltCityToDirectServer
+// (cmd/gc/beads_doltlite_binding_test.go), which asserts this on the actual
+// written artifact rather than on this constant, so a future reintroduction
+// of the flip through any call site is caught regardless of shape.
+const defaultFreshScopeDoltMode = "server"
+
+// explicitProxiedDoltMode is the mode written for a scope that IS proxied —
+// by explicit --beads-transport=proxied intent, a persisted proxied marker,
+// or (before ga-m07q9) the ambient default. Unlike defaultFreshScopeDoltMode,
+// this value is NOT the fork's policy default and never changes with it: it
+// is a true statement about one specific scope's own resolved transport, so
+// it stays "proxied-server" regardless of what an unsignaled scope defaults
+// to. Callers reach this only from a classifier that already decided the
+// scope is proxied (scopeUsesProxiedDoltMode / scopeInitUsesProxiedDoltMode);
+// reusing defaultFreshScopeDoltMode in their branches instead — as
+// preInitScopeDoltMode and postInitScopeDoltMode both did until this fix —
+// silently loses the "proxied" answer the moment the fork's ambient default
+// changes, exactly the way ga-m07q9's edit here first broke both of them.
+const explicitProxiedDoltMode = "proxied-server"
 
 // preInitScopeDoltMode reports the dolt_mode startup normalization may stamp
 // on a scope that has no metadata yet and no store behind it.
@@ -3013,9 +3047,16 @@ const defaultFreshScopeDoltMode = "proxied-server"
 // provider-owned: the next lifecycle op then demands a proxied store nobody
 // ever created and the scope is refused for good. Deferring to the classifier
 // keeps what gc writes and what gc reads in agreement.
+//
+// The true branch is reached only when scopeUsesProxiedDoltMode has already
+// classified this scope as proxied — an explicit --beads-transport=proxied
+// intent or a persisted marker, never the ambient default (which resolves to
+// "server" on this fork, ga-m07q9) — so it reports explicitProxiedDoltMode,
+// not defaultFreshScopeDoltMode: the marker must match what was actually
+// decided for THIS scope, not the fork's unsignaled-default policy.
 func preInitScopeDoltMode(cityPath, dir string) string {
 	if scopeUsesProxiedDoltMode(cityPath, dir) {
-		return defaultFreshScopeDoltMode
+		return explicitProxiedDoltMode
 	}
 	return "server"
 }
@@ -3317,10 +3358,19 @@ func canonicalConfigDoltMode(mode string) string {
 }
 
 // freshScopeCanonicalDoltMode reports the mode a scope with no persisted
-// dolt_mode resolves to: server for an existing Dolt workspace (the
-// pre-dolt_mode legacy shape), the fresh proxied-local default otherwise. It
-// mirrors the hasDoltMetadata rule in scopeUsesProxiedDoltMode.
-func freshScopeCanonicalDoltMode(cityPath string) string {
+// dolt_mode resolves to. Every branch below currently answers "server" — an
+// existing Dolt workspace (the pre-dolt_mode legacy shape), a doltlite city,
+// and (ga-m07q9) this fork's unsignaled fresh-scope default all agree — but
+// each answers it for a distinct reason worth keeping separately documented:
+// this is config.yaml's mirror of the same no-signal policy
+// defaultFreshScopeDoltMode governs for metadata.json. Callers reach this
+// only once an explicit proxied opt-in (--beads-transport=proxied, or a
+// persisted proxied marker) has already been ruled out by their own
+// resolution (desiredCityDoltConfigState's persistedScopeDoltMode check,
+// scopeUsesProxiedDoltMode's classifier) — this function itself has no
+// opt-in branch and never needs one. It mirrors the hasDoltMetadata rule in
+// scopeUsesProxiedDoltMode.
+func freshScopeCanonicalDoltMode(cityPath string) string { //nolint:unparam // three branches, same current answer for three distinct reasons (ga-m07q9); collapsing would erase why each is server
 	if backend, ok, err := contract.ReadMetadataBackend(fsys.OSFS{}, scopeMetadataJSONPath(cityPath)); err == nil && ok && contract.IsDoltBackend(backend) {
 		return "server"
 	}
@@ -3334,7 +3384,15 @@ func freshScopeCanonicalDoltMode(cityPath string) string {
 	if cityUsesDoltliteBeadsBackend(cityPath) {
 		return "server"
 	}
-	return "proxied-server"
+	// This fork does not take upstream's proxied-by-default topology flip
+	// (ga-m07q9): config.Proxied stays defaulting false, so a scope with no
+	// persisted dolt_mode and no other signal resolves to an ordinary
+	// gc-managed Dolt server, not bd's proxied-local UOW. A city that wants
+	// the proxied lane opts in explicitly (an existing proxied-server
+	// dolt_mode, above, or one of the --beads-transport/--beads-target
+	// escape hatches) rather than getting it by default for having no
+	// opinion yet.
+	return "server"
 }
 
 func desiredRigDoltConfigState(cityPath string, rig config.Rig, cityState contract.ConfigState) contract.ConfigState {
