@@ -98,17 +98,7 @@ func TestNewSessionWithCommandAndEnv_PATHSurvivesZshenv(t *testing.T) {
 				t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
 			}
 
-			var body []byte
-			for range 50 {
-				if body, err = os.ReadFile(outFile); err == nil && len(body) > 0 {
-					break
-				}
-				time.Sleep(100 * time.Millisecond)
-			}
-			if err != nil || len(body) == 0 {
-				t.Fatalf("pane never wrote %s: %v", outFile, err)
-			}
-			got := string(body)
+			got := waitForFileContents(t, outFile, 5*time.Second)
 			if got == zshenvPATH {
 				t.Fatalf("pane saw the hostile ~/.zshenv PATH (%q): the caller's PATH was clobbered by the pane's default-shell startup file", got)
 			}
@@ -154,12 +144,10 @@ func TestNewSessionWithCommandAndEnv_PaneProcessIdentity(t *testing.T) {
 		}
 		var cmd string
 		var err error
-		for range 50 {
-			if cmd, err = tm.GetPaneCommand(session); err == nil && cmd != "" {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
+		waitForPaneCondition(t, 5*time.Second, "pane_current_command becomes non-empty", func() bool {
+			cmd, err = tm.GetPaneCommand(session)
+			return err == nil && cmd != ""
+		})
 		if err != nil {
 			t.Fatalf("GetPaneCommand: %v", err)
 		}
@@ -188,15 +176,37 @@ func TestNewSessionWithCommandAndEnv_PaneProcessIdentity(t *testing.T) {
 		// this is the actual production consumer (IsRuntimeRunning backs
 		// IsAgentAlive, WaitForCommand's fallback, and CheckSessionHealth).
 		var alive bool
-		for range 50 {
-			if alive = tm.IsRuntimeRunning(session, []string{"sleep"}); alive {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
+		waitForPaneCondition(t, 5*time.Second, "IsRuntimeRunning becomes true", func() bool {
+			alive = tm.IsRuntimeRunning(session, []string{"sleep"})
+			return alive
+		})
 		if !alive {
 			cmd, _ := tm.GetPaneCommand(session)
 			t.Errorf("IsRuntimeRunning(session, [\"sleep\"]) = false after compound command started (pane_current_command=%q); descendant walk did not find the real process", cmd)
 		}
 	})
+}
+
+// waitForPaneCondition polls check every 25ms until it returns true, failing
+// the test if that does not happen within timeout. Mirrors the timer+ticker
+// idiom this package's other integration tests already use for condition
+// waits (waitForFileContents, waitForProcessTargetsGone) rather than a fixed
+// sleep, so a slow-but-healthy run isn't penalized and a genuinely stuck one
+// still fails promptly.
+func waitForPaneCondition(t *testing.T, timeout time.Duration, describe string, check func() bool) {
+	t.Helper()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if check() {
+			return
+		}
+		select {
+		case <-timer.C:
+			t.Fatalf("%s did not become true within %s", describe, timeout)
+		case <-ticker.C:
+		}
+	}
 }
