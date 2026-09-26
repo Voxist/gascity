@@ -814,11 +814,6 @@ func TestBuildSupervisorServiceDataMissingSecretsFileIsNotAnError(t *testing.T) 
 	}
 }
 
-// TestBuildSupervisorServiceDataMalformedSecretsFileDegradesGracefully asserts
-// the fix for #5982: a malformed line in the secrets file does not block
-// service file generation (no error) and does not wipe out the entries that
-// parsed cleanly — only the malformed line itself is skipped, the good entry
-// still reaches ExtraEnv.
 // TestBuildSupervisorServiceDataMalformedSecretsFileDegradesGracefully
 // asserts the supervisor never fails to start over a bad secrets file
 // (buildSupervisorServiceData must not error), not that a malformed file's
