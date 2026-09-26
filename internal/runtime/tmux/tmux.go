@@ -590,43 +590,29 @@ func sessionEnvUnsetKeys(env map[string]string) []string {
 // it is a property of one command string, not of the session — which is why
 // markSessionEnvRemoved has to carry the same withholding forward.
 //
-// resetPath, when non-empty, re-asserts PATH verbatim as the last env
-// mutation before the real command runs. -e sets PATH in the session
+// resetPath, when non-empty, re-asserts PATH as a leading statement in the
+// pane's own shell syntax before command runs. -e sets PATH in the session
 // environment before the pane's shell forks, but the pane's *default shell*
-// (whatever $SHELL resolves to) still runs its own startup files before it
-// interprets this command string — a zsh ~/.zshenv that unconditionally
-// exports PATH (the common nvm/volta/asdf/fnm pattern) rebuilds it there,
-// discarding whatever -e supplied. Re-asserting PATH closes that gap the same
-// way this prefix already closes it for withheld keys.
-//
-// Unlike the -u-only case, a resetPath prefix wraps the whole original
-// command in `sh -c '<command>'` rather than prepending `env` directly onto
-// it: `env NAME=VALUE cmd` only applies to a single simple command, and
-// command here is caller-authored (agent.toml start_command, pack templates)
-// with no guarantee it isn't itself compound (`cd x && exec y`, `a; b`, its
-// own `VAR=val` prefix, ...) — env would misparse or break those. Wrapping in
-// sh -c makes the whole string one opaque unit that inherits the reasserted
-// env regardless of its own internal shape.
-//
-// When command is unambiguously a single external program invocation
-// (commandIsExecSafe), the wrap forces `sh -c 'exec <command>'` instead of
-// `sh -c '<command>'`. Every pane-liveness consumer in this package that
-// cares about process identity already tolerates a shell lingering as
-// pane_current_command with the real agent as its child — FindAgentPane,
-// IsRuntimeRunning/IsAgentAlive, WaitForCommand, and state_cache's
-// paneRuntimeState.processAlive all walk descendants for exactly this case
-// (it already happens for GC_AGENT_SLICE's systemd-run wrap and for a
-// caller's own "bash -c 'exec claude'" pattern). But whether a bare `sh -c`
-// actually exec-replaces itself for a lone simple command is the shell's own
-// tail-call optimization, not a POSIX guarantee — observed to hold for
-// macOS's /bin/sh (bash 3.2, posix mode) but not worth trusting across every
-// $SHELL this ever runs under. Forcing `exec` for the safe common case makes
-// the pane's process become the real command unconditionally, matching the
-// same explicit-exec convention the codebase already uses elsewhere, and
-// costs nothing: IsAgentRunning is the one liveness check with no descendant
-// fallback, but it is reachable only through EnsureSessionFresh's bare
-// NewSession path, which never calls this function.
-func withEnvUnsetPrefix(command string, unsetKeys []string, resetPath string) (string, error) {
+// still runs its own startup files before it interprets this command
+// string — a zsh ~/.zshenv that unconditionally exports PATH (the common
+// nvm/volta/asdf/fnm pattern) rebuilds it there, discarding whatever -e
+// supplied. tmux runs the whole command string via `$SHELL -c "<command>"`
+// (verified against tmux 3.4/3.7), so prepending a PATH assignment statement
+// re-asserts PATH after the startup file has already run, in the SAME shell
+// invocation that then goes on to interpret command — the interpreter,
+// exec-optimization behavior, and process identity are all whatever they
+// already were for command alone. shellBasename picks the assignment
+// syntax: the csh family (csh/tcsh) has no `export NAME=VALUE` form and uses
+// `setenv NAME VALUE` instead; every other shell this package recognizes
+// (sh, bash, zsh, ksh, dash, and fish 3.x, which gained a POSIX-compatible
+// `export` builtin) accepts POSIX-style `export NAME=VALUE`. An earlier
+// version of this fix wrapped command in `sh -c 'exec ...'` instead; that
+// forced every real start_command (which almost always carries quoted args
+// and so never qualified for the exec form) through `sh` instead of the
+// pane's actual $SHELL, a silent interpreter change, and `sh` itself had to
+// be resolved through the very PATH being reasserted. This shape needs
+// neither.
+func withEnvUnsetPrefix(command string, unsetKeys []string, resetPath, shellBasename string) (string, error) {
 	for _, key := range unsetKeys {
 		if !validEnvNameRe.MatchString(key) {
 			return "", fmt.Errorf("invalid environment variable name %q for tmux env -u", key)
@@ -638,80 +624,56 @@ func withEnvUnsetPrefix(command string, unsetKeys []string, resetPath string) (s
 	if command == "" {
 		return command, nil
 	}
-	var prefix string
-	for _, k := range unsetKeys {
-		prefix += " -u " + k
+	result := command
+	if len(unsetKeys) > 0 {
+		var flags string
+		for _, k := range unsetKeys {
+			flags += " -u " + k
+		}
+		result = "env" + flags + " " + result
 	}
-	if resetPath == "" {
-		return "env" + prefix + " " + command, nil
+	if resetPath != "" {
+		result = pathAssignmentStatement(shellBasename, resetPath) + result
 	}
-	prefix += " PATH=" + shellquote.Quote(resetPath)
-	inner := command
-	if commandIsExecSafe(command) {
-		inner = "exec " + command
-	}
-	return "env" + prefix + " sh -c " + shellquote.Quote(inner), nil
+	return result, nil
 }
 
-// shellControlChars are the characters whose presence means a raw command
-// string needs real shell grammar — lists (`;` `&`), pipelines (`|`),
-// substitution/expansion (backtick, `$`), redirection (`<` `>`), subshells or
-// braces (`(` `)` `{` `}`), an embedded newline, or quoting (`'` `"` `\`)
-// that a naive split would misparse. Distinct from internal/shellquote's own
-// metacharacter set, which answers "does this argument need quoting" (and so
-// includes whitespace); this answers "can this whole string be force-exec'd
-// as one external program" and must NOT include whitespace, since any
-// multi-word command legitimately contains it.
-const shellControlChars = ";&|`$<>(){}\n'\"\\"
-
-// shellBuiltinFirstWords are program names that name a shell builtin or
-// keyword rather than (necessarily) an external executable. `exec cd /x`
-// fails outright — `cd` has no meaning to exec, which only ever execve(2)s a
-// PATH-resolved external program — and forcing exec on `export X`, `. f`,
-// `source f`, `exit 0` and the rest would either fail the same way or run
-// silently different code (`echo`/`printf`/`test`/`kill` all have external
-// equivalents on every OS this runs on, but exec would use the external one
-// instead of the shell's own, which is not what wrapping the caller's
-// command was supposed to change). This is shell grammar — a small, fixed,
-// well-known set the POSIX and bash manuals define, not application
-// judgment — so a first word in this set disqualifies command from
-// commandIsExecSafe the same way a control character does.
-var shellBuiltinFirstWords = map[string]struct{}{
-	// POSIX special builtins (XCU 2.14).
-	"break": {}, ":": {}, ".": {}, "continue": {}, "eval": {}, "exec": {},
-	"exit": {}, "export": {}, "readonly": {}, "return": {}, "set": {},
-	"shift": {}, "times": {}, "trap": {}, "unset": {},
-	// Common regular builtins with no guarantee the caller meant the
-	// external equivalent, if one even exists on the target host.
-	"cd": {}, "true": {}, "false": {}, "test": {}, "[": {}, "kill": {},
-	"fg": {}, "bg": {}, "jobs": {}, "wait": {}, "umask": {}, "ulimit": {},
-	"type": {}, "hash": {}, "read": {}, "getopts": {}, "local": {},
-	"declare": {}, "typeset": {}, "let": {}, "alias": {}, "unalias": {},
-	"command": {}, "builtin": {}, "source": {}, "echo": {}, "printf": {},
-	"pwd": {},
+// pathAssignmentStatement returns a leading shell statement, in
+// shellBasename's own syntax, that sets PATH to path — meant to be prepended
+// to a command string the pane's own $SHELL will interpret via `-c`, so the
+// statement and command run in the same shell invocation. See
+// withEnvUnsetPrefix for why this works and shellquote.Quote for the
+// escaping, which was verified byte-identical across bash, zsh, dash, fish
+// and csh/tcsh for values containing `'`, `$`, backticks and spaces.
+func pathAssignmentStatement(shellBasename, path string) string {
+	switch shellBasename {
+	case "csh", "tcsh":
+		return "setenv PATH " + shellquote.Quote(path) + "; "
+	default:
+		return "export PATH=" + shellquote.Quote(path) + "; "
+	}
 }
 
-// commandIsExecSafe reports whether command is unambiguously a single
-// external program invocation, safe to run as `exec <command>` inside the
-// sh -c wrap withEnvUnsetPrefix builds. It errs conservative: any shell
-// control character, a leading NAME=VALUE assignment word (which `exec`
-// cannot run — unlike `env`, a leading assignment is not part of exec's own
-// syntax, so `exec FOO=bar cmd` tries to execute a program literally named
-// "FOO=bar"), or a first word naming a shell builtin/keyword disqualifies
-// command. A conservative false here just falls back to the plain (non-exec)
-// wrap, which is the behavior this function's caller already had.
-func commandIsExecSafe(command string) bool {
-	if command == "" || strings.ContainsAny(command, shellControlChars) {
-		return false
+// resolvePaneShellBasename returns the basename of the shell that will
+// interpret the pane's command string, for pathAssignmentStatement's syntax
+// choice. tmux resolves its own default-shell from $SHELL in the
+// environment the tmux server itself was started under (or the passwd
+// database), not from this session's -e overrides — env["SHELL"] is
+// consulted first only because a caller that explicitly sets SHELL in an
+// agent's env most likely intends it to match the pane's actual shell too.
+// Falling back to os.Getenv("SHELL") mirrors tmux's own resolution for the
+// common case; an empty or unrecognized result defaults
+// pathAssignmentStatement to the POSIX `export` form, which covers every
+// shell this package expects to see except the rare csh/tcsh case.
+func resolvePaneShellBasename(env map[string]string) string {
+	shellPath := env["SHELL"]
+	if shellPath == "" {
+		shellPath = os.Getenv("SHELL")
 	}
-	first, _, _ := strings.Cut(command, " ")
-	if eq := strings.IndexByte(first, '='); eq > 0 && validEnvNameRe.MatchString(first[:eq]) {
-		return false
+	if shellPath == "" {
+		return ""
 	}
-	if _, isBuiltin := shellBuiltinFirstWords[first]; isBuiltin {
-		return false
-	}
-	return true
+	return filepath.Base(shellPath)
 }
 
 func validateUnsetEnvKeys(env map[string]string) error {
@@ -838,7 +800,7 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	// host whose shell profile rebuilds PATH unconditionally. This prefix is a
 	// property of THIS command only.
 	var err error
-	command, err = withEnvUnsetPrefix(command, unsetKeys, env["PATH"])
+	command, err = withEnvUnsetPrefix(command, unsetKeys, env["PATH"], resolvePaneShellBasename(env))
 	if err != nil {
 		return err
 	}
