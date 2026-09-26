@@ -957,7 +957,8 @@ func cityGrantsProviderOwnershipToFreshScopes(cityPath string, cityInitialized b
 // providerOwnershipIntentFromPersistedCity derives the topology a new rig
 // inherits from the city's durable beads binding. City.toml is only a legacy
 // compatibility input, so it must not reclassify an existing direct city as
-// the fresh proxied-local default.
+// the fresh direct-local default (ga-m07q9: this fork does not adopt
+// upstream's proxied-local-by-default topology).
 func providerOwnershipIntentFromPersistedCity(cityPath string) (providerScopeIntent, error) {
 	metadata, ok, err := contract.LoadMetadataState(fsys.OSFS{}, scopeMetadataJSONPath(cityPath))
 	if err != nil {
@@ -969,8 +970,9 @@ func providerOwnershipIntentFromPersistedCity(cityPath string) (providerScopeInt
 	if contract.IsDoltBackend(strings.TrimSpace(metadata.Backend)) && strings.EqualFold(strings.TrimSpace(metadata.DoltMode), "embedded") {
 		// Embedded Beads metadata has no server transport a fresh rig can
 		// inherit. Preserve the city exactly as it is and initialize the new
-		// provider-owned rig with the normal fresh-scope default.
-		return providerScopeIntent{Transport: "proxied", Target: "local"}, nil
+		// provider-owned rig with the normal fresh-scope default (direct/
+		// local, ga-m07q9 — not upstream's proxied/local default).
+		return providerScopeIntent{Transport: "direct", Target: "local"}, nil
 	}
 	state, configured, err := contract.ReadConfigState(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "config.yaml"))
 	if err != nil {

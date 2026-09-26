@@ -2787,7 +2787,7 @@ func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase, freshDolt
 	}
 	doltMode := freshDoltMode
 	if strings.TrimSpace(doltMode) == "" {
-		doltMode = "proxied-server"
+		doltMode = defaultFreshScopeDoltMode
 	}
 	if metadataExists && (metadataBackend == "legacy" || metadataBackend == "dolt") {
 		doltMode = "server"
@@ -3324,10 +3324,12 @@ func desiredCityDoltConfigState(cityPath string, cityDolt config.DoltConfig, cit
 	if mode := persistedScopeDoltMode(cityPath); mode != "" {
 		return contract.ConfigState{IssuePrefix: cityPrefix, EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified, DoltMode: mode}
 	}
-	// Fresh bd/Dolt scopes default to Beads' proxied-local UOW path. A Dolt
-	// scope whose metadata predates dolt_mode is not a candidate for it: it is
-	// a legacy direct server, and stamping the fresh default on it moved a
-	// GC-managed workspace onto bd's proxy over the same data dir.
+	// Fresh bd/Dolt scopes default to direct/server (ga-m07q9 — this fork does
+	// not adopt upstream's proxied-local-by-default topology). A Dolt scope
+	// whose metadata predates dolt_mode is not a candidate for the fresh
+	// default either: it is a legacy direct server, and stamping the fresh
+	// default on it moved a GC-managed workspace onto bd's proxy over the
+	// same data dir.
 	return contract.ConfigState{
 		IssuePrefix:    cityPrefix,
 		EndpointOrigin: contract.EndpointOriginManagedCity,

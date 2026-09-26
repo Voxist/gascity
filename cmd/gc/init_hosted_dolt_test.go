@@ -904,9 +904,12 @@ version = "^1.4"
 	if err := persistFreshProviderOwnership(city, hostedDoltInitOptions{}); err != nil {
 		t.Fatalf("persistFreshProviderOwnership: %v", err)
 	}
+	// No selector was requested, so this exercises the no-signal fresh-scope
+	// default, which is direct/local (ga-m07q9) — not upstream's proxied/local
+	// default (B1: a plain `gc init` must not create a proxied-server city).
 	entry, owned, err := providerScopeOwnership(city, city)
-	if err != nil || !owned || entry.State != providerScopeInitializing || entry.Intent != (providerScopeIntent{Transport: "proxied", Target: "local"}) {
-		t.Fatalf("ownership = (%+v, %t, %v), want pending proxied/local", entry, owned, err)
+	if err != nil || !owned || entry.State != providerScopeInitializing || entry.Intent != (providerScopeIntent{Transport: "direct", Target: "local"}) {
+		t.Fatalf("ownership = (%+v, %t, %v), want pending direct/local", entry, owned, err)
 	}
 	for _, name := range []string{"metadata.json", "config.yaml"} {
 		if _, err := os.Stat(filepath.Join(city, ".beads", name)); !os.IsNotExist(err) {

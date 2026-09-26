@@ -2973,8 +2973,11 @@ func TestDoRigAdd_AdoptWithBdContractProvider_NonAdoptControlInvokesInit(t *test
 	var initCalls []string
 	initDirIfReadyInitAndHookDir = func(_, dir, _ string) error {
 		initCalls = append(initCalls, dir)
+		// No selector was requested, so the fresh rig gets the no-signal
+		// default, which is direct/local (ga-m07q9) -- not upstream's
+		// proxied/local default.
 		entry, owned, err := providerScopeOwnership(cityPath, dir)
-		if err != nil || !owned || entry.State != providerScopeInitializing || entry.Intent != (providerScopeIntent{Transport: "proxied", Target: "local"}) {
+		if err != nil || !owned || entry.State != providerScopeInitializing || entry.Intent != (providerScopeIntent{Transport: "direct", Target: "local"}) {
 			t.Fatalf("new rig ownership before provider init = (%+v, %t, %v)", entry, owned, err)
 		}
 		return nil

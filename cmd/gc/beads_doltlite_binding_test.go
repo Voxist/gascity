@@ -293,3 +293,112 @@ func TestPreAndPostInitScopeDoltModeHonorExplicitProxiedOptIn(t *testing.T) {
 		}
 	}
 }
+
+// TestPersistFreshProviderOwnershipDefaultsFreshCityAndRigToDirectServer is a
+// B1 regression guard (2026-09-27 independent review of resync PR #215): the
+// two invariant tests above build a city and normalize its scope files
+// directly (normalizeCanonicalBdScopeFiles), which never goes through the
+// actual `gc init` journal. That gap is exactly why B1 shipped undetected:
+// applySelectorToCityConfig and providerOwnershipIntent
+// (cmd/gc/init_hosted_dolt.go) still passed contract.InitIntent{Transport:
+// "proxied", Target: "local"} as ResolveInitIntent's provider-default
+// argument -- upstream's rejected topology (ga-m07q9) -- so a PLAIN `gc init`
+// with no selector journaled the city (and every fresh rig `gc init`
+// initializes alongside it) as pending proxied/local, and
+// scopeUsesProxiedDoltMode's FIRST check reads that journal entry before any
+// ga-m07q9 guard ever runs. persistFreshProviderOwnership is the real entry
+// point `gc init` calls to write that journal; postInitScopeDoltMode is the
+// real function initDefaultRigBdStore consults to decide `bd init --server`
+// vs `--proxied-server`. This test exercises both together, for the city and
+// a rig `gc init` would initialize with it, so the invariant is pinned on
+// the actual init path rather than on a scope-file-only shortcut.
+func TestPersistFreshProviderOwnershipDefaultsFreshCityAndRigToDirectServer(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"dolt-city\"\nprefix = \"gc\"\n[beads]\nprovider = \"bd\"\n\n[[rigs]]\nname = \"frontend\"\npath = \"rigs/frontend\"\nprefix = \"fe\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigPath := filepath.Join(cityPath, "rigs", "frontend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// No selector requested: this is the no-signal `gc init` a brand new city
+	// gets by default.
+	if err := persistFreshProviderOwnership(cityPath, hostedDoltInitOptions{}); err != nil {
+		t.Fatalf("persistFreshProviderOwnership: %v", err)
+	}
+
+	if entry, owned, err := providerScopeOwnership(cityPath, cityPath); err != nil || !owned || entry.Intent.Transport != "direct" {
+		t.Errorf("city journaled intent = (%+v, %t, %v), want direct transport", entry, owned, err)
+	}
+	if entry, owned, err := providerScopeOwnership(cityPath, rigPath); err != nil || !owned || entry.Intent.Transport != "direct" {
+		t.Errorf("rig journaled intent = (%+v, %t, %v), want direct transport", entry, owned, err)
+	}
+
+	if got := postInitScopeDoltMode(cityPath, cityPath); got != "server" {
+		t.Errorf("city postInitScopeDoltMode = %q, want server", got)
+	}
+	if got := postInitScopeDoltMode(cityPath, rigPath); got != "server" {
+		t.Errorf("rig postInitScopeDoltMode = %q, want server", got)
+	}
+}
+
+// TestEnsureFreshRigProviderOwnershipDefaultsEmbeddedCityRigToDirectServer is
+// B1's other half: a fresh rig added under an ALREADY provider-owned city
+// whose own backend is embedded Dolt (no server transport for the rig to
+// inherit) went through providerOwnershipIntentFromPersistedCity's separate
+// "embedded" branch (cmd/gc/beads_scope_ownership.go), which had its own,
+// independent copy of the same rejected proxied/local default. This exercises
+// that branch through ensureFreshRigProviderOwnership, the real entry point a
+// `gc rig add` (or a second `gc init` pass) under an established city runs.
+func TestEnsureFreshRigProviderOwnershipDefaultsEmbeddedCityRigToDirectServer(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "fresh")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"backend":"dolt","dolt_mode":"embedded"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte("gc.endpoint_origin: managed_city\ndolt.mode: embedded\ndolt.auto-start: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\n[beads]\nprovider = \"bd\"\n[[rigs]]\nname = \"fresh\"\npath = \"rigs/fresh\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Mark the city itself provider-owned and ready: an embedded city with no
+	// ownership journal or handoff marker is NOT provider-owned
+	// (cityScopeProviderOwned), which routes a fresh rig onto the legacy
+	// path instead and never reaches the branch under test. A provider-owned
+	// embedded city is the scenario providerOwnershipIntentFromPersistedCity's
+	// embedded branch actually exists for.
+	if err := persistProviderScopeOwnership(cityPath, cityPath, providerScopeIntent{Transport: "direct", Target: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := markProviderScopeOwnershipReady(cityPath, cityPath); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureFreshRigProviderOwnership(cityPath, cfg); err != nil {
+		t.Fatalf("ensureFreshRigProviderOwnership: %v", err)
+	}
+
+	entry, owned, err := providerScopeOwnership(cityPath, rigPath)
+	if err != nil || !owned || entry.Intent.Transport != "direct" {
+		t.Fatalf("rig journaled intent under embedded city = (%+v, %t, %v), want direct transport", entry, owned, err)
+	}
+	if got := postInitScopeDoltMode(cityPath, rigPath); got != "server" {
+		t.Errorf("rig postInitScopeDoltMode under embedded city = %q, want server", got)
+	}
+}

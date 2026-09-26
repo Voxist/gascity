@@ -629,7 +629,9 @@ func TestFinalizeInitRecordsProviderOwnershipBeforeReadinessPreflight(t *testing
 		opts initFinalizeOptions
 		want providerScopeIntent
 	}{
-		{name: "default", opts: initFinalizeOptions{commandName: "gc init"}, want: providerScopeIntent{Transport: "proxied", Target: "local"}},
+		// No selector: the no-signal default is direct/local (ga-m07q9), not
+		// upstream's proxied/local default.
+		{name: "default", opts: initFinalizeOptions{commandName: "gc init"}, want: providerScopeIntent{Transport: "direct", Target: "local"}},
 		{name: "direct external", opts: initFinalizeOptions{commandName: "gc init", hostedDolt: hostedDoltInitOptions{Host: "127.0.0.1", Port: "3306", Database: "new_city", ProjectID: "new-city", Transport: "direct", Target: "external"}}, want: providerScopeIntent{Transport: "direct", Target: "external"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -692,8 +694,10 @@ func TestFinalizeInitRecordsProviderOwnershipBeforeDependencyFailure(t *testing.
 	if code := finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{commandName: "gc init"}); code != 1 {
 		t.Fatalf("finalizeInit = %d, want dependency failure: %s", code, stderr.String())
 	}
+	// No selector: the no-signal default is direct/local (ga-m07q9), not
+	// upstream's proxied/local default.
 	entry, owned, err := providerScopeOwnership(cityPath, cityPath)
-	if err != nil || !owned || entry.State != providerScopeInitializing || entry.Intent != (providerScopeIntent{Transport: "proxied", Target: "local"}) {
+	if err != nil || !owned || entry.State != providerScopeInitializing || entry.Intent != (providerScopeIntent{Transport: "direct", Target: "local"}) {
 		t.Fatalf("pending ownership after dependency failure = (%+v, %t, %v)", entry, owned, err)
 	}
 }

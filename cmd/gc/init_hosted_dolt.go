@@ -102,7 +102,12 @@ func (o hostedDoltInitOptions) applySelectorToCityConfig(cfg *config.City) error
 	if transport == "" && target == "" && o.enabled() {
 		transport, target = "direct", "external"
 	}
-	resolved, err := contract.ResolveInitIntent(contract.InitScopeState{}, contract.InitIntent{Transport: transport, Target: target}, contract.InitIntent{}, configDoltInitIntent(*cfg), contract.InitIntent{Transport: "proxied", Target: "local"})
+	// The no-signal fresh-scope default is direct/local (ga-m07q9): this fork
+	// does not adopt upstream's proxied-local-by-default topology (that
+	// default belongs to a different beads pin, gastownhall/beads v1.3.0, not
+	// this fork's Voxist/beads). An explicit selector or persisted city
+	// config still wins ahead of this fallback.
+	resolved, err := contract.ResolveInitIntent(contract.InitScopeState{}, contract.InitIntent{Transport: transport, Target: target}, contract.InitIntent{}, configDoltInitIntent(*cfg), contract.InitIntent{Transport: "direct", Target: "local"})
 	if err != nil {
 		return err
 	}
@@ -263,7 +268,9 @@ func (o hostedDoltInitOptions) providerOwnershipIntent(city config.City) (provid
 	if transport == "" && target == "" && o.enabled() {
 		transport, target = "direct", "external"
 	}
-	resolved, err := contract.ResolveInitIntent(contract.InitScopeState{}, contract.InitIntent{Transport: transport, Target: target}, contract.InitIntent{}, configDoltInitIntent(city), contract.InitIntent{Transport: "proxied", Target: "local"})
+	// See applySelectorToCityConfig: the no-signal fresh-scope default is
+	// direct/local (ga-m07q9), not upstream's proxied-local default.
+	resolved, err := contract.ResolveInitIntent(contract.InitScopeState{}, contract.InitIntent{Transport: transport, Target: target}, contract.InitIntent{}, configDoltInitIntent(city), contract.InitIntent{Transport: "direct", Target: "local"})
 	if err != nil {
 		return providerScopeIntent{}, err
 	}
