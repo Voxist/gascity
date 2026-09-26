@@ -107,6 +107,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A tmux agent pane's default shell could silently clobber the PATH the
+  controller assigned it.** `internal/runtime/tmux` sets `-e PATH=...` on
+  `new-session`, but the pane's `$SHELL` still runs its own startup files
+  (a zsh `~/.zshenv` that unconditionally rebuilds PATH, the common
+  nvm/volta/asdf/fnm pattern) before it ever interprets the command tmux was
+  told to run, discarding whatever `-e` supplied. The agent then launched
+  against whichever `bd`/`gc` its rebuilt PATH resolved to instead of the
+  caller's, so it ran against the wrong city and its bead never closed. CI
+  never saw this: it runs the pane's command under bash with no `~/.zshenv`.
+  `withEnvUnsetPrefix` now re-asserts PATH as the last env mutation
+  immediately before the real command runs, wrapping it in
+  `env PATH=... sh -c '<command>'` so a caller-authored compound command
+  (`cd x && exec y`) still runs as one opaque unit instead of being split by
+  `env`'s single-simple-command argv parsing.
+
 - **`gc doctor`'s `deploy-provenance` check can assert provenance again.** It
   read the running binary's revision from `debug.ReadBuildInfo`'s
   `vcs.revision` only. Since `-buildvcs=false` reached the `build` target on
