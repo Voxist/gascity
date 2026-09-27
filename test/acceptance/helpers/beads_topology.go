@@ -392,13 +392,21 @@ func BeadsTopologies() []BeadsTopology {
 	directExternalDoctorGaps := []string{"order-firing-current"}
 	return []BeadsTopology{
 		{
-			Name:                "M1-proxied-local",
-			Doc:                 "the default: no selector at all, bd owns a proxy and its Dolt child",
+			Name: "M1-proxied-local",
+			// This fork does not adopt the proxied-local no-signal default
+			// (ga-m07q9): a `gc init` with no selector now produces
+			// M2-direct-local's shape, not this one. M1 stays as the explicit
+			// --beads-transport=proxied opt-in's evidence -- the shape still
+			// exists and still has to work end to end -- rather than the
+			// no-signal default upstream originally wrote it to prove.
+			Doc:                 "the explicit opt-in: --beads-transport=proxied, bd owns a proxy and its Dolt child",
 			City:                proxiedLocalScope,
 			Rig:                 proxiedLocalScope,
 			CityStore:           proxiedProviderStore,
 			CityStoreNativeLane: proxiedNativeStore,
-			InitArgs:            func(*ExternalDolt) []string { return nil },
+			InitArgs: func(*ExternalDolt) []string {
+				return []string{"--beads-transport", "proxied", "--beads-target", "local"}
+			},
 		},
 		{
 			Name:                     "M2-direct-local",

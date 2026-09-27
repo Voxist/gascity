@@ -75,7 +75,7 @@ func newProxiedNativeCity(t *testing.T, bdPath, doltPath string) *proxiedNativeC
 		root:   city.Dir,
 	}
 	t.Cleanup(func() { c.retire(t) })
-	city.InitNoStart("claude")
+	city.InitNoStartWithBeadsTransport("claude", "proxied", "local")
 	assertProxiedScope(t, c.root, "the lifecycle city")
 	c.proxyDir = proxiedScopeProxyRoot(t, c.root)
 	return c

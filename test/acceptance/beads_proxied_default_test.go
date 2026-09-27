@@ -1,13 +1,15 @@
 //go:build acceptance_a
 
-// Proxied-local default acceptance test.
+// Proxied explicit-opt-in acceptance test.
 //
-// This is the front-door proof for the beads v1.3.0 proxied-local
-// default: a fresh `gc init` with no transport selector must produce a store
-// whose Dolt process belongs to bd (a `bd db-proxy-child` supervising a
-// `dolt sql-server` under the scope's proxy root), and every ordinary command
-// — doctor, bd, rig add, start, status, stop — must work against it and leave
-// no process behind.
+// This is the front-door proof for the beads proxied-local topology this
+// fork supports as an explicit opt-in, not as the no-signal default (upstream
+// v1.3.0 makes it the default; this fork rejects that flip, ga-m07q9): a
+// fresh `gc init --beads-transport proxied --beads-target local` must
+// produce a store whose Dolt process belongs to bd (a `bd db-proxy-child`
+// supervising a `dolt sql-server` under the scope's proxy root), and every
+// ordinary command — doctor, bd, rig add, start, status, stop — must work
+// against it and leave no process behind.
 //
 // It needs a real bd with proxied-server support and a real dolt, so it skips
 // when either is missing. Everything else is the ordinary Tier A harness: the
@@ -665,8 +667,8 @@ func TestBeadsProxiedDefault(t *testing.T) {
 		}
 	})
 
-	t.Run("init-default", func(t *testing.T) {
-		city.Init("claude")
+	t.Run("init-explicit-proxied", func(t *testing.T) {
+		city.InitWithBeadsTransport("claude", "proxied", "local")
 
 		assertProxiedScope(t, cityRoot, "city")
 
@@ -1293,7 +1295,7 @@ func runProxiedNativeLaneGates(t *testing.T, bdPath, doltPath string) {
 			t.Errorf("the fork-gate city's processes outlived the lane:\n%s", strings.Join(leaked, "\n"))
 		}
 	})
-	city.InitNoStart("claude")
+	city.InitNoStartWithBeadsTransport("claude", "proxied", "local")
 
 	t.Run("precondition-gc-initialised", func(t *testing.T) {
 		assertProxiedScope(t, cityRoot, "the fork-gate city")

@@ -78,6 +78,33 @@ func (c *City) Init(provider string) {
 	})
 }
 
+// InitWithBeadsTransport runs gc init with an explicit --beads-transport/
+// --beads-target selector (non-interactive). Callers that need to prove a
+// specific topology's evidence — rather than whatever the no-signal default
+// currently resolves to (ga-m07q9) — use this instead of Init so the
+// selector, not an ambient default, is what the test is honestly exercising.
+func (c *City) InitWithBeadsTransport(provider, transport, target string) {
+	c.t.Helper()
+	args := []string{"init", "--skip-provider-readiness"}
+	if provider != "" {
+		args = append(args, "--provider", provider)
+	}
+	if transport != "" {
+		args = append(args, "--beads-transport", transport)
+	}
+	if target != "" {
+		args = append(args, "--beads-target", target)
+	}
+	args = append(args, c.Dir)
+	out, err := RunGC(c.Env, "", args...)
+	if err != nil {
+		c.t.Fatalf("gc init --beads-transport %s --beads-target %s failed: %v\n%s", transport, target, err, out)
+	}
+	c.t.Cleanup(func() {
+		c.cleanupRuntime()
+	})
+}
+
 // InitNoStart runs gc init without registering or starting the city.
 func (c *City) InitNoStart(provider string) {
 	c.t.Helper()
@@ -89,6 +116,31 @@ func (c *City) InitNoStart(provider string) {
 	out, err := RunGC(c.Env, "", args...)
 	if err != nil {
 		c.t.Fatalf("gc init --no-start failed: %v\n%s", err, out)
+	}
+	c.t.Cleanup(func() {
+		c.cleanupScaffoldOnly()
+	})
+}
+
+// InitNoStartWithBeadsTransport is InitNoStart plus an explicit
+// --beads-transport/--beads-target selector — see InitWithBeadsTransport for
+// why a fixture proving a specific topology needs this instead of InitNoStart.
+func (c *City) InitNoStartWithBeadsTransport(provider, transport, target string) {
+	c.t.Helper()
+	args := []string{"init", "--skip-provider-readiness", "--no-start"}
+	if provider != "" {
+		args = append(args, "--provider", provider)
+	}
+	if transport != "" {
+		args = append(args, "--beads-transport", transport)
+	}
+	if target != "" {
+		args = append(args, "--beads-target", target)
+	}
+	args = append(args, c.Dir)
+	out, err := RunGC(c.Env, "", args...)
+	if err != nil {
+		c.t.Fatalf("gc init --no-start --beads-transport %s --beads-target %s failed: %v\n%s", transport, target, err, out)
 	}
 	c.t.Cleanup(func() {
 		c.cleanupScaffoldOnly()
