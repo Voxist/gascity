@@ -130,7 +130,7 @@ const (
 	// pin schema-skewed against the beads library gc actually links). Taken
 	// from the candidate digest TestCurrentWorkflowsMatchPolicy printed for
 	// the changed workflow, not pasted from the review.
-	expectedCIExecutionHash     = "727efd485c97aa5e7c5692b94af66465bd795f0a014a637011ef0a09f3bb7167"
+	expectedCIExecutionHash     = "4efe23d8619f3bbb14c3ede7c1b2d160e84c37f1107aae8afbd14a51848c113e"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
