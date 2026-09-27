@@ -545,3 +545,33 @@ func TestValidateDurationsBadChatSessionsGracePeriod(t *testing.T) {
 		t.Errorf("warning should mention bad value: %s", warnings[0])
 	}
 }
+
+func TestValidateBDCompatibilityAcceptsKnownAndEmpty(t *testing.T) {
+	for _, value := range []string{"", BeadsBDCompatibility104, BeadsBDCompatibility105} {
+		cfg := &City{Beads: BeadsConfig{BDCompatibility: value}}
+		if err := ValidateBDCompatibility(cfg, "city.toml"); err != nil {
+			t.Fatalf("ValidateBDCompatibility(%q): %v", value, err)
+		}
+	}
+	if err := ValidateBDCompatibility(nil, "city.toml"); err != nil {
+		t.Fatalf("ValidateBDCompatibility(nil): %v", err)
+	}
+}
+
+func TestValidateBDCompatibilityRejectsUnknown(t *testing.T) {
+	for _, value := range []string{"bd-1.0.6", "bd-1.05", "1.0.5", "BD-1.0.5", " bd-1.0.5"} {
+		t.Run(value, func(t *testing.T) {
+			cfg := &City{Beads: BeadsConfig{BDCompatibility: value}}
+			err := ValidateBDCompatibility(cfg, "city.toml")
+			if err == nil {
+				t.Fatalf("ValidateBDCompatibility(%q) = nil, want error", value)
+			}
+			msg := err.Error()
+			for _, want := range []string{"city.toml", "[beads] bd_compatibility", "\"" + value + "\"", BeadsBDCompatibility104, BeadsBDCompatibility105} {
+				if !strings.Contains(msg, want) {
+					t.Fatalf("error = %q, want substring %q", msg, want)
+				}
+			}
+		})
+	}
+}
