@@ -123,7 +123,14 @@ const (
 	// origin's beads-topology-acceptance job, so the merged ci.yml hashes to
 	// neither side's prior pin. Taken from the candidate digest
 	// TestCurrentWorkflowsMatchPolicy printed for the merged workflow.
-	expectedCIExecutionHash     = "1968f7a23880e4c2ff5e368b267204dbd0448045eff41fea81a3f5a8bac34b84"
+	// Re-derived again (B2, independent review of PR #215): beads-topology-
+	// acceptance and beads-proxied-native-acceptance's bd-build steps now
+	// resolve BD_REPO/BD_SOURCE_REF/BD_VERSION from deps.env instead of
+	// gastownhall/beads @ BD_CURRENT_REF (ga-m07q9's item 1 -- that upstream
+	// pin schema-skewed against the beads library gc actually links). Taken
+	// from the candidate digest TestCurrentWorkflowsMatchPolicy printed for
+	// the changed workflow, not pasted from the review.
+	expectedCIExecutionHash     = "727efd485c97aa5e7c5692b94af66465bd795f0a014a637011ef0a09f3bb7167"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
