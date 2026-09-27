@@ -605,13 +605,11 @@ func sessionEnvUnsetKeys(env map[string]string) []string {
 // syntax: the csh family (csh/tcsh) has no `export NAME=VALUE` form and uses
 // `setenv NAME VALUE` instead; every other shell this package recognizes
 // (sh, bash, zsh, ksh, dash, and fish 3.x, which gained a POSIX-compatible
-// `export` builtin) accepts POSIX-style `export NAME=VALUE`. An earlier
-// version of this fix wrapped command in `sh -c 'exec ...'` instead; that
-// forced every real start_command (which almost always carries quoted args
-// and so never qualified for the exec form) through `sh` instead of the
-// pane's actual $SHELL, a silent interpreter change, and `sh` itself had to
-// be resolved through the very PATH being reasserted. This shape needs
-// neither.
+// `export` builtin) accepts POSIX-style `export NAME=VALUE`.
+//
+// The PATH statement is prepended last, so it lands first in the returned
+// string: `env` is resolved via resetPath too, same as command's own
+// binary. A resetPath missing /usr/bin can leave `env` unresolvable.
 func withEnvUnsetPrefix(command string, unsetKeys []string, resetPath, shellBasename string) (string, error) {
 	for _, key := range unsetKeys {
 		if !validEnvNameRe.MatchString(key) {
