@@ -511,9 +511,11 @@ jobs:
   # running 13 minutes later, having burned 28 of the 35 on a contended one.
   # The whole matrix does not belong on a PR gate at that cost.
   #
-  # M1-proxied-local is the shape this branch makes the default, so it is the
-  # evidence worth paying for. M5-legacy-gc-managed costs nothing today (it
-  # skips, see below) and is listed so the gap stays visible in the log rather
+  # M1-proxied-local is this fork's explicit --beads-transport=proxied
+  # opt-in (ga-m07q9: the no-signal default is M2-direct-local's shape here,
+  # not M1's), so it is the evidence worth paying for. M5-legacy-gc-managed
+  # costs nothing today (it skips, see below) and is listed so the gap stays
+  # visible in the log rather
   # than being quietly forgotten. M2, the external shapes (M3a, M3b, M4), M6
   # and M7 run in NO job: this comment used to leave them to "a fuller
   # scheduled run", and no such run exists (nightly.yml runs no matrix). That
@@ -560,31 +562,38 @@ jobs:
       GC_ACCEPTANCE_TOPOLOGY_MATRIX: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      # bd-version is empty: this job builds bd from BD_CURRENT_REF below,
-      # exactly as contract-acceptance-current does, so the bd on PATH and the
-      # beads library in go.mod reach the same upstream commit.
+      # bd-version is empty: this job builds bd from BD_REPO @ BD_SOURCE_REF
+      # below, the same fork pin every other job uses (ga-m07q9 vp-kpoi) --
+      # NOT BD_CURRENT_REF/gastownhall/beads, which is contract-acceptance-
+      # current's own upstream cross-version contract pin, a different bd
+      # entirely (schema 66, no --proxied-server semantics this fork ships).
+      # Building from the upstream pin here made these jobs schema-skewed
+      # against the beads library actually linked into gc (schema 67) and
+      # panic before any acceptance test ran.
       - uses: ./.github/actions/setup-gascity-ubuntu
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ""
           install-claude-cli: "false"
-      - name: Resolve bd current pin
+      - name: Resolve bd fork pin
         id: bd
         run: |
           set -euo pipefail
-          ref="$(grep -E '^BD_CURRENT_REF=' deps.env | cut -d= -f2)"
-          ver="$(grep -E '^BD_CURRENT_VERSION=' deps.env | cut -d= -f2)"
-          if [ -z "$ref" ] || [ -z "$ver" ]; then
-            echo "::error::BD_CURRENT_REF/BD_CURRENT_VERSION missing or empty in deps.env" >&2
+          repo="$(grep -E '^BD_REPO=' deps.env | cut -d= -f2)"
+          ref="$(grep -E '^BD_SOURCE_REF=' deps.env | cut -d= -f2)"
+          ver="$(grep -E '^BD_VERSION=' deps.env | cut -d= -f2)"
+          if [ -z "$repo" ] || [ -z "$ref" ] || [ -z "$ver" ]; then
+            echo "::error::BD_REPO/BD_SOURCE_REF/BD_VERSION missing or empty in deps.env" >&2
             exit 1
           fi
+          echo "repo=$repo" >> "$GITHUB_OUTPUT"
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
           echo "ver=$ver" >> "$GITHUB_OUTPUT"
       - name: Build bd ${{ steps.bd.outputs.ver }} from source @ ${{ steps.bd.outputs.ref }}
         run: |
           set -euo pipefail
           src="${RUNNER_TEMP}/beads-src"
-          git clone --filter=blob:none https://github.com/gastownhall/beads "$src"
+          git clone --filter=blob:none "https://github.com/${{ steps.bd.outputs.repo }}" "$src"
           git -C "$src" checkout "${{ steps.bd.outputs.ref }}"
           mkdir -p "${HOME}/.local/bin"
           go -C "$src" build -tags gms_pure_go -o "${HOME}/.local/bin/bd" ./cmd/bd
@@ -602,7 +611,7 @@ jobs:
             exit 1
           fi
           dolt version
-      - name: Proxied-default acceptance
+      - name: Proxied explicit-opt-in acceptance
         run: |
           set -euo pipefail
           go test -tags acceptance_a -timeout 30m -count=1 -v \
@@ -675,30 +684,33 @@ jobs:
       GC_REQUIRE_ACCEPTANCE_TOOLING: "1"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      # bd-version is empty: this job builds bd from BD_CURRENT_REF below,
-      # exactly as the topology job does.
+      # bd-version is empty: this job builds bd from BD_REPO @ BD_SOURCE_REF
+      # below, exactly as the topology job does -- NOT BD_CURRENT_REF/
+      # gastownhall/beads (see that job's comment for why).
       - uses: ./.github/actions/setup-gascity-ubuntu
         with:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ""
           install-claude-cli: "false"
-      - name: Resolve bd current pin
+      - name: Resolve bd fork pin
         id: bd
         run: |
           set -euo pipefail
-          ref="$(grep -E '^BD_CURRENT_REF=' deps.env | cut -d= -f2)"
-          ver="$(grep -E '^BD_CURRENT_VERSION=' deps.env | cut -d= -f2)"
-          if [ -z "$ref" ] || [ -z "$ver" ]; then
-            echo "::error::BD_CURRENT_REF/BD_CURRENT_VERSION missing or empty in deps.env" >&2
+          repo="$(grep -E '^BD_REPO=' deps.env | cut -d= -f2)"
+          ref="$(grep -E '^BD_SOURCE_REF=' deps.env | cut -d= -f2)"
+          ver="$(grep -E '^BD_VERSION=' deps.env | cut -d= -f2)"
+          if [ -z "$repo" ] || [ -z "$ref" ] || [ -z "$ver" ]; then
+            echo "::error::BD_REPO/BD_SOURCE_REF/BD_VERSION missing or empty in deps.env" >&2
             exit 1
           fi
+          echo "repo=$repo" >> "$GITHUB_OUTPUT"
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
           echo "ver=$ver" >> "$GITHUB_OUTPUT"
       - name: Build bd ${{ steps.bd.outputs.ver }} from source @ ${{ steps.bd.outputs.ref }}
         run: |
           set -euo pipefail
           src="${RUNNER_TEMP}/beads-src"
-          git clone --filter=blob:none https://github.com/gastownhall/beads "$src"
+          git clone --filter=blob:none "https://github.com/${{ steps.bd.outputs.repo }}" "$src"
           git -C "$src" checkout "${{ steps.bd.outputs.ref }}"
           mkdir -p "${HOME}/.local/bin"
           go -C "$src" build -tags gms_pure_go -o "${HOME}/.local/bin/bd" ./cmd/bd
