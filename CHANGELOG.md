@@ -177,6 +177,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A tmux agent pane's default shell could silently clobber the PATH the
+  controller assigned it, on every start and every warm relaunch.**
+  `internal/runtime/tmux` sets `-e PATH=...` on `new-session`, but the
+  pane's `$SHELL` still runs its own startup files (a zsh `~/.zshenv` that
+  unconditionally rebuilds PATH, the common nvm/volta/asdf/fnm pattern)
+  before it ever interprets the command tmux was told to run, discarding
+  whatever `-e` supplied. The agent then launched against whichever
+  `bd`/`gc` its rebuilt PATH resolved to instead of the caller's, so it ran
+  against the wrong city and its bead never closed. `respawn-pane`
+  (the warm-relaunch path `Provider.Relaunch` uses) runs the command
+  through the same pane shell and had the identical exposure on every
+  relaunch, not only at create. CI never saw either case: it runs the
+  pane's command under bash with no `~/.zshenv`.
+
+  `withEnvUnsetPrefix` now re-asserts PATH by prepending a plain
+  assignment statement — `export PATH=...; ` for every shell this package
+  recognizes except the csh family, which gets `setenv PATH ...; ` instead
+  — directly onto the command string, rather than wrapping it in a second
+  shell invocation. tmux runs the whole command through
+  `$SHELL -c "<command>"`, so the prepended statement executes in that
+  same shell, after its startup files already ran and before the caller's
+  own command does; the interpreter and the caller's command are otherwise
+  untouched. (An earlier version of this fix wrapped non-trivial commands
+  in `sh -c 'exec <command>'`; that forced real start commands — which
+  almost always carry quoted arguments and so never qualified for the
+  `exec` form — through `/bin/sh` instead of the pane's actual `$SHELL`, a
+  silent interpreter change, and `sh` itself had to be resolved through
+  the very PATH being reasserted, so a workspace PATH without `/bin` could
+  no longer start a session at all. The new shape needs neither a second
+  shell nor any classification of the caller's command, and applies
+  identically to `respawnAgent`.)
+
 - **`gc doctor`'s `deploy-provenance` check can assert provenance again.** It
   read the running binary's revision from `debug.ReadBuildInfo`'s
   `vcs.revision` only. Since `-buildvcs=false` reached the `build` target on
