@@ -185,7 +185,7 @@ func TestBuildOrderDispatcherStampsFleetRole(t *testing.T) {
 	t.Setenv(config.FleetRoleEnvVar, "")
 	cfg := &config.City{CityRole: config.CityRoleConfig{Role: orders.RoleFleetHost}}
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcherFromOrderSet(nil, t.TempDir(), cfg, []orders.Order{runOnOrder("sweep", orders.RunOnFleetHost)}, events.Discard, &stderr)
+	ad := buildOrderDispatcherFromOrderSet(nil, t.TempDir(), cfg, []orders.Order{runOnOrder("sweep", orders.RunOnFleetHost)}, events.Discard, &stderr, "")
 	if ad == nil {
 		t.Fatal("buildOrderDispatcherFromOrderSet returned nil")
 	}
@@ -199,7 +199,7 @@ func TestBuildOrderDispatcherStampsFleetRole(t *testing.T) {
 func TestBuildOrderDispatcherFleetRoleFromEnv(t *testing.T) {
 	t.Setenv(config.FleetRoleEnvVar, orders.RoleFleetHost)
 	var stderr bytes.Buffer
-	ad := buildOrderDispatcherFromOrderSet(nil, t.TempDir(), &config.City{}, []orders.Order{runOnOrder("sweep", orders.RunOnFleetHost)}, events.Discard, &stderr)
+	ad := buildOrderDispatcherFromOrderSet(nil, t.TempDir(), &config.City{}, []orders.Order{runOnOrder("sweep", orders.RunOnFleetHost)}, events.Discard, &stderr, "")
 	if ad == nil {
 		t.Fatal("buildOrderDispatcherFromOrderSet returned nil")
 	}
@@ -256,7 +256,7 @@ func TestOrderDispatchRunOnFromScannedCity(t *testing.T) {
 		t.Run(tc.role, func(t *testing.T) {
 			cityDir, cfg := newRunOnScanCity(t, tc.role)
 			var stderr bytes.Buffer
-			ad, snapshot := buildOrderDispatcherWithSnapshot(nil, cityDir, cfg, events.Discard, &stderr, "test")
+			ad, snapshot := buildOrderDispatcherWithSnapshot(nil, cityDir, cfg, events.Discard, &stderr, "test", "")
 			if ad == nil {
 				t.Fatalf("nil dispatcher; stderr: %s", stderr.String())
 			}
@@ -309,7 +309,7 @@ func TestBuildOrderDispatcherLogsIgnoredFleetRoleEnv(t *testing.T) {
 	t.Setenv(config.FleetRoleEnvVar, "fleet")
 	var stderr bytes.Buffer
 	ad := buildOrderDispatcherFromOrderSet(nil, t.TempDir(), &config.City{},
-		[]orders.Order{runOnOrder("sweep", orders.RunOnFleetHost)}, events.Discard, &stderr)
+		[]orders.Order{runOnOrder("sweep", orders.RunOnFleetHost)}, events.Discard, &stderr, "")
 	if ad == nil {
 		t.Fatal("buildOrderDispatcherFromOrderSet returned nil")
 	}
@@ -326,7 +326,7 @@ func TestBuildOrderDispatcherSilentForValidFleetRoleEnv(t *testing.T) {
 	t.Setenv(config.FleetRoleEnvVar, orders.RoleFleetHost)
 	var stderr bytes.Buffer
 	buildOrderDispatcherFromOrderSet(nil, t.TempDir(), &config.City{},
-		[]orders.Order{runOnOrder("sweep", orders.RunOnFleetHost)}, events.Discard, &stderr)
+		[]orders.Order{runOnOrder("sweep", orders.RunOnFleetHost)}, events.Discard, &stderr, "")
 	if strings.Contains(stderr.String(), "not a known city role") {
 		t.Fatalf("stderr = %q, want no warning for a valid env value", stderr.String())
 	}

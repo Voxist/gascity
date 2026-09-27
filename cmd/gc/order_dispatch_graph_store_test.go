@@ -362,7 +362,7 @@ func TestOrderDispatchConstructorDeliversRoutesToTheWispBirth(t *testing.T) {
 	graphStore.IDPrefix = "gcg"
 
 	var rec memRecorder
-	od := buildOrderDispatcherFromOrderSet(messagingSplitRoutes(graphStore), cityPath, cfg, []orders.Order{a}, &rec, io.Discard)
+	od := buildOrderDispatcherFromOrderSet(messagingSplitRoutes(graphStore), cityPath, cfg, []orders.Order{a}, &rec, io.Discard, "")
 	m, ok := od.(*memoryOrderDispatcher)
 	if !ok {
 		t.Fatalf("buildOrderDispatcherFromOrderSet returned %T, want *memoryOrderDispatcher", od)

@@ -1939,37 +1939,42 @@ func TestCityRuntimeRunStartupOrderDispatchPanicIsRecovered(t *testing.T) {
 }
 
 func TestOrderTrackingSweepWatchdogClosesAllStaleTracking(t *testing.T) {
-	// #2168: the watchdog must clear stale tracking beads for EVERY order, not
-	// just order-tracking-sweep's own. The old narrow scope only swept the
-	// sweep order's tracking to bootstrap it, relying on order-tracking-sweep
-	// to then clean the rest — a single-point-of-failure that jammed every
-	// order when slow reconciler cycles kept that one order from firing. The
-	// staleAfter cutoff still protects in-flight dispatches regardless of order.
+	// #2168: the watchdog must clear dead-controller tracking beads for EVERY
+	// order, not just order-tracking-sweep's own. The old narrow scope only
+	// swept the sweep order's tracking to bootstrap it, relying on
+	// order-tracking-sweep to then clean the rest — a single-point-of-failure
+	// that jammed every order. Under ADR-0130 D1 the markers are stamped with
+	// their controller's generation at creation, so a marker naming a dead
+	// controller closes immediately, with no age clock involved.
 	store := beads.NewMemStore()
+	foreign := map[string]string{orders.GenerationMetadataKey: "ctrl-old"}
 	sweepTracking, err := store.Create(beads.Bead{
-		Title:  "order:" + orderTrackingSweepOrder,
-		Labels: []string{"order-run:" + orderTrackingSweepOrder, labelOrderTracking},
+		Title:    "order:" + orderTrackingSweepOrder,
+		Labels:   []string{"order-run:" + orderTrackingSweepOrder, labelOrderTracking},
+		Metadata: foreign,
 	})
 	if err != nil {
 		t.Fatalf("Create(sweep): %v", err)
 	}
 	mergeTracking, err := store.Create(beads.Bead{
-		Title:  "order:pr-merge-queue",
-		Labels: []string{"order-run:pr-merge-queue", labelOrderTracking},
+		Title:    "order:pr-merge-queue",
+		Labels:   []string{"order-run:pr-merge-queue", labelOrderTracking},
+		Metadata: foreign,
 	})
 	if err != nil {
 		t.Fatalf("Create(merge): %v", err)
 	}
 
 	cr := &CityRuntime{
-		cityName:            "test-city",
-		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
-		standaloneCityStore: store,
-		stdout:              io.Discard,
-		stderr:              io.Discard,
-		logPrefix:           "gc test",
+		cityName:             "test-city",
+		cfg:                  &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		controllerGeneration: "ctrl-test-live",
+		standaloneCityStore:  store,
+		stdout:               io.Discard,
+		stderr:               io.Discard,
+		logPrefix:            "gc test",
 	}
-	cr.runOrderTrackingSweepWatchdog(time.Now().Add(orderTrackingSweepWatchdogStaleAfter + time.Second))
+	cr.runOrderTrackingSweepWatchdog(time.Now().Add(time.Second))
 
 	gotSweep, err := store.Get(sweepTracking.ID)
 	if err != nil {
@@ -1995,6 +2000,7 @@ func TestOrderTrackingSweepWatchdogUsesCloseBudget(t *testing.T) {
 			Title:     fmt.Sprintf("order:stale-%d", i),
 			Labels:    []string{fmt.Sprintf("order-run:stale-%d", i), labelOrderTracking},
 			Ephemeral: true,
+			Metadata:  map[string]string{orders.GenerationMetadataKey: "ctrl-old"},
 		})
 		if err != nil {
 			t.Fatalf("Create(stale-%d): %v", i, err)
@@ -2003,14 +2009,15 @@ func TestOrderTrackingSweepWatchdogUsesCloseBudget(t *testing.T) {
 	}
 
 	cr := &CityRuntime{
-		cityName:            "test-city",
-		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
-		standaloneCityStore: store,
-		stdout:              io.Discard,
-		stderr:              io.Discard,
-		logPrefix:           "gc test",
+		cityName:             "test-city",
+		cfg:                  &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		controllerGeneration: "ctrl-test-live",
+		standaloneCityStore:  store,
+		stdout:               io.Discard,
+		stderr:               io.Discard,
+		logPrefix:            "gc test",
 	}
-	cr.runOrderTrackingSweepWatchdog(time.Now().Add(orderTrackingSweepWatchdogStaleAfter + time.Second))
+	cr.runOrderTrackingSweepWatchdog(time.Now().Add(time.Second))
 
 	closed := 0
 	for _, id := range ids {
@@ -2029,10 +2036,12 @@ func TestOrderTrackingSweepWatchdogUsesCloseBudget(t *testing.T) {
 
 func TestOrderTrackingSweepWatchdogAllowsSweepOrderToCleanStaleTracking(t *testing.T) {
 	store := beads.NewMemStore()
+	foreign := map[string]string{orders.GenerationMetadataKey: "ctrl-old"}
 	sweepTracking, err := store.Create(beads.Bead{
 		Title:     "order:" + orderTrackingSweepOrder,
 		Labels:    []string{"order-run:" + orderTrackingSweepOrder, labelOrderTracking},
 		Ephemeral: true,
+		Metadata:  foreign,
 	})
 	if err != nil {
 		t.Fatalf("Create(sweep): %v", err)
@@ -2041,20 +2050,22 @@ func TestOrderTrackingSweepWatchdogAllowsSweepOrderToCleanStaleTracking(t *testi
 		Title:     "order:pr-merge-queue",
 		Labels:    []string{"order-run:pr-merge-queue", labelOrderTracking},
 		Ephemeral: true,
+		Metadata:  foreign,
 	})
 	if err != nil {
 		t.Fatalf("Create(stale merge): %v", err)
 	}
 
 	cr := &CityRuntime{
-		cityName:            "test-city",
-		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
-		standaloneCityStore: store,
-		stdout:              io.Discard,
-		stderr:              io.Discard,
-		logPrefix:           "gc test",
+		cityName:             "test-city",
+		cfg:                  &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		controllerGeneration: "ctrl-test-live",
+		standaloneCityStore:  store,
+		stdout:               io.Discard,
+		stderr:               io.Discard,
+		logPrefix:            "gc test",
 	}
-	cr.runOrderTrackingSweepWatchdog(sweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter + time.Second))
+	cr.runOrderTrackingSweepWatchdog(sweepTracking.CreatedAt.Add(time.Second))
 
 	if got, err := store.Get(sweepTracking.ID); err != nil {
 		t.Fatalf("Get(sweep): %v", err)
@@ -2121,6 +2132,7 @@ func TestOrderTrackingSweepWatchdogClosesRigStoreSweepTracking(t *testing.T) {
 		Title:     "order:" + orderTrackingSweepOrder + ":rig:frontend",
 		Labels:    []string{"order-run:" + orderTrackingSweepOrder + ":rig:frontend", labelOrderTracking},
 		Ephemeral: true,
+		Metadata:  map[string]string{orders.GenerationMetadataKey: "ctrl-old"},
 	})
 	if err != nil {
 		t.Fatalf("Create(rig sweep): %v", err)
@@ -2146,16 +2158,17 @@ func TestOrderTrackingSweepWatchdogClosesRigStoreSweepTracking(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "frontend")
 	cr := &CityRuntime{
-		cityPath:            cityPath,
-		cityName:            "test-city",
-		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}, Rigs: []config.Rig{{Name: "frontend", Path: rigPath}}},
-		standaloneCityStore: cityStore,
-		standaloneRigStores: map[string]beads.Store{"frontend": rigStore},
-		stdout:              io.Discard,
-		stderr:              io.Discard,
-		logPrefix:           "gc test",
+		cityPath:             cityPath,
+		cityName:             "test-city",
+		cfg:                  &config.City{Workspace: config.Workspace{Name: "test-city"}, Rigs: []config.Rig{{Name: "frontend", Path: rigPath}}},
+		controllerGeneration: "ctrl-test-live",
+		standaloneCityStore:  cityStore,
+		standaloneRigStores:  map[string]beads.Store{"frontend": rigStore},
+		stdout:               io.Discard,
+		stderr:               io.Discard,
+		logPrefix:            "gc test",
 	}
-	cr.runOrderTrackingSweepWatchdog(rigSweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter + time.Millisecond))
+	cr.runOrderTrackingSweepWatchdog(rigSweepTracking.CreatedAt.Add(time.Second))
 
 	gotRig, err := rigStore.Get(rigSweepTracking.ID)
 	if err != nil {
@@ -2187,6 +2200,7 @@ func TestOrderTrackingSweepWatchdogFallsBackToConfiguredRigStore(t *testing.T) {
 		Title:     "order:" + orderTrackingSweepOrder,
 		Labels:    []string{"order-run:" + orderTrackingSweepOrder, labelOrderTracking},
 		Ephemeral: true,
+		Metadata:  map[string]string{orders.GenerationMetadataKey: "ctrl-old"},
 	})
 	if err != nil {
 		t.Fatalf("Create(city sweep): %v", err)
@@ -2196,6 +2210,7 @@ func TestOrderTrackingSweepWatchdogFallsBackToConfiguredRigStore(t *testing.T) {
 		Title:     "order:" + orderTrackingSweepOrder + ":rig:frontend",
 		Labels:    []string{"order-run:" + orderTrackingSweepOrder + ":rig:frontend", labelOrderTracking},
 		Ephemeral: true,
+		Metadata:  map[string]string{orders.GenerationMetadataKey: "ctrl-old"},
 	})
 	if err != nil {
 		t.Fatalf("Create(rig sweep): %v", err)
@@ -2221,16 +2236,17 @@ func TestOrderTrackingSweepWatchdogFallsBackToConfiguredRigStore(t *testing.T) {
 	})
 
 	cr := &CityRuntime{
-		cityPath:            cityPath,
-		cityName:            "test-city",
-		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}, Rigs: []config.Rig{{Name: "frontend", Path: rigPath}}},
-		standaloneCityStore: cityStore,
-		standaloneRigStores: map[string]beads.Store{},
-		stdout:              io.Discard,
-		stderr:              io.Discard,
-		logPrefix:           "gc test",
+		cityPath:             cityPath,
+		cityName:             "test-city",
+		cfg:                  &config.City{Workspace: config.Workspace{Name: "test-city"}, Rigs: []config.Rig{{Name: "frontend", Path: rigPath}}},
+		controllerGeneration: "ctrl-test-live",
+		standaloneCityStore:  cityStore,
+		standaloneRigStores:  map[string]beads.Store{},
+		stdout:               io.Discard,
+		stderr:               io.Discard,
+		logPrefix:            "gc test",
 	}
-	cr.runOrderTrackingSweepWatchdog(rigSweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter + time.Millisecond))
+	cr.runOrderTrackingSweepWatchdog(rigSweepTracking.CreatedAt.Add(time.Second))
 
 	gotRig, err := rigStore.Get(rigSweepTracking.ID)
 	if err != nil {
