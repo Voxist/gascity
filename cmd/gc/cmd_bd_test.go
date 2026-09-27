@@ -1431,12 +1431,20 @@ func TestFreshManagedBdCityInitSeedsPinnedHQDatabaseAndKeepsGCPrefix(t *testing.
 	cityPath := setupFreshManagedBdWaitTestCity(t)
 	bdPath := waitTestRealBDPath(t)
 
+	// The no-signal `gc init` default is direct/local (ga-m07q9): this fork
+	// does not adopt upstream's proxied-local-by-default topology. The
+	// city's ownership (provider-owned via persistFreshProviderOwnership,
+	// so bd owns the Dolt lifecycle) is unaffected -- that came in with the
+	// upstream merge itself, not with the ga-m07q9 transport-axis decision
+	// -- only dolt_mode changes: "server", not "proxied-server". The HQ
+	// database naming and gc bead prefix checks below are unaffected either
+	// way and still hold.
 	mode, ok, err := contract.ReadDoltMode(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "metadata.json"))
 	if err != nil || !ok {
 		t.Fatalf("ReadDoltMode(metadata): mode=%q ok=%v err=%v", mode, ok, err)
 	}
-	if mode != "proxied-server" {
-		t.Fatalf("metadata dolt_mode = %q, want proxied-server", mode)
+	if mode != "server" {
+		t.Fatalf("metadata dolt_mode = %q, want server", mode)
 	}
 	database, ok, err := contract.ReadDoltDatabase(fsys.OSFS{}, filepath.Join(cityPath, ".beads", "metadata.json"))
 	if err != nil || !ok || database != "hq" {
