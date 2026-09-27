@@ -605,24 +605,11 @@ func sessionEnvUnsetKeys(env map[string]string) []string {
 // syntax: the csh family (csh/tcsh) has no `export NAME=VALUE` form and uses
 // `setenv NAME VALUE` instead; every other shell this package recognizes
 // (sh, bash, zsh, ksh, dash, and fish 3.x, which gained a POSIX-compatible
-// `export` builtin) accepts POSIX-style `export NAME=VALUE`. An earlier
-// version of this fix wrapped command in `sh -c 'exec ...'` instead; that
-// forced every real start_command (which almost always carries quoted args
-// and so never qualified for the exec form) through `sh` instead of the
-// pane's actual $SHELL, a silent interpreter change, and `sh` itself had to
-// be resolved through the very PATH being reasserted. This shape needs
-// neither.
+// `export` builtin) accepts POSIX-style `export NAME=VALUE`.
 //
-// Ordering matters when both prefixes apply: the PATH assignment statement
-// is prepended LAST, so it ends up first in the returned string, ahead of
-// the `env -u ...` prefix. The `env` binary that applies `-u` is therefore
-// itself looked up via resetPath, not via whatever PATH the pane had before
-// — the same requirement command's own binary already had. A resetPath
-// that omits the directory holding `env` (typically /usr/bin) makes the
-// shell report "command not found" (exit 127) before command ever runs.
-// Callers that pass both unsetKeys and resetPath must keep resetPath
-// workable for this reason; it is an existing constraint on resetPath, not
-// a new failure mode introduced by combining the two prefixes.
+// The PATH statement is prepended last, so it lands first in the returned
+// string: `env` is resolved via resetPath too, same as command's own
+// binary. A resetPath missing /usr/bin can leave `env` unresolvable.
 func withEnvUnsetPrefix(command string, unsetKeys []string, resetPath, shellBasename string) (string, error) {
 	for _, key := range unsetKeys {
 		if !validEnvNameRe.MatchString(key) {
