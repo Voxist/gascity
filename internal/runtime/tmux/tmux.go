@@ -585,24 +585,95 @@ func sessionEnvUnsetKeys(env map[string]string) []string {
 	return keys
 }
 
-// withEnvUnsetPrefix prefixes command with `env -u KEY ...` so the process tmux
-// execs starts without those vars. This covers the INITIAL exec only — it is a
-// property of one command string, not of the session — which is why
+// withEnvUnsetPrefix prefixes command with `env -u KEY ...` so the process
+// tmux execs starts without those vars. This covers the INITIAL exec only —
+// it is a property of one command string, not of the session — which is why
 // markSessionEnvRemoved has to carry the same withholding forward.
-func withEnvUnsetPrefix(command string, unsetKeys []string) (string, error) {
+//
+// resetPath, when non-empty, re-asserts PATH as a leading statement in the
+// pane's own shell syntax before command runs. -e sets PATH in the session
+// environment before the pane's shell forks, but the pane's *default shell*
+// still runs its own startup files before it interprets this command
+// string — a zsh ~/.zshenv that unconditionally exports PATH (the common
+// nvm/volta/asdf/fnm pattern) rebuilds it there, discarding whatever -e
+// supplied. tmux runs the whole command string via `$SHELL -c "<command>"`
+// (verified against tmux 3.4/3.7), so prepending a PATH assignment statement
+// re-asserts PATH after the startup file has already run, in the SAME shell
+// invocation that then goes on to interpret command — the interpreter,
+// exec-optimization behavior, and process identity are all whatever they
+// already were for command alone. shellBasename picks the assignment
+// syntax: the csh family (csh/tcsh) has no `export NAME=VALUE` form and uses
+// `setenv NAME VALUE` instead; every other shell this package recognizes
+// (sh, bash, zsh, ksh, dash, and fish 3.x, which gained a POSIX-compatible
+// `export` builtin) accepts POSIX-style `export NAME=VALUE`. An earlier
+// version of this fix wrapped command in `sh -c 'exec ...'` instead; that
+// forced every real start_command (which almost always carries quoted args
+// and so never qualified for the exec form) through `sh` instead of the
+// pane's actual $SHELL, a silent interpreter change, and `sh` itself had to
+// be resolved through the very PATH being reasserted. This shape needs
+// neither.
+func withEnvUnsetPrefix(command string, unsetKeys []string, resetPath, shellBasename string) (string, error) {
 	for _, key := range unsetKeys {
 		if !validEnvNameRe.MatchString(key) {
 			return "", fmt.Errorf("invalid environment variable name %q for tmux env -u", key)
 		}
 	}
-	if len(unsetKeys) == 0 || command == "" {
+	if len(unsetKeys) == 0 && resetPath == "" {
 		return command, nil
 	}
-	var prefix string
-	for _, k := range unsetKeys {
-		prefix += " -u " + k
+	if command == "" {
+		return command, nil
 	}
-	return "env" + prefix + " " + command, nil
+	result := command
+	if len(unsetKeys) > 0 {
+		var flags string
+		for _, k := range unsetKeys {
+			flags += " -u " + k
+		}
+		result = "env" + flags + " " + result
+	}
+	if resetPath != "" {
+		result = pathAssignmentStatement(shellBasename, resetPath) + result
+	}
+	return result, nil
+}
+
+// pathAssignmentStatement returns a leading shell statement, in
+// shellBasename's own syntax, that sets PATH to path — meant to be prepended
+// to a command string the pane's own $SHELL will interpret via `-c`, so the
+// statement and command run in the same shell invocation. See
+// withEnvUnsetPrefix for why this works and shellquote.Quote for the
+// escaping, which was verified byte-identical across bash, zsh, dash, fish
+// and csh/tcsh for values containing `'`, `$`, backticks and spaces.
+func pathAssignmentStatement(shellBasename, path string) string {
+	switch shellBasename {
+	case "csh", "tcsh":
+		return "setenv PATH " + shellquote.Quote(path) + "; "
+	default:
+		return "export PATH=" + shellquote.Quote(path) + "; "
+	}
+}
+
+// resolvePaneShellBasename returns the basename of the shell that will
+// interpret the pane's command string, for pathAssignmentStatement's syntax
+// choice. tmux resolves its own default-shell from $SHELL in the
+// environment the tmux server itself was started under (or the passwd
+// database), not from this session's -e overrides — env["SHELL"] is
+// consulted first only because a caller that explicitly sets SHELL in an
+// agent's env most likely intends it to match the pane's actual shell too.
+// Falling back to os.Getenv("SHELL") mirrors tmux's own resolution for the
+// common case; an empty or unrecognized result defaults
+// pathAssignmentStatement to the POSIX `export` form, which covers every
+// shell this package expects to see except the rare csh/tcsh case.
+func resolvePaneShellBasename(env map[string]string) string {
+	shellPath := env["SHELL"]
+	if shellPath == "" {
+		shellPath = os.Getenv("SHELL")
+	}
+	if shellPath == "" {
+		return ""
+	}
+	return filepath.Base(shellPath)
 }
 
 func validateUnsetEnvKeys(env map[string]string) error {
@@ -724,9 +795,12 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	// For vars that need unsetting, prefix the command with env -u flags. The
 	// pane's shell would otherwise inherit them from the tmux server's global
 	// environment, which holds whatever the controller exported when the server
-	// started. This prefix is a property of THIS command only.
+	// started. PATH additionally gets re-asserted here (see withEnvUnsetPrefix):
+	// -e alone does not survive the pane's own default-shell startup files on a
+	// host whose shell profile rebuilds PATH unconditionally. This prefix is a
+	// property of THIS command only.
 	var err error
-	command, err = withEnvUnsetPrefix(command, unsetKeys)
+	command, err = withEnvUnsetPrefix(command, unsetKeys, env["PATH"], resolvePaneShellBasename(env))
 	if err != nil {
 		return err
 	}

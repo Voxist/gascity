@@ -941,8 +941,21 @@ func (o *tmuxStartOps) createSession(name, workDir, command string, env map[stri
 // the controller's real value for the rest of the box's life. Re-marking a key
 // already marked is a no-op, and only controller-scope keys are marked, so a
 // relaunch that withholds no credential costs no extra tmux call at all.
+//
+// respawn-pane runs command through the pane's default shell exactly like the
+// initial new-session exec does, so it is just as exposed to a hostile
+// ~/.zshenv rebuilding PATH — ga-tg8t5 reproduces on every relaunch otherwise,
+// not only at create. Unlike the create path, respawn needs no `env -u`
+// prefix here: durableWithholdKeys was already marked into the session
+// environment above (and, for a box created by this or an older gc, at
+// create time), so withheld keys are already absent from what respawn-pane's
+// process inherits — only PATH needs re-asserting per exec.
 func (o *tmuxStartOps) respawnAgent(name, workDir, command string, env map[string]string) error {
 	if err := o.tm.markSessionEnvRemoved(name, durableWithholdKeys(env)); err != nil {
+		return err
+	}
+	command, err := withEnvUnsetPrefix(command, nil, env["PATH"], resolvePaneShellBasename(env))
+	if err != nil {
 		return err
 	}
 	return o.tm.RespawnPaneWithWorkDir(name, workDir, command)
