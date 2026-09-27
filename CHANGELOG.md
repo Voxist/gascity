@@ -198,8 +198,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shell invocation. tmux runs the whole command through
   `$SHELL -c "<command>"`, so the prepended statement executes in that
   same shell, after its startup files already ran and before the caller's
-  own command does; the interpreter and the caller's command are otherwise
-  untouched. (An earlier version of this fix wrapped non-trivial commands
+  own command does; the interpreter and the caller's command text are
+  otherwise unmodified. (When both a PATH reassertion and an `env -u`
+  withholding prefix apply, the `env` binary that applies `-u` is itself
+  looked up via the freshly reasserted PATH — the same requirement the
+  caller's own command already had, and not a new failure mode: a
+  resetPath omitting the directory that holds `env`, typically `/usr/bin`,
+  fails that lookup with "command not found" before command runs, exactly
+  as it would already fail to find the caller's own command.) (An earlier
+  version of this fix wrapped non-trivial commands
   in `sh -c 'exec <command>'`; that forced real start commands — which
   almost always carry quoted arguments and so never qualified for the
   `exec` form — through `/bin/sh` instead of the pane's actual `$SHELL`, a
