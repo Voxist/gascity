@@ -164,4 +164,21 @@ fi
 
 # The Makefile and direct sharded runner share scripts/test-local-job-count as
 # their default policy. Do not shadow it here; an explicit override still wins.
-exec make test-fast-parallel
+#
+# Gate 3 is ADVISORY (vp-iauu): a red local tier REPORTS and the push
+# proceeds. CI is the authoritative gate; a fail-closed local tier converts
+# any host-dependent failure — vp-iauu's darwin PATH_MAX/NOFILE red-at-base
+# is the proven case — into permanent work loss, because the seat that hits
+# the rejection is ephemeral, cannot attribute a failure in code it never
+# touched, and dies with its worktree unpushed. The outcome is still named
+# and greppable on stderr either way, so a red tier stays auditable after
+# the fact. LOCAL_TESTS_ACK above remains the deliberate skip; gates 1
+# (resync-loss) and 2 (bead-ownership) remain fail-closed.
+tier_rc=0
+make test-fast-parallel || tier_rc=$?
+if [ "$tier_rc" -eq 0 ]; then
+  echo "pre-push: gate 3 (make test-fast-parallel) PASSED (advisory since vp-iauu; refs: ${pushed_refs[*]})" >&2
+else
+  echo "pre-push: gate 3 (make test-fast-parallel) RED (exit $tier_rc) — push CONTINUING (advisory since vp-iauu: the local fast tier is a convenience; CI is the authoritative gate). Treat the failure above as signal: verify CI on the pushed commit before merging." >&2
+fi
+exit 0
