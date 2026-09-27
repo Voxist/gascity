@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -252,5 +253,45 @@ func TestGuardedReleaseParseAndValidate(t *testing.T) {
 	// an out-of-enum value fails load (a typo must never silently mean off).
 	if _, err := Parse([]byte("[beads]\nguarded_release = \"requre\"\n")); err == nil {
 		t.Fatalf("expected an error for an out-of-enum guarded_release value")
+	}
+}
+
+// TestLoadWithIncludesRejectsUnknownBDCompatibility: a typo in
+// bd_compatibility must fail config load rather than silently normalize to
+// bd-1.0.4 and drop bd 1.0.5 ready/list semantics.
+func TestLoadWithIncludesRejectsUnknownBDCompatibility(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+
+[beads]
+bd_compatibility = "bd-1.05"
+`)
+	_, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err == nil {
+		t.Fatal("LoadWithIncludes = nil error, want unknown bd_compatibility rejected")
+	}
+	if !strings.Contains(err.Error(), `bd_compatibility = "bd-1.05"`) {
+		t.Fatalf("error = %q, want it to name the unknown value", err)
+	}
+}
+
+// TestLoadWithIncludesRejectsUnknownBDCompatibilityFromFragment: the check
+// runs on the merged config, so an unknown value from an include is caught too.
+func TestLoadWithIncludesRejectsUnknownBDCompatibilityFromFragment(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+include = ["fragment.toml"]
+
+[workspace]
+name = "test"
+`)
+	fs.Files["/city/fragment.toml"] = []byte(`
+[beads]
+bd_compatibility = "bd-1.0.6"
+`)
+	if _, _, err := LoadWithIncludes(fs, "/city/city.toml"); err == nil {
+		t.Fatal("LoadWithIncludes = nil error, want unknown bd_compatibility from fragment rejected")
 	}
 }

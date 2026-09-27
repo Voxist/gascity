@@ -1714,8 +1714,8 @@ const (
 )
 
 // NormalizedBDCompatibility returns the configured bd compatibility mode.
-// Empty and unknown values are treated as bd 1.0.4 by runtime code; validation
-// reports unknown values separately when loading user config.
+// Empty and unknown values are treated as bd 1.0.4 by runtime code; unknown
+// non-empty values are rejected at config load by ValidateBDCompatibility.
 func (b BeadsConfig) NormalizedBDCompatibility() string {
 	switch b.BDCompatibility {
 	case "", BeadsBDCompatibility104:

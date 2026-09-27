@@ -793,6 +793,9 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// Validate all duration strings in the fully-merged config.
 	prov.Warnings = append(prov.Warnings, ValidateDurations(root, path)...)
 	prov.Warnings = append(prov.Warnings, ValidateEventsRotation(root)...)
+	if err := ValidateBDCompatibility(root, path); err != nil {
+		return nil, nil, err
+	}
 	if err := ValidateBeadPolicyStorageCompatibility(root, path); err != nil {
 		return nil, nil, err
 	}
