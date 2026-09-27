@@ -19,7 +19,6 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pidutil"
-	"github.com/gastownhall/gascity/internal/session"
 )
 
 type managedDoltStartReport struct {
@@ -1346,20 +1345,46 @@ func managedDoltTestParentDone(rawFD string) (<-chan struct{}, func(), error) {
 	return done, func() { _ = parentPipe.Close() }, nil
 }
 
-// doltServerEnv returns the environment applied to every managed dolt
-// sql-server we launch.
-func doltServerEnv(cityPath string, parent []string) []string {
-	env := removeEnvKey(parent, "DOLT_DISABLE_EVENT_FLUSH")
-	// The managed server and its scope watchdog are city infrastructure, never
-	// part of a session incarnation (ga-fjr5f). Started from inside an agent
-	// session — a SessionStart hook, or a shell that inherited the session's
-	// environment — they would otherwise carry its GC_SESSION_ID. Once their
-	// spawner exits they are orphans with that id, which is exactly what the
-	// runtime's orphan sweep (proctable.ScanBySessionID) kills when the session
-	// is torn down or replaced — taking the city's managed Dolt with it.
-	for key := range session.RuntimeEnvWithAlias("", "", "", 0, 0, "") {
+// managedDoltSessionScopedEnvKeys are the per-session identity variables the
+// session lifecycle injects into an agent runtime
+// (session.RuntimeEnvWithSessionContext), plus the provider's own session id.
+// A managed server started from inside an agent session would otherwise
+// inherit them, and its scope watchdog reparents to init, so the session
+// reconciler's orphan sweep (sweepProcessTableOrphans) would reap the watchdog
+// as that session's process-table root once the session bead closes, taking
+// the server down with it. A managed server is city infrastructure, not part
+// of any session.
+var managedDoltSessionScopedEnvKeys = []string{
+	"GC_SESSION_ID",
+	"GC_SESSION_NAME",
+	"GC_ALIAS",
+	"GC_AGENT",
+	"GC_TEMPLATE",
+	"GC_SESSION_ORIGIN",
+	"GC_RUNTIME_EPOCH",
+	"GC_CONTINUATION_EPOCH",
+	"GC_INSTANCE_TOKEN",
+	"BEADS_HOLDER_TOKEN",
+	"BEADS_ACTOR",
+	"CLAUDE_CODE_SESSION_ID",
+}
+
+// withoutSessionIdentityEnv returns env with every
+// managedDoltSessionScopedEnvKeys entry removed. Every long-lived, detached
+// city-infrastructure process gc spawns (managed Dolt, its scope watchdog, a
+// drift-respawned supervisor) goes through it, because a reparented process
+// carrying an agent's GC_SESSION_ID is that session's orphan-sweep target.
+func withoutSessionIdentityEnv(env []string) []string {
+	for _, key := range managedDoltSessionScopedEnvKeys {
 		env = removeEnvKey(env, key)
 	}
+	return env
+}
+
+// doltServerEnv returns the environment applied to every managed dolt
+// sql-server we launch, and to the scope watchdog that supervises it.
+func doltServerEnv(cityPath string, parent []string) []string {
+	env := withoutSessionIdentityEnv(removeEnvKey(parent, "DOLT_DISABLE_EVENT_FLUSH"))
 	if managedDoltDisableEventFlush(cityPath) {
 		// Disable Dolt usage telemetry for managed servers by default. The
 		// `dolt send-metrics` event-flush reporter spawns transient

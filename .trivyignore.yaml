@@ -26,24 +26,16 @@
 # Go CVE can be attributed to it. It may never be waived
 # (TestTrivyIgnoreCarriesNoBRWaiver).
 #
-# WHAT IS LEFT, AND WHY (ga-elgvf, #5885)
+# THE BRIDGE IS RETIRED (ga-elgvf, #5885)
 #
-# Four entries, all on the 2026-09-21 bridge horizon, each held to its exact
-# paths/purls and statement by TestTrivyIgnoreKeepsReviewedBridgeEntries:
-#
-#   CVE-2026-84445  grpc, fixed in 1.83.2. The durable fix LANDED in #186:
-#                   go.mod, Dockerfile.base and Dockerfile.agent all pin
-#                   1.83.2 now, so the gc path was dropped from this entry --
-#                   TestTrivyIgnoreDropsGCModuleWaiversPastThreshold encodes
-#                   that threshold and fires the moment go.mod passes it.
-#                   The gh/dolt/bd paths REMAIN only because
-#                   TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools still
-#                   asserts their retention; with GRPC_VERSION at 1.83.2 those
-#                   rebuilds should be clean too, so this entry is a candidate
-#                   for deletion once that assertion is revisited.
-#   CVE-2026-78675  GitPython, in the gc-mcp-mail image's own requirements. No
-#   CVE-2026-78676  rebuild touches that file, so the fix is a pinned-dependency
-#   CVE-2026-78677  bump to 3.1.59.
+# The four entries this file carried on the 2026-09-21 bridge horizon are
+# gone. Each one's own statement named its removal condition, and both are now
+# met: CVE-2026-84445 (grpc, fixed 1.83.2) said "remove each path once its pin
+# moves" -- go.mod, Dockerfile.base and Dockerfile.agent all pin 1.83.2 now.
+# CVE-2026-78675/78676/78677 (GitPython) said "remove once the image bumps the
+# pinned dependency" -- .github/requirements/mcp-agent-mail.in floors it at
+# 3.1.59 and the regenerated lock resolves to 3.1.62. Nothing here is waived
+# for a finding the rebuilds or the pinned requirements do not already clear.
 #
 # WHY THE LIST IS NOT LONGER
 #
@@ -82,26 +74,4 @@
 #    and delete the ones that no longer apply.
 # 5. Cite a bead id that resolves via `bd show`.
 
-vulnerabilities:
-  - id: CVE-2026-84445
-    paths:
-      - "usr/bin/gh"
-      - "usr/local/bin/dolt"
-      - "usr/local/bin/bd"
-    expired_at: 2026-09-21
-    statement: google.golang.org/grpc xDS CVE, fixed in 1.82.2 and 1.83.2. The gh and Dolt rebuilds pin grpc 1.83.1 (GRPC_VERSION in contrib/k8s/Dockerfile.base), the bd rebuild pins 1.83.1 (GRPC_VERSION in contrib/k8s/Dockerfile.agent), and gc takes 1.83.1 from go.mod. Those pins already clear CVE-2026-84304, which 1.83.1 fixes; this one needs 1.83.2 on the 1.83 line. Durable fix is raising each of those pins to 1.83.2 or later. Remove each path once its pin moves.
-  - id: CVE-2026-78676
-    purls:
-      - "pkg:pypi/gitpython"
-    expired_at: 2026-09-21
-    statement: GitPython CRITICAL remote-code-execution CVE; gc-mcp-mail pins GitPython 3.1.58, fixed in 3.1.59. Tracked in ga-dkgeoi; remove once the image bumps the pinned dependency. This purl appears only in gc-mcp-mail's own package set, which confines the waiver without a paths entry.
-  - id: CVE-2026-78675
-    purls:
-      - "pkg:pypi/gitpython"
-    expired_at: 2026-09-21
-    statement: GitPython CVE; gc-mcp-mail pins GitPython 3.1.58, fixed in 3.1.59. Tracked in ga-dkgeoi; remove once the image bumps the pinned dependency. This purl appears only in gc-mcp-mail's own package set, which confines the waiver without a paths entry.
-  - id: CVE-2026-78677
-    purls:
-      - "pkg:pypi/gitpython"
-    expired_at: 2026-09-21
-    statement: GitPython CVE; gc-mcp-mail pins GitPython 3.1.58, fixed in 3.1.59. Tracked in ga-dkgeoi; remove once the image bumps the pinned dependency. This purl appears only in gc-mcp-mail's own package set, which confines the waiver without a paths entry.
+vulnerabilities: []

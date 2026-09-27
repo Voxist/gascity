@@ -814,11 +814,18 @@ func TestBuildSupervisorServiceDataMissingSecretsFileIsNotAnError(t *testing.T) 
 	}
 }
 
-// TestBuildSupervisorServiceDataMalformedSecretsFileDegradesGracefully asserts
-// the documented fail-safe: a malformed secrets file does not block service
-// file generation (no error) and contributes no env — the malformed file is
-// ignored rather than partially applied, so the good first line must not leak
-// through.
+// TestBuildSupervisorServiceDataMalformedSecretsFileDegradesGracefully
+// asserts the supervisor never fails to start over a bad secrets file
+// (buildSupervisorServiceData must not error), not that a malformed file's
+// good entries survive. readSupervisorSecretsEnvFile deliberately discards
+// the WHOLE file on any parse error, not just the offending line (fork
+// hardening 2026-09-03, TestProviderCredentialsSurfacesUnparseableSecretsFile
+// in cmd_provider_credentials_test.go is the canonical test for that
+// contract): a caller here cannot tell the operator which of the returned
+// entries came from a file it already knows is malformed, so trusting the
+// good-looking ones is exactly the failure mode the hardening closed.
+// "Degrades gracefully" means the supervisor still starts with that entry
+// simply absent, not that it recovers the entry.
 func TestBuildSupervisorServiceDataMalformedSecretsFileDegradesGracefully(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
@@ -832,8 +839,62 @@ func TestBuildSupervisorServiceDataMalformedSecretsFileDegradesGracefully(t *tes
 	if err != nil {
 		t.Fatalf("buildSupervisorServiceData with malformed secrets file: %v", err)
 	}
-	if _, ok := supervisorServiceEnvMap(data.ExtraEnv)["ANTHROPIC_AUTH_TOKEN"]; ok {
-		t.Fatalf("ExtraEnv should not include any key from a malformed secrets file")
+	if got := supervisorServiceEnvMap(data.ExtraEnv)["ANTHROPIC_AUTH_TOKEN"]; got != "" {
+		t.Fatalf("ExtraEnv[ANTHROPIC_AUTH_TOKEN] = %q, want empty (a malformed line discards the whole file, not just its own line)", got)
+	}
+}
+
+// TestBuildSupervisorServiceDataMultiLineQuotedSecretSkipsBlock is the
+// end-to-end check for #6022 (plus #5982): the issue's multi-line quoted
+// script is rejected as unparseable, even with both the script key and the
+// continuation-line key opted in via GC_SUPERVISOR_ENV, so neither a truncated
+// GC_NOMAD_AGENT_LAUNCH_SCRIPT nor a stray CODEX_HOME reaches the service env.
+// Under the fork's 2026-09-03 whole-file-discard hardening (see
+// TestBuildSupervisorServiceDataMalformedSecretsFileDegradesGracefully), the
+// entry after the block no longer survives either -- a parse error costs the
+// whole file, not just the offending block -- but the stderr diagnostic still
+// names the key and line range without echoing any value.
+func TestBuildSupervisorServiceDataMultiLineQuotedSecretSkipsBlock(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", filepath.Join(homeDir, ".gc"))
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("GC_SUPERVISOR_ENV", "GC_NOMAD_AGENT_LAUNCH_SCRIPT CODEX_HOME")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("GC_NOMAD_AGENT_LAUNCH_SCRIPT", "")
+	t.Setenv("CODEX_HOME", "")
+
+	writeSupervisorSecretsEnvFile(t, `GC_NOMAD_AGENT_LAUNCH_SCRIPT="export PATH=/mnt/nomad/gc/bin/current:$PATH
+export CODEX_HOME=$NOMAD_SECRETS_DIR/codex-home"
+ANTHROPIC_AUTH_TOKEN=sk-from-file
+`)
+
+	var (
+		data *supervisorServiceData
+		err  error
+	)
+	stderr := captureSweepStderr(t, func() {
+		data, err = buildSupervisorServiceData()
+	})
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	got := supervisorServiceEnvMap(data.ExtraEnv)
+	if v, ok := got["ANTHROPIC_AUTH_TOKEN"]; ok {
+		t.Fatalf("ExtraEnv[ANTHROPIC_AUTH_TOKEN] = %q, want absent (the multi-line quoted block makes the whole file unparseable, so even the entry after it is discarded)", v)
+	}
+	for _, key := range []string{"GC_NOMAD_AGENT_LAUNCH_SCRIPT", "CODEX_HOME"} {
+		if v, ok := got[key]; ok {
+			t.Errorf("ExtraEnv[%s] = %q, want absent (multi-line quoted block must be skipped)", key, v)
+		}
+	}
+	if !strings.Contains(stderr, "lines 1-2") || !strings.Contains(stderr, "GC_NOMAD_AGENT_LAUNCH_SCRIPT") {
+		t.Errorf("stderr = %q, want a diagnostic naming lines 1-2 and GC_NOMAD_AGENT_LAUNCH_SCRIPT", stderr)
+	}
+	for _, leak := range []string{"/mnt/nomad", "NOMAD_SECRETS_DIR", "sk-from-file"} {
+		if strings.Contains(stderr, leak) {
+			t.Errorf("stderr leaks value material %q: %q", leak, stderr)
+		}
 	}
 }
 

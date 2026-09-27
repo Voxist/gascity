@@ -275,7 +275,7 @@ func TestInstallClaudeUpgradesPreviousCanonicalSessionStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readEmbedded: %v", err)
 	}
-	stale := strings.Replace(string(current), jsonEscaped(sessionStartCurrentFormBody("")), jsonEscaped(sessionStartPreviousManagedFormBody), 1)
+	stale := strings.Replace(string(current), jsonEscaped(sessionStartCurrentFormBody("", gcInvocationToken)), jsonEscaped(sessionStartPreviousManagedFormBody), 1)
 	if stale == string(current) {
 		t.Fatal("stale fixture did not diverge from current embedded config — check previous SessionStart pattern")
 	}
@@ -289,8 +289,8 @@ func TestInstallClaudeUpgradesPreviousCanonicalSessionStart(t *testing.T) {
 	hookData := fs.Files["/city/hooks/claude.json"]
 	runtimeData := fs.Files["/city/.gc/settings.json"]
 	sessionStartCommand := claudeHookCommand(t, hookData, "SessionStart")
-	if got := commandBodyAfterCanonicalPrefix(sessionStartCommand); got != sessionStartCurrentFormBody("") {
-		t.Fatalf("upgraded SessionStart body = %q, want %q", got, sessionStartCurrentFormBody(""))
+	if got := commandBodyAfterCanonicalPrefix(sessionStartCommand); got != sessionStartCurrentFormBody("", gcInvocationToken) {
+		t.Fatalf("upgraded SessionStart body = %q, want %q", got, sessionStartCurrentFormBody("", gcInvocationToken))
 	}
 	if string(runtimeData) != string(hookData) {
 		t.Fatalf("runtime Claude settings should mirror upgraded hook settings:\n%s", string(runtimeData))
@@ -790,6 +790,70 @@ func TestUpgradeCodexHooksSkipsWhenDesiredPreCompactUnavailable(t *testing.T) {
 	}
 }
 
+func TestUpgradeCodexHooksPreservesLegacyShapeWhenAddingPreCompact(t *testing.T) {
+	desired, err := core.PackFS.ReadFile("overlay/per-provider/codex/.codex/hooks.json")
+	if err != nil {
+		t.Fatalf("read embedded codex overlay: %v", err)
+	}
+	for _, tc := range []struct {
+		name            string
+		sessionStart    string
+		wantPrefix      string
+		wantGCToken     string
+		forbidSubstring string
+	}{
+		{
+			// The PATH-prefix shape is preserved (prepend, not switched to
+			// append), but the invocation token is NOT: an active upgrade
+			// always flips a bare `gc` to the GC_BIN-honoring form (vp-7mjx),
+			// including when the upgrade is "just" adding a PreCompact
+			// sibling to an existing file — see upgradeCodexHookCommand's
+			// doc comment.
+			name:            "legacy prepend and bare gc",
+			sessionStart:    canonicalGCPathPrefix + `gc prime --hook --hook-format codex`,
+			wantPrefix:      canonicalGCPathPrefix,
+			wantGCToken:     managedGCBinInvocation,
+			forbidSubstring: canonicalGCPathPrefixAppend,
+		},
+		{
+			name:            "current append and GC_BIN",
+			sessionStart:    canonicalGCPathPrefixAppend + managedGCBinInvocation + ` prime --hook --hook-format codex`,
+			wantPrefix:      canonicalGCPathPrefixAppend,
+			wantGCToken:     managedGCBinInvocation,
+			forbidSubstring: canonicalGCPathPrefix,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			existing, err := json.Marshal(map[string]any{
+				"hooks": map[string]any{
+					"SessionStart": []any{map[string]any{
+						"hooks": []any{map[string]any{"type": "command", "command": tc.sessionStart}},
+					}},
+				},
+			})
+			if err != nil {
+				t.Fatalf("marshal fixture: %v", err)
+			}
+			got, changed, err := upgradeCodexHooks(existing, desired, "/city")
+			if err != nil {
+				t.Fatalf("upgradeCodexHooks: %v", err)
+			}
+			if !changed {
+				t.Fatal("upgradeCodexHooks changed = false, want true")
+			}
+			if want := tc.wantPrefix + preCompactCurrentFormBody("/city", tc.wantGCToken); codexHookCommand(t, got, "PreCompact") != want {
+				t.Fatalf("PreCompact command = %q, want %q", codexHookCommand(t, got, "PreCompact"), want)
+			}
+			if want := tc.wantPrefix + sessionStartCurrentFormBody("/city", tc.wantGCToken); codexHookCommand(t, got, "SessionStart") != want {
+				t.Fatalf("SessionStart command = %q, want %q", codexHookCommand(t, got, "SessionStart"), want)
+			}
+			if strings.Contains(string(got), tc.forbidSubstring) {
+				t.Fatalf("upgraded hooks switched shape, found %q:\n%s", tc.forbidSubstring, got)
+			}
+		})
+	}
+}
+
 func TestAddCodexPreCompactHookRejectsInvalidRoots(t *testing.T) {
 	desired := []byte(`{"hooks":{"PreCompact":[{"hooks":[{"type":"command","command":"gc handoff --auto"}]}]}}`)
 	for name, root := range map[string]any{
@@ -814,7 +878,7 @@ func TestAddCodexPreCompactHookRejectsInvalidRoots(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if addCodexPreCompactHook(root, desired) {
+			if addCodexPreCompactHook(root, desired, "") {
 				t.Fatalf("addCodexPreCompactHook(%s) = true, want false", name)
 			}
 		})

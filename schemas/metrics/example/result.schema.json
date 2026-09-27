@@ -221,7 +221,9 @@
               "provider-quota",
               "provider-rotate-key",
               "provider-credentials",
-              "storage-preflight"
+              "storage-preflight",
+              "beads-city-migrate-proxied",
+              "nudge-drop"
             ]
           },
           "event_id": {

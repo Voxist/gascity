@@ -309,6 +309,8 @@ func TestLifecycleCoordination_InitDirIfReady_BdDeferred(t *testing.T) {
 		t.Fatalf("read deferred metadata: %v", err)
 	}
 	metaText := string(metaData)
+	// ga-m07q9: restored to fork/main's original "server" (2026-09-25 resync)
+	// after the merge silently took origin's "proxied-server" (af7ad8a0f).
 	for _, needle := range []string{`"backend": "dolt"`, `"database": "dolt"`, `"dolt_mode": "server"`, `"dolt_database": "hq"`} {
 		if !strings.Contains(metaText, needle) {
 			t.Fatalf("deferred metadata missing %s:\n%s", needle, metaText)
@@ -549,6 +551,8 @@ func TestSeedDeferredManagedBeadsUsesExplicitDoltDatabase(t *testing.T) {
 		t.Fatalf("read metadata: %v", err)
 	}
 	metaText := string(metaData)
+	// ga-m07q9: restored to fork/main's original "server" (2026-09-25 resync)
+	// after the merge silently took origin's "proxied-server" (af7ad8a0f).
 	for _, needle := range []string{`"backend": "dolt"`, `"database": "dolt"`, `"dolt_mode": "server"`, `"dolt_database": "gascity"`} {
 		if !strings.Contains(metaText, needle) {
 			t.Fatalf("metadata missing %s:\n%s", needle, metaText)

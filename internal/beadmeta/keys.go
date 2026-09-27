@@ -205,6 +205,7 @@ const (
 	ReasoningMetadataKey                = "gc.reasoning"
 	RequiredArtifactMetadataKey         = "gc.required_artifact"
 	RequiredArtifactsMetadataKey        = "gc.required_artifacts"
+	RetryAttemptMetadataKey             = "gc.retry_attempt" // see attempt.go
 	RetryCountMetadataKey               = "gc.retry_count"
 	RetryFromMetadataKey                = "gc.retry_from"
 	RetrySessionRecycledMetadataKey     = "gc.retry_session_recycled"
@@ -550,6 +551,7 @@ var KnownMetadataKeys = []string{
 	RequiredArtifactMetadataKey,
 	RequiredArtifactsMetadataKey,
 	ReviewGateMetadataKey,
+	RetryAttemptMetadataKey,
 	RetryCountMetadataKey,
 	RetryFromMetadataKey,
 	RetrySessionRecycledMetadataKey,

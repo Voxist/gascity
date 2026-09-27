@@ -2050,7 +2050,19 @@ type ACPSessionConfig struct {
 	// OutputBufferLines is the number of output lines to keep in the
 	// circular buffer for Peek. Defaults to 1000.
 	OutputBufferLines int `toml:"output_buffer_lines,omitempty" jsonschema:"default=1000"`
+	// StopGrace is how long stopping an ACP session waits after SIGTERM
+	// before escalating to SIGKILL. Raise it for agents that need longer to
+	// drain in-flight tool calls on shutdown. Duration string (e.g., "5s",
+	// "20s"). Defaults to "5s"; non-positive or unparseable values fall back
+	// to the default. gc stop bounds each session at 30s, so keep stop_grace
+	// comfortably below that.
+	StopGrace string `toml:"stop_grace,omitempty" jsonschema:"default=5s"`
 }
+
+// DefaultACPStopGrace is the ACP SIGTERM-to-SIGKILL grace used when
+// [session.acp] stop_grace is unset or invalid. It matches the grace every
+// managed-process runtime uses.
+const DefaultACPStopGrace = 5 * time.Second
 
 // HandshakeTimeoutDuration returns the handshake timeout as a time.Duration.
 // Defaults to 30s if empty or unparseable.
@@ -2062,6 +2074,15 @@ func (a *ACPSessionConfig) HandshakeTimeoutDuration() time.Duration {
 // Defaults to 60s if empty or unparseable.
 func (a *ACPSessionConfig) NudgeBusyTimeoutDuration() time.Duration {
 	return durationOr(a.NudgeBusyTimeout, 60*time.Second)
+}
+
+// StopGraceDuration returns the ACP stop grace as a time.Duration.
+// Defaults to DefaultACPStopGrace if empty, unparseable, or non-positive.
+func (a *ACPSessionConfig) StopGraceDuration() time.Duration {
+	if d := durationOr(a.StopGrace, DefaultACPStopGrace); d > 0 {
+		return d
+	}
+	return DefaultACPStopGrace
 }
 
 // OutputBufferLinesOrDefault returns the output buffer line count.
@@ -2100,8 +2121,11 @@ type MailConfig struct {
 	// Provider selects the mail backend: "fake", "fail",
 	// "exec:<script>", or "" (default: beadmail).
 	Provider string `toml:"provider,omitempty"`
-	// RetentionTTL is how long read messages are retained before purge. Empty
-	// or "0" disables read-message retention.
+	// RetentionTTL has two consumers: it is how long read messages are
+	// retained before purge, and how long a read mail bead stays open before
+	// the nudge-mail sweep closes it. Empty or "0" disables read-message
+	// purge. The sweep distinguishes the two: empty leaves it at its own
+	// 60-minute default, while "0" disables its mail-close phase.
 	RetentionTTL string `toml:"retention_ttl,omitempty"`
 }
 
@@ -5142,6 +5166,13 @@ func Parse(data []byte) (*City, error) {
 	cfg := City{}
 	md, err := toml.Decode(string(data), &cfg)
 	if err != nil {
+		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+	// Parse intentionally preserves non-storage legacy authoring surfaces for
+	// the migration reader. The removed Dolt mode is topology authority, never
+	// migration input, so reject it at decode time without broadening that
+	// tolerance.
+	if err := validateDoltModeAuthoringSurface(md); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	if err := validateStorageAuthoringSurface(md); err != nil {
