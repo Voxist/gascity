@@ -51,7 +51,6 @@ const (
 	minClosedOrderTrackingRetained         = 10
 	legacyOrderTrackingRetentionBucket     = "\x00legacy-unscoped-order-tracking"
 	orderTrackingSweepWatchdogInterval     = 30 * time.Second
-	orderTrackingSweepWatchdogStaleAfter   = 2 * time.Minute
 	orderTrackingSweepMetadataReason       = "stale-order-tracking"
 	orderTrackingSweepMetadataInitiator    = "order-tracking-sweep"
 	orderTrackingWatchdogMetadataInitiator = "controller-watchdog"
@@ -77,6 +76,13 @@ const (
 	// wedges (no bead.created/closed events, only metadata churn).
 	staleOrderTrackingCloseReason = "order-tracking sweep: stale tracking bead exceeded retention window"
 	staleOrderWispCloseReason     = "order-tracking sweep: stale order wisp subtree exceeded retention window"
+
+	// orderTrackingDeadlineExceededCloseReason is the canonical close_reason
+	// stamped by the watchdog's deadline tier (ADR-0130 D2): an open marker
+	// from the LIVE controller (or an unstamped legacy/CLI marker) that has
+	// outlived its dispatch's own effective timeout plus grace. Same
+	// >=20-char rationale as orphanedOrderTrackingCloseReason.
+	orderTrackingDeadlineExceededCloseReason = "order-tracking sweep: open marker outlived its dispatch's effective timeout"
 
 	completedOrderTrackingCloseReason = "order dispatch completed: tracking bead lifecycle finished"
 
@@ -137,6 +143,16 @@ const (
 var defaultOrderTrackingDeleteAfterClose = config.BeadPolicyConfig{
 	DeleteAfterClose: config.DefaultOrderTrackingDeleteAfterClose,
 }.DeleteAfterCloseDuration()
+
+// orderTrackingDeadlineGrace is added to an order's effective timeout to
+// form the watchdog's residual reap cutoff (ADR-0130 D2). The dispatch's
+// own context timeout kills the exec AT the deadline and the dispatcher
+// closes the marker right after; the grace window exists so the watchdog
+// never races that close path — a marker "may not die before" its
+// dispatch's deadline-plus-close, and only becomes sweepable once that
+// window has visibly elapsed. A var so tests can pin it (the
+// orderConditionCheckConcurrency precedent); production never mutates it.
+var orderTrackingDeadlineGrace = 2 * time.Minute
 
 var (
 	// shellExecPostCancelWaitDelay is os/exec's pipe-close wait after
@@ -372,6 +388,16 @@ type memoryOrderDispatcher struct {
 	// reload builds a new one, which is what makes the role change take
 	// effect and what re-arms the once-per-generation skip record below.
 	fleetRole string
+	// generation is the controller's PER-BOOT generation (boot id), stamped on
+	// every tracking bead this dispatcher creates (ADR-0130 D1) and used by
+	// the watchdog to distinguish the live controller's own markers from a
+	// dead prior controller's orphans. It is owned by the CityRuntime and
+	// threaded in at construction — NOT minted here — because a config reload
+	// builds a new dispatcher while the controller PROCESS (and therefore the
+	// boot) continues; minting per dispatcher would orphan every marker
+	// created before the reload and hand the watchdog a false dead-controller
+	// verdict for the live controller's own in-flight runs.
+	generation string
 	// runOnSkipNoted records the scoped names whose run_on skip has already
 	// been logged and stamped into order tracking. It is deliberately NOT
 	// carried across a reload (unlike lastRunCache and gateBackoffUntil): the
@@ -442,17 +468,20 @@ type orderTrackingSummary struct {
 // field stamped so they use independent scoped labels. routes is the caller's
 // resolved storage binding; nil is the identity routing of a single-store city.
 func buildOrderDispatcher(routes *storageRoutes, cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer) orderDispatcher { //nolint:unparam // routes is nil in current callers but is the storage binding a production caller must pass
-	od, _ := buildOrderDispatcherWithSnapshot(routes, cityPath, cfg, rec, stderr, "gc start: order scan")
+	// No generation: this builder has no runtime to own a boot id. Callers that
+	// dispatch through it produce unstamped markers, which the watchdog treats
+	// as the deadline-derived residual tier (ADR-0130 D2), never orphans.
+	od, _ := buildOrderDispatcherWithSnapshot(routes, cityPath, cfg, rec, stderr, "gc start: order scan", "")
 	return od
 }
 
-func buildOrderDispatcherWithSnapshot(routes *storageRoutes, cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer, cmdName string) (orderDispatcher, orderSetSnapshot) {
+func buildOrderDispatcherWithSnapshot(routes *storageRoutes, cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer, cmdName string, generation string) (orderDispatcher, orderSetSnapshot) {
 	snapshot, err := scanOrderSetSnapshotFS(fsys.OSFS{}, cityPath, cfg, stderr, cmdName)
 	if err != nil {
 		logDispatchError(stderr, "%s: %v", cmdName, err)
 		return nil, orderSetSnapshot{}
 	}
-	return buildOrderDispatcherFromOrderSet(routes, cityPath, cfg, snapshot.Orders, rec, stderr), snapshot
+	return buildOrderDispatcherFromOrderSet(routes, cityPath, cfg, snapshot.Orders, rec, stderr, generation), snapshot
 }
 
 func scanOrderSetSnapshotFS(fs fsys.FS, cityPath string, cfg *config.City, stderr io.Writer, cmdName string) (orderSetSnapshot, error) {
@@ -501,7 +530,7 @@ func orderSetSignature(aa []orders.Order) string {
 	return fmt.Sprintf("%x", sum[:])
 }
 
-func buildOrderDispatcherFromOrderSet(routes *storageRoutes, cityPath string, cfg *config.City, allAA []orders.Order, rec events.Recorder, stderr io.Writer) orderDispatcher {
+func buildOrderDispatcherFromOrderSet(routes *storageRoutes, cityPath string, cfg *config.City, allAA []orders.Order, rec events.Recorder, stderr io.Writer, generation string) orderDispatcher {
 	if cfg == nil {
 		cfg = &config.City{}
 	}
@@ -519,7 +548,7 @@ func buildOrderDispatcherFromOrderSet(routes *storageRoutes, cityPath string, cf
 		return nil
 	}
 
-	return newMemoryOrderDispatcher(routes, auto, cityPath, cfg, rec, stderr)
+	return newMemoryOrderDispatcher(routes, auto, cityPath, cfg, rec, stderr, generation)
 }
 
 // newMemoryOrderDispatcher builds a memoryOrderDispatcher over a resolved order
@@ -529,7 +558,7 @@ func buildOrderDispatcherFromOrderSet(routes *storageRoutes, cityPath string, cf
 // routes is the storage binding the caller already opened, so a dispatched wisp
 // materializes in the same graph store the rest of the process reads; nil is
 // the identity routing of a single-store city.
-func newMemoryOrderDispatcher(routes *storageRoutes, aa []orders.Order, cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer) *memoryOrderDispatcher {
+func newMemoryOrderDispatcher(routes *storageRoutes, aa []orders.Order, cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer, generation string) *memoryOrderDispatcher {
 	if cfg == nil {
 		cfg = &config.City{}
 	}
@@ -577,6 +606,7 @@ func newMemoryOrderDispatcher(routes *storageRoutes, aa []orders.Order, cityPath
 		cityName:             loadedCityName(cfg, cityPath),
 		cityPath:             cityPath,
 		fleetRole:            fleetRole,
+		generation:           generation,
 		dispatchCtx:          dispatchCtx,
 		dispatchCancel:       dispatchCancel,
 	}
@@ -880,7 +910,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			logDispatchError(m.stderr, "gc: order dispatch: building trigger env for %s: %s", a.ScopedName(), redacted)
 			// Leave this open so the existing open-work gate suppresses repeat
 			// ticks until the normal stale tracking sweep gives the order another try.
-			trackingBead, createErr := m.orderFrontDoorFor(store).CreateRun(scoped, orders.RunOpts{Outcome: orders.RunOutcomeTriggerEnvFailed})
+			trackingBead, createErr := m.orderFrontDoorFor(store).CreateRun(scoped, orders.RunOpts{Outcome: orders.RunOutcomeTriggerEnvFailed, Generation: m.generation})
 			if createErr != nil {
 				logDispatchError(m.stderr, "gc: order dispatch: creating trigger env failure tracking bead for %s: %v", scoped, createErr)
 			} else {
@@ -1082,7 +1112,7 @@ func (m *memoryOrderDispatcher) runDispatchGuarded(ctx context.Context, store be
 // A caller tracking its own WaitGroup must register it before calling and
 // release it in onDone (and, on a returned error, itself — nothing launched).
 func (m *memoryOrderDispatcher) launchResolvedDispatch(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath string, vars, execEnv map[string]string, onDone func()) (orders.OrderRun, error) {
-	trackingRun, err := m.orderFrontDoorFor(store).CreateRun(a.ScopedName(), orders.RunOpts{})
+	trackingRun, err := m.orderFrontDoorFor(store).CreateRun(a.ScopedName(), orders.RunOpts{Generation: m.generation})
 	if err != nil {
 		return orders.OrderRun{}, err
 	}
@@ -3109,6 +3139,157 @@ func (m *memoryOrderDispatcher) recordGateTimeoutFailOpen(a orders.Order, scoped
 	})
 }
 
+// orderTrackingReapVerdict is the watchdog's decision for one open
+// order-tracking marker under the ADR-0130 predicate.
+type orderTrackingReapVerdict int
+
+const (
+	// orderTrackingKeep leaves the marker alone: it belongs to the live
+	// controller and has not outlived its dispatch's deadline, or there is no
+	// basis to judge it.
+	orderTrackingKeep orderTrackingReapVerdict = iota
+	// orderTrackingReapForeign marks a PROVEN dead-controller orphan: the
+	// marker's generation names a controller that is not the live one. D1
+	// reaps it with no clock — a dead controller is running nothing, so age
+	// carries no protective meaning, and the #2168 jam recovery depends on
+	// this tier being immediate.
+	orderTrackingReapForeign
+	// orderTrackingReapDeadline marks the residual tier (D2): a marker from
+	// the live controller (a child crashed without closing it) or with no
+	// generation at all (pre-upgrade, or created by a CLI/manual dispatch).
+	// These may only be reaped once they have outlived their dispatch's own
+	// effective timeout plus grace — never by a global clock, and never before
+	// the dispatch's deadline has visibly elapsed.
+	orderTrackingReapDeadline
+)
+
+// classifyOrderTrackingRunForReap is the ADR-0130 reap predicate, kept pure so
+// the truth table is unit-testable without a store. liveGeneration is the
+// running controller's boot id; residualFor returns the marker order's
+// deadline-plus-grace cutoff (nil disables the deadline tier — fail-safe: the
+// verdict can only ever become LESS aggressive). An empty liveGeneration (a
+// runtime that predates generation stamping) disables the foreign tier, never
+// enables it: an unknown live generation must not let the sweep reclassify
+// every stamped marker in every store as a dead-controller orphan.
+func classifyOrderTrackingRunForReap(run orders.OrderRun, now time.Time, liveGeneration string, residualFor func(scoped string) time.Duration) orderTrackingReapVerdict {
+	if liveGeneration != "" && run.Generation != "" && run.Generation != liveGeneration {
+		return orderTrackingReapForeign
+	}
+	if residualFor == nil {
+		return orderTrackingKeep
+	}
+	if residual := residualFor(run.Scoped); residual > 0 && now.Sub(run.CreatedAt) > residual {
+		return orderTrackingReapDeadline
+	}
+	return orderTrackingKeep
+}
+
+// sweepOrderTrackingByGenerationAcrossStoresLimit is the controller watchdog's
+// tracking sweep under the ADR-0130 predicate: foreign-generation markers are
+// closed immediately (dead prior controller, D1), live- and unstamped-
+// generation markers only once they have outlived their dispatch's own
+// effective timeout plus grace (D2). The global 2-minute age constant this
+// sweep used to apply is GONE, not raised — age alone could not distinguish a
+// dead controller's leftover from a live long run, which made single-flight
+// void for every order running longer than two minutes (code-review-gate
+// accumulated 6-8 live instances city-wide). limit bounds closes per pass
+// across all stores, matching the old sweep's budget behavior. Wisp-subtree
+// recovery stays out of the watchdog: wisps are not the single-flight marker.
+func sweepOrderTrackingByGenerationAcrossStoresLimit(stores []beads.Store, now time.Time, liveGeneration string, residualFor func(scoped string) time.Duration, limit int) (orderTrackingSweepResult, error) {
+	result := orderTrackingSweepResult{}
+	var errs []error
+	for i, store := range stores {
+		if store == nil {
+			continue
+		}
+		remainingLimit := 0
+		if limit > 0 {
+			remainingLimit = limit - result.trackingClosed
+			if remainingLimit <= 0 {
+				break
+			}
+		}
+		partial, err := sweepOrderTrackingByGenerationLimitMode(store, now, liveGeneration, residualFor, remainingLimit)
+		result.trackingClosed += partial.trackingClosed
+		if err != nil {
+			errs = append(errs, fmt.Errorf("sweeping order-tracking %s: %w", orderTrackingSweepStoreLabel(store, i), err))
+			continue
+		}
+		result.storesSwept++
+		if key := orderTrackingSweepStoreKey(store); key != "" {
+			if result.sweptStoreKeys == nil {
+				result.sweptStoreKeys = make(map[string]struct{})
+			}
+			result.sweptStoreKeys[key] = struct{}{}
+		}
+	}
+	return result, errors.Join(errs...)
+}
+
+// sweepOrderTrackingByGenerationLimitMode applies the ADR-0130 predicate to one
+// store. Candidates are classified first and closed per verdict so each close
+// batch carries its own canonical close_reason: orphanedOrderTrackingCloseReason
+// for the D1 tier, orderTrackingDeadlineExceededCloseReason for D2.
+func sweepOrderTrackingByGenerationLimitMode(store beads.Store, now time.Time, liveGeneration string, residualFor func(scoped string) time.Duration, limit int) (orderTrackingSweepResult, error) {
+	front := orders.NewStore(beads.OrdersStore{Store: store})
+	// cutoff=now: every open tracking bead, both tiers — the generation and
+	// deadline predicates, not a global age constant, decide what closes.
+	runs, err := front.StaleOpenRuns(now)
+	if err != nil {
+		return orderTrackingSweepResult{}, fmt.Errorf("listing order-tracking beads: %w", err)
+	}
+	var foreignIDs, deadlineIDs []string
+	for _, run := range runs {
+		if limit > 0 && len(foreignIDs)+len(deadlineIDs) >= limit {
+			break
+		}
+		switch classifyOrderTrackingRunForReap(run, now, liveGeneration, residualFor) {
+		case orderTrackingReapForeign:
+			foreignIDs = append(foreignIDs, run.ID)
+		case orderTrackingReapDeadline:
+			deadlineIDs = append(deadlineIDs, run.ID)
+		case orderTrackingKeep:
+		}
+	}
+	result := orderTrackingSweepResult{}
+	metadata := func(closeReason string) map[string]string {
+		m := map[string]string{
+			"order_tracking_sweep": orderTrackingSweepMetadataReason,
+			"close_reason":         closeReason,
+		}
+		return m
+	}
+	if len(foreignIDs) > 0 {
+		m := metadata(orphanedOrderTrackingCloseReason)
+		m["order_tracking_sweep_by"] = orderTrackingWatchdogMetadataInitiator
+		n, err := closeAndVerifyOrderTrackingBeads(context.Background(), store, foreignIDs, m)
+		result.trackingClosed += n
+		if err != nil {
+			return result, fmt.Errorf("closing orphaned order-tracking beads: %w", err)
+		}
+	}
+	if len(deadlineIDs) > 0 {
+		remaining := 0
+		if limit > 0 {
+			remaining = limit - len(foreignIDs)
+			if remaining <= 0 {
+				return result, nil
+			}
+		}
+		if remaining > 0 && len(deadlineIDs) > remaining {
+			deadlineIDs = deadlineIDs[:remaining]
+		}
+		m := metadata(orderTrackingDeadlineExceededCloseReason)
+		m["order_tracking_sweep_by"] = orderTrackingWatchdogMetadataInitiator
+		n, err := closeAndVerifyOrderTrackingBeads(context.Background(), store, deadlineIDs, m)
+		result.trackingClosed += n
+		if err != nil {
+			return result, fmt.Errorf("closing deadline-exceeded order-tracking beads: %w", err)
+		}
+	}
+	return result, nil
+}
+
 // sweepOrphanedOrderTracking closes any open order-tracking beads left
 // behind by a previous controller instance. Returns the count of beads
 // closed. This is non-fatal: dispatch proceeds even if the sweep fails.
@@ -4085,6 +4266,30 @@ func effectiveTimeout(a orders.Order, maxTimeout time.Duration) time.Duration {
 		return maxTimeout
 	}
 	return t
+}
+
+// trackingResidualCutoff returns how long an open order-tracking marker for
+// scoped may exist past its creation before the watchdog's deadline tier may
+// reap it: effectiveTimeout(order) + grace (ADR-0130 D2). It is the same
+// deadline the dispatch itself runs under — a marker "may not outlive its
+// dispatch's own deadline, and may not die before it" — so the cutoff is
+// derived per order, never from a global constant. An order the dispatcher
+// does not know (uninstalled mid-run, cross-store manual marker) falls back to
+// the exec default, the LONGER of the two built-in defaults, so the cutoff
+// errs late rather than early: the failure mode of a too-long cutoff is a
+// marker that lingers one extra window, while the failure mode of a too-short
+// one is a re-dispatch of live work.
+func (m *memoryOrderDispatcher) trackingResidualCutoff(scoped string) time.Duration {
+	for i := range m.aa {
+		if m.aa[i].ScopedName() == scoped {
+			return effectiveTimeout(m.aa[i], m.maxTimeout) + orderTrackingDeadlineGrace
+		}
+	}
+	// Unknown order: the longer of TimeoutOrDefault's two built-in defaults
+	// (300s exec, 30s formula — the zero Order would decode as the 30s formula
+	// arm). 300s is kept literal rather than reconstructed through a synthetic
+	// exec Order so the coupling to that default is greppable from here.
+	return 300*time.Second + orderTrackingDeadlineGrace
 }
 
 // rigExclusiveLayers returns the suffix of rigLayers that is not in

@@ -3037,7 +3037,11 @@ func (d controllerWebhookDispatcher) dispatcher() *memoryOrderDispatcher {
 		// discard recorder keeps it panic-free when the city has events disabled.
 		rec = events.Discard
 	}
-	return newMemoryOrderDispatcher(routes, nil, cs.cityPath, cfg, rec, os.Stderr)
+	// No generation: this is a stateless preview dispatcher over a nil order
+	// set — it never dispatches, so it never creates a marker to stamp. If it
+	// ever grows a dispatch path, it must be threaded the runtime's
+	// controllerGeneration (ADR-0130 D1), not mint one.
+	return newMemoryOrderDispatcher(routes, nil, cs.cityPath, cfg, rec, os.Stderr, "")
 }
 
 // ExtMsgServices returns the external messaging services.

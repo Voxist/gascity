@@ -1986,7 +1986,7 @@ func TestOrderDispatchDoesNotReparseConfigPerTick(t *testing.T) {
 		Interval: "1h",
 		Exec:     "true",
 	}}
-	ad := newMemoryOrderDispatcher(nil, aa, cityDir, cfg, events.Discard, io.Discard)
+	ad := newMemoryOrderDispatcher(nil, aa, cityDir, cfg, events.Discard, io.Discard, "")
 
 	before := loadCityConfigCalls.Load()
 	now := time.Now()
@@ -10585,7 +10585,7 @@ func TestOrderDispatchMaxDispatchesPerTickConfig(t *testing.T) {
 
 	// Unset (zero) preserves the historical default of 4.
 	cfgDefault := &config.City{}
-	adDefault := buildOrderDispatcherFromOrderSet(nil, t.TempDir(), cfgDefault, aa, events.Discard, &bytes.Buffer{})
+	adDefault := buildOrderDispatcherFromOrderSet(nil, t.TempDir(), cfgDefault, aa, events.Discard, &bytes.Buffer{}, "")
 	mDefault, ok := adDefault.(*memoryOrderDispatcher)
 	if !ok {
 		t.Fatalf("expected *memoryOrderDispatcher, got %T", adDefault)
@@ -10598,7 +10598,7 @@ func TestOrderDispatchMaxDispatchesPerTickConfig(t *testing.T) {
 	one := 1
 	cfgOne := &config.City{}
 	cfgOne.Orders.MaxDispatchesPerTick = &one
-	adOne := buildOrderDispatcherFromOrderSet(nil, t.TempDir(), cfgOne, aa, events.Discard, &bytes.Buffer{})
+	adOne := buildOrderDispatcherFromOrderSet(nil, t.TempDir(), cfgOne, aa, events.Discard, &bytes.Buffer{}, "")
 	mOne, ok := adOne.(*memoryOrderDispatcher)
 	if !ok {
 		t.Fatalf("expected *memoryOrderDispatcher, got %T", adOne)
@@ -10614,7 +10614,7 @@ func TestOrderDispatchMaxDispatchesPerTickConfig(t *testing.T) {
 		v := bad
 		cfgBad := &config.City{}
 		cfgBad.Orders.MaxDispatchesPerTick = &v
-		adBad := buildOrderDispatcherFromOrderSet(nil, t.TempDir(), cfgBad, aa, events.Discard, &bytes.Buffer{})
+		adBad := buildOrderDispatcherFromOrderSet(nil, t.TempDir(), cfgBad, aa, events.Discard, &bytes.Buffer{}, "")
 		mBad, ok := adBad.(*memoryOrderDispatcher)
 		if !ok {
 			t.Fatalf("expected *memoryOrderDispatcher, got %T", adBad)
