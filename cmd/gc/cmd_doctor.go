@@ -543,6 +543,15 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	}
 	register(doctor.NewWorktreeDiskSizeCheck(doctorCfg))
 	register(doctor.NewNestedWorktreePruneCheck(doctorCfg))
+	// Shallow-clone canary (vp-vj42): one depth-limited fetch against a shared
+	// clone grafts .git/shallow and silently poisons every later git analysis
+	// there (merge-base returns nothing; histories look truncated — the
+	// "re-rooted main" false alarm, and voxist-web-stack/asr-medical found
+	// still poisoned 2026-09-28). Pure rev-parse per repository — no store
+	// opens, so suspended rigs stay covered, unlike the per-rig loop below
+	// (ga-wzk). Registered outside the store-gated blocks for the same reason
+	// the worktree checks are: it needs only the city path.
+	register(doctor.NewGitShallowCheckForConfig(cityPath, cfg, cfgErr))
 
 	// Custom types / hold-label conventions — city store (gated with preflight).
 	if storeOK {
