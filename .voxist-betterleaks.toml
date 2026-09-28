@@ -1,0 +1,82 @@
+# Voxist betterleaks configuration for the gascity fork (vp-ty88y).
+#
+# Named .voxist-betterleaks.toml, not .betterleaks.toml, so a future upstream
+# gastownhall/gascity commit that adds its own betterleaks/gitleaks config at
+# the default path never collides with this fork-only file on resync (the
+# same "files upstream never touches" rule as
+# .github/workflows/voxist-secret-scan.yml and
+# .github/ci/voxist-secret-scan-range.sh in this same PR). Passed explicitly
+# via `betterleaks git . --config .voxist-betterleaks.toml`.
+#
+# Copied from voxist-platform .github/workflows/pack-ci.yml's secret-scan job
+# / livetranslate-webrtc .betterleaks.toml (fleet standard, bd memory
+# secret-scan-tool-is-betterleaks). BETTERLEAKS_VERSION pinned to v1.3.1
+# alongside this config in the workflow.
+
+# Global prefilter — skip binary/vendor/node_modules paths before regex.
+# Reduces scan time and eliminates noisy false positives.
+#
+# go.sum is added here after the full-history triage for vp-ty88y: every one
+# of its 23 unique findings is a base64-encoded Go module checksum (44 chars,
+# entropy ~4.7-5.1), the same well-known FP class the shared voxist-platform
+# config calls out for its own reasons — go.sum is regenerated content, never
+# hand-authored, and cannot carry a committed credential.
+#
+# The three cmd/gc / internal/worker / internal/processenv test files are
+# added for the same reason: dedicated test-fixture files (resume-token and
+# secrets.env-parsing test data) whose sole non-UUID findings are synthetic
+# fixture values reused verbatim across their own test cases, never referenced
+# from non-test code. Scoped to these three files, not all of `*_test.go`, so
+# a real secret pasted into some other test file is still caught.
+prefilter = '''
+matchesAny(attributes[?"path"].orValue(""), [
+  r"""(?i)\.(?:bmp|gif|jpe?g|png|svg|tiff|pdf|exe|dll|so|dylib|woff2?|ttf|eot|ico|mp3|mp4|wav|ogg|webm|zip|tar\.gz|tgz)$""",
+  r"""(?:^|/)node_modules(?:/.*)?$""",
+  r"""(?:^|/)vendor(?:/.*)?$""",
+  r"""(?:^|/)\.git(?:/.*)?$""",
+  r"""(?:^|/)__pycache__(?:/.*)?$""",
+  r"""(?:^|/)go\.sum$""",
+  r"""(?:^|/)cmd/gc/session_reconciler_drift_resume_test\.go$""",
+  r"""(?:^|/)internal/worker/provider_resume_test\.go$""",
+  r"""(?:^|/)internal/processenv/envfile_test\.go$"""
+])
+'''
+
+# Global post-match filter — remove known placeholder patterns, plus UUIDs.
+#
+# UUID allowlist added after the full-history triage for vp-ty88y: 58 of the
+# 87 unique gascity findings are dashed or undashed UUIDs (identifiers, e.g.
+# bead/session ids repeated verbatim in cmd/gc test fixtures, testdata/*.jsonl
+# corpora, and issues.jsonl), which trip generic-api-key on entropy alone. A
+# UUID identifies a record; it authorises nothing on its own, so it is not a
+# secret — the same reasoning the shared voxist-platform config applies to the
+# public Claude Code OAuth client id.
+filter = '''
+containsAny(finding["secret"], [
+  "EXAMPLE",
+  "CHANGEME",
+  "YOUR_API_KEY_HERE",
+  "INSERT_",
+  "FIXME",
+  "TODO",
+  "0000000000000000",
+  "XXXXXXXXXXXXXXXX",
+  "xxxxxxxxxxxxxxxx",
+  "sk-placeholder",
+  "test-key-do-not-use",
+  "fake-secret"
+])
+|| finding["secret"].size() < 8
+|| matchesAny(finding["secret"], [
+  r"""^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$""",
+  r"""^[0-9a-fA-F]{32}$"""
+])
+'''
+
+# Restore the built-in ruleset. `--config` REPLACES the default config
+# rather than extending it — a config carrying only prefilter/filter would
+# scan with an EMPTY ruleset: it reads every byte, matches nothing, and
+# reports green even with a real secret committed (bead vp-gwww5,
+# docs/betterleaks-setup.md in voxist-platform).
+[extend]
+useDefault = true
