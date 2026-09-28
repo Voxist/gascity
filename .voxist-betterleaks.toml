@@ -28,6 +28,13 @@
 # fixture values reused verbatim across their own test cases, never referenced
 # from non-test code. Scoped to these three files, not all of `*_test.go`, so
 # a real secret pasted into some other test file is still caught.
+#
+# .beads/(metadata.json|config.yaml|interactions.jsonl) is restored from the
+# shared voxist-platform .betterleaks.toml: this fork's history carries
+# .beads/config.yaml and .beads/metadata.json from before the .beads/backup/
+# restructure (no live findings from either today, but a full-history scan
+# still walks their old blobs, and future bead metadata can reintroduce this
+# FP class), so keep the same exclusion the platform config applies fleet-wide.
 prefilter = '''
 matchesAny(attributes[?"path"].orValue(""), [
   r"""(?i)\.(?:bmp|gif|jpe?g|png|svg|tiff|pdf|exe|dll|so|dylib|woff2?|ttf|eot|ico|mp3|mp4|wav|ogg|webm|zip|tar\.gz|tgz)$""",
@@ -38,19 +45,14 @@ matchesAny(attributes[?"path"].orValue(""), [
   r"""(?:^|/)go\.sum$""",
   r"""(?:^|/)cmd/gc/session_reconciler_drift_resume_test\.go$""",
   r"""(?:^|/)internal/worker/provider_resume_test\.go$""",
-  r"""(?:^|/)internal/processenv/envfile_test\.go$"""
+  r"""(?:^|/)internal/processenv/envfile_test\.go$""",
+  r"""(?:^|/)\.beads/(?:metadata\.json|config\.yaml|interactions\.jsonl)$"""
 ])
 '''
 
-# Global post-match filter — remove known placeholder patterns, plus UUIDs.
-#
-# UUID allowlist added after the full-history triage for vp-ty88y: 58 of the
-# 87 unique gascity findings are dashed or undashed UUIDs (identifiers, e.g.
-# bead/session ids repeated verbatim in cmd/gc test fixtures, testdata/*.jsonl
-# corpora, and issues.jsonl), which trip generic-api-key on entropy alone. A
-# UUID identifies a record; it authorises nothing on its own, so it is not a
-# secret — the same reasoning the shared voxist-platform config applies to the
-# public Claude Code OAuth client id.
+# Global post-match filter — remove known placeholder patterns, the
+# production signed-pause public key, and UUID-shaped test-fixture ids in
+# the specific files that carry them.
 filter = '''
 containsAny(finding["secret"], [
   "EXAMPLE",
@@ -67,10 +69,57 @@ containsAny(finding["secret"], [
   "fake-secret"
 ])
 || finding["secret"].size() < 8
-|| matchesAny(finding["secret"], [
-  r"""^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$""",
-  r"""^[0-9a-fA-F]{32}$"""
-])
+
+// internal/productmetrics/pause.go's productionPauseKeyBase64 is the ed25519
+// PUBLIC verification key for the signed-pause (kill-switch) envelope,
+// compiled into production artifacts (upstream commit 3928f31e, "seat the
+// approved signed-pause kill-switch key"). The matching PRIVATE seed lives in
+// OpenBao and is never in this repo; the public key authorises nothing on its
+// own — it only lets the transport verify a pause someone else signed. Listed
+// as the exact literal, scoped to its one file, so nothing else is suppressed
+// with it (same model as the voxist-platform config's Claude Code OAuth
+// client id, bead vc-zacb).
+|| (
+  finding["secret"] == "zNKeoRoMhfYJ0ZB82trzvK+7ZgIcRSbyBBp2NtX49vY"
+  && attributes[?"path"].orValue("") == "internal/productmetrics/pause.go"
+)
+
+// UUID-shaped (dashed or undashed) test-fixture ids — bead/session ids reused
+// verbatim as record identifiers in these specific test and corpus files, not
+// secrets on their own (a UUID identifies a record; it authorises nothing).
+// Scoped to exactly the paths the vp-ty88y full-history triage found them in,
+// not a blanket "any UUID anywhere" rule: gascity's production code paths
+// (e.g. provider credential handling) are NOT covered by this clause, so a
+// UUID-shaped credential committed outside these files — Voxist API keys ARE
+// UUID-shaped, per the livetranslate incident — still trips generic-api-key.
+|| (
+  matchesAny(finding["secret"], [
+    r"""^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$""",
+    r"""^[0-9a-fA-F]{32}$"""
+  ])
+  && matchesAny(attributes[?"path"].orValue(""), [
+    r"""(?:^|/)cmd/gc/usage_compute_test\.go$""",
+    r"""(?:^|/)cmd/gc/adoption_barrier_test\.go$""",
+    r"""(?:^|/)cmd/gc/session_wake_fence_test\.go$""",
+    r"""(?:^|/)cmd/gc/cmd_session_logs_test\.go$""",
+    r"""(?:^|/)cmd/gc/productmetrics_private_process_test\.go$""",
+    r"""(?:^|/)cmd/gc/productmetrics_private_process_testhook_test\.go$""",
+    r"""(?:^|/)cmd/gc/session_beads_test\.go$""",
+    r"""(?:^|/)cmd/gc/testdata/wd15_drain_ack_twin_corpus\.jsonl$""",
+    r"""(?:^|/)cmd/gc/testdata/wd15_campaign_corpus\.jsonl$""",
+    r"""(?:^|/)internal/session/transcript_lookup_test\.go$""",
+    r"""(?:^|/)internal/session/manager_test\.go$""",
+    r"""(?:^|/)internal/worker/history_identity_test\.go$""",
+    r"""(?:^|/)internal/worker/transcript/claude_slug_test\.go$""",
+    r"""(?:^|/)internal/worker/invocation_telemetry_usagefact_test\.go$""",
+    r"""(?:^|/)internal/worker/message_receipt_test\.go$""",
+    r"""(?:^|/)internal/api/handler_sessions_test\.go$""",
+    r"""(?:^|/)internal/api/session_structured_identity_test\.go$""",
+    // Root-level historical bead export, pre-.beads/backup restructure; no
+    // longer tracked at HEAD, but still present in full git history.
+    r"""^issues\.jsonl$"""
+  ])
+)
 '''
 
 # Restore the built-in ruleset. `--config` REPLACES the default config
