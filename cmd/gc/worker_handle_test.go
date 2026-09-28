@@ -480,6 +480,59 @@ func TestResolvedWorkerRuntimeWithConfigMergesWorkspaceEnv(t *testing.T) {
 	}
 }
 
+// vp-w7cc D1 (worker boundary): resume/reattach sessions build SessionEnv via
+// resolvedWorkerSessionEnvWithConfig, the same substitution-ordering site as
+// resolveTemplate's Step 10. Workspace/provider env referencing
+// ${GC_SESSION_NAME}/${GC_AGENT} must expand against the RESUMED session's own
+// identity (session.Info.SessionName / session.AssigneeIdentifier), not the
+// controller process resuming it — otherwise OTEL_RESOURCE_ATTRIBUTES and any
+// other identity-bearing config env collapses fleet-wide on every resume, the
+// same failure this bead tracks for the create path.
+func TestResolvedWorkerRuntimeWithConfigExpandsProviderEnvAgainstSessionIdentity(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Env: map[string]string{
+			"WS_SESSION_PROBE": "session=${GC_SESSION_NAME}",
+		}},
+		Agents: []config.Agent{{Name: "worker", Provider: "stub"}},
+		Providers: map[string]config.ProviderSpec{
+			"stub": {
+				Command: "/bin/echo",
+				Env: map[string]string{
+					"OTEL_RESOURCE_ATTRIBUTES": "gc.session=${GC_SESSION_NAME},gc.agent=${GC_AGENT}",
+				},
+			},
+		},
+	}
+
+	// The controller resuming this session carries a DIFFERENT identity; the
+	// resumed session's own identity must win, and the controller's must
+	// never leak into the resumed process's config-authored env.
+	t.Setenv("GC_SESSION_NAME", "controller-session-must-not-leak")
+	t.Setenv("GC_AGENT", "controller/agent-must-not-leak")
+
+	resolved, err := resolvedWorkerRuntimeWithConfigAndMetadata(cityDir, cfg, session.Info{
+		Template:    "worker",
+		WorkDir:     cityDir,
+		SessionName: "resumed-session-42",
+		Alias:       "resumed-agent",
+	}, "", nil)
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfigAndMetadata: %v", err)
+	}
+	if resolved == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfigAndMetadata() = nil")
+	}
+	wantOTEL := "gc.session=resumed-session-42,gc.agent=resumed-agent"
+	if got := resolved.SessionEnv["OTEL_RESOURCE_ATTRIBUTES"]; got != wantOTEL {
+		t.Errorf("SessionEnv[OTEL_RESOURCE_ATTRIBUTES] = %q, want %q (resumed session's identity, not the controller's)", got, wantOTEL)
+	}
+	wantProbe := "session=resumed-session-42"
+	if got := resolved.SessionEnv["WS_SESSION_PROBE"]; got != wantProbe {
+		t.Errorf("SessionEnv[WS_SESSION_PROBE] = %q, want %q", got, wantProbe)
+	}
+}
+
 // TestResolvedWorkerSessionConfigWithConfigSeedsCityAnchorsOnCreatePath
 // covers the CLI session-create path (called by `gc session start` /
 // `gc session new` etc. through newWorkerSessionHandleForResolvedRuntimeWithConfig).
