@@ -54,6 +54,13 @@
 #     (default: 3)    — --drain only. How many push+verify rounds a single store
 #                     gets before it is declared undrainable and reported under
 #                     'BACKLOG NOT DRAINED:'. See ADR-0064 D1.
+#   GC_DOLT_SYNC_FETCH_ATTEMPTS
+#     (default: 3)    — tries for the read-only pre-push fetch. The fetch, not
+#                     the push, is what loses to a short server read timeout on
+#                     large stores; it is idempotent and its remote cache warms
+#                     across attempts, so retrying converges (vp-q3kp).
+#   GC_DOLT_SYNC_FETCH_RETRY_DELAY_SECS
+#     (default: 2)    — backoff between fetch attempts. 0 means retry at once.
 set -e
 
 dry_run=false
@@ -103,11 +110,13 @@ while [ $# -gt 0 ]; do
       echo "  exclude it from sync (reported as 'skipped (.no-sync)')."
       echo ""
       echo "Environment:"
-      echo "  GC_DOLT_REMOTE_<DB>              Select which remote to push to when a database has several"
-      echo "                                   (also the only way to push to a non-file:// remote)"
-      echo "  GC_DOLT_SYNC_FETCH_TIMEOUT_SECS  pre-push fetch bound (default 60)"
-      echo "  GC_DOLT_SYNC_PUSH_TIMEOUT_SECS   push bound (default 1800)"
-      echo "  GC_DOLT_SYNC_DRAIN_ATTEMPTS      --drain push+verify rounds (default 3)"
+      echo "  GC_DOLT_REMOTE_<DB>                  Select which remote to push to when a database has several"
+      echo "                                       (also the only way to push to a non-file:// remote)"
+      echo "  GC_DOLT_SYNC_FETCH_TIMEOUT_SECS      pre-push fetch bound (default 60)"
+      echo "  GC_DOLT_SYNC_FETCH_ATTEMPTS          pre-push fetch tries (default 3)"
+      echo "  GC_DOLT_SYNC_FETCH_RETRY_DELAY_SECS  backoff between tries (default 2)"
+      echo "  GC_DOLT_SYNC_PUSH_TIMEOUT_SECS       push bound (default 1800)"
+      echo "  GC_DOLT_SYNC_DRAIN_ATTEMPTS          --drain push+verify rounds (default 3)"
       exit 0
       ;;
     *) echo "gc dolt sync: unknown flag: $1" >&2; exit 1 ;;
@@ -192,6 +201,62 @@ if [ "$drain_attempts_valid" != true ]; then
     "$drain_attempts" >&2
   exit 2
 fi
+# Attempt budget for the pre-push fetch (vp-q3kp). Defaults to 5.
+#
+# THE COST IS COLD-VS-WARM, NOT DELTA SIZE. A store's first remote operation in
+# a given sql-server lifetime must spool the remote's blobs (GitBlobstore has no
+# server-side range read, so a ranged read streams whole blobs); every later
+# operation on that store in the same lifetime is sub-second. On a short server
+# read timeout the cold operation is what dies, and because it is the FETCH that
+# runs first, the push is never even attempted. A single-attempt fetch therefore
+# turns "this store is cold" into "skipped (NOT pushed)" for the whole server
+# lifetime.
+#
+# WHY A RETRY IS CORRECT HERE AND WOULD NOT BE FOR A PUSH: the fetch is
+# read-only and idempotent, so a torn fetch loses nothing, and partial spool
+# progress is retained across attempts — which makes retrying a way to pay the
+# cold cost in installments that each fit inside the deadline.
+#
+# Measured from cold on the voxist-city fleet 2026-08-04, against
+# read_timeout_millis=15000 (dolt 2.2.3, git+ssh remotes), attempts to converge
+# vs the store's git-remote-cache size:
+#
+#   vg 1 (5.7M) · vl 1 (12M) · vw 1 (57M) · vm 2 (342M) · vr 2 (465M)
+#   va 3 (871M) · vp 4 (799M) · hq NEVER (2.1G)
+#
+# 5 covers every store that converges at all, with one attempt of margin over
+# the worst (vp at 4). It deliberately does NOT rescue hq: hq made 4 KB of
+# progress per attempt against a 2.24 GB cache over 12 attempts, so no budget
+# converges it and a larger default would only burn cycle time. That is a
+# separate, escalated problem — see the bead.
+#
+# Validated with the same all-digit, at-least-one-non-zero rule as the timeouts:
+# a zero or non-numeric budget must fail loud, not silently mean "once" or
+# "never" — a misconfigured budget that quietly becomes something else is the
+# unreviewable-config failure this command set already guards against.
+fetch_attempts="${GC_DOLT_SYNC_FETCH_ATTEMPTS-5}"
+case "$fetch_attempts" in
+  ''|*[!0-9]*) fetch_attempts_valid=false ;;
+  *[1-9]*)     fetch_attempts_valid=true ;;
+  *)           fetch_attempts_valid=false ;;
+esac
+if [ "$fetch_attempts_valid" != true ]; then
+  printf 'gc dolt sync: invalid GC_DOLT_SYNC_FETCH_ATTEMPTS=%s (must be a positive integer)\n' \
+    "$fetch_attempts" >&2
+  exit 2
+fi
+
+# Backoff between fetch attempts (seconds). Defaults to 2. Unlike the bounds
+# above, 0 IS valid and means "retry immediately" — it is a delay, not a
+# ceiling, so zero has an unambiguous meaning and no unbounded-run hazard.
+fetch_retry_delay="${GC_DOLT_SYNC_FETCH_RETRY_DELAY_SECS-2}"
+case "$fetch_retry_delay" in
+  ''|*[!0-9]*)
+    printf 'gc dolt sync: invalid GC_DOLT_SYNC_FETCH_RETRY_DELAY_SECS=%s (must be a non-negative integer)\n' \
+      "$fetch_retry_delay" >&2
+    exit 2
+    ;;
+esac
 
 # Check if server is running.
 is_running() {
@@ -601,11 +666,46 @@ sync_database_sql() {
       last_fail_reason="cannot create temp file for fetch diagnostics"
       return 1
     }
+    # Retry the fetch while the failure is transport-shaped (vp-q3kp). Only two
+    # outcomes end the loop early, because retrying either is wrong or wasteful:
+    #   * a first-push signal — not a failure at all, just a branch the remote
+    #     does not have yet; a retry would spend two round trips to learn the
+    #     same thing
+    #   * exit 124 — the client wall-clock bound already burned fetch_timeout
+    #     seconds; another attempt costs the same again and would starve the
+    #     stores queued behind this one inside the order's own deadline
+    #
+    # Everything else retries, INCLUDING "Blob not found". That string looks
+    # like archive corruption and an earlier cut of this code treated it as
+    # terminal on the strength of one store failing 5/5 attempts with a varying
+    # missing-blob hash. It did not reproduce — the same store later fetched 5/5
+    # clean — and the string appears 456 times across 10+ days and 17 distinct
+    # hashes in this fleet's dolt.log, on days when nothing was damaged. It is a
+    # recurring transient. A terminal branch would have converted it into a
+    # guaranteed per-cycle skip, and these attempts fail in ~3.4s rather than at
+    # the deadline, so retrying them is cheap.
     fetch_rc=0
-    fetch_start=$(date +%s)
-    dolt_sql "USE \`$name\`; CALL DOLT_FETCH('$remote_name', '$remote_branch')" "$fetch_timeout" \
-      >/dev/null 2>"$fetch_err_tmp" || fetch_rc=$?
-    fetch_elapsed=$(( $(date +%s) - fetch_start ))
+    fetch_try=0
+    while :; do
+      fetch_try=$((fetch_try + 1))
+      fetch_rc=0
+      : > "$fetch_err_tmp"
+      # Elapsed is measured PER ATTEMPT: the post-loop classification (vp-9v6f9)
+      # needs the last attempt's elapsed time to tell a wall-shaped failure from
+      # a fast one.
+      fetch_start=$(date +%s)
+      dolt_sql "USE \`$name\`; CALL DOLT_FETCH('$remote_name', '$remote_branch')" "$fetch_timeout" \
+        >/dev/null 2>"$fetch_err_tmp" || fetch_rc=$?
+      fetch_elapsed=$(( $(date +%s) - fetch_start ))
+      [ "$fetch_rc" -eq 0 ] && break
+      grep -q "no branches found in remote" "$fetch_err_tmp" 2>/dev/null && break
+      grep -q "invalid ref spec" "$fetch_err_tmp" 2>/dev/null && break
+      [ "$fetch_rc" -eq 124 ] && break
+      [ "$fetch_try" -ge "$fetch_attempts" ] && break
+      echo "  $name: fetch attempt $fetch_try/$fetch_attempts failed — retrying" >&2
+      [ "$fetch_retry_delay" -gt 0 ] && sleep "$fetch_retry_delay"
+    done
+
     if [ "$fetch_rc" -ne 0 ] && { grep -q "no branches found in remote" "$fetch_err_tmp" 2>/dev/null || grep -q "invalid ref spec" "$fetch_err_tmp" 2>/dev/null; }; then
       # The remote has no such branch: an empty remote ("no branches found in
       # remote") or a brand-new branch on a populated remote ("invalid ref
@@ -630,15 +730,28 @@ sync_database_sql() {
       # (every attempt dies at the same wall). Threshold is 90% of the live
       # deadline: comfortably above fast-failure noise (e.g. a corrupt remote,
       # vp-catlj) and below the deadline itself.
+      #
+      # Under the retry budget (vp-q3kp) this classification runs POST-BUDGET:
+      # an attempt that dies at the wall is retried like any other transport
+      # failure, because partial spool progress is retained across attempts and
+      # the budget converges every store except hq (vp-9v6f9: retry "fixes the
+      # other 8 stores. Not hq"). Reaching here with a wall-shaped last attempt
+      # therefore means the budget is exhausted AND the store still has not
+      # warmed — the hq signature (dead-flat ~15.3s, 4 KB per attempt) — so the
+      # run reports it terminally instead of pretending a bigger budget would
+      # help.
       deadline=$(listener_read_timeout_secs)
       threshold=$(( deadline * 9 / 10 ))
       if [ "$fetch_elapsed" -ge "$threshold" ]; then
         rm -f "$fetch_err_tmp"
-        echo "  $name: COLD-OPEN WALL — fetch killed at ${fetch_elapsed}s (listener deadline ${deadline}s); NO off-box copy this server lifetime — skipped (NOT pushed)" >&2
+        echo "  $name: COLD-OPEN WALL — fetch killed at ${fetch_elapsed}s (listener deadline ${deadline}s, $fetch_try attempt(s)); NO off-box copy this server lifetime — skipped (NOT pushed)" >&2
         cold_wall_stores="$cold_wall_stores $name"
         return 1
       fi
-      echo "  $name: fetch failed (exit $fetch_rc) after ${fetch_elapsed}s (listener deadline ${deadline}s) — skipped (NOT pushed)" >&2
+      # Report the attempts spent: "failed once" and "failed every time the
+      # budget allowed" are different operator signals, and the second is the
+      # one that means a store is genuinely stuck rather than merely unlucky.
+      echo "  $name: fetch failed (exit $fetch_rc) after $fetch_try attempts, last after ${fetch_elapsed}s (listener deadline ${deadline}s) — skipped (NOT pushed)" >&2
       if [ -s "$fetch_err_tmp" ]; then
         while IFS= read -r line || [ -n "$line" ]; do
           printf '  %s: %s\n' "$name" "$line" >&2
