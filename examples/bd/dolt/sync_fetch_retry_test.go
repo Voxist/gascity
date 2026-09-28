@@ -51,10 +51,13 @@ import (
 // runFFSyncRC is runFFSync plus the exit code, which the retry contract turns
 // load-bearing: a converged retry must exit 0, and an exhausted or terminal
 // failure must exit non-zero so the order's own failure signal still fires.
-func runFFSyncRC(t *testing.T, binDir string) (string, int) {
+//
+// The caller constructs the `sh <script>` command itself: each test owns its
+// subprocess call site (test/test-resources.toml registers each as a checked
+// Medium owner, and helper bodies do not inherit a source exemption).
+func runFFSyncRC(t *testing.T, binDir string, cmd *exec.Cmd) (string, int) {
 	t.Helper()
 	root := repoRoot(t)
-	script := filepath.Join(root, syncScript)
 	port, cleanup := startReachableTCPListener(t)
 	defer cleanup()
 
@@ -65,7 +68,6 @@ func runFFSyncRC(t *testing.T, binDir string) (string, int) {
 	}
 	writeSyncFakeBeadsBD(t, cityPath)
 
-	cmd := exec.Command("sh", script)
 	cmd.Env = append(syncFilteredEnv(),
 		"PATH="+binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
@@ -139,7 +141,7 @@ func TestSyncRetriesTransientFetchFailureThenPushes(t *testing.T) {
 	binDir := t.TempDir()
 	logPath, countPath := writeSyncFakeDoltFetchFlaky(t, binDir, "unexpected EOF", 1)
 
-	out, code := runFFSyncRC(t, binDir)
+	out, code := runFFSyncRC(t, binDir, exec.Command("sh", filepath.Join(repoRoot(t), syncScript)))
 
 	if got := fetchAttempts(t, countPath); got != 2 {
 		t.Fatalf("expected 2 fetch attempts (1 failure + 1 converged), got %d\nout:\n%s", got, out)
@@ -160,7 +162,7 @@ func TestSyncRetriesFetchTwiceThenPushes(t *testing.T) {
 	binDir := t.TempDir()
 	logPath, countPath := writeSyncFakeDoltFetchFlaky(t, binDir, "unexpected EOF", 2)
 
-	out, code := runFFSyncRC(t, binDir)
+	out, code := runFFSyncRC(t, binDir, exec.Command("sh", filepath.Join(repoRoot(t), syncScript)))
 
 	if got := fetchAttempts(t, countPath); got != 3 {
 		t.Fatalf("expected 3 fetch attempts, got %d\nout:\n%s", got, out)
@@ -181,7 +183,7 @@ func TestSyncFetchRetryExhaustionDoesNotPush(t *testing.T) {
 	binDir := t.TempDir()
 	logPath, countPath := writeSyncFakeDoltFetchFlaky(t, binDir, "unexpected EOF", 99)
 
-	out, code := runFFSyncRC(t, binDir)
+	out, code := runFFSyncRC(t, binDir, exec.Command("sh", filepath.Join(repoRoot(t), syncScript)))
 
 	if got := fetchAttempts(t, countPath); got != 5 {
 		t.Fatalf("expected the default 5-attempt budget, got %d\nout:\n%s", got, out)
@@ -217,7 +219,7 @@ func TestSyncRetriesBlobNotFound(t *testing.T) {
 	logPath, countPath := writeSyncFakeDoltFetchFlaky(t,
 		binDir, "Blob not found: bckv59m50r5l43o5koeiap6ecjihm36a.darc", 2)
 
-	out, code := runFFSyncRC(t, binDir)
+	out, code := runFFSyncRC(t, binDir, exec.Command("sh", filepath.Join(repoRoot(t), syncScript)))
 
 	if got := fetchAttempts(t, countPath); got != 3 {
 		t.Fatalf("Blob not found must be retried like any transport failure: expected 3 attempts, got %d\nout:\n%s", got, out)
@@ -241,7 +243,7 @@ func TestSyncFirstPushSignalIsNotRetried(t *testing.T) {
 	binDir := t.TempDir()
 	logPath, countPath := writeSyncFakeDoltFetchFlaky(t, binDir, "fetch failed: invalid ref spec", 99)
 
-	out, code := runFFSyncRC(t, binDir)
+	out, code := runFFSyncRC(t, binDir, exec.Command("sh", filepath.Join(repoRoot(t), syncScript)))
 
 	if got := fetchAttempts(t, countPath); got != 1 {
 		t.Fatalf("a first-push signal must not be retried: expected 1 attempt, got %d\nout:\n%s", got, out)
