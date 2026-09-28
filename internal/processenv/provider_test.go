@@ -154,6 +154,57 @@ func TestExpandSessionEnvValueMasksControllerOnlyKeys(t *testing.T) {
 	}
 }
 
+// vp-w7cc: provider/workspace env is authored against the CHILD session's
+// identity (${GC_AGENT}, ${GC_SESSION_NAME}), which exists only once the
+// session runtime composes it. Expanding those references against the
+// controller process silently collapsed every attribution attribute
+// fleet-wide. The identity-aware expansion consults the child's identity map
+// FIRST, then falls back to the controller process for everything else.
+func TestExpandSessionEnvValueWithIdentityPrefersChildIdentity(t *testing.T) {
+	// Pin hermetic against bead-bound test processes: the fallback path reads
+	// the controller env, so an ambient GC_BEAD_ID must not leak into the
+	// expectation (a bead-less identity map entry means EMPTY, always).
+	t.Setenv("GC_BEAD_ID", "")
+	identity := map[string]string{
+		"GC_AGENT":        "voxist-platform/voxist.executor-1",
+		"GC_SESSION_NAME": "voxist.executor-9",
+	}
+	for _, tc := range []struct{ in, want string }{
+		{
+			in:   "gc.bead_id=${GC_BEAD_ID},gc.session=${GC_SESSION_NAME},gc.agent=${GC_AGENT},gc.provider=claude",
+			want: "gc.bead_id=,gc.session=voxist.executor-9,gc.agent=voxist-platform/voxist.executor-1,gc.provider=claude",
+		},
+	} {
+		if got := ExpandSessionEnvValueWithIdentity(tc.in, identity); got != tc.want {
+			t.Errorf("ExpandSessionEnvValueWithIdentity(%q, identity) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestExpandSessionEnvValueWithIdentityFallsBackToController(t *testing.T) {
+	t.Setenv("VP_W7CC_CONTROLLER_VAR", "from-controller")
+	identity := map[string]string{"GC_AGENT": "child-agent"}
+	in := "${VP_W7CC_CONTROLLER_VAR}/${GC_AGENT}"
+	if got := ExpandSessionEnvValueWithIdentity(in, identity); got != "from-controller/child-agent" {
+		t.Errorf("ExpandSessionEnvValueWithIdentity(%q, identity) = %q, want %q", in, got, "from-controller/child-agent")
+	}
+}
+
+// The identity map must never become a laundering path for controller-only
+// credentials: the mask wins even when the map carries the key.
+func TestExpandSessionEnvValueWithIdentityStillMasksControllerOnlyKeys(t *testing.T) {
+	t.Setenv("GC_CONTROLLER_TOKEN", "super-secret-controller-token")
+	identity := map[string]string{"GC_CONTROLLER_TOKEN": "leaked-anyway"}
+	for _, tc := range []struct{ in, want string }{
+		{"${GC_CONTROLLER_TOKEN}", ""},
+		{"Bearer ${GC_CONTROLLER_TOKEN}", "Bearer "},
+	} {
+		if got := ExpandSessionEnvValueWithIdentity(tc.in, identity); got != tc.want {
+			t.Errorf("ExpandSessionEnvValueWithIdentity(%q, identity) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 // TZ passes through to spawned provider sessions so in-session time
 // reasoning (e.g. `gc order check`) agrees with the supervisor's wall clock
 // instead of defaulting to UTC in the constructed env.
