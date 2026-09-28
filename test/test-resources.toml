@@ -10,8 +10,8 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 712
-baseline_files = 206
+baseline_calls = 718
+baseline_files = 207
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-cp3hwi"
@@ -51,8 +51,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 478
-baseline_files = 136
+baseline_calls = 484
+baseline_files = 137
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-cp3hwi"
@@ -381,6 +381,75 @@ resources = ["subprocess"]
 owner_bead = "ga-t00ejy"
 invariant = "the nested-git-worktree walk-skip regression proof is a checked Medium subprocess owner"
 resource_owner = "the one go run subprocess is confined to TestAddTestenvImportSkipsNestedGitWorktrees, which exists to exercise add-testenv-import.go end to end: the script is package main, so only a real subprocess run can prove its directory walk skips linked git worktrees"
+migration_target = "P0.4b"
+expires = "2026-10-01"
+
+# The dolt sync pre-push fetch-retry proofs (vp-q3kp). Each test constructs its
+# own `sh commands/sync/run.sh` command so the call site is lexically inside
+# the registered runnable.
+[[medium]]
+package_dir = "examples/bd/dolt"
+package_name = "dolt_test"
+owner = "TestSyncRetriesTransientFetchFailureThenPushes"
+resources = ["subprocess"]
+owner_bead = "vp-q3kp"
+invariant = "the dolt sync pre-push fetch-retry contract proof is a checked Medium subprocess owner"
+resource_owner = "the one sh sync-script run lexically inside TestSyncRetriesTransientFetchFailureThenPushes leaves Small debt: the retry contract is a property of a real sh execution of commands/sync/run.sh, so a fake would only prove itself"
+migration_target = "P0.4b"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "examples/bd/dolt"
+package_name = "dolt_test"
+owner = "TestSyncRetriesFetchTwiceThenPushes"
+resources = ["subprocess"]
+owner_bead = "vp-q3kp"
+invariant = "the dolt sync pre-push fetch-retry contract proof is a checked Medium subprocess owner"
+resource_owner = "the one sh sync-script run lexically inside TestSyncRetriesFetchTwiceThenPushes leaves Small debt: the retry contract is a property of a real sh execution of commands/sync/run.sh, so a fake would only prove itself"
+migration_target = "P0.4b"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "examples/bd/dolt"
+package_name = "dolt_test"
+owner = "TestSyncFetchRetryExhaustionDoesNotPush"
+resources = ["subprocess"]
+owner_bead = "vp-q3kp"
+invariant = "the dolt sync pre-push fetch-retry contract proof is a checked Medium subprocess owner"
+resource_owner = "the one sh sync-script run lexically inside TestSyncFetchRetryExhaustionDoesNotPush leaves Small debt: the retry contract is a property of a real sh execution of commands/sync/run.sh, so a fake would only prove itself"
+migration_target = "P0.4b"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "examples/bd/dolt"
+package_name = "dolt_test"
+owner = "TestSyncRetriesBlobNotFound"
+resources = ["subprocess"]
+owner_bead = "vp-q3kp"
+invariant = "the dolt sync pre-push fetch-retry contract proof is a checked Medium subprocess owner"
+resource_owner = "the one sh sync-script run lexically inside TestSyncRetriesBlobNotFound leaves Small debt: the retry contract is a property of a real sh execution of commands/sync/run.sh, so a fake would only prove itself"
+migration_target = "P0.4b"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "examples/bd/dolt"
+package_name = "dolt_test"
+owner = "TestSyncFirstPushSignalIsNotRetried"
+resources = ["subprocess"]
+owner_bead = "vp-q3kp"
+invariant = "the dolt sync pre-push fetch-retry contract proof is a checked Medium subprocess owner"
+resource_owner = "the one sh sync-script run lexically inside TestSyncFirstPushSignalIsNotRetried leaves Small debt: the retry contract is a property of a real sh execution of commands/sync/run.sh, so a fake would only prove itself"
+migration_target = "P0.4b"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "examples/bd/dolt"
+package_name = "dolt_test"
+owner = "TestSyncFetchAttemptsEnvOverride"
+resources = ["subprocess"]
+owner_bead = "vp-q3kp"
+invariant = "the dolt sync pre-push fetch-retry contract proof is a checked Medium subprocess owner"
+resource_owner = "the one sh sync-script run lexically inside TestSyncFetchAttemptsEnvOverride leaves Small debt: the retry contract is a property of a real sh execution of commands/sync/run.sh, so a fake would only prove itself"
 migration_target = "P0.4b"
 expires = "2026-10-01"
 

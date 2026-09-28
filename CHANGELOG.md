@@ -810,6 +810,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   store, so a future lapse degrades one entry instead of the whole merge
   queue.
 
+- **`gc dolt sync` now retries its pre-push fetch, which is what actually
+  fails on large stores.** The fast-forward classification fetches the remote
+  before pushing, and treated any fetch failure as `skipped (NOT pushed)` on
+  the first try — so the push was never even attempted.
+
+  The cost that decides this is **cold vs warm, not delta size or store size**.
+  A store's first remote operation in a given sql-server lifetime must spool
+  the remote's blobs; every later operation on that store in the same lifetime
+  is sub-second. Measured on a 9-store fleet against a listener with
+  `read_timeout_millis=15000` (dolt 2.2.3, `git+ssh` remotes), the same stores
+  across two server lifetimes: warm `hq` 1.83s / `vp` 1.57s / `vr` 1.90s /
+  `vm` 2.11s, versus cold after a restart `hq` 15.2s / `vp` 15.2s / `vr` 15.7s
+  / `vm` 15.2s, all failing. `vr` and `vm` went from ~2s to failing with no
+  change in delta, and a restart resets every store at once.
+
+  A fetch is read-only and idempotent, so a torn fetch loses nothing, and
+  partial spool progress is retained across attempts — which makes retrying a
+  way to pay the cold cost in installments that each fit inside the deadline.
+  The fetch is now retried `GC_DOLT_SYNC_FETCH_ATTEMPTS` times (default 5)
+  with `GC_DOLT_SYNC_FETCH_RETRY_DELAY_SECS` (default 2) between tries.
+  Attempts needed to converge from cold, against `git-remote-cache` size:
+  `vg` 1 (5.7M), `vl` 1 (12M), `vw` 1 (57M), `vm` 2 (342M), `vr` 2 (465M),
+  `va` 3 (871M), `vp` 4 (799M). The default covers all of them with one
+  attempt of margin.
+
+  It does not rescue every store, and the default is sized not to pretend
+  otherwise: the largest store advanced 4 KB per attempt against a 2.24 GB
+  cache over 12 attempts, so no budget converges it and a larger default would
+  only burn cycle time.
+
+  This change composes with the cold-open wall classifier (`vp-9v6f9`), which
+  landed on main after this work was cut. A wall-shaped failure — the last
+  attempt dying at ≥ 90% of the live listener deadline — is retried like any
+  other transport failure, because that is exactly how the convergence above
+  is paid for. Only when the budget is exhausted with a wall-shaped last
+  attempt does the store fall to the terminal `COLD-OPEN WALL` status; the
+  message now also reports how many attempts were spent, and the generic
+  failure status carries the last elapsed time against the live deadline.
+
+  Only two failures skip the retry, because retrying either is wasteful: a
+  first-push signal (not a failure — just a branch the remote does not have
+  yet) and a client-bound timeout (exit 124, which already spent its whole
+  budget). Everything else retries, including `Blob not found` — that string
+  looks like archive corruption but is a recurring transient on this class of
+  remote (456 occurrences across 10+ days and 17 distinct hashes in one
+  fleet's log, on days when nothing was damaged), and treating it as terminal
+  would convert a transient into a guaranteed per-cycle skip.
+
+  `dolt-remotes-patrol` moves from the 300s exec default to an explicit 600s
+  timeout: the run is sequential across databases, so a cold-cache cycle that
+  spends its retry budget on slow stores would otherwise hit the order
+  deadline and leave the databases later in the scan order SIGTERMed before
+  they were ever attempted — starvation that the emitted event cannot
+  distinguish from a clean run. (vp-q3kp)
+
 - **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
   SIGKILL, matching its documented contract.** The fallback (used when
   neither `timeout` nor `gtimeout` is on `PATH`, the default on stock macOS)
