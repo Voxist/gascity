@@ -127,6 +127,7 @@ func TestBuildDoctorChecks_SkipsStoreChecksWhenStoreUnreachable(t *testing.T) {
 	}
 	for _, name := range []string{
 		"rig:alpha:beads", "rig:beta:beads",
+		"rig:alpha:data-presence", "rig:beta:data-presence",
 		"custom-types:alpha", "custom-types:beta",
 		"hold-label-conventions:alpha", "hold-label-conventions:beta",
 	} {
@@ -188,6 +189,7 @@ func TestBuildDoctorChecks_RegistersStoreChecksWhenStoreReachable(t *testing.T) 
 	}
 	for _, name := range []string{
 		"rig:alpha:beads", "rig:beta:beads",
+		"rig:alpha:data-presence", "rig:beta:data-presence",
 		"custom-types:alpha", "custom-types:beta",
 		"hold-label-conventions:alpha", "hold-label-conventions:beta",
 		"rig:alpha:path", "rig:beta:path",
@@ -266,6 +268,7 @@ func TestBuildDoctorChecks_RigStoreNameSetPreflight(t *testing.T) {
 	healthy := doctorCheckNames(buildDoctorChecks(cityDir, cfg, nil, opts))
 	mustHave := append(append([]string{}, doctorCityStoreDependentNames...),
 		"rig:alpha:beads", "rig:beta:beads",
+		"rig:alpha:data-presence", "rig:beta:data-presence",
 		"custom-types:alpha", "custom-types:beta",
 		"hold-label-conventions:alpha", "hold-label-conventions:beta",
 		"rig:alpha:path", "rig:beta:path",
