@@ -18,9 +18,10 @@ const (
 	// 17, not upstream's 16: the fork's prDeliveryDoctorCheck is a city store
 	// check and lives inside buildDoctorChecks' storeOK block alongside
 	// upstream's. This constant is the drift lock the preflight test asserts
-	// against.
+	// against. Per-rig is 4: rig beads, rig data-presence, custom-types and
+	// hold-label conventions.
 	doctorCityStoreCheckCount   = 17
-	doctorPerRigStoreCheckCount = 3
+	doctorPerRigStoreCheckCount = 4
 )
 
 // City-scoped store probe before store-dependent checks (also used at gc start warmup). Tests override.
