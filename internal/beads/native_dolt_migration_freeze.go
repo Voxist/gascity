@@ -25,10 +25,13 @@ package beads
 // github.com/Voxist/beads internal/migration/freeze.go's marker FORMAT (file
 // name, env override name, and the tab-separated operator/timestamp/reason
 // payload) even though the two modules cannot share the Go code that reads
-// it. native_dolt_migration_freeze_fixture_test.go is the shared contract:
-// it is written to be copy-pasteable (same fixture shape, same assertions)
-// into the fork's own freeze_test.go, so a change to either side's marker
-// format shows up as a fixture mismatch rather than a silent divergence.
+// it. native_dolt_migration_freeze_test.go's TestMigrationFreezeMarkerFixtureShape
+// is the shared contract for THIS repo's side: it is written to be
+// copy-pasteable (same fixture shape, same assertions) into the fork's own
+// freeze_test.go, so a change to either side's marker format shows up as a
+// fixture mismatch rather than a silent divergence. There is currently no
+// automated check that actually spans both repositories -- ga-ijjie tracks
+// building one (a shared fixture file, or a CI job that diffs the two).
 //
 // This is a deliberately close port of the fork's semantics — the ancestor
 // walk, the env override, the ENOENT-is-not-frozen but
@@ -37,18 +40,33 @@ package beads
 // each one closes a real gap (an unreadable marker must not read as "not
 // frozen"; a marker the untrusted ancestor walk merely passed through must
 // not be redirectable via a symlink; a world-writable sticky directory like
-// /tmp is forgeable by any local account). One deliberate divergence from
-// the fork's own Find: gc always has an explicit scopeRoot for the store it
-// is about to open, so this walks ONLY that scope's ancestry
+// /tmp is forgeable by any local account). Two deliberate divergences from
+// the fork's own Find: (1) gc always has an explicit scopeRoot for the store
+// it is about to open, so this walks ONLY that scope's ancestry
 // (migration.FindFrom's shape), never gc's own process cwd, which is not
-// part of the operation being gated.
+// part of the operation being gated; (2) the fork's Find also walks every
+// root in townFreezeRoots() (a Gas-Town multi-repo concept) in addition to
+// the workspace's own ancestry -- gc has no equivalent walk today, tracked
+// as ga-ejfzo rather than guessed at here.
+//
+// SCOPE, STATED PLAINLY: this closes the OPEN/RECONNECT path only, per
+// operator decision A (gate at open time, not on every write). A
+// NativeDoltStore handle that was ALREADY OPEN before a freeze marker
+// appeared keeps writing straight through the freeze for as long as it
+// stays open — the choke points below run once, at open, not on every
+// subsequent write. gc's controller holds exactly such long-lived handles.
+// This is NOT a gap this file closes; ga-6ou7x tracks a write-path check or
+// a patrol that closes and reopens native handles when a freeze appears.
+// Until ga-6ou7x ships, the pre-existing runbook rule is PERMANENT, not
+// superseded by this file: stop the controller, or set
+// GC_BEADS_FORCE_FALLBACK=1, before setting a MIGRATION-FREEZE marker.
 
 import (
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -276,8 +294,31 @@ func checkMigrationFreezeForNativeOpen(scopeRoot string) error {
 		return nil
 	}
 	detail := migrationFreezeDetail(result, readMigrationFreezeInfo(result.Path))
-	log.Printf("gc: refusing a native (in-process) beads open for %s: %s", scopeRoot, detail)
+	// No logger is threaded through this choke point (its callers are the
+	// low-level native-open functions, several layers below anything that
+	// carries a *slog.Logger today), so this matches this package's own
+	// nil-logger convention (proxied_incident_log.go): slog.Default() rather
+	// than a bespoke log.Printf line.
+	slog.Default().Warn("gc: refusing a native (in-process) beads open",
+		slog.String("scope", scopeRoot), slog.String("detail", detail))
 	return fmt.Errorf("%w: %s", errNativeOpenFrozen, detail)
+}
+
+// MigrationFrozen reports whether an active MIGRATION-FREEZE marker covers
+// scopeRoot, without logging or erroring. checkMigrationFreezeForNativeOpen
+// above remains the actual choke-point gate for every native open and is
+// what every caller in this package relies on; this export exists for a
+// caller OUTSIDE this package whose own path has an irreversible side
+// effect earlier than any native open -- specifically the native read-path
+// reopen closures (cmd/gc/main.go, cmd/gc/api_state.go), which re-resolve
+// the current managed-Dolt env before reconnecting and can trigger managed-
+// Dolt recovery/restart as part of that resolution. A frozen scope must
+// never have gc restart a database an operator deliberately stopped, even
+// briefly on the way to the choke point's own refusal a few lines later --
+// so those closures call this FIRST and skip straight to returning an error
+// without touching recovery at all when it reports true.
+func MigrationFrozen(scopeRoot string) bool {
+	return findMigrationFreezeFrom(filepath.Join(scopeRoot, ".beads")).Frozen()
 }
 
 func migrationFreezeDetail(result migrationFreezeResult, info *migrationFreezeInfo) string {
@@ -287,9 +328,9 @@ func migrationFreezeDetail(result migrationFreezeResult, info *migrationFreezeIn
 	detail := result.Path
 	switch {
 	case info != nil && info.Operator != "" && info.Reason != "":
-		detail += fmt.Sprintf(" (operator=%s, reason=%q)", info.Operator, info.Reason)
+		detail += fmt.Sprintf(" (operator=%q, reason=%q)", info.Operator, info.Reason)
 	case info != nil && info.Operator != "":
-		detail += fmt.Sprintf(" (operator=%s)", info.Operator)
+		detail += fmt.Sprintf(" (operator=%q)", info.Operator)
 	case info != nil && info.Reason != "":
 		detail += fmt.Sprintf(" (reason=%q)", info.Reason)
 	}

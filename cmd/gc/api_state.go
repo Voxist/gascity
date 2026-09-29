@@ -493,6 +493,14 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 			// scan / Get recovers a managed-Dolt hard-kill/rebind instead of
 			// dialing the dead port for the whole retry budget.
 			reopen := func(ctx context.Context) (beads.NativeStorage, error) {
+				// ga-vwupk: checked BEFORE re-resolving the env below, which can
+				// trigger managed-Dolt recovery/restart -- a frozen scope must
+				// never have gc restart a database an operator deliberately
+				// stopped on the way to OpenNativeStorage's own choke-point
+				// refusal a few lines down.
+				if beads.MigrationFrozen(scopeRoot) {
+					return nil, fmt.Errorf("re-resolve native rig store env %s: migration freeze is active; refusing the reconnect before recovery", scopeRoot)
+				}
 				freshEnv, rerr := nativeDoltOpenEnvForScopeContext(ctx, cs.cityPath, cfg, scopeRoot)
 				if rerr != nil {
 					return nil, fmt.Errorf("re-resolve native rig store env %s: %w", scopeRoot, rerr)

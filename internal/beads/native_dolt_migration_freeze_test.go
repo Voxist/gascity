@@ -6,11 +6,24 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"syscall"
 	"testing"
 	"time"
 
 	beadslib "github.com/steveyegge/beads"
 )
+
+// clearAmbientMigrationFreezeEnv neutralizes an ambient BD_MIGRATION_FREEZE_FILE
+// the operator's own shell might export, so a developer machine configured
+// with a real freeze override cannot make an "unfrozen" test in this file see
+// a spurious freeze (or an "env override wins" test see a DIFFERENT marker
+// than the one it set up). Setting it to "" rather than leaving it alone is
+// equivalent to unset for migrationFreezeEnvOverride's own empty-string check,
+// and t.Setenv restores the real value (if any) when the test ends.
+func clearAmbientMigrationFreezeEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv(migrationFreezeEnvFile, "")
+}
 
 // TestDirectNativeOpenEnvKeysWithholdBDAllowRemoteMigrate pins the ga-vwupk
 // structure directly, alongside the behavioral tests below: a SEPARATE
@@ -21,6 +34,7 @@ import (
 // BEADS_ keys, and which would otherwise land the same key in both the direct
 // and proxied-only lists (a state that test independently forbids).
 func TestDirectNativeOpenEnvKeysWithholdBDAllowRemoteMigrate(t *testing.T) {
+	clearAmbientMigrationFreezeEnv(t)
 	if !slices.Contains(directNativeOpenWithheldKeys, "BD_ALLOW_REMOTE_MIGRATE") {
 		t.Fatalf("directNativeOpenWithheldKeys = %v, want it to contain BD_ALLOW_REMOTE_MIGRATE", directNativeOpenWithheldKeys)
 	}
@@ -67,6 +81,7 @@ func writeMigrationFreezeMarker(t *testing.T, scopeRoot, reason string) {
 // ---------------------------------------------------------------------
 
 func TestCheckMigrationFreezeForNativeOpen_FrozenWhenMarkerPresent(t *testing.T) {
+	clearAmbientMigrationFreezeEnv(t)
 	scopeRoot := t.TempDir()
 	writeMigrationFreezeMarker(t, scopeRoot, "dolt v2 migration")
 
@@ -77,6 +92,7 @@ func TestCheckMigrationFreezeForNativeOpen_FrozenWhenMarkerPresent(t *testing.T)
 }
 
 func TestCheckMigrationFreezeForNativeOpen_UnfrozenWhenNoMarker(t *testing.T) {
+	clearAmbientMigrationFreezeEnv(t)
 	scopeRoot := t.TempDir()
 	if err := checkMigrationFreezeForNativeOpen(scopeRoot); err != nil {
 		t.Fatalf("checkMigrationFreezeForNativeOpen with no marker = %v, want nil", err)
@@ -84,6 +100,7 @@ func TestCheckMigrationFreezeForNativeOpen_UnfrozenWhenNoMarker(t *testing.T) {
 }
 
 func TestCheckMigrationFreezeForNativeOpen_MarkerInAncestorDirFreezes(t *testing.T) {
+	clearAmbientMigrationFreezeEnv(t)
 	// The fork's own semantics: a marker anywhere in the ancestry freezes
 	// everything beneath it, not just the exact .beads directory.
 	root := t.TempDir()
@@ -102,6 +119,7 @@ func TestCheckMigrationFreezeForNativeOpen_MarkerInAncestorDirFreezes(t *testing
 }
 
 func TestCheckMigrationFreezeForNativeOpen_EnvOverrideWins(t *testing.T) {
+	clearAmbientMigrationFreezeEnv(t)
 	scopeRoot := t.TempDir()
 	writeMigrationFreezeMarker(t, scopeRoot, "in the ancestor walk")
 
@@ -134,6 +152,7 @@ func TestCheckMigrationFreezeForNativeOpen_EnvOverrideWins(t *testing.T) {
 // ---------------------------------------------------------------------
 
 func TestOpenNativeDoltStoreAtRefusesWhenFrozen(t *testing.T) {
+	clearAmbientMigrationFreezeEnv(t)
 	scopeRoot := t.TempDir()
 	writeMigrationFreezeMarker(t, scopeRoot, "dolt v2 migration")
 
@@ -151,6 +170,7 @@ func TestOpenNativeDoltStoreAtRefusesWhenFrozen(t *testing.T) {
 }
 
 func TestOpenNativeDoltStoreAtUnaffectedWhenUnfrozen(t *testing.T) {
+	clearAmbientMigrationFreezeEnv(t)
 	scopeRoot := t.TempDir()
 
 	oldOpen := nativeDoltOpenBestAvailable
@@ -185,6 +205,7 @@ func TestOpenNativeDoltStoreAtUnaffectedWhenUnfrozen(t *testing.T) {
 // (openNativeStorageWithCredentialCommand), not only on the initial-open
 // path.
 func TestOpenNativeStorageReconnectRefusesWhenFrozen(t *testing.T) {
+	clearAmbientMigrationFreezeEnv(t)
 	scopeRoot := t.TempDir()
 	writeMigrationFreezeMarker(t, scopeRoot, "dolt v2 migration")
 
@@ -202,6 +223,7 @@ func TestOpenNativeStorageReconnectRefusesWhenFrozen(t *testing.T) {
 }
 
 func TestOpenNativeStorageReconnectUnaffectedWhenUnfrozen(t *testing.T) {
+	clearAmbientMigrationFreezeEnv(t)
 	scopeRoot := t.TempDir()
 
 	oldOpen := nativeDoltOpenBestAvailable
@@ -229,6 +251,7 @@ func TestOpenNativeStorageReconnectUnaffectedWhenUnfrozen(t *testing.T) {
 // its reopen hook OpenNativeStorageAtProxied both go through
 // openNativeStorageProxied, guarded the same way as the direct lane.
 func TestOpenNativeDoltStoreAtProxiedRefusesWhenFrozen(t *testing.T) {
+	clearAmbientMigrationFreezeEnv(t)
 	scopeRoot := filepath.Join(t.TempDir(), "scope")
 	writeMigrationFreezeMarker(t, scopeRoot, "dolt v2 migration")
 
@@ -257,6 +280,7 @@ func TestOpenNativeDoltStoreAtProxiedRefusesWhenFrozen(t *testing.T) {
 // a beadsworkspace-specific fixture, since the choke point is what's under
 // test, not that package's own wiring.
 func TestOpenNativeDoltStoreAtWithoutAmbientEnvRefusesWhenFrozen(t *testing.T) {
+	clearAmbientMigrationFreezeEnv(t)
 	scopeRoot := t.TempDir()
 	writeMigrationFreezeMarker(t, scopeRoot, "dolt v2 migration")
 
@@ -277,6 +301,7 @@ func TestOpenNativeDoltStoreAtWithoutAmbientEnvRefusesWhenFrozen(t *testing.T) {
 // ---------------------------------------------------------------------
 
 func TestOpenNativeDoltStoreAtWithholdsBDAllowRemoteMigrate(t *testing.T) {
+	clearAmbientMigrationFreezeEnv(t)
 	t.Setenv("BD_ALLOW_REMOTE_MIGRATE", "1")
 
 	oldOpen := nativeDoltOpenBestAvailable
@@ -309,6 +334,7 @@ func TestOpenNativeDoltStoreAtWithholdsBDAllowRemoteMigrate(t *testing.T) {
 }
 
 func TestOpenNativeStorageReconnectWithholdsBDAllowRemoteMigrate(t *testing.T) {
+	clearAmbientMigrationFreezeEnv(t)
 	// The reconnect lane goes through the exact same
 	// openNativeStorageWithCredentialCommand as the initial open (that
 	// sharing is the whole point of the fix), so this pins the same
@@ -350,6 +376,7 @@ func TestOpenNativeStorageReconnectWithholdsBDAllowRemoteMigrate(t *testing.T) {
 // fixture mismatch instead of a silent divergence (ga-vwupk, operator
 // decision 2026-09-29: this drift risk is accepted, not eliminated).
 func TestMigrationFreezeMarkerFixtureShape(t *testing.T) {
+	clearAmbientMigrationFreezeEnv(t)
 	const fixtureLine = "migrator\t2026-09-29T18:00:00Z\tdolt v2 migration\n"
 
 	info := parseMigrationFreezeInfo(fixtureLine)
@@ -380,6 +407,7 @@ func TestMigrationFreezeMarkerFixtureShape(t *testing.T) {
 }
 
 func TestMigrationFreezeFileNameAndEnvMatchTheFork(t *testing.T) {
+	clearAmbientMigrationFreezeEnv(t)
 	// Pins the two literal strings against accidental drift — these must
 	// match github.com/Voxist/beads internal/migration.FileName and
 	// .EnvFreezeFile exactly, since gc reimplements rather than imports
@@ -389,5 +417,126 @@ func TestMigrationFreezeFileNameAndEnvMatchTheFork(t *testing.T) {
 	}
 	if migrationFreezeEnvFile != "BD_MIGRATION_FREEZE_FILE" {
 		t.Errorf("migrationFreezeEnvFile = %q, want BD_MIGRATION_FREEZE_FILE", migrationFreezeEnvFile)
+	}
+}
+
+// ---------------------------------------------------------------------
+// Fail-closed carve-outs: symlink, sticky-directory, and EACCES
+// ---------------------------------------------------------------------
+
+// TestCheckMigrationFreezeForNativeOpen_UntrustedSymlinkIsIgnoredNotFollowed
+// pins statMigrationFreezeSymlinkMarker's untrusted-walk behavior: a
+// MIGRATION-FREEZE the ANCESTOR WALK merely passed through must not be
+// followed even if it is a symlink to a real regular file elsewhere — an
+// indirection like that could otherwise redirect the gate to a marker (or
+// non-marker) an attacker controls. The scope stays UNFROZEN, and the
+// bypass is announced on stderr (not asserted here; see
+// statMigrationFreezeSymlinkMarker's doc comment) rather than silent.
+func TestCheckMigrationFreezeForNativeOpen_UntrustedSymlinkIsIgnoredNotFollowed(t *testing.T) {
+	clearAmbientMigrationFreezeEnv(t)
+	root := t.TempDir()
+	realTarget := filepath.Join(t.TempDir(), "real-marker")
+	if err := os.WriteFile(realTarget, []byte("migrator\t2026-09-29T18:00:00Z\treal\n"), 0o644); err != nil {
+		t.Fatalf("write symlink target: %v", err)
+	}
+	if err := os.Symlink(realTarget, filepath.Join(root, migrationFreezeFileName)); err != nil {
+		t.Fatalf("create symlink marker: %v", err)
+	}
+	scopeRoot := filepath.Join(root, "city", "rig")
+	if err := os.MkdirAll(filepath.Join(scopeRoot, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir scope: %v", err)
+	}
+
+	if err := checkMigrationFreezeForNativeOpen(scopeRoot); err != nil {
+		t.Fatalf("checkMigrationFreezeForNativeOpen with an untrusted symlinked marker = %v, want nil (not followed)", err)
+	}
+}
+
+// TestCheckMigrationFreezeForNativeOpen_TrustedSymlinkViaEnvOverrideIsFollowed
+// is the mirror case: EnvFreezeFile is the operator's OWN stated intent, not
+// something the ancestor walk stumbled onto, so a symlink there IS followed
+// and a regular target still freezes.
+func TestCheckMigrationFreezeForNativeOpen_TrustedSymlinkViaEnvOverrideIsFollowed(t *testing.T) {
+	clearAmbientMigrationFreezeEnv(t)
+	realTarget := filepath.Join(t.TempDir(), "real-marker")
+	if err := os.WriteFile(realTarget, []byte(""), 0o644); err != nil {
+		t.Fatalf("write symlink target: %v", err)
+	}
+	linkPath := filepath.Join(t.TempDir(), "current-marker")
+	if err := os.Symlink(realTarget, linkPath); err != nil {
+		t.Fatalf("create trusted symlink: %v", err)
+	}
+	t.Setenv(migrationFreezeEnvFile, linkPath)
+
+	scopeRoot := t.TempDir()
+	if err := checkMigrationFreezeForNativeOpen(scopeRoot); !errors.Is(err, errNativeOpenFrozen) {
+		t.Fatalf("checkMigrationFreezeForNativeOpen with a trusted symlinked marker = %v, want errNativeOpenFrozen", err)
+	}
+}
+
+// TestCheckMigrationFreezeForNativeOpen_StickyWorldWritableDirIsIgnored pins
+// inUntrustedDir's carve-out: a marker sitting in a world-writable sticky
+// directory (/tmp and its kin) is forgeable by any local account and, thanks
+// to the sticky bit, undeletable by whoever a refusal would tell to remove
+// it. Such a marker must not freeze the scope.
+func TestCheckMigrationFreezeForNativeOpen_StickyWorldWritableDirIsIgnored(t *testing.T) {
+	clearAmbientMigrationFreezeEnv(t)
+	root := t.TempDir()
+	stickyDir := filepath.Join(root, "sticky")
+	if err := os.Mkdir(stickyDir, 0o755); err != nil {
+		t.Fatalf("mkdir sticky dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(stickyDir, 0o755) })
+	// 0o1777: sticky bit set, world-writable — the /tmp shape. Deliberately
+	// syscall.Chmod, not os.Chmod: on this Go toolchain (go1.27.1
+	// darwin/arm64, observed 2026-09-29) os.Chmod silently drops the sticky
+	// bit (S_ISVTX) on Darwin — verified against a bare, non-test program,
+	// so it is not a test-harness artifact — while the raw syscall sets it
+	// correctly. Linux CI is unaffected either way.
+	if err := syscall.Chmod(stickyDir, 0o1777); err != nil {
+		t.Fatalf("chmod sticky dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stickyDir, migrationFreezeFileName), []byte(""), 0o644); err != nil {
+		t.Fatalf("write marker in sticky dir: %v", err)
+	}
+	scopeRoot := filepath.Join(stickyDir, "city", "rig")
+	if err := os.MkdirAll(filepath.Join(scopeRoot, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir scope: %v", err)
+	}
+
+	if err := checkMigrationFreezeForNativeOpen(scopeRoot); err != nil {
+		t.Fatalf("checkMigrationFreezeForNativeOpen with a marker in a sticky world-writable dir = %v, want nil (untrusted dir)", err)
+	}
+}
+
+// TestCheckMigrationFreezeForNativeOpen_EACCESIsUndeterminableAndFailsClosed
+// pins classifyMigrationFreezeStatErr's central safety property: a stat
+// failure that is NOT a definitive not-exist (EACCES from an unsearchable
+// ancestor directory, standing in for permission, I/O, or hung-mount errors)
+// must be treated as FROZEN — "cannot tell" is not the same answer as "not
+// frozen", and a write gate must never collapse the two.
+func TestCheckMigrationFreezeForNativeOpen_EACCESIsUndeterminableAndFailsClosed(t *testing.T) {
+	clearAmbientMigrationFreezeEnv(t)
+	if os.Geteuid() == 0 {
+		t.Skip("running as root bypasses directory permission checks")
+	}
+	root := t.TempDir()
+	locked := filepath.Join(root, "locked")
+	if err := os.Mkdir(locked, 0o755); err != nil {
+		t.Fatalf("mkdir locked: %v", err)
+	}
+	scopeRoot := filepath.Join(locked, "city", "rig")
+	if err := os.MkdirAll(filepath.Join(scopeRoot, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir scope before locking: %v", err)
+	}
+	// Restore search permission before t.TempDir's RemoveAll cleanup runs
+	// (Cleanup is LIFO, so this registers after — and runs before — it).
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatalf("chmod locked: %v", err)
+	}
+
+	if err := checkMigrationFreezeForNativeOpen(scopeRoot); !errors.Is(err, errNativeOpenFrozen) {
+		t.Fatalf("checkMigrationFreezeForNativeOpen with an unsearchable ancestor (EACCES) = %v, want errNativeOpenFrozen (fail closed)", err)
 	}
 }

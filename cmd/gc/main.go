@@ -1738,6 +1738,14 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 			// direct native path (which bypasses the factory preflight/identity
 			// gate, so an absent scope project_id cannot block the reconnect).
 			reopen := func(ctx context.Context) (beads.NativeStorage, error) {
+				// ga-vwupk: checked BEFORE re-resolving the env below, which can
+				// trigger managed-Dolt recovery/restart (allowRecovery=true) --
+				// a frozen scope must never have gc restart a database an
+				// operator deliberately stopped on the way to
+				// OpenNativeStorage's own choke-point refusal a few lines down.
+				if beads.MigrationFrozen(scopeRoot) {
+					return nil, fmt.Errorf("re-resolve native store env %s: migration freeze is active; refusing the reconnect before recovery", scopeRoot)
+				}
 				var freshEnv map[string]string
 				var rerr error
 				if longLived {
