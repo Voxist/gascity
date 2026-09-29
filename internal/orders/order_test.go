@@ -426,6 +426,38 @@ func TestValidateExecWithPool(t *testing.T) {
 	}
 }
 
+// TestValidateRecoverOnStoreUnavailableRequiresCooldownExec covers the
+// MEDIUM review item on ga-3bwmf: recover_on_store_unavailable's cooldown
+// IS the order's own Interval, so it means nothing outside a
+// cooldown-triggered exec order. Validate must reject it on a formula order
+// and on event/cron/condition exec orders, and accept it on the one shape
+// it was built for.
+func TestValidateRecoverOnStoreUnavailableRequiresCooldownExec(t *testing.T) {
+	bad := []Order{
+		{Name: "formula-order", Formula: "mol-x", Trigger: "cooldown", Interval: "30s", RecoverOnStoreUnavailable: true},
+		{Name: "event-exec", Exec: "true", Trigger: "event", On: "bead.closed", RecoverOnStoreUnavailable: true},
+		{Name: "cron-exec", Exec: "true", Trigger: "cron", Schedule: "* * * * *", RecoverOnStoreUnavailable: true},
+		{Name: "condition-exec", Exec: "true", Trigger: "condition", Check: "true", RecoverOnStoreUnavailable: true},
+		{Name: "manual-exec", Exec: "true", Trigger: "manual", RecoverOnStoreUnavailable: true},
+	}
+	for _, a := range bad {
+		t.Run(a.Name, func(t *testing.T) {
+			err := Validate(a)
+			if err == nil {
+				t.Fatalf("Validate should reject recover_on_store_unavailable on a %s-triggered %s order", a.Trigger, map[bool]string{true: "formula", false: "exec"}[a.Formula != ""])
+			}
+			if !strings.Contains(err.Error(), "recover_on_store_unavailable") {
+				t.Errorf("error %q does not name recover_on_store_unavailable", err.Error())
+			}
+		})
+	}
+
+	good := Order{Name: "beads-health-like", Exec: "gc beads health --quiet", Trigger: "cooldown", Interval: "30s", RecoverOnStoreUnavailable: true}
+	if err := Validate(good); err != nil {
+		t.Errorf("Validate should accept recover_on_store_unavailable on a cooldown-triggered exec order: %v", err)
+	}
+}
+
 func TestValidateFormulaWithEnv(t *testing.T) {
 	a := Order{Name: "bad", Formula: "mol-x", Trigger: "manual", Env: map[string]string{"CUSTOM_ORDER_FLAG": "enabled"}}
 	err := Validate(a)

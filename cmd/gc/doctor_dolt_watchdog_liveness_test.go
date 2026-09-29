@@ -34,16 +34,27 @@ func installWatchdogLivenessCity(t *testing.T) (string, managedDoltRuntimeLayout
 	if err != nil {
 		t.Fatalf("resolve layout: %v", err)
 	}
+	// Every test below stands in a plain `sleep`/shell process for the
+	// managed dolt server (there is no real dolt binary in a unit test), so
+	// the real argv-matching pidLooksLikeDoltSQLServer would reject every
+	// one of them as "PID reuse". Stub it here; the one test that exercises
+	// the real function (TestPidLooksLikeDoltSQLServerRejectsAnUnrelatedProcess)
+	// restores it first.
+	prevLooksLikeDolt := pidLooksLikeDoltSQLServer
+	t.Cleanup(func() { pidLooksLikeDoltSQLServer = prevLooksLikeDolt })
+	pidLooksLikeDoltSQLServer = func(int) bool { return true }
 	return cityPath, layout
 }
 
-// writeWatchdogLivenessState records a running managed-Dolt server at pid —
-// every test here cares about a RUNNING recording (the not-running case is
-// covered directly in TestDoltWatchdogLivenessCheckIsQuietWithNoRuntimeState,
-// which writes no state at all).
-func writeWatchdogLivenessState(t *testing.T, layout managedDoltRuntimeLayout, pid int) {
+// writeWatchdogLivenessState records a running managed-Dolt server at pid,
+// with watchdog recorded exactly as dolt_start_managed.go would at spawn
+// time (started.WatchdogPID > 0) — every test here cares about a RUNNING
+// recording (the not-running case is covered directly in
+// TestDoltWatchdogLivenessCheckIsQuietWithNoRuntimeState, which writes no
+// state at all).
+func writeWatchdogLivenessState(t *testing.T, layout managedDoltRuntimeLayout, pid int, watchdog bool) {
 	t.Helper()
-	data, err := json.Marshal(doltRuntimeState{Running: true, PID: pid, Port: 48770, DataDir: layout.DataDir})
+	data, err := json.Marshal(doltRuntimeState{Running: true, PID: pid, Port: 48770, DataDir: layout.DataDir, Watchdog: watchdog})
 	if err != nil {
 		t.Fatalf("marshal runtime state: %v", err)
 	}
@@ -107,14 +118,20 @@ func spawnOrphanedChild(t *testing.T) int {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("pid %d was never observed reparented after its watchdog shell died", childPID)
+	// This host's reparenting model adopted the child under neither pid 1
+	// nor a detected systemd --user subreaper — some other live process (a
+	// non-systemd session manager, a container init, etc.) — which this
+	// test's own reparented-orphan test cannot reason about either. Skip
+	// rather than fail: it says nothing about the check under test, only
+	// about this host's process topology.
+	t.Skipf("pid %d was never observed reparented (host subreaper model not recognized by pidutil.IsReparentedOrphan)", childPID)
 	return 0
 }
 
 func TestDoltWatchdogLivenessCheckFlagsAnOrphanedServer(t *testing.T) {
 	cityPath, layout := installWatchdogLivenessCity(t)
 	childPID := spawnOrphanedChild(t)
-	writeWatchdogLivenessState(t, layout, childPID)
+	writeWatchdogLivenessState(t, layout, childPID, true)
 
 	got := runWatchdogLivenessCheck(t, cityPath)
 	if got.Status != doctor.StatusError {
@@ -140,7 +157,7 @@ func TestDoltWatchdogLivenessCheckPassesForASupervisedServer(t *testing.T) {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	})
-	writeWatchdogLivenessState(t, layout, cmd.Process.Pid)
+	writeWatchdogLivenessState(t, layout, cmd.Process.Pid, true)
 
 	got := runWatchdogLivenessCheck(t, cityPath)
 	if got.Status != doctor.StatusOK {
@@ -172,7 +189,7 @@ func TestDoltWatchdogLivenessCheckIsQuietWhenRecordedPIDIsDead(t *testing.T) {
 	cityPath, layout := installWatchdogLivenessCity(t)
 	// A recently-reaped PID: dead-PID classification is a different check's
 	// lane (dolt-topology/dolt-drift).
-	writeWatchdogLivenessState(t, layout, deadPID(t))
+	writeWatchdogLivenessState(t, layout, deadPID(t), true)
 
 	got := runWatchdogLivenessCheck(t, cityPath)
 	if got.Status != doctor.StatusOK {
@@ -180,15 +197,60 @@ func TestDoltWatchdogLivenessCheckIsQuietWhenRecordedPIDIsDead(t *testing.T) {
 	}
 }
 
+// TestDoltWatchdogLivenessCheckIsQuietWhenWatchdogDisabled covers the
+// direct-spawn case (GC_DOLT_SCOPE_WATCHDOG=0 AT START TIME): the check
+// reads Watchdog=false from runtime state — the durable fact recorded when
+// this server started, not a re-read of the current env, which could have
+// changed since (ga-3bwmf review) — and declines to judge an orphaned PID
+// that was never supposed to have a watchdog in the first place.
 func TestDoltWatchdogLivenessCheckIsQuietWhenWatchdogDisabled(t *testing.T) {
 	cityPath, layout := installWatchdogLivenessCity(t)
-	t.Setenv("GC_DOLT_SCOPE_WATCHDOG", "0")
 	childPID := spawnOrphanedChild(t)
-	writeWatchdogLivenessState(t, layout, childPID)
+	writeWatchdogLivenessState(t, layout, childPID, false)
 
 	got := runWatchdogLivenessCheck(t, cityPath)
 	if got.Status != doctor.StatusOK {
-		t.Fatalf("status = %v, want ok when the watchdog is deliberately disabled (result %+v)", got.Status, got)
+		t.Fatalf("status = %v, want ok when the recorded state says this server was started without a watchdog (result %+v)", got.Status, got)
+	}
+}
+
+// TestDoltWatchdogLivenessCheckIgnoresCurrentEnvAtCheckTime pins the exact
+// review finding: GC_DOLT_SCOPE_WATCHDOG at the moment `gc doctor` runs must
+// have NO effect on the verdict for an already-recorded server. A server
+// recorded as watchdog=true but now orphaned is still a genuine finding even
+// if the operator has since flipped the env off (that env change affects
+// only FUTURE starts).
+func TestDoltWatchdogLivenessCheckIgnoresCurrentEnvAtCheckTime(t *testing.T) {
+	cityPath, layout := installWatchdogLivenessCity(t)
+	t.Setenv("GC_DOLT_SCOPE_WATCHDOG", "0")
+	childPID := spawnOrphanedChild(t)
+	writeWatchdogLivenessState(t, layout, childPID, true)
+
+	got := runWatchdogLivenessCheck(t, cityPath)
+	if got.Status != doctor.StatusError {
+		t.Fatalf("status = %v, want error: a watchdog=true recording must still be judged regardless of the CURRENT env (result %+v)", got.Status, got)
+	}
+}
+
+// TestPidLooksLikeDoltSQLServerRejectsAnUnrelatedProcess covers the LOW
+// review item: a recorded PID that has been reused by an unrelated process
+// must not be judged for supervision at all. This exercises the REAL
+// default implementation directly (every other test in this file stubs it,
+// standing in a plain `sleep` for lack of a real dolt binary).
+func TestPidLooksLikeDoltSQLServerRejectsAnUnrelatedProcess(t *testing.T) {
+	cmd := exec.Command("sleep", "5")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	if pidLooksLikeDoltSQLServer(cmd.Process.Pid) {
+		t.Fatalf("pidLooksLikeDoltSQLServer(sleep pid) = true, want false (argv is not \"dolt sql-server\")")
+	}
+	if !pidLooksLikeDoltSQLServer(0) {
+		t.Error("pidLooksLikeDoltSQLServer(0) = false, want true: a failed Cmdline read must not manufacture a mismatch")
 	}
 }
 

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
@@ -73,20 +75,6 @@ func (c *doltWatchdogLivenessCheck) Run(_ *doctor.CheckContext) *doctor.CheckRes
 	if c.cfg == nil || !workspaceUsesManagedBdStoreContract(c.cityPath, c.cfg.Rigs) {
 		return okCheck(name, "not using managed Dolt topology")
 	}
-	// Deliberately NOT managedDoltScopeWatchdogEnabled(): that function folds
-	// in "are we running inside a go test binary" (managedDoltTestModeEnabled),
-	// which exists to keep unit tests that spawn managed-dolt fixtures from
-	// interposing a real watchdog — a concern about what a FRESH start does,
-	// not about whether an ALREADY-RUNNING recorded PID is supervised, which
-	// is what this check reads. Consulting only the raw env var is both the
-	// semantically correct question here and what makes this check's own
-	// logic exercisable under `go test` at all.
-	if !managedDoltScopeWatchdogEnabledFor(false, os.Getenv(managedDoltScopeWatchdogEnv)) {
-		// An operator who opted out of the watchdog (GC_DOLT_SCOPE_WATCHDOG=0)
-		// gets a directly-spawned server with no watchdog BY DESIGN — ppid 1
-		// there is expected, not a finding.
-		return okCheck(name, "scope watchdog disabled (GC_DOLT_SCOPE_WATCHDOG=0); nothing to check")
-	}
 	layout, err := resolveManagedDoltRuntimeLayout(c.cityPath)
 	if err != nil {
 		return okCheck(name, "no managed Dolt runtime layout for this city")
@@ -105,10 +93,30 @@ func (c *doltWatchdogLivenessCheck) Run(_ *doctor.CheckContext) *doctor.CheckRes
 	if !state.Running || state.PID <= 0 {
 		return okCheck(name, "no managed Dolt server recorded as running")
 	}
+	// Watchdog is the durable fact recorded AT SPAWN TIME (dolt_start_managed.go,
+	// started.WatchdogPID > 0), not a re-read of the CURRENT
+	// GC_DOLT_SCOPE_WATCHDOG env: direct-mode (deliberately no watchdog) and
+	// watchdog-enabled-but-since-died both leave this PID orphaned to the
+	// same ppid, so only a spawn-time fact can tell them apart (env can
+	// change after spawn; process topology alone cannot distinguish them —
+	// ga-3bwmf review). An older runtime-state file written before this
+	// field existed defaults to false (Go's zero value), which is the safe
+	// direction: it reports "nothing to check" rather than guessing a
+	// finding from a fact it was never given.
+	if !state.Watchdog {
+		return okCheck(name, "this server was started without a scope watchdog (recorded at spawn); nothing to check")
+	}
 	if !pidAlive(state.PID) {
 		// A dead recorded PID is a different finding (dolt-topology/dolt-drift's
 		// lane); this check answers only "is a LIVE recorded server supervised".
 		return okCheck(name, fmt.Sprintf("recorded pid %d is not alive", state.PID))
+	}
+	if !pidLooksLikeDoltSQLServer(state.PID) {
+		// The recorded PID number has been reused by an unrelated process
+		// (pidAlive above only proves SOME process holds it now). Judging
+		// supervision of a process that is not our dolt server at all would
+		// be a false finding either way, so decline rather than guess.
+		return okCheck(name, fmt.Sprintf("pid %d is alive but its argv no longer looks like a managed dolt sql-server (likely PID reuse)", state.PID))
 	}
 
 	ppid, err := pidutil.ParentPIDOf(state.PID)
@@ -127,4 +135,22 @@ func (c *doltWatchdogLivenessCheck) Run(_ *doctor.CheckContext) *doctor.CheckRes
 			[]string{fmt.Sprintf("pid=%d ppid=%d detected_subreaper=%d", state.PID, ppid, subreaperPID)})
 	}
 	return okCheck(name, fmt.Sprintf("managed Dolt pid %d is supervised (parent pid %d)", state.PID, ppid))
+}
+
+// pidLooksLikeDoltSQLServer reports whether pid's argv still looks like the
+// managed dolt sql-server this check was told about (dolt_start_managed.go
+// spawns it as `dolt sql-server --config <path>`). A failed or empty argv
+// read is NOT treated as a mismatch — Cmdline can fail under load or on a
+// restricted host, and this check's job is to catch a genuinely reused PID,
+// not to manufacture a finding out of a read it could not complete.
+//
+// A package var so tests can stand in a fake process (a plain `sleep`, not
+// a real `dolt` binary) for the reparenting scenarios this check's own
+// tests exercise, without those tests needing a real dolt binary on PATH.
+var pidLooksLikeDoltSQLServer = func(pid int) bool {
+	argv, err := pidutil.Cmdline(pid)
+	if err != nil || len(argv) < 2 {
+		return true
+	}
+	return strings.EqualFold(filepath.Base(argv[0]), "dolt") && argv[1] == "sql-server"
 }

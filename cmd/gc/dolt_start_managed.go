@@ -319,6 +319,7 @@ func startManagedDoltProcessWithConfig(cityPath, host, port, user, logLevel stri
 			Port:      currentPort,
 			DataDir:   layout.DataDir,
 			StartedAt: time.Now().UTC().Format(time.RFC3339),
+			Watchdog:  started.WatchdogPID > 0,
 		}); err != nil {
 			terminateManagedDoltStartedProcess(started)
 			_ = os.Remove(layout.PIDFile)

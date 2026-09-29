@@ -113,27 +113,30 @@ type Order struct {
 	// is implemented separately (gastownhall/gascity ga-1ocm3f); this field
 	// only declares eligibility.
 	ReservedDispatch bool `toml:"reserved_dispatch,omitempty"`
-	// RecoverOnStoreUnavailable opts an exec order into a narrow fallback
-	// path when the dispatcher cannot even OPEN a beads store for it
-	// (beads.ErrStoreUnavailable): the dispatcher runs the order's exec
-	// directly, without the tracking-bead write or open-work gate that
-	// normally single-flight it, since both require the very store that is
-	// down. It is gated by its own in-memory cooldown (the order's own
-	// Interval, or a small floor when that is unset/unparseable) so a
-	// persistently down store cannot make it loop faster than its declared
-	// cadence (gastownhall/gascity ga-3bwmf).
+	// RecoverOnStoreUnavailable opts a cooldown-triggered exec order into a
+	// narrow fallback path when a beads-store operation the dispatcher needs
+	// to schedule it (the store-open, either open-work gate, or the
+	// tracking-bead CreateRun) fails and classifies as
+	// beads.ErrStoreUnavailable: the dispatcher runs the order's exec
+	// directly, without the tracking bead or open-work gate that normally
+	// single-flight it, since all of those need the very store that is
+	// down. It is gated by its own cooldown — the order's own Interval,
+	// floored at a small minimum — shared with the normal path's clock, plus
+	// a single-flight guard, so a persistently down store cannot make it
+	// loop faster than its declared cadence or overlap two runs of its exec
+	// (gastownhall/gascity ga-3bwmf).
 	//
-	// This exists for exactly one shape of order: one whose exec has its
-	// OWN internal recovery logic that does not itself depend on this
-	// store (gc beads health's provider-health-op → guarded recover route
-	// is the motivating case) — without it, the one periodic mechanism
-	// that could restart a fully-dead beads store can never run its own
-	// recovery exec, because scheduling it needs the store it exists to
-	// heal. It is meaningless for a formula order (materializing a wisp
-	// needs a store) or a sweep whose whole job is bead bookkeeping
-	// (order-tracking-sweep): IsExec() false or a store-dependent exec
-	// simply does nothing useful through this path, so declaring it there
-	// is a no-op, not a footgun.
+	// This exists for exactly one shape of order: a cooldown-triggered exec
+	// order whose exec has its OWN internal recovery logic that does not
+	// itself depend on this store (gc beads health's provider-health-op →
+	// guarded recover route is the motivating case) — without it, the one
+	// periodic mechanism that could restart a fully-dead beads store can
+	// never run its own recovery exec, because scheduling it needs the
+	// store it exists to heal. Validate rejects it on anything else
+	// (formula orders, and event/cron/condition exec orders) rather than
+	// letting it silently no-op: a formula order has no store-free exec to
+	// run, and the cooldown shape this field's own semantics depend on
+	// (Interval) does not exist on the other trigger kinds.
 	RecoverOnStoreUnavailable bool `toml:"recover_on_store_unavailable,omitempty"`
 	// Env is a map of environment variables exported into an exec
 	// order's child process. Use the `[order.env]` TOML table to
@@ -314,6 +317,17 @@ func Validate(a Order) error {
 	// Exec orders must not have a pool (no agent pipeline).
 	if a.Exec != "" && a.Pool != "" {
 		return fmt.Errorf("order %q: exec orders cannot have a pool", a.Name)
+	}
+	// recover_on_store_unavailable's cooldown IS the order's own Interval
+	// (see cmd/gc order_dispatch.go's storeUnavailableFallbackCooldown), so
+	// it means nothing outside a cooldown-triggered exec order: an event,
+	// cron, or condition order has no Interval field at all, and on a
+	// formula order there is no store-free exec to run. Without this an
+	// event/cron/condition order that set the flag by copy-paste would fire
+	// on whatever floor cooldown applies, on a 30s+ timer unrelated to its
+	// declared trigger, silently.
+	if a.RecoverOnStoreUnavailable && (a.Exec == "" || a.Trigger != "cooldown") {
+		return fmt.Errorf("order %q: recover_on_store_unavailable requires an exec order with trigger = \"cooldown\"", a.Name)
 	}
 	for key := range a.Env {
 		if strings.TrimSpace(key) == "" {
