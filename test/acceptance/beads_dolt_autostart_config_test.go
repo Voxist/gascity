@@ -161,12 +161,21 @@ func TestGascityProbeEnsureRunningDetailedLibraryConsumer(t *testing.T) {
 	}
 }
 
-// assertProcessIsDead confirms pid is no longer a live process, independent
-// of anything the .beads state file says -- that file is exactly what is
-// under test, so trusting it again here to prove itself clean would be
-// circular, not a safety net. Signal(0) is the classic portable Unix
-// liveness probe (the "kill(pid, 0)" idiom): it delivers nothing, only
-// reports via its error whether the kernel still has the PID.
+// assertProcessIsDead confirms the kernel no longer has pid runnable,
+// independent of anything the .beads state file says -- that file is
+// exactly what is under test, so trusting it again here to prove itself
+// clean would be circular, not a safety net. Signal(0) is the classic
+// portable Unix liveness probe (the "kill(pid, 0)" idiom): it delivers
+// nothing, only reports via its error whether the kernel still has the PID.
+//
+// Signal(0) also succeeds against an unreaped ZOMBIE: StopWithForce's kill
+// terminates the process, but until ITS parent (this test's own process,
+// since EnsureRunningDetailed started it directly) calls wait() on it, the
+// kernel keeps a zombie table entry that answers Signal(0) exactly like a
+// live one. A zombie holds none of the resources ("a stray server on a
+// shared host") this check exists to catch, and Kill() against one is a
+// harmless no-op the kernel ignores -- so calling it here is safe -- but
+// "still alive" would misdescribe what was actually found.
 func assertProcessIsDead(t *testing.T, pid int) {
 	t.Helper()
 	if pid <= 0 {
@@ -177,7 +186,7 @@ func assertProcessIsDead(t *testing.T, pid int) {
 		return
 	}
 	if sigErr := proc.Signal(syscall.Signal(0)); sigErr == nil {
-		t.Errorf("pid %d is still alive after cleanup despite the .beads state file reporting it stopped; killing it directly", pid)
+		t.Errorf("pid %d is still alive or an unreaped zombie after cleanup despite the .beads state file reporting it stopped; killing it directly (a no-op if it is already a zombie)", pid)
 		_ = proc.Kill()
 	}
 }

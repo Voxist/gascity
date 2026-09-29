@@ -123,10 +123,19 @@ var bootstrapPolicy = Ledger{
 	Version: 2,
 	AuditBaseline: []Baseline{
 		{
-			Scope:           ScopeAll,
-			Resource:        ResourceSubprocess,
-			BaselineCalls:   712,
-			BaselineFiles:   206,
+			Scope:    ScopeAll,
+			Resource: ResourceSubprocess,
+			// Bumped 712->715 calls, 206->207 files for ga-xwn1k's new
+			// test/acceptance/beads_dolt_autostart_config_test.go
+			// (TestBeadsDoltAutoStartConfigHonouredByLibraryConsumer):
+			// fetchAndVerifyBDSource's curl+tar and the injected probe's own
+			// `go test` invocation are exec.Command calls inherent to what
+			// the test does -- fetch and build the pinned bd source to
+			// prove the ga-rpgvw fix against a library consumer, which
+			// cannot be done any other way (see that test's own file-level
+			// doc comment). Not a sleep-polling bump; a justified one.
+			BaselineCalls:   715,
+			BaselineFiles:   207,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-cp3hwi",
