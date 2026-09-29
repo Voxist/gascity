@@ -1795,14 +1795,28 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	}
 }
 
+// controllerGenerationNonce disambiguates two newControllerGeneration calls
+// that land in the same wall-clock second within the same process — the
+// timestamp+pid alone collide there. Process-wide, monotonically increasing,
+// and deliberately not a secret, same as the id it rides in: see that
+// function's doc comment. In production this fires only if a runtime were
+// ever (incorrectly) re-minted mid-life; in tests it is common — the whole
+// point of building this counter is that a test constructing two runtimes
+// back-to-back must NOT get the same id just because both calls landed in
+// the same second, or a bug that re-mints per dispatcher rebuild becomes
+// invisible to any test that runs faster than a second.
+var controllerGenerationNonce atomic.Uint64
+
 // newControllerGeneration mints a controller boot id (ADR-0130 D1): sortable,
-// human-readable, and collision-free across restarts (the wall-clock component
-// changes every boot; the pid disambiguates a same-second overlap). It is
-// stamped on every tracking bead the controller creates and is deliberately
-// NOT a secret — the ACL token stays in .gc/controller.token and never rides
-// bead metadata.
+// human-readable, and collision-free — the wall-clock component changes every
+// boot, the pid disambiguates a same-second overlap across processes, and the
+// trailing counter disambiguates multiple mints within the same process in
+// the same second. It is stamped on every tracking bead the controller
+// creates and is deliberately NOT a secret — the ACL token stays in
+// .gc/controller.token and never rides bead metadata.
 func newControllerGeneration() string {
-	return fmt.Sprintf("ctrl-%s-p%d", time.Now().UTC().Format("20060102T150405"), os.Getpid())
+	n := controllerGenerationNonce.Add(1)
+	return fmt.Sprintf("ctrl-%s-p%d-n%d", time.Now().UTC().Format("20060102T150405"), os.Getpid(), n)
 }
 
 // bulkDeleteMaxAge returns the maximum backup age allowed for bulk bead

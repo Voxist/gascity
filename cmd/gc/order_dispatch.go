@@ -4383,6 +4383,13 @@ func effectiveTimeout(a orders.Order, maxTimeout time.Duration) time.Duration {
 // state is not left unrecoverable: a foreign-generation marker (D1) still
 // reaps immediately, and sweepOrphanedOrderTrackingAtBoot still recovers a
 // truly abandoned one at the next boot.
+//
+// Concretely: a webhook or manual dispatch whose CloseRun write fails after
+// its exec finishes now stays open until the next boot rather than being
+// reaped by a guessed deadline. This does not gate anything — these markers
+// are outside the tick loop's own order set by construction (that is the
+// same "doesn't know" this function is about), so no scheduled dispatch
+// waits on one.
 func (m *memoryOrderDispatcher) trackingResidualCutoff(scoped string) time.Duration {
 	for i := range m.aa {
 		if m.aa[i].ScopedName() == scoped {
