@@ -127,6 +127,91 @@ func TestParseSkipExpression(t *testing.T) {
 	}
 }
 
+// TestExtractAndBlankCanonicalSkips is the direct, parser-level regression
+// for HIGH round 4's right-boundary fix: skipArgPattern must accept a
+// canonical -skip whose closing quote is followed by end-of-text,
+// whitespace, or one of `;&|)`, and must REJECT (not match at all) one
+// glued to more text via another quote, a shell variable, or an escaped
+// pipe -- the four concrete forms review probed. A rejection here means the
+// text is left for skipFlagTokenPattern's fallback scan to catch as
+// skip-flag-shaped, which TestSkipAllowlistProblems's "every probed bypass"
+// table proves end to end; this test isolates the boundary decision itself.
+func TestExtractAndBlankCanonicalSkips(t *testing.T) {
+	cases := []struct {
+		name      string
+		text      string
+		wantExprs []string
+		wantLeft  string // substring that must survive unblanked, "" to skip the check
+	}{
+		{
+			name:      "canonical, followed by end-of-text",
+			text:      "go test -skip 'TestFoo/bar'",
+			wantExprs: []string{"TestFoo/bar"},
+		},
+		{
+			name:      "canonical, followed by whitespace",
+			text:      "go test -skip 'TestFoo/bar' ./test/acceptance/",
+			wantExprs: []string{"TestFoo/bar"},
+		},
+		{
+			name:      "canonical, followed by a semicolon",
+			text:      "go test -skip 'TestFoo/bar';echo done",
+			wantExprs: []string{"TestFoo/bar"},
+			wantLeft:  ";echo done",
+		},
+		{
+			name:      "canonical, followed by a closing paren",
+			text:      "if true; then go test -skip 'TestFoo/bar'); fi",
+			wantExprs: []string{"TestFoo/bar"},
+		},
+		{
+			// review's glue form 1: two adjacent single-quoted shell
+			// strings, which the shell concatenates into one -skip value
+			// ("Allowed|TestOther"). The right-boundary fix must refuse to
+			// treat "Allowed" as the whole expression.
+			name:      "glued: adjacent single-quoted strings",
+			text:      "go test -skip 'Allowed''|TestOther'",
+			wantExprs: nil,
+			wantLeft:  "-skip 'Allowed''|TestOther'",
+		},
+		{
+			// review's glue form 2: a double-quoted continuation.
+			name:      "glued: double-quoted continuation",
+			text:      `go test -skip 'Allowed'"|TestOther"`,
+			wantExprs: nil,
+			wantLeft:  `-skip 'Allowed'"|TestOther"`,
+		},
+		{
+			// review's glue form 3: a shell variable reference glued on.
+			name:      "glued: shell variable glued on",
+			text:      "go test -skip 'Allowed'$EXTRA",
+			wantExprs: nil,
+			wantLeft:  "-skip 'Allowed'$EXTRA",
+		},
+		{
+			// review's glue form 4: an escaped pipe glued on.
+			name:      `glued: escaped pipe glued on`,
+			text:      `go test -skip 'Allowed'\|TestOther`,
+			wantExprs: nil,
+			wantLeft:  `-skip 'Allowed'\|TestOther`,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			exprs, blanked := extractAndBlankCanonicalSkips(c.text)
+			if !equalStringSlices(exprs, c.wantExprs) {
+				t.Fatalf("extractAndBlankCanonicalSkips(%q) exprs = %v, want %v", c.text, exprs, c.wantExprs)
+			}
+			if c.wantLeft != "" && !strings.Contains(blanked, c.wantLeft) {
+				t.Fatalf("extractAndBlankCanonicalSkips(%q) blanked = %q, want it to still contain %q", c.text, blanked, c.wantLeft)
+			}
+			if len(c.wantExprs) > 0 && strings.Contains(blanked, c.wantExprs[0]) {
+				t.Fatalf("extractAndBlankCanonicalSkips(%q) blanked = %q, a recognized expression must not survive in the blanked text", c.text, blanked)
+			}
+		})
+	}
+}
+
 func TestSplitTopLevelAlternation(t *testing.T) {
 	cases := []struct {
 		name string
@@ -575,6 +660,55 @@ func TestSkipAllowlistProblems(t *testing.T) {
 				name:    "echo $# -- not a comment start, and no -skip present",
 				run:     []string{`echo $#; go test -run 'TestFoo$' ./test/acceptance/`},
 				wantErr: "",
+			},
+			{
+				// HIGH round 4: the concrete false match review found in the
+				// previous (word-start) comment rule. A '#' preceded by
+				// whitespace INSIDE a double-quoted string is not a shell
+				// comment; the old rule fired on "step #1" anyway and
+				// truncated the rest of the line, silently dropping the
+				// real -skip=X that followed. The full-line-only rule must
+				// leave this whole line alone, so the real -skip is still
+				// visible (and still hard-errors, since -skip=X is not the
+				// canonical single-quoted form).
+				name:    `echo "step #1"; go test -skip=X -- a quoted '#' must not swallow the rest of the line`,
+				run:     []string{`echo "step #1"; go test -run 'TestFoo$' -skip=TestFoo/bar ./test/acceptance/`},
+				wantErr: "skip-flag-shaped token",
+			},
+			{
+				// Control: ci.yml has this exact shape today (an "## " lead-in
+				// inside a double-quoted echo). It has no -skip on the line at
+				// all, so the full-line-only rule -- which does not touch this
+				// line either way -- must not error.
+				name:    `echo "## Section banner" -- the real shape already in ci.yml, no -skip present`,
+				run:     []string{`echo "## Section banner"`, `go test -run 'TestFoo$' ./test/acceptance/`},
+				wantErr: "",
+			},
+			{
+				// HIGH round 4, glue form 1: adjacent single-quoted strings
+				// the shell concatenates into one value. Must not be read
+				// as a clean "Allowed" expression with the rest ignored.
+				name:    "glued: -skip 'Allowed''|TestOther' (adjacent single quotes)",
+				run:     []string{`go test -run 'TestFoo$' -skip 'Allowed''|TestOther' ./test/acceptance/`},
+				wantErr: "skip-flag-shaped token",
+			},
+			{
+				// HIGH round 4, glue form 2: a double-quoted continuation.
+				name:    `glued: -skip 'Allowed'"|TestOther" (double-quoted continuation)`,
+				run:     []string{`go test -run 'TestFoo$' -skip 'Allowed'"|TestOther" ./test/acceptance/`},
+				wantErr: "skip-flag-shaped token",
+			},
+			{
+				// HIGH round 4, glue form 3: a shell variable glued on.
+				name:    "glued: -skip 'Allowed'$EXTRA (shell variable glued on)",
+				run:     []string{`go test -run 'TestFoo$' -skip 'Allowed'$EXTRA ./test/acceptance/`},
+				wantErr: "skip-flag-shaped token",
+			},
+			{
+				// HIGH round 4, glue form 4: an escaped pipe glued on.
+				name:    `glued: -skip 'Allowed'\|TestOther (escaped pipe glued on)`,
+				run:     []string{`go test -run 'TestFoo$' -skip 'Allowed'\|TestOther ./test/acceptance/`},
+				wantErr: "skip-flag-shaped token",
 			},
 			{
 				// Decoy: an unrelated flag that merely starts with "skip-"

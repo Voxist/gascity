@@ -284,17 +284,33 @@ type skippedRow struct {
 // skipArgPattern matches the body of the ONE canonical `-skip '<expr>'`
 // spelling this parser accepts: single-quoted, the same convention runPattern
 // relies on for `-run`, with a left boundary that excludes it matching mid-
-// identifier (an "...x-skip" tail cannot masquerade as the flag). go test's
-// actual -skip flag also accepts --skip, -skip=X, -skip "X", an unquoted
-// value, -test.skip/--test.skip, and reads GOFLAGS -- none of those are
-// parsed here. Rather than enumerate and parse every one of them,
-// requiredJobSkipsFromDoc DENIES BY DEFAULT: it removes every canonical
-// occurrence this pattern finds, then hard-errors if anything matching
-// skipFlagTokenPattern remains anywhere in the run script or any env value in
-// scope. Unlike a missed `-run` (which a green CI run makes visible by never
-// running), a missed `-skip` fails OPEN: the row runs -- or a shared resource
-// the allowlist assumed was staying off does not.
-var skipArgPattern = regexp.MustCompile(`(^|[^A-Za-z0-9_.-])-skip\s+'([^']*)'`)
+// identifier (an "...x-skip" tail cannot masquerade as the flag) AND a right
+// boundary requiring the closing `'` be followed by end-of-text, whitespace,
+// or one of `;&|)` -- go test's actual -skip flag also accepts --skip,
+// -skip=X, -skip "X", an unquoted value, -test.skip/--test.skip, and reads
+// GOFLAGS -- none of those are parsed here. Rather than enumerate and parse
+// every one of them, requiredJobSkipsFromDoc DENIES BY DEFAULT: it removes
+// every canonical occurrence this pattern finds, then hard-errors if anything
+// matching skipFlagTokenPattern remains anywhere in the run script or any env
+// value in scope. Unlike a missed `-run` (which a green CI run makes visible
+// by never running), a missed `-skip` fails OPEN: the row runs -- or a shared
+// resource the allowlist assumed was staying off does not.
+//
+// The right boundary closes a glued-suffix hole review found: without it,
+// `-skip 'Allowed”|TestOther'` (two adjacent single-quoted shell strings,
+// which the shell concatenates into one -skip 'Allowed|TestOther') matches
+// this pattern as if "Allowed" were the whole expression, blanks exactly
+// that much, and leaves the trailing `'|TestOther'` looking like ordinary
+// quoted text -- not skip-flag-shaped, so it never reaches
+// skipFlagTokenPattern's fallback scan either. TestOther silently skips with
+// no allowlist entry and no error, from a spelling nobody was asked to
+// recognize. `-skip 'Allowed'"|X"`, `-skip 'Allowed'$E`, and
+// `-skip 'Allowed'\|X` are the same hole through a double-quoted glue, a
+// shell variable, and an escaped pipe respectively. Go's regexp (RE2) has no
+// lookahead, so the right boundary is a captured, consumed group like the
+// left one; extractAndBlankCanonicalSkips re-emits it unchanged, the same
+// way it already re-emits the left boundary character.
+var skipArgPattern = regexp.MustCompile(`(^|[^A-Za-z0-9_.-])-skip\s+'([^']*)'($|[\s;&|)])`)
 
 // skipFlagTokenPattern finds anything that LOOKS like a go test skip flag, in
 // any spelling and quoting: -skip/--skip/-test.skip/--test.skip, with or
@@ -320,49 +336,65 @@ func joinBackslashContinuations(s string) string {
 	return backslashContinuationPattern.ReplaceAllString(s, " ")
 }
 
-// shellCommentStartPattern finds a '#' that starts a shell comment: at the
-// beginning of a line, or immediately after whitespace -- the shell's own
-// "comments begin a word" rule. This deliberately does not track quoting (an
-// actually-quoted `"a # b"` still has its '#' preceded by a space and so is
-// still treated as commented-out here), but it DOES fix the two concrete
-// false matches review found with a naive first-'#'-on-the-line rule:
-// `echo '#'; go test -skip 'X'` (the '#' is preceded by a quote, not
-// whitespace, so it does not start a comment -- and must not swallow the
-// real -skip after it) and `echo $#` (the '#' is the second character of the
-// $# parameter, preceded by '$', not whitespace).
-var shellCommentStartPattern = regexp.MustCompile(`(^|\s)#.*$`)
+// fullLineCommentPattern matches a line whose first non-whitespace character
+// is '#' -- a FULL-LINE shell comment, and only that. review's HIGH-2 found
+// this guard's previous word-start rule ("'#' at line-start or after
+// whitespace starts a comment") still had a false match of its own: a '#'
+// preceded by whitespace INSIDE a double-quoted string is not a shell
+// comment at all, so `echo "step #1"; go test -skip=X` had its word-start
+// rule fire on the '#' in "step #1" and truncate the rest of the line --
+// including the real `; go test -skip=X` -- and ci.yml already has this
+// shape (`echo "## ..."`). Restricting to whole-line comments (nothing but
+// whitespace before the '#') cannot make that mistake: a '#' anywhere after
+// real content on the line, quoted or not, is simply left alone, and the
+// worst case is an over-detection downstream (skipFlagTokenPattern still
+// catches `-skip=X` on a line this no longer blanks), never a missed one.
+var fullLineCommentPattern = regexp.MustCompile(`^\s*#`)
 
-// stripShellComments removes shell comments by shellCommentStartPattern's
-// word-start rule, so a comment that MENTIONS "-skip" in prose (exactly how
+// stripShellComments blanks every FULL-LINE shell comment (fullLineCommentPattern),
+// so a comment that MENTIONS "-skip" in prose on its own line (exactly how
 // the real beads-proxied-native-acceptance step documents its own
 // deselection: "# -skip excludes child-term-zombie and root-move: ...") is
-// not counted as a skip-flag token, while a '#' that is not actually a
-// comment start does not swallow real content after it. Applied before
-// joinBackslashContinuations: a real shell comment absorbs any trailing '\'
-// too, so line-joining must not cross one.
+// not counted as a skip-flag token. A '#' that shares a line with real
+// content -- commented-out trailing code, or one that is merely inside a
+// quoted string -- is deliberately left untouched; see
+// fullLineCommentPattern's doc comment for why that direction is safe.
+// Applied before joinBackslashContinuations: a real shell comment absorbs
+// any trailing '\' too, so line-joining must not cross one.
 func stripShellComments(s string) string {
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
-		lines[i] = shellCommentStartPattern.ReplaceAllString(line, "$1")
+		if fullLineCommentPattern.MatchString(line) {
+			lines[i] = ""
+		}
 	}
 	return strings.Join(lines, "\n")
 }
 
 // extractAndBlankCanonicalSkips finds every canonical -skip '<expr>'
 // occurrence skipArgPattern recognizes, returning the expressions in
-// left-to-right order and TEXT with those occurrences replaced (boundary
-// character kept, the rest blanked) so a subsequent scan for anything
-// skip-flag-shaped does not re-flag what this parser already accounted for.
+// left-to-right order and TEXT with those occurrences replaced (both
+// boundary characters kept, the rest blanked) so a subsequent scan for
+// anything skip-flag-shaped does not re-flag what this parser already
+// accounted for. The right boundary (end-of-text, whitespace, or one of
+// `;&|)`) is consumed by the match the same way the left one is -- RE2 has
+// no lookahead -- so it is re-emitted here exactly like the left boundary,
+// rather than dropped: dropping it would silently delete a real separator
+// (e.g. the `;` between two shell commands) from the blanked text a later
+// scan still has to read correctly.
 func extractAndBlankCanonicalSkips(text string) (exprs []string, blanked string) {
 	var b strings.Builder
 	last := 0
 	for _, m := range skipArgPattern.FindAllStringSubmatchIndex(text, -1) {
 		b.WriteString(text[last:m[0]])
 		if m[2] >= 0 {
-			b.WriteString(text[m[2]:m[3]]) // keep the boundary character
+			b.WriteString(text[m[2]:m[3]]) // keep the left boundary character
 		}
 		b.WriteByte(' ')
 		exprs = append(exprs, text[m[4]:m[5]])
+		if m[6] >= 0 {
+			b.WriteString(text[m[6]:m[7]]) // keep the right boundary character (empty at end-of-text)
+		}
 		last = m[1]
 	}
 	b.WriteString(text[last:])
@@ -724,10 +756,24 @@ func checkPatternMatchesExactlyOne(pattern, row string, candidates []string, wha
 func requiredJobSkipsFromDoc(workflowName string, doc acceptanceWorkflowDoc, universe acceptanceTestUniverse) ([]skippedRow, error) {
 	var out []skippedRow
 	for jobName, job := range doc.Jobs {
+		// LOW (ga-may9k round 4): a job is in scope if ANY of its steps sets
+		// the required-tooling env, not only the specific step being
+		// scanned right now. A step that itself carries no
+		// GC_REQUIRE_ACCEPTANCE_TOOLING but runs later in a job another
+		// step DID mark required is still part of a required job -- job and
+		// workflow env apply uniformly to every step regardless of which
+		// step's YAML happens to repeat them.
+		jobRequired := requiredJobEnv(doc.Env, job.Env)
 		for _, step := range job.Steps {
-			if !requiredJobEnv(doc.Env, job.Env, step.Env) {
-				continue
+			if jobRequired {
+				break
 			}
+			jobRequired = requiredJobEnv(step.Env)
+		}
+		if !jobRequired {
+			continue
+		}
+		for _, step := range job.Steps {
 			for _, env := range []map[string]any{doc.Env, job.Env, step.Env} {
 				for key, value := range env {
 					s := fmt.Sprint(value)
@@ -854,28 +900,55 @@ func skipAllowlistProblems(workflows map[string][]byte, allowlist []skipAllowlis
 // ACCEPTANCE_GO_TEST_FLAGS). That closes `'-skip' 'X'`, `"-skip" "X"`,
 // `-skip"" X`, an unquoted value, `-test.skip`, a shell variable holding the
 // flag (`ARGS=-skip=X; go test $ARGS`), a bash array
-// (`args=(-skip=X); go test "${args[@]}"`), `GOFLAGS+='-skip=X'`, and an env
-// entry under any name (`env: EXTRA: -skip=X`) -- see
-// acceptance_run_skip_allowlist_fixture_test.go for a fixture proving each
-// one. stripShellComments' word-start rule keeps a `#` inside a quoted
-// string (`echo '#'; go test -skip=X`) or a `$#` parameter (`echo $#`) from
-// swallowing real content after it, which a naive first-'#' rule would have.
+// (`args=(-skip=X); go test "${args[@]}"`), `GOFLAGS+='-skip=X'`, a glued
+// quote-concatenation (`-skip 'Allowed”|TestOther'`, `-skip 'Allowed'"|X"`,
+// `-skip 'Allowed'$E`, `-skip 'Allowed'\|X`), and an env entry under any
+// name (`env: EXTRA: -skip=X`) -- see acceptance_run_skip_allowlist_fixture_test.go
+// for a fixture proving each one. stripShellComments only blanks a FULL-LINE
+// comment (first non-whitespace character is `#`); it never touches a `#`
+// that shares a line with real content, so `echo "step #1"; go test -skip=X`
+// (ci.yml has this exact shape: `echo "## ..."`) cannot have its trailing
+// `-skip=X` swallowed by mistaking a quoted `#` for a comment start.
 //
-// Known remaining limits, stated rather than silently assumed: this guard
-// reads `step.run:` text and job/step/workflow `env:` maps -- it does not
-// execute shell, so it has no notion of what a script the run: text merely
-// INVOKES (rather than inlines) does; nothing about invoking a checked-in
-// script mentions "skip". stripShellComments' word-start rule is not
-// quote-aware beyond that one case: a `#` after a shell metacharacter other
-// than whitespace (e.g. `;#comment`) is not recognized as a comment start
-// either, so it stays in the scanned text -- conservative (it can cause an
-// over-detection, never a missed one) but still a known gap from real shell
-// tokenization. GITHUB_ENV (a step appending to it for a LATER step to read)
-// and a workflow_call input threaded through `${{ }}` interpolation both
-// still reach this scan as the literal `${{ ... }}` text GitHub Actions has
-// not yet resolved, which parseSkipExpression then correctly refuses to
-// expand as an unrecognized -skip form -- caught, but for the wrong stated
-// reason, which is worth knowing when reading that error.
+// Known remaining limits, stated rather than silently assumed, not silently
+// claimed away:
+//   - This guard reads `step.run:` text and job/step/workflow `env:` maps --
+//     it does not execute shell, so it has no notion of what a script the
+//     run: text merely INVOKES (rather than inlines) does; nothing about
+//     invoking a checked-in script mentions "skip".
+//   - `${{ }}` expansion is not resolved: `go test ${{ inputs.flags }}`, an
+//     `env:` value like `F: ${{ vars.F }}`, and a `with:` input all reach
+//     this scan as the literal, unresolved `${{ ... }}` text. A `-skip`
+//     hiding inside one is not visible as `-skip` at all, canonical or
+//     otherwise -- this is a true gap, not a caught-for-the-wrong-reason
+//     case, because the literal text contains no skip-flag-shaped token to
+//     trip skipFlagTokenPattern either.
+//   - GITHUB_ENV: a step that appends to it for a LATER step to read moves
+//     the value out of the `env:` maps this guard scans entirely.
+//   - Runtime construction the scan cannot decode -- `printf`, ANSI-C
+//     quoting (`$'\x2d skip'`), `eval`, or a base64/decode round trip --
+//     can build the flag text at run time from characters that never spell
+//     "-skip" in the checked-in YAML.
+//   - Quote-splicing WITHOUT a glued right-hand alternation still parses
+//     (`-s”kip 'X'`, `-sk\ip 'X'`, `"-sk""ip" 'X'`): the shell reassembles
+//     these into `-skip 'X'`, but neither skipArgPattern nor
+//     skipFlagTokenPattern's literal `-skip`/`--skip`/`-test.skip` spelling
+//     recognizes the split form, so it is invisible to both the canonical
+//     parser and its deny-by-default fallback -- not merely caught for the
+//     wrong reason, but not caught at all.
+//
+// This list replaces an earlier, broader "never miss" claim this comment
+// used to make; review's MEDIUM found it did not hold once quote-splicing
+// and `${{ }}` were tried against the actual parser, and a limits section
+// that overstates its own reach is worse than a shorter, accurate one.
+//
+// A related deselection vector is explicitly OUT of scope: `-run` can drop
+// rows the same way `-skip` can (`-run 'TestX/(a|b)$'` in a required job
+// runs only rows a and b, silently skipping every other subtest of TestX,
+// with no allowlist and no error). ga-0xvbd (P2, discovered from ga-may9k)
+// tracks reusing this parser against `-run`; until it ships, a `-run` that
+// narrows a required job's subtests is not checked by anything in this
+// file.
 func TestRequiredJobSkipsAreAllowlisted(t *testing.T) {
 	root := repoRoot(t)
 	workflows := map[string][]byte{}
