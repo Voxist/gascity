@@ -234,6 +234,62 @@ interval = "24h"
 	}
 }
 
+// TestOrderRecoverOnStoreUnavailableParsed covers ga-3bwmf: an order opts into
+// the dispatcher's store-unavailable fallback via recover_on_store_unavailable
+// in TOML, with no name-based logic in Go. Every order is opted out by
+// default; today only beads-health sets it, since it is the one order whose
+// exec has its own recovery logic independent of the dispatcher's store.
+func TestOrderRecoverOnStoreUnavailableParsed(t *testing.T) {
+	on, err := Parse([]byte("[order]\nexec = \"true\"\ntrigger = \"cooldown\"\ninterval = \"30s\"\nrecover_on_store_unavailable = true\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !on.RecoverOnStoreUnavailable {
+		t.Error("RecoverOnStoreUnavailable = false, want true")
+	}
+	off, err := Parse([]byte("[order]\nexec = \"true\"\ntrigger = \"cooldown\"\ninterval = \"30s\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if off.RecoverOnStoreUnavailable {
+		t.Error("RecoverOnStoreUnavailable = true, want false (default)")
+	}
+
+	// Pin the deployed shape of beads-health by reading the file itself — an
+	// embedded copy would stay green if the shipped pack dropped the flag.
+	const path = "../bootstrap/packs/core/orders/beads-health.toml"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile %s: %v", path, err)
+	}
+	a, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse %s: %v", path, err)
+	}
+	if !a.RecoverOnStoreUnavailable {
+		t.Errorf("beads-health: RecoverOnStoreUnavailable = false, want true")
+	}
+
+	// gate-sweep and order-tracking-sweep stay opted out: gate-sweep and
+	// order-tracking-sweep both do pure bead bookkeeping, which is
+	// meaningless without a store, unlike beads-health's provider-health
+	// exec.
+	for _, name := range []string{"gate-sweep", "order-tracking-sweep"} {
+		path := "../bootstrap/packs/core/orders/" + name + ".toml"
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("%s: ReadFile %s: %v", name, path, err)
+		}
+		a, err := Parse(data)
+		if err != nil {
+			t.Fatalf("%s: Parse: %v", name, err)
+		}
+		if a.RecoverOnStoreUnavailable {
+			t.Errorf("%s: RecoverOnStoreUnavailable = true, want false", name)
+		}
+	}
+}
+
 func TestValidateCooldown(t *testing.T) {
 	a := Order{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h"}
 	if err := Validate(a); err != nil {

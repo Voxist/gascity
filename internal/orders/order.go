@@ -113,6 +113,28 @@ type Order struct {
 	// is implemented separately (gastownhall/gascity ga-1ocm3f); this field
 	// only declares eligibility.
 	ReservedDispatch bool `toml:"reserved_dispatch,omitempty"`
+	// RecoverOnStoreUnavailable opts an exec order into a narrow fallback
+	// path when the dispatcher cannot even OPEN a beads store for it
+	// (beads.ErrStoreUnavailable): the dispatcher runs the order's exec
+	// directly, without the tracking-bead write or open-work gate that
+	// normally single-flight it, since both require the very store that is
+	// down. It is gated by its own in-memory cooldown (the order's own
+	// Interval, or a small floor when that is unset/unparseable) so a
+	// persistently down store cannot make it loop faster than its declared
+	// cadence (gastownhall/gascity ga-3bwmf).
+	//
+	// This exists for exactly one shape of order: one whose exec has its
+	// OWN internal recovery logic that does not itself depend on this
+	// store (gc beads health's provider-health-op → guarded recover route
+	// is the motivating case) — without it, the one periodic mechanism
+	// that could restart a fully-dead beads store can never run its own
+	// recovery exec, because scheduling it needs the store it exists to
+	// heal. It is meaningless for a formula order (materializing a wisp
+	// needs a store) or a sweep whose whole job is bead bookkeeping
+	// (order-tracking-sweep): IsExec() false or a store-dependent exec
+	// simply does nothing useful through this path, so declaring it there
+	// is a no-op, not a footgun.
+	RecoverOnStoreUnavailable bool `toml:"recover_on_store_unavailable,omitempty"`
 	// Env is a map of environment variables exported into an exec
 	// order's child process. Use the `[order.env]` TOML table to
 	// override thresholds (e.g. GC_DOCTOR_LATENCY_WARN_S) without
@@ -153,28 +175,29 @@ func (a *Order) ScopedName() string {
 }
 
 type orderDecode struct {
-	Description      string                `toml:"description,omitempty"`
-	Formula          string                `toml:"formula,omitempty"`
-	Exec             string                `toml:"exec,omitempty"`
-	Scope            string                `toml:"scope,omitempty"`
-	RunOn            string                `toml:"run_on,omitempty"`
-	Trigger          string                `toml:"trigger,omitempty"`
-	Gate             string                `toml:"gate,omitempty"`
-	Interval         string                `toml:"interval,omitempty"`
-	Schedule         string                `toml:"schedule,omitempty"`
-	TZ               string                `toml:"tz,omitempty"`
-	Check            string                `toml:"check,omitempty"`
-	On               string                `toml:"on,omitempty"`
-	Pool             string                `toml:"pool,omitempty"`
-	Timeout          string                `toml:"timeout,omitempty"`
-	CheckTimeout     string                `toml:"check_timeout,omitempty"`
-	Enabled          *bool                 `toml:"enabled,omitempty"`
-	Idempotent       bool                  `toml:"idempotent,omitempty"`
-	NoWorkGate       bool                  `toml:"no_work_gate,omitempty"`
-	ReservedDispatch bool                  `toml:"reserved_dispatch,omitempty"`
-	Env              map[string]string     `toml:"env,omitempty"`
-	Params           map[string]OrderParam `toml:"params,omitempty"`
-	SkipAliases      []string              `toml:"skip_aliases,omitempty"`
+	Description               string                `toml:"description,omitempty"`
+	Formula                   string                `toml:"formula,omitempty"`
+	Exec                      string                `toml:"exec,omitempty"`
+	Scope                     string                `toml:"scope,omitempty"`
+	RunOn                     string                `toml:"run_on,omitempty"`
+	Trigger                   string                `toml:"trigger,omitempty"`
+	Gate                      string                `toml:"gate,omitempty"`
+	Interval                  string                `toml:"interval,omitempty"`
+	Schedule                  string                `toml:"schedule,omitempty"`
+	TZ                        string                `toml:"tz,omitempty"`
+	Check                     string                `toml:"check,omitempty"`
+	On                        string                `toml:"on,omitempty"`
+	Pool                      string                `toml:"pool,omitempty"`
+	Timeout                   string                `toml:"timeout,omitempty"`
+	CheckTimeout              string                `toml:"check_timeout,omitempty"`
+	Enabled                   *bool                 `toml:"enabled,omitempty"`
+	Idempotent                bool                  `toml:"idempotent,omitempty"`
+	NoWorkGate                bool                  `toml:"no_work_gate,omitempty"`
+	ReservedDispatch          bool                  `toml:"reserved_dispatch,omitempty"`
+	RecoverOnStoreUnavailable bool                  `toml:"recover_on_store_unavailable,omitempty"`
+	Env                       map[string]string     `toml:"env,omitempty"`
+	Params                    map[string]OrderParam `toml:"params,omitempty"`
+	SkipAliases               []string              `toml:"skip_aliases,omitempty"`
 }
 
 func (d orderDecode) normalized() Order {
@@ -183,27 +206,28 @@ func (d orderDecode) normalized() Order {
 		trigger = d.Gate
 	}
 	return Order{
-		Description:      d.Description,
-		Formula:          d.Formula,
-		Exec:             d.Exec,
-		Scope:            d.Scope,
-		RunOn:            d.RunOn,
-		Trigger:          trigger,
-		Interval:         d.Interval,
-		Schedule:         d.Schedule,
-		TZ:               d.TZ,
-		Check:            d.Check,
-		On:               d.On,
-		Pool:             d.Pool,
-		Timeout:          d.Timeout,
-		CheckTimeout:     d.CheckTimeout,
-		Enabled:          d.Enabled,
-		Idempotent:       d.Idempotent,
-		NoWorkGate:       d.NoWorkGate,
-		ReservedDispatch: d.ReservedDispatch,
-		Env:              d.Env,
-		Params:           d.Params,
-		skipAliases:      d.SkipAliases,
+		Description:               d.Description,
+		Formula:                   d.Formula,
+		Exec:                      d.Exec,
+		Scope:                     d.Scope,
+		RunOn:                     d.RunOn,
+		Trigger:                   trigger,
+		Interval:                  d.Interval,
+		Schedule:                  d.Schedule,
+		TZ:                        d.TZ,
+		Check:                     d.Check,
+		On:                        d.On,
+		Pool:                      d.Pool,
+		Timeout:                   d.Timeout,
+		CheckTimeout:              d.CheckTimeout,
+		Enabled:                   d.Enabled,
+		Idempotent:                d.Idempotent,
+		NoWorkGate:                d.NoWorkGate,
+		ReservedDispatch:          d.ReservedDispatch,
+		RecoverOnStoreUnavailable: d.RecoverOnStoreUnavailable,
+		Env:                       d.Env,
+		Params:                    d.Params,
+		skipAliases:               d.SkipAliases,
 	}
 }
 

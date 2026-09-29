@@ -5,3 +5,14 @@ interval = "30s"
 exec = "gc beads health --quiet"
 timeout = "60s"
 reserved_dispatch = true
+# ga-3bwmf: a fully-down beads store makes the normal due-check/tracking-bead
+# path fail closed every tick, so this order — whose whole job is noticing
+# and recovering that exact failure — could never run its own exec while the
+# store it heals stayed down. This opts into the store-unavailable fallback
+# (cmd/gc/order_dispatch.go, fireStoreUnavailableFallback): when the
+# dispatcher can't open a store at all, it still runs `gc beads health
+# --quiet` directly, cooldown-bounded by this order's own interval. The
+# managed-dolt recover invariants (never replace a live server, single
+# cooldown-throttled choke point) are untouched — they live entirely inside
+# that exec, in runGuardedManagedDoltRecover.
+recover_on_store_unavailable = true

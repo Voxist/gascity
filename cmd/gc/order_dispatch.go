@@ -383,6 +383,13 @@ type memoryOrderDispatcher struct {
 	lastRunCache        map[string]time.Time
 	gateBackoffUntil    map[string]time.Time
 	openWorkSuppression map[string]orderOpenWorkSuppression
+	// storeUnavailableFallbackLastRun is the in-memory cooldown clock for
+	// fireStoreUnavailableFallback, keyed by scoped order name. It exists
+	// only because the normal store-backed cooldown (lastRunCache, fed by
+	// order-tracking beads) is exactly what's unreachable when this path
+	// fires — a second, beads-free clock is the only way to bound it.
+	// Guarded by cacheMu alongside the other per-order caches above.
+	storeUnavailableFallbackLastRun map[string]time.Time
 
 	dispatchCtx    context.Context
 	dispatchCancel context.CancelFunc
@@ -777,6 +784,12 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			store, err = m.storeFn(target)
 			if err != nil {
 				logDispatchError(m.stderr, "gc: order dispatch: opening %s store for %s: %v", target.ScopeKind, a.ScopedName(), err)
+				// ga-3bwmf: an order that opts in may still run its exec here,
+				// store-free, when the store itself is what's unavailable — see
+				// fireStoreUnavailableFallback for why and its own cooldown.
+				if a.RecoverOnStoreUnavailable && errors.Is(classifyWorkQueryStoreUnavailable(err), beads.ErrStoreUnavailable) {
+					m.fireStoreUnavailableFallback(ctx, a, target, cityPath, now)
+				}
 				continue
 			}
 			stores[storeKey] = store
@@ -1122,6 +1135,149 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 	}
 	m.rememberLastRun(scoped, storeKeysForGate, trackingBead.CreatedAt)
 	return true
+}
+
+// storeUnavailableFallbackMinCooldown floors fireStoreUnavailableFallback's
+// cooldown when an order's own Interval is unset or unparseable, so a
+// misconfigured order can never fire this path every tick.
+const storeUnavailableFallbackMinCooldown = 30 * time.Second
+
+// storeUnavailableFallbackCooldown resolves how often a is allowed to fire
+// through fireStoreUnavailableFallback. It reuses the order's own cooldown
+// Interval — the cadence the operator already chose for this order — falling
+// back to storeUnavailableFallbackMinCooldown when Interval is empty or fails
+// to parse.
+func storeUnavailableFallbackCooldown(a orders.Order) time.Duration {
+	if d, err := time.ParseDuration(a.Interval); err == nil && d > 0 {
+		return d
+	}
+	return storeUnavailableFallbackMinCooldown
+}
+
+// storeUnavailableFallbackDue reports whether a's cooldown has elapsed, and
+// if so records now as its last fire time in the same locked step — mirroring
+// admitManagedDoltRecover's own read-decide-write discipline (dolt_recover_gate.go)
+// so two concurrent callers cannot both observe a stale timestamp and both fire.
+func (m *memoryOrderDispatcher) storeUnavailableFallbackDue(scoped string, now time.Time, cooldown time.Duration) bool {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if last, ok := m.storeUnavailableFallbackLastRun[scoped]; ok && now.Sub(last) < cooldown {
+		return false
+	}
+	if m.storeUnavailableFallbackLastRun == nil {
+		m.storeUnavailableFallbackLastRun = make(map[string]time.Time)
+	}
+	m.storeUnavailableFallbackLastRun[scoped] = now
+	return true
+}
+
+// fireStoreUnavailableFallback is the ga-3bwmf escape hatch: it runs an
+// order's exec when the dispatcher could not even open a beads store for it
+// (beads.ErrStoreUnavailable), for orders that opted in with
+// RecoverOnStoreUnavailable.
+//
+// WHY THIS EXISTS. Every other path to dispatching an order needs a beads
+// store: the due-check reads order-tracking beads, and a normal dispatch
+// writes one before running the exec (launchResolvedDispatch → CreateRun).
+// So a fully-down store makes every order fail closed before its exec ever
+// runs — including the one order whose entire job is noticing the store is
+// down and recovering it (beads-health → gc beads health --quiet →
+// runGuardedManagedDoltRecover). This function is the one place that breaks
+// that chicken-and-egg, and ONLY for orders that explicitly ask for it: it
+// runs the bare exec, with no tracking bead and no open-work gate, gated
+// solely by storeUnavailableFallbackDue's own in-memory cooldown.
+//
+// WHAT IT DOES NOT DO. It never touches the managed-dolt recover invariants
+// ga-amol9 landed: this function does not call runGuardedManagedDoltRecover
+// or any recover primitive directly. It only ensures the order's own exec —
+// which may or may not decide to recover anything — actually gets to run.
+// The liveness check, the "never replace a live server" rule, and the single
+// cooldown-throttled recover route all still live entirely inside that exec's
+// own process (gc beads health), untouched by this path.
+//
+// It silently no-ops for a non-exec (formula) order: materializing a wisp
+// needs a store, so there is nothing safe to do here for one.
+//
+// It tracks its goroutine through m.addInflight/doneInflight — the same
+// dispatcher-wide counter drain() waits on — rather than the tick-local
+// inFlight WaitGroup dispatch() uses to bound per-tick store handles: this
+// path opens no store of its own, so it has nothing in common with that
+// barrier, but a shutdown must still wait for it like any other dispatch.
+func (m *memoryOrderDispatcher) fireStoreUnavailableFallback(ctx context.Context, a orders.Order, target execStoreTarget, cityPath string, now time.Time) {
+	if !a.IsExec() {
+		return
+	}
+	scoped := a.ScopedName()
+	if !m.storeUnavailableFallbackDue(scoped, now, storeUnavailableFallbackCooldown(a)) {
+		return
+	}
+	m.rec.Record(events.Event{
+		Type:    events.OrderFired,
+		Actor:   "controller",
+		Subject: scoped,
+		Message: "dispatched via store-unavailable fallback: beads store is down, running exec without a tracking bead (ga-3bwmf)",
+	})
+	timeout := effectiveTimeout(a, m.maxTimeout)
+	m.addInflight()
+	go func() {
+		defer m.doneInflight()
+		defer func() {
+			if p := recover(); p != nil {
+				logDispatchError(m.stderr, "gc: order %s: store-unavailable fallback dispatch panic: %v", scoped, p)
+			}
+		}()
+		childCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		m.dispatchExecStoreless(childCtx, target, a, cityPath, nil)
+	}()
+}
+
+// dispatchExecStoreless is dispatchExec with every beads-store touch removed:
+// no tracking-bead outcome label, no event-cursor persistence (event-triggered
+// orders never reach this path — fireStoreUnavailableFallback is only called
+// from the store-open failure in dispatch's phase 1, before a candidate, and
+// therefore before any trigger-specific handling exists). It still builds the
+// order's real exec environment and runs the real command, and still records
+// the same OrderFailed/OrderCompleted events dispatchExec does — the event bus
+// is independent of beads and stays available exactly when this path is used.
+func (m *memoryOrderDispatcher) dispatchExecStoreless(ctx context.Context, target execStoreTarget, a orders.Order, cityPath string, vars map[string]string) {
+	scoped := a.ScopedName()
+	env, err := orderExecEnvWithError(cityPath, m.cfg, target, a, vars)
+	if err != nil {
+		redactionEnv := append(os.Environ(), env...)
+		redacted := redactOrderEnvError(err, redactionEnv)
+		logDispatchError(m.stderr, "gc: order exec %s env failed (store-unavailable fallback): %s", scoped, redacted)
+		m.rec.Record(events.Event{
+			Type:    events.OrderFailed,
+			Actor:   "controller",
+			Subject: scoped,
+			Message: "exec env failed: " + redacted,
+		})
+		return
+	}
+	output, err := m.execRun(ctx, a.Exec, target.ScopeRoot, env)
+	if err != nil {
+		redactionEnv := append(os.Environ(), env...)
+		execErrMsg := execenv.RedactText(err.Error(), redactionEnv)
+		logDispatchError(m.stderr, "gc: order exec %s failed (store-unavailable fallback): %s", scoped, execErrMsg)
+		if len(output) > 0 {
+			redactedOutput := execenv.RedactText(string(output), redactionEnv)
+			logDispatchError(m.stderr, "gc: order exec %s output: %s", scoped, redactedOutput)
+			execErrMsg += ": " + tailForOrderFailureEvent(redactedOutput)
+		}
+		m.rec.Record(events.Event{
+			Type:    events.OrderFailed,
+			Actor:   "controller",
+			Subject: scoped,
+			Message: execErrMsg,
+		})
+		return
+	}
+	m.rec.Record(events.Event{
+		Type:    events.OrderCompleted,
+		Actor:   "controller",
+		Subject: scoped,
+	})
 }
 
 // launchDispatchOne spawns dispatchOne with a context that cancels when
