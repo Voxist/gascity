@@ -1216,28 +1216,29 @@ func controllerLoop(
 		loopCfg = &cfgCopy
 	}
 	cr := &CityRuntime{
-		cityPath:            cityPath,
-		cityName:            cityName,
-		tomlPath:            tomlPath,
-		watchTargets:        watchTargets,
-		cfg:                 loopCfg,
-		sp:                  sp,
-		buildFn:             buildFn,
-		dops:                dops,
-		ct:                  ct,
-		it:                  it,
-		wg:                  wg,
-		od:                  od,
-		rec:                 rec,
-		cs:                  cs,
-		poolSessions:        poolSessions,
-		poolDeathHandlers:   poolDeathHandlers,
-		suspendedNames:      suspendedNames,
-		pokeCh:              make(chan struct{}, 1),
-		controlDispatcherCh: make(chan struct{}, 1),
-		logPrefix:           "gc start",
-		stdout:              stdout,
-		stderr:              stderr,
+		cityPath:             cityPath,
+		cityName:             cityName,
+		tomlPath:             tomlPath,
+		watchTargets:         watchTargets,
+		cfg:                  loopCfg,
+		sp:                   sp,
+		buildFn:              buildFn,
+		dops:                 dops,
+		ct:                   ct,
+		it:                   it,
+		wg:                   wg,
+		od:                   od,
+		controllerGeneration: newControllerGeneration(),
+		rec:                  rec,
+		cs:                   cs,
+		poolSessions:         poolSessions,
+		poolDeathHandlers:    poolDeathHandlers,
+		suspendedNames:       suspendedNames,
+		pokeCh:               make(chan struct{}, 1),
+		controlDispatcherCh:  make(chan struct{}, 1),
+		logPrefix:            "gc start",
+		stdout:               stdout,
+		stderr:               stderr,
 	}
 	cr.setControllerState(cs)
 	cr.run(ctx)
@@ -1398,6 +1399,11 @@ func runController(
 	cs.pokeCh = pokeCh
 	cs.configDirty = configDirty
 	cs.services = cr.svc
+	// ADR-0130 D1: the webhook dispatch seam mints its per-delivery
+	// dispatcher from this controllerState, so it needs the runtime's boot
+	// id to stamp a webhook-fired tracking marker the same way a tick-fired
+	// one is stamped.
+	cs.controllerGeneration = cr.controllerGeneration
 	cs.emergencyCh = make(chan emergency.Record, 64)
 	cr.setControllerState(cs)
 

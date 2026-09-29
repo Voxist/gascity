@@ -55,7 +55,23 @@ const (
 	// city that stopped running an order look freshly-run to every liveness
 	// reader, which is precisely the watchdog this field exists to keep armed.
 	labelOrderSkipRunOn = "order-skip:run_on"
+
+	// orderTrackingGenerationKey is the metadata key carrying the CONTROLLER
+	// GENERATION (boot id) of the process that created a tracking bead
+	// (ADR-0130 D1). Age is a proxy for orphanhood and cannot distinguish a
+	// dead controller's leftover marker from a live long run; the generation is
+	// the fact itself. The watchdog reaps only markers whose generation differs
+	// from the live one; markers with NO generation (created before this key
+	// existed, or by a CLI process that never dispatched through the
+	// controller) fall back to the deadline-derived residual cutoff (D2), never
+	// the global 2-minute clock.
+	orderTrackingGenerationKey = "controller_generation"
 )
+
+// GenerationMetadataKey is the exported name of the controller-generation
+// metadata key so callers outside this package (tests, doctor tooling) can
+// read the stamp without re-declaring the string.
+const GenerationMetadataKey = orderTrackingGenerationKey
 
 // SkipReasonRunOn is the close reason stamped on a tracking bead that records
 // a deliberate run_on skip. It reads as "this city was never supposed to run
@@ -174,6 +190,11 @@ type OrderRun struct {
 	// city which STOPPED dispatching an order report the freshest possible
 	// last-run to the cooldown gate and to every liveness reader.
 	SkippedRunOn bool
+	// Generation is the creating controller's boot id, decoded from the bead's
+	// controller_generation metadata (ADR-0130 D1). Empty for pre-upgrade
+	// markers and CLI/manual-created beads; the watchdog's reap predicate
+	// classes empty as the deadline-derived residual tier, not orphanhood.
+	Generation string
 }
 
 // State returns the feed-facing lifecycle status of the run: "skipped" for a
@@ -205,6 +226,13 @@ type RunOpts struct {
 	// the trigger-env-failed pre-dispatch path which creates an already-labeled
 	// open bead so the open-work gate suppresses repeat ticks.
 	Outcome RunOutcome
+	// Generation is the creating controller's boot id, stamped as
+	// controller_generation metadata at creation (ADR-0130 D1). The dispatcher
+	// passes its runtime's per-boot generation; empty (CLI/manual paths,
+	// pre-upgrade writers) leaves the marker unstamped, which the watchdog
+	// reads as the deadline-derived residual tier — never the dead-controller
+	// tier, which requires a PROVEN foreign generation.
+	Generation string
 }
 
 // Store is the order-class domain wrapper. It holds the strongly-typed
@@ -312,20 +340,30 @@ func baseLabels(scoped string, outcome RunOutcome) []string {
 // {order-run, order-tracking[, outcome]}, NoHistory:true}) sites in
 // order_dispatch.go.
 func (s *Store) CreateRun(scoped string, opts RunOpts) (OrderRun, error) {
+	// The generation stamp rides the Create itself (one write, not
+	// create-then-update): every provider forwards create-time metadata, and a
+	// marker whose stamp landed late could be observed unstamped by a sweep
+	// racing the update.
+	var metadata map[string]string
+	if opts.Generation != "" {
+		metadata = map[string]string{orderTrackingGenerationKey: opts.Generation}
+	}
 	created, err := s.store.Create(beads.Bead{
 		Title:     trackingTitle(scoped),
 		Labels:    baseLabels(scoped, opts.Outcome),
+		Metadata:  metadata,
 		NoHistory: true,
 	})
 	if err != nil {
 		return OrderRun{}, fmt.Errorf("creating order run for %q: %w", scoped, err)
 	}
 	return OrderRun{
-		ID:        created.ID,
-		Scoped:    scoped,
-		Outcome:   opts.Outcome,
-		CreatedAt: created.CreatedAt,
-		Open:      true,
+		ID:         created.ID,
+		Scoped:     scoped,
+		Outcome:    opts.Outcome,
+		CreatedAt:  created.CreatedAt,
+		Open:       true,
+		Generation: opts.Generation,
 	}, nil
 }
 
@@ -550,7 +588,8 @@ func RunFromTrackingBead(b beads.Bead) (OrderRun, bool) {
 // decodeRun projects an order tracking/run bead onto an OrderRun. It is pure,
 // side-effect-free, and backend-invariant (reads only bead fields), matching the
 // projection-invariance invariant. The cooldown clock (CreatedAt), open flag,
-// outcome (from labels), and event cursor (max seq from labels) are decoded here.
+// outcome (from labels), event cursor (max seq from labels), and controller
+// generation (from metadata, ADR-0130 D1) are decoded here.
 func decodeRun(scoped string, b beads.Bead) OrderRun {
 	return OrderRun{
 		ID:        b.ID,
@@ -562,6 +601,7 @@ func decodeRun(scoped string, b beads.Bead) OrderRun {
 		Cursor:    EventCursor(MaxSeqFromLabels([][]string{b.Labels})),
 
 		SkippedRunOn: IsRunOnSkipBead(b),
+		Generation:   b.Metadata[orderTrackingGenerationKey],
 	}
 }
 

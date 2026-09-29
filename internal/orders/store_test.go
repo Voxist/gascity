@@ -61,6 +61,48 @@ func TestCreateRunWithTriggerEnvFailedOutcome(t *testing.T) {
 	}
 }
 
+// TestCreateRunStampsControllerGeneration proves the D1 stamp: a run created
+// with a generation carries the controller-generation metadata at CREATE time
+// (one write, no create-then-update race) and decodes back through the read
+// path; an unstamped run carries no generation key at all, so the watchdog's
+// empty-generation tier — not the foreign tier — governs it.
+func TestCreateRunStampsControllerGeneration(t *testing.T) {
+	st, rec := recordingOrdersStore()
+
+	if _, err := st.CreateRun("rig/agent", RunOpts{Generation: "ctrl-boot-1"}); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	got := rec.CallsForOp("Create")[0].Bead
+	if got.Metadata[GenerationMetadataKey] != "ctrl-boot-1" {
+		t.Errorf("metadata[%s] = %q, want ctrl-boot-1", GenerationMetadataKey, got.Metadata[GenerationMetadataKey])
+	}
+
+	runs, err := st.StaleOpenRuns(time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("StaleOpenRuns: %v", err)
+	}
+	if len(runs) != 1 || runs[0].Generation != "ctrl-boot-1" {
+		t.Fatalf("runs = %+v, want one open run with generation ctrl-boot-1", runs)
+	}
+
+	// Empty Generation: the key must be absent entirely, not present-empty.
+	st2, rec2 := recordingOrdersStore()
+	if _, err := st2.CreateRun("rig/agent", RunOpts{}); err != nil {
+		t.Fatalf("CreateRun(unstamped): %v", err)
+	}
+	got2 := rec2.CallsForOp("Create")[0].Bead
+	if raw, ok := got2.Metadata[GenerationMetadataKey]; ok {
+		t.Errorf("unstamped run carries metadata[%s] = %q, want the key absent", GenerationMetadataKey, raw)
+	}
+	runs2, err := st2.StaleOpenRuns(time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("StaleOpenRuns(unstamped): %v", err)
+	}
+	if len(runs2) != 1 || runs2[0].Generation != "" {
+		t.Fatalf("runs = %+v, want one open run with empty generation", runs2)
+	}
+}
+
 // TestSetOutcomeLabelSets proves each outcome maps to the exact label set the
 // dispatcher stamps via store.Update.
 func TestSetOutcomeLabelSets(t *testing.T) {

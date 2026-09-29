@@ -91,16 +91,25 @@ type controllerState struct {
 	version                string
 	startedAt              time.Time
 	storeMetadataSignature string
-	ct                     crashTracker  // nil if crash tracking disabled
-	pokeCh                 chan struct{} // nil when poke is not available; triggers immediate reconciler tick
-	configDirty            *atomic.Bool  // optional dirty flag shared with the reconciler reload path
-	services               workspacesvc.Registry
-	extmsgSvc              *extmsg.Services
-	adapterReg             *extmsg.AdapterRegistry
-	maintenanceLoop        *supervisor.StoreMaintenanceLoop // nil when [maintenance.dolt] enabled=false
-	updateMu               sync.Mutex                       // serializes rebuild+swap so stale reloads cannot overtake newer mutations
-	beadEventStartSeq      uint64
-	beadEventStartSeqOK    bool // false when LatestSeq errored at construction; 0+true = genuinely empty log
+	// controllerGeneration is the owning CityRuntime's boot id (ADR-0130 D1),
+	// set once by the production wiring at controllerState construction time
+	// (never by newControllerStateWithRoutes itself, which has no runtime to
+	// read it from). It is threaded into every per-delivery dispatcher the
+	// webhook seam builds (WebhookDispatcher) so a webhook-fired tracking
+	// marker is stamped exactly like a tick-fired one. Empty in tests that
+	// construct a controllerState directly — those dispatchers get the D1
+	// foreign tier disabled, same fail-safe as an empty CityRuntime.controllerGeneration.
+	controllerGeneration string
+	ct                   crashTracker  // nil if crash tracking disabled
+	pokeCh               chan struct{} // nil when poke is not available; triggers immediate reconciler tick
+	configDirty          *atomic.Bool  // optional dirty flag shared with the reconciler reload path
+	services             workspacesvc.Registry
+	extmsgSvc            *extmsg.Services
+	adapterReg           *extmsg.AdapterRegistry
+	maintenanceLoop      *supervisor.StoreMaintenanceLoop // nil when [maintenance.dolt] enabled=false
+	updateMu             sync.Mutex                       // serializes rebuild+swap so stale reloads cannot overtake newer mutations
+	beadEventStartSeq    uint64
+	beadEventStartSeqOK  bool // false when LatestSeq errored at construction; 0+true = genuinely empty log
 
 	// completionsDeltaIndex is the tick delta pass's warm completion-fact
 	// idempotency record: loaded from the journal once, then kept current by the
@@ -3080,6 +3089,7 @@ func (d controllerWebhookDispatcher) dispatcher() *memoryOrderDispatcher {
 	cs.mu.RLock()
 	cfg := cs.cfg
 	routes := cs.storageRoutes
+	generation := cs.controllerGeneration
 	var rec events.Recorder = cs.eventProv
 	cs.mu.RUnlock()
 	if rec == nil {
@@ -3087,7 +3097,16 @@ func (d controllerWebhookDispatcher) dispatcher() *memoryOrderDispatcher {
 		// discard recorder keeps it panic-free when the city has events disabled.
 		rec = events.Discard
 	}
-	return newMemoryOrderDispatcher(routes, nil, cs.cityPath, cfg, rec, os.Stderr)
+	// This dispatcher DOES dispatch — Dispatch (order_dispatch_seam.go) fires
+	// a webhook-triggered order through it, creating a real tracking marker
+	// (E3/E6). It carries a nil order set only because the webhook sink has
+	// already resolved and validated the one order it fires; it is not a
+	// stateless preview. generation is the runtime's controllerGeneration
+	// (ADR-0130 D1), threaded through controllerState at construction — see
+	// the assignments in controller.go and cmd_supervisor.go — so a
+	// webhook-fired marker is stamped exactly like a tick-fired one, never a
+	// freshly minted generation of its own.
+	return newMemoryOrderDispatcher(routes, nil, cs.cityPath, cfg, rec, os.Stderr, generation)
 }
 
 // ExtMsgServices returns the external messaging services.
