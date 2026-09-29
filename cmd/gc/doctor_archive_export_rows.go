@@ -56,18 +56,31 @@ func archiveExportRowsFor(cityPath string) func(rigPath string) (int, bool) {
 // the live store could never fire. The rows array is the record count the
 // script itself uses (count_jsonl_rows). A file that is not that shape is
 // counted as newline-delimited JSON, the way the local issues.jsonl is.
+//
+// An empty table is the exception to that fallback: `dolt sql -r json` prints
+// a bare {} for an empty result set, not {"rows":[]}, and the script scores it
+// as 0 (`.rows // []`). A line count would report 1 for it, and doctor would
+// then call every freshly added rig with no beads yet "live store is empty but
+// archived export has 1 rows — data loss".
 func countArchiveExportRows(path string) (int, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, err
 	}
-	var payload struct {
-		Rows []json.RawMessage `json:"rows"`
-	}
+	var payload map[string]json.RawMessage
 	decodeErr := json.NewDecoder(f).Decode(&payload)
 	f.Close() //nolint:errcheck // read-only
-	if decodeErr == nil && payload.Rows != nil {
-		return len(payload.Rows), nil
+	if decodeErr == nil {
+		if raw, ok := payload["rows"]; ok {
+			var rows []json.RawMessage
+			if err := json.Unmarshal(raw, &rows); err != nil {
+				return 0, err
+			}
+			return len(rows), nil
+		}
+		if len(payload) == 0 {
+			return 0, nil
+		}
 	}
 	return doctor.CountJSONLLines(path)
 }
