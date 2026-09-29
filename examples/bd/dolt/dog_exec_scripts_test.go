@@ -60,6 +60,50 @@ func runDogScript(t *testing.T, scriptName, binDir, cityPath, dataDir string, ex
 	return out
 }
 
+// runBoundedShimNames lists every external binary name that could satisfy
+// runtime.sh's run_bounded resolution (runtime.sh:253-258: `command -v
+// gtimeout`, then `command -v timeout`, then a python3 fallback that never
+// shells out to an external "timeout"-named binary at all) or
+// escalate.sh's own separate, gtimeout-blind `command -v timeout` check.
+//
+// A test that shadows only ONE of these names is host-dependent: on a host
+// with a REAL coreutils `gtimeout` on PATH (Homebrew on macOS is the common
+// case), `command -v gtimeout` in runtime.sh finds the real binary before
+// ever reaching a fake installed only under the name "timeout", and the
+// fake silently never runs (ga-27liw). This was misdiagnosed at first as an
+// openrsync incompatibility -- it is not: rsync itself is always faked out
+// separately in these tests (writeBackupFakeRsync), the real system rsync
+// is never invoked, and the script's only rsync call is already wrapped by
+// the flavor-agnostic run_bounded rather than relying on any rsync-native
+// timeout flag. The bug is purely this PATH-resolution mismatch between the
+// test's fake bin dir and whichever bounded-execution helper the host
+// happens to have installed.
+var runBoundedShimNames = []string{"gtimeout", "timeout"}
+
+// writeBoundedTimeoutShim installs a fake bounded-execution helper under
+// EVERY name in runBoundedShimNames, all logging to and delegating through
+// the same file, so a test asserting on that log is independent of which
+// name the host's own PATH would have resolved run_bounded (or escalate.sh)
+// to. Because binDir is prepended ahead of the rest of PATH by
+// runDogScriptCommand, whichever name `command -v` checks first is always
+// found here first too -- a fake installed under only one of these names
+// would still be shadowed by a REAL binary under a name it doesn't cover.
+// Returns the shared log path.
+func writeBoundedTimeoutShim(t *testing.T, binDir string) string {
+	t.Helper()
+	logPath := filepath.Join(binDir, "timeout.log")
+	shim := fmt.Sprintf(`#!/bin/sh
+printf 'timeout %%s\n' "$*" >> %s
+[ "$1" = "--kill-after=2" ] && shift
+shift
+exec "$@"
+`, shellQuote(logPath))
+	for _, name := range runBoundedShimNames {
+		writeExecutable(t, filepath.Join(binDir, name), shim)
+	}
+	return logPath
+}
+
 func writeDogFakeGC(t *testing.T, binDir string) string {
 	t.Helper()
 	logPath := filepath.Join(binDir, "gc.log")
@@ -5537,13 +5581,7 @@ func TestBackupScriptEscalatesOffsiteFailureWithConfiguredBound(t *testing.T) {
 	gcLogPath := writeDogFakeGC(t, binDir)
 	_ = writeBackupFakeDolt(t, binDir, "2.1.0", 0, "prod")
 	_ = writeBackupFakeRsync(t, binDir, 1)
-	timeoutLogPath := filepath.Join(binDir, "timeout.log")
-	writeExecutable(t, filepath.Join(binDir, "timeout"), fmt.Sprintf(`#!/bin/sh
-printf 'timeout %%s\n' "$*" >> %s
-[ "$1" = "--kill-after=2" ] && shift
-shift
-exec "$@"
-`, shellQuote(timeoutLogPath)))
+	timeoutLogPath := writeBoundedTimeoutShim(t, binDir)
 
 	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir,
 		"GC_BACKUP_OFFSITE_PATH="+offsiteDir,
@@ -5600,13 +5638,7 @@ func TestBackupScriptRejectsUnusableOffsiteTimeout(t *testing.T) {
 			_ = writeDogFakeGC(t, binDir)
 			_ = writeBackupFakeDolt(t, binDir, "2.1.0", 0, "prod")
 			_ = writeBackupFakeRsync(t, binDir)
-			timeoutLogPath := filepath.Join(binDir, "timeout.log")
-			writeExecutable(t, filepath.Join(binDir, "timeout"), fmt.Sprintf(`#!/bin/sh
-printf 'timeout %%s\n' "$*" >> %s
-[ "$1" = "--kill-after=2" ] && shift
-shift
-exec "$@"
-`, shellQuote(timeoutLogPath)))
+			timeoutLogPath := writeBoundedTimeoutShim(t, binDir)
 
 			out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir,
 				"GC_BACKUP_OFFSITE_PATH="+offsiteDir,
