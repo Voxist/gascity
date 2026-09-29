@@ -123,13 +123,22 @@ type CityRuntime struct {
 	buildFn                 func(*config.City, runtime.Provider, beads.Store) DesiredStateResult
 	buildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
 
-	dops                    drainOps
-	ct                      crashTracker
-	it                      idleTracker
-	mat                     maxSessionAgeTracker
-	adt                     assignedWorkDeferTracker
-	wg                      wispGC
-	od                      orderDispatcher
+	dops drainOps
+	ct   crashTracker
+	it   idleTracker
+	mat  maxSessionAgeTracker
+	adt  assignedWorkDeferTracker
+	wg   wispGC
+	od   orderDispatcher
+	// controllerGeneration is this CityRuntime's boot id (ADR-0130 D1).
+	// Minted once at construction and reused by every dispatcher rebuild for
+	// the life of this runtime: reloads replace the dispatcher, never the
+	// boot, so markers stamped before a reload must still classify as live. The
+	// watchdog compares it against each open tracking marker's
+	// controller_generation to reap only dead-controller orphans without a
+	// clock; empty (directly-constructed test runtimes) disables the foreign
+	// tier entirely — fail-safe, never aggressive.
+	controllerGeneration    string
 	retiredOrderDispatchers []orderDispatcher
 	orderSet                []orders.Order
 	orderSetSignature       string
@@ -418,7 +427,12 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 
 	sweepOrphanedOrderTrackingAtBoot(routes, p.CityPath, p.Cfg, p.Rec, p.Stderr)
 
-	od, orderSnapshot := buildOrderDispatcherWithSnapshot(routes, p.CityPath, p.Cfg, p.Rec, p.Stderr, "gc start: order scan")
+	// The boot id is minted once per CityRuntime, before the first
+	// dispatcher build, and is the same value every rebuild below reuses
+	// (ADR-0130 D1): reloads build new dispatchers, but the boot — and
+	// therefore what counts as "the live generation" — is this runtime.
+	controllerGeneration := newControllerGeneration()
+	od, orderSnapshot := buildOrderDispatcherWithSnapshot(routes, p.CityPath, p.Cfg, p.Rec, p.Stderr, "gc start: order scan", controllerGeneration)
 
 	suspendedNames := computeSuspendedNames(p.Cfg, p.CityName, p.CityPath)
 
@@ -443,6 +457,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		adt:                     adt,
 		wg:                      wg,
 		od:                      od,
+		controllerGeneration:    controllerGeneration,
 		orderSet:                orderSnapshot.Orders,
 		orderSetSignature:       orderSnapshot.Signature,
 		orderRescanEnabled:      true,
@@ -1671,7 +1686,10 @@ func (cr *CityRuntime) rescanOrderDispatcher(ctx context.Context, cityRoot strin
 		cr.drainOutgoingOrderDispatcher(drainCtx, cr.od)
 		drainCancel()
 	}
-	cr.replaceOrderDispatcher(buildOrderDispatcherFromOrderSet(cr.storageRoutes, cityRoot, cfg, snapshot.Orders, cr.rec, cr.stderr))
+	// The SAME boot generation, not a fresh one: the boot continues across the
+	// rebuild, so markers stamped by the outgoing dispatcher must still
+	// classify as live after it (ADR-0130 D1).
+	cr.replaceOrderDispatcher(buildOrderDispatcherFromOrderSet(cr.storageRoutes, cityRoot, cfg, snapshot.Orders, cr.rec, cr.stderr, cr.controllerGeneration))
 	cr.orderSet = snapshot.Orders
 	cr.orderSetSignature = snapshot.Signature
 	if summary != "unchanged" {
@@ -1740,18 +1758,32 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 		}
 		return
 	}
-	// Sweep stale tracking beads for ALL orders (nil filter), not just
+	// Sweep tracking beads for ALL orders (nil filter), not just
 	// order-tracking-sweep's own. The old narrow scope only swept the sweep
 	// order's tracking so that order could bootstrap and clean the rest — a
 	// single-point-of-failure: when slow reconciler cycles keep order-tracking-
 	// sweep from firing, every order's tracking jams and no order fires (#2168).
-	// The staleAfter cutoff still protects in-flight dispatches regardless of
-	// which order they belong to, so a direct all-orders sweep is safe and
-	// recovers the jam without depending on any single order being scheduled.
-	// Closed-history retention is intentionally left to the maintenance exec
-	// order or the gc order sweep-tracking CLI; the watchdog only recovers
-	// stale open tracking beads.
-	result, sweepErr := sweepStaleOrderTrackingAcrossStoresLimit(stores, nil, now, orderTrackingSweepWatchdogStaleAfter, nil, orderTrackingWatchdogMetadataInitiator, false, orderTrackingSweepCloseBudget)
+	//
+	// The predicate is ADR-0130's: orphanhood is the FACT of a different
+	// controller generation, not an age. A marker stamped by a DIFFERENT boot
+	// closes immediately (dead prior controller — D1, no clock, which is what
+	// keeps #2168 jam recovery immediate), while the live controller's own
+	// markers and unstamped legacy/CLI markers close only after their
+	// dispatch's own effective timeout plus grace (D2). Closed-history retention is
+	// intentionally left to the maintenance exec order or the
+	// gc order sweep-tracking CLI; the watchdog only recovers orphaned open
+	// tracking beads.
+	//
+	// The deadline resolver rides a type assertion rather than the
+	// orderDispatcher interface: a dispatcher that doesn't carry the resolved
+	// order set must fail toward NEVER reaping (residualFor nil), not toward
+	// guessing deadlines. Production dispatchers are always
+	// *memoryOrderDispatcher; test fakes simply get the D1 tier only.
+	var residualFor func(scoped string) time.Duration
+	if md, ok := cr.od.(*memoryOrderDispatcher); ok && md != nil {
+		residualFor = md.trackingResidualCutoff
+	}
+	result, sweepErr := sweepOrderTrackingByGenerationAcrossStoresLimit(stores, now, cr.controllerGeneration, residualFor, orderTrackingSweepCloseBudget)
 	if err := errors.Join(storeErr, sweepErr); err != nil {
 		if cr.stderr != nil {
 			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -1759,8 +1791,32 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	}
 	n := result.trackingClosed
 	if n > 0 && cr.stderr != nil {
-		fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog closed %d stale tracking bead(s)\n", cr.logPrefix, n) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog closed %d orphaned tracking bead(s)\n", cr.logPrefix, n) //nolint:errcheck // best-effort stderr
 	}
+}
+
+// controllerGenerationNonce disambiguates two newControllerGeneration calls
+// that land in the same wall-clock second within the same process — the
+// timestamp+pid alone collide there. Process-wide, monotonically increasing,
+// and deliberately not a secret, same as the id it rides in: see that
+// function's doc comment. In production this fires only if a runtime were
+// ever (incorrectly) re-minted mid-life; in tests it is common — the whole
+// point of building this counter is that a test constructing two runtimes
+// back-to-back must NOT get the same id just because both calls landed in
+// the same second, or a bug that re-mints per dispatcher rebuild becomes
+// invisible to any test that runs faster than a second.
+var controllerGenerationNonce atomic.Uint64
+
+// newControllerGeneration mints a controller boot id (ADR-0130 D1): sortable,
+// human-readable, and collision-free — the wall-clock component changes every
+// boot, the pid disambiguates a same-second overlap across processes, and the
+// trailing counter disambiguates multiple mints within the same process in
+// the same second. It is stamped on every tracking bead the controller
+// creates and is deliberately NOT a secret — the ACL token stays in
+// .gc/controller.token and never rides bead metadata.
+func newControllerGeneration() string {
+	n := controllerGenerationNonce.Add(1)
+	return fmt.Sprintf("ctrl-%s-p%d-n%d", time.Now().UTC().Format("20060102T150405"), os.Getpid(), n)
 }
 
 // bulkDeleteMaxAge returns the maximum backup age allowed for bulk bead
@@ -2364,7 +2420,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 		cr.drainOutgoingOrderDispatcher(drainCtx, cr.od)
 		drainCancel()
 	}
-	nextOD, orderSnapshot := buildOrderDispatcherWithSnapshot(cr.storageRoutes, cityRoot, nextCfg, cr.rec, cr.stderr, "gc reload: order scan")
+	nextOD, orderSnapshot := buildOrderDispatcherWithSnapshot(cr.storageRoutes, cityRoot, nextCfg, cr.rec, cr.stderr, "gc reload: order scan", cr.controllerGeneration)
 	orderSummary := orderSetChangeSummary(cr.orderSet, orderSnapshot.Orders)
 	cr.replaceOrderDispatcher(nextOD)
 	cr.orderSet = orderSnapshot.Orders
