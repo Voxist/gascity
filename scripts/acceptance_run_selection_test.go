@@ -283,21 +283,30 @@ type skippedRow struct {
 
 // skipArgPattern matches the body of the ONE canonical `-skip '<expr>'`
 // spelling this parser accepts: single-quoted, the same convention runPattern
-// relies on for `-run`. go test's actual -skip flag also accepts --skip,
-// -skip=X, -skip "X", an unquoted value, -test.skip/--test.skip, and reads
-// GOFLAGS -- none of those are parsed here; skipFlagTokenPattern below exists
-// to COUNT every one of those spellings well enough to notice when one was
-// used, so requiredJobSkipsFromDoc can hard-error on "something skip-shaped
-// is here that isn't the one form we parse" instead of silently proceeding.
-// Unlike a missed `-run` (which a green CI run makes visible by never
+// relies on for `-run`, with a left boundary that excludes it matching mid-
+// identifier (an "...x-skip" tail cannot masquerade as the flag). go test's
+// actual -skip flag also accepts --skip, -skip=X, -skip "X", an unquoted
+// value, -test.skip/--test.skip, and reads GOFLAGS -- none of those are
+// parsed here. Rather than enumerate and parse every one of them,
+// requiredJobSkipsFromDoc DENIES BY DEFAULT: it removes every canonical
+// occurrence this pattern finds, then hard-errors if anything matching
+// skipFlagTokenPattern remains anywhere in the run script or any env value in
+// scope. Unlike a missed `-run` (which a green CI run makes visible by never
 // running), a missed `-skip` fails OPEN: the row runs -- or a shared resource
 // the allowlist assumed was staying off does not.
-var skipArgPattern = regexp.MustCompile(`-skip\s+'([^']*)'`)
+var skipArgPattern = regexp.MustCompile(`(^|[^A-Za-z0-9_.-])-skip\s+'([^']*)'`)
 
 // skipFlagTokenPattern finds anything that LOOKS like a go test skip flag, in
-// any spelling: -skip/--skip/-test.skip/--test.skip, with or without '=',
-// quoted or not. Its only job is counting candidate occurrences.
-var skipFlagTokenPattern = regexp.MustCompile(`(^|[\s'"])--?(test\.)?skip([\s=]|$)`)
+// any spelling and quoting: -skip/--skip/-test.skip/--test.skip, with or
+// without '=', any quote style or none. The left boundary excludes identifier
+// characters (so "x-skip" or "--skip-foo" cannot trigger it) as does the
+// right boundary except '-' itself is excluded from the "clear" set (so
+// "--skip-foo", a hypothetical unrelated flag, and "SKIP_X" as a bare word
+// both stay clear, while "-skip=", "-skip'", "-skip\"", "-skip " all match).
+// Deliberately wider than a real shell's tokenization -- it only ever
+// OVER-detects, never under-detects, which is the fail-closed direction this
+// guard wants.
+var skipFlagTokenPattern = regexp.MustCompile(`(^|[^A-Za-z0-9_.-])--?(test\.)?skip([^A-Za-z0-9_-]|$)`)
 
 // backslashContinuationPattern matches a shell line continuation, so a
 // `-skip` split across a `\`-continued line for readability parses the same
@@ -311,82 +320,93 @@ func joinBackslashContinuations(s string) string {
 	return backslashContinuationPattern.ReplaceAllString(s, " ")
 }
 
-// stripShellComments removes '#'-led shell comments -- naively, from the
-// first '#' on a line to its end, not accounting for a '#' inside a quoted
-// string -- so a comment that MENTIONS "-skip" in prose (exactly how the
-// real beads-proxied-native-acceptance step documents its own deselection:
-// "# -skip excludes child-term-zombie and root-move: ...") is not counted as
-// a skip-flag token. Applied before joinBackslashContinuations: a real shell
-// comment absorbs any trailing '\' too, so line-joining must not cross one.
+// shellCommentStartPattern finds a '#' that starts a shell comment: at the
+// beginning of a line, or immediately after whitespace -- the shell's own
+// "comments begin a word" rule. This deliberately does not track quoting (an
+// actually-quoted `"a # b"` still has its '#' preceded by a space and so is
+// still treated as commented-out here), but it DOES fix the two concrete
+// false matches review found with a naive first-'#'-on-the-line rule:
+// `echo '#'; go test -skip 'X'` (the '#' is preceded by a quote, not
+// whitespace, so it does not start a comment -- and must not swallow the
+// real -skip after it) and `echo $#` (the '#' is the second character of the
+// $# parameter, preceded by '$', not whitespace).
+var shellCommentStartPattern = regexp.MustCompile(`(^|\s)#.*$`)
+
+// stripShellComments removes shell comments by shellCommentStartPattern's
+// word-start rule, so a comment that MENTIONS "-skip" in prose (exactly how
+// the real beads-proxied-native-acceptance step documents its own
+// deselection: "# -skip excludes child-term-zombie and root-move: ...") is
+// not counted as a skip-flag token, while a '#' that is not actually a
+// comment start does not swallow real content after it. Applied before
+// joinBackslashContinuations: a real shell comment absorbs any trailing '\'
+// too, so line-joining must not cross one.
 func stripShellComments(s string) string {
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
-		if idx := strings.Index(line, "#"); idx >= 0 {
-			lines[i] = line[:idx]
-		}
+		lines[i] = shellCommentStartPattern.ReplaceAllString(line, "$1")
 	}
 	return strings.Join(lines, "\n")
 }
 
-func collectSkipExpressions(runBody string) []string {
-	var out []string
-	for _, match := range skipArgPattern.FindAllStringSubmatch(runBody, -1) {
-		out = append(out, match[1])
-	}
-	return out
-}
-
-// goFlagsEnvAssignmentPattern matches an inline shell assignment to GOFLAGS or
-// ACCEPTANCE_GO_TEST_FLAGS (the Makefile's `test-acceptance` passthrough,
-// Makefile:906/921) whose value mentions "skip" -- either would carry a
-// `-skip` straight into `go test` without ever appearing as a `-skip`
-// argument the patterns above look for.
-var goFlagsEnvAssignmentPattern = regexp.MustCompile(`(?i)(GOFLAGS|ACCEPTANCE_GO_TEST_FLAGS)\s*=[^\n]*skip`)
-
-// goFlagsEnvAssignmentAppears reports the first inline GOFLAGS/
-// ACCEPTANCE_GO_TEST_FLAGS=...skip... assignment found in runText, if any.
-func goFlagsEnvAssignmentAppears(runText string) (key, match string, found bool) {
-	m := goFlagsEnvAssignmentPattern.FindStringSubmatch(runText)
-	if m == nil {
-		return "", "", false
-	}
-	return m[1], m[0], true
-}
-
-// skipCapableEnvKeys are env keys that can carry a -skip into `go test`
-// outside any `-skip '...'` argument: GOFLAGS is go's own env-based flag
-// injection, and ACCEPTANCE_GO_TEST_FLAGS is this repo's own
-// `make test-acceptance` passthrough (Makefile:906/921). Neither is parsed
-// for content -- a "skip" substring anywhere in the value is refused
-// outright, forcing the one recognized spelling instead of trying to parse
-// shell.
-var skipCapableEnvKeys = []string{"GOFLAGS", "ACCEPTANCE_GO_TEST_FLAGS"}
-
-// envValuesMentionSkip reports the first of skipCapableEnvKeys, across envs,
-// set to a value containing "skip" (case-insensitive).
-func envValuesMentionSkip(envs ...map[string]any) (key, value string, found bool) {
-	for _, env := range envs {
-		for _, k := range skipCapableEnvKeys {
-			v, ok := env[k]
-			if !ok {
-				continue
-			}
-			s := fmt.Sprint(v)
-			if strings.Contains(strings.ToLower(s), "skip") {
-				return k, s, true
-			}
+// extractAndBlankCanonicalSkips finds every canonical -skip '<expr>'
+// occurrence skipArgPattern recognizes, returning the expressions in
+// left-to-right order and TEXT with those occurrences replaced (boundary
+// character kept, the rest blanked) so a subsequent scan for anything
+// skip-flag-shaped does not re-flag what this parser already accounted for.
+func extractAndBlankCanonicalSkips(text string) (exprs []string, blanked string) {
+	var b strings.Builder
+	last := 0
+	for _, m := range skipArgPattern.FindAllStringSubmatchIndex(text, -1) {
+		b.WriteString(text[last:m[0]])
+		if m[2] >= 0 {
+			b.WriteString(text[m[2]:m[3]]) // keep the boundary character
 		}
+		b.WriteByte(' ')
+		exprs = append(exprs, text[m[4]:m[5]])
+		last = m[1]
 	}
-	return "", "", false
+	b.WriteString(text[last:])
+	return exprs, b.String()
 }
+
+// findSkipFlagToken reports a short window of text around the first
+// skip-flag-shaped token remaining in s, if any -- enough to identify it in
+// an error message without dumping the whole run script.
+func findSkipFlagToken(s string) (window string, found bool) {
+	loc := skipFlagTokenPattern.FindStringIndex(s)
+	if loc == nil {
+		return "", false
+	}
+	start, end := loc[0]-20, loc[1]+20
+	if start < 0 {
+		start = 0
+	}
+	if end > len(s) {
+		end = len(s)
+	}
+	return strings.TrimSpace(s[start:end]), true
+}
+
+// bareOrAnchoredTestName and bareOrAnchoredSubtest are the fragment grammars
+// this parser accepts, each optionally wrapped in a literal '^'/'$' pair --
+// go test -skip matches each '/'-separated fragment as an independent,
+// UNANCHORED regexp.MatchString, so anchoring a fragment is the real,
+// working way to make it an exact match instead of a substring match. Without
+// this, the parser's own ambiguity advice ("anchor it") named a form the
+// parser could not then parse -- checkSkipAmbiguity's error message
+// literally could not be followed.
+const (
+	bareOrAnchoredTestName = `\^?Test[A-Za-z0-9_]*\$?`
+	bareOrAnchoredSubtest  = `\^?[A-Za-z0-9_-]+\$?`
+)
 
 // bareTestNamePattern matches a -skip clause naming a whole top-level test
-// with no subtest scoping: "TestFoo".
-var bareTestNamePattern = regexp.MustCompile(`^(Test[A-Za-z0-9_]*)$`)
+// with no subtest scoping: "TestFoo", "^TestFoo$", ...
+var bareTestNamePattern = regexp.MustCompile(`^(` + bareOrAnchoredTestName + `)$`)
 
 // plainSubtestPattern matches a -skip clause naming one subtest without the
-// parenthesized-alternation form: "TestFoo/bar".
-var plainSubtestPattern = regexp.MustCompile(`^(Test[A-Za-z0-9_]*)/([A-Za-z0-9_-]+)$`)
+// parenthesized-alternation form: "TestFoo/bar", "TestFoo/^bar$", ...
+var plainSubtestPattern = regexp.MustCompile(`^(` + bareOrAnchoredTestName + `)/(` + bareOrAnchoredSubtest + `)$`)
 
 // groupedSubtestPattern matches a test name followed by a parenthesized
 // `|`-separated alternation of subtest names -- go test -skip's
@@ -396,23 +416,36 @@ var plainSubtestPattern = regexp.MustCompile(`^(Test[A-Za-z0-9_]*)/([A-Za-z0-9_-
 // rejected there rather than silently accepted, per the same "checkable, not
 // a full regex evaluator" stance TestProxiedAcceptanceFunctionsAreSelectedByCI
 // takes for `-run`.
-var groupedSubtestPattern = regexp.MustCompile(`^(Test[A-Za-z0-9_]*)/\((.+)\)$`)
+var groupedSubtestPattern = regexp.MustCompile(`^(` + bareOrAnchoredTestName + `)/\((.+)\)$`)
 
 // simpleSubtestNamePattern is what a single alternative inside the `(a|b|c)`
 // group must look like to count as an explicit row name rather than more
 // regex syntax this parser does not evaluate.
-var simpleSubtestNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+var simpleSubtestNamePattern = regexp.MustCompile(`^` + bareOrAnchoredSubtest + `$`)
 
-// skipClause is one `|`-separated piece of a -skip expression, expanded
-// enough to both list the explicit row names it deselects (rows) and, in
-// checkSkipAmbiguity, check whether its PATTERN could also reach further
-// than that: go test -skip matches each `/`-separated fragment via an
-// UNANCHORED regexp.MatchString, not an exact-name comparison, so
-// "TestProxiedNative" (no anchor, no subtest group) matches both
-// TestProxiedNativeLifecycle and TestProxiedNativeSafety.
+// splitAnchors separates a fragment's bare name (anchors stripped, for the
+// row/allowlist key -- an allowlist entry never spells "^root-move$") from
+// the fragment exactly as written (anchors kept, for
+// checkSkipAmbiguity's regexp compilation -- the anchors are the entire
+// reason a fragment can disambiguate itself from a longer sibling).
+func splitAnchors(fragment string) (bareName, pattern string) {
+	pattern = fragment
+	bareName = strings.TrimSuffix(strings.TrimPrefix(fragment, "^"), "$")
+	return bareName, pattern
+}
+
+// skipClause is one `|`-separated piece of a -skip expression, carrying both
+// the explicit row names it deselects (TestName/Alts, via rows()) and the
+// fragment PATTERNS checkSkipAmbiguity compiles to check whether they reach
+// further than that literal expansion claims: go test -skip matches each
+// `/`-separated fragment via an UNANCHORED regexp.MatchString, not an
+// exact-name comparison, so "TestProxiedNative" (no anchor, no subtest group)
+// matches both TestProxiedNativeLifecycle and TestProxiedNativeSafety.
 type skipClause struct {
-	TestName string   // the top-level test function name
-	Alts     []string // subtest name fragments; nil means the clause targets the whole top-level test
+	TestName        string   // the top-level test function name, anchors stripped
+	TestNamePattern string   // the top-level fragment exactly as written, anchors kept
+	Alts            []string // subtest name fragments, anchors stripped; nil means the clause targets the whole top-level test
+	AltPatterns     []string // each Alts entry exactly as written, anchors kept
 }
 
 // rows returns the explicit row names this clause's LITERAL expansion
@@ -444,28 +477,40 @@ func parseSkipExpression(expr string) ([]skipClause, error) {
 	for _, raw := range splitTopLevelAlternation(expr) {
 		clause := strings.TrimSpace(raw)
 		if m := bareTestNamePattern.FindStringSubmatch(clause); m != nil {
-			clauses = append(clauses, skipClause{TestName: m[1]})
+			bare, pattern := splitAnchors(m[1])
+			clauses = append(clauses, skipClause{TestName: bare, TestNamePattern: pattern})
 			continue
 		}
 		if m := plainSubtestPattern.FindStringSubmatch(clause); m != nil {
-			clauses = append(clauses, skipClause{TestName: m[1], Alts: []string{m[2]}})
+			testBare, testPattern := splitAnchors(m[1])
+			altBare, altPattern := splitAnchors(m[2])
+			clauses = append(clauses, skipClause{
+				TestName: testBare, TestNamePattern: testPattern,
+				Alts: []string{altBare}, AltPatterns: []string{altPattern},
+			})
 			continue
 		}
 		if m := groupedSubtestPattern.FindStringSubmatch(clause); m != nil {
-			testName, alternation := m[1], m[2]
-			var alts []string
+			testBare, testPattern := splitAnchors(m[1])
+			alternation := m[2]
+			var altBares, altPatterns []string
 			for _, alt := range strings.Split(alternation, "|") {
 				alt = strings.TrimSpace(alt)
 				if !simpleSubtestNamePattern.MatchString(alt) {
 					return nil, fmt.Errorf("cannot expand -skip clause %q: subtest alternative %q is not a plain name", clause, alt)
 				}
-				alts = append(alts, alt)
+				b, p := splitAnchors(alt)
+				altBares = append(altBares, b)
+				altPatterns = append(altPatterns, p)
 			}
-			clauses = append(clauses, skipClause{TestName: testName, Alts: alts})
+			clauses = append(clauses, skipClause{
+				TestName: testBare, TestNamePattern: testPattern,
+				Alts: altBares, AltPatterns: altPatterns,
+			})
 			continue
 		}
 		return nil, fmt.Errorf("cannot expand -skip clause %q into explicit row names "+
-			"(supported shapes: TestName, TestName/subtest, or TestName/(alt1|alt2|...))", clause)
+			"(supported shapes: TestName, TestName/subtest, or TestName/(alt1|alt2|...), each optionally wrapped in ^...$)", clause)
 	}
 	return clauses, nil
 }
@@ -601,14 +646,18 @@ func splitByTopLevelTestFunction(body string) map[string]string {
 	return out
 }
 
+// acceptanceUniverseScope names where checkPatternMatchesExactlyOne's
+// candidate pool comes from, for its own error messages.
+const acceptanceUniverseScope = "test/acceptance/beads_proxied_*_test.go"
+
 // checkSkipAmbiguity reports the first way clause's PATTERN reaches beyond
 // what its literal expansion (clause.rows()) claims, per go test -skip's real
-// unanchored per-fragment matching:
-//   - a bare "TestName" clause must MatchString exactly one name in
-//     universe.TopLevel;
-//   - each subtest alternative under "TestName/(...)" (or the plain
-//     "TestName/subtest" form) must MatchString exactly one name in
-//     universe.Subtests[TestName].
+// unanchored per-fragment matching. It ALWAYS checks the top-level fragment
+// (clause.TestNamePattern) against universe.TopLevel -- not only for a bare
+// clause -- because a future sibling top-level test (a
+// "TestProxiedNativeLifecycleV2") can make even a subtest-scoped clause's own
+// top-level fragment newly ambiguous. When the clause has subtest
+// alternatives, each is then checked against universe.Subtests[TestName] too.
 //
 // Zero matches means the pattern is stale or misspelled (nothing skips what
 // the allowlist thinks it does); more than one means it silently reaches a
@@ -616,12 +665,13 @@ func splitByTopLevelTestFunction(body string) map[string]string {
 // (no anchor) matching both TestProxiedNativeLifecycle and TestProxiedNativeSafety,
 // or "root-move" also matching a future "root-move-after-crash" subtest.
 func checkSkipAmbiguity(clause skipClause, universe acceptanceTestUniverse) error {
-	if len(clause.Alts) == 0 {
-		return checkPatternMatchesExactlyOne(clause.TestName, clause.TestName, universe.TopLevel, "test function")
+	if err := checkPatternMatchesExactlyOne(clause.TestNamePattern, clause.TestName, universe.TopLevel, "test function"); err != nil {
+		return err
 	}
 	subtests := universe.Subtests[clause.TestName]
-	for _, alt := range clause.Alts {
-		if err := checkPatternMatchesExactlyOne(alt, clause.TestName+"/"+alt, subtests, "subtest of "+clause.TestName); err != nil {
+	for i, alt := range clause.Alts {
+		pattern := clause.AltPatterns[i]
+		if err := checkPatternMatchesExactlyOne(pattern, clause.TestName+"/"+alt, subtests, "subtest of "+clause.TestName); err != nil {
 			return err
 		}
 	}
@@ -641,12 +691,13 @@ func checkPatternMatchesExactlyOne(pattern, row string, candidates []string, wha
 	}
 	switch len(matched) {
 	case 0:
-		return fmt.Errorf("-skip fragment %q (row %q) matches no known %s; it may be stale or misspelled", pattern, row, what)
+		return fmt.Errorf("-skip fragment %q (row %q) matches no known %s in %s; it may be stale or misspelled",
+			pattern, row, what, acceptanceUniverseScope)
 	case 1:
 		return nil
 	default:
-		return fmt.Errorf("-skip fragment %q (row %q) is ambiguous: go test's unanchored matching also reaches %v; "+
-			"anchor it (e.g. ^%s$) or write it to match only the intended %s", pattern, row, matched, pattern, what)
+		return fmt.Errorf("-skip fragment %q (row %q) is ambiguous across %s: go test's unanchored matching also reaches %v; "+
+			"anchor it (e.g. ^%s$) or write it to match only the intended %s", pattern, row, acceptanceUniverseScope, matched, pattern, what)
 	}
 }
 
@@ -654,11 +705,21 @@ func checkPatternMatchesExactlyOne(pattern, row string, candidates []string, wha
 // requiredJobEnv) in one workflow document and expands each recognized
 // `-skip` argument on its `go test` invocations into explicit row names,
 // checking each against universe for the unanchored-matching ambiguity
-// checkSkipAmbiguity guards. It returns an error -- not a partial result --
-// the moment anything about a step's -skip cannot be trusted: an
-// unrecognized spelling (HIGH: -skip token count disagrees with the
-// canonical `-skip '<expr>'` count), a GOFLAGS/ACCEPTANCE_GO_TEST_FLAGS env
-// value or inline assignment that mentions "skip", an unparseable clause, or
+// checkSkipAmbiguity guards.
+//
+// DENY BY DEFAULT, not an enumeration of known-bad spellings: for each
+// step, extractAndBlankCanonicalSkips removes every canonical
+// `-skip '<expr>'` occurrence from the (comment-stripped,
+// continuation-joined) run text, and ANYTHING skip-flag-shaped
+// (skipFlagTokenPattern) still present in what remains -- or in ANY env
+// value in scope, workflow/job/step, under ANY key name -- is a hard error.
+// This closes the class rather than chasing individual spellings: it also
+// catches `'-skip' 'X'`, `-skip"" X`, an env var carrying `-skip=X` under a
+// name that is not GOFLAGS or ACCEPTANCE_GO_TEST_FLAGS, and anything else
+// that looks like the flag, without needing to have been told about it in
+// advance. It returns an error -- not a partial result -- the moment
+// anything about a step's -skip cannot be trusted: a leftover skip-flag-
+// shaped token in the run script or an env value, an unparseable clause, or
 // an ambiguous one.
 func requiredJobSkipsFromDoc(workflowName string, doc acceptanceWorkflowDoc, universe acceptanceTestUniverse) ([]skippedRow, error) {
 	var out []skippedRow
@@ -667,23 +728,24 @@ func requiredJobSkipsFromDoc(workflowName string, doc acceptanceWorkflowDoc, uni
 			if !requiredJobEnv(doc.Env, job.Env, step.Env) {
 				continue
 			}
-			if key, value, found := envValuesMentionSkip(doc.Env, job.Env, step.Env); found {
-				return nil, fmt.Errorf("%s job %q: env %s=%q may carry a -skip into go test outside the recognized "+
-					"-skip '<expr>' form; this guard cannot see inside it -- rewrite the skip as an explicit "+
-					"-skip '<expr>' argument instead", workflowName, jobName, key, value)
+			for _, env := range []map[string]any{doc.Env, job.Env, step.Env} {
+				for key, value := range env {
+					s := fmt.Sprint(value)
+					if window, found := findSkipFlagToken(s); found {
+						return nil, fmt.Errorf("%s job %q: env %s=%q contains a skip-flag-shaped token (%q) outside the "+
+							"recognized -skip '<expr>' form; this guard cannot see inside an env value's content -- "+
+							"rewrite the skip as an explicit -skip '<expr>' argument on the go test line instead",
+							workflowName, jobName, key, s, window)
+					}
+				}
 			}
 			joined := joinBackslashContinuations(stripShellComments(step.Run))
-			if key, match, found := goFlagsEnvAssignmentAppears(joined); found {
-				return nil, fmt.Errorf("%s job %q: an inline %s assignment (%q) in the run script may carry a -skip into "+
-					"go test; rewrite the skip as an explicit -skip '<expr>' argument instead", workflowName, jobName, key, match)
-			}
-			tokenCount := len(skipFlagTokenPattern.FindAllStringIndex(joined, -1))
-			exprs := collectSkipExpressions(joined)
-			if tokenCount != len(exprs) {
-				return nil, fmt.Errorf("%s job %q: found %d go-test skip-flag token(s) in the run script but only %d in "+
-					"the recognized -skip '<expr>' form; every -skip/-test.skip must be written exactly as "+
-					"-skip '<expr>' (single-quoted) -- other spellings (-skip=X, -skip \"X\", an unquoted value, "+
-					"-test.skip, GOFLAGS, ...) fail open and are refused here", workflowName, jobName, tokenCount, len(exprs))
+			exprs, blanked := extractAndBlankCanonicalSkips(joined)
+			if window, found := findSkipFlagToken(blanked); found {
+				return nil, fmt.Errorf("%s job %q: run script contains a skip-flag-shaped token (%q) outside the "+
+					"recognized -skip '<expr>' form; every -skip/-test.skip must be written exactly as "+
+					"-skip '<expr>' (single-quoted) -- any other spelling fails open and is refused here",
+					workflowName, jobName, window)
 			}
 			for _, expr := range exprs {
 				clauses, err := parseSkipExpression(expr)
@@ -785,22 +847,35 @@ func skipAllowlistProblems(workflows map[string][]byte, allowlist []skipAllowlis
 // beads-proxied-perf). A `-skip` in a required job in some OTHER workflow
 // file is outside this guard's scope.
 //
+// Deny by default, not an enumeration: requiredJobSkipsFromDoc removes every
+// canonical `-skip '<expr>'` occurrence and hard-errors on anything
+// skip-flag-shaped left in the run script OR in any env value in scope
+// (workflow, job, or step, under any key name -- not only GOFLAGS or
+// ACCEPTANCE_GO_TEST_FLAGS). That closes `'-skip' 'X'`, `"-skip" "X"`,
+// `-skip"" X`, an unquoted value, `-test.skip`, a shell variable holding the
+// flag (`ARGS=-skip=X; go test $ARGS`), a bash array
+// (`args=(-skip=X); go test "${args[@]}"`), `GOFLAGS+='-skip=X'`, and an env
+// entry under any name (`env: EXTRA: -skip=X`) -- see
+// acceptance_run_skip_allowlist_fixture_test.go for a fixture proving each
+// one. stripShellComments' word-start rule keeps a `#` inside a quoted
+// string (`echo '#'; go test -skip=X`) or a `$#` parameter (`echo $#`) from
+// swallowing real content after it, which a naive first-'#' rule would have.
+//
 // Known remaining limits, stated rather than silently assumed: this guard
 // reads `step.run:` text and job/step/workflow `env:` maps -- it does not
-// execute shell. A `-skip` a step's run: block merely INVOKES (a checked-in
-// script the step calls, rather than a `go test` line the run: text itself
-// spells out) is invisible to it: nothing about invoking a script mentions
-// "skip". A shell variable's VALUE ("-skip \"$S\""), a GOFLAGS/
-// ACCEPTANCE_GO_TEST_FLAGS assignment, or an unrecognized -skip spelling are
-// NOT invisible -- envValuesMentionSkip, goFlagsEnvAssignmentAppears, and the
-// skip-flag-token count all hard-error on those rather than silently passing
-// (see the fixture cases in acceptance_run_skip_allowlist_fixture_test.go).
-// GITHUB_ENV (a step appending to it for a LATER step to read) and a
-// workflow_call input threaded through `${{ }}` interpolation both still
-// reach this scan as the literal `${{ ... }}` text GitHub Actions has not
-// yet resolved, which parseSkipExpression then correctly refuses to expand
-// as an unrecognized -skip form -- caught, but for the wrong stated reason,
-// which is worth knowing when reading that error.
+// execute shell, so it has no notion of what a script the run: text merely
+// INVOKES (rather than inlines) does; nothing about invoking a checked-in
+// script mentions "skip". stripShellComments' word-start rule is not
+// quote-aware beyond that one case: a `#` after a shell metacharacter other
+// than whitespace (e.g. `;#comment`) is not recognized as a comment start
+// either, so it stays in the scanned text -- conservative (it can cause an
+// over-detection, never a missed one) but still a known gap from real shell
+// tokenization. GITHUB_ENV (a step appending to it for a LATER step to read)
+// and a workflow_call input threaded through `${{ }}` interpolation both
+// still reach this scan as the literal `${{ ... }}` text GitHub Actions has
+// not yet resolved, which parseSkipExpression then correctly refuses to
+// expand as an unrecognized -skip form -- caught, but for the wrong stated
+// reason, which is worth knowing when reading that error.
 func TestRequiredJobSkipsAreAllowlisted(t *testing.T) {
 	root := repoRoot(t)
 	workflows := map[string][]byte{}

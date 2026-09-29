@@ -8,9 +8,9 @@ import (
 // Fixture-based unit tests for parseSkipExpression, splitTopLevelAlternation,
 // requiredJobEnv, checkSkipAmbiguity, and skipAllowlistProblems, all defined
 // in acceptance_run_selection_test.go. These exercise the parser and the
-// allowlist engine directly, without touching the real ci.yml -- the TDD
-// probe ga-may9k asked for, kept as permanent regression coverage rather
-// than a one-off manual check.
+// deny-by-default allowlist engine directly, without touching the real
+// ci.yml -- the TDD probe ga-may9k asked for, kept as permanent regression
+// coverage rather than a one-off manual check.
 
 func TestParseSkipExpression(t *testing.T) {
 	cases := []struct {
@@ -56,6 +56,23 @@ func TestParseSkipExpression(t *testing.T) {
 			want: []string{"TestFoo/bar"},
 		},
 		{
+			// The anchoring advice ("anchor it, e.g. ^Name$") must itself
+			// parse -- a bare anchored name yields the same bare row.
+			name: "an anchored bare test name is accepted, anchors stripped from the row",
+			expr: "^TestFoo$",
+			want: []string{"TestFoo"},
+		},
+		{
+			name: "an anchored subtest alternative is accepted, anchors stripped from the row",
+			expr: "TestFoo/(^bar$|baz)",
+			want: []string{"TestFoo/bar", "TestFoo/baz"},
+		},
+		{
+			name: "a fully anchored plain subtest form is accepted",
+			expr: "^TestFoo$/^bar$",
+			want: []string{"TestFoo/bar"},
+		},
+		{
 			name:    "empty expression",
 			expr:    "",
 			wantErr: "empty -skip expression",
@@ -63,11 +80,6 @@ func TestParseSkipExpression(t *testing.T) {
 		{
 			name:    "regex metacharacters are not expanded",
 			expr:    "TestFoo.*",
-			wantErr: "cannot expand",
-		},
-		{
-			name:    "anchors are not expanded",
-			expr:    "^TestFoo$",
 			wantErr: "cannot expand",
 		},
 		{
@@ -177,17 +189,22 @@ func TestCheckSkipAmbiguity(t *testing.T) {
 		TopLevel: []string{"TestProxiedNativeLifecycle", "TestProxiedNativeSafety"},
 		Subtests: map[string][]string{
 			"TestProxiedNativeLifecycle": {"child-term-zombie", "root-move", "root-move-after-crash"},
+			"TestProxiedNativeSafety":    {"no-spawn-control", "no-spawn", "library-no-spawn-control"},
 		},
 	}
 
-	t.Run("an anchored-in-substance single-match clause is clean", func(t *testing.T) {
-		if err := checkSkipAmbiguity(skipClause{TestName: "TestProxiedNativeLifecycle"}, universe); err != nil {
+	t.Run("an unambiguous bare top-level clause is clean", func(t *testing.T) {
+		clause := skipClause{TestName: "TestProxiedNativeLifecycle", TestNamePattern: "TestProxiedNativeLifecycle"}
+		if err := checkSkipAmbiguity(clause, universe); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
 
 	t.Run("child-term-zombie matches exactly one subtest", func(t *testing.T) {
-		clause := skipClause{TestName: "TestProxiedNativeLifecycle", Alts: []string{"child-term-zombie"}}
+		clause := skipClause{
+			TestName: "TestProxiedNativeLifecycle", TestNamePattern: "TestProxiedNativeLifecycle",
+			Alts: []string{"child-term-zombie"}, AltPatterns: []string{"child-term-zombie"},
+		}
 		if err := checkSkipAmbiguity(clause, universe); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -197,7 +214,8 @@ func TestCheckSkipAmbiguity(t *testing.T) {
 		// The concrete review finding: "-skip 'TestProxiedNative'" (no
 		// subtest group, no anchor) reaches BOTH TestProxiedNativeLifecycle
 		// and TestProxiedNativeSafety via go test's unanchored regexp match.
-		err := checkSkipAmbiguity(skipClause{TestName: "TestProxiedNative"}, universe)
+		clause := skipClause{TestName: "TestProxiedNative", TestNamePattern: "TestProxiedNative"}
+		err := checkSkipAmbiguity(clause, universe)
 		if err == nil {
 			t.Fatal("expected an ambiguity error, got nil")
 		}
@@ -211,7 +229,10 @@ func TestCheckSkipAmbiguity(t *testing.T) {
 	t.Run("a subtest alternative unanchored matches a future sibling subtest", func(t *testing.T) {
 		// The review's second concrete example: ".../(root-move)" also
 		// matches a future "root-move-after-crash" subtest once one exists.
-		clause := skipClause{TestName: "TestProxiedNativeLifecycle", Alts: []string{"root-move"}}
+		clause := skipClause{
+			TestName: "TestProxiedNativeLifecycle", TestNamePattern: "TestProxiedNativeLifecycle",
+			Alts: []string{"root-move"}, AltPatterns: []string{"root-move"},
+		}
 		err := checkSkipAmbiguity(clause, universe)
 		if err == nil {
 			t.Fatal("expected an ambiguity error, got nil")
@@ -222,13 +243,67 @@ func TestCheckSkipAmbiguity(t *testing.T) {
 	})
 
 	t.Run("a stale or misspelled pattern matches nothing", func(t *testing.T) {
-		clause := skipClause{TestName: "TestProxiedNativeLifecycle", Alts: []string{"no-such-subtest"}}
+		clause := skipClause{
+			TestName: "TestProxiedNativeLifecycle", TestNamePattern: "TestProxiedNativeLifecycle",
+			Alts: []string{"no-such-subtest"}, AltPatterns: []string{"no-such-subtest"},
+		}
 		err := checkSkipAmbiguity(clause, universe)
 		if err == nil {
 			t.Fatal("expected an error for a pattern matching no known subtest, got nil")
 		}
-		if !strings.Contains(err.Error(), "matches no known") {
-			t.Fatalf("error = %q, want it to say the pattern matches nothing known", err.Error())
+		if !strings.Contains(err.Error(), "matches no known") || !strings.Contains(err.Error(), acceptanceUniverseScope) {
+			t.Fatalf("error = %q, want it to say the pattern matches nothing known and name the scan scope", err.Error())
+		}
+	})
+
+	t.Run("no-spawn-control is unanchored-ambiguous against its own longer sibling", func(t *testing.T) {
+		// "no-spawn-control" is a SUFFIX of "library-no-spawn-control", so
+		// the unanchored pattern reaches both.
+		clause := skipClause{
+			TestName: "TestProxiedNativeSafety", TestNamePattern: "TestProxiedNativeSafety",
+			Alts: []string{"no-spawn-control"}, AltPatterns: []string{"no-spawn-control"},
+		}
+		err := checkSkipAmbiguity(clause, universe)
+		if err == nil {
+			t.Fatal("expected an ambiguity error, got nil")
+		}
+		if !strings.Contains(err.Error(), "library-no-spawn-control") {
+			t.Fatalf("error = %q, want it to name the longer sibling subtest", err.Error())
+		}
+	})
+
+	t.Run("anchoring no-spawn-control disambiguates it -- the anchoring advice actually works", func(t *testing.T) {
+		// LOW: this is what checkPatternMatchesExactlyOne's own "anchor it"
+		// advice recommends, and it must actually resolve the case above:
+		// anchored, "no-spawn-control" only exact-matches itself.
+		clause := skipClause{
+			TestName: "TestProxiedNativeSafety", TestNamePattern: "TestProxiedNativeSafety",
+			Alts: []string{"no-spawn-control"}, AltPatterns: []string{"^no-spawn-control$"},
+		}
+		if err := checkSkipAmbiguity(clause, universe); err != nil {
+			t.Fatalf("anchoring should have disambiguated this pattern, got: %v", err)
+		}
+	})
+
+	t.Run("a clause with alternatives still checks its own top-level fragment", func(t *testing.T) {
+		// LOW: even when a clause scopes to a subtest, its own top-level
+		// fragment is unanchored-matched too -- a future
+		// TestProxiedNativeLifecycleV2 would make this ambiguous despite the
+		// subtest alternative itself being unambiguous.
+		universeWithFutureSibling := acceptanceTestUniverse{
+			TopLevel: []string{"TestProxiedNativeLifecycle", "TestProxiedNativeLifecycleV2", "TestProxiedNativeSafety"},
+			Subtests: universe.Subtests,
+		}
+		clause := skipClause{
+			TestName: "TestProxiedNativeLifecycle", TestNamePattern: "TestProxiedNativeLifecycle",
+			Alts: []string{"child-term-zombie"}, AltPatterns: []string{"child-term-zombie"},
+		}
+		err := checkSkipAmbiguity(clause, universeWithFutureSibling)
+		if err == nil {
+			t.Fatal("expected an ambiguity error for the top-level fragment, got nil")
+		}
+		if !strings.Contains(err.Error(), "TestProxiedNativeLifecycleV2") {
+			t.Fatalf("error = %q, want it to name the future sibling top-level test", err.Error())
 		}
 	})
 }
@@ -405,67 +480,108 @@ func TestSkipAllowlistProblems(t *testing.T) {
 		}
 	})
 
-	// HIGH: every unsupported -skip spelling must hard-error, never pass
-	// silently. Each of these reproduces one form the review found passing
-	// silently against the single-quoted-only parser.
-	t.Run("unsupported -skip spellings all error instead of passing silently", func(t *testing.T) {
+	// HIGH round 2: deny-by-default. Every one of these is a bypass the
+	// review probed against round 1's spelling-enumeration parser; each must
+	// still hard-error under the new "remove the canonical form, anything
+	// skip-flag-shaped left over is an error" design. Two decoys and two
+	// controls prove the design does not also over-trigger.
+	t.Run("every probed bypass still errors instead of passing silently", func(t *testing.T) {
 		cases := []struct {
 			name    string
 			run     []string
 			wantErr string
 		}{
 			{
-				name:    "equals form with quotes: -skip='...'",
-				run:     []string{`go test -run 'TestFoo$' -skip='TestFoo/(bar|baz)' ./test/acceptance/`},
-				wantErr: "skip-flag token",
+				name:    "the flag name itself quoted: '-skip' 'X'",
+				run:     []string{`go test -run 'TestFoo$' '-skip' 'TestFoo/(bar|baz)' ./test/acceptance/`},
+				wantErr: "skip-flag-shaped token",
 			},
 			{
-				name:    "equals form, no quotes: -skip=X/a",
+				name:    `double-quoted flag and value: "-skip" "X"`,
+				run:     []string{`go test -run 'TestFoo$' "-skip" "TestFoo/(bar|baz)" ./test/acceptance/`},
+				wantErr: "skip-flag-shaped token",
+			},
+			{
+				name:    `an elided empty string glued to the flag: -skip"" X`,
+				run:     []string{`go test -run 'TestFoo$' -skip"" TestFoo/bar ./test/acceptance/`},
+				wantErr: "skip-flag-shaped token",
+			},
+			{
+				name: "a shell variable holding the flag: ARGS=-skip=X; go test $ARGS",
+				run: []string{
+					`ARGS=-skip=TestFoo/bar`,
+					`go test -run 'TestFoo$' $ARGS ./test/acceptance/`,
+				},
+				wantErr: "skip-flag-shaped token",
+			},
+			{
+				name: "a bash array holding the flag",
+				run: []string{
+					`args=(-skip=TestFoo/bar)`,
+					`go test -run 'TestFoo$' "${args[@]}" ./test/acceptance/`,
+				},
+				wantErr: "skip-flag-shaped token",
+			},
+			{
+				name:    "GOFLAGS appended to with +=",
+				run:     []string{`export GOFLAGS+='-skip=TestFoo/bar'`, `go test -run 'TestFoo$' ./test/acceptance/`},
+				wantErr: "skip-flag-shaped token",
+			},
+			{
+				name:    "an unquoted, equals-form value: -skip=X/a",
 				run:     []string{`go test -run 'TestFoo$' -skip=TestFoo/bar ./test/acceptance/`},
-				wantErr: "skip-flag token",
-			},
-			{
-				name:    `double-quoted: -skip "X/a"`,
-				run:     []string{`go test -run 'TestFoo$' -skip "TestFoo/bar" ./test/acceptance/`},
-				wantErr: "skip-flag token",
-			},
-			{
-				name:    "unquoted: -skip X/a",
-				run:     []string{`go test -run 'TestFoo$' -skip TestFoo/bar ./test/acceptance/`},
-				wantErr: "skip-flag token",
+				wantErr: "skip-flag-shaped token",
 			},
 			{
 				name:    "fully-qualified flag: -test.skip '...'",
 				run:     []string{`go test -run 'TestFoo$' -test.skip 'TestFoo/(bar|baz)' ./test/acceptance/`},
-				wantErr: "skip-flag token",
+				wantErr: "skip-flag-shaped token",
 			},
 			{
-				name:    "double-dash: --skip '...' (functionally identical to -skip, still counted consistently)",
+				// go test treats -skip and --skip identically, but
+				// skipArgPattern's left boundary (added this round to stop
+				// a longer flag like "--not-skip 'X'" from being read as
+				// canonical) means it only recognizes the single-hyphen
+				// spelling: --skip is "not the one form" too, and must be
+				// rewritten rather than silently accepted.
+				name:    "double-dash --skip '...' is refused; the one spelling is single-hyphen -skip",
 				run:     []string{`go test -run 'TestFoo$' --skip 'TestFoo/(bar|baz)' ./test/acceptance/`},
-				wantErr: "",
+				wantErr: "skip-flag-shaped token",
 			},
 			{
 				name:    "passed after -args: -args -test.skip=...",
 				run:     []string{`go test -run 'TestFoo$' ./test/acceptance/ -args -test.skip=TestFoo/bar`},
-				wantErr: "skip-flag token",
+				wantErr: "skip-flag-shaped token",
 			},
 			{
-				name: "unresolvable shell variable: -skip \"$S\"",
+				name: "an unresolvable shell variable: -skip \"$S\"",
 				run: []string{
 					`S='TestFoo/(bar|baz)'`,
 					`go test -run 'TestFoo$' -skip "$S" ./test/acceptance/`,
 				},
-				wantErr: "skip-flag token",
+				wantErr: "skip-flag-shaped token",
 			},
 			{
-				name:    "GOFLAGS inline assignment carries -skip",
-				run:     []string{`GOFLAGS='-skip=TestFoo/bar' go test -run 'TestFoo$' ./test/acceptance/`},
-				wantErr: "GOFLAGS",
+				// A comment containing a lone '#' preceded by a quote, not
+				// whitespace, must NOT swallow the real -skip after it.
+				name:    "echo '#'; go test -skip=X -- the '#' is quoted, not a comment start",
+				run:     []string{`echo '#'; go test -run 'TestFoo$' -skip=TestFoo/bar ./test/acceptance/`},
+				wantErr: "skip-flag-shaped token",
 			},
 			{
-				name:    "ACCEPTANCE_GO_TEST_FLAGS into make test-acceptance",
-				run:     []string{`ACCEPTANCE_GO_TEST_FLAGS='-skip TestFoo/bar' make test-acceptance`},
-				wantErr: "ACCEPTANCE_GO_TEST_FLAGS",
+				// $# (bash's positional-parameter count) must not be
+				// mistaken for a comment start either; this line has no
+				// -skip at all, so it must NOT error.
+				name:    "echo $# -- not a comment start, and no -skip present",
+				run:     []string{`echo $#; go test -run 'TestFoo$' ./test/acceptance/`},
+				wantErr: "",
+			},
+			{
+				// Decoy: an unrelated flag that merely starts with "skip-"
+				// must stay clear.
+				name:    "decoy: --skip-foo is not the skip flag",
+				run:     []string{`go test -run 'TestFoo$' --skip-foo=1 ./test/acceptance/`},
+				wantErr: "",
 			},
 			{
 				// Control: the one recognized spelling, split across a
@@ -483,7 +599,7 @@ func TestSkipAllowlistProblems(t *testing.T) {
 				// how the real beads-proxied-native-acceptance step
 				// documents its own deselection -- must not be counted as a
 				// skip-flag token.
-				name: "a -skip mentioned in a comment is not counted",
+				name: "a -skip mentioned in a real trailing comment is not counted",
 				run: []string{
 					`# -skip excludes bar and baz for now, see some-bead`,
 					`go test -run 'TestFoo$' \`,
@@ -513,23 +629,53 @@ func TestSkipAllowlistProblems(t *testing.T) {
 		}
 	})
 
-	// GOFLAGS/ACCEPTANCE_GO_TEST_FLAGS set via a job or step env: map, not
-	// inline in the run text.
-	t.Run("GOFLAGS or ACCEPTANCE_GO_TEST_FLAGS set in job env errors", func(t *testing.T) {
+	// HIGH round 2: an env value under ANY key name, not just GOFLAGS/
+	// ACCEPTANCE_GO_TEST_FLAGS, is scanned.
+	t.Run("an env value under any key name errors", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			envKey string
+		}{
+			{name: "GOFLAGS", envKey: "GOFLAGS"},
+			{name: "ACCEPTANCE_GO_TEST_FLAGS into make test-acceptance (Makefile:906/921)", envKey: "ACCEPTANCE_GO_TEST_FLAGS"},
+			{name: "an arbitrary key name the reviewer's HIGH named", envKey: "EXTRA"},
+			{name: "TEST_FLAGS threaded through as $TEST_FLAGS", envKey: "TEST_FLAGS"},
+		}
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				workflow := []byte("jobs:\n" +
+					"  probe:\n" +
+					"    env:\n" +
+					"      GC_REQUIRE_ACCEPTANCE_TOOLING: \"1\"\n" +
+					"      " + c.envKey + ": \"-skip=TestFoo/bar\"\n" +
+					"    steps:\n" +
+					"      - name: run\n" +
+					"        run: go test -run 'TestFoo$' ./test/acceptance/\n")
+				_, err := skipAllowlistProblems(map[string][]byte{"ci.yml": workflow}, allowlisted, fixtureUniverse())
+				if err == nil {
+					t.Fatalf("expected an error for %s set in job env, got nil", c.envKey)
+				}
+				if !strings.Contains(err.Error(), c.envKey) {
+					t.Fatalf("error = %q, want it to name %s", err.Error(), c.envKey)
+				}
+			})
+		}
+	})
+
+	// Decoy: an env var whose NAME merely contains "skip" but whose VALUE
+	// does not must stay clear -- only the value is scanned.
+	t.Run("decoy: an env key named SKIP_X with an unrelated value stays clear", func(t *testing.T) {
 		workflow := []byte("jobs:\n" +
 			"  probe:\n" +
 			"    env:\n" +
 			"      GC_REQUIRE_ACCEPTANCE_TOOLING: \"1\"\n" +
-			"      GOFLAGS: \"-skip=TestFoo/bar\"\n" +
+			"      SKIP_X: \"hello\"\n" +
 			"    steps:\n" +
 			"      - name: run\n" +
 			"        run: go test -run 'TestFoo$' ./test/acceptance/\n")
-		_, err := skipAllowlistProblems(map[string][]byte{"ci.yml": workflow}, allowlisted, fixtureUniverse())
-		if err == nil {
-			t.Fatal("expected an error for GOFLAGS set in job env, got nil")
-		}
-		if !strings.Contains(err.Error(), "GOFLAGS") {
-			t.Fatalf("error = %q, want it to name GOFLAGS", err.Error())
+		_, err := skipAllowlistProblems(map[string][]byte{"ci.yml": workflow}, nil, fixtureUniverse())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
 		}
 	})
 }
