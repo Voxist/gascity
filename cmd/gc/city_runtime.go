@@ -1784,7 +1784,7 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	// order set must fail toward NEVER reaping (residualFor nil), not toward
 	// guessing deadlines. Production dispatchers are always
 	// *memoryOrderDispatcher; test fakes simply get the D1 tier only.
-	residualFor := func(scoped string) time.Duration { return 0 }
+	var residualFor func(scoped string) time.Duration
 	if md, ok := cr.od.(*memoryOrderDispatcher); ok && md != nil {
 		residualFor = md.trackingResidualCutoff
 	}
