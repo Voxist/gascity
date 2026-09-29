@@ -100,7 +100,37 @@ const (
 	// (99d81dd4d -> 2498618eb) and BD_VERSION (v1.90.0 -> v1.91.0) moved at
 	// the same five pin sites and nothing else. Taken from the candidate
 	// digest this package printed for the changed workflow.
-	expectedCIExecutionHash     = "61b7de469d0f35806bde6e49082c40336c276a6774ec86cb28acc682caed1475"
+	// Bumped for the beads-topology-acceptance job (origin/main): the
+	// bd/dolt-backed topology shapes had never executed in CI — every job
+	// lacked a bd with --proxied-server, so each test skipped and a suite
+	// that ran nothing reported green. The new job builds bd from
+	// BD_CURRENT_REF and sets GC_REQUIRE_ACCEPTANCE_TOOLING so a runner
+	// without that bd fails instead. Widened twice more (beads_topology's
+	// path filter, first to cmd/gc/**+internal/beads/**+internal/doctor/**+
+	// examples/bd/**+test/acceptance/**, then to internal/** wholesale once
+	// `go list -deps` showed 139 of 166 internal packages actually reachable),
+	// plus the "Proxied-native lifecycle and safety" step (later split into
+	// its own "Beads / proxied-native acceptance" job to fit under its own
+	// 90-minute job timeout) and the beads-proxied-perf nightly job. None of
+	// this changes proxied=false behavior — it is coverage for the
+	// proxied-server escape hatch this resync also takes (ga-m07q9); the
+	// fork's own execution-shape history above (BD_REPO/BD_SOURCE_REF bridge
+	// pins, the scripts/** and bootstrap-scripts integration filters, the
+	// static-checks split, the 3-way noncmdgc cover matrix) survives
+	// unchanged into the merged workflow.
+	//
+	// Re-derived again at the 2026-09-25 resync: this merge also carries
+	// origin's beads-topology-acceptance job, so the merged ci.yml hashes to
+	// neither side's prior pin. Taken from the candidate digest
+	// TestCurrentWorkflowsMatchPolicy printed for the merged workflow.
+	// Re-derived again (B2, independent review of PR #215): beads-topology-
+	// acceptance and beads-proxied-native-acceptance's bd-build steps now
+	// resolve BD_REPO/BD_SOURCE_REF/BD_VERSION from deps.env instead of
+	// gastownhall/beads @ BD_CURRENT_REF (ga-m07q9's item 1 -- that upstream
+	// pin schema-skewed against the beads library gc actually links). Taken
+	// from the candidate digest TestCurrentWorkflowsMatchPolicy printed for
+	// the changed workflow, not pasted from the review.
+	expectedCIExecutionHash     = "4efe23d8619f3bbb14c3ede7c1b2d160e84c37f1107aae8afbd14a51848c113e"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
@@ -124,7 +154,11 @@ const (
 	// candidate digest this package printed for the changed workflow.
 	// Re-derived for the bd v1.91.0 repin: the same two pin sites, same two
 	// keys, nothing else.
-	expectedNightlyExecutionHash = "ff702fc4e0aec70e0caba25b6a5c0084e57f6835d5f5bdf3a1ec2cb52dd6536f"
+	//
+	// Bumped again (origin/main, merged at this resync): the
+	// beads-proxied-perf job (see above). Taken from the candidate digest
+	// TestCurrentWorkflowsMatchPolicy printed for the merged workflow.
+	expectedNightlyExecutionHash = "9b1d408a481c580ae51c4564b7a0358ef2e59778b70551de2b451b429a900941"
 	// Re-derived at the 2026-08-31 resync: the composite setup actions under
 	// .github/actions/setup-gascity-* auto-merged both sides as well, moving
 	// this pin along with the two workflow execution pins above.
@@ -151,6 +185,21 @@ var requiredFilterPaths = map[string][]string{
 		"deps.env",
 		".github/scripts/install-bd-archive.sh",
 		"cmd/gc/init_provider_readiness.go",
+	},
+	// beads-topology-acceptance is the only job that stands up the proxied
+	// shapes for real, and ci-required allows its skip, so the paths that must
+	// trigger it are policy rather than convention. The internal/** entry is
+	// the dependency graph of the binaries the job builds:
+	// `go list -deps ./test/acceptance/... ./cmd/gc`.
+	"beads_topology": {
+		"go.mod",
+		"go.sum",
+		"deps.env",
+		"cmd/gc/**",
+		"internal/**",
+		"examples/bd/**",
+		"test/acceptance/**",
+		".github/workflows/ci.yml",
 	},
 	"packs": {
 		"examples/gastown/**",

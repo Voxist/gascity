@@ -122,6 +122,33 @@ func Open(host, port, user, password, database string) (*sql.DB, error) {
 	return db, nil
 }
 
+// OpenSocket returns a shared *sql.DB for a Dolt Unix-socket endpoint.
+func OpenSocket(socket, user, password, database string) (*sql.DB, error) {
+	k := key("unix", socket, user, password, database)
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if db, ok := registry.dbs[k]; ok {
+		return db, nil
+	}
+	cfg := mysql.NewConfig()
+	cfg.User, cfg.Passwd, cfg.Net, cfg.Addr, cfg.DBName = user, password, "unix", socket, database
+	cfg.Timeout, cfg.ReadTimeout, cfg.WriteTimeout = connTimeout, readTimeout, writeTimeout
+	cfg.AllowNativePasswords = true
+	cfg.ParseTime = true
+	db, err := sql.Open("mysql", cfg.FormatDSN())
+	if err != nil {
+		return nil, fmt.Errorf("opening pooled dolt socket connection %s/%s: %w", socket, database, err)
+	}
+	db.SetMaxOpenConns(maxOpenConns)
+	db.SetMaxIdleConns(maxIdleConns)
+	db.SetConnMaxLifetime(connMaxLifetime)
+	// The vc-wz5 death-match guard, same as Open above. See the
+	// connMaxIdleTime doc comment and the dolt-timeout-race doctor check.
+	db.SetConnMaxIdleTime(connMaxIdleTime)
+	registry.dbs[k] = db
+	return db, nil
+}
+
 // IdleConnCeiling reports the longest an idle pooled connection may live before
 // this pool reaps it client-side: the smaller positive bound of connMaxIdleTime
 // and connMaxLifetime (a non-positive bound means "no limit from that knob").

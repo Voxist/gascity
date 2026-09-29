@@ -29,7 +29,10 @@ ARG GRPC_VERSION=1.83.2
 # matters where the floors are applied one `go get` at a time: a later `go get`
 # can roll an earlier one back, and only the rolled-back module's own assertion
 # would catch it, so the gh build below keeps XMOD_VERSION -- its newest
-# constraint -- last, and the dolt build keeps the same ascending order.
+# constraint -- last, and the dolt build keeps the same ascending order. The
+# rebuilt bd tracks its own GRPC_VERSION and THRIFT_VERSION in
+# contrib/k8s/Dockerfile.agent; both files carry the same thrift floor,
+# 0.24.0, where CVE-2026-43871 is fixed (see below).
 ARG XTEXT_VERSION=0.41.0
 # gh and dolt resolve these through their own module graphs, so the image scan
 # kept flagging them after bd was fixed: x/crypto CVE-2026-56854 (CRITICAL,

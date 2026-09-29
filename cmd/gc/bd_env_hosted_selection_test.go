@@ -9,22 +9,33 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/config"
 )
 
-// countHostedBeadsSelectionLoads wraps the config loader behind the hosted
-// Beads selection so a test can count how many full config loads one bd
-// invocation performs.
-func countHostedBeadsSelectionLoads(t *testing.T) *int {
+// hostedSelectionLoadCounter reports, at any point after construction, how
+// many real (cache-missing) config loads citySelectsHostedBeadsCredentialProvider
+// has performed since it was created — the delta on the package-level
+// hostedCredentialProbeLoads counter, which is the load-dedup mechanism now
+// that the probe caches across invocations, not just within one (ga-s3cnmy /
+// cherry 2026-09-23).
+type hostedSelectionLoadCounter struct{ start int64 }
+
+func (c *hostedSelectionLoadCounter) get() int {
+	return int(hostedCredentialProbeLoads.Load() - c.start)
+}
+
+// countHostedBeadsSelectionLoads returns a counter snapshotting the hosted
+// Beads selection's config-load count so a test can measure how many full
+// loads one bd invocation performs.
+//
+// Clears the persistent probe cache first: these tests measure the load
+// budget of a SINGLE invocation window, and a setup call earlier in the same
+// subtest (e.g. the breaker-tripping calls before the measured one in
+// TestBdRunnersOpenBreakerLoadsNoConfig) would otherwise have already warmed
+// the cache for the same cityPath, undercounting the window being measured.
+func countHostedBeadsSelectionLoads(t *testing.T) *hostedSelectionLoadCounter {
 	t.Helper()
-	orig := loadHostedBeadsSelectionConfig
-	t.Cleanup(func() { loadHostedBeadsSelectionConfig = orig })
-	loads := new(int)
-	loadHostedBeadsSelectionConfig = func(cityConfigPath string) (*config.City, error) {
-		*loads++
-		return orig(cityConfigPath)
-	}
-	return loads
+	resetHostedCredentialProbeCache()
+	return &hostedSelectionLoadCounter{start: hostedCredentialProbeLoads.Load()}
 }
 
 // installFakeHostedBdExec stubs the hermetic (ambient-withholding) exec layer
@@ -63,8 +74,8 @@ func TestBdRunnersLoadConfigOncePerInvocation(t *testing.T) {
 		if _, err := bdCommandRunnerForCity(cityPath)(t.TempDir(), "bd", "list", "--json"); err != nil {
 			t.Fatalf("runner: %v", err)
 		}
-		if *loads != 1 {
-			t.Fatalf("managed bd invocation loaded the city config %d times, want 1", *loads)
+		if loads.get() != 1 {
+			t.Fatalf("managed bd invocation loaded the city config %d times, want 1", loads.get())
 		}
 	})
 
@@ -92,8 +103,8 @@ func TestBdRunnersLoadConfigOncePerInvocation(t *testing.T) {
 		if *calls != 2 {
 			t.Fatalf("subprocess attempts = %d, want 2 (initial + managed retry)", *calls)
 		}
-		if *loads != 1 {
-			t.Fatalf("managed bd invocation with retry loaded the city config %d times, want 1", *loads)
+		if loads.get() != 1 {
+			t.Fatalf("managed bd invocation with retry loaded the city config %d times, want 1", loads.get())
 		}
 	})
 
@@ -112,8 +123,8 @@ func TestBdRunnersLoadConfigOncePerInvocation(t *testing.T) {
 		if _, err := bdCommandRunnerForRig(cityPath, nil, rigDir)(rigDir, "bd", "list", "--json"); err != nil {
 			t.Fatalf("runner: %v", err)
 		}
-		if *loads != 1 {
-			t.Fatalf("rig bd invocation loaded the city config %d times, want 1", *loads)
+		if loads.get() != 1 {
+			t.Fatalf("rig bd invocation loaded the city config %d times, want 1", loads.get())
 		}
 	})
 
@@ -133,8 +144,8 @@ func TestBdRunnersLoadConfigOncePerInvocation(t *testing.T) {
 		if *hostedCalls != 1 {
 			t.Fatalf("hosted runner spawned %d subprocesses, want 1 through the ambient-withholding exec layer", *hostedCalls)
 		}
-		if *loads != 1 {
-			t.Fatalf("external-binding bd invocation loaded the city config %d times, want 1", *loads)
+		if loads.get() != 1 {
+			t.Fatalf("external-binding bd invocation loaded the city config %d times, want 1", loads.get())
 		}
 	})
 }
@@ -192,8 +203,8 @@ func TestBdRunnersOpenBreakerLoadsNoConfig(t *testing.T) {
 		if *calls != callsBefore {
 			t.Fatalf("breaker-open call spawned %d subprocesses, want 0", *calls-callsBefore)
 		}
-		if *loads != 1 {
-			t.Fatalf("breaker-open call loaded the city config %d times, want 1 (the env projection's own; the runner choice must not add one)", *loads)
+		if loads.get() != 1 {
+			t.Fatalf("breaker-open call loaded the city config %d times, want 1 (the env projection's own; the runner choice must not add one)", loads.get())
 		}
 	})
 
@@ -230,8 +241,8 @@ func TestBdRunnersOpenBreakerLoadsNoConfig(t *testing.T) {
 		if *calls != callsBefore {
 			t.Fatalf("breaker-open call spawned %d subprocesses, want 0", *calls-callsBefore)
 		}
-		if *loads != 0 {
-			t.Fatalf("breaker-open call loaded the city config %d times, want 0", *loads)
+		if loads.get() != 0 {
+			t.Fatalf("breaker-open call loaded the city config %d times, want 0", loads.get())
 		}
 	})
 }

@@ -181,8 +181,8 @@ func TestEveryManagedDoltSpawnStripsSessionIdentity(t *testing.T) {
 			"runManagedDoltTestWatchdog",                // that watchdog's own dolt child
 		},
 		"dolt_scope_watchdog.go": {
-			"startManagedDoltSQLServerWithScopeWatchdog", // production watchdog re-exec
-			"runManagedDoltScopeWatchdog",                // the watchdog's own dolt child
+			"startManagedDoltSQLServerWithScopeWatchdogEnv", // production watchdog re-exec (Env variant: parentEnv threaded for tests, os.Environ() in production via the wrapper)
+			"runManagedDoltScopeWatchdog",                   // the watchdog's own dolt child
 		},
 	}
 	fset := token.NewFileSet()
