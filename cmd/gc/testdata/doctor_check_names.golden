@@ -99,6 +99,7 @@ bd-backup-state
 bd-backup-freshness
 worktree-disk-size
 nested-worktree-prune
+git-shallow
 custom-types:city
 hold-label-conventions:city
 worktrees
