@@ -25,14 +25,14 @@ FROM golang:1.26.8-bookworm@sha256:9fdc884aacc3bec89b20ffc69f4bb369c78210e3e4f60
 # upstream release carries schema 0067 yet, so this image builds bd from the
 # Voxist/beads fork tip, whose newest upstream ancestor (BD_LIB_REF
 # 71c4cd08b999) is the commit gc's go.mod links — same schema, no skew.
-# BD_SOURCE_REF is the commit the fork's v1.92.0 tag names (see deps.env).
+# BD_SOURCE_REF is the commit the fork's v1.93.0 tag names (see deps.env).
 # Retire the bridge once a release >= 0067 exists on a module-resolvable repo:
 # set BD_VERSION to that tag and drop BD_SOURCE_REF/BD_SOURCE_SHA256.
-ARG BD_VERSION=v1.92.0
+ARG BD_VERSION=v1.93.0
 ARG BD_REPO=Voxist/beads
-ARG BD_SOURCE_REF=dbf278efbe6220e7382e0405f69b984bb8149d12
-ARG BD_SOURCE_SHA256=5db362a1cb91b80a412dd3e7db3f38158cd879aad9b1a9954e49b1f502ffa8f6
-ARG BD_BUILD=dbf278efb
+ARG BD_SOURCE_REF=384c2ccca43f64051c067c1d963fc13a4f958690
+ARG BD_SOURCE_SHA256=da471f3e0dc999a057105adb2b49c6ce66e2090942fd21f0503c6fec002de208
+ARG BD_BUILD=384c2ccca
 ARG BD_BRANCH=HEAD
 # 1.83.2, not 1.83.1: CVE-2026-84445 (HIGH) covers <=1.83.1. The pinned
 # source declares 1.83.2, so this is a match, not an override.
@@ -58,7 +58,7 @@ ARG THRIFT_VERSION=0.24.0
 # required. Both must be >= what the pinned source already declares — pinning
 # BELOW it silently downgrades the shipped binary (and drags x/net and x/crypto
 # back with it), which neither post-build assertion would catch. At
-# BD_SOURCE_REF dbf278efb (unchanged from 2498618eb) the source resolves grpc
+# BD_SOURCE_REF 384c2ccca (unchanged from 2498618eb) the source resolves grpc
 # 1.83.2, x/text 0.41.0, x/crypto 0.56.0 and x/mod 0.40.0 on its own; the only
 # remaining lift is thrift 0.24.0. The rest are held at parity so a later source bump that
 # regresses one of them is caught here rather than shipped.

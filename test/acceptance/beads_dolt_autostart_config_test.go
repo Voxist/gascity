@@ -1,9 +1,9 @@
 //go:build acceptance_a
 
-// ga-xwn1k / ga-rpgvw: pin the fix carried by the bd v1.92.0 repin
-// (Voxist/beads#56, #57) -- a workspace's own `dolt.auto-start: false`
-// must gate every IMPLICIT dolt sql-server auto-start, not just the
-// BEADS_DOLT_AUTO_START env var.
+// ga-xwn1k / ga-rpgvw: pin the fix carried by the bd v1.92.0/v1.93.0 repin
+// (Voxist/beads#56, #57, and #62's Start()-level hardening) -- a
+// workspace's own `dolt.auto-start: false` must gate every IMPLICIT dolt
+// sql-server auto-start, not just the BEADS_DOLT_AUTO_START env var.
 //
 // The real shape, per the beads-side investigation on ga-rpgvw: a
 // SERVER-mode workspace (metadata.json dolt_mode=server, not an embedded
@@ -39,17 +39,17 @@
 // BEADS_DOLT_AUTO_START unset, and a call to EnsureRunningDetailed with
 // no prior config.Initialize() -- the library-consumer path.
 //
-// Proven red-at-1.91.0 / green-at-1.92.0 by hand while writing this test
-// (not re-verified on every CI run -- that would double the network/build
-// cost of every row for a fixed historical fact): built bd from
-// Voxist/beads 2498618eb (deps.env's pin before this repin) and got
+// Proven red-at-1.91.0 / green-at-current-pin by hand while writing this
+// test (not re-verified on every CI run -- that would double the
+// network/build cost of every row for a fixed historical fact): built bd
+// from Voxist/beads 2498618eb (v1.91.0, deps.env's pin before the first of
+// these repins) and got
 //
 //	RED: EnsureRunningDetailed started/adopted a server (port=50497
 //	startedByUs=true) despite dolt.auto-start:false ...
 //
 // against the identical probe, an unmanaged `dolt sql-server` process and
-// all. The same probe against Voxist/beads dbf278efb (this repin's pin)
-// refused:
+// all. The same probe against deps.env's current BD_SOURCE_REF refused:
 //
 //	GREEN: EnsureRunningDetailed refused: Dolt server unreachable (port 0)
 //	and auto-start is disabled (dolt.auto-start: false in config.yaml or
@@ -58,6 +58,14 @@
 // This test pins the CURRENT deps.env pin's (green) behaviour going
 // forward, so a future accidental downgrade of BD_SOURCE_REF -- or a
 // beads regression on the same commit -- fails it.
+//
+// Known CI-tier limitation: fetchAndVerifyBDSource calls
+// helpers.MissingTooling on a download failure, which SKIPS locally and
+// FAILS only under GC_REQUIRE_ACCEPTANCE_TOOLING (see that helper's own
+// doc comment). A Tier A / smoke run with no network reachable for
+// github.com therefore skips this test rather than failing it; the
+// acceptance jobs that set GC_REQUIRE_ACCEPTANCE_TOOLING are where a
+// genuine network outage would be caught instead of silently passing.
 package acceptance_test
 
 import (
@@ -82,6 +90,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -90,6 +99,15 @@ import (
 // (ga-xwn1k / ga-rpgvw). See that file for what this proves and why it has
 // to live here rather than in gascity's own module.
 func TestGascityProbeEnsureRunningDetailedLibraryConsumer(t *testing.T) {
+	// Sandbox HOME and the shared-server override too, not just the
+	// per-workspace env vars below: SharedServerPath() falls back to
+	// os.UserHomeDir()/.beads/shared-server whenever BEADS_SHARED_SERVER_DIR
+	// is unset, and this workspace's own dolt.mode:server keeps
+	// IsSharedServerMode() off today -- but a future code path that
+	// resolves the shared dir before checking that mode must still never
+	// reach a developer's real ~/.beads/shared-server on a shared host.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
 	for _, k := range []string{
 		"BEADS_DOLT_AUTO_START", "BEADS_DOLT_SHARED_SERVER",
 		"BEADS_DOLT_SERVER_MODE", "BEADS_DOLT_SERVER_HOST",
@@ -97,7 +115,8 @@ func TestGascityProbeEnsureRunningDetailedLibraryConsumer(t *testing.T) {
 	} {
 		t.Setenv(k, "")
 	}
-	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	root := t.TempDir()
+	beadsDir := filepath.Join(root, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -117,12 +136,20 @@ func TestGascityProbeEnsureRunningDetailedLibraryConsumer(t *testing.T) {
 	// is reached implicitly, never via the ungated 'bd dolt start'.
 	serverDir := resolveServerDir(beadsDir)
 	t.Cleanup(func() {
-		if state, err := IsRunning(serverDir); err == nil && state != nil && state.Running {
-			t.Logf("a server was started at %s (pid %d, port %d) despite auto-start being disabled; killing it", serverDir, state.PID, state.Port)
-			if stopErr := StopWithForce(serverDir, true); stopErr != nil {
-				t.Errorf("FAILED TO KILL the leaked server (pid %d): %v -- kill it by hand", state.PID, stopErr)
-			}
+		state, err := IsRunning(serverDir)
+		if err != nil || state == nil || !state.Running {
+			return
 		}
+		t.Errorf("a server was started at %s (pid %d, port %d) despite auto-start being disabled; killing it", serverDir, state.PID, state.Port)
+		if stopErr := StopWithForce(serverDir, true); stopErr != nil {
+			t.Errorf("FAILED TO KILL the leaked server (pid %d) via StopWithForce: %v -- falling back to a direct kill", state.PID, stopErr)
+		}
+		// Hardened safety net (round 2 review): do not trust the state file
+		// to prove itself clean. Confirm the actual OS process it named is
+		// gone, and kill it directly if StopWithForce's own bookkeeping
+		// missed it -- a green run on a shared host must never leave an
+		// orphan dolt sql-server behind for another job to trip over.
+		assertProcessIsDead(t, state.PID)
 	})
 
 	port, startedByUs, err := EnsureRunningDetailed(beadsDir)
@@ -131,6 +158,27 @@ func TestGascityProbeEnsureRunningDetailedLibraryConsumer(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "auto-start is disabled") {
 		t.Fatalf("refusal must name the policy; got: %v", err)
+	}
+}
+
+// assertProcessIsDead confirms pid is no longer a live process, independent
+// of anything the .beads state file says -- that file is exactly what is
+// under test, so trusting it again here to prove itself clean would be
+// circular, not a safety net. Signal(0) is the classic portable Unix
+// liveness probe (the "kill(pid, 0)" idiom): it delivers nothing, only
+// reports via its error whether the kernel still has the PID.
+func assertProcessIsDead(t *testing.T, pid int) {
+	t.Helper()
+	if pid <= 0 {
+		return
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return
+	}
+	if sigErr := proc.Signal(syscall.Signal(0)); sigErr == nil {
+		t.Errorf("pid %d is still alive after cleanup despite the .beads state file reporting it stopped; killing it directly", pid)
+		_ = proc.Kill()
 	}
 }
 `
@@ -170,6 +218,12 @@ func depsEnvBDPins(t *testing.T) (repo, ref, sha256sum string) {
 // install-bd-archive.sh's and test/integration's bridge-mode download, so a
 // bad deps.env pin fails the same way here as it would in CI or the image
 // build.
+//
+// A download failure reports via helpers.MissingTooling: it skips locally
+// (no network, no GC_REQUIRE_ACCEPTANCE_TOOLING) and fails under that
+// switch, the same contract every other acceptance row in this package
+// uses. A Tier A / smoke run with no route to github.com therefore skips
+// this test rather than failing it -- see the file-level doc comment.
 func fetchAndVerifyBDSource(t *testing.T, repo, ref, wantSHA256, dir string) {
 	t.Helper()
 	tarPath := filepath.Join(t.TempDir(), "bd-source.tar.gz")
@@ -193,12 +247,12 @@ func fetchAndVerifyBDSource(t *testing.T, repo, ref, wantSHA256, dir string) {
 }
 
 // TestBeadsDoltAutoStartConfigHonouredByLibraryConsumer pins the fixed
-// behaviour of deps.env's CURRENT bd pin (v1.92.0, Voxist/beads dbf278efb
+// behaviour of deps.env's CURRENT bd pin (v1.93.0, Voxist/beads 384c2ccca
 // as of this writing): a server-mode workspace's own
 // `dolt.auto-start: false` must refuse an implicit auto-start for a
 // library consumer that never ran bd's own config.Initialize(). See the
-// file-level doc comment for the red-at-1.91.0/green-at-1.92.0 evidence
-// and why this cannot be proven through the bd CLI binary itself.
+// file-level doc comment for the red-at-1.91.0/green-at-current-pin
+// evidence and why this cannot be proven through the bd CLI binary itself.
 func TestBeadsDoltAutoStartConfigHonouredByLibraryConsumer(t *testing.T) {
 	if _, err := exec.LookPath("go"); err != nil {
 		helpers.MissingTooling(t, "go toolchain not on PATH: %v", err)
@@ -219,7 +273,13 @@ func TestBeadsDoltAutoStartConfigHonouredByLibraryConsumer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bd %s (%s@%s) failed to honour dolt.auto-start:false for an implicit, no-config-init auto-start -- this is the ga-rpgvw regression:\n%s", ref, repo, ref, out)
 	}
-	if !strings.Contains(string(out), "PASS") {
-		t.Fatalf("expected the injected probe test to report PASS; got:\n%s", out)
+	// The exact "--- PASS: <name>" line, not a bare "PASS" substring: `go
+	// test -run <pattern>` that matches nothing still prints a lone "PASS"
+	// (with "testing: warning: no tests to run" above it), which a
+	// strings.Contains(out, "PASS") check cannot tell apart from the probe
+	// actually running and passing.
+	wantLine := "--- PASS: TestGascityProbeEnsureRunningDetailedLibraryConsumer"
+	if !strings.Contains(string(out), wantLine) {
+		t.Fatalf("expected the injected probe test to report %q; got:\n%s", wantLine, out)
 	}
 }
