@@ -7,12 +7,14 @@ package main
 // never a global age clock. vp-qauad.
 
 import (
+	"context"
 	"io"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -340,5 +342,121 @@ func TestOrderTrackingSweepWatchdogDeadlineTierUsesEffectiveTimeout(t *testing.T
 	}
 	if gotFresh.Status != "open" {
 		t.Fatalf("same-gen marker inside its deadline = %s, want open (deadline tier fired before the dispatch's own deadline elapsed)", gotFresh.Status)
+	}
+}
+
+// TestMemoryOrderDispatcherDispatchStampsGeneration is a regression guard for
+// ADR-0130 D1's actual write path, not just the predicate that reads it:
+// every tracking marker a real dispatch creates must carry the dispatcher's
+// own controller_generation. Deleting `Generation: m.generation` from either
+// CreateRun call site in order_dispatch.go, or minting a fresh generation per
+// dispatcher instead of threading the boot id through, both pass the rest of
+// the suite silently; this test is what catches either.
+func TestMemoryOrderDispatcherDispatchStampsGeneration(t *testing.T) {
+	store := beads.NewMemStore()
+	aa := []orders.Order{{
+		Name:     "test-order",
+		Trigger:  "cooldown",
+		Interval: "1h",
+		Exec:     "true",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, successfulExec, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	md, ok := ad.(*memoryOrderDispatcher)
+	if !ok {
+		t.Fatalf("dispatcher = %T, want *memoryOrderDispatcher", ad)
+	}
+	md.generation = "ctrl-x"
+
+	md.dispatch(context.Background(), t.TempDir(), time.Now())
+	md.drain(context.Background())
+
+	all := trackingBeads(t, store, "order-run:test-order")
+	if len(all) != 1 {
+		t.Fatalf("order-run beads = %d, want 1", len(all))
+	}
+	if got := all[0].Metadata[orders.GenerationMetadataKey]; got != "ctrl-x" {
+		t.Fatalf("tracking bead controller_generation = %q, want %q", got, "ctrl-x")
+	}
+}
+
+// TestOrderDispatcherGenerationSurvivesRescanAndReload is the D1 "reused
+// across dispatcher rebuilds" guarantee at the CityRuntime layer: the
+// dispatcher's generation must stay pinned to the runtime's boot id across
+// both an order-set rescan and a config reload, neither of which may re-mint
+// it. Re-minting per rebuild is exactly the bug D1 exists to prevent — it
+// would orphan every marker created before the rebuild and hand the watchdog
+// a false dead-controller verdict for the runtime's own live runs.
+func TestOrderDispatcherGenerationSurvivesRescanAndReload(t *testing.T) {
+	cr, tomlPath := bootSplitCityForReloadWithOrder(t)
+
+	assertGeneration := func(stage string) {
+		t.Helper()
+		if cr.od == nil {
+			t.Fatalf("%s: the split city has no order dispatcher, so this test asserts nothing", stage)
+		}
+		m, ok := cr.od.(*memoryOrderDispatcher)
+		if !ok {
+			t.Fatalf("%s: cr.od is %T, want *memoryOrderDispatcher", stage, cr.od)
+		}
+		if cr.controllerGeneration == "" {
+			t.Fatalf("%s: runtime's own controllerGeneration is empty; this test asserts nothing", stage)
+		}
+		if m.generation != cr.controllerGeneration {
+			t.Fatalf("%s: dispatcher generation = %q, want the runtime's boot id %q", stage, m.generation, cr.controllerGeneration)
+		}
+	}
+
+	assertGeneration("boot")
+
+	// The rescan rebuilds the dispatcher only when the order SET changed, so
+	// add an order rather than rescanning an unchanged one.
+	writeCityOrder(t, cr.cityPath, "sweeper")
+	changed, _, err := cr.rescanOrderDispatcher(context.Background(), cr.cityPath, cr.cfg, "test: order scan", time.Now())
+	if err != nil {
+		t.Fatalf("rescanOrderDispatcher: %v", err)
+	}
+	if !changed {
+		t.Fatal("the rescan reported no change, so it never rebuilt the dispatcher and this stage asserts nothing")
+	}
+	assertGeneration("after rescanOrderDispatcher")
+
+	// A reload that leaves [storage] alone but changes something else: the
+	// dispatcher is rebuilt, and its generation must be rebuilt over the same
+	// boot id.
+	writeSplitCityConfig(t, tomlPath, cr.cfg.Storage.Bindings["infra"].Path, "\n[daemon]\nshutdown_timeout = \"7s\"\n")
+	lastProviderName := "fake"
+	if reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cr.cityPath, nil, reloadSourceManual); reply.Outcome == reloadOutcomeFailed {
+		t.Fatalf("reload failed, so the rebuilt dispatcher proves nothing: %s", reply.Error)
+	}
+	assertGeneration("after reloadConfigTraced")
+}
+
+// TestTrackingResidualCutoffNeverGuessesForAnUnknownOrder pins the "never
+// guess deadlines" doctrine (stated in runOrderTrackingSweepWatchdog's own
+// comment for a dispatcher-level nil residualFor) at the per-order level too:
+// an order this dispatcher's own set does not recognize — a manual or
+// webhook-fired marker, or one a reload removed — must return 0, not a
+// synthesized deadline. classifyOrderTrackingRunForReap treats a 0 residual
+// identically to a nil residualFor (never satisfies residual > 0), so this
+// keeps the D2 tier disabled for that marker rather than inventing a cutoff
+// none of the order's own config ever declared.
+func TestTrackingResidualCutoffNeverGuessesForAnUnknownOrder(t *testing.T) {
+	aa := []orders.Order{{
+		Name:     "known-order",
+		Trigger:  "cooldown",
+		Interval: "1h",
+		Exec:     "true",
+		Timeout:  "10m",
+	}}
+	m := newMemoryOrderDispatcher(nil, aa, t.TempDir(), &config.City{}, events.Discard, io.Discard, "ctrl-x")
+
+	if got := m.trackingResidualCutoff("unknown-order"); got != 0 {
+		t.Fatalf("trackingResidualCutoff(unknown-order) = %v, want 0 (never guess a deadline the order's own config never declared)", got)
+	}
+	if got := m.trackingResidualCutoff("known-order"); got <= 0 {
+		t.Fatalf("trackingResidualCutoff(known-order) = %v, want > 0 (a recognized order still gets its own effectiveTimeout+grace)", got)
 	}
 }

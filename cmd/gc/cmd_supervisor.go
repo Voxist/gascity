@@ -2486,6 +2486,10 @@ func startOneCity(
 	var cs *controllerState
 	if err := runPostPrepareStep("opening_controller_state", func() error {
 		cs = newControllerStateWithRoutes(cityCtx, cityRuntime.storageRoutes, cfg, sp, eventProv, cityName, path)
+		// ADR-0130 D1: see the matching assignment in controller.go — the
+		// webhook seam's per-delivery dispatcher stamps markers from this
+		// controllerState's generation.
+		cs.controllerGeneration = cityRuntime.controllerGeneration
 		return nil
 	}); err != nil {
 		// The runtime is already built, and it holds this city's storage

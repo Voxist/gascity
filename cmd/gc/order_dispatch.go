@@ -393,7 +393,7 @@ type memoryOrderDispatcher struct {
 	// the watchdog to distinguish the live controller's own markers from a
 	// dead prior controller's orphans. It is owned by the CityRuntime and
 	// threaded in at construction — NOT minted here — because a config reload
-	// builds a new dispatcher while the controller PROCESS (and therefore the
+	// builds a new dispatcher while the owning runtime (and therefore the
 	// boot) continues; minting per dispatcher would orphan every marker
 	// created before the reload and hand the watchdog a false dead-controller
 	// verdict for the live controller's own in-flight runs.
@@ -3289,13 +3289,9 @@ func classifyOrderTrackingRunForReap(run orders.OrderRun, now time.Time, liveGen
 // tracking sweep under the ADR-0130 predicate: foreign-generation markers are
 // closed immediately (dead prior controller, D1), live- and unstamped-
 // generation markers only once they have outlived their dispatch's own
-// effective timeout plus grace (D2). The global 2-minute age constant this
-// sweep used to apply is GONE, not raised — age alone could not distinguish a
-// dead controller's leftover from a live long run, which made single-flight
-// void for every order running longer than two minutes (code-review-gate
-// accumulated 6-8 live instances city-wide). limit bounds closes per pass
-// across all stores, matching the old sweep's budget behavior. Wisp-subtree
-// recovery stays out of the watchdog: wisps are not the single-flight marker.
+// effective timeout plus grace (D2). limit bounds closes per pass across all
+// stores, matching the old sweep's budget behavior. Wisp-subtree recovery
+// stays out of the watchdog: wisps are not the single-flight marker.
 func sweepOrderTrackingByGenerationAcrossStoresLimit(stores []beads.Store, now time.Time, liveGeneration string, residualFor func(scoped string) time.Duration, limit int) (orderTrackingSweepResult, error) {
 	result := orderTrackingSweepResult{}
 	var errs []error
@@ -4374,23 +4370,26 @@ func effectiveTimeout(a orders.Order, maxTimeout time.Duration) time.Duration {
 // reap it: effectiveTimeout(order) + grace (ADR-0130 D2). It is the same
 // deadline the dispatch itself runs under — a marker "may not outlive its
 // dispatch's own deadline, and may not die before it" — so the cutoff is
-// derived per order, never from a global constant. An order the dispatcher
-// does not know (uninstalled mid-run, cross-store manual marker) falls back to
-// the exec default, the LONGER of the two built-in defaults, so the cutoff
-// errs late rather than early: the failure mode of a too-long cutoff is a
-// marker that lingers one extra window, while the failure mode of a too-short
-// one is a re-dispatch of live work.
+// derived per order, never from a global constant.
+//
+// An order this dispatcher's own order set does not know (a manual or
+// webhook-fired marker, or an order removed from the set by a reload) returns
+// 0, which classifyOrderTrackingRunForReap treats identically to a nil
+// residualFor: the deadline tier stays disabled for that marker. This is the
+// same "never guess deadlines" doctrine the caller's own comment states for a
+// dispatcher-level nil residualFor — it has to hold per order too, not just
+// per dispatcher, or an order the resolver merely doesn't recognize would get
+// a synthetic deadline none of its own config ever declared. A marker in this
+// state is not left unrecoverable: a foreign-generation marker (D1) still
+// reaps immediately, and sweepOrphanedOrderTrackingAtBoot still recovers a
+// truly abandoned one at the next boot.
 func (m *memoryOrderDispatcher) trackingResidualCutoff(scoped string) time.Duration {
 	for i := range m.aa {
 		if m.aa[i].ScopedName() == scoped {
 			return effectiveTimeout(m.aa[i], m.maxTimeout) + orderTrackingDeadlineGrace
 		}
 	}
-	// Unknown order: the longer of TimeoutOrDefault's two built-in defaults
-	// (300s exec, 30s formula — the zero Order would decode as the 30s formula
-	// arm). 300s is kept literal rather than reconstructed through a synthetic
-	// exec Order so the coupling to that default is greppable from here.
-	return 300*time.Second + orderTrackingDeadlineGrace
+	return 0
 }
 
 // rigExclusiveLayers returns the suffix of rigLayers that is not in

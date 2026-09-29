@@ -1399,6 +1399,11 @@ func runController(
 	cs.pokeCh = pokeCh
 	cs.configDirty = configDirty
 	cs.services = cr.svc
+	// ADR-0130 D1: the webhook dispatch seam mints its per-delivery
+	// dispatcher from this controllerState, so it needs the runtime's boot
+	// id to stamp a webhook-fired tracking marker the same way a tick-fired
+	// one is stamped.
+	cs.controllerGeneration = cr.controllerGeneration
 	cs.emergencyCh = make(chan emergency.Record, 64)
 	cr.setControllerState(cs)
 

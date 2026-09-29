@@ -130,10 +130,10 @@ type CityRuntime struct {
 	adt  assignedWorkDeferTracker
 	wg   wispGC
 	od   orderDispatcher
-	// controllerGeneration is this controller PROCESS's boot id (ADR-0130 D1).
+	// controllerGeneration is this CityRuntime's boot id (ADR-0130 D1).
 	// Minted once at construction and reused by every dispatcher rebuild for
-	// the life of the process: reloads replace the dispatcher, never the boot,
-	// so markers stamped before a reload must still classify as live. The
+	// the life of this runtime: reloads replace the dispatcher, never the
+	// boot, so markers stamped before a reload must still classify as live. The
 	// watchdog compares it against each open tracking marker's
 	// controller_generation to reap only dead-controller orphans without a
 	// clock; empty (directly-constructed test runtimes) disables the foreign
@@ -427,10 +427,10 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 
 	sweepOrphanedOrderTrackingAtBoot(routes, p.CityPath, p.Cfg, p.Rec, p.Stderr)
 
-	// The boot id is minted once per controller PROCESS, before the first
+	// The boot id is minted once per CityRuntime, before the first
 	// dispatcher build, and is the same value every rebuild below reuses
 	// (ADR-0130 D1): reloads build new dispatchers, but the boot — and
-	// therefore what counts as "the live generation" — is this process.
+	// therefore what counts as "the live generation" — is this runtime.
 	controllerGeneration := newControllerGeneration()
 	od, orderSnapshot := buildOrderDispatcherWithSnapshot(routes, p.CityPath, p.Cfg, p.Rec, p.Stderr, "gc start: order scan", controllerGeneration)
 
@@ -1765,16 +1765,11 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 	// sweep from firing, every order's tracking jams and no order fires (#2168).
 	//
 	// The predicate is ADR-0130's: orphanhood is the FACT of a different
-	// controller generation, not an age. The old global 2-minute staleAfter
-	// claimed "the cutoff still protects in-flight dispatches" — true only for
-	// a dispatch's first two minutes, which made single-flight void for every
-	// order running longer than that (code-review-gate at timeout 6000s/120s
-	// accumulated 6-8 live instances; 10% of all city-wide order runs produced
-	// nothing). Now: a marker stamped by a DIFFERENT boot closes immediately
-	// (dead prior controller — D1, no clock, which is what keeps #2168 jam
-	// recovery immediate), while the live controller's own markers and
-	// unstamped legacy/CLI markers close only after their dispatch's own
-	// effective timeout plus grace (D2). Closed-history retention is
+	// controller generation, not an age. A marker stamped by a DIFFERENT boot
+	// closes immediately (dead prior controller — D1, no clock, which is what
+	// keeps #2168 jam recovery immediate), while the live controller's own
+	// markers and unstamped legacy/CLI markers close only after their
+	// dispatch's own effective timeout plus grace (D2). Closed-history retention is
 	// intentionally left to the maintenance exec order or the
 	// gc order sweep-tracking CLI; the watchdog only recovers orphaned open
 	// tracking beads.
