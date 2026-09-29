@@ -241,3 +241,258 @@ func TestProxiedAcceptanceRowsNeverSkipInRow(t *testing.T) {
 		}
 	}
 }
+
+// skipAllowlist is TestRequiredJobSkipsAreAllowlisted's ledger of every
+// acceptance row a required ci.yml job's `go test -skip` is allowed to
+// deselect. An in-row t.Skip is closed by TestProxiedAcceptanceRowsNeverSkipInRow
+// above; this is the CI-selection door beside it (ga-may9k) -- a `-skip`
+// deselects a row invisibly to both that guard and
+// TestProxiedAcceptanceFunctionsAreSelectedByCI, which only checks that the
+// function's name appears SOMEWHERE in a `-run` expression, never that
+// `-skip` does not immediately take rows back out.
+//
+// Every entry needs a Reason (why the row cannot run today) and a Bead (the
+// tracker that removes the entry when it can). TestRequiredJobSkipsAreAllowlisted
+// fails on an unlisted deselection, a stale entry (nothing skips it anymore),
+// or an entry missing either field.
+var skipAllowlist = []skipAllowlistEntry{
+	{
+		Row:    "TestProxiedNativeLifecycle/child-term-zombie",
+		Reason: "post-SIGTERM child-respawn recovery depends on a proxy-subsystem rewrite (internal/storage/dbproxy/proxy/) upstream shipped after this fork's bd pin, which no fork bd release carries yet",
+		Bead:   "ga-w9xm9",
+	},
+	{
+		Row:    "TestProxiedNativeLifecycle/root-move",
+		Reason: "post-root-move recovery depends on the same proxy-subsystem rewrite as child-term-zombie",
+		Bead:   "ga-w9xm9",
+	},
+}
+
+// skipAllowlistEntry is one accepted `go test -skip` deselection.
+type skipAllowlistEntry struct {
+	Row    string // "TestName" or "TestName/subtest", exactly as -skip expands
+	Reason string // why the row cannot run today
+	Bead   string // the tracker that removes this entry when the row comes back
+}
+
+// skippedRow is one row a required job's `-skip` deselects.
+type skippedRow struct {
+	Row string
+	Job string
+}
+
+// skipArgPattern matches the body of a `-skip '<expr>'` argument, the same
+// single-quoted convention runPattern relies on for `-run`.
+var skipArgPattern = regexp.MustCompile(`-skip\s+'([^']*)'`)
+
+func collectSkipExpressions(runBody string) []string {
+	var out []string
+	for _, match := range skipArgPattern.FindAllStringSubmatch(runBody, -1) {
+		out = append(out, match[1])
+	}
+	return out
+}
+
+// skipClausePattern matches one `-skip` clause this parser can expand:
+// a bare test name, or a test name followed by a parenthesized `|`-separated
+// alternation of subtest names -- go test -skip's `A/(b|c)` idiom. Anything
+// with other regex metacharacters (`.*`, `^`, nested groups, character
+// classes, ...) does not match and is reported as unexpandable rather than
+// silently accepted, per the same "checkable, not a full regex evaluator"
+// stance TestProxiedAcceptanceFunctionsAreSelectedByCI takes for `-run`.
+var skipClausePattern = regexp.MustCompile(`^(Test[A-Za-z0-9_]*)(?:/\(([^()]*)\))?$`)
+
+// simpleSubtestNamePattern is what a single alternative inside the `(a|b|c)`
+// group must look like to count as an explicit row name rather than more
+// regex syntax this parser does not evaluate.
+var simpleSubtestNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// parseSkipExpression expands a `go test -skip` regular expression into the
+// explicit row names ("TestName" or "TestName/subtest") it deselects, or
+// reports an error when the expression is not one of the two shapes this
+// parser understands. A `-skip` expression may itself be several clauses
+// joined by top-level `|` (e.g. "TestA|TestB/(x|y)"); a `|` nested inside a
+// clause's own `(...)` group is a subtest alternation, not a clause
+// separator, so splitting happens at paren depth 0 only.
+func parseSkipExpression(expr string) ([]string, error) {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return nil, fmt.Errorf("empty -skip expression")
+	}
+	var rows []string
+	for _, clause := range splitTopLevelAlternation(expr) {
+		clause = strings.TrimSpace(clause)
+		m := skipClausePattern.FindStringSubmatch(clause)
+		if m == nil {
+			return nil, fmt.Errorf("cannot expand -skip clause %q into explicit row names "+
+				"(supported shapes: TestName, or TestName/(alt1|alt2|...))", clause)
+		}
+		testName, alternation := m[1], m[2]
+		if alternation == "" {
+			rows = append(rows, testName)
+			continue
+		}
+		for _, alt := range strings.Split(alternation, "|") {
+			alt = strings.TrimSpace(alt)
+			if !simpleSubtestNamePattern.MatchString(alt) {
+				return nil, fmt.Errorf("cannot expand -skip clause %q: subtest alternative %q is not a plain name", clause, alt)
+			}
+			rows = append(rows, testName+"/"+alt)
+		}
+	}
+	return rows, nil
+}
+
+// splitTopLevelAlternation splits expr on '|' at paren depth 0, so a `|`
+// inside a clause's own "(a|b)" subtest group stays part of that clause.
+func splitTopLevelAlternation(expr string) []string {
+	var parts []string
+	depth, start := 0, 0
+	for i := 0; i < len(expr); i++ {
+		switch expr[i] {
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		case '|':
+			if depth == 0 {
+				parts = append(parts, expr[start:i])
+				start = i + 1
+			}
+		}
+	}
+	parts = append(parts, expr[start:])
+	return parts
+}
+
+// requiredJobEnv reports whether GC_REQUIRE_ACCEPTANCE_TOOLING is on in the
+// merged env of a workflow/job/step. This mirrors
+// test/acceptance/helpers/tooling.go's requireSwitchOn exactly -- unset,
+// empty, and "0" are off, anything else is on -- because that is the
+// existing guard's own source for what a "required job" means
+// (helpers.MissingTooling / helpers.MissingPrecondition fail rather than
+// skip precisely when this switch is on), and this guard has to agree with
+// it or it is checking the wrong jobs.
+func requiredJobEnv(envs ...map[string]any) bool {
+	const key = "GC_REQUIRE_ACCEPTANCE_TOOLING"
+	for _, env := range envs {
+		v, ok := env[key]
+		if !ok {
+			continue
+		}
+		s := strings.TrimSpace(fmt.Sprint(v))
+		if s != "" && s != "0" {
+			return true
+		}
+	}
+	return false
+}
+
+// requiredJobSkipsFromDoc walks every step of every REQUIRED job (per
+// requiredJobEnv) and expands each `-skip` argument on its `go test`
+// invocations into explicit row names. It returns an error -- not a partial
+// result -- the moment any `-skip` expression cannot be expanded, so an
+// unparseable pattern fails the check instead of silently passing it.
+func requiredJobSkipsFromDoc(doc acceptanceWorkflowDoc) ([]skippedRow, error) {
+	var out []skippedRow
+	for jobName, job := range doc.Jobs {
+		for _, step := range job.Steps {
+			if !requiredJobEnv(doc.Env, job.Env, step.Env) {
+				continue
+			}
+			for _, expr := range collectSkipExpressions(step.Run) {
+				rows, err := parseSkipExpression(expr)
+				if err != nil {
+					return nil, fmt.Errorf("job %q: %w", jobName, err)
+				}
+				for _, row := range rows {
+					out = append(out, skippedRow{Row: row, Job: jobName})
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
+// skipAllowlistProblems is TestRequiredJobSkipsAreAllowlisted's engine,
+// factored out as a pure function (workflow bytes + allowlist in, problem
+// strings + a parse error out) so fixture-based unit tests can drive it
+// against synthetic workflow YAML without touching the real ci.yml. A
+// non-nil error means a `-skip` expression could not be expanded at all --
+// a different failure mode from a policy mismatch, and one that must not be
+// swallowed into an empty, all-clear problems slice.
+func skipAllowlistProblems(workflow []byte, allowlist []skipAllowlistEntry) ([]string, error) {
+	var doc acceptanceWorkflowDoc
+	if err := yaml.Unmarshal(workflow, &doc); err != nil {
+		return nil, fmt.Errorf("parse workflow: %w", err)
+	}
+	if len(doc.Jobs) == 0 {
+		return nil, fmt.Errorf("workflow declares no jobs; the scan is broken")
+	}
+
+	skipped, err := requiredJobSkipsFromDoc(doc)
+	if err != nil {
+		return nil, err
+	}
+
+	allowed := map[string]skipAllowlistEntry{}
+	var problems []string
+	for _, e := range allowlist {
+		if strings.TrimSpace(e.Reason) == "" {
+			problems = append(problems, fmt.Sprintf("skipAllowlist entry for %q has an empty Reason", e.Row))
+		}
+		if strings.TrimSpace(e.Bead) == "" {
+			problems = append(problems, fmt.Sprintf("skipAllowlist entry for %q has an empty Bead id", e.Row))
+		}
+		if _, dup := allowed[e.Row]; dup {
+			problems = append(problems, fmt.Sprintf("skipAllowlist has more than one entry for %q", e.Row))
+		}
+		allowed[e.Row] = e
+	}
+
+	seen := map[string]bool{}
+	for _, row := range skipped {
+		seen[row.Row] = true
+		if _, ok := allowed[row.Row]; !ok {
+			problems = append(problems, fmt.Sprintf(
+				"job %q deselects %q via `go test -skip` with no entry in skipAllowlist; "+
+					"add one with a Reason and the Bead tracking when the row comes back, or stop skipping it",
+				row.Job, row.Row))
+		}
+	}
+	for _, e := range allowlist {
+		if !seen[e.Row] {
+			problems = append(problems, fmt.Sprintf(
+				"skipAllowlist entry %q (%s) is stale: no required job's `go test -skip` deselects it anymore; remove the entry",
+				e.Row, e.Bead))
+		}
+	}
+	return problems, nil
+}
+
+// TestRequiredJobSkipsAreAllowlisted is TestProxiedAcceptanceRowsNeverSkipInRow's
+// CI-selection counterpart (ga-may9k). That test closes the in-row t.Skip
+// door; this one closes the door beside it: a required job's own
+// `go test -skip` deselecting a row from outside the row entirely, which
+// neither that guard nor TestProxiedAcceptanceFunctionsAreSelectedByCI (which
+// only checks a function is named by SOME `-run`) can see. -skip'ing
+// TestProxiedNativeLifecycle/(child-term-zombie|root-move) in the
+// beads-proxied-native-acceptance job (#215, ga-w9xm9) produces exactly the
+// silent-pass-with-rows-unrun outcome TestProxiedAcceptanceRowsNeverSkipInRow
+// exists to prevent, from a place it never looks.
+func TestRequiredJobSkipsAreAllowlisted(t *testing.T) {
+	root := repoRoot(t)
+	workflow, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatalf("read ci.yml: %v", err)
+	}
+	problems, err := skipAllowlistProblems(workflow, skipAllowlist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, problem := range problems {
+		t.Error(problem)
+	}
+}
