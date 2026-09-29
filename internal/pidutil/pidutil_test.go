@@ -129,6 +129,42 @@ func TestStartTimeStableForLivePID(t *testing.T) {
 	}
 }
 
+// TestParentPIDOfFindsLiveParent covers ga-3bwmf: a live child process's
+// parent must resolve to the pid that spawned it, on every platform this
+// project builds for (the /proc reader on linux, the kernel-record reader on
+// darwin, and the ps fallback if neither answers).
+func TestParentPIDOfFindsLiveParent(t *testing.T) {
+	cmd := exec.Command("sleep", "5")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	var ppid int
+	var err error
+	for time.Now().Before(deadline) {
+		ppid, err = ParentPIDOf(cmd.Process.Pid)
+		if err == nil && ppid == os.Getpid() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("ParentPIDOf(%d) = (%d, %v), want (%d, nil)", cmd.Process.Pid, ppid, err, os.Getpid())
+}
+
+func TestParentPIDOfRejectsInvalidPID(t *testing.T) {
+	if _, err := ParentPIDOf(0); err == nil {
+		t.Fatal("ParentPIDOf(0) = nil error, want error")
+	}
+	if _, err := ParentPIDOf(-1); err == nil {
+		t.Fatal("ParentPIDOf(-1) = nil error, want error")
+	}
+}
+
 func TestStartTimeRejectsInvalidPID(t *testing.T) {
 	if _, err := StartTime(0); err == nil {
 		t.Fatal("StartTime(0) = nil error, want error")
