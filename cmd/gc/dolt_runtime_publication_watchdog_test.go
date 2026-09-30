@@ -89,3 +89,57 @@ func TestWriteDoltRuntimeStateFileWatchdogFallThroughs(t *testing.T) {
 		t.Error("fresh Watchdog = false, want true (nothing to preserve, incoming value used as-is)")
 	}
 }
+
+// TestWriteDoltRuntimeStateFileSpawnAuthoritativeWinsOnPIDReuse pins the
+// ga-3bwmf review round-3 M2 finding: writeDoltRuntimeStateFile compares
+// only the PID NUMBER, not process identity, so a genuine fresh spawn whose
+// newly-chosen pid happens to reuse a STALE on-disk pid (left by an
+// unrelated, earlier process) must not have its own correctly-computed
+// Watchdog silently overwritten by that stale record's value.
+// writeDoltRuntimeStateFileSpawnAuthoritative is the spawn path's own write
+// and must always win, regardless of what pid is already on disk.
+func TestWriteDoltRuntimeStateFileSpawnAuthoritativeWinsOnPIDReuse(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+
+	// A stale record from an earlier, unrelated process: watchdog=false,
+	// pid 4242 (long dead, but nothing here proves that -- the whole point
+	// of the finding is that pid-number comparison alone cannot).
+	stale := doltRuntimeState{Running: false, PID: 4242, Port: 48770, DataDir: "/d", StartedAt: "2026-09-01T00:00:00Z", Watchdog: false}
+	if err := writeDoltRuntimeStateFile(path, stale); err != nil {
+		t.Fatalf("seed stale record: %v", err)
+	}
+
+	// A genuine fresh spawn whose OS-assigned pid happens to reuse 4242,
+	// this time correctly supervised (watchdog=true).
+	spawned := doltRuntimeState{Running: true, PID: 4242, Port: 48770, DataDir: "/d", StartedAt: "2026-09-30T00:00:00Z", Watchdog: true}
+	if err := writeDoltRuntimeStateFileSpawnAuthoritative(path, spawned); err != nil {
+		t.Fatalf("spawn-authoritative write: %v", err)
+	}
+
+	got, err := readDoltRuntimeStateFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !got.Watchdog {
+		t.Error("Watchdog = false, want true: the spawn path's own freshly-computed value must win over a stale same-pid record, not the ordinary preserve-on-pid-match writer")
+	}
+
+	// The mirror-image case: a genuine fresh spawn that is NOT supervised
+	// must also win, even against a stale record that WAS.
+	path2 := filepath.Join(t.TempDir(), "state2.json")
+	staleSupervised := doltRuntimeState{Running: false, PID: 4242, Port: 48770, DataDir: "/d", StartedAt: "2026-09-01T00:00:00Z", Watchdog: true}
+	if err := writeDoltRuntimeStateFile(path2, staleSupervised); err != nil {
+		t.Fatalf("seed stale supervised record: %v", err)
+	}
+	spawnedUnsupervised := doltRuntimeState{Running: true, PID: 4242, Port: 48770, DataDir: "/d", StartedAt: "2026-09-30T00:00:00Z", Watchdog: false}
+	if err := writeDoltRuntimeStateFileSpawnAuthoritative(path2, spawnedUnsupervised); err != nil {
+		t.Fatalf("spawn-authoritative write: %v", err)
+	}
+	got2, err := readDoltRuntimeStateFile(path2)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if got2.Watchdog {
+		t.Error("Watchdog = true, want false: the spawn path's own freshly-computed value must win even when a stale same-pid record says the opposite")
+	}
+}

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -351,6 +352,200 @@ func TestOrderDispatchStoreUnavailableFallbackBlocksNormalDispatchWhileInFlight(
 	}
 }
 
+// TestOrderDispatchStoreUnavailableFallbackNoOverlapFromWarmCache pins the
+// round-3 review's HIGH finding #1: cachedLastRun's exact-key entry, once
+// warmed by an EARLIER completed normal dispatch, used to shadow a LATER
+// fallback fire recorded under the fallback's own (storeless) cache key —
+// TestOrderDispatchStoreUnavailableFallbackBlocksNormalDispatchWhileInFlight
+// above starts from an empty cache and so never exercised this.
+//
+// Timeline (the reviewer's own reproduction): a normal dispatch completes at
+// t0, warming the exact-key cache entry and closing its tracking bead. The
+// store then dies; the fallback fires at t0+61s (past the order's 1m
+// cooldown) and is still in flight when a new tick sees the store reachable
+// again a moment later. A stale exact-key-first read would see the order as
+// overdue since t0 (a WARM hit short-circuits before ever consulting
+// peekLastRunLocked) and — since the fallback writes no tracking bead — find
+// no open work either, launching a second, tracked dispatch while the
+// fallback's untracked one is still running. Both this PR's fixes are
+// exercised together here: cachedLastRun now takes max(exact, peek) even on
+// a warm exact hit, and the shared recoverOnStoreUnavailableExecRunning fact
+// blocks the launch regardless.
+func TestOrderDispatchStoreUnavailableFallbackNoOverlapFromWarmCache(t *testing.T) {
+	const orderName = "warm-cache-overlap"
+	recorder := &reservedDispatchExecRecorder{}
+	order := storeUnavailableFallbackOrder(t, orderName, true)
+	store := &toggleableTransportFailStore{Store: beads.NewMemStore()}
+	m := buildOrderDispatcherFromListExec([]orders.Order{order}, store, nil, recorder.run, nil).(*memoryOrderDispatcher)
+	cityPath := t.TempDir()
+
+	// Phase 1: a normal dispatch completes while the store is healthy,
+	// warming cachedLastRun's exact-key entry and closing its tracking
+	// bead. The tracking bead's own CreatedAt (real wall-clock, MemStore
+	// does not accept an injected clock) is t0 for the cooldown math below.
+	m.dispatch(context.Background(), cityPath, time.Now())
+	drainOrderDispatch(t, m)
+	if got := recorder.counts()[orderName]; got != 1 {
+		t.Fatalf("warm-up exec calls = %d, want 1", got)
+	}
+	warmBeads := trackingBeads(t, store, "order-run:"+orderName)
+	if len(warmBeads) != 1 {
+		t.Fatalf("tracking beads after warm-up = %d, want 1", len(warmBeads))
+	}
+	t0 := warmBeads[0].CreatedAt
+
+	// Phase 2: the store dies; the fallback fires past the order's 1m
+	// cooldown and blocks mid-exec.
+	started := make(chan struct{})
+	release := make(chan struct{})
+	recorder.started = started
+	recorder.release = release
+	store.setListErr(errConnectionRefused)
+
+	t1 := t0.Add(61 * time.Second)
+	m.dispatch(context.Background(), cityPath, t1)
+	awaitClose(t, started, "fallback exec start")
+	if got := recorder.counts()[orderName]; got != 2 {
+		t.Fatalf("exec calls once the fallback has fired = %d, want 2 (warm-up + fallback)", got)
+	}
+
+	// The store is back, but the fallback exec is still in flight. A new
+	// tick must not launch a THIRD exec, even though a stale exact-key read
+	// would see the order as overdue since t0.
+	store.setListErr(nil)
+	m.dispatch(context.Background(), cityPath, t1.Add(time.Second))
+
+	if got := recorder.counts()[orderName]; got != 2 {
+		t.Fatalf("exec calls with the fallback still in flight and the store just recovered = %d, want 2 (the normal path must not also fire from a stale warm cache read)", got)
+	}
+
+	close(release)
+	drainOrderDispatch(t, m)
+	if got := recorder.counts()[orderName]; got != 2 {
+		t.Fatalf("exec calls after the fallback released = %d, want 2", got)
+	}
+}
+
+// TestOrderDispatchStoreUnavailableFallbackNoOverlapWhenCooldownOutrunsTimeout
+// pins the round-3 review's HIGH finding #2: beads-health's real
+// configuration has timeout=60s but interval=30s, so the normal path's own
+// cooldown can elapse — and its due-check can say "due" — well before the
+// fallback's exec, still within its own 60s timeout, has finished. The
+// normal path never consulted storeUnavailableFallbackRunning before this
+// PR, so it could launch a second exec at 31s while the fallback fired at
+// t0 was still legitimately running.
+func TestOrderDispatchStoreUnavailableFallbackNoOverlapWhenCooldownOutrunsTimeout(t *testing.T) {
+	const orderName = "cooldown-outruns-timeout"
+	definition := `[order]
+exec = "placeholder"
+trigger = "cooldown"
+interval = "30s"
+timeout = "60s"
+recover_on_store_unavailable = true
+`
+	order, err := orders.Parse([]byte(definition))
+	if err != nil {
+		t.Fatalf("Parse order: %v", err)
+	}
+	order.Name = orderName
+	order.Exec = orderName
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	recorder := &reservedDispatchExecRecorder{started: started, release: release}
+	store := &toggleableTransportFailStore{Store: beads.NewMemStore()}
+	store.setListErr(errConnectionRefused)
+	m := buildOrderDispatcherFromListExec([]orders.Order{order}, store, nil, recorder.run, nil).(*memoryOrderDispatcher)
+	cityPath := t.TempDir()
+	var releaseOnce sync.Once
+	releaseRun := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(func() {
+		releaseRun()
+		drainOrderDispatch(t, m)
+	})
+
+	t0 := time.Now()
+	m.dispatch(context.Background(), cityPath, t0)
+	awaitClose(t, started, "fallback exec start")
+	if got := recorder.counts()[orderName]; got != 1 {
+		t.Fatalf("exec calls once the fallback has fired = %d, want 1", got)
+	}
+
+	// The store recovers immediately, well inside the fallback's own 60s
+	// timeout. At t0+31s — past the order's 30s cooldown, which is what
+	// would make a due-check say "due" — the fallback exec is still
+	// blocked mid-flight; the normal path must not launch a second one.
+	store.setListErr(nil)
+	m.dispatch(context.Background(), cityPath, t0.Add(31*time.Second))
+
+	if got := recorder.counts()[orderName]; got != 1 {
+		t.Fatalf("exec calls at t0+31s with the fallback still in flight = %d, want 1 (a 30s-cooldown order's normal path must not fire while a 60s-timeout fallback exec is still running)", got)
+	}
+
+	releaseRun()
+	drainOrderDispatch(t, m)
+	if got := recorder.counts()[orderName]; got != 1 {
+		t.Fatalf("exec calls after the fallback released = %d, want 1", got)
+	}
+}
+
+// TestOrderDispatchStoreUnavailableFallbackNoOverlapReverseDirection pins
+// the round-3 review's HIGH finding #3: the mirror-image direction, where a
+// NORMAL dispatch is already in flight (its own exec's recover call may be
+// mid-stop/start against Dolt) when the store starts refusing connections,
+// and — once the order's own cooldown has passed — the fallback must not
+// fire a second, untracked exec while the normal one is still running.
+// admitManagedDoltRecover's throttle (dolt_recover_gate.go) is an
+// in-process sync.Map: two `gc beads health` processes mean two throttles,
+// so two recovers could overlap in the stop-then-start gap, and the second
+// one's stop could kill the server the first just started — exactly the
+// "never replace a live server, one throttle" invariant this guard exists
+// to protect regardless of which direction the overlap comes from.
+func TestOrderDispatchStoreUnavailableFallbackNoOverlapReverseDirection(t *testing.T) {
+	const orderName = "reverse-direction-overlap"
+	started := make(chan struct{})
+	release := make(chan struct{})
+	recorder := &reservedDispatchExecRecorder{started: started, release: release}
+	order := storeUnavailableFallbackOrder(t, orderName, true)
+	store := &toggleableTransportFailStore{Store: beads.NewMemStore()}
+	m := buildOrderDispatcherFromListExec([]orders.Order{order}, store, nil, recorder.run, nil).(*memoryOrderDispatcher)
+	cityPath := t.TempDir()
+	var releaseOnce sync.Once
+	releaseRun := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(func() {
+		releaseRun()
+		drainOrderDispatch(t, m)
+	})
+
+	// A normal dispatch starts against a healthy store and blocks mid-exec
+	// -- standing in for its own recover call being in progress.
+	now := time.Now()
+	m.dispatch(context.Background(), cityPath, now)
+	awaitClose(t, started, "normal dispatch exec start")
+	if got := recorder.counts()[orderName]; got != 1 {
+		t.Fatalf("normal-path exec calls = %d, want 1", got)
+	}
+
+	// The store now refuses connections -- standing in for the in-flight
+	// exec's own recover call having just stopped Dolt.
+	store.setListErr(errConnectionRefused)
+
+	// Past the order's own 1m cooldown, a new tick sees the dead store and
+	// must not fire the fallback while the normal dispatch is still in
+	// flight.
+	m.dispatch(context.Background(), cityPath, now.Add(61*time.Second))
+
+	if got := recorder.counts()[orderName]; got != 1 {
+		t.Fatalf("exec calls with a normal dispatch still in flight and the store now dead = %d, want 1 (the fallback must not also fire)", got)
+	}
+
+	releaseRun()
+	drainOrderDispatch(t, m)
+	if got := recorder.counts()[orderName]; got != 1 {
+		t.Fatalf("exec calls after the normal dispatch released = %d, want 1", got)
+	}
+}
+
 // openWorkGateDualBehaviorStore fails the open-work gate's two distinct
 // reads differently: the broad, unlabeled index scan (entriesForStore's
 // call, CACHED and shared across both open-work gates within a tick) times
@@ -446,5 +641,41 @@ func TestOrderDispatchStoreUnavailableFallbackNeverFiresWhenStoreOpens(t *testin
 	// storeless fallback (which writes none): a real tracking bead exists.
 	if got := len(trackingBeads(t, store, "order-run:"+orderName)); got != 1 {
 		t.Fatalf("tracking beads for %s = %d, want 1 (normal dispatch must still write one)", orderName, got)
+	}
+}
+
+// TestClassifyStoreUnavailableFallbackTrigger covers the ga-3bwmf review
+// round-3 M1 finding: at load 200 the reviewer's probe fired this fallback
+// against a LIVE store on several shapes the classifier used to treat as
+// death evidence. Every shape from that finding is pinned here, both the
+// ones that must now be rejected and the ones that must still be accepted.
+func TestClassifyStoreUnavailableFallbackTrigger(t *testing.T) {
+	wrappedDeadline := fmt.Errorf("dial tcp 127.0.0.1:48770: %w", context.DeadlineExceeded)
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, false},
+		{"bare context.DeadlineExceeded", context.DeadlineExceeded, false},
+		{"dial tcp i/o timeout text", errors.New("dial tcp 127.0.0.1:48770: connect: i/o timeout"), false},
+		{"connect operation timed out text", errors.New("connect: operation timed out"), false},
+		{"wrapped DeadlineExceeded whose text also contains dial tcp", wrappedDeadline, false},
+		{"driver bad connection", errors.New("driver: bad connection"), false},
+		{"broken pipe", errors.New("write: broken pipe"), false},
+		{"unexpected EOF", errors.New("read: unexpected EOF"), false},
+		{"use of closed network connection", errors.New("read: use of closed network connection"), false},
+		{"connection refused", errConnectionRefused, true},
+		{"no such host", errors.New("dial tcp: lookup dolt-host: no such host"), true},
+		{"server unreachable", errors.New("server unreachable"), true},
+		{"bd auto-import marker, no timeout text", errors.New("auto-importing into empty database"), true},
+		{"bd auto-import marker WITH timeout text", errors.New("auto-importing into empty database: dial tcp: i/o timeout"), false},
+		{"unrelated error", errors.New("invalid issue type"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyStoreUnavailableFallbackTrigger(tc.err); got != tc.want {
+				t.Errorf("classifyStoreUnavailableFallbackTrigger(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }

@@ -150,13 +150,14 @@ var bootstrapPolicy = Ledger{
 			// rework: doctor_dolt_watchdog_liveness_test.go's
 			// spawnOrphanedChild (one exec.Command("sh", "-c", "sleep 60 &
 			// echo $!; wait")) and two exec.Command("sleep", "5")
-			// fixtures, plus internal/pidutil's ps-based ParentPIDOf
-			// fallback (exec.CommandContext(ctx, "ps", ...)) and its own
-			// test's exec.Command("sleep", "5") fixture -- all real
-			// subprocesses are load-bearing: this suite proves genuine
-			// OS-level process reparenting (orphaning to ppid 1) and
-			// live-vs-reused-pid argv reads, neither of which a fake can
-			// stand in for.
+			// fixtures, plus internal/pidutil_test.go's own
+			// exec.Command("sleep", "5") fixture -- all real subprocesses
+			// are load-bearing: this suite proves genuine OS-level process
+			// reparenting (orphaning to ppid 1) and live-vs-reused-pid
+			// argv reads, neither of which a fake can stand in for.
+			// (internal/pidutil.go's own ps-based ParentPIDOf fallback is
+			// production code, not test source, and is not counted by
+			// this census.)
 			BaselineCalls:   720,
 			BaselineFiles:   209,
 			ReportedCalls:   495,

@@ -31,7 +31,37 @@ func readDoltRuntimeStateFile(path string) (doltRuntimeState, error) {
 	return state, nil
 }
 
-// writeDoltRuntimeStateFile persists state to path atomically.
+// writeDoltRuntimeStateFile persists state to path atomically, preserving
+// both StartedAt and Watchdog on a PID match. This is every writer's default
+// EXCEPT a genuine fresh spawn — see writeDoltRuntimeStateFileSpawnAuthoritative
+// and writeDoltRuntimeStateFileWithWatchdogAuthority for the full reasoning.
+func writeDoltRuntimeStateFile(path string, state doltRuntimeState) error {
+	return writeDoltRuntimeStateFileWithWatchdogAuthority(path, state, false)
+}
+
+// writeDoltRuntimeStateFileSpawnAuthoritative persists a genuine fresh
+// spawn's state, where state.Watchdog -- computed from
+// started.WatchdogPID > 0 at the moment of spawn (dolt_start_managed.go) --
+// is authoritative and must win even on a PID match. Every OTHER writer
+// (adoption rewrites via `gc dolt-state write-provider`, repairs via
+// recoverManagedDoltRepairRuntimeStateForHealthyPort) still preserves the
+// prior value on a PID match through the plain writeDoltRuntimeStateFile,
+// since none of them observed the real spawn and so cannot know Watchdog.
+//
+// ga-3bwmf review round 3, M2: writeDoltRuntimeStateFile used to preserve
+// on every writer including this one. Since preservedDoltWatchdog compares
+// only the PID number, not process identity, an OS pid-reuse coincidence --
+// the new spawn's chosen pid happening to match a STALE on-disk record left
+// by a different, earlier process -- would have silently discarded this
+// spawn's own correctly-computed Watchdog fact in favor of the old record's.
+func writeDoltRuntimeStateFileSpawnAuthoritative(path string, state doltRuntimeState) error {
+	return writeDoltRuntimeStateFileWithWatchdogAuthority(path, state, true)
+}
+
+// writeDoltRuntimeStateFileWithWatchdogAuthority persists state to path
+// atomically. It ALWAYS preserves an existing StartedAt when the PID is
+// unchanged (see the doc comment below); it preserves Watchdog under that
+// same PID-match condition only when watchdogAuthoritative is false.
 //
 // It PRESERVES an existing StartedAt when the PID is unchanged. started_at
 // dates a PROCESS, so while a pid keeps running its start time is a fact about
@@ -49,12 +79,14 @@ func readDoltRuntimeStateFile(path string) (doltRuntimeState, error) {
 // reuse, where a genuinely new process inherits the old start time; that is
 // rarer, and strictly less wrong, than discarding the true start time on every
 // single write.
-func writeDoltRuntimeStateFile(path string, state doltRuntimeState) error {
+func writeDoltRuntimeStateFileWithWatchdogAuthority(path string, state doltRuntimeState, watchdogAuthoritative bool) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
 	state.StartedAt = preservedDoltStartedAt(path, state)
-	state.Watchdog = preservedDoltWatchdog(path, state)
+	if !watchdogAuthoritative {
+		state.Watchdog = preservedDoltWatchdog(path, state)
+	}
 	data, err := json.Marshal(state)
 	if err != nil {
 		return err
@@ -90,7 +122,9 @@ func preservedDoltStartedAt(path string, state doltRuntimeState) string {
 // preservedDoltWatchdog returns the Watchdog that should be written: the one
 // already on disk when it names the SAME pid, otherwise the incoming one.
 // Unreadable or absent prior state, or a zero/changed pid, all fall through
-// to the incoming value.
+// to the incoming value. Called only by writeDoltRuntimeStateFileWithWatchdogAuthority
+// when watchdogAuthoritative is false — every writer except the genuine
+// fresh-spawn path (writeDoltRuntimeStateFileSpawnAuthoritative).
 //
 // ga-3bwmf review. Watchdog is durable ground truth fixed at SPAWN time (see
 // its doc comment on doltRuntimeState) — it must never move for a PID that
@@ -102,9 +136,15 @@ func preservedDoltStartedAt(path string, state doltRuntimeState) string {
 // (its repaired state is likewise built without one) — silently clears a
 // true Watchdog back to false for a server that never restarted, and the
 // dolt-watchdog-liveness doctor check goes blind exactly after the next
-// kickstart adopts. A real restart gets a new pid, so the incoming
-// (correctly recomputed, e.g. dolt_start_managed.go's
-// `started.WatchdogPID > 0`) value is used precisely when it should be.
+// kickstart adopts.
+//
+// Review round 3, M2: this function compares only the PID NUMBER, not
+// process identity (no liveness or start-time cross-check), so it cannot by
+// itself tell a real restart's genuinely new pid apart from an OS pid-reuse
+// coincidence against a stale on-disk record. That is why the genuine
+// fresh-spawn path does not call it at all — its own freshly-computed
+// Watchdog is authoritative and must win regardless of what pid happens to
+// be on disk; see writeDoltRuntimeStateFileSpawnAuthoritative.
 func preservedDoltWatchdog(path string, state doltRuntimeState) bool {
 	if state.PID <= 0 {
 		return state.Watchdog

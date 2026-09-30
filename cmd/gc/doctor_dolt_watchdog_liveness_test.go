@@ -247,14 +247,18 @@ func TestPidLooksLikeDoltSQLServerRejectsAnUnrelatedProcess(t *testing.T) {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	})
-	// A fork/exec race, not a flaky assertion: right after Start returns, the
-	// child may still be between fork and the exec() that replaces its
-	// argv, so its /proc cmdline can read back empty (a successful read of
-	// nothing, not an error) for a brief window. pidLooksLikeDoltSQLServer's
-	// own "failed or empty read is not a mismatch" fallback then answers
-	// true, exactly the answer this test is trying to disprove for a
-	// genuinely unrelated process. Wait until the child's own cmdline
-	// actually reads back "sleep" -- proving exec() has landed -- before
+	// A load-timing race, not a flaky assertion: this failed on CI (shard
+	// 7, run 36657665083) with pidLooksLikeDoltSQLServer(sleep pid) = true.
+	// The exact mechanism by which a read shortly after Start() can still
+	// come back unable to identify the child's real argv is not settled --
+	// review round 3 (L4) found the original comment here overclaimed an
+	// "empty /proc read" explanation Linux's fork/exec semantics don't
+	// obviously support -- but the observed failure and
+	// pidLooksLikeDoltSQLServer's own documented "failed or unreadable is
+	// not a mismatch" fallback (which answers true whenever it cannot
+	// positively identify argv) together are enough to fix regardless of
+	// the precise cause: wait until the child's own cmdline actually reads
+	// back "sleep" -- proving its real argv is observable -- before
 	// asserting on it.
 	pid := cmd.Process.Pid
 	awaitCond(t, func() bool {
