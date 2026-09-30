@@ -103,7 +103,16 @@ review_formulas_recovery_tests=(
 
 # Keep this list to top-level test names. Matching a parent test runs all of
 # its subtests, so additions here directly widen the every-PR smoke budget.
+#
+# TestCleanInstallTutorialPath (ga-wuda3): the clean-install gc init + gc rig
+# add path (issue #1670) regressed silently for three days across the #215
+# resync because it lived only in rest-full, which is push-only (main-red
+# runs 36656062182 etc.) -- no PR in that range ever exercised it. It is a
+# cheap, deterministic, no-flags-needed smoke test (one gc init, one gc rig
+# add, two bd calls), exactly the shape the smoke set already favors, so it
+# moves here rather than widening rest-full's PR footprint.
 rest_smoke_tests=(
+  TestCleanInstallTutorialPath
   TestE2E_WorkspaceDefaults
   TestE2E_Hook_WithWork
   TestE2E_MultiAgent_PoolAndFixed

@@ -260,8 +260,27 @@ func (o hostedDoltInitOptions) persistedSelectorAuthority(cityPath string, cfg c
 // The selector is never written to city.toml: the provider receives it during
 // initialization and owns the resulting backend metadata.
 func (o hostedDoltInitOptions) providerOwnershipIntent(city config.City) (providerScopeIntent, error) {
+	intent, _, err := o.providerOwnershipIntentSourced(city)
+	return intent, err
+}
+
+// providerOwnershipIntentSourced is providerOwnershipIntent's full form. Its
+// second return reports whether ResolveInitIntent found any real signal (a
+// CLI/environment selector or a legacy city-config endpoint) rather than
+// falling back to the provider-default argument.
+//
+// ga-m07q9: a no-signal `gc init` must stay on the classic gc-managed
+// lifecycle -- the shared server every rig is just a database on --
+// ResolveInitIntent still needs *some* value to hand back when nothing else
+// supplied one (every InitIntent field is required once the resolution
+// picks a source), and that fallback value is not itself a signal to become
+// provider-owned. persistFreshProviderOwnership is the only caller that acts
+// on the fallback value directly; it uses this second return to decide
+// whether to journal ownership at all, rather than the direct/local value
+// itself, which by construction never changes what "no signal" means.
+func (o hostedDoltInitOptions) providerOwnershipIntentSourced(city config.City) (providerScopeIntent, bool, error) {
 	if err := o.validateSelectors(); err != nil {
-		return providerScopeIntent{}, err
+		return providerScopeIntent{}, false, err
 	}
 	transport := strings.ToLower(strings.TrimSpace(o.Transport))
 	target := strings.ToLower(strings.TrimSpace(o.Target))
@@ -269,12 +288,19 @@ func (o hostedDoltInitOptions) providerOwnershipIntent(city config.City) (provid
 		transport, target = "direct", "external"
 	}
 	// See applySelectorToCityConfig: the no-signal fresh-scope default is
-	// direct/local (ga-m07q9), not upstream's proxied-local default.
+	// direct/local (ga-m07q9), not upstream's proxied-local default. That
+	// value only takes effect when the caller below finds an explicit
+	// signal elsewhere (persisted state, or a resume of an already-pending
+	// init); a bare fallback resolution here is not one.
 	resolved, err := contract.ResolveInitIntent(contract.InitScopeState{}, contract.InitIntent{Transport: transport, Target: target}, contract.InitIntent{}, configDoltInitIntent(city), contract.InitIntent{Transport: "direct", Target: "local"})
 	if err != nil {
-		return providerScopeIntent{}, err
+		return providerScopeIntent{}, false, err
 	}
-	return normalizeProviderScopeIntent(providerScopeIntent{Transport: resolved.Intent.Transport, Target: resolved.Intent.Target})
+	intent, err := normalizeProviderScopeIntent(providerScopeIntent{Transport: resolved.Intent.Transport, Target: resolved.Intent.Target})
+	if err != nil {
+		return providerScopeIntent{}, false, err
+	}
+	return intent, resolved.Source != "provider-default", nil
 }
 
 // providerScopeEndpoint projects the one-shot external endpoint this init
@@ -317,7 +343,7 @@ func persistFreshProviderOwnership(cityPath string, opts hostedDoltInitOptions) 
 		}
 		return fmt.Errorf("load configured rig scopes for provider ownership: %w", err)
 	}
-	intent, err := opts.providerOwnershipIntent(*cfg)
+	intent, explicit, err := opts.providerOwnershipIntentSourced(*cfg)
 	if err != nil {
 		return err
 	}
@@ -325,6 +351,7 @@ func persistFreshProviderOwnership(cityPath string, opts hostedDoltInitOptions) 
 		return err
 	} else if initialized {
 		intent = persisted
+		explicit = true
 	}
 	if existing, owned, ownershipErr := providerScopeOwnership(cityPath, cityPath); ownershipErr != nil {
 		return ownershipErr
@@ -336,12 +363,29 @@ func persistFreshProviderOwnership(cityPath string, opts hostedDoltInitOptions) 
 		} else if existing.Intent != intent {
 			return fmt.Errorf("conflicting provider initialization intent for scope %q", cityPath)
 		}
+		// A pending record already committed this scope to provider ownership
+		// on an earlier pass. ga-m07q9's no-signal default governs only a
+		// scope that has never been given any topology at all; persisted
+		// state wins over it, same as an explicit selector does.
+		explicit = true
 	}
 	cityInitialized, err := scopeHasPersistedBeadsIdentity(cityPath)
 	if err != nil {
 		return err
 	}
 	if !cityInitialized {
+		if !explicit {
+			// ga-m07q9: a no-signal fresh `gc init` stays on the classic
+			// gc-managed lifecycle -- the shared server every rig is just a
+			// database on. Do not journal provider ownership for the city
+			// just because ResolveInitIntent needed a fallback value to hand
+			// back. With the city left unjournaled,
+			// cityGrantsProviderOwnershipToFreshScopes below (and gc rig
+			// add's own ensureFreshRigProviderOwnership /
+			// ensureProviderScopeOwnershipBeforeInit checks, later) correctly
+			// decline to hand ownership down to any configured rig either.
+			return nil
+		}
 		if err := persistProviderScopeOwnershipWithEndpoint(cityPath, cityPath, intent, opts.providerScopeEndpoint(intent)); err != nil {
 			return err
 		}

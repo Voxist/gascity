@@ -905,11 +905,14 @@ version = "^1.4"
 		t.Fatalf("persistFreshProviderOwnership: %v", err)
 	}
 	// No selector was requested, so this exercises the no-signal fresh-scope
-	// default, which is direct/local (ga-m07q9) — not upstream's proxied/local
-	// default (B1: a plain `gc init` must not create a proxied-server city).
-	entry, owned, err := providerScopeOwnership(city, city)
-	if err != nil || !owned || entry.State != providerScopeInitializing || entry.Intent != (providerScopeIntent{Transport: "direct", Target: "local"}) {
-		t.Fatalf("ownership = (%+v, %t, %v), want pending direct/local", entry, owned, err)
+	// default, which is classic gc-managed (ga-m07q9) — neither upstream's
+	// rejected proxied/local default (B1) nor a bare direct/local flavor of
+	// the same rejected "provider-owned by default" topology (ga-wuda3). The
+	// point under test -- that ownership resolution runs, and cleanly finds
+	// nothing to journal, before ever touching the uninstalled remote
+	// import -- still holds; it just no longer produces a pending record.
+	if entry, owned, err := providerScopeOwnership(city, city); err != nil || owned {
+		t.Fatalf("ownership = (%+v, %t, %v), want not owned (classic gc-managed)", entry, owned, err)
 	}
 	for _, name := range []string{"metadata.json", "config.yaml"} {
 		if _, err := os.Stat(filepath.Join(city, ".beads", name)); !os.IsNotExist(err) {

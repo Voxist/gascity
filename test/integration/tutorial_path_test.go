@@ -22,6 +22,39 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
+// dumpRigDoltDiagnostics summarizes the on-disk state that distinguishes a
+// classic gc-managed rig (sharing the city's one Dolt server) from a
+// provider-owned one (its own, separately-seeded server) at failure time. It
+// reads best-effort: a missing file is reported as such rather than failing
+// the dump itself, since the diagnostic's whole point is to explain a prior
+// failure, not introduce a new one.
+//
+// This is deliberately narrow to the two files that answer "which server, if
+// any, was this rig pointed at, and did the city think it owned that server
+// itself": .beads/dolt-server.port (which port a scope's own bd process
+// bound, when it ran one) and .beads/metadata.json (backend/dolt_mode, which
+// distinguishes classic "server" mode from an embedded or provider-owned
+// scope). ga-wuda3's root cause was exactly this: a rig silently got its own
+// unseeded provider-owned Dolt server instead of sharing the city's.
+func dumpRigDoltDiagnostics(cityDir, rigDir string) string {
+	var b strings.Builder
+	dump := func(label, path string) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			fmt.Fprintf(&b, "  %s (%s): %v\n", label, path, err)
+			return
+		}
+		fmt.Fprintf(&b, "  %s (%s): %s\n", label, path, strings.TrimSpace(string(data)))
+	}
+	fmt.Fprintf(&b, "city dir: %s\n", cityDir)
+	dump("city dolt-server.port", filepath.Join(cityDir, ".beads", "dolt-server.port"))
+	dump("city metadata.json", filepath.Join(cityDir, ".beads", "metadata.json"))
+	fmt.Fprintf(&b, "rig dir: %s\n", rigDir)
+	dump("rig dolt-server.port", filepath.Join(rigDir, ".beads", "dolt-server.port"))
+	dump("rig metadata.json", filepath.Join(rigDir, ".beads", "metadata.json"))
+	return b.String()
+}
+
 // bdDoltInRig runs the bd binary in rigDir using the managed Dolt endpoint
 // from cityDir. The rig and the city share the same Dolt server; the database
 // name is read from the rig's .beads/metadata.json by bd.
@@ -92,11 +125,11 @@ func TestCleanInstallTutorialPath(t *testing.T) {
 	// Regression: rig Dolt DB was never seeded so this returned "" before the fix.
 	prefixOut, err := bdDoltInRig(cityDir, rigDir, "config", "get", "issue_prefix")
 	if err != nil {
-		t.Fatalf("bd config get issue_prefix in rig failed: %v\noutput: %s\n(regression: issue #1670 — rig Dolt DB not seeded during gc rig add)", err, prefixOut)
+		t.Fatalf("bd config get issue_prefix in rig failed: %v\noutput: %s\n(regression: issue #1670 — rig Dolt DB not seeded during gc rig add)\n%s", err, prefixOut, dumpRigDoltDiagnostics(cityDir, rigDir))
 	}
 	gotPrefix := strings.TrimSpace(prefixOut)
 	if gotPrefix != wantPrefix {
-		t.Errorf("bd config get issue_prefix = %q, want %q\n(regression: issue #1670 — rig Dolt DB not seeded during gc rig add)", gotPrefix, wantPrefix)
+		t.Errorf("bd config get issue_prefix = %q, want %q\n(regression: issue #1670 — rig Dolt DB not seeded during gc rig add)\n%s", gotPrefix, wantPrefix, dumpRigDoltDiagnostics(cityDir, rigDir))
 	}
 
 	// --- Assertion 2: rig-scoped bead creation succeeds ---
@@ -106,9 +139,9 @@ func TestCleanInstallTutorialPath(t *testing.T) {
 	beadOut, err := bdDoltInRig(cityDir, rigDir, "create", beadTitle)
 	if err != nil {
 		if strings.Contains(strings.ToLower(beadOut+err.Error()), "not initialized") {
-			t.Fatalf("bd create in rig failed with database-not-initialized (regression issue #1670): %v\noutput: %s", err, beadOut)
+			t.Fatalf("bd create in rig failed with database-not-initialized (regression issue #1670): %v\noutput: %s\n%s", err, beadOut, dumpRigDoltDiagnostics(cityDir, rigDir))
 		}
-		t.Fatalf("bd create in rig failed: %v\noutput: %s", err, beadOut)
+		t.Fatalf("bd create in rig failed: %v\noutput: %s\n%s", err, beadOut, dumpRigDoltDiagnostics(cityDir, rigDir))
 	}
 	// Bead ID should carry the rig prefix, e.g. "mp-abc".
 	if !strings.Contains(beadOut, wantPrefix+"-") {

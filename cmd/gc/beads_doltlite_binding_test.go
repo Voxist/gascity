@@ -312,7 +312,17 @@ func TestPreAndPostInitScopeDoltModeHonorExplicitProxiedOptIn(t *testing.T) {
 // vs `--proxied-server`. This test exercises both together, for the city and
 // a rig `gc init` would initialize with it, so the invariant is pinned on
 // the actual init path rather than on a scope-file-only shortcut.
-func TestPersistFreshProviderOwnershipDefaultsFreshCityAndRigToDirectServer(t *testing.T) {
+//
+// ga-wuda3: the fix that gave the direct/local fallback its correct FLAVOR
+// still left a no-signal `gc init` journaling the city (and every rig
+// configured alongside it) as provider-owned -- a third leak of the same
+// rejected upstream default, this time over WHETHER a fresh scope is
+// provider-owned at all rather than which flavor it is. A city.toml's rigs
+// share the city's one managed Dolt server exactly like TestCleanInstall-
+// TutorialPath expects; `gc rig add` on that city read the journal this test
+// used to assert existed and started a second, unseeded Dolt server per rig.
+// See ga-m07q9's notes for the full audit.
+func TestPersistFreshProviderOwnershipLeavesFreshCityAndRigGCManaged(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
@@ -327,23 +337,93 @@ func TestPersistFreshProviderOwnershipDefaultsFreshCityAndRigToDirectServer(t *t
 	}
 
 	// No selector requested: this is the no-signal `gc init` a brand new city
-	// gets by default.
+	// gets by default. ga-m07q9 says this must stay on the classic gc-managed
+	// lifecycle -- one shared Dolt server -- not silently become
+	// provider-owned just because ResolveInitIntent needed some fallback
+	// value to hand back.
 	if err := persistFreshProviderOwnership(cityPath, hostedDoltInitOptions{}); err != nil {
 		t.Fatalf("persistFreshProviderOwnership: %v", err)
 	}
 
-	if entry, owned, err := providerScopeOwnership(cityPath, cityPath); err != nil || !owned || entry.Intent.Transport != "direct" {
-		t.Errorf("city journaled intent = (%+v, %t, %v), want direct transport", entry, owned, err)
+	if entry, owned, err := providerScopeOwnership(cityPath, cityPath); err != nil || owned {
+		t.Errorf("city journaled intent = (%+v, %t, %v), want not owned (classic gc-managed)", entry, owned, err)
 	}
-	if entry, owned, err := providerScopeOwnership(cityPath, rigPath); err != nil || !owned || entry.Intent.Transport != "direct" {
-		t.Errorf("rig journaled intent = (%+v, %t, %v), want direct transport", entry, owned, err)
+	if entry, owned, err := providerScopeOwnership(cityPath, rigPath); err != nil || owned {
+		t.Errorf("rig journaled intent = (%+v, %t, %v), want not owned (classic gc-managed)", entry, owned, err)
 	}
 
+	// Classic gc-managed scopes also run `bd init --server`, so this stays
+	// "server" regardless of provider ownership -- it is the journal above,
+	// not this transport flavor, that distinguishes the two lifecycles.
 	if got := postInitScopeDoltMode(cityPath, cityPath); got != "server" {
 		t.Errorf("city postInitScopeDoltMode = %q, want server", got)
 	}
 	if got := postInitScopeDoltMode(cityPath, rigPath); got != "server" {
 		t.Errorf("rig postInitScopeDoltMode = %q, want server", got)
+	}
+}
+
+// TestPersistFreshProviderOwnershipHonorsExplicitSelector is
+// TestPersistFreshProviderOwnershipLeavesFreshCityAndRigGCManaged's
+// complement: an explicit --beads-transport/--beads-target selector must
+// still produce a provider-owned city and rig exactly as before. ga-m07q9's
+// no-signal default never overrides a real signal.
+func TestPersistFreshProviderOwnershipHonorsExplicitSelector(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"dolt-city\"\nprefix = \"gc\"\n[beads]\nprovider = \"bd\"\n\n[[rigs]]\nname = \"frontend\"\npath = \"rigs/frontend\"\nprefix = \"fe\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigPath := filepath.Join(cityPath, "rigs", "frontend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := hostedDoltInitOptions{Transport: "direct", Target: "local"}
+	if err := persistFreshProviderOwnership(cityPath, opts); err != nil {
+		t.Fatalf("persistFreshProviderOwnership: %v", err)
+	}
+
+	if entry, owned, err := providerScopeOwnership(cityPath, cityPath); err != nil || !owned || entry.Intent.Transport != "direct" {
+		t.Errorf("city journaled intent = (%+v, %t, %v), want direct transport, owned", entry, owned, err)
+	}
+	if entry, owned, err := providerScopeOwnership(cityPath, rigPath); err != nil || !owned || entry.Intent.Transport != "direct" {
+		t.Errorf("rig journaled intent = (%+v, %t, %v), want direct transport, owned", entry, owned, err)
+	}
+}
+
+// TestPersistFreshProviderOwnershipResumesPendingRecordWithNoNewSignal covers
+// constraint #3 (persisted state wins): a `gc init` interrupted after an
+// earlier, explicit-selector pass already journaled the city as pending
+// provider ownership must not be "healed" back to gc-managed just because
+// the retry supplies no selector of its own.
+func TestPersistFreshProviderOwnershipResumesPendingRecordWithNoNewSignal(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"dolt-city\"\nprefix = \"gc\"\n[beads]\nprovider = \"bd\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate an earlier, explicit-selector `gc init` pass that journaled the
+	// city as pending provider ownership and was then interrupted before bd
+	// committed metadata.
+	if err := persistProviderScopeOwnership(cityPath, cityPath, providerScopeIntent{Transport: "direct", Target: "local"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The retry supplies no selector at all -- a plain `gc init` re-run.
+	if err := persistFreshProviderOwnership(cityPath, hostedDoltInitOptions{}); err != nil {
+		t.Fatalf("persistFreshProviderOwnership: %v", err)
+	}
+
+	if entry, owned, err := providerScopeOwnership(cityPath, cityPath); err != nil || !owned || entry.Intent.Transport != "direct" {
+		t.Errorf("city journaled intent = (%+v, %t, %v), want direct transport, owned (persisted state wins)", entry, owned, err)
 	}
 }
 
