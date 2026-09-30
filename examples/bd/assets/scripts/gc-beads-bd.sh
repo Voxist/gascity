@@ -2139,13 +2139,14 @@ load_health_check_from_gc() {
     output=$("$gc_bin" dolt-state health-check --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --check-read-only </dev/null 2>/dev/null)
     status=$?
     # ga-z3c6p: propagate the real exit status rather than collapsing every
-    # failure to 1. gc dolt-state health-check exits 3 specifically when its
-    # query probe hit managedDoltSQLCommandTimeout (die_unobservable's own
-    # code) -- a distinct signal from "the probe ran and answered bad" (which
-    # still exits 1) that op_health's caller needs to see, so a starved probe
-    # under host load is never read as an observed-unhealthy server
-    # (the ga-amol9 class of bug, applied to the query probe rather than
-    # tcp_check).
+    # failure to 1. Exit 3 is gc's general "could not observe" signal
+    # (providerOpExitUnobservable) -- not a code reserved to the query probe
+    # -- and gc dolt-state health-check raises it when ITS query probe step
+    # hits managedDoltSQLCommandTimeout. That is a distinct signal from "the
+    # probe ran and answered bad" (which still exits 1) that op_health's
+    # caller needs to see, so a starved probe under host load is never read
+    # as an observed-unhealthy server (the ga-amol9 class of bug, applied to
+    # the query probe rather than tcp_check).
     if [ "$status" -ne 0 ]; then
         return "$status"
     fi
@@ -4017,8 +4018,9 @@ op_health() {
         # either had no gc binary to call, or gc dolt-state health-check failed
         # for a reason other than its own query-probe timeout (already handled
         # above).
-        if ! do_query_probe; then
-            query_probe_status=$?
+        query_probe_status=0
+        do_query_probe || query_probe_status=$?
+        if [ "$query_probe_status" -ne 0 ]; then
             if [ "$query_probe_status" -eq 3 ]; then
                 die_unobservable "dolt query probe timed out (information_schema.SCHEMATA)"
             fi

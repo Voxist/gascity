@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,8 +27,15 @@ import (
 // exiting cleanly, so a real exec.CommandContext timeout fires through the
 // genuine code path (runManagedDoltSQLContext) rather than a synthesized
 // error. `sleep` takes whole seconds portably, so delay is rounded up.
+//
+// Clears GC_DOLT_PASSWORD: every caller of this helper means to exercise the
+// CLI (dolt-fork) lane specifically, and managedDoltPassword() != "" routes
+// every one of these functions to the direct (sql-driver) lane instead —
+// silently testing a different code path if the ambient environment happens
+// to carry that variable.
 func stubSlowDoltBinary(t *testing.T, delay time.Duration) {
 	t.Helper()
+	t.Setenv("GC_DOLT_PASSWORD", "")
 	binDir := t.TempDir()
 	sleepSeconds := int(delay/time.Second) + 1
 	script := fmt.Sprintf("#!/bin/sh\nsleep %d\n", sleepSeconds)
@@ -37,9 +47,11 @@ func stubSlowDoltBinary(t *testing.T, delay time.Duration) {
 
 // stubFailingDoltBinary puts a `dolt` on PATH that exits immediately with a
 // non-timeout failure, standing in for a probe that ran to completion and
-// reported a genuine error.
+// reported a genuine error. See stubSlowDoltBinary's doc comment for why
+// GC_DOLT_PASSWORD is cleared.
 func stubFailingDoltBinary(t *testing.T, stderr string) {
 	t.Helper()
+	t.Setenv("GC_DOLT_PASSWORD", "")
 	binDir := t.TempDir()
 	script := "#!/bin/sh\necho " + shellQuote(stderr) + " >&2\nexit 1\n"
 	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(script), 0o755); err != nil {
@@ -98,6 +110,78 @@ func TestManagedDoltWrapQueryProbeTimeoutClassifiesOnContextDeadline(t *testing.
 	}
 }
 
+// TestManagedDoltWrapSQLCommandTimeoutClassifiesOnContextDeadline is the
+// read-only-step direct-lane counterpart of
+// TestManagedDoltWrapQueryProbeTimeoutClassifiesOnContextDeadline: the same
+// ctx.Err()-gated classification, applied to managedDoltReadOnlyStateDirect's
+// failure points instead of the query probe's (ga-z3c6p).
+func TestManagedDoltWrapSQLCommandTimeoutClassifiesOnContextDeadline(t *testing.T) {
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	<-expired.Done()
+	wrapped := managedDoltWrapSQLCommandTimeout(expired, errors.New("some driver error"))
+	if !errors.Is(wrapped, errManagedDoltSQLCommandTimeout) {
+		t.Fatalf("wrapping against an expired context = %v, want errManagedDoltSQLCommandTimeout", wrapped)
+	}
+
+	live := context.Background()
+	unwrapped := managedDoltWrapSQLCommandTimeout(live, errors.New("some driver error"))
+	if errors.Is(unwrapped, errManagedDoltSQLCommandTimeout) {
+		t.Fatalf("wrapping against a live context = %v, want unchanged (not a timeout)", unwrapped)
+	}
+}
+
+// TestManagedDoltReadOnlyStateDirectClassifiesHangAsTimeout is the direct-lane
+// (GC_DOLT_PASSWORD set) counterpart of the CLI-lane read-only-step-timeout
+// coverage above: a listener that accepts the TCP connection but never sends
+// the MySQL handshake models a wedged server, so the driver blocks reading
+// it until managedDoltReadOnlyStateDirect's own 5s context deadline fires —
+// the same shape a real hung dolt server under host load produces. Real
+// 5-second wait; there is no shorter knob for the direct lane's hardcoded
+// timeout.
+func TestManagedDoltReadOnlyStateDirectClassifiesHangAsTimeout(t *testing.T) {
+	t.Setenv("GC_DOLT_PASSWORD", "x")
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close() //nolint:errcheck
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			accepted <- conn
+		}
+	}()
+	t.Cleanup(func() {
+		select {
+		case conn := <-accepted:
+			conn.Close() //nolint:errcheck
+		default:
+		}
+	})
+
+	host, port, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatalf("split listener addr: %v", err)
+	}
+
+	start := time.Now()
+	state, stateErr := managedDoltReadOnlyStateDirect(host, port, "root")
+	elapsed := time.Since(start)
+	if elapsed < 4*time.Second {
+		t.Fatalf("managedDoltReadOnlyStateDirect returned after %s, want it to have waited out its own 5s context deadline", elapsed)
+	}
+	if state != "unknown" {
+		t.Fatalf("state = %q, want %q", state, "unknown")
+	}
+	if !errors.Is(stateErr, errManagedDoltSQLCommandTimeout) {
+		t.Fatalf("err = %v, want errManagedDoltSQLCommandTimeout", stateErr)
+	}
+}
+
 // ---------------------------------------------------------------------
 // The `gc dolt-state` cobra commands: the actual process exit code.
 // ---------------------------------------------------------------------
@@ -139,6 +223,95 @@ func TestDoltStateQueryProbeStillExitsOneWhenAnsweredBad(t *testing.T) {
 	}
 	if got := commandExitCode(err); got != 1 {
 		t.Fatalf("gc dolt-state query-probe exit code for an answered-bad probe = %d, want 1 (unchanged)", got)
+	}
+}
+
+// stubDoltAnswersProbeButHangsOnShowDatabases puts a `dolt` on PATH that
+// answers the query probe's information_schema.SCHEMATA query immediately
+// but sleeps past delay specifically on SHOW DATABASES — the read-only
+// step's own first query, run only after the probe has already answered —
+// so a real exec.CommandContext timeout fires on that later step alone.
+// Clears GC_DOLT_PASSWORD for the same reason as stubSlowDoltBinary.
+func stubDoltAnswersProbeButHangsOnShowDatabases(t *testing.T, delay time.Duration) {
+	t.Helper()
+	t.Setenv("GC_DOLT_PASSWORD", "")
+	binDir := t.TempDir()
+	sleepSeconds := int(delay/time.Second) + 1
+	script := fmt.Sprintf("#!/bin/sh\ncase \"$*\" in\n  *\"SHOW DATABASES\"*)\n    sleep %d\n    ;;\nesac\nexit 0\n", sleepSeconds)
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write dolt stub: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestManagedDoltHealthCheckReadOnlyTimeoutStaysHealthy is the ga-z3c6p fix
+// at the Go level: cmd_dolt_state.go's health-check used to exit 1 when the
+// read-only step timed out AFTER the query probe had already proven the
+// server alive — an inconclusive later step overriding a proven-good
+// observation. It must instead report ReadOnly "unknown" and succeed, the
+// same way an absent user database (errManagedDoltNoUserDatabase) already
+// does not fail the check.
+func TestManagedDoltHealthCheckReadOnlyTimeoutStaysHealthy(t *testing.T) {
+	stubDoltAnswersProbeButHangsOnShowDatabases(t, 2*time.Second)
+	withShortSQLCommandTimeout(t, 100*time.Millisecond)
+
+	report, err := managedDoltHealthCheck("127.0.0.1", "1", "root", true)
+	if err != nil {
+		t.Fatalf("managedDoltHealthCheck with a read-only step that times out after the probe answered = %v, want no error", err)
+	}
+	if !report.QueryReady {
+		t.Fatal("report.QueryReady = false, want true: the query probe answered before the read-only step ever ran")
+	}
+	if report.ReadOnly != "unknown" {
+		t.Fatalf("report.ReadOnly = %q, want %q", report.ReadOnly, "unknown")
+	}
+}
+
+// TestDoltStateHealthCheckDoesNotExitOneOnReadOnlyStepTimeout is the same
+// fix through the actual `gc dolt-state health-check` process exit code —
+// the shape health-patrol's caller actually observes.
+func TestDoltStateHealthCheckDoesNotExitOneOnReadOnlyStepTimeout(t *testing.T) {
+	stubDoltAnswersProbeButHangsOnShowDatabases(t, 2*time.Second)
+	withShortSQLCommandTimeout(t, 100*time.Millisecond)
+
+	err := runDoltStateCommand(t, "health-check", "--host", "127.0.0.1", "--port", "1", "--check-read-only")
+	if err != nil {
+		t.Fatalf("gc dolt-state health-check with a read-only step that times out after the probe answered = %v, want success (exit 0)", err)
+	}
+}
+
+// stubDoltAnswersProbeButHangsOnProcesslist mirrors
+// stubDoltAnswersProbeButHangsOnShowDatabases for the connection-count step's
+// own query (information_schema.PROCESSLIST) instead of the read-only step's.
+func stubDoltAnswersProbeButHangsOnProcesslist(t *testing.T, delay time.Duration) {
+	t.Helper()
+	t.Setenv("GC_DOLT_PASSWORD", "")
+	binDir := t.TempDir()
+	sleepSeconds := int(delay/time.Second) + 1
+	script := fmt.Sprintf("#!/bin/sh\ncase \"$*\" in\n  *\"PROCESSLIST\"*)\n    sleep %d\n    ;;\nesac\nexit 0\n", sleepSeconds)
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write dolt stub: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestManagedDoltHealthCheckConnectionCountTimeoutStaysHealthy confirms the
+// connection-count step (already non-fatal by construction: its caller only
+// ever checks `err == nil` before using the result) really does stay that
+// way under a real timeout, not just when the query fails fast.
+func TestManagedDoltHealthCheckConnectionCountTimeoutStaysHealthy(t *testing.T) {
+	stubDoltAnswersProbeButHangsOnProcesslist(t, 2*time.Second)
+	withShortSQLCommandTimeout(t, 100*time.Millisecond)
+
+	report, err := managedDoltHealthCheck("127.0.0.1", "1", "root", false)
+	if err != nil {
+		t.Fatalf("managedDoltHealthCheck with a connection-count step that times out = %v, want no error", err)
+	}
+	if !report.QueryReady {
+		t.Fatal("report.QueryReady = false, want true: the query probe answered before the connection-count step ever ran")
+	}
+	if report.ConnectionCount != "" {
+		t.Fatalf("report.ConnectionCount = %q, want empty (count unavailable is not fatal)", report.ConnectionCount)
 	}
 }
 
@@ -212,7 +385,32 @@ func TestQueryProbeAnsweredBadStillRecoversAgainstALiveServer(t *testing.T) {
 // fix at op_health's tcp_check step.
 // ---------------------------------------------------------------------
 
-func TestBundledProviderScriptPropagatesQueryProbeTimeoutAsUnobservable(t *testing.T) {
+// stubGCBinaryForHealthProbe writes a fake `gc` binary that answers
+// `dolt-state health-check` and `dolt-state query-probe` with the given exit
+// codes and nothing else, so op_health's real health-check/query-probe
+// exit-code interplay can be driven from Go without a real dolt server.
+func stubGCBinaryForHealthProbe(t *testing.T, healthCheckExit, queryProbeExit int) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gc-stub")
+	script := fmt.Sprintf("#!/bin/sh\ncase \"$1 $2\" in\n  \"dolt-state health-check\")\n    exit %d\n    ;;\n  \"dolt-state query-probe\")\n    exit %d\n    ;;\nesac\nexit 0\n", healthCheckExit, queryProbeExit)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub gc: %v", err)
+	}
+	return path
+}
+
+// runOpHealthAgainstStub extracts op_health and the functions it calls
+// straight out of the bundled provider script and runs the real thing as a
+// bash subprocess (mirroring TestServerReachableReflectsDoltExit's own
+// extractShellFunction convention), with GC_BIN pointed at a stub gc that
+// answers health-check/query-probe with the given exit codes. tcp_check and
+// is_remote are overridden to isolate this test to the health-check/
+// query-probe exit-code decision op_health makes — TCP reachability and
+// read-only detection are covered elsewhere and are not what ga-z3c6p is
+// about. Returns the process's exit code.
+func runOpHealthAgainstStub(t *testing.T, healthCheckExit, queryProbeExit int) int {
+	t.Helper()
 	script := filepath.Join("..", "..", "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
 	src, err := os.ReadFile(script)
 	if err != nil {
@@ -220,22 +418,67 @@ func TestBundledProviderScriptPropagatesQueryProbeTimeoutAsUnobservable(t *testi
 	}
 	text := string(src)
 
-	if strings.Contains(text, `output=$("$gc_bin" dolt-state health-check --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --check-read-only </dev/null 2>/dev/null) || return 1`) {
-		t.Fatal("load_health_check_from_gc still collapses every gc dolt-state health-check failure to 1; a query-probe-timeout exit 3 would be lost (ga-z3c6p)")
+	composed := strings.Join([]string{
+		"set -e",
+		"tcp_check() { return 0; }",
+		"is_remote() { return 0; }",
+		"connect_host() { printf '127.0.0.1'; }",
+		extractShellFunction(t, text, "die"),
+		extractShellFunction(t, text, "die_unobservable"),
+		extractShellFunction(t, text, "resolve_gc_helper_bin"),
+		extractShellFunction(t, text, "load_health_check_from_gc"),
+		extractShellFunction(t, text, "do_query_probe"),
+		extractShellFunction(t, text, "get_connection_count"),
+		extractShellFunction(t, text, "op_health"),
+		"op_health",
+	}, "\n")
+
+	gcBin := stubGCBinaryForHealthProbe(t, healthCheckExit, queryProbeExit)
+	cmd := exec.Command("bash", "-c", composed)
+	cmd.Env = append(os.Environ(),
+		"GC_BIN="+gcBin,
+		"DOLT_PORT=1",
+		"DOLT_USER=root",
+		"DOLT_PASSWORD=",
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+	if runErr != nil {
+		exitError := &exec.ExitError{}
+		if errors.As(runErr, &exitError) {
+			t.Fatalf("running op_health: %v (stderr: %s)", runErr, stderr.String())
+		}
 	}
-	if !strings.Contains(text, `status=$?`) {
-		t.Fatal("load_health_check_from_gc no longer captures the real exit status")
+	return commandExitCode(runErr)
+}
+
+// TestOpHealthPropagatesQueryProbeExitCode is the ga-z3c6p behavioral
+// regression guard, replacing a prior version of this test that only
+// grepped the script for the text of the fix rather than running it — a
+// check that passes on broken code (the bug's own capture line,
+// `query_probe_status=$?`, appears verbatim inside `do_query_probe ||
+// query_probe_status=$?` too, so the grep could never tell correct code
+// from the `if ! do_query_probe; then query_probe_status=$?` bug it meant
+// to catch).
+func TestOpHealthPropagatesQueryProbeExitCode(t *testing.T) {
+	cases := []struct {
+		name            string
+		healthCheckExit int
+		queryProbeExit  int
+		wantExit        int
+	}{
+		{"health_check_timeout_short_circuits", 3, 0, 3},
+		{"health_check_answered_bad_query_probe_times_out", 1, 3, 3},
+		{"health_check_answered_bad_query_probe_answered_bad_stays_observed", 1, 1, 1},
+		{"health_check_answered_bad_query_probe_healthy", 1, 0, 0},
+		{"health_check_other_failure_query_probe_times_out", 2, 3, 3},
 	}
-	if !strings.Contains(text, `return "$status"`) {
-		t.Fatal("load_health_check_from_gc no longer propagates its captured status")
-	}
-	if !strings.Contains(text, `health_check_status=$?`) {
-		t.Fatal("op_health no longer captures load_health_check_from_gc's failure status")
-	}
-	if !strings.Contains(text, `query_probe_status=$?`) {
-		t.Fatal("op_health no longer captures do_query_probe's failure status")
-	}
-	if strings.Count(text, `die_unobservable "dolt query probe timed out (information_schema.SCHEMATA)"`) != 2 {
-		t.Fatal("op_health no longer calls die_unobservable for a timed-out query probe on both the loader and do_query_probe branches")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := runOpHealthAgainstStub(t, tc.healthCheckExit, tc.queryProbeExit); got != tc.wantExit {
+				t.Fatalf("op_health(health-check exit %d, query-probe exit %d) = %d, want %d", tc.healthCheckExit, tc.queryProbeExit, got, tc.wantExit)
+			}
+		})
 	}
 }

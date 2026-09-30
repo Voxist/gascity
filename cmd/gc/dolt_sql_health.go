@@ -280,9 +280,18 @@ func managedDoltHealthCheck(host, port, user string, checkReadOnly bool) (manage
 		ReadOnly:   "false",
 	}
 	if checkReadOnly {
+		// The query probe above already proved the server answers (that is
+		// what checkReadOnly runs after), so a read-only step that times out
+		// is inconclusive, not an observation that the server is bad — it
+		// must not turn an otherwise-healthy check into a failure any more
+		// than "no user database to probe" does. errManagedDoltSQLCommandTimeout
+		// covers both lanes: the CLI lane's runManagedDoltSQLContext wraps its
+		// own timeouts with it directly, and managedDoltReadOnlyStateDirect
+		// wraps its own via managedDoltWrapSQLCommandTimeout for the same
+		// reason (ga-z3c6p).
 		state, err := managedDoltReadOnlyState(host, port, user)
 		if err != nil {
-			if !errors.Is(err, errManagedDoltNoUserDatabase) {
+			if !errors.Is(err, errManagedDoltNoUserDatabase) && !errors.Is(err, errManagedDoltSQLCommandTimeout) {
 				return managedDoltSQLHealthReport{}, err
 			}
 		}
@@ -356,6 +365,23 @@ func managedDoltWrapQueryProbeTimeout(ctx context.Context, err error) error {
 	return err
 }
 
+// managedDoltWrapSQLCommandTimeout marks err with errManagedDoltSQLCommandTimeout
+// when ctx's deadline is what actually ended the call, mirroring
+// managedDoltWrapQueryProbeTimeout's mechanism for the query probe's direct
+// lane. Applied to managedDoltReadOnlyStateDirect's failure points so a
+// read-only-step timeout classifies identically to the CLI lane's
+// runManagedDoltSQLContext (which already wraps its own timeouts this way) —
+// letting managedDoltHealthCheck treat a read-only-step timeout the same
+// regardless of lane (ga-z3c6p): the query probe already proved the server
+// answers, so a later read-only-step timeout is inconclusive, not an
+// observed-bad-server verdict.
+func managedDoltWrapSQLCommandTimeout(ctx context.Context, err error) error {
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("%w: %w", errManagedDoltSQLCommandTimeout, err)
+	}
+	return err
+}
+
 func managedDoltReadOnlyStateDirect(host, port, user string) (string, error) {
 	db, err := managedDoltOpenDB(host, port, user)
 	if err != nil {
@@ -365,17 +391,17 @@ func managedDoltReadOnlyStateDirect(host, port, user string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
-		return "unknown", err
+		return "unknown", managedDoltWrapSQLCommandTimeout(ctx, err)
 	}
 	conn, err := db.Conn(ctx)
 	if err != nil {
-		return "unknown", err
+		return "unknown", managedDoltWrapSQLCommandTimeout(ctx, err)
 	}
 	defer conn.Close() //nolint:errcheck
 
 	userDB, err := managedDoltSelectUserDatabaseFromConn(ctx, conn)
 	if err != nil {
-		return "unknown", err
+		return "unknown", managedDoltWrapSQLCommandTimeout(ctx, err)
 	}
 	if userDB == "" {
 		return "unknown", errManagedDoltNoUserDatabase
@@ -386,7 +412,7 @@ func managedDoltReadOnlyStateDirect(host, port, user string) (string, error) {
 			if strings.Contains(msg, "read only") || strings.Contains(msg, "read-only") {
 				return "true", nil
 			}
-			return "unknown", err
+			return "unknown", managedDoltWrapSQLCommandTimeout(ctx, err)
 		}
 	}
 	return "false", nil
