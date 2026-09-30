@@ -309,16 +309,36 @@ func checkMigrationFreezeForNativeOpen(scopeRoot string) error {
 // above remains the actual choke-point gate for every native open and is
 // what every caller in this package relies on; this export exists for a
 // caller OUTSIDE this package whose own path has an irreversible side
-// effect earlier than any native open -- specifically the native read-path
-// reopen closures (cmd/gc/main.go, cmd/gc/api_state.go), which re-resolve
-// the current managed-Dolt env before reconnecting and can trigger managed-
-// Dolt recovery/restart as part of that resolution. A frozen scope must
+// effect earlier than any native open -- specifically the native (direct
+// and proxied) read-path reopen and initial-open closures in cmd/gc, which
+// re-resolve the current managed-Dolt env (or, on the proxied lane,
+// re-admit against bd's proxy) before ever reaching a native open, and can
+// trigger recovery/restart as part of that resolution. The NATIVE lane must
 // never have gc restart a database an operator deliberately stopped, even
 // briefly on the way to the choke point's own refusal a few lines later --
-// so those closures call this FIRST and skip straight to returning an error
-// without touching recovery at all when it reports true.
+// so those closures call this (or CheckMigrationFreeze below) FIRST and
+// skip straight to returning an error without touching recovery at all when
+// it reports true. This claim is scoped to the native lane on purpose: the
+// BdStore/CLI fallback's OWN env resolution (bdRuntimeEnvWithErrorRecoveryContext,
+// reached via bdCommandRunnerWithManagedRetryFor whenever a bd command
+// actually runs) is a separate, currently UNGATED recovery trigger -- see
+// ga-lc97s.
 func MigrationFrozen(scopeRoot string) bool {
 	return findMigrationFreezeFrom(filepath.Join(scopeRoot, ".beads")).Frozen()
+}
+
+// CheckMigrationFreeze is MigrationFrozen's error-returning sibling: nil
+// when scopeRoot is not frozen, otherwise the same detail-carrying,
+// errors.Is(err, ...)-comparable error checkMigrationFreezeForNativeOpen
+// itself would return (including the slog.Warn line -- a frozen result from
+// here always short-circuits a caller before it ever reaches the choke
+// point, so there is no double-logging risk in reusing it). Prefer this over
+// the bare-bool MigrationFrozen when the caller is about to propagate an
+// error anyway: it carries the marker's own operator/reason detail via %w
+// instead of a hand-written message that would have to be kept in sync by
+// hand.
+func CheckMigrationFreeze(scopeRoot string) error {
+	return checkMigrationFreezeForNativeOpen(scopeRoot)
 }
 
 func migrationFreezeDetail(result migrationFreezeResult, info *migrationFreezeInfo) string {

@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"syscall"
 	"testing"
 	"time"
 
@@ -487,13 +486,18 @@ func TestCheckMigrationFreezeForNativeOpen_StickyWorldWritableDirIsIgnored(t *te
 		t.Fatalf("mkdir sticky dir: %v", err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(stickyDir, 0o755) })
-	// 0o1777: sticky bit set, world-writable — the /tmp shape. Deliberately
-	// syscall.Chmod, not os.Chmod: on this Go toolchain (go1.27.1
-	// darwin/arm64, observed 2026-09-29) os.Chmod silently drops the sticky
-	// bit (S_ISVTX) on Darwin — verified against a bare, non-test program,
-	// so it is not a test-harness artifact — while the raw syscall sets it
-	// correctly. Linux CI is unaffected either way.
-	if err := syscall.Chmod(stickyDir, 0o1777); err != nil {
+	// World-writable with the sticky bit set — the /tmp shape. os.Chmod
+	// takes an os.FileMode, whose bit layout for the special bits
+	// (ModeSticky/ModeSetuid/ModeSetgid) does NOT match the raw Unix mode_t
+	// layout (S_ISVTX is bit 9 on disk, but os.ModeSticky is a high bit in
+	// Go's own os.FileMode encoding) — passing the raw octal 0o1777
+	// therefore does not set what one might expect from reading it as a
+	// Unix permission literal. Composing it from os.ModeSticky, which
+	// os.Chmod translates correctly, is neither a syscall-package
+	// workaround nor a Darwin-specific issue (round 2 review correction: an
+	// earlier version of this file wrongly blamed a Darwin os.Chmod bug for
+	// what was this literal-vs-os.FileMode mismatch).
+	if err := os.Chmod(stickyDir, 0o777|os.ModeSticky); err != nil {
 		t.Fatalf("chmod sticky dir: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(stickyDir, migrationFreezeFileName), []byte(""), 0o644); err != nil {
@@ -539,4 +543,79 @@ func TestCheckMigrationFreezeForNativeOpen_EACCESIsUndeterminableAndFailsClosed(
 	if err := checkMigrationFreezeForNativeOpen(scopeRoot); !errors.Is(err, errNativeOpenFrozen) {
 		t.Fatalf("checkMigrationFreezeForNativeOpen with an unsearchable ancestor (EACCES) = %v, want errNativeOpenFrozen (fail closed)", err)
 	}
+}
+
+// ---------------------------------------------------------------------
+// MigrationFrozen / CheckMigrationFreeze — the exported probes review
+// round 2 asked to be pinned directly, not only through
+// checkMigrationFreezeForNativeOpen's own tests.
+// ---------------------------------------------------------------------
+
+// TestMigrationFrozen is a 3-case table: marker present (frozen), marker
+// absent (unfrozen), and EACCES on an ancestor directory (undeterminable,
+// must fail CLOSED -- same as checkMigrationFreezeForNativeOpen's own
+// EACCES case, pinned here for the bare-bool probe specifically since
+// callers outside this package (cmd/gc's initial-open and reopen closures)
+// depend on it directly).
+func TestMigrationFrozen(t *testing.T) {
+	clearAmbientMigrationFreezeEnv(t)
+
+	t.Run("marker present", func(t *testing.T) {
+		scopeRoot := t.TempDir()
+		writeMigrationFreezeMarker(t, scopeRoot, "present case")
+		if !MigrationFrozen(scopeRoot) {
+			t.Fatal("MigrationFrozen with a marker present = false, want true")
+		}
+	})
+
+	t.Run("marker absent", func(t *testing.T) {
+		scopeRoot := t.TempDir()
+		if MigrationFrozen(scopeRoot) {
+			t.Fatal("MigrationFrozen with no marker = true, want false")
+		}
+	})
+
+	t.Run("EACCES on an ancestor is undeterminable and fails closed", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("running as root bypasses directory permission checks")
+		}
+		root := t.TempDir()
+		locked := filepath.Join(root, "locked")
+		if err := os.Mkdir(locked, 0o755); err != nil {
+			t.Fatalf("mkdir locked: %v", err)
+		}
+		scopeRoot := filepath.Join(locked, "city", "rig")
+		if err := os.MkdirAll(filepath.Join(scopeRoot, ".beads"), 0o755); err != nil {
+			t.Fatalf("mkdir scope before locking: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+		if err := os.Chmod(locked, 0o000); err != nil {
+			t.Fatalf("chmod locked: %v", err)
+		}
+		if !MigrationFrozen(scopeRoot) {
+			t.Fatal("MigrationFrozen with an unsearchable ancestor (EACCES) = false, want true (fail closed)")
+		}
+	})
+}
+
+// TestCheckMigrationFreeze pins that the exported error-returning probe
+// carries the same errors.Is-comparable sentinel as the unexported
+// choke-point check, and is nil when unfrozen.
+func TestCheckMigrationFreeze(t *testing.T) {
+	clearAmbientMigrationFreezeEnv(t)
+
+	t.Run("frozen", func(t *testing.T) {
+		scopeRoot := t.TempDir()
+		writeMigrationFreezeMarker(t, scopeRoot, "frozen case")
+		if err := CheckMigrationFreeze(scopeRoot); !errors.Is(err, errNativeOpenFrozen) {
+			t.Fatalf("CheckMigrationFreeze with a marker present = %v, want errNativeOpenFrozen", err)
+		}
+	})
+
+	t.Run("unfrozen", func(t *testing.T) {
+		scopeRoot := t.TempDir()
+		if err := CheckMigrationFreeze(scopeRoot); err != nil {
+			t.Fatalf("CheckMigrationFreeze with no marker = %v, want nil", err)
+		}
+	})
 }

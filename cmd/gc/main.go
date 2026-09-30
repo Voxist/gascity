@@ -1713,6 +1713,18 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 			return openExecStoreAtForCityWithConfig(provider, scopeRoot, runtimeCityPath, cfg)
 		},
 		OpenNativeStore: func() (beads.Store, error) {
+			// ga-vwupk round 2: checked BEFORE the env projection below,
+			// which can trigger managed-Dolt recovery/restart -- the native
+			// lane must never have gc restart a database an operator
+			// deliberately stopped on the way to a factory fallback (or the
+			// choke point inside OpenNativeDoltStoreAt itself) that would
+			// have refused anyway. This was the gap the round-1 fix missed:
+			// it gated the RECONNECT closure below but not this initial
+			// open, which every ordinary `gc hook --claim` / `gc ready`
+			// reaches on ITS very first native store construction.
+			if err := beads.CheckMigrationFreeze(scopeRoot); err != nil {
+				return nil, fmt.Errorf("project native store env %s: %w", scopeRoot, err)
+			}
 			// Reuse the config this call already loaded. Passing nil made the
 			// rig-scoped projection load the whole city config a second time,
 			// pack expansion included, for the same city at the same moment.
@@ -1740,11 +1752,11 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 			reopen := func(ctx context.Context) (beads.NativeStorage, error) {
 				// ga-vwupk: checked BEFORE re-resolving the env below, which can
 				// trigger managed-Dolt recovery/restart (allowRecovery=true) --
-				// a frozen scope must never have gc restart a database an
+				// the native lane must never have gc restart a database an
 				// operator deliberately stopped on the way to
 				// OpenNativeStorage's own choke-point refusal a few lines down.
-				if beads.MigrationFrozen(scopeRoot) {
-					return nil, fmt.Errorf("re-resolve native store env %s: migration freeze is active; refusing the reconnect before recovery", scopeRoot)
+				if err := beads.CheckMigrationFreeze(scopeRoot); err != nil {
+					return nil, fmt.Errorf("re-resolve native store env %s: %w", scopeRoot, err)
 				}
 				var freshEnv map[string]string
 				var rerr error

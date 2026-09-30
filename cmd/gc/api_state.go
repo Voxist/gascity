@@ -483,6 +483,18 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 		OpenProxiedStore: proxiedNativeStoreOpenerForScope(cs.cityPath, scopeRoot, cfg, openBd),
 		OpenExecStore:    openExecStore,
 		OpenNativeStore: func() (beads.Store, error) {
+			// ga-vwupk round 2: checked BEFORE the env projection below,
+			// which can trigger managed-Dolt recovery/restart -- the native
+			// lane must never have gc restart a database an operator
+			// deliberately stopped on the way to a factory fallback (or the
+			// choke point inside OpenNativeDoltStoreAt itself) that would
+			// have refused anyway. This was the gap the round-1 fix missed:
+			// it gated the RECONNECT closure below but not this initial
+			// open, which the controller's very first rig-store construction
+			// reaches.
+			if err := beads.CheckMigrationFreeze(scopeRoot); err != nil {
+				return nil, fmt.Errorf("project native rig store env %s: %w", scopeRoot, err)
+			}
 			env, err := nativeDoltOpenEnvForScope(cs.cityPath, cfg, scopeRoot)
 			if err != nil {
 				return nil, fmt.Errorf("project native rig store env %s: %w", scopeRoot, err)
@@ -494,12 +506,12 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 			// dialing the dead port for the whole retry budget.
 			reopen := func(ctx context.Context) (beads.NativeStorage, error) {
 				// ga-vwupk: checked BEFORE re-resolving the env below, which can
-				// trigger managed-Dolt recovery/restart -- a frozen scope must
+				// trigger managed-Dolt recovery/restart -- the native lane must
 				// never have gc restart a database an operator deliberately
 				// stopped on the way to OpenNativeStorage's own choke-point
 				// refusal a few lines down.
-				if beads.MigrationFrozen(scopeRoot) {
-					return nil, fmt.Errorf("re-resolve native rig store env %s: migration freeze is active; refusing the reconnect before recovery", scopeRoot)
+				if err := beads.CheckMigrationFreeze(scopeRoot); err != nil {
+					return nil, fmt.Errorf("re-resolve native rig store env %s: %w", scopeRoot, err)
 				}
 				freshEnv, rerr := nativeDoltOpenEnvForScopeContext(ctx, cs.cityPath, cfg, scopeRoot)
 				if rerr != nil {
