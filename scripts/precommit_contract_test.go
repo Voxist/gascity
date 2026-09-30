@@ -1,9 +1,11 @@
 package scripts_test
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -709,5 +711,173 @@ func writeTestFile(t *testing.T, path, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// --- ga-w7nyj: --fix must never rewrite a negated type assertion ---
+//
+// golangci-lint 2.12.0's errorlint linter has a stock --fix that rewrites
+// `if _, ok := err.(*T); ok { ... }`-shaped code to `errors.As`, and on the
+// negated form -- `if _, ok := err.(*T); !ok { ... }` -- it silently drops
+// the `!`, inverting the branch's meaning. .githooks/pre-commit used to run
+// `make lint-changed` with --fix, which corrupted exactly this shape twice
+// in this repo's own history before this guard existed (Voxist/gascity#219
+// and #231's review fix-up commits both hit it). golangci-lint 2.12.0 has
+// no per-linter fix control (confirmed against the official configuration
+// docs: the only fix toggle is the global issues.fix / --fix, which applies
+// to every linter that supports auto-fix — govet, errorlint, gocritic,
+// misspell, and revive are all enabled in .golangci.yml and support it), so
+// the fix is to drop --fix from the hook's invocation entirely: lint issues
+// fail the commit instead of being silently rewritten.
+
+// errorlintVulnerableSource is the exact shape golangci-lint's stock --fix
+// corrupts. golangci-lint's report says "type assertion on error will fail
+// on wrapped errors" and 2.12.0's stock fix drops the negation regardless of
+// which specific error type or error-typed value is asserted on.
+const errorlintVulnerableSource = `package main
+
+import "os/exec"
+
+func check(err error) string {
+	if _, ok := err.(*exec.ExitError); !ok {
+		return "not an exit error"
+	}
+	return "exit error"
+}
+
+func main() { _ = check(nil) }
+`
+
+// preCommitLintChangedFlags extracts the exact LINT_FLAGS string
+// .githooks/pre-commit passes to `make lint-changed`, so this test tracks
+// the real hook rather than a copy of it that could silently drift out of
+// sync with what actually runs on every commit.
+func preCommitLintChangedFlags(t *testing.T, repoRoot string) string {
+	t.Helper()
+	hook, err := os.ReadFile(filepath.Join(repoRoot, ".githooks", "pre-commit"))
+	if err != nil {
+		t.Fatalf("read pre-commit hook: %v", err)
+	}
+	re := regexp.MustCompile(`make lint-changed LINT_CHANGED_SCOPE=staged LINT_FLAGS="([^"]*)"`)
+	m := re.FindStringSubmatch(string(hook))
+	if m == nil {
+		t.Fatal("pre-commit hook's `make lint-changed LINT_CHANGED_SCOPE=staged LINT_FLAGS=\"...\"` invocation " +
+			"not found in the expected shape -- update this test's regex to match the hook's current form " +
+			"(and re-check TestErrorlintStockFixDropsTypeAssertionNegation's premise still holds)")
+	}
+	return m[1]
+}
+
+func TestPreCommitLintChangedFlagsDoNotAutoFix(t *testing.T) {
+	repoRoot := repoRoot(t)
+	flags := preCommitLintChangedFlags(t, repoRoot)
+	if strings.Contains(flags, "--fix") {
+		t.Fatalf("pre-commit hook's lint-changed invocation passes --fix (flags=%q): golangci-lint 2.12.0 has "+
+			"no per-linter fix control, and its stock errorlint --fix silently drops the negation on "+
+			"`if _, ok := x.(*T); !ok`-shaped code (ga-w7nyj) -- --fix must stay out of any hook that runs "+
+			"unattended against a developer's staged code", flags)
+	}
+}
+
+// newErrorlintFixtureModule writes a minimal, throwaway Go module containing
+// errorlintVulnerableSource and returns its directory. No go.sum/vendor is
+// needed: the fixture only imports the standard library.
+func newErrorlintFixtureModule(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "go.mod"), "module errorlintfixture\n\ngo 1.24\n")
+	writeTestFile(t, filepath.Join(dir, "main.go"), errorlintVulnerableSource)
+	return dir
+}
+
+// runGolangciLintFixture runs golangci-lint against the fixture module using
+// THIS repo's own .golangci.yml (so the fixture is linted under the exact
+// settings and enabled-linter set production commits go through), with or
+// without --fix, and returns the process's exit code. Deliberately unscoped
+// (no --new-from-rev/--whole-files): those flags gate WHICH issues count as
+// "new" for the hook's own cost/scope reasons, unrelated to whether --fix is
+// safe, and this test's premise (the fixture module IS the whole diff) makes
+// scoping moot -- every issue in it is "new" under any scoping.
+//
+// HOME is pointed at a fresh, empty directory per call. golangci-lint's own
+// result cache lives under the real $HOME and is keyed loosely enough that
+// two fixtures with byte-identical content (this test's fixture always is)
+// can collide across separate t.TempDir()s: a --fix run can silently no-op
+// against a STALE cached absolute path from an earlier call's
+// since-deleted temp dir, logging only a warning ("no such file or
+// directory") rather than failing, which would make this test wrongly
+// report the negation as "surviving" --fix. An isolated HOME gives each
+// call its own empty cache, so the fixture's exact content is always seen
+// fresh.
+func runGolangciLintFixture(t *testing.T, fixtureDir, repoRoot string, fix bool) int {
+	t.Helper()
+	if _, err := exec.LookPath("golangci-lint"); err != nil {
+		t.Skip("golangci-lint not on PATH")
+	}
+	args := []string{"run", "-c", filepath.Join(repoRoot, ".golangci.yml")}
+	if fix {
+		args = append(args, "--fix")
+	}
+	args = append(args, ".")
+	cmd := exec.Command("golangci-lint", args...)
+	cmd.Dir = fixtureDir
+	cmd.Env = append(os.Environ(), "HOME="+t.TempDir())
+	out, err := cmd.CombinedOutput()
+	exitCode := 0
+	if err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("run golangci-lint: %v\n%s", err, out)
+		}
+		exitCode = exitErr.ExitCode()
+	}
+	return exitCode
+}
+
+// TestErrorlintStockFixDropsTypeAssertionNegation is the RED/GREEN proof
+// behind ga-w7nyj's fix, on THIS repo's exact .golangci.yml and whatever
+// golangci-lint is on PATH: the GREEN half is the actual guard (--fix
+// absent: the vulnerable pattern survives lint untouched and the run fails,
+// so the commit is blocked instead of silently rewritten); the RED half
+// proves the danger this guard exists for is real on this exact toolchain,
+// not just a delta reviewer's one-off observation -- if a future
+// golangci-lint/errorlint release fixes this upstream, the RED assertion
+// starts failing here first, not silently, and --fix could be reconsidered.
+func TestErrorlintStockFixDropsTypeAssertionNegation(t *testing.T) {
+	repoRoot := repoRoot(t)
+
+	// GREEN: no --fix. The negation must survive, and the issue must fail
+	// the run (lint fails the commit instead of rewriting it).
+	fixture := newErrorlintFixtureModule(t)
+	if code := runGolangciLintFixture(t, fixture, repoRoot, false); code == 0 {
+		t.Fatal("golangci-lint without --fix reported no issues against errorlintVulnerableSource; " +
+			"either errorlint no longer flags this pattern or the fixture/config drifted -- either way, " +
+			"this test no longer proves what it claims to")
+	}
+	got, err := os.ReadFile(filepath.Join(fixture, "main.go"))
+	if err != nil {
+		t.Fatalf("read fixture after lint (no --fix): %v", err)
+	}
+	if string(got) != errorlintVulnerableSource {
+		t.Fatalf("golangci-lint WITHOUT --fix rewrote the fixture; --fix must be the only thing that can "+
+			"ever do that, and it was not passed:\n%s", got)
+	}
+
+	// RED: same config, same golangci-lint, --fix added back. Confirms the
+	// bug this guard exists for is still reproducible.
+	fixture = newErrorlintFixtureModule(t)
+	runGolangciLintFixture(t, fixture, repoRoot, true)
+	got, err = os.ReadFile(filepath.Join(fixture, "main.go"))
+	if err != nil {
+		t.Fatalf("read fixture after lint (--fix): %v", err)
+	}
+	if strings.Contains(string(got), "!ok") {
+		t.Fatalf("expected golangci-lint --fix to reproduce the ga-w7nyj bug (drop the !ok negation) on "+
+			"this golangci-lint/errorlint version; the negation survived instead -- if upstream fixed this, "+
+			"TestPreCommitLintChangedFlagsDoNotAutoFix is the only guard left and re-enabling --fix (now that "+
+			"it is provably safe again) could be reconsidered:\n%s", got)
+	}
+	if !strings.Contains(string(got), "errors.As(") {
+		t.Fatalf("expected golangci-lint --fix to rewrite the type assertion to errors.As; got:\n%s", got)
 	}
 }
