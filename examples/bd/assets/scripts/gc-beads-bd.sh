@@ -2865,22 +2865,37 @@ op_start() {
     # recreating the lock file after retry exhaustion is unsafe because flock
     # attaches to the inode, not the pathname, so a second starter could bypass
     # a live holder by acquiring a brand-new file.
-    exec 9>"$LOCK_FILE"
+    #
+    # ga-iv2l2: op_recover holds this same LOCK_FILE flock on fd 9 across its
+    # own stop -> cleanup -> start sequence, and sets
+    # GC_DOLT_START_LOCK_HELD before calling op_start to say so. Do not
+    # re-exec fd 9 in that case: flock is scoped to the open file
+    # description, not the pathname, so `exec 9>"$LOCK_FILE"` here would
+    # close the caller's locked fd and open a fresh, unlocked one --
+    # silently dropping the lock for the window between that exec and the
+    # flock call below, reopening exactly the concurrent-recover race
+    # op_recover's own lock exists to close. Trust the caller's lock
+    # instead of re-acquiring it.
     local lock_acquired=false
-    local attempt=0
-    while [ "$attempt" -lt 6 ]; do
-        if flock -n 9 2>/dev/null; then
-            lock_acquired=true
-            break
+    if [ "${GC_DOLT_START_LOCK_HELD:-false}" = "true" ]; then
+        lock_acquired=true
+    else
+        exec 9>"$LOCK_FILE"
+        local attempt=0
+        while [ "$attempt" -lt 6 ]; do
+            if flock -n 9 2>/dev/null; then
+                lock_acquired=true
+                break
+            fi
+            sleep 0.5 2>/dev/null || sleep 1
+            attempt=$((attempt + 1))
+        done
+        if [ "$lock_acquired" = "false" ]; then
+            if wait_for_concurrent_start_ready; then
+                exit 0
+            fi
+            die "could not acquire dolt start lock ($LOCK_FILE)"
         fi
-        sleep 0.5 2>/dev/null || sleep 1
-        attempt=$((attempt + 1))
-    done
-    if [ "$lock_acquired" = "false" ]; then
-        if wait_for_concurrent_start_ready; then
-            exit 0
-        fi
-        die "could not acquire dolt start lock ($LOCK_FILE)"
     fi
 
     # Check if a dolt process is already serving our data dir (any port).
@@ -4165,6 +4180,44 @@ op_recover() {
             esac
         fi
     fi
+
+    # Serialize the whole stop -> cleanup -> start sequence under the same
+    # LOCK_FILE flock op_start uses internally, so a second concurrent
+    # op_recover (reached whenever the gc-helper fast path above is
+    # unavailable, e.g. two independent `gc beads health` processes, or an
+    # older/absent gc binary) cannot stop the server the first one just
+    # started (ga-iv2l2). A single non-blocking attempt, not op_start's own
+    # bounded retry: a second concurrent recover must not queue behind the
+    # first and rerun the same stop/start sequence a moment later against a
+    # server the first recover may have already fixed -- it should notice
+    # that and get out of the way instead.
+    if ! command -v flock >/dev/null 2>&1; then
+        die "flock is required but not installed. Install: brew install flock (macOS) or apt install util-linux (Linux)"
+    fi
+    mkdir -p "$(dirname "$LOCK_FILE")"
+    exec 9>"$LOCK_FILE"
+    if ! flock -n 9 2>/dev/null; then
+        # Someone else -- another recover, or a concurrent op_start -- holds
+        # the lock. Re-probe instead of blindly failing: if health now
+        # passes, the lock holder already fixed things and this recover has
+        # nothing left to do. Run op_health in a subshell: it calls
+        # die/die_unobservable on failure, which would otherwise exit this
+        # whole process instead of just failing the probe.
+        if (op_health) >/dev/null 2>&1; then
+            return 0
+        fi
+        die_unobservable "dolt recovery lock ($LOCK_FILE) held by another process; declining to run a concurrent stop/start"
+    fi
+
+    # Tell op_start the LOCK_FILE flock is already held on fd 9 by this
+    # process, so it must not try to acquire it again. flock is scoped to
+    # the open file description, not the pathname: op_start's own
+    # `exec 9>"$LOCK_FILE"` would close this fd's locked open file
+    # description and open a fresh, unlocked one, silently dropping the
+    # lock just acquired above for the window between that exec and
+    # op_start's own flock call -- reopening exactly the race this guard
+    # exists to close.
+    GC_DOLT_START_LOCK_HELD="true"
 
     # Stop.
     op_stop_impl || true
