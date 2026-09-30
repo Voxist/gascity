@@ -362,7 +362,7 @@ func TestOrderDispatchConstructorDeliversRoutesToTheWispBirth(t *testing.T) {
 	graphStore.IDPrefix = "gcg"
 
 	var rec memRecorder
-	od := buildOrderDispatcherFromOrderSet(messagingSplitRoutes(graphStore), cityPath, cfg, []orders.Order{a}, &rec, io.Discard)
+	od := buildOrderDispatcherFromOrderSet(messagingSplitRoutes(graphStore), cityPath, cfg, []orders.Order{a}, &rec, io.Discard, "")
 	m, ok := od.(*memoryOrderDispatcher)
 	if !ok {
 		t.Fatalf("buildOrderDispatcherFromOrderSet returned %T, want *memoryOrderDispatcher", od)
@@ -395,7 +395,7 @@ func TestOrderDispatchConstructorDeliversRoutesToTheWispBirth(t *testing.T) {
 // holding anything other than cr.storageRoutes is holding a handle to a database
 // nothing else in the process is reading.
 func TestOrderDispatcherServesTheBootResolvedBinding(t *testing.T) {
-	cr, tomlPath, _ := bootSplitCityForReloadWithOrder(t)
+	cr, tomlPath := bootSplitCityForReloadWithOrder(t)
 
 	assertDispatcherRoutes := func(stage string) {
 		t.Helper()
@@ -445,9 +445,10 @@ func TestWebhookOrderDispatcherServesTheBootResolvedBinding(t *testing.T) {
 	graphStore := beads.NewMemStore()
 	routes := messagingSplitRoutes(graphStore)
 	cs := &controllerState{
-		cityPath:      t.TempDir(),
-		cfg:           &config.City{Workspace: config.Workspace{Name: "test-city"}},
-		storageRoutes: routes,
+		cityPath:             t.TempDir(),
+		cfg:                  &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		storageRoutes:        routes,
+		controllerGeneration: "ctrl-x",
 	}
 
 	md := controllerWebhookDispatcher{cs: cs}.dispatcher()
@@ -456,6 +457,13 @@ func TestWebhookOrderDispatcherServesTheBootResolvedBinding(t *testing.T) {
 	}
 	if got := md.graphStoreFor(beads.NewMemStore()); got != beads.Store(graphStore) {
 		t.Fatalf("webhook dispatcher graph store = %T(%p), want the binding %p", got, got, graphStore)
+	}
+	// ADR-0130 D1: a webhook-fired dispatch creates a real tracking marker
+	// (order_dispatch_seam.go Dispatch -> launchResolvedDispatch), so this
+	// per-delivery dispatcher must carry the runtime's controller generation,
+	// not mint its own or go unstamped.
+	if md.generation != "ctrl-x" {
+		t.Fatalf("webhook dispatcher generation = %q, want the controller's %q; an unstamped webhook marker silently loses D1's immediate dead-controller reap", md.generation, "ctrl-x")
 	}
 }
 
@@ -669,7 +677,7 @@ func beadByIDForTest(t *testing.T, store beads.Store, id string) beads.Bead {
 // so its runtime has a real order dispatcher to assert on. Orders are discovered
 // from <city>/orders/<name>.toml, not from city.toml, so the order file is
 // written before the runtime boots and survives the reloads below.
-func bootSplitCityForReloadWithOrder(t *testing.T) (*CityRuntime, string, *bytes.Buffer) {
+func bootSplitCityForReloadWithOrder(t *testing.T) (*CityRuntime, string) {
 	t.Helper()
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
@@ -702,7 +710,7 @@ func bootSplitCityForReloadWithOrder(t *testing.T) (*CityRuntime, string, *bytes
 	if cr.storageRoutes == nil {
 		t.Fatal("the split city opened no storage routes, so nothing below is about a binding")
 	}
-	return cr, tomlPath, &stderr
+	return cr, tomlPath
 }
 
 // writeCityOrder drops a city-scoped cron order on disk. Orders are discovered

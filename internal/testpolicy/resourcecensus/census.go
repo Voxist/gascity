@@ -123,10 +123,30 @@ var bootstrapPolicy = Ledger{
 	Version: 2,
 	AuditBaseline: []Baseline{
 		{
-			Scope:           ScopeAll,
-			Resource:        ResourceSubprocess,
-			BaselineCalls:   712,
-			BaselineFiles:   206,
+			Scope:    ScopeAll,
+			Resource: ResourceSubprocess,
+			// Bumped 712->715 calls, 206->207 files for ga-xwn1k's new
+			// test/acceptance/beads_dolt_autostart_config_test.go
+			// (TestBeadsDoltAutoStartConfigHonouredByLibraryConsumer):
+			// fetchAndVerifyBDSource's curl+tar and the injected probe's own
+			// `go test` invocation are exec.Command calls inherent to what
+			// the test does -- fetch and build the pinned bd source to
+			// prove the ga-rpgvw fix against a library consumer, which
+			// cannot be done any other way (see that test's own file-level
+			// doc comment). Not a sleep-polling bump; a justified one.
+			//
+			// Bumped 715->716 calls, 207->208 files for ga-z3c6p's
+			// TestOpHealthPropagatesQueryProbeExitCode
+			// (cmd/gc/dolt_sql_health_probe_timeout_test.go): one new
+			// exec.Command("bash", "-c", ...) call site running the
+			// bundled provider script's op_health as a real subprocess
+			// against a stub gc binary -- the only way to behaviorally
+			// exercise the shell script's exit-code propagation instead of
+			// grepping its source text (which the review this bead came
+			// from found could not tell correct code from the bug it
+			// meant to catch).
+			BaselineCalls:   716,
+			BaselineFiles:   208,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-cp3hwi",
@@ -164,10 +184,13 @@ var bootstrapPolicy = Ledger{
 	},
 	Debt: []Baseline{
 		{
-			Scope:           ScopeUntagged,
-			Resource:        ResourceSubprocess,
-			BaselineCalls:   478,
-			BaselineFiles:   136,
+			Scope:    ScopeUntagged,
+			Resource: ResourceSubprocess,
+			// Bumped 478->479 calls, 136->137 files for ga-z3c6p's
+			// TestOpHealthPropagatesQueryProbeExitCode (see the matching
+			// audit_baseline subprocess comment above for the source).
+			BaselineCalls:   479,
+			BaselineFiles:   137,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-cp3hwi",
@@ -255,10 +278,17 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-10-01",
 		},
 		{
-			Scope:           ScopeUntagged,
-			Resource:        ResourceNetListen,
-			BaselineCalls:   98,
-			BaselineFiles:   38,
+			Scope:    ScopeUntagged,
+			Resource: ResourceNetListen,
+			// Bumped 98->99 calls, 38->39 files for ga-z3c6p's
+			// TestManagedDoltReadOnlyStateDirectClassifiesHangAsTimeout
+			// (cmd/gc/dolt_sql_health_probe_timeout_test.go): a real
+			// net.Listen is the only way to drive the direct (sql-driver)
+			// lane's own read timeout through a genuine blocked handshake
+			// read instead of a manually-expired context, which is what
+			// the sibling query-probe test already had to settle for.
+			BaselineCalls:   99,
+			BaselineFiles:   39,
 			ReportedCalls:   92,
 			ReportedFiles:   34,
 			OwnerBead:       "ga-cp3hwi",
@@ -530,10 +560,13 @@ var bootstrapPolicy = Ledger{
 	},
 	SmallDebt: []Baseline{
 		{
-			Scope:           ScopeUntagged,
-			Resource:        ResourceSubprocess,
-			BaselineCalls:   460,
-			BaselineFiles:   130,
+			Scope:    ScopeUntagged,
+			Resource: ResourceSubprocess,
+			// Bumped 460->461 calls, 130->131 files for ga-z3c6p's
+			// TestOpHealthPropagatesQueryProbeExitCode (see the matching
+			// audit_baseline subprocess comment above for the source).
+			BaselineCalls:   461,
+			BaselineFiles:   131,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
 			OwnerBead:       "ga-cp3hwi",
@@ -621,10 +654,14 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-10-01",
 		},
 		{
-			Scope:           ScopeUntagged,
-			Resource:        ResourceNetListen,
-			BaselineCalls:   96,
-			BaselineFiles:   37,
+			Scope:    ScopeUntagged,
+			Resource: ResourceNetListen,
+			// Bumped 96->97 calls, 37->38 files for ga-z3c6p's
+			// TestManagedDoltReadOnlyStateDirectClassifiesHangAsTimeout
+			// (see the matching debt net_listen comment above for the
+			// source).
+			BaselineCalls:   97,
+			BaselineFiles:   38,
 			ReportedCalls:   92,
 			ReportedFiles:   34,
 			OwnerBead:       "ga-cp3hwi",

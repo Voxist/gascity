@@ -418,30 +418,32 @@ func TestOrderTrackingWatchdogsReachTheOrdersBinding(t *testing.T) {
 	cityStore := beads.NewMemStore()
 
 	stale, err := binding.Create(beads.Bead{
-		Title:  "order:dolt-health",
-		Labels: []string{"order-run:dolt-health", labelOrderTracking},
+		Title:    "order:dolt-health",
+		Labels:   []string{"order-run:dolt-health", labelOrderTracking},
+		Metadata: map[string]string{orders.GenerationMetadataKey: "ctrl-old"},
 	})
 	if err != nil {
 		t.Fatalf("seeding the stale tracking bead: %v", err)
 	}
 
 	cr := &CityRuntime{
-		cityPath:            t.TempDir(),
-		cityName:            "test-city",
-		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
-		storageRoutes:       messagingSplitRoutes(binding),
-		standaloneCityStore: cityStore,
-		standaloneRigStores: map[string]beads.Store{},
-		stdout:              io.Discard,
-		stderr:              io.Discard,
-		logPrefix:           "gc test",
+		cityPath:             t.TempDir(),
+		cityName:             "test-city",
+		cfg:                  &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		controllerGeneration: "ctrl-test-live",
+		storageRoutes:        messagingSplitRoutes(binding),
+		standaloneCityStore:  cityStore,
+		standaloneRigStores:  map[string]beads.Store{},
+		stdout:               io.Discard,
+		stderr:               io.Discard,
+		logPrefix:            "gc test",
 	}
 
 	if got := cr.relocatedOrdersStore(); got != beads.Store(binding) {
 		t.Fatalf("relocatedOrdersStore = %T(%p), want the binding %p", got, got, binding)
 	}
 
-	now := stale.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter + time.Millisecond)
+	now := stale.CreatedAt.Add(time.Second)
 	cr.runOrderTrackingSweepWatchdog(now)
 
 	closed, err := binding.Get(stale.ID)
