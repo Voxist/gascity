@@ -954,6 +954,94 @@ func TestSkipAllowlistProblems(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
+
+	// ga-1ebvc MEDIUM: acceptanceWorkflowDoc's typed decode only sees env:
+	// and steps[].run. A -skip placed in any OTHER field of a required job
+	// -- strategy.matrix, a step's own shell:, defaults.run.shell,
+	// container.env, `with:` -- was invisible to this guard no matter what
+	// it said, because the typed struct has no field for it and the value
+	// is silently dropped during yaml.Unmarshal.
+	t.Run("a skip-flag-shaped token in a job field the typed decode does not cover errors", func(t *testing.T) {
+		cases := []struct {
+			name               string
+			jobYAML            string
+			jobYAMLHasOwnSteps bool // jobYAML already declares its own steps:, don't append the default one
+		}{
+			{
+				name: "strategy.matrix",
+				jobYAML: "    strategy:\n" +
+					"      matrix:\n" +
+					"        flags: [\"-skip=TestFoo/bar\"]\n",
+			},
+			{
+				name: "a step's own shell:",
+				jobYAML: "    steps:\n" +
+					"      - name: run\n" +
+					"        shell: 'env GOFLAGS=-skip=TestFoo/bar bash -e {0}'\n" +
+					"        run: go test -run 'TestFoo$' ./test/acceptance/\n",
+				jobYAMLHasOwnSteps: true,
+			},
+			{
+				name: "defaults.run.shell",
+				jobYAML: "    defaults:\n" +
+					"      run:\n" +
+					"        shell: 'env GOFLAGS=-skip=TestFoo/bar bash -e {0}'\n",
+			},
+			{
+				name: "container.env",
+				jobYAML: "    container:\n" +
+					"      image: golang\n" +
+					"      env:\n" +
+					"        GOFLAGS: \"-skip=TestFoo/bar\"\n",
+			},
+			{
+				name: "with: on a step",
+				jobYAML: "    steps:\n" +
+					"      - name: run\n" +
+					"        uses: some/action@v1\n" +
+					"        with:\n" +
+					"          args: \"-skip=TestFoo/bar\"\n",
+				jobYAMLHasOwnSteps: true,
+			},
+		}
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				body := "jobs:\n" +
+					"  probe:\n" +
+					"    env:\n" +
+					"      GC_REQUIRE_ACCEPTANCE_TOOLING: \"1\"\n" +
+					c.jobYAML
+				if !c.jobYAMLHasOwnSteps {
+					body += "    steps:\n" +
+						"      - name: run\n" +
+						"        run: go test -run 'TestFoo$' ./test/acceptance/\n"
+				}
+				workflow := []byte(body)
+				_, err := skipAllowlistProblems(map[string][]byte{"ci.yml": workflow}, nil, fixtureUniverse())
+				if err == nil {
+					t.Fatalf("expected an error for a skip-flag-shaped token in %s, got nil "+
+						"(this is the silent-pass hole ga-1ebvc found)", c.name)
+				}
+				if !strings.Contains(err.Error(), "skip-flag-shaped token") {
+					t.Fatalf("error = %q, want it to contain %q", err.Error(), "skip-flag-shaped token")
+				}
+			})
+		}
+	})
+
+	// Control: steps[].run keeps its canonical treatment through the raw
+	// scalar scan -- a properly-written -skip '<expr>' there must NOT
+	// double-error just because the generic scan also walks the job node.
+	t.Run("a canonical -skip in steps[].run is not double-flagged by the raw scalar scan", func(t *testing.T) {
+		workflow := fixtureWorkflow(true, "TestFoo/(bar|baz)")
+		problems, err := skipAllowlistProblems(map[string][]byte{"ci.yml": workflow}, allowlisted, fixtureUniverse())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(problems) != 0 {
+			t.Fatalf("problems = %v, want none", problems)
+		}
+	})
 }
 
 func equalStringSlices(a, b []string) bool {

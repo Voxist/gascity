@@ -900,7 +900,114 @@ func checkPatternMatchesExactlyOne(pattern, row string, candidates []string, wha
 // anything about a step's -skip cannot be trusted: a leftover skip-flag-
 // shaped token in the run script or an env value, an unparseable clause, or
 // an ambiguous one.
-func requiredJobSkipsFromDoc(workflowName string, doc acceptanceWorkflowDoc, universe acceptanceTestUniverse) ([]skippedRow, error) {
+// findJobNode returns the raw YAML node for jobName under root's top-level
+// "jobs:" mapping, or nil if root is nil or shaped in a way that could not
+// be navigated (the typed decode elsewhere already rejects a workflow that
+// does not parse as YAML at all, so this is a defensive nil, not a second
+// error path).
+func findJobNode(root *yaml.Node, jobName string) *yaml.Node {
+	if root == nil {
+		return nil
+	}
+	doc := root
+	if doc.Kind == yaml.DocumentNode && len(doc.Content) > 0 {
+		doc = doc.Content[0]
+	}
+	jobsNode := mappingValue(doc, "jobs")
+	if jobsNode == nil {
+		return nil
+	}
+	return mappingValue(jobsNode, jobName)
+}
+
+// mappingValue returns the value node for key in a YAML mapping node, or
+// nil if mapping is not a mapping node or has no such key.
+func mappingValue(mapping *yaml.Node, key string) *yaml.Node {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == key {
+			return mapping.Content[i+1]
+		}
+	}
+	return nil
+}
+
+// scanJobNodeForBypassSkips walks every scalar in a job's raw YAML node,
+// except a "run" key's value (steps[].run gets the canonical -skip '<expr>'
+// treatment in requiredJobSkipsFromDoc's own loop instead), and hard-errors
+// on anything skip-flag-shaped. ga-1ebvc MEDIUM: this is what closes the
+// door acceptanceWorkflowDoc's typed decode leaves open on strategy.matrix,
+// a step's own shell:, defaults.run.shell, container.env, with:, and
+// anywhere else the struct has no field for. Excluding by the bare key name
+// "run" wherever it appears (not only steps[].run specifically) is
+// deliberately approximate rather than YAML-path-precise -- consistent with
+// this guard's "checkable, not a full YAML-semantics evaluator" stance
+// elsewhere (see skipArgPattern's own doc comment).
+func scanJobNodeForBypassSkips(workflowName, jobName string, jobNode *yaml.Node) error {
+	return walkYAMLNode(jobNode, "", func(path, value string) error {
+		if window, found := findSkipFlagToken(value); found {
+			return fmt.Errorf("%s job %q: %s contains a skip-flag-shaped token (%q) outside the recognized "+
+				"-skip '<expr>' run-script form; this guard only parses -skip inside steps[].run -- move it there",
+				workflowName, jobName, path, window)
+		}
+		return nil
+	})
+}
+
+// walkYAMLNode recursively visits every scalar value under node, calling
+// visit(path, value) for each one not under a "run" key. path is a
+// dotted/bracketed breadcrumb (e.g. "strategy.matrix.flags[0]") used only
+// for error messages.
+func walkYAMLNode(node *yaml.Node, path string, visit func(string, string) error) error {
+	if node == nil {
+		return nil
+	}
+	switch node.Kind {
+	case yaml.DocumentNode:
+		for _, c := range node.Content {
+			if err := walkYAMLNode(c, path, visit); err != nil {
+				return err
+			}
+		}
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			key := node.Content[i].Value
+			value := node.Content[i+1]
+			childPath := key
+			if path != "" {
+				childPath = path + "." + key
+			}
+			// Only a "run" key whose OWN value is a scalar is the
+			// canonical steps[].run shape this skips -- "run" as a
+			// MAPPING key (e.g. defaults.run.shell) is a different field
+			// entirely and must still be scanned. Suppressing only this
+			// one child, rather than propagating a flag through the rest
+			// of the subtree, is what keeps defaults.run.shell in scope
+			// while steps[].run itself stays out of it.
+			if key == "run" && value.Kind == yaml.ScalarNode {
+				continue
+			}
+			if err := walkYAMLNode(value, childPath, visit); err != nil {
+				return err
+			}
+		}
+	case yaml.SequenceNode:
+		for i, c := range node.Content {
+			if err := walkYAMLNode(c, fmt.Sprintf("%s[%d]", path, i), visit); err != nil {
+				return err
+			}
+		}
+	case yaml.ScalarNode:
+		return visit(path, node.Value)
+	case yaml.AliasNode:
+		return walkYAMLNode(node.Alias, path, visit)
+	}
+	return nil
+}
+
+func requiredJobSkipsFromDoc(workflowName string, doc acceptanceWorkflowDoc, root *yaml.Node, universe acceptanceTestUniverse) ([]skippedRow, error) {
 	var out []skippedRow
 	for jobName, job := range doc.Jobs {
 		// LOW (ga-may9k round 4): a job is in scope if ANY of its steps sets
@@ -919,6 +1026,19 @@ func requiredJobSkipsFromDoc(workflowName string, doc acceptanceWorkflowDoc, uni
 		}
 		if !jobRequired {
 			continue
+		}
+		// ga-1ebvc MEDIUM: everything below this point (env: maps,
+		// steps[].run) is exactly what acceptanceWorkflowDoc's typed
+		// struct has fields for. A -skip hiding anywhere ELSE in this
+		// job's YAML -- strategy.matrix, a step's own shell:,
+		// defaults.run.shell, container.env, with: -- is invisible to all
+		// of it, because the typed decode silently dropped that field.
+		// scanJobNodeForBypassSkips walks the job's RAW node instead,
+		// catching every scalar the typed struct does not, while leaving
+		// "run" values (which are handled below, with the canonical
+		// -skip '<expr>' parser) alone.
+		if err := scanJobNodeForBypassSkips(workflowName, jobName, findJobNode(root, jobName)); err != nil {
+			return nil, err
 		}
 		for _, step := range job.Steps {
 			for _, env := range []map[string]any{doc.Env, job.Env, step.Env} {
@@ -982,7 +1102,15 @@ func skipAllowlistProblems(workflows map[string][]byte, allowlist []skipAllowlis
 		if len(doc.Jobs) == 0 {
 			return nil, fmt.Errorf("%s declares no jobs; the scan is broken", name)
 		}
-		rows, err := requiredJobSkipsFromDoc(name, doc, universe)
+		// ga-1ebvc MEDIUM: a second, raw parse alongside the typed one
+		// above, so requiredJobSkipsFromDoc can also walk each required
+		// job's full YAML subtree (scanJobNodeForBypassSkips) for a -skip
+		// hiding in a field the typed struct has no field for.
+		var root yaml.Node
+		if err := yaml.Unmarshal(workflow, &root); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", name, err)
+		}
+		rows, err := requiredJobSkipsFromDoc(name, doc, &root, universe)
 		if err != nil {
 			return nil, err
 		}
