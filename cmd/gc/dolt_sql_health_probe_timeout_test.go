@@ -445,8 +445,8 @@ func runOpHealthAgainstStub(t *testing.T, healthCheckExit, queryProbeExit int) i
 	cmd.Stderr = &stderr
 	runErr := cmd.Run()
 	if runErr != nil {
-		exitError := &exec.ExitError{}
-		if errors.As(runErr, &exitError) {
+		var exitErr *exec.ExitError
+		if !errors.As(runErr, &exitErr) {
 			t.Fatalf("running op_health: %v (stderr: %s)", runErr, stderr.String())
 		}
 	}
