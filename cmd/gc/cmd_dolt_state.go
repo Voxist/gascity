@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -265,6 +266,16 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if err := managedDoltQueryProbe(hostText, portText, userText); err != nil {
 				fmt.Fprintf(stderr, "gc dolt-state query-probe: %v\n", err) //nolint:errcheck
+				// ga-z3c6p: a probe that TIMED OUT could not observe the
+				// server, as distinct from one that ran and answered bad
+				// (which stays errExit/exit 1). Exit
+				// providerOpExitUnobservable (3) so gc-beads-bd.sh's
+				// op_health can tell the two apart and call
+				// die_unobservable instead of die — the same distinction
+				// tcp_check's own failure already gets.
+				if errors.Is(err, errManagedDoltQueryProbeTimeout) {
+					return exitForCode(providerOpExitUnobservable)
+				}
 				return errExit
 			}
 			return nil
@@ -332,6 +343,13 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 			report, err := managedDoltHealthCheck(hostText, portText, userText, checkReadOnly)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc dolt-state health-check: %v\n", err) //nolint:errcheck
+				// ga-z3c6p: see query-probe's identical check above. The
+				// health check's own query probe (managedDoltHealthCheck's
+				// first step) is the same call, so it can time out the
+				// same way.
+				if errors.Is(err, errManagedDoltQueryProbeTimeout) {
+					return exitForCode(providerOpExitUnobservable)
+				}
 				return errExit
 			}
 			for _, line := range managedDoltHealthCheckFields(report) {
