@@ -252,8 +252,14 @@ func stubDoltAnswersProbeButHangsOnShowDatabases(t *testing.T, delay time.Durati
 // same way an absent user database (errManagedDoltNoUserDatabase) already
 // does not fail the check.
 func TestManagedDoltHealthCheckReadOnlyTimeoutStaysHealthy(t *testing.T) {
-	stubDoltAnswersProbeButHangsOnShowDatabases(t, 2*time.Second)
-	withShortSQLCommandTimeout(t, 100*time.Millisecond)
+	// Unlike the other short-timeout tests in this file, this one needs the
+	// FIRST query (the probe) to actually succeed inside the deadline before
+	// the SECOND (SHOW DATABASES) hangs past it — 100ms is fine when every
+	// query is meant to time out, but too tight a margin for a real forked
+	// shell to answer quickly under host load, which made this test flaky
+	// (occasionally the probe itself was the one that time out).
+	stubDoltAnswersProbeButHangsOnShowDatabases(t, 3*time.Second)
+	withShortSQLCommandTimeout(t, time.Second)
 
 	report, err := managedDoltHealthCheck("127.0.0.1", "1", "root", true)
 	if err != nil {
@@ -271,8 +277,10 @@ func TestManagedDoltHealthCheckReadOnlyTimeoutStaysHealthy(t *testing.T) {
 // fix through the actual `gc dolt-state health-check` process exit code —
 // the shape health-patrol's caller actually observes.
 func TestDoltStateHealthCheckDoesNotExitOneOnReadOnlyStepTimeout(t *testing.T) {
-	stubDoltAnswersProbeButHangsOnShowDatabases(t, 2*time.Second)
-	withShortSQLCommandTimeout(t, 100*time.Millisecond)
+	// See TestManagedDoltHealthCheckReadOnlyTimeoutStaysHealthy's comment on
+	// the timeout margin.
+	stubDoltAnswersProbeButHangsOnShowDatabases(t, 3*time.Second)
+	withShortSQLCommandTimeout(t, time.Second)
 
 	err := runDoltStateCommand(t, "health-check", "--host", "127.0.0.1", "--port", "1", "--check-read-only")
 	if err != nil {
@@ -300,8 +308,11 @@ func stubDoltAnswersProbeButHangsOnProcesslist(t *testing.T, delay time.Duration
 // ever checks `err == nil` before using the result) really does stay that
 // way under a real timeout, not just when the query fails fast.
 func TestManagedDoltHealthCheckConnectionCountTimeoutStaysHealthy(t *testing.T) {
-	stubDoltAnswersProbeButHangsOnProcesslist(t, 2*time.Second)
-	withShortSQLCommandTimeout(t, 100*time.Millisecond)
+	// See TestManagedDoltHealthCheckReadOnlyTimeoutStaysHealthy's comment on
+	// the timeout margin: this test needs the probe to answer inside the
+	// deadline before the connection-count query hangs past it.
+	stubDoltAnswersProbeButHangsOnProcesslist(t, 3*time.Second)
+	withShortSQLCommandTimeout(t, time.Second)
 
 	report, err := managedDoltHealthCheck("127.0.0.1", "1", "root", false)
 	if err != nil {
