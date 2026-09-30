@@ -145,8 +145,20 @@ var bootstrapPolicy = Ledger{
 			// grepping its source text (which the review this bead came
 			// from found could not tell correct code from the bug it
 			// meant to catch).
-			BaselineCalls:   716,
-			BaselineFiles:   208,
+			//
+			// Bumped 716->720 calls, 208->209 files for ga-3bwmf's #227
+			// rework: doctor_dolt_watchdog_liveness_test.go's
+			// spawnOrphanedChild (one exec.Command("sh", "-c", "sleep 60 &
+			// echo $!; wait")) and two exec.Command("sleep", "5")
+			// fixtures, plus internal/pidutil's ps-based ParentPIDOf
+			// fallback (exec.CommandContext(ctx, "ps", ...)) and its own
+			// test's exec.Command("sleep", "5") fixture -- all real
+			// subprocesses are load-bearing: this suite proves genuine
+			// OS-level process reparenting (orphaning to ppid 1) and
+			// live-vs-reused-pid argv reads, neither of which a fake can
+			// stand in for.
+			BaselineCalls:   720,
+			BaselineFiles:   209,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-cp3hwi",
@@ -156,10 +168,17 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-10-01",
 		},
 		{
-			Scope:           ScopeAll,
-			Resource:        ResourceFixedSleep,
-			BaselineCalls:   485,
-			BaselineFiles:   177,
+			Scope:    ScopeAll,
+			Resource: ResourceFixedSleep,
+			// Bumped 485->487 calls, 177->178 files for ga-3bwmf's #227
+			// rework: the same spawnOrphanedChild helper's bounded
+			// reparenting-detection poll (time.Sleep(20ms) between
+			// deadline-bounded checks) and internal/pidutil's matching
+			// poll in its own test (time.Sleep(10ms)) -- both are the
+			// sleep INTERVAL inside an already deadline-bounded polling
+			// loop, not an unbounded fixed wait.
+			BaselineCalls:   487,
+			BaselineFiles:   178,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
 			OwnerBead:       "ga-cp3hwi",
@@ -189,8 +208,12 @@ var bootstrapPolicy = Ledger{
 			// Bumped 478->479 calls, 136->137 files for ga-z3c6p's
 			// TestOpHealthPropagatesQueryProbeExitCode (see the matching
 			// audit_baseline subprocess comment above for the source).
-			BaselineCalls:   479,
-			BaselineFiles:   137,
+			//
+			// Bumped 479->483 calls, 137->138 files for ga-3bwmf's #227
+			// rework (see the matching audit_baseline subprocess comment
+			// above for the source).
+			BaselineCalls:   483,
+			BaselineFiles:   138,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-cp3hwi",
@@ -200,10 +223,13 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-10-01",
 		},
 		{
-			Scope:           ScopeUntagged,
-			Resource:        ResourceFixedSleep,
-			BaselineCalls:   319,
-			BaselineFiles:   121,
+			Scope:    ScopeUntagged,
+			Resource: ResourceFixedSleep,
+			// Bumped 319->321 calls, 121->122 files for ga-3bwmf's #227
+			// rework (see the matching audit_baseline fixed_sleep comment
+			// above for the source).
+			BaselineCalls:   321,
+			BaselineFiles:   122,
 			ReportedCalls:   295,
 			ReportedFiles:   114,
 			OwnerBead:       "ga-cp3hwi",
@@ -565,8 +591,12 @@ var bootstrapPolicy = Ledger{
 			// Bumped 460->461 calls, 130->131 files for ga-z3c6p's
 			// TestOpHealthPropagatesQueryProbeExitCode (see the matching
 			// audit_baseline subprocess comment above for the source).
-			BaselineCalls:   461,
-			BaselineFiles:   131,
+			//
+			// Bumped 461->465 calls, 131->132 files for ga-3bwmf's #227
+			// rework (see the matching audit_baseline subprocess comment
+			// above for the source).
+			BaselineCalls:   465,
+			BaselineFiles:   132,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
 			OwnerBead:       "ga-cp3hwi",
@@ -576,10 +606,13 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-10-01",
 		},
 		{
-			Scope:           ScopeUntagged,
-			Resource:        ResourceFixedSleep,
-			BaselineCalls:   319,
-			BaselineFiles:   121,
+			Scope:    ScopeUntagged,
+			Resource: ResourceFixedSleep,
+			// Bumped 319->321 calls, 121->122 files for ga-3bwmf's #227
+			// rework (see the matching audit_baseline fixed_sleep comment
+			// above for the source).
+			BaselineCalls:   321,
+			BaselineFiles:   122,
 			ReportedCalls:   287,
 			ReportedFiles:   113,
 			OwnerBead:       "ga-cp3hwi",

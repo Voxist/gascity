@@ -247,7 +247,21 @@ func TestPidLooksLikeDoltSQLServerRejectsAnUnrelatedProcess(t *testing.T) {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	})
-	if pidLooksLikeDoltSQLServer(cmd.Process.Pid) {
+	// A fork/exec race, not a flaky assertion: right after Start returns, the
+	// child may still be between fork and the exec() that replaces its
+	// argv, so its /proc cmdline can read back empty (a successful read of
+	// nothing, not an error) for a brief window. pidLooksLikeDoltSQLServer's
+	// own "failed or empty read is not a mismatch" fallback then answers
+	// true, exactly the answer this test is trying to disprove for a
+	// genuinely unrelated process. Wait until the child's own cmdline
+	// actually reads back "sleep" -- proving exec() has landed -- before
+	// asserting on it.
+	pid := cmd.Process.Pid
+	awaitCond(t, func() bool {
+		argv, err := pidutil.Cmdline(pid)
+		return err == nil && len(argv) > 0 && filepath.Base(argv[0]) == "sleep"
+	}, "child process's cmdline to read back \"sleep\" (post-exec)")
+	if pidLooksLikeDoltSQLServer(pid) {
 		t.Fatalf("pidLooksLikeDoltSQLServer(sleep pid) = true, want false (argv is not \"dolt sql-server\")")
 	}
 	if !pidLooksLikeDoltSQLServer(0) {

@@ -10,8 +10,17 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 716
-baseline_files = 208
+# Bumped 716->720 calls, 208->209 files for ga-3bwmf's #227 rework:
+# doctor_dolt_watchdog_liveness_test.go's spawnOrphanedChild (one
+# exec.Command("sh", "-c", "sleep 60 & echo $!; wait")) and two
+# exec.Command("sleep", "5") fixtures, plus internal/pidutil's ps-based
+# ParentPIDOf fallback (exec.CommandContext(ctx, "ps", ...)) and its own
+# test's exec.Command("sleep", "5") fixture -- all real subprocesses are
+# load-bearing: this suite proves genuine OS-level process reparenting
+# (orphaning to ppid 1) and live-vs-reused-pid argv reads, neither of
+# which a fake can stand in for.
+baseline_calls = 720
+baseline_files = 209
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-cp3hwi"
@@ -23,8 +32,14 @@ expires = "2026-10-01"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 485
-baseline_files = 177
+# Bumped 485->487 calls, 177->178 files for ga-3bwmf's #227 rework: the
+# same spawnOrphanedChild helper's bounded reparenting-detection poll
+# (time.Sleep(20ms) between deadline-bounded checks) and internal/pidutil's
+# matching poll in its own test (time.Sleep(10ms)) -- both are the sleep
+# INTERVAL inside an already deadline-bounded polling loop, not an
+# unbounded fixed wait.
+baseline_calls = 487
+baseline_files = 178
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-cp3hwi"
@@ -51,8 +66,10 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 479
-baseline_files = 137
+# Bumped 479->483 calls, 137->138 files for ga-3bwmf's #227 rework (see the
+# matching audit_baseline subprocess comment above for the source).
+baseline_calls = 483
+baseline_files = 138
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-cp3hwi"
@@ -64,8 +81,10 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 319
-baseline_files = 121
+# Bumped 319->321 calls, 121->122 files for ga-3bwmf's #227 rework (see the
+# matching audit_baseline fixed_sleep comment above for the source).
+baseline_calls = 321
+baseline_files = 122
 reported_calls = 295
 reported_files = 114
 owner_bead = "ga-cp3hwi"
@@ -421,8 +440,10 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 461
-baseline_files = 131
+# Bumped 461->465 calls, 131->132 files for ga-3bwmf's #227 rework (see the
+# matching audit_baseline subprocess comment above for the source).
+baseline_calls = 465
+baseline_files = 132
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-cp3hwi"
@@ -434,8 +455,10 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 319
-baseline_files = 121
+# Bumped 319->321 calls, 121->122 files for ga-3bwmf's #227 rework (see the
+# matching audit_baseline fixed_sleep comment above for the source).
+baseline_calls = 321
+baseline_files = 122
 reported_calls = 287
 reported_files = 113
 owner_bead = "ga-cp3hwi"
