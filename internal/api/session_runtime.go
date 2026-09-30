@@ -27,6 +27,15 @@ import (
 // city anchors plus GC_BIN are authoritative. TOML-sourced workspace and
 // provider values support the same $VAR expansion as the CLI launch path.
 //
+// The identity map carries the CHILD session's identity as the session runtime
+// will bind it (GC_SESSION_NAME, GC_AGENT — see sessionIdentityLookup).
+// Config-authored values reference that identity (${GC_SESSION_NAME} in the
+// fleet's OTEL_RESOURCE_ATTRIBUTES), and it exists nowhere in the controller
+// process doing the expansion: expanding against the controller collapsed
+// every attribution attribute fleet-wide (vp-w7cc). Callers that only know a
+// partial identity (create paths, before the session exists) pass what they
+// have; expansion falls back to the controller process for the rest.
+//
 // As the final step — mirroring the CLI env finalization in template_resolve.go
 // — the gc binary's directory is prepended to PATH so a bare `gc` in the
 // session resolves to this binary rather than a colliding one, and
@@ -62,7 +71,7 @@ import (
 // drops the inherited entry. GC_CITY_ROOT is pinned too even though
 // citylayout.CityIdentityEnvMap never seeds it, because the guard trips on it
 // and nothing else clears an inherited value.
-func cityAnchoredSessionEnv(cityPath string, workspaceEnv, providerEnv map[string]string) map[string]string {
+func cityAnchoredSessionEnv(cityPath string, workspaceEnv, providerEnv, identity map[string]string) map[string]string {
 	baseline := processenv.ProviderProcessPassthroughEnv()
 	gcBin, _ := os.Executable()
 
@@ -71,10 +80,10 @@ func cityAnchoredSessionEnv(cityPath string, workspaceEnv, providerEnv map[strin
 		out[k] = v
 	}
 	for k, v := range workspaceEnv {
-		out[k] = processenv.ExpandSessionEnvValue(v)
+		out[k] = processenv.ExpandSessionEnvValueWithIdentity(v, identity)
 	}
 	for k, v := range providerEnv {
-		out[k] = processenv.ExpandSessionEnvValue(v)
+		out[k] = processenv.ExpandSessionEnvValueWithIdentity(v, identity)
 	}
 
 	remoteTargeted := strings.TrimSpace(out["GC_CITY_URL"]) != "" || strings.TrimSpace(out["GC_CITY_CONTEXT"]) != ""
@@ -105,6 +114,25 @@ func configuredWorkspaceSessionEnv(cfg *config.City) map[string]string {
 		return nil
 	}
 	return cfg.Workspace.Env
+}
+
+// sessionIdentityLookup returns the child-session identity entries that
+// config-authored env expansion must prefer over the controller process
+// (vp-w7cc): GC_SESSION_NAME and GC_AGENT as the session runtime will
+// actually bind them. Resume paths know both from the session's Info; create
+// paths know only the alias/explicit name and pass a partial map. Entries
+// that resolve empty are omitted rather than pinned empty, so a missing
+// identity falls through to the controller process instead of shadowing a
+// value it might legitimately carry.
+func sessionIdentityLookup(sessionName, agent string) map[string]string {
+	m := make(map[string]string, 2)
+	if v := strings.TrimSpace(sessionName); v != "" {
+		m["GC_SESSION_NAME"] = v
+	}
+	if v := strings.TrimSpace(agent); v != "" {
+		m["GC_AGENT"] = v
+	}
+	return m
 }
 
 var errAmbiguousLegacyACPTransport = errors.New("legacy session transport is ambiguous")
@@ -405,7 +433,7 @@ func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config, 
 	resolvedInfo.ResumeFlag = resolved.ResumeFlag
 	resolvedInfo.ResumeStyle = resolved.ResumeStyle
 	resolvedInfo.ResumeCommand = resumeCommand
-	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), resolved.Env)
+	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), resolved.Env, sessionIdentityLookup(info.SessionName, session.AssigneeIdentifier(info)))
 	return session.BuildResumeCommand(resolvedInfo), sessionResumeHints(resolved, workDir, sessionEnv, mcpServers, sessionResumeInteractive(metadata)), nil
 }
 
@@ -523,7 +551,7 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 			resumeCommand = command
 		}
 	}
-	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), resolved.Env)
+	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), resolved.Env, sessionIdentityLookup(info.SessionName, session.AssigneeIdentifier(info)))
 	runtimeCfg, err := worker.NormalizeResolvedRuntime(worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    firstNonEmptyString(info.WorkDir, workDir),
