@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -251,6 +252,81 @@ func TestPidLooksLikeDoltSQLServerRejectsAnUnrelatedProcess(t *testing.T) {
 	}
 	if !pidLooksLikeDoltSQLServer(0) {
 		t.Error("pidLooksLikeDoltSQLServer(0) = false, want true: a failed Cmdline read must not manufacture a mismatch")
+	}
+}
+
+// runWriteProviderAdoption invokes the real `gc dolt-state write-provider`
+// command against layout.StateFile for pid — exactly what gc-beads-bd.sh's
+// kickstart-adoption path runs (write-provider has no --watchdog flag, so
+// every such call carries the zero value) — and returns the state that
+// ends up on disk.
+func runWriteProviderAdoption(t *testing.T, layout managedDoltRuntimeLayout, pid int) doltRuntimeState {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	cmd := newDoltStateCmd(&stdout, &stderr)
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{
+		"write-provider",
+		"--file", layout.StateFile,
+		"--pid", strconv.Itoa(pid),
+		"--running", "true",
+		"--port", "48770",
+		"--data-dir", layout.DataDir,
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("gc dolt-state write-provider: %v (stderr: %s)", err, stderr.String())
+	}
+	state, err := readDoltRuntimeStateFile(layout.StateFile)
+	if err != nil {
+		t.Fatalf("read rewritten state: %v", err)
+	}
+	return state
+}
+
+// TestDoltWatchdogLivenessSurvivesWriteProviderAdoptionWithSamePID pins the
+// MEDIUM review item: an adoption rewrite for the SAME already-running,
+// already-supervised pid must not silently clear the durable Watchdog fact
+// this check depends on (preservedDoltWatchdog, dolt_runtime_publication.go).
+// Before that fix, `gc dolt-state write-provider` — which has no --watchdog
+// flag — made this check go blind (report ok, "nothing to check") for an
+// orphaned, watchdog=true server exactly after a kickstart adopted it: the
+// scenario ga-3bwmf's own doc comment describes.
+func TestDoltWatchdogLivenessSurvivesWriteProviderAdoptionWithSamePID(t *testing.T) {
+	cityPath, layout := installWatchdogLivenessCity(t)
+	childPID := spawnOrphanedChild(t)
+	writeWatchdogLivenessState(t, layout, childPID, true)
+
+	rewritten := runWriteProviderAdoption(t, layout, childPID)
+	if !rewritten.Watchdog {
+		t.Fatal("write-provider adoption rewrite for the SAME pid cleared Watchdog; it must be preserved")
+	}
+
+	got := runWatchdogLivenessCheck(t, cityPath)
+	if got.Status != doctor.StatusError {
+		t.Fatalf("status after adoption rewrite = %v, want error (the check must not go blind): result %+v", got.Status, got)
+	}
+}
+
+// TestDoltWatchdogLivenessWriteProviderClearsWatchdogOnPIDChange pins the
+// mirror-image case: a write-provider rewrite for a DIFFERENT pid (a genuine
+// restart, adopted without yet knowing whether the new process has a
+// watchdog) must NOT inherit the old pid's Watchdog=true. That fact is fixed
+// at spawn time (dolt_start_managed.go) and does not carry across pids —
+// dolt_port_selection.go's repair path reassigning PID is the other place
+// this same "clear on PID change" behavior matters.
+func TestDoltWatchdogLivenessWriteProviderClearsWatchdogOnPIDChange(t *testing.T) {
+	_, layout := installWatchdogLivenessCity(t)
+	const oldPID = 999999
+	writeWatchdogLivenessState(t, layout, oldPID, true)
+
+	newPID := os.Getpid()
+	if newPID == oldPID {
+		t.Fatal("test setup collision: this process's own pid equals oldPID")
+	}
+	rewritten := runWriteProviderAdoption(t, layout, newPID)
+	if rewritten.Watchdog {
+		t.Fatal("write-provider rewrite for a DIFFERENT pid inherited the old pid's Watchdog=true; it must be cleared")
 	}
 }
 

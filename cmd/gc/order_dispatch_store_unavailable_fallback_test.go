@@ -144,19 +144,20 @@ func TestOrderDispatchStoreUnavailableFallbackFiresOnCreateRunTransportError(t *
 	}
 }
 
-// TestOrderDispatchStoreUnavailableFallbackFiresOnASlowButLiveStore pins the
-// other half of the review's ask: a store that is merely SLOW — its List
-// call runs to completion but returns context.DeadlineExceeded, exactly a
-// wedged-but-listening Dolt under load, not a dead one — classifies the
-// same as store-unavailable (classifyWorkQueryStoreUnavailable does not,
-// deliberately, distinguish them — see gc hook's identical use), so the
-// fallback WILL fire here too. That is safe only because gc beads health's
-// OWN liveness check, exercised in
-// TestGuardedRecoverDeclinesAgainstALiveServer
-// (beads_provider_recover_gate_test.go), declines to replace a server it
-// can positively confirm alive — this test proves only that the fallback
-// reaches that exec at all, not what the exec then decides.
-func TestOrderDispatchStoreUnavailableFallbackFiresOnASlowButLiveStore(t *testing.T) {
+// TestOrderDispatchStoreUnavailableFallbackNeverFiresOnASlowButLiveStore
+// pins the fix for the review's safety HIGH: a store that is merely SLOW —
+// its List call runs to completion but returns context.DeadlineExceeded,
+// exactly a wedged-but-listening Dolt under load, not a dead one — must
+// NEVER fire this fallback. It used to: classifyWorkQueryStoreUnavailable
+// (gc hook's own classifier, reused here before this fix) treats
+// DeadlineExceeded the same as store-unavailable on purpose for gc hook's
+// own dead-drop concern, and this fallback inherited that call rather than
+// having its own. classifyStoreUnavailableFallbackTrigger now only fires on
+// genuine transport-class death evidence (dial refused, connection refused,
+// unexpected EOF — the ga-xuapz shape), never on a bare timeout, so a
+// slow-but-live store must leave the normal tracking-bead/open-work-gate
+// path in full effect instead of a bare, untracked exec.
+func TestOrderDispatchStoreUnavailableFallbackNeverFiresOnASlowButLiveStore(t *testing.T) {
 	const orderName = "slow-but-live"
 	recorder := &reservedDispatchExecRecorder{}
 	order := storeUnavailableFallbackOrder(t, orderName, true)
@@ -167,8 +168,8 @@ func TestOrderDispatchStoreUnavailableFallbackFiresOnASlowButLiveStore(t *testin
 	m.dispatch(context.Background(), cityPath, time.Now())
 	drainOrderDispatch(t, m)
 
-	if got := recorder.counts()[orderName]; got != 1 {
-		t.Fatalf("slow-but-live (DeadlineExceeded) gate error: fallback exec calls = %d, want 1", got)
+	if got := recorder.counts()[orderName]; got != 0 {
+		t.Fatalf("slow-but-live (DeadlineExceeded) gate error: fallback exec calls = %d, want 0 (must never fire on a timeout, only on death evidence)", got)
 	}
 }
 
@@ -264,6 +265,160 @@ func TestOrderDispatchStoreUnavailableFallbackSingleFlightsOverlappingFires(t *t
 	drainOrderDispatch(t, m)
 	if got := recorder.counts()[orderName]; got != 1 {
 		t.Fatalf("exec calls after the first fallback released = %d, want 1", got)
+	}
+}
+
+// toggleableTransportFailStore is orderDispatchTransportFailStore's mutable
+// counterpart: its List error can change between dispatch ticks, to
+// simulate a store that transitions from dead to live mid-test — the exact
+// "store came back while the fallback is still in flight" shape
+// TestOrderDispatchStoreUnavailableFallbackBlocksNormalDispatchWhileInFlight
+// needs and orderDispatchTransportFailStore's immutable field cannot give it.
+type toggleableTransportFailStore struct {
+	beads.Store
+	mu      sync.Mutex
+	listErr error
+}
+
+func (s *toggleableTransportFailStore) setListErr(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.listErr = err
+}
+
+func (s *toggleableTransportFailStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.mu.Lock()
+	err := s.listErr
+	s.mu.Unlock()
+	if err != nil && isOrderGateListQuery(query) {
+		return nil, err
+	}
+	return s.Store.List(query)
+}
+
+// TestOrderDispatchStoreUnavailableFallbackBlocksNormalDispatchWhileInFlight
+// covers the MEDIUM review item: the fallback records its fire under
+// orderHistoryCacheKey(orderName, nil) — no storeKeys, since it runs
+// storeless — while the normal path's due-check (cachedLastRun) is scoped by
+// the real store's storeKeys, and those two keys never matched before this
+// PR's cachedLastRun/peekLastRunLocked fix. A normal dispatch tick racing the
+// store's return mid-fallback would read a tracking bead that predates the
+// fallback (none exists — the fallback writes none) and could conclude the
+// order overdue, firing a SECOND, tracked dispatch while the first
+// (untracked) fallback exec was still in flight — the mirror-image of the
+// failure mode ga-amol9 fixed on the managed-dolt recover path, reintroduced
+// here through the fallback's own separate clock.
+func TestOrderDispatchStoreUnavailableFallbackBlocksNormalDispatchWhileInFlight(t *testing.T) {
+	const orderName = "fallback-then-normal-race"
+	started := make(chan struct{})
+	release := make(chan struct{})
+	recorder := &reservedDispatchExecRecorder{started: started, release: release}
+	order := storeUnavailableFallbackOrder(t, orderName, true)
+	store := &toggleableTransportFailStore{Store: beads.NewMemStore()}
+	store.setListErr(errConnectionRefused)
+	m := buildOrderDispatcherFromListExec([]orders.Order{order}, store, nil, recorder.run, nil).(*memoryOrderDispatcher)
+	cityPath := t.TempDir()
+	var releaseOnce sync.Once
+	releaseRun := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(func() {
+		releaseRun()
+		drainOrderDispatch(t, m)
+	})
+
+	now := time.Now()
+	m.dispatch(context.Background(), cityPath, now)
+	awaitClose(t, started, "fallback exec start")
+
+	// The store is back — clear the injected failure, exactly like a
+	// recovering server would look on the next tick, while the first
+	// fallback exec is still running (single-flight armed, no tracking bead
+	// written yet).
+	store.setListErr(nil)
+	m.dispatch(context.Background(), cityPath, now.Add(time.Millisecond))
+
+	if got := recorder.counts()[orderName]; got != 1 {
+		t.Fatalf("exec calls with the fallback still in flight and the store just recovered = %d, want 1 (the normal path must not also fire)", got)
+	}
+
+	releaseRun()
+	drainOrderDispatch(t, m)
+	if got := recorder.counts()[orderName]; got != 1 {
+		t.Fatalf("exec calls after the fallback released = %d, want 1", got)
+	}
+	// The normal path never ran, so it never wrote a tracking bead either.
+	if got := len(trackingBeads(t, store, "order-run:"+orderName)); got != 0 {
+		t.Fatalf("tracking beads for %s = %d, want 0 (the normal path must not have run at all)", orderName, got)
+	}
+}
+
+// openWorkGateDualBehaviorStore fails the open-work gate's two distinct
+// reads differently: the broad, unlabeled index scan (entriesForStore's
+// call, CACHED and shared across both open-work gates within a tick) times
+// out, while the narrow order-run:<scoped>-labeled strict query
+// (hasOpenWorkStrict's own live read, which hasOpenWork retries when the
+// cached index read errors) hits a genuine transport failure.
+//
+// This is the one shape that reaches openWorkGateShut's own fallback call
+// (the LOW review item: it had zero coverage) WITH the fallback actually
+// firing. hasOpenTracking (the FIRST gate, in dispatch's per-order loop)
+// returns a cached index error directly with no live retry, so for an
+// idempotent order a contention-timeout-classified index error fails OPEN
+// there (gateFailClosed, isGateContentionTimeout) and a candidate is
+// formed — the fallback does NOT fire from that call. hasOpenWork (the
+// SECOND gate, openWorkGateShut) consults the SAME cached error but then
+// retries live via hasOpenWorkStrict before giving up; when THAT live
+// retry hits a genuine (non-timeout) transport failure, gateFailClosed
+// blocks unconditionally, and openWorkGateShut's own fallback call fires.
+type openWorkGateDualBehaviorStore struct {
+	beads.Store
+	indexErr  error
+	strictErr error
+}
+
+func (s *openWorkGateDualBehaviorStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if s.indexErr != nil && isOrderGateIndexQuery(query) {
+		return nil, s.indexErr
+	}
+	// hasOpenWorkStrict's live retry query only — NOT the trigger's own
+	// last-run lookup, which also carries an "order-run:" label prefix but
+	// sets IncludeClosed/Limit (it needs closed tracking beads to find the
+	// last run), the exact distinction isOrderGateListQuery itself draws.
+	if s.strictErr != nil && isOrderGateListQuery(query) && !isOrderGateIndexQuery(query) {
+		return nil, s.strictErr
+	}
+	return s.Store.List(query)
+}
+
+func TestOrderDispatchStoreUnavailableFallbackFiresFromOpenWorkGateShutHook(t *testing.T) {
+	const orderName = "open-work-gate-shut"
+	recorder := &reservedDispatchExecRecorder{}
+	definition := `[order]
+exec = "placeholder"
+trigger = "cooldown"
+interval = "1m"
+idempotent = true
+recover_on_store_unavailable = true
+`
+	order, err := orders.Parse([]byte(definition))
+	if err != nil {
+		t.Fatalf("Parse order: %v", err)
+	}
+	order.Name = orderName
+	order.Exec = orderName
+
+	store := &openWorkGateDualBehaviorStore{
+		Store:     beads.NewMemStore(),
+		indexErr:  context.DeadlineExceeded,
+		strictErr: errConnectionRefused,
+	}
+	m := buildOrderDispatcherFromListExec([]orders.Order{order}, store, nil, recorder.run, nil).(*memoryOrderDispatcher)
+	cityPath := t.TempDir()
+
+	m.dispatch(context.Background(), cityPath, time.Now())
+	drainOrderDispatch(t, m)
+
+	if got := recorder.counts()[orderName]; got != 1 {
+		t.Fatalf("openWorkGateShut fallback exec calls = %d, want 1", got)
 	}
 }
 

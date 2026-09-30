@@ -1160,13 +1160,38 @@ func storeUnavailableFallbackCooldown(a orders.Order) time.Duration {
 	return d
 }
 
+// classifyStoreUnavailableFallbackTrigger reports whether err carries death
+// evidence for the beads store — a dial failure, connection refused, or an
+// unexpected EOF (the ga-xuapz shape: a dolt sql-server that is not
+// listening at all) — as distinct from a store call that merely timed out
+// against something still listening.
+//
+// This deliberately does NOT reuse classifyWorkQueryStoreUnavailable (gc
+// hook's own classifier), which treats context.DeadlineExceeded as
+// store-unavailable on purpose (a wedged-but-listening Dolt is gc hook's
+// dominant outage shape, and reading it as no-work is the dead-drop that
+// classifier exists to close). maybeFireStoreUnavailableFallback is not gc
+// hook: firing it launches a bare exec with no tracking bead and no
+// open-work gate, and a live-but-slow store recovering mid-fallback is
+// exactly the one-directional-clock hazard the SHARED CLOCK section below
+// describes. So this fallback only fires on the same transport-class
+// message markers gc hook's classifier also keys on
+// (isTransportClassMessage / bdTransportRetryableMarkers, the fleet's
+// shared table) — never on a bare context.DeadlineExceeded.
+func classifyStoreUnavailableFallbackTrigger(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isTransportClassMessage(strings.ToLower(err.Error()))
+}
+
 // maybeFireStoreUnavailableFallback is the ga-3bwmf escape hatch. Call it
 // from every point in the dispatch pipeline where a beads-store operation
 // can fail for an order — the store-open itself, either open-work gate, and
 // the tracking-bead CreateRun — with the error each one actually produced.
 // For an order that opted in with RecoverOnStoreUnavailable, and only when
-// err classifies as beads.ErrStoreUnavailable, it runs that order's exec
-// directly.
+// err classifies via classifyStoreUnavailableFallbackTrigger as death
+// evidence, it runs that order's exec directly.
 //
 // WHY THIS EXISTS. Every other path to dispatching an order needs a beads
 // store: the due-check reads order-tracking beads, both open-work gates
@@ -1186,19 +1211,25 @@ func storeUnavailableFallbackCooldown(a orders.Order) time.Duration {
 // which may or may not decide to recover anything — actually gets to run.
 // The liveness check, the "never replace a live server" rule, and the single
 // cooldown-throttled recover route all still live entirely inside that
-// exec's own process (gc beads health), untouched by this path — including
-// for the case where err is a context.DeadlineExceeded from a store call
-// that ran to completion against a slow-but-LIVE store:
-// classifyWorkQueryStoreUnavailable does not distinguish that from a dead
-// store (deliberately — see gc hook's identical use), so this WILL fire
-// there too. That is safe only because the exec it runs re-derives liveness
-// itself before touching anything; see
+// exec's own process (gc beads health), untouched by this path.
+//
+// It deliberately does NOT fire for a context.DeadlineExceeded from a store
+// call that ran to completion against a slow-but-LIVE store (see
+// classifyStoreUnavailableFallbackTrigger above) — a real regression this PR
+// closes: before it, this fired there too, and until ga-z3c6p's fix landed
+// (gc dolt-state's query probe timing out was misclassified as an answered,
+// confirmed-bad server rather than an unobservable one — see that bead) the
+// exec this fallback launches could reach a live-server replace on nothing
+// but slowness. ga-z3c6p made that exec's own liveness check honest again in
+// the general case, but this fallback still has no business firing a
+// store-free exec against a store that is merely slow; only a genuinely dead
+// store — dial refused, connection refused, unexpected EOF — is worth
+// bypassing the tracking bead and open-work gate for. See
 // TestGuardedRecoverDeclinesAgainstALiveServer
 // (beads_provider_recover_gate_test.go, pre-dating this PR) for the pinned
-// proof that call-failed/timeout evidence against a confirmed-live server
-// is declined, not acted on — the exact evidence class op_health's own
-// killed-at-deadline path produces, and the one this fallback's exec
-// (gc beads health) would reach it through.
+// proof that call-failed evidence against a confirmed-live server is
+// declined by the exec anyway, in case some other transport-class message
+// this function does key on ever turns out to reach a live server too.
 //
 // SHARED CLOCK. The due-check and the fire both read/write the same
 // lastRunCache the normal tracking-bead path uses (peekLastRunLocked /
@@ -1209,12 +1240,19 @@ func storeUnavailableFallbackCooldown(a orders.Order) time.Duration {
 // dispatcher rebuild automatically, since it rides carryLastRunCacheFrom.
 //
 // It silently no-ops for a non-exec (formula) order (materializing a wisp
-// needs a store) and for an err that does not classify as store-unavailable.
+// needs a store) and for an err that does not classify as death evidence.
 func (m *memoryOrderDispatcher) maybeFireStoreUnavailableFallback(ctx context.Context, a orders.Order, target execStoreTarget, cityPath string, now time.Time, err error) {
 	if !a.RecoverOnStoreUnavailable || !a.IsExec() {
 		return
 	}
-	if !errors.Is(classifyWorkQueryStoreUnavailable(err), beads.ErrStoreUnavailable) {
+	if ctx.Err() != nil {
+		// A canceled/expired dispatch context (shutdown, reload, tick
+		// deadline) is not a signal about the STORE at all; racing a bare
+		// exec launch against a context already on its way out only adds an
+		// orphaned goroutine with nothing to cancel it cleanly.
+		return
+	}
+	if !classifyStoreUnavailableFallbackTrigger(err) {
 		return
 	}
 	scoped := a.ScopedName()
@@ -1233,10 +1271,6 @@ func (m *memoryOrderDispatcher) maybeFireStoreUnavailableFallback(ctx context.Co
 		m.cacheMu.Unlock()
 		return
 	}
-	if m.storeUnavailableFallbackRunning == nil {
-		m.storeUnavailableFallbackRunning = make(map[string]bool)
-	}
-	m.storeUnavailableFallbackRunning[scoped] = true
 	m.rememberLastRunLocked(key, now)
 	m.cacheMu.Unlock()
 
@@ -1247,6 +1281,27 @@ func (m *memoryOrderDispatcher) maybeFireStoreUnavailableFallback(ctx context.Co
 		Message: "dispatched via store-unavailable fallback: beads store is down, running exec without a tracking bead (ga-3bwmf)",
 	})
 	timeout := effectiveTimeout(a, m.maxTimeout)
+
+	// The single-flight flag is set here, in its own critical section
+	// immediately before the goroutine launch, rather than folded into the
+	// section above: setting it any earlier means a panic in the housekeeping
+	// between that point and `go func()` (e.g. a broken events.Recorder)
+	// leaves it stuck true forever, since the ONLY code that clears it lives
+	// inside the goroutine that would then never have been launched. This
+	// second check-and-set re-validates against a caller that raced in during
+	// the gap above (event Record, effectiveTimeout) — if one already won,
+	// this call yields rather than launching a second fallback exec.
+	m.cacheMu.Lock()
+	if m.storeUnavailableFallbackRunning[scoped] {
+		m.cacheMu.Unlock()
+		return
+	}
+	if m.storeUnavailableFallbackRunning == nil {
+		m.storeUnavailableFallbackRunning = make(map[string]bool)
+	}
+	m.storeUnavailableFallbackRunning[scoped] = true
+	m.cacheMu.Unlock()
+
 	m.addInflight()
 	go func() {
 		defer m.doneInflight()
@@ -1278,13 +1333,22 @@ func (m *memoryOrderDispatcher) maybeFireStoreUnavailableFallback(ctx context.Co
 }
 
 // dispatchExecStoreless is dispatchExec with every beads-store touch removed:
-// no tracking-bead outcome label, no event-cursor persistence (event-triggered
-// orders never reach this path — fireStoreUnavailableFallback is only called
-// from the store-open failure in dispatch's phase 1, before a candidate, and
-// therefore before any trigger-specific handling exists). It still builds the
-// order's real exec environment and runs the real command, and still records
-// the same OrderFailed/OrderCompleted events dispatchExec does — the event bus
-// is independent of beads and stays available exactly when this path is used.
+// no tracking-bead outcome label, no event-cursor persistence. That is safe
+// regardless of which of maybeFireStoreUnavailableFallback's call sites
+// reached it — the store-open failure and the hasOpenTracking gate failure
+// in dispatch's per-order loop (both before a candidate exists), or the
+// hasOpenWork gate failure (openWorkGateShut) and the tracking-bead
+// CreateRun failure (both after a candidate exists, and so, for an
+// event-triggered order, after its cursor read already succeeded — a
+// cursor-read failure returns fireCandidate early, before either of those
+// two gates, so this path never runs FOR that failure). An event-triggered
+// order that does reach this function simply has its cursor left where it
+// was: the next normal-path tick re-evaluates from the same position, which
+// is at-least-once, not silently-skipped — the semantics event orders
+// already tolerate elsewhere. It still builds the order's real exec
+// environment and runs the real command, and still records the same
+// OrderFailed/OrderCompleted events dispatchExec does — the event bus is
+// independent of beads and stays available exactly when this path is used.
 func (m *memoryOrderDispatcher) dispatchExecStoreless(ctx context.Context, target execStoreTarget, a orders.Order, cityPath string, vars map[string]string) {
 	scoped := a.ScopedName()
 	env, err := orderExecEnvWithError(cityPath, m.cfg, target, a, vars)
@@ -1756,6 +1820,26 @@ func (m *memoryOrderDispatcher) cachedLastRun(orderName string, storeKeys []stri
 			return last, true, nil
 		}
 	}
+	// ga-3bwmf: fall back to the freshest entry cached under ANY store-key
+	// combo for this order before touching the store. This closes a
+	// one-directional clock gap: maybeFireStoreUnavailableFallback records
+	// its fire under orderHistoryCacheKey(orderName, nil) — it has no
+	// storeKeys, since it runs storeless — which this function's own exact
+	// key (scoped by storeKeys) never matches. Without this, a normal
+	// dispatch tick racing the store's return mid-fallback misses the
+	// fallback's just-recorded run, re-reads a tracking bead that predates
+	// it, and can conclude the order is overdue while the fallback's
+	// untracked exec is still in flight — a second, tracked dispatch
+	// overlapping the first. peekLastRunLocked only ever returns a value
+	// rememberLastRunLocked already accepted as the freshest for this order
+	// (values there only move forward), so consulting it here can only make
+	// an order look MORE recently run than a stale store read would — the
+	// conservative direction for avoiding a double-fire, never the one that
+	// risks skipping a genuinely due run.
+	if last, ok := m.peekLastRunLocked(orderName); ok {
+		m.cacheMu.Unlock()
+		return last, true, nil
+	}
 	m.cacheMu.Unlock()
 
 	last, err := read(orderName)
@@ -1978,9 +2062,12 @@ func orderHistoryCacheKey(orderName string, storeKeys []string) string {
 }
 
 // peekLastRun returns the freshest cached last-run for a scoped order name
-// across any store-key combination, without touching a store. Used only for
-// admission ordering — the dispatch loop still resolves the authoritative
-// last-run per order.
+// across any store-key combination, without touching a store. Used for
+// admission ordering, and — since ga-3bwmf — as cachedLastRun's fallback for
+// bridging the store-unavailable fallback's storeKeys-less cache entry into
+// a store-key-scoped due-check (see cachedLastRun). The dispatch loop still
+// resolves the authoritative last-run per order when neither cache path
+// hits.
 func (m *memoryOrderDispatcher) peekLastRun(scoped string) (time.Time, bool) {
 	m.cacheMu.Lock()
 	defer m.cacheMu.Unlock()

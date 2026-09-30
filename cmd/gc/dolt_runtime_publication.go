@@ -54,6 +54,7 @@ func writeDoltRuntimeStateFile(path string, state doltRuntimeState) error {
 		return err
 	}
 	state.StartedAt = preservedDoltStartedAt(path, state)
+	state.Watchdog = preservedDoltWatchdog(path, state)
 	data, err := json.Marshal(state)
 	if err != nil {
 		return err
@@ -84,6 +85,35 @@ func preservedDoltStartedAt(path string, state doltRuntimeState) string {
 		return state.StartedAt
 	}
 	return prior.StartedAt
+}
+
+// preservedDoltWatchdog returns the Watchdog that should be written: the one
+// already on disk when it names the SAME pid, otherwise the incoming one.
+// Unreadable or absent prior state, or a zero/changed pid, all fall through
+// to the incoming value.
+//
+// ga-3bwmf review. Watchdog is durable ground truth fixed at SPAWN time (see
+// its doc comment on doltRuntimeState) — it must never move for a PID that
+// keeps running, the same reasoning preservedDoltStartedAt already applies
+// to StartedAt. Without this, every adoption rewrite that goes through this
+// function without knowing Watchdog — `gc dolt-state write-provider`
+// (parseDoltRuntimeStateFlags has no --watchdog flag, so its state always
+// carries the zero value) and recoverManagedDoltRepairRuntimeStateForHealthyPort
+// (its repaired state is likewise built without one) — silently clears a
+// true Watchdog back to false for a server that never restarted, and the
+// dolt-watchdog-liveness doctor check goes blind exactly after the next
+// kickstart adopts. A real restart gets a new pid, so the incoming
+// (correctly recomputed, e.g. dolt_start_managed.go's
+// `started.WatchdogPID > 0`) value is used precisely when it should be.
+func preservedDoltWatchdog(path string, state doltRuntimeState) bool {
+	if state.PID <= 0 {
+		return state.Watchdog
+	}
+	prior, err := readDoltRuntimeStateFile(path)
+	if err != nil || prior.PID != state.PID {
+		return state.Watchdog
+	}
+	return prior.Watchdog
 }
 
 func removeDoltRuntimeStateFile(path string) error {
