@@ -605,20 +605,30 @@ func TestCityGrantsProviderOwnershipToFreshScopesAcceptsPendingUninitializedCity
 	}
 }
 
-// TestCityGrantsProviderOwnershipToFreshScopesAcceptsReadyUninitializedCity
-// (ga-fo5mg) covers the third ownership state cityGrantsProviderOwnership-
-// ToFreshScopes's !cityInitialized branch must recognize: a READY record
-// (not merely a pending one) on a city whose own .beads identity is,
-// nonetheless, still absent. This is only reachable through out-of-band
-// interference -- a crash, a doctor repair, or something deleting
-// .beads/metadata.json -- between markProviderScopeOwnershipReady
-// committing the ownership journal and the scope's own identity write
-// landing (normally the same operation, in that order, inside
-// initAndHookDir). But a ready record is, if anything, a STRONGER ownership
-// signal than a pending one, so a fresh scope added alongside such a city
-// must still inherit -- not get silently stranded on the classic gc-managed
-// path under a city that genuinely is provider-owned.
-func TestCityGrantsProviderOwnershipToFreshScopesAcceptsReadyUninitializedCity(t *testing.T) {
+// TestCityGrantsProviderOwnershipToFreshScopesRefusesReadyUninitializedCity
+// (ga-fo5mg follow-up, option (a)) covers the third ownership state
+// cityGrantsProviderOwnershipToFreshScopes's !cityInitialized branch must
+// recognize: a READY record (not merely a pending one) on a city whose own
+// .beads identity is, nonetheless, still absent.
+//
+// An earlier version of this test (and of the function) treated this as
+// grantable, reasoning that a ready record is a STRONGER ownership signal
+// than a pending one. That reasoning does not survive contact with the
+// caller: markProviderScopeOwnershipReady clears the record's Intent to its
+// zero value on commit, so even a granted ownership here has no intent left
+// for freshScopeProviderOwnershipIntent to inherit -- the fresh-scope path
+// only ever has a PENDING record to fall back to. Granting ownership here
+// just moves the failure one layer up, into freshScopeProviderOwnershipIntent's
+// own invariant-violation error, which is less specific about what actually
+// went wrong. This function must report the state directly instead.
+//
+// The state itself is reachable only through out-of-band interference -- a
+// crash, a doctor repair, or something deleting .beads/metadata.json or
+// config.yaml -- after markProviderScopeOwnershipReady already committed the
+// journal entry: initAndHookDir writes the scope's own identity BEFORE
+// calling markProviderScopeOwnershipReady, in that order, as one operation,
+// so an ordinary crash mid-init cannot produce ready-but-no-identity.
+func TestCityGrantsProviderOwnershipToFreshScopesRefusesReadyUninitializedCity(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
@@ -634,10 +644,13 @@ func TestCityGrantsProviderOwnershipToFreshScopesAcceptsReadyUninitializedCity(t
 	// out-of-band scenario described above.
 
 	inherits, err := cityGrantsProviderOwnershipToFreshScopes(cityPath, false)
-	if err != nil {
-		t.Fatalf("cityGrantsProviderOwnershipToFreshScopes: %v", err)
+	if err == nil {
+		t.Fatalf("cityGrantsProviderOwnershipToFreshScopes = (%v, nil) for a ready-but-uninitialized city, want an actionable error", inherits)
 	}
-	if !inherits {
-		t.Fatal("cityGrantsProviderOwnershipToFreshScopes = false for a ready provider-owned uninitialized city, want true")
+	if inherits {
+		t.Fatal("cityGrantsProviderOwnershipToFreshScopes = true for a ready-but-uninitialized city, want false alongside the error")
+	}
+	if !strings.Contains(err.Error(), "ready provider-ownership record") {
+		t.Fatalf("error = %v, want it to name the ready-but-uninitialized state", err)
 	}
 }

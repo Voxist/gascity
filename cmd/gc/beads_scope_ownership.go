@@ -879,25 +879,24 @@ func rigProviderScopeKeyAtPath(journal providerScopeOwnershipJournal, scopeRoot 
 // a READY record there means something different (the scope already has a
 // committed topology, which is a conflicting-intent error, not a resume).
 // A caller that only needs "is this scope owned at all, regardless of
-// state" wants cityHasProviderOwnershipRecord instead.
+// state" calls providerScopeOwnership directly instead (see
+// cityGrantsProviderOwnershipToFreshScopes's ready-record branch).
 func pendingProviderOwnership(cityPath, scopeRoot string) (providerScopeIntent, bool, error) {
 	entry, owned, err := providerScopeOwnership(cityPath, scopeRoot)
 	if err != nil {
 		return providerScopeIntent{}, false, err
 	}
-	return entry.Intent, owned && entry.State == providerScopeInitializing, nil
-}
-
-// cityHasProviderOwnershipRecord reports whether cityPath carries ANY
-// provider-ownership record for itself, pending or ready. Used only by
-// cityGrantsProviderOwnershipToFreshScopes's uninitialized-city branch,
-// where a ready record is just as real an ownership signal as a pending
-// one -- unlike pendingProviderOwnership, which intentionally stays
-// state-specific for the in-flight-init semantics persistFreshProvider-
-// Ownership needs.
-func cityHasProviderOwnershipRecord(cityPath string) (bool, error) {
-	_, owned, err := providerScopeOwnership(cityPath, cityPath)
-	return owned, err
+	pending := owned && entry.State == providerScopeInitializing
+	if !pending {
+		// A ready (or absent) record carries no intent a caller may treat as
+		// pending. markProviderScopeOwnershipReady clears entry.Intent to its
+		// zero value on commit precisely so nothing downstream can read a
+		// stale pending-style intent off a record that has already settled;
+		// returning entry.Intent here regardless of state would hand callers
+		// exactly that stale value.
+		return providerScopeIntent{}, false, nil
+	}
+	return entry.Intent, true, nil
 }
 
 // freshScopeProviderOwnershipIntent keeps every fresh rig on the city's
@@ -1022,21 +1021,44 @@ func ensureProviderScopeOwnershipBeforeInit(cityPath, scopeRoot string) error {
 // function before the city's own store exists must tell the two cases
 // apart, or it hands ownership to a rig under a city that is, and stays,
 // classic gc-managed.
+//
+// A pending record is the only grantable signal here (ga-fo5mg follow-up):
+// a READY record on a city that is STILL uninitialized cannot be served. It
+// is reachable only through out-of-band interference -- a crash, a doctor
+// repair, or something deleting .beads/metadata.json/config.yaml -- after
+// markProviderScopeOwnershipReady already committed the journal entry,
+// because initAndHookDir writes the scope's own identity BEFORE calling
+// markProviderScopeOwnershipReady, in that order, as one operation; an
+// ordinary crash mid-init cannot leave ready-but-no-identity behind.
+// markProviderScopeOwnershipReady also clears entry.Intent to its zero value
+// on commit, so even if this granted ownership here, there would be no
+// intent left for the caller to inherit (fresh-scope resolution has nothing
+// but a pending record to fall back to). Report the state plainly instead of
+// silently falling through to that invariant error one layer up.
 func cityGrantsProviderOwnershipToFreshScopes(cityPath string, cityInitialized bool) (bool, error) {
 	if !cityInitialized {
-		// A pending record is the normal case; a READY one here (rather
-		// than the more common pending state) is only reachable through
-		// out-of-band interference -- a crash, a doctor repair, or
-		// something deleting .beads/metadata.json -- between
-		// markProviderScopeOwnershipReady committing the ownership journal
-		// and the scope's own identity write landing (normally the same
-		// operation, in that order, inside initAndHookDir). Either way,
-		// grant: a ready record is, if anything, a STRONGER signal than a
-		// pending one, so this checks for any owned record at all rather
-		// than reusing pendingProviderOwnership, which deliberately stays
-		// state-specific for persistFreshProviderOwnership's in-flight-init
-		// intent/conflict handling.
-		return cityHasProviderOwnershipRecord(cityPath)
+		_, pending, err := pendingProviderOwnership(cityPath, cityPath)
+		if err != nil {
+			return false, err
+		}
+		if pending {
+			return true, nil
+		}
+		_, owned, err := providerScopeOwnership(cityPath, cityPath)
+		if err != nil {
+			return false, err
+		}
+		if owned {
+			// Narrow race: a concurrent `gc init` can commit markProviderScope-
+			// OwnershipReady and write the city's own .beads identity between
+			// this function's caller reading cityInitialized=false and this
+			// read landing here. That window is real but short, so the error
+			// says so rather than claiming a permanent break -- a retry after
+			// the concurrent init finishes resolves it via the cityInitialized
+			// branch below instead.
+			return false, fmt.Errorf("city %q has a ready provider-ownership record but no .beads identity (metadata.json/config.yaml missing); if this city is actively being initialized by another process, retry once that finishes, otherwise restore the city's beads metadata before adding rigs", cityPath)
+		}
+		return false, nil
 	}
 	return cityScopeProviderOwned(cityPath)
 }
