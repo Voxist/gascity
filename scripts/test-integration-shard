@@ -104,6 +104,16 @@ review_formulas_recovery_tests=(
 # Keep this list to top-level test names. Matching a parent test runs all of
 # its subtests, so additions here directly widen the every-PR smoke budget.
 #
+# Add new entries at the END of the list. rest-smoke splits this list across
+# 2 shards by index parity (i%2, run_pkg_tests_modulo in this script), so
+# inserting anywhere but the end reshuffles every later test's shard
+# assignment. ga-wuda3 inserted TestCleanInstallTutorialPath at the front and
+# moved TestGraphWorkflowSuccessPath from shard 2 (where ga-hwjxn's flake has
+# always been observed) into shard 1, where it then failed 2/2 while passing
+# 6/6 elsewhere in the same window -- not a new defect, but a pre-existing
+# flake exposed by a shard it had never run in before. See ga-hwjxn for the
+# mechanism.
+#
 # TestCleanInstallTutorialPath (ga-wuda3): the clean-install gc init + gc rig
 # add path (issue #1670) regressed silently for three days across the #215
 # resync because it lived only in rest-full, which is push-only (main-red
@@ -112,7 +122,6 @@ review_formulas_recovery_tests=(
 # add, two bd calls), exactly the shape the smoke set already favors, so it
 # moves here rather than widening rest-full's PR footprint.
 rest_smoke_tests=(
-  TestCleanInstallTutorialPath
   TestE2E_WorkspaceDefaults
   TestE2E_Hook_WithWork
   TestE2E_MultiAgent_PoolAndFixed
@@ -121,6 +130,7 @@ rest_smoke_tests=(
   TestGraphWorkflowSuccessPath
   TestIntegrationEnvForPinsRealHome
   TestStandaloneBDEnvForDirIsolatesHome
+  TestCleanInstallTutorialPath
 )
 
 # These are the top-level tests contributed only when cmd/gc is built with the
