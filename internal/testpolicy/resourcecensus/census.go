@@ -162,8 +162,19 @@ var bootstrapPolicy = Ledger{
 			// "GOPATH")` and `exec.Command(bin, "--version")`, to resolve
 			// and verify the pinned golangci-lint binary instead of
 			// whatever "golangci-lint" happened to resolve to on PATH.
-			BaselineCalls:   719,
-			BaselineFiles:   208,
+			//
+			// Bumped 719->723 calls, 208->209 files for ga-iv2l2's new
+			// cmd/gc/gc_beads_bd_recover_lock_test.go: four
+			// exec.Command("bash"/"flock", ...) call sites across
+			// TestConcurrentOpRecoverSerializesStopAndStart and
+			// TestOpStartTrustsCallerHeldLockInsteadOfReacquiring -- real
+			// subprocesses (the extracted op_recover/op_start shell
+			// functions, plus a real `flock` holder process and probe) are
+			// the only way to behaviorally prove the stop/cleanup/start
+			// sequence is serialized under one lock, not grepped from
+			// source text.
+			BaselineCalls:   723,
+			BaselineFiles:   209,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-cp3hwi",
@@ -173,10 +184,17 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-10-01",
 		},
 		{
-			Scope:           ScopeAll,
-			Resource:        ResourceFixedSleep,
-			BaselineCalls:   485,
-			BaselineFiles:   177,
+			Scope:    ScopeAll,
+			Resource: ResourceFixedSleep,
+			// Bumped 485->486 calls, 177->178 files for ga-iv2l2's new
+			// cmd/gc/gc_beads_bd_recover_lock_test.go: one
+			// time.Sleep(20*time.Millisecond) call polling for the real
+			// external flock holder in
+			// TestOpStartTrustsCallerHeldLockInsteadOfReacquiring (see the
+			// matching audit_baseline subprocess comment above for the
+			// source).
+			BaselineCalls:   486,
+			BaselineFiles:   178,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
 			OwnerBead:       "ga-cp3hwi",
@@ -215,8 +233,12 @@ var bootstrapPolicy = Ledger{
 			// Bumped 480->482 calls (files unchanged, 137) for the same
 			// bead's review fix-up (see the matching audit_baseline
 			// subprocess comment above for the source).
-			BaselineCalls:   482,
-			BaselineFiles:   137,
+			//
+			// Bumped 482->486 calls, 137->138 files for ga-iv2l2's review
+			// fix-up (see the matching audit_baseline subprocess comment
+			// above for the source).
+			BaselineCalls:   486,
+			BaselineFiles:   138,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-cp3hwi",
@@ -226,10 +248,13 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-10-01",
 		},
 		{
-			Scope:           ScopeUntagged,
-			Resource:        ResourceFixedSleep,
-			BaselineCalls:   319,
-			BaselineFiles:   121,
+			Scope:    ScopeUntagged,
+			Resource: ResourceFixedSleep,
+			// Bumped 319->320 calls, 121->122 files for ga-iv2l2's review
+			// fix-up (see the matching audit_baseline subprocess comment
+			// above for the source).
+			BaselineCalls:   320,
+			BaselineFiles:   122,
 			ReportedCalls:   295,
 			ReportedFiles:   114,
 			OwnerBead:       "ga-cp3hwi",
@@ -600,8 +625,12 @@ var bootstrapPolicy = Ledger{
 			// Bumped 462->464 calls (files unchanged, 131) for the same
 			// bead's review fix-up (see the matching audit_baseline
 			// subprocess comment above for the source).
-			BaselineCalls:   464,
-			BaselineFiles:   131,
+			//
+			// Bumped 464->468 calls, 131->132 files for ga-iv2l2's review
+			// fix-up (see the matching audit_baseline subprocess comment
+			// above for the source).
+			BaselineCalls:   468,
+			BaselineFiles:   132,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
 			OwnerBead:       "ga-cp3hwi",
@@ -611,10 +640,13 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-10-01",
 		},
 		{
-			Scope:           ScopeUntagged,
-			Resource:        ResourceFixedSleep,
-			BaselineCalls:   319,
-			BaselineFiles:   121,
+			Scope:    ScopeUntagged,
+			Resource: ResourceFixedSleep,
+			// Bumped 319->320 calls, 121->122 files for ga-iv2l2's review
+			// fix-up (see the matching audit_baseline subprocess comment
+			// above for the source).
+			BaselineCalls:   320,
+			BaselineFiles:   122,
 			ReportedCalls:   287,
 			ReportedFiles:   113,
 			OwnerBead:       "ga-cp3hwi",
