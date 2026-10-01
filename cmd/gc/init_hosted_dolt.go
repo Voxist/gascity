@@ -300,7 +300,7 @@ func (o hostedDoltInitOptions) providerOwnershipIntentSourced(city config.City) 
 	if err != nil {
 		return providerScopeIntent{}, false, err
 	}
-	return intent, resolved.Source != "provider-default", nil
+	return intent, resolved.Source != contract.SourceProviderDefault, nil
 }
 
 // providerScopeEndpoint projects the one-shot external endpoint this init

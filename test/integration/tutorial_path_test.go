@@ -13,6 +13,7 @@ package integration
 // This test passes against current main (post-#1477) and guards against future regressions of #1670.
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,6 +23,46 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
+// redactedMetadataJSONKeyNeedles is the set of substrings a metadata.json key
+// must not contain in a diagnostics dump. Mirrors
+// cmd/gc/internal/beads/contract/preflight.go's own redaction needle list
+// (password, passwd, secret, token, key) so the two stay in agreement about
+// what counts as sensitive in this file.
+var redactedMetadataJSONKeyNeedles = []string{"password", "passwd", "secret", "token", "key"}
+
+// dumpScopeMetadataJSON reads a scope's .beads/metadata.json and renders it
+// with any sensitive-looking field (anything matching
+// redactedMetadataJSONKeyNeedles, case-insensitively -- metadata.json can
+// carry dolt_password for an external endpoint) replaced with "[redacted]"
+// rather than printed verbatim into a CI log.
+func dumpScopeMetadataJSON(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Sprintf("%v", err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(data, &fields); err != nil {
+		// Not valid JSON (or not an object) -- still worth seeing fewer than
+		// the raw bytes is unhelpful, but printing raw bytes risks a secret
+		// that didn't parse as expected. Report the shape only.
+		return fmt.Sprintf("(unparseable as a JSON object: %v)", err)
+	}
+	for key := range fields {
+		lower := strings.ToLower(key)
+		for _, needle := range redactedMetadataJSONKeyNeedles {
+			if strings.Contains(lower, needle) {
+				fields[key] = "[redacted]"
+				break
+			}
+		}
+	}
+	redacted, err := json.Marshal(fields)
+	if err != nil {
+		return fmt.Sprintf("(failed to re-marshal after redaction: %v)", err)
+	}
+	return string(redacted)
+}
+
 // dumpRigDoltDiagnostics summarizes the on-disk state that distinguishes a
 // classic gc-managed rig (sharing the city's one Dolt server) from a
 // provider-owned one (its own, separately-seeded server) at failure time. It
@@ -29,16 +70,20 @@ import (
 // the dump itself, since the diagnostic's whole point is to explain a prior
 // failure, not introduce a new one.
 //
-// This is deliberately narrow to the two files that answer "which server, if
-// any, was this rig pointed at, and did the city think it owned that server
-// itself": .beads/dolt-server.port (which port a scope's own bd process
-// bound, when it ran one) and .beads/metadata.json (backend/dolt_mode, which
-// distinguishes classic "server" mode from an embedded or provider-owned
-// scope). ga-wuda3's root cause was exactly this: a rig silently got its own
-// unseeded provider-owned Dolt server instead of sharing the city's.
+// Three files answer "which server, if any, was this rig pointed at, and did
+// the city think it owned that server itself": .beads/dolt-server.port
+// (which port a scope's own bd process bound, when it ran one),
+// .beads/metadata.json (backend/dolt_mode, which distinguishes classic
+// "server" mode from an embedded or provider-owned scope -- redacted, since
+// it can carry dolt_password for an external endpoint), and
+// .gc/scope-ownership.json (the journal that actually tells gc-managed from
+// provider-owned, read by cityScopeProviderOwned/scopeProviderOwned -- the
+// ownership VALUE both metadata.json and dolt-server.port are only indirect
+// evidence of). ga-wuda3's root cause was exactly this: a rig silently got
+// its own unseeded provider-owned Dolt server instead of sharing the city's.
 func dumpRigDoltDiagnostics(cityDir, rigDir string) string {
 	var b strings.Builder
-	dump := func(label, path string) {
+	dumpPortFile := func(label, path string) {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			fmt.Fprintf(&b, "  %s (%s): %v\n", label, path, err)
@@ -46,12 +91,16 @@ func dumpRigDoltDiagnostics(cityDir, rigDir string) string {
 		}
 		fmt.Fprintf(&b, "  %s (%s): %s\n", label, path, strings.TrimSpace(string(data)))
 	}
+	dumpMetadata := func(label, path string) {
+		fmt.Fprintf(&b, "  %s (%s): %s\n", label, path, dumpScopeMetadataJSON(path))
+	}
 	fmt.Fprintf(&b, "city dir: %s\n", cityDir)
-	dump("city dolt-server.port", filepath.Join(cityDir, ".beads", "dolt-server.port"))
-	dump("city metadata.json", filepath.Join(cityDir, ".beads", "metadata.json"))
+	dumpPortFile("city dolt-server.port", filepath.Join(cityDir, ".beads", "dolt-server.port"))
+	dumpMetadata("city metadata.json", filepath.Join(cityDir, ".beads", "metadata.json"))
+	dumpPortFile("city scope-ownership.json", filepath.Join(cityDir, ".gc", "scope-ownership.json"))
 	fmt.Fprintf(&b, "rig dir: %s\n", rigDir)
-	dump("rig dolt-server.port", filepath.Join(rigDir, ".beads", "dolt-server.port"))
-	dump("rig metadata.json", filepath.Join(rigDir, ".beads", "metadata.json"))
+	dumpPortFile("rig dolt-server.port", filepath.Join(rigDir, ".beads", "dolt-server.port"))
+	dumpMetadata("rig metadata.json", filepath.Join(rigDir, ".beads", "metadata.json"))
 	return b.String()
 }
 

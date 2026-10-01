@@ -482,3 +482,98 @@ func TestEnsureFreshRigProviderOwnershipDefaultsEmbeddedCityRigToDirectServer(t 
 		t.Errorf("rig postInitScopeDoltMode under embedded city = %q, want server", got)
 	}
 }
+
+// TestEnsureProviderScopeOwnershipBeforeInitLeavesNoSignalCityGCManaged pins
+// ensureProviderScopeOwnershipBeforeInit's own city-journaling branch
+// (cmd/gc/beads_scope_ownership.go), a SECOND writer independent of
+// persistFreshProviderOwnership (cmd/gc/init_hosted_dolt.go). Both can
+// journal the city as provider-owned, and both had their own copy of the
+// same no-signal-still-owns bug.
+//
+// This writer is reached (via initDirIfReady, beads_provider_lifecycle.go,
+// when GC_DOLT != "skip") when `gc init` defers bead-store seeding past the
+// readiness preflight -- exactly what `gc init --skip-provider-readiness`
+// does (runInitProviderPreflightForConfig, which calls
+// seedDeferredManagedBeadsBeforeProviderReadiness, only runs when
+// !skipProviderReadiness) -- so initDirIfReady reaches this function before
+// the city's own .beads identity exists. TestCleanInstallTutorialPath's
+// `gc init` call uses exactly this flag, with GC_DOLT unset, which is why
+// this writer -- not persistFreshProviderOwnership -- was the one that kept
+// the regression alive even after persistFreshProviderOwnership's own fix
+// landed. Calling it directly (rather than through initDirIfReady's full
+// dispatch, which needs a real bd/dolt-server environment to proceed past
+// the ownership decision this test cares about) keeps the test a narrow
+// unit test of the ownership decision itself.
+func TestEnsureProviderScopeOwnershipBeforeInitLeavesNoSignalCityGCManaged(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"dolt-city\"\nprefix = \"gc\"\n[beads]\nprovider = \"bd\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ensureProviderScopeOwnershipBeforeInit(cityPath, cityPath); err != nil {
+		t.Fatalf("ensureProviderScopeOwnershipBeforeInit: %v", err)
+	}
+
+	if entry, owned, err := providerScopeOwnership(cityPath, cityPath); err != nil || owned {
+		t.Fatalf("city ownership after ensureProviderScopeOwnershipBeforeInit = (%+v, %t, %v), want not owned (classic gc-managed)", entry, owned, err)
+	}
+}
+
+// TestCityGrantsProviderOwnershipToFreshScopesDeclinesForUnjournaledFreshCity
+// pins cityGrantsProviderOwnershipToFreshScopes directly: an uninitialized
+// city (no .beads identity yet) with no pending ownership journal entry must
+// NOT grant ownership to a scope added alongside it. Before this fix, the
+// function returned true unconditionally for any uninitialized city --
+// correct back when persistFreshProviderOwnership always journaled a pending
+// record for any fresh init, wrong once ga-m07q9 made the no-signal case
+// leave that record absent. A `gc rig add` or `gc start` reaching this
+// function while the city's own store still doesn't exist (e.g. a deferred
+// seeding, ga-wuda3) would otherwise make the rig provider-owned under a
+// city that stays, and was always going to stay, classic gc-managed -- the
+// exact split topology this function's own doc comment warns against.
+func TestCityGrantsProviderOwnershipToFreshScopesDeclinesForUnjournaledFreshCity(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// No metadata.json/config.yaml: the city is uninitialized. No ownership
+	// journal entry at all: no explicit or persisted signal ever named this
+	// city provider-owned.
+
+	inherits, err := cityGrantsProviderOwnershipToFreshScopes(cityPath, false)
+	if err != nil {
+		t.Fatalf("cityGrantsProviderOwnershipToFreshScopes: %v", err)
+	}
+	if inherits {
+		t.Fatal("cityGrantsProviderOwnershipToFreshScopes = true for an unjournaled fresh city, want false (classic gc-managed, no split topology)")
+	}
+}
+
+// TestCityGrantsProviderOwnershipToFreshScopesAcceptsPendingUninitializedCity
+// is the complement: a city that IS uninitialized but DOES carry a pending
+// provider-owned journal entry (an explicit-selector `gc init` that hasn't
+// reached bd's own metadata commit yet) must still grant ownership to a
+// scope added alongside it -- the exact "gc init records the pending intent
+// that this function's caller reads" case this function's doc comment
+// describes.
+func TestCityGrantsProviderOwnershipToFreshScopesAcceptsPendingUninitializedCity(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := persistProviderScopeOwnership(cityPath, cityPath, providerScopeIntent{Transport: "direct", Target: "local"}); err != nil {
+		t.Fatal(err)
+	}
+
+	inherits, err := cityGrantsProviderOwnershipToFreshScopes(cityPath, false)
+	if err != nil {
+		t.Fatalf("cityGrantsProviderOwnershipToFreshScopes: %v", err)
+	}
+	if !inherits {
+		t.Fatal("cityGrantsProviderOwnershipToFreshScopes = false for a pending provider-owned uninitialized city, want true")
+	}
+}
