@@ -85,8 +85,7 @@ func TestGraphWorkflowSuccessPath(t *testing.T) {
 		t.Fatalf("worktree path %s should be removed, stat err=%v", worktreePath, err)
 	}
 
-	report := readWorkflowReport(t, cityDir)
-	for _, suffix := range []string{
+	wantSteps := []string{
 		".load-context",
 		".workspace-setup",
 		".preflight-tests",
@@ -94,7 +93,9 @@ func TestGraphWorkflowSuccessPath(t *testing.T) {
 		".self-review",
 		".submit",
 		".cleanup-worktree",
-	} {
+	}
+	report := readWorkflowReport(t, cityDir, wantSteps...)
+	for _, suffix := range wantSteps {
 		if !strings.Contains(report, suffix) {
 			t.Fatalf("report missing %s:\n%s", suffix, report)
 		}
@@ -135,8 +136,9 @@ func TestGraphWorkflowFailureRunsCleanup(t *testing.T) {
 		}
 	}
 
-	report := readWorkflowReport(t, cityDir)
-	for _, suffix := range []string{".load-context", ".workspace-setup", ".preflight-tests", ".cleanup-worktree"} {
+	wantSteps := []string{".load-context", ".workspace-setup", ".preflight-tests", ".cleanup-worktree"}
+	report := readWorkflowReport(t, cityDir, wantSteps...)
+	for _, suffix := range wantSteps {
 		if !strings.Contains(report, suffix) {
 			t.Fatalf("report missing %s:\n%s", suffix, report)
 		}
@@ -451,15 +453,34 @@ func extractJSONPayload(raw string) string {
 	return raw
 }
 
-func readWorkflowReport(t *testing.T, cityDir string) string {
+// readWorkflowReport polls cityDir's workflow step-report file until it
+// contains every suffix in wantSuffixes, not merely until the file becomes
+// non-empty. graph-dispatch.sh appends one line per step as the molecule
+// executes them, so a bare non-empty check can observe the report mid-
+// sequence -- after the first steps have landed but before the rest,
+// including cleanup-worktree, have been appended -- and hand the caller a
+// truncated snapshot even though the workflow itself completed correctly
+// (ga-hwjxn: this is the actual mechanism behind "report missing
+// .cleanup-worktree", a report-read race against the report-write, not a
+// product defect).
+//
+// If wantSuffixes never all land before the deadline, this returns
+// whatever content exists (or "" if the file was never created) rather
+// than failing itself, so the caller's own per-suffix assertion reports
+// exactly which step is missing, with the partial report as evidence.
+func readWorkflowReport(t *testing.T, cityDir string, wantSuffixes ...string) string {
 	t.Helper()
 
 	path := filepath.Join(cityDir, "graph-workflow-steps.log")
 	deadline := time.Now().Add(5 * time.Second)
+	var last string
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(path)
-		if err == nil && len(strings.TrimSpace(string(data))) > 0 {
-			return string(data)
+		if err == nil {
+			last = string(data)
+			if workflowReportHasAllSteps(last, wantSuffixes) {
+				return last
+			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -469,4 +490,13 @@ func readWorkflowReport(t *testing.T, cityDir string) string {
 		t.Fatalf("reading workflow report: %v", err)
 	}
 	return string(data)
+}
+
+func workflowReportHasAllSteps(report string, wantSuffixes []string) bool {
+	for _, suffix := range wantSuffixes {
+		if !strings.Contains(report, suffix) {
+			return false
+		}
+	}
+	return true
 }
