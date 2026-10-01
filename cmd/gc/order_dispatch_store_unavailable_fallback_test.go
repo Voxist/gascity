@@ -444,6 +444,67 @@ func TestOrderDispatchStoreUnavailableFallbackNoOverlapFromWarmCache(t *testing.
 	}
 }
 
+// TestOrderDispatchStoreUnavailableFallbackCooldownHoldsAfterCompletion pins
+// the round-5 review's MEDIUM: cachedLastRun's max(exact, peek) must stay
+// pinned even after the fallback exec has COMPLETED, not just while it is
+// still in flight. The three NoOverlap tests above all exercise the
+// in-flight case, where the shared recoverSF guard alone would also block
+// a second fire regardless of cachedLastRun's own behavior — reverting
+// cachedLastRun to `peekOK && !exactOK` leaves all of them green, because
+// the flag masks the regression. This test lets the fallback run to
+// completion (recorder.run with no started/release channel set returns
+// immediately) before the next tick, so recoverSF has nothing left to
+// block and only cachedLastRun's own cooldown math can prevent the
+// overlap. Timeline: a normal dispatch completes at t0, warming the
+// exact-key cache entry. The store dies; the fallback fires at t0+61s
+// (past the order's 1m cooldown) and completes immediately. The store
+// recovers at t0+62s: a stale exact-key-first read would see the order as
+// overdue since t0 again and fire a THIRD exec, even though the fallback
+// already satisfied the order's cooldown one second earlier.
+func TestOrderDispatchStoreUnavailableFallbackCooldownHoldsAfterCompletion(t *testing.T) {
+	const orderName = "cooldown-holds-after-fallback-completion"
+	recorder := &reservedDispatchExecRecorder{}
+	order := storeUnavailableFallbackOrder(t, orderName, true)
+	store := &toggleableTransportFailStore{Store: beads.NewMemStore()}
+	m := buildOrderDispatcherFromListExec([]orders.Order{order}, store, nil, recorder.run, nil).(*memoryOrderDispatcher)
+	cityPath := t.TempDir()
+
+	// Phase 1: a normal dispatch completes while the store is healthy,
+	// warming cachedLastRun's exact-key entry.
+	m.dispatch(context.Background(), cityPath, time.Now())
+	drainOrderDispatch(t, m)
+	if got := recorder.counts()[orderName]; got != 1 {
+		t.Fatalf("warm-up exec calls = %d, want 1", got)
+	}
+	warmBeads := trackingBeads(t, store, "order-run:"+orderName)
+	if len(warmBeads) != 1 {
+		t.Fatalf("tracking beads after warm-up = %d, want 1", len(warmBeads))
+	}
+	t0 := warmBeads[0].CreatedAt
+
+	// Phase 2: the store dies; the fallback fires past the order's 1m
+	// cooldown and runs to completion immediately.
+	t1 := t0.Add(61 * time.Second)
+	store.setListErr(errConnectionRefused)
+	m.dispatch(context.Background(), cityPath, t1)
+	drainOrderDispatch(t, m)
+	if got := recorder.counts()[orderName]; got != 2 {
+		t.Fatalf("exec calls once the fallback has fired and completed = %d, want 2 (warm-up + fallback)", got)
+	}
+
+	// The store is back one second later. recoverSF has nothing left to
+	// block (the fallback already finished and released it) -- cachedLastRun
+	// taking max(exact, peek) is the ONLY thing left that can prevent a
+	// third exec from a stale exact-key read that still thinks t0 is the
+	// last run.
+	store.setListErr(nil)
+	m.dispatch(context.Background(), cityPath, t1.Add(time.Second))
+	drainOrderDispatch(t, m)
+	if got := recorder.counts()[orderName]; got != 2 {
+		t.Fatalf("exec calls one second after the fallback completed and the store recovered = %d, want 2 (cachedLastRun must not let a stale exact-key read re-fire within the fallback's own cooldown)", got)
+	}
+}
+
 // TestOrderDispatchStoreUnavailableFallbackNoOverlapWhenCooldownOutrunsTimeout
 // pins the round-3 review's HIGH finding #2: beads-health's real
 // configuration has timeout=60s but interval=30s, so the normal path's own
@@ -561,6 +622,81 @@ func TestOrderDispatchStoreUnavailableFallbackNoOverlapReverseDirection(t *testi
 	drainOrderDispatch(t, m)
 	if got := recorder.counts()[orderName]; got != 1 {
 		t.Fatalf("exec calls after the normal dispatch released = %d, want 1", got)
+	}
+}
+
+// TestReplaceOrderDispatcherSharesRecoverSingleFlight pins the round-5
+// review's HIGH: replaceOrderDispatcher carries lastRunCache, gate backoff,
+// and open-work suppression across a dispatcher swap (config reload or
+// order rescan), but before this fix did NOT carry the recoverSF
+// single-flight guard -- the incoming dispatcher started with an empty
+// map. A swap mid-incident (the operator running `gc reload` while the
+// store is down, or a rescan racing a live recover) could therefore admit
+// a second, concurrent `gc beads health` exec: the outgoing dispatcher's
+// exec, launched before the swap, keeps running (a 1s drain timeout parks
+// it in retiredOrderDispatchers rather than waiting for it), while the
+// incoming dispatcher's fresh, empty map lets the SAME order fire again.
+//
+// This test drives that exact timeline: dispatcher A starts an exec and
+// blocks mid-flight; CityRuntime swaps to dispatcher B while A's exec is
+// still running; B ticks past the order's cooldown and must see exactly
+// one exec in flight, not two -- proving the swap SHARES the guard (by
+// pointer) rather than resetting it.
+func TestReplaceOrderDispatcherSharesRecoverSingleFlight(t *testing.T) {
+	const orderName = "swap-shares-single-flight"
+	started := make(chan struct{})
+	release := make(chan struct{})
+	recorder := &reservedDispatchExecRecorder{started: started, release: release}
+	order := storeUnavailableFallbackOrder(t, orderName, true)
+	store := &toggleableTransportFailStore{Store: beads.NewMemStore()}
+	cityPath := t.TempDir()
+
+	store.setListErr(errConnectionRefused)
+	dispatcherA := buildOrderDispatcherFromListExec([]orders.Order{order}, store, nil, recorder.run, nil).(*memoryOrderDispatcher)
+
+	// The store is down; A fires the storeless fallback and blocks
+	// mid-exec. This matters: the fallback writes NO tracking bead, so
+	// nothing store-backed (an open-work gate) can independently block a
+	// second fire the way it would for a normal, tracked dispatch -- only
+	// the single-flight guard can.
+	now := time.Now()
+	dispatcherA.dispatch(context.Background(), cityPath, now)
+	awaitClose(t, started, "dispatcher A fallback exec start")
+	if got := recorder.counts()[orderName]; got != 1 {
+		t.Fatalf("exec calls on A = %d, want 1", got)
+	}
+
+	// CityRuntime swaps to B WHILE A's exec is still in flight.
+	dispatcherB := buildOrderDispatcherFromListExec([]orders.Order{order}, store, nil, recorder.run, nil).(*memoryOrderDispatcher)
+	cr := &CityRuntime{od: dispatcherA}
+	cr.replaceOrderDispatcher(dispatcherB)
+	if cr.od != orderDispatcher(dispatcherB) {
+		t.Fatalf("replaceOrderDispatcher installed %v, want dispatcher B", cr.od)
+	}
+
+	// Past the order's own 1m cooldown, with the store STILL down, B would
+	// also try the fallback -- which writes no tracking bead, so nothing
+	// but the shared single-flight guard can stop it from firing a
+	// second, concurrent exec while A's fallback is still running.
+	dispatcherB.dispatch(context.Background(), cityPath, now.Add(61*time.Second))
+	if got := recorder.counts()[orderName]; got != 1 {
+		t.Fatalf("exec calls on B while A's fallback exec is still in flight = %d, want 1 (the swap must share the single-flight guard, not reset it)", got)
+	}
+
+	close(release)
+	drainOrderDispatch(t, dispatcherA)
+	drainOrderDispatch(t, dispatcherB)
+	if got := recorder.counts()[orderName]; got != 1 {
+		t.Fatalf("exec calls after A's fallback released = %d, want 1", got)
+	}
+
+	// The guard must not leak forever either: once A's fallback has
+	// released and enough time has passed, B must still be able to fire
+	// its own fallback for this order (the store is still down).
+	dispatcherB.dispatch(context.Background(), cityPath, now.Add(130*time.Second))
+	drainOrderDispatch(t, dispatcherB)
+	if got := recorder.counts()[orderName]; got != 2 {
+		t.Fatalf("exec calls after A released and B's own cooldown passed = %d, want 2 (B must still be able to fire once the shared guard clears)", got)
 	}
 }
 
@@ -683,6 +819,7 @@ func TestClassifyStoreUnavailableFallbackTrigger(t *testing.T) {
 		{"broken pipe", errors.New("write: broken pipe"), false},
 		{"unexpected EOF", errors.New("read: unexpected EOF"), false},
 		{"use of closed network connection", errors.New("read: use of closed network connection"), false},
+		{"EADDRNOTAVAIL", errors.New("dial tcp 127.0.0.1:48770: bind: can't assign requested address"), false},
 		{"connection refused", errConnectionRefused, true},
 		{"no such host", errors.New("dial tcp: lookup dolt-host: no such host"), true},
 		{"server unreachable", errors.New("server unreachable"), true},
@@ -775,6 +912,33 @@ recover_on_store_unavailable = true
 	return order
 }
 
+// assertSingleFlightReleased asserts, by reading recoverSingleFlight's map
+// directly under its own mutex, that scoped is NOT marked running on m right
+// now (ga-3bwmf review round 5 LOW). This is deliberately a direct state
+// check rather than an inference from a second dispatch's behavior: the
+// round-3 onDone-vs-doneInflight ordering bug this PR fixed (see
+// dispatchOne's preInflightRelease) was ~30% intermittent precisely because
+// a stale release raced against drainOrderDispatch's own wakeup, so an
+// indirect "did the second dispatch succeed" assertion only ever caught it
+// probabilistically -- reliably under -race (which perturbs scheduling
+// enough to widen the window), not in a plain `go test` run. Calling this
+// directly after drainOrderDispatch turns that into a deterministic check:
+// dispatchOne's preInflightRelease hook is a defer in the SAME function
+// frame as doneInflight, registered to unwind strictly before it (see the
+// doc comment on memoryOrderDispatcher.recoverSF), so by the time drain()
+// observes doneInflight's effect, the release is already guaranteed to
+// have happened -- no timing dependency left to hide behind.
+func assertSingleFlightReleased(t *testing.T, m *memoryOrderDispatcher, scoped string) {
+	t.Helper()
+	sf := m.singleFlight()
+	sf.mu.Lock()
+	held := sf.running[scoped]
+	sf.mu.Unlock()
+	if held {
+		t.Fatalf("recoverSF still marks %q running directly after drain -- the release is not actually visible by the time drain() returns", scoped)
+	}
+}
+
 func TestOrderDispatchStoreUnavailableFallbackReleasesRunningFactOnNormalPathPanic(t *testing.T) {
 	const orderName = "normal-path-panic-releases"
 	var calls int32
@@ -790,6 +954,8 @@ func TestOrderDispatchStoreUnavailableFallbackReleasesRunningFactOnNormalPathPan
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("exec calls after the panicking run = %d, want 1", got)
 	}
+
+	assertSingleFlightReleased(t, m, order.ScopedName())
 
 	// A second, LATER dispatch (well past the order's own cooldown, so
 	// only the leak question is being tested) must still be able to
@@ -816,6 +982,8 @@ func TestOrderDispatchStoreUnavailableFallbackReleasesRunningFactOnFallbackPanic
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("exec calls after the panicking fallback = %d, want 1", got)
 	}
+
+	assertSingleFlightReleased(t, m, order.ScopedName())
 
 	// Store recovers; a LATER tick's normal path must still be able to
 	// launch.
@@ -844,6 +1012,7 @@ func TestOrderDispatchStoreUnavailableFallbackReleasesRunningFactOnNormalPathCtx
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("exec calls after ctx cancel = %d, want 1", got)
 	}
+	assertSingleFlightReleased(t, m, order.ScopedName())
 
 	m.dispatch(context.Background(), cityPath, time.Now().Add(2*time.Minute))
 	drainOrderDispatch(t, m)
@@ -870,6 +1039,7 @@ func TestOrderDispatchStoreUnavailableFallbackReleasesRunningFactOnFallbackCtxCa
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("exec calls after ctx cancel = %d, want 1", got)
 	}
+	assertSingleFlightReleased(t, m, order.ScopedName())
 
 	store.setListErr(nil)
 	m.dispatch(context.Background(), cityPath, time.Now().Add(2*time.Minute))
@@ -895,6 +1065,8 @@ func TestOrderDispatchStoreUnavailableFallbackReleasesRunningFactOnNormalPathTim
 		t.Fatalf("exec calls after the timeout = %d, want 1", got)
 	}
 
+	assertSingleFlightReleased(t, m, order.ScopedName())
+
 	m.dispatch(context.Background(), cityPath, time.Now().Add(2*time.Minute))
 	drainOrderDispatch(t, m)
 	if got := atomic.LoadInt32(&calls); got != 2 {
@@ -916,6 +1088,8 @@ func TestOrderDispatchStoreUnavailableFallbackReleasesRunningFactOnFallbackTimeo
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("exec calls after the fallback's own timeout = %d, want 1", got)
 	}
+
+	assertSingleFlightReleased(t, m, order.ScopedName())
 
 	store.setListErr(nil)
 	m.dispatch(context.Background(), cityPath, time.Now().Add(2*time.Minute))
@@ -943,6 +1117,8 @@ func TestOrderDispatchStoreUnavailableFallbackReleasesRunningFactOnCreateRunErro
 	if got := recorder.counts()[orderName]; got != 1 {
 		t.Fatalf("exec calls after the CreateRun failure (fallback) = %d, want 1", got)
 	}
+
+	assertSingleFlightReleased(t, m, order.ScopedName())
 
 	// The store recovers fully; a LATER tick's normal path must still be
 	// able to launch.
