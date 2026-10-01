@@ -139,7 +139,15 @@ const (
 	// BD_VERSION (v1.92.0 -> v1.93.0) moved at the same five pin sites and
 	// nothing else. Taken from the candidate digest TestCurrentWorkflowsMatchPolicy
 	// printed for the changed workflow.
-	expectedCIExecutionHash     = "2fa72185fa7ddbe0858a1b37633eb806cafe58293f35ae300f695fdec4f5b21a"
+	// Re-derived for ga-w7nyj's preflight-static review fix-up: added the
+	// "Verify errorlint --fix regression guard (ga-w7nyj)" step
+	// (`go test -run TestErrorlintStockFixDropsTypeAssertionNegation -v
+	// ./scripts/...`) after the two lint steps, so the one test proving
+	// errorlint's stock --fix drops a negation on this repo's pinned
+	// toolchain runs on every PR (preflight-static), not only on push
+	// (preflight-unit-cover-noncmdgc). Taken from the candidate digest
+	// TestCurrentWorkflowsMatchPolicy printed for the changed workflow.
+	expectedCIExecutionHash     = "7f115165e70d99c93e9a2e37ebbfc6cc8ed112feeb13bc8b0b8cf87b278870ca"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale

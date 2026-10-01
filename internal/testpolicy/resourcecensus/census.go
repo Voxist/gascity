@@ -145,7 +145,24 @@ var bootstrapPolicy = Ledger{
 			// grepping its source text (which the review this bead came
 			// from found could not tell correct code from the bug it
 			// meant to catch).
-			BaselineCalls:   716,
+			//
+			// Bumped 716->717 calls (files unchanged, 208) for ga-w7nyj's
+			// TestErrorlintStockFixDropsTypeAssertionNegation
+			// (scripts/precommit_contract_test.go): one new
+			// exec.Command("golangci-lint", ...) call site running the
+			// real golangci-lint binary against a throwaway fixture module
+			// to prove errorlint's stock --fix silently drops a negation
+			// on this repo's actual .golangci.yml -- the same
+			// already-tracked file this bead's structural guard test also
+			// lives in, so no new file enters the census.
+			//
+			// Bumped 717->719 calls (files unchanged, 208) for the same
+			// bead's review fix-up: pinnedGolangciLintBin added two more
+			// call sites in that file, `exec.Command("go", "env",
+			// "GOPATH")` and `exec.Command(bin, "--version")`, to resolve
+			// and verify the pinned golangci-lint binary instead of
+			// whatever "golangci-lint" happened to resolve to on PATH.
+			BaselineCalls:   719,
 			BaselineFiles:   208,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
@@ -189,7 +206,16 @@ var bootstrapPolicy = Ledger{
 			// Bumped 478->479 calls, 136->137 files for ga-z3c6p's
 			// TestOpHealthPropagatesQueryProbeExitCode (see the matching
 			// audit_baseline subprocess comment above for the source).
-			BaselineCalls:   479,
+			//
+			// Bumped 479->480 calls (files unchanged, 137) for ga-w7nyj's
+			// TestErrorlintStockFixDropsTypeAssertionNegation (see the
+			// matching audit_baseline subprocess comment above for the
+			// source).
+			//
+			// Bumped 480->482 calls (files unchanged, 137) for the same
+			// bead's review fix-up (see the matching audit_baseline
+			// subprocess comment above for the source).
+			BaselineCalls:   482,
 			BaselineFiles:   137,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
@@ -565,7 +591,16 @@ var bootstrapPolicy = Ledger{
 			// Bumped 460->461 calls, 130->131 files for ga-z3c6p's
 			// TestOpHealthPropagatesQueryProbeExitCode (see the matching
 			// audit_baseline subprocess comment above for the source).
-			BaselineCalls:   461,
+			//
+			// Bumped 461->462 calls (files unchanged, 131) for ga-w7nyj's
+			// TestErrorlintStockFixDropsTypeAssertionNegation (see the
+			// matching audit_baseline subprocess comment above for the
+			// source).
+			//
+			// Bumped 462->464 calls (files unchanged, 131) for the same
+			// bead's review fix-up (see the matching audit_baseline
+			// subprocess comment above for the source).
+			BaselineCalls:   464,
 			BaselineFiles:   131,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
