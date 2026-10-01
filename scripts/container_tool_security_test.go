@@ -93,21 +93,20 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	const (
 		// FORK DIVERGENCE — FORK-FIRST BRIDGE (ga-zzcjs; supersedes the
 		// ADR-0026 C5 upstream bridge). The image builds bd from the
-		// Voxist/beads fork tip (schema 0067 plus fork-only fixes; the
-		// 0066->0067 store migration was rehearsed and cut over
+		// Voxist/beads fork tip (schema 0069 plus fork-only fixes; the
+		// 0067->0069 store migration was rehearsed and cut over
 		// deliberately). go.mod links BD_LIB_REF — the fork tip's newest
 		// upstream ancestor — because fork commits do not resolve on the
 		// module path. These values move together with deps.env and go.mod;
-		// a published release >= 0067 on a module-resolvable repo retires
+		// a published release >= 0069 on a module-resolvable repo retires
 		// the bridge (one change: BD_VERSION=tag, drop the refs). Upstream
 		// v1.3.0 is not such a release: it tops out at schema 0066.
 		// BD_VERSION is the string the pinned commit declares (1.93.0). bdSourceRef
-		// is the commit the fork's annotated v1.93.0 tag names (384c2ccca, the
-		// merge of Voxist/beads#63 -- a merge commit, not the bump commit); see
-		// deps.env.
-		bdSourceRef    = "384c2ccca43f64051c067c1d963fc13a4f958690"
-		bdSourceSHA256 = "da471f3e0dc999a057105adb2b49c6ce66e2090942fd21f0503c6fec002de208"
-		bdBuild        = "384c2ccca"
+		// is Voxist/beads 5cc9948c7 on branch resync/upstream-0927 (PR #60,
+		// ga-b2q0c) -- CI SIGNAL ONLY, not yet deployed; see deps.env.
+		bdSourceRef    = "5cc9948c78044c1181f18e7b6c4f99bb2e347198"
+		bdSourceSHA256 = "f9e80f956b2b805c67522b68b8165f6e633aaa0374900f8f42a9ec4f063afca0"
+		bdBuild        = "5cc9948c7"
 		bdBranch       = "HEAD"
 		grpcVersion    = "1.83.2"
 		// Floors, not exact pins: each must be >= what the pinned source

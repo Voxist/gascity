@@ -99,7 +99,7 @@ import (
 // SchemaVersions().
 const (
 	// SchemaCursorMain is schema.LatestVersion() for the pinned library.
-	SchemaCursorMain = 67
+	SchemaCursorMain = 69
 	// SchemaCursorIgnored is schema.LatestIgnoredVersion() for the pinned
 	// library.
 	SchemaCursorIgnored = 27

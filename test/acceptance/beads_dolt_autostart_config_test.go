@@ -256,8 +256,9 @@ func fetchAndVerifyBDSource(t *testing.T, repo, ref, wantSHA256, dir string) {
 }
 
 // TestBeadsDoltAutoStartConfigHonouredByLibraryConsumer pins the fixed
-// behaviour of deps.env's CURRENT bd pin (v1.93.0, Voxist/beads 384c2ccca
-// as of this writing): a server-mode workspace's own
+// behaviour of deps.env's CURRENT bd pin (v1.93.0, Voxist/beads 5cc9948c7
+// as of this writing -- schema 0069, descends from the 384c2ccca pin this
+// test originally proved green against): a server-mode workspace's own
 // `dolt.auto-start: false` must refuse an implicit auto-start for a
 // library consumer that never ran bd's own config.Initialize(). See the
 // file-level doc comment for the red-at-1.91.0/green-at-current-pin

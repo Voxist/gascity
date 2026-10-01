@@ -139,7 +139,7 @@ const (
 	// BD_VERSION (v1.92.0 -> v1.93.0) moved at the same five pin sites and
 	// nothing else. Taken from the candidate digest TestCurrentWorkflowsMatchPolicy
 	// printed for the changed workflow.
-	expectedCIExecutionHash     = "2fa72185fa7ddbe0858a1b37633eb806cafe58293f35ae300f695fdec4f5b21a"
+	expectedCIExecutionHash     = "3e00094ee949285493c3f087f4b9448bd2258f450a3c695ac17e3c609059b828"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
@@ -174,7 +174,7 @@ const (
 	// changed mid-review): the same two pin sites, same two keys, nothing
 	// else. Taken from the candidate digest TestCurrentWorkflowsMatchPolicy
 	// printed for the changed workflow.
-	expectedNightlyExecutionHash = "20987faa6f817ee8f00b0876bbafcdccf8ac2d1117a324767a90a30dbda77406"
+	expectedNightlyExecutionHash = "9f2fc726fffbe18a25e5e34a45d3e009ec91a60dc5273b1b43b46e5df3d239cc"
 	// Re-derived at the 2026-08-31 resync: the composite setup actions under
 	// .github/actions/setup-gascity-* auto-merged both sides as well, moving
 	// this pin along with the two workflow execution pins above.
