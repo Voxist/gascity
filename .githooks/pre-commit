@@ -53,8 +53,8 @@ if [ -n "$staged_go_files" ]; then
   # ga-w7nyj: --fix is deliberately NOT passed here. golangci-lint 2.12.0 has
   # no per-linter fix control (the only toggle is this global flag, which
   # applies to every linter that supports auto-fix -- govet, errorlint,
-  # gocritic, misspell, and revive are all enabled below and all support it),
-  # and its stock errorlint --fix silently drops the negation on
+  # gocritic, misspell, and revive are all enabled in .golangci.yml and all
+  # support it), and its stock errorlint --fix silently drops the negation on
   # `if _, ok := x.(*T); !ok`-shaped code, inverting the branch's meaning
   # (reproduced twice in this repo's own history: Voxist/gascity#219 and
   # #231's review fix-up commits both hit it). A lint issue in staged code
@@ -62,8 +62,10 @@ if [ -n "$staged_go_files" ]; then
   # TestPreCommitLintChangedFlagsDoNotAutoFix and
   # TestErrorlintStockFixDropsTypeAssertionNegation in
   # scripts/precommit_contract_test.go.
+  #
+  # No re-stage follows: lint-changed cannot modify staged files anymore
+  # (that was --fix's job), so the git add above is the only one needed.
   make lint-changed LINT_CHANGED_SCOPE=staged LINT_FLAGS="--new-from-rev=HEAD --whole-files" || exit 1
-  printf '%s\n' "$staged_go_files" | xargs git add
 
   # Regenerate the OpenAPI spec from the live Huma API and stage both
   # canonical copies. Keeps the committed spec and the published

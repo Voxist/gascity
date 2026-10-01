@@ -777,6 +777,45 @@ func TestPreCommitLintChangedFlagsDoNotAutoFix(t *testing.T) {
 			"`if _, ok := x.(*T); !ok`-shaped code (ga-w7nyj) -- --fix must stay out of any hook that runs "+
 			"unattended against a developer's staged code", flags)
 	}
+
+	// The hook's own LINT_FLAGS is only one way --fix could come back.
+	// Guard the other two places it could hide: hardcoded into the
+	// Makefile's lint-changed recipe itself (bypassing LINT_FLAGS
+	// entirely), or set as a standing default via .golangci.yml's `fix:`
+	// config key (which applies even when no caller passes --fix at all).
+	makefile, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	lintChangedRecipe := extractMakeRecipe(t, string(makefile), "lint-changed")
+	if strings.Contains(lintChangedRecipe, "--fix") {
+		t.Fatalf("Makefile's lint-changed recipe hardcodes --fix:\n%s\n"+
+			"(ga-w7nyj: this would auto-fix every lint-changed caller regardless of what LINT_FLAGS the "+
+			"pre-commit hook passes)", lintChangedRecipe)
+	}
+
+	golangciConfig, err := os.ReadFile(filepath.Join(repoRoot, ".golangci.yml"))
+	if err != nil {
+		t.Fatalf("read .golangci.yml: %v", err)
+	}
+	if regexp.MustCompile(`(?m)^\s*fix:`).Match(golangciConfig) {
+		t.Fatalf(".golangci.yml sets a `fix:` key, which auto-fixes every golangci-lint invocation against this " +
+			"config by default -- including the pre-commit hook's, regardless of what flags it passes (ga-w7nyj)")
+	}
+}
+
+// extractMakeRecipe returns the recipe body (the tab-indented lines)
+// following the first `<target>:` rule header in a Makefile, up to the
+// first blank line or next rule header -- enough to check a specific
+// recipe's own command text without parsing full Make syntax.
+func extractMakeRecipe(t *testing.T, makefile, target string) string {
+	t.Helper()
+	re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(target) + `:[^\n]*\n((?:\t[^\n]*\n?)*)`)
+	m := re.FindStringSubmatch(makefile)
+	if m == nil {
+		t.Fatalf("Makefile target %q not found in the expected `%s: ...` + tab-indented-recipe shape", target, target)
+	}
+	return m[1]
 }
 
 // newErrorlintFixtureModule writes a minimal, throwaway Go module containing
@@ -790,40 +829,97 @@ func newErrorlintFixtureModule(t *testing.T) string {
 	return dir
 }
 
-// runGolangciLintFixture runs golangci-lint against the fixture module using
-// THIS repo's own .golangci.yml (so the fixture is linted under the exact
-// settings and enabled-linter set production commits go through), with or
-// without --fix, and returns the process's exit code. Deliberately unscoped
-// (no --new-from-rev/--whole-files): those flags gate WHICH issues count as
-// "new" for the hook's own cost/scope reasons, unrelated to whether --fix is
-// safe, and this test's premise (the fixture module IS the whole diff) makes
-// scoping moot -- every issue in it is "new" under any scoping.
+// golangciLintVersionPin extracts GOLANGCI_LINT_VERSION from the Makefile,
+// so pinnedGolangciLintBin tracks the real pin rather than a copy of it
+// that could silently drift.
+func golangciLintVersionPin(t *testing.T, repoRoot string) string {
+	t.Helper()
+	makefile, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	re := regexp.MustCompile(`(?m)^GOLANGCI_LINT_VERSION := (\S+)`)
+	m := re.FindStringSubmatch(string(makefile))
+	if m == nil {
+		t.Fatal("Makefile's `GOLANGCI_LINT_VERSION := ...` pin not found in the expected shape")
+	}
+	return m[1]
+}
+
+// pinnedGolangciLintBin resolves the pinned golangci-lint binary the same
+// way the Makefile does (GOLANGCI_LINT := $(shell go env GOPATH)/bin/golangci-lint),
+// not whatever "golangci-lint" happens to resolve to on PATH, and confirms
+// its --version matches the Makefile's GOLANGCI_LINT_VERSION pin: this
+// test's RED half asserts a specific known bug shape in a specific
+// version's errorlint --fix, and a different version resolved from PATH
+// would make that assertion meaningless.
 //
-// HOME is pointed at a fresh, empty directory per call. golangci-lint's own
-// result cache lives under the real $HOME and is keyed loosely enough that
+// Missing the binary only skips locally. On CI it fails instead (CI=true,
+// set by GitHub Actions on every job): preflight-static installs the
+// pinned binary via its own `make lint-affected`/`make lint` step before
+// this test runs there (ga-w7nyj), and that is the one lane meant to keep
+// this guard honest on every PR, not just on push -- a silent skip there
+// would hide exactly the regression this guard exists to catch.
+func pinnedGolangciLintBin(t *testing.T, repoRoot string) string {
+	t.Helper()
+	gopath, err := exec.Command("go", "env", "GOPATH").Output()
+	if err != nil {
+		t.Fatalf("go env GOPATH: %v", err)
+	}
+	bin := filepath.Join(strings.TrimSpace(string(gopath)), "bin", "golangci-lint")
+	if _, err := os.Stat(bin); err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatalf("pinned golangci-lint binary not found at %s on CI: %v", bin, err)
+		}
+		t.Skip("golangci-lint not installed; run `make install-tools` to exercise this test locally")
+	}
+
+	wantVersion := golangciLintVersionPin(t, repoRoot)
+	out, err := exec.Command(bin, "--version").CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s --version: %v\n%s", bin, err, out)
+	}
+	if !strings.Contains(string(out), wantVersion) {
+		t.Fatalf("%s --version = %q, want it to contain the Makefile's GOLANGCI_LINT_VERSION pin %q -- this "+
+			"test's RED half asserts a specific known bug in a specific version's errorlint --fix", bin, out, wantVersion)
+	}
+	return bin
+}
+
+// runGolangciLintFixture runs the pinned golangci-lint against the fixture
+// module using THIS repo's own .golangci.yml (so the fixture is linted
+// under the exact settings and enabled-linter set production commits go
+// through), with or without --fix, and returns the process's exit code and
+// combined output. Deliberately unscoped (no --new-from-rev/--whole-files):
+// those flags gate WHICH issues count as "new" for the hook's own cost/scope
+// reasons, unrelated to whether --fix is safe, and this test's premise (the
+// fixture module IS the whole diff) makes scoping moot -- every issue in it
+// is "new" under any scoping.
+//
+// GOLANGCI_LINT_CACHE (golangci-lint's own result cache, not Go's build
+// cache) is pointed at a fresh, empty directory per call, same as CI's own
+// lint steps use. golangci-lint's result cache is keyed loosely enough that
 // two fixtures with byte-identical content (this test's fixture always is)
 // can collide across separate t.TempDir()s: a --fix run can silently no-op
 // against a STALE cached absolute path from an earlier call's
 // since-deleted temp dir, logging only a warning ("no such file or
 // directory") rather than failing, which would make this test wrongly
-// report the negation as "surviving" --fix. An isolated HOME gives each
-// call its own empty cache, so the fixture's exact content is always seen
-// fresh.
-func runGolangciLintFixture(t *testing.T, fixtureDir, repoRoot string, fix bool) int {
+// report the negation as "surviving" --fix. An isolated GOLANGCI_LINT_CACHE
+// gives each call its own empty result cache without also forcing a cold
+// GOCACHE (an isolated HOME would do both, and the Go-level rebuild alone
+// costs ~17s per call).
+func runGolangciLintFixture(t *testing.T, fixtureDir, repoRoot string, fix bool) (exitCode int, output string) {
 	t.Helper()
-	if _, err := exec.LookPath("golangci-lint"); err != nil {
-		t.Skip("golangci-lint not on PATH")
-	}
+	bin := pinnedGolangciLintBin(t, repoRoot)
 	args := []string{"run", "-c", filepath.Join(repoRoot, ".golangci.yml")}
 	if fix {
 		args = append(args, "--fix")
 	}
 	args = append(args, ".")
-	cmd := exec.Command("golangci-lint", args...)
+	cmd := exec.Command(bin, args...)
 	cmd.Dir = fixtureDir
-	cmd.Env = append(os.Environ(), "HOME="+t.TempDir())
+	cmd.Env = append(os.Environ(), "GOLANGCI_LINT_CACHE="+t.TempDir())
 	out, err := cmd.CombinedOutput()
-	exitCode := 0
 	if err != nil {
 		var exitErr *exec.ExitError
 		if !errors.As(err, &exitErr) {
@@ -831,7 +927,7 @@ func runGolangciLintFixture(t *testing.T, fixtureDir, repoRoot string, fix bool)
 		}
 		exitCode = exitErr.ExitCode()
 	}
-	return exitCode
+	return exitCode, string(out)
 }
 
 // TestErrorlintStockFixDropsTypeAssertionNegation is the RED/GREEN proof
@@ -846,13 +942,24 @@ func runGolangciLintFixture(t *testing.T, fixtureDir, repoRoot string, fix bool)
 func TestErrorlintStockFixDropsTypeAssertionNegation(t *testing.T) {
 	repoRoot := repoRoot(t)
 
-	// GREEN: no --fix. The negation must survive, and the issue must fail
-	// the run (lint fails the commit instead of rewriting it).
+	// GREEN: no --fix. errorlint specifically (not merely "some linter")
+	// must flag the vulnerable pattern, and the negation must survive.
+	// Asserting on "(errorlint)" rather than a bare nonzero exit matters:
+	// this fixture also trips revive's package-comments (it has no package
+	// doc comment), so a bare `code == 0` check could never go red even if
+	// errorlint itself stopped flagging the pattern -- revive's unrelated
+	// finding would keep the exit code nonzero regardless.
 	fixture := newErrorlintFixtureModule(t)
-	if code := runGolangciLintFixture(t, fixture, repoRoot, false); code == 0 {
+	code, output := runGolangciLintFixture(t, fixture, repoRoot, false)
+	if code == 0 {
 		t.Fatal("golangci-lint without --fix reported no issues against errorlintVulnerableSource; " +
 			"either errorlint no longer flags this pattern or the fixture/config drifted -- either way, " +
 			"this test no longer proves what it claims to")
+	}
+	if !strings.Contains(output, "(errorlint)") {
+		t.Fatalf("golangci-lint without --fix found issues, but none attributed to errorlint specifically -- "+
+			"this test must prove errorlint flags the vulnerable pattern, not merely that some linter does "+
+			"(e.g. revive's package-comments on this fixture):\n%s", output)
 	}
 	got, err := os.ReadFile(filepath.Join(fixture, "main.go"))
 	if err != nil {
@@ -864,20 +971,27 @@ func TestErrorlintStockFixDropsTypeAssertionNegation(t *testing.T) {
 	}
 
 	// RED: same config, same golangci-lint, --fix added back. Confirms the
-	// bug this guard exists for is still reproducible.
+	// bug this guard exists for is still reproducible -- specifically the
+	// INVERTED rewrite (`if errors.As(...) {`, no negation), not just any
+	// rewrite that mentions errors.As. A CORRECT upstream fix would rewrite
+	// to `if !errors.As(...) {`, which also drops the literal substring
+	// "!ok" and also contains "errors.As(" -- the prior version of these
+	// assertions could not tell a correct fix from the bug, so it could
+	// never go red even once upstream fixed this.
 	fixture = newErrorlintFixtureModule(t)
 	runGolangciLintFixture(t, fixture, repoRoot, true)
 	got, err = os.ReadFile(filepath.Join(fixture, "main.go"))
 	if err != nil {
 		t.Fatalf("read fixture after lint (--fix): %v", err)
 	}
-	if strings.Contains(string(got), "!ok") {
-		t.Fatalf("expected golangci-lint --fix to reproduce the ga-w7nyj bug (drop the !ok negation) on "+
-			"this golangci-lint/errorlint version; the negation survived instead -- if upstream fixed this, "+
-			"TestPreCommitLintChangedFlagsDoNotAutoFix is the only guard left and re-enabling --fix (now that "+
-			"it is provably safe again) could be reconsidered:\n%s", got)
+	if !strings.Contains(string(got), "if errors.As(") {
+		t.Fatalf("expected golangci-lint --fix to reproduce the ga-w7nyj bug on this golangci-lint/errorlint "+
+			"version: an UNNEGATED `if errors.As(...) {`, inverting the original branch's meaning. Got:\n%s", got)
 	}
-	if !strings.Contains(string(got), "errors.As(") {
-		t.Fatalf("expected golangci-lint --fix to rewrite the type assertion to errors.As; got:\n%s", got)
+	if strings.Contains(string(got), "!errors.As(") {
+		t.Fatalf("golangci-lint --fix produced a NEGATED `if !errors.As(...) {` -- that is the CORRECT "+
+			"rewrite, meaning upstream has already fixed the bug this guard exists for. "+
+			"TestPreCommitLintChangedFlagsDoNotAutoFix is the only guard left, and re-enabling --fix (now "+
+			"that it is provably safe again) could be reconsidered:\n%s", got)
 	}
 }
