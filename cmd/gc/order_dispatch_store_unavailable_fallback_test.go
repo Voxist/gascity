@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -277,14 +278,21 @@ func TestOrderDispatchStoreUnavailableFallbackSingleFlightsOverlappingFires(t *t
 // needs and orderDispatchTransportFailStore's immutable field cannot give it.
 type toggleableTransportFailStore struct {
 	beads.Store
-	mu      sync.Mutex
-	listErr error
+	mu        sync.Mutex
+	listErr   error
+	createErr error
 }
 
 func (s *toggleableTransportFailStore) setListErr(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.listErr = err
+}
+
+func (s *toggleableTransportFailStore) setCreateErr(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.createErr = err
 }
 
 func (s *toggleableTransportFailStore) List(query beads.ListQuery) ([]beads.Bead, error) {
@@ -295,6 +303,16 @@ func (s *toggleableTransportFailStore) List(query beads.ListQuery) ([]beads.Bead
 		return nil, err
 	}
 	return s.Store.List(query)
+}
+
+func (s *toggleableTransportFailStore) Create(b beads.Bead) (beads.Bead, error) {
+	s.mu.Lock()
+	err := s.createErr
+	s.mu.Unlock()
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	return s.Store.Create(b)
 }
 
 // TestOrderDispatchStoreUnavailableFallbackBlocksNormalDispatchWhileInFlight
@@ -677,5 +695,261 @@ func TestClassifyStoreUnavailableFallbackTrigger(t *testing.T) {
 				t.Errorf("classifyStoreUnavailableFallbackTrigger(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------
+// recoverOnStoreUnavailableExecRunning leak-safety (ga-3bwmf review round
+// 3, guard #1): "if it's left set, beads-health is silently disabled
+// forever, which is worse than a double fire." Each test below drives one
+// early-exit path to completion and then proves the order is still
+// dispatchable afterward -- the only observable proof the flag did not
+// leak, since it is unexported dispatcher state.
+// ---------------------------------------------------------------------
+
+// panicOnceExecRunner panics on its first invocation -- standing in for an
+// exec callback panic -- and behaves like an ordinary immediate-success
+// exec on every later call.
+func panicOnceExecRunner(calls *int32) ExecRunner {
+	return func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+		if atomic.AddInt32(calls, 1) == 1 {
+			panic("simulated exec panic (ga-3bwmf review round 3 leak-safety test)")
+		}
+		return nil, nil
+	}
+}
+
+// ctxDoneOnceExecRunner blocks until ctx is done and returns ctx.Err() on
+// its FIRST invocation only -- standing in for both an externally-canceled
+// dispatch context and an order's own exec timeout elapsing, since both
+// manifest identically from inside the exec, as a context that becomes
+// Done. Every later call behaves like an ordinary immediate-success exec,
+// so a SECOND dispatch -- proving the order is still dispatchable after the
+// early exit -- does not also block on a ctx that was never going to
+// become Done (a later tick's own ctx is uncancelled and carries no short
+// deadline, unlike the first).
+func ctxDoneOnceExecRunner(calls *int32) ExecRunner {
+	return func(ctx context.Context, _, _ string, _ []string) ([]byte, error) {
+		if atomic.AddInt32(calls, 1) == 1 {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return nil, nil
+	}
+}
+
+// startSignalingCtxDoneOnceExecRunner is ctxDoneOnceExecRunner plus a
+// one-shot signal the moment the FIRST call starts, so a test can wait for
+// the exec to be genuinely in flight before canceling its context out
+// from under it.
+func startSignalingCtxDoneOnceExecRunner(calls *int32, started chan struct{}) ExecRunner {
+	var once sync.Once
+	return func(ctx context.Context, _, _ string, _ []string) ([]byte, error) {
+		if atomic.AddInt32(calls, 1) == 1 {
+			once.Do(func() { close(started) })
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return nil, nil
+	}
+}
+
+// timeoutOrder builds a cooldown-triggered, RecoverOnStoreUnavailable exec
+// order with an explicit (short) exec timeout, for the two timeout-path
+// leak-safety tests below.
+func timeoutOrder(t *testing.T, name, timeout string) orders.Order {
+	t.Helper()
+	definition := fmt.Sprintf(`[order]
+exec = "placeholder"
+trigger = "cooldown"
+interval = "1m"
+timeout = "%s"
+recover_on_store_unavailable = true
+`, timeout)
+	order, err := orders.Parse([]byte(definition))
+	if err != nil {
+		t.Fatalf("Parse order: %v", err)
+	}
+	order.Name = name
+	order.Exec = name
+	return order
+}
+
+func TestOrderDispatchStoreUnavailableFallbackReleasesRunningFactOnNormalPathPanic(t *testing.T) {
+	const orderName = "normal-path-panic-releases"
+	var calls int32
+	order := storeUnavailableFallbackOrder(t, orderName, true)
+	store := beads.NewMemStore()
+	m := buildOrderDispatcherFromListExec([]orders.Order{order}, store, nil, panicOnceExecRunner(&calls), nil).(*memoryOrderDispatcher)
+	cityPath := t.TempDir()
+
+	// First dispatch: the exec panics. runDispatchGuarded's own recover
+	// must catch it, and the running fact must still be released.
+	m.dispatch(context.Background(), cityPath, time.Now())
+	drainOrderDispatch(t, m)
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("exec calls after the panicking run = %d, want 1", got)
+	}
+
+	// A second, LATER dispatch (well past the order's own cooldown, so
+	// only the leak question is being tested) must still be able to
+	// launch.
+	m.dispatch(context.Background(), cityPath, time.Now().Add(2*time.Minute))
+	drainOrderDispatch(t, m)
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("exec calls after a later tick = %d, want 2 (the running fact must not leak from a normal-path exec panic)", got)
+	}
+}
+
+func TestOrderDispatchStoreUnavailableFallbackReleasesRunningFactOnFallbackPanic(t *testing.T) {
+	const orderName = "fallback-panic-releases"
+	var calls int32
+	order := storeUnavailableFallbackOrder(t, orderName, true)
+	store := &toggleableTransportFailStore{Store: beads.NewMemStore()}
+	store.setListErr(errConnectionRefused)
+	m := buildOrderDispatcherFromListExec([]orders.Order{order}, store, nil, panicOnceExecRunner(&calls), nil).(*memoryOrderDispatcher)
+	cityPath := t.TempDir()
+
+	// First tick: store down, the fallback fires, its exec panics.
+	m.dispatch(context.Background(), cityPath, time.Now())
+	drainOrderDispatch(t, m)
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("exec calls after the panicking fallback = %d, want 1", got)
+	}
+
+	// Store recovers; a LATER tick's normal path must still be able to
+	// launch.
+	store.setListErr(nil)
+	m.dispatch(context.Background(), cityPath, time.Now().Add(2*time.Minute))
+	drainOrderDispatch(t, m)
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("exec calls after a later tick = %d, want 2 (the running fact must not leak from a fallback exec panic)", got)
+	}
+}
+
+func TestOrderDispatchStoreUnavailableFallbackReleasesRunningFactOnNormalPathCtxCancel(t *testing.T) {
+	const orderName = "normal-path-ctx-cancel-releases"
+	var calls int32
+	started := make(chan struct{})
+	order := storeUnavailableFallbackOrder(t, orderName, true)
+	store := beads.NewMemStore()
+	m := buildOrderDispatcherFromListExec([]orders.Order{order}, store, nil, startSignalingCtxDoneOnceExecRunner(&calls, started), nil).(*memoryOrderDispatcher)
+	cityPath := t.TempDir()
+
+	dispatchCtx, cancelDispatch := context.WithCancel(context.Background())
+	m.dispatch(dispatchCtx, cityPath, time.Now())
+	awaitClose(t, started, "normal dispatch exec start")
+	cancelDispatch()
+	drainOrderDispatch(t, m)
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("exec calls after ctx cancel = %d, want 1", got)
+	}
+
+	m.dispatch(context.Background(), cityPath, time.Now().Add(2*time.Minute))
+	drainOrderDispatch(t, m)
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("exec calls after a later tick = %d, want 2 (the running fact must not leak from a canceled dispatch context)", got)
+	}
+}
+
+func TestOrderDispatchStoreUnavailableFallbackReleasesRunningFactOnFallbackCtxCancel(t *testing.T) {
+	const orderName = "fallback-ctx-cancel-releases"
+	var calls int32
+	started := make(chan struct{})
+	order := storeUnavailableFallbackOrder(t, orderName, true)
+	store := &toggleableTransportFailStore{Store: beads.NewMemStore()}
+	store.setListErr(errConnectionRefused)
+	m := buildOrderDispatcherFromListExec([]orders.Order{order}, store, nil, startSignalingCtxDoneOnceExecRunner(&calls, started), nil).(*memoryOrderDispatcher)
+	cityPath := t.TempDir()
+
+	dispatchCtx, cancelDispatch := context.WithCancel(context.Background())
+	m.dispatch(dispatchCtx, cityPath, time.Now())
+	awaitClose(t, started, "fallback exec start")
+	cancelDispatch()
+	drainOrderDispatch(t, m)
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("exec calls after ctx cancel = %d, want 1", got)
+	}
+
+	store.setListErr(nil)
+	m.dispatch(context.Background(), cityPath, time.Now().Add(2*time.Minute))
+	drainOrderDispatch(t, m)
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("exec calls after a later tick = %d, want 2 (the running fact must not leak from a canceled fallback context)", got)
+	}
+}
+
+func TestOrderDispatchStoreUnavailableFallbackReleasesRunningFactOnNormalPathTimeout(t *testing.T) {
+	const orderName = "normal-path-timeout-releases"
+	var calls int32
+	order := timeoutOrder(t, orderName, "50ms")
+	store := beads.NewMemStore()
+	m := buildOrderDispatcherFromListExec([]orders.Order{order}, store, nil, ctxDoneOnceExecRunner(&calls), nil).(*memoryOrderDispatcher)
+	cityPath := t.TempDir()
+
+	// The 50ms exec timeout elapses on its own inside drainOrderDispatch's
+	// 10s budget.
+	m.dispatch(context.Background(), cityPath, time.Now())
+	drainOrderDispatch(t, m)
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("exec calls after the timeout = %d, want 1", got)
+	}
+
+	m.dispatch(context.Background(), cityPath, time.Now().Add(2*time.Minute))
+	drainOrderDispatch(t, m)
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("exec calls after a later tick = %d, want 2 (the running fact must not leak from the order's own exec timeout)", got)
+	}
+}
+
+func TestOrderDispatchStoreUnavailableFallbackReleasesRunningFactOnFallbackTimeout(t *testing.T) {
+	const orderName = "fallback-timeout-releases"
+	var calls int32
+	order := timeoutOrder(t, orderName, "50ms")
+	store := &toggleableTransportFailStore{Store: beads.NewMemStore()}
+	store.setListErr(errConnectionRefused)
+	m := buildOrderDispatcherFromListExec([]orders.Order{order}, store, nil, ctxDoneOnceExecRunner(&calls), nil).(*memoryOrderDispatcher)
+	cityPath := t.TempDir()
+
+	m.dispatch(context.Background(), cityPath, time.Now())
+	drainOrderDispatch(t, m)
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("exec calls after the fallback's own timeout = %d, want 1", got)
+	}
+
+	store.setListErr(nil)
+	m.dispatch(context.Background(), cityPath, time.Now().Add(2*time.Minute))
+	drainOrderDispatch(t, m)
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("exec calls after a later tick = %d, want 2 (the running fact must not leak from the fallback's own exec timeout)", got)
+	}
+}
+
+func TestOrderDispatchStoreUnavailableFallbackReleasesRunningFactOnCreateRunError(t *testing.T) {
+	const orderName = "createrun-error-releases"
+	recorder := &reservedDispatchExecRecorder{}
+	order := storeUnavailableFallbackOrder(t, orderName, true)
+	store := &toggleableTransportFailStore{Store: beads.NewMemStore()}
+	store.setCreateErr(errConnectionRefused)
+	m := buildOrderDispatcherFromListExec([]orders.Order{order}, store, nil, recorder.run, nil).(*memoryOrderDispatcher)
+	cityPath := t.TempDir()
+
+	// First tick: the normal path's CreateRun fails with a real transport
+	// error, so launchResolvedDispatch releases the flag via the
+	// "not committed" safety net (nothing launched) rather than the
+	// goroutine's own defer, and the fallback fires instead.
+	m.dispatch(context.Background(), cityPath, time.Now())
+	drainOrderDispatch(t, m)
+	if got := recorder.counts()[orderName]; got != 1 {
+		t.Fatalf("exec calls after the CreateRun failure (fallback) = %d, want 1", got)
+	}
+
+	// The store recovers fully; a LATER tick's normal path must still be
+	// able to launch.
+	store.setCreateErr(nil)
+	m.dispatch(context.Background(), cityPath, time.Now().Add(2*time.Minute))
+	drainOrderDispatch(t, m)
+	if got := recorder.counts()[orderName]; got != 2 {
+		t.Fatalf("exec calls after a later tick = %d, want 2 (the running fact must not leak from a CreateRun failure)", got)
 	}
 }
