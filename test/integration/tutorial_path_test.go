@@ -25,7 +25,7 @@ import (
 
 // redactedMetadataJSONKeyNeedles is the set of substrings a metadata.json key
 // must not contain in a diagnostics dump. Mirrors
-// cmd/gc/internal/beads/contract/preflight.go's own redaction needle list
+// internal/beads/contract/preflight.go's own redaction needle list
 // (password, passwd, secret, token, key) so the two stay in agreement about
 // what counts as sensitive in this file.
 var redactedMetadataJSONKeyNeedles = []string{"password", "passwd", "secret", "token", "key"}
@@ -42,9 +42,10 @@ func dumpScopeMetadataJSON(path string) string {
 	}
 	var fields map[string]any
 	if err := json.Unmarshal(data, &fields); err != nil {
-		// Not valid JSON (or not an object) -- still worth seeing fewer than
-		// the raw bytes is unhelpful, but printing raw bytes risks a secret
-		// that didn't parse as expected. Report the shape only.
+		// Not valid JSON (or not a JSON object). Seeing less than the raw
+		// bytes is an acceptable loss, but printing the raw bytes risks a
+		// secret that happens to live in a file that didn't parse as
+		// expected -- report only that it failed to parse.
 		return fmt.Sprintf("(unparseable as a JSON object: %v)", err)
 	}
 	for key := range fields {
@@ -83,7 +84,7 @@ func dumpScopeMetadataJSON(path string) string {
 // its own unseeded provider-owned Dolt server instead of sharing the city's.
 func dumpRigDoltDiagnostics(cityDir, rigDir string) string {
 	var b strings.Builder
-	dumpPortFile := func(label, path string) {
+	dumpRawFile := func(label, path string) {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			fmt.Fprintf(&b, "  %s (%s): %v\n", label, path, err)
@@ -95,11 +96,11 @@ func dumpRigDoltDiagnostics(cityDir, rigDir string) string {
 		fmt.Fprintf(&b, "  %s (%s): %s\n", label, path, dumpScopeMetadataJSON(path))
 	}
 	fmt.Fprintf(&b, "city dir: %s\n", cityDir)
-	dumpPortFile("city dolt-server.port", filepath.Join(cityDir, ".beads", "dolt-server.port"))
+	dumpRawFile("city dolt-server.port", filepath.Join(cityDir, ".beads", "dolt-server.port"))
 	dumpMetadata("city metadata.json", filepath.Join(cityDir, ".beads", "metadata.json"))
-	dumpPortFile("city scope-ownership.json", filepath.Join(cityDir, ".gc", "scope-ownership.json"))
+	dumpRawFile("city scope-ownership.json", filepath.Join(cityDir, ".gc", "scope-ownership.json"))
 	fmt.Fprintf(&b, "rig dir: %s\n", rigDir)
-	dumpPortFile("rig dolt-server.port", filepath.Join(rigDir, ".beads", "dolt-server.port"))
+	dumpRawFile("rig dolt-server.port", filepath.Join(rigDir, ".beads", "dolt-server.port"))
 	dumpMetadata("rig metadata.json", filepath.Join(rigDir, ".beads", "metadata.json"))
 	return b.String()
 }

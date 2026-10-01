@@ -750,7 +750,7 @@ func ensureFreshRigProviderOwnership(cityPath string, cfg *config.City) error {
 	if cityInitialized {
 		intent, err = providerOwnershipIntentFromPersistedCity(cityPath)
 	} else {
-		intent, err = freshScopeProviderOwnershipIntent(cityPath, *cfg)
+		intent, err = freshScopeProviderOwnershipIntent(cityPath)
 	}
 	if err != nil {
 		return err
@@ -860,19 +860,70 @@ func rigProviderScopeKeyAtPath(journal providerScopeOwnershipJournal, scopeRoot 
 	return ""
 }
 
+// pendingProviderOwnership reports whether scopeRoot already carries a
+// pending (not yet committed -- providerScopeInitializing) provider-
+// ownership record, and that record's intent when it does. This is the
+// "persisted state wins" signal a caller checks before falling back to
+// ga-m07q9's no-signal gc-managed default: a pending record from an earlier,
+// explicit-or-persisted pass is itself a real signal, not a bare fallback
+// value. ga-fo5mg: centralized here after this exact two-step check
+// (providerScopeOwnership + State == providerScopeInitializing) was found
+// independently duplicated in persistFreshProviderOwnership
+// (init_hosted_dolt.go), freshScopeProviderOwnershipIntent, and
+// cityGrantsProviderOwnershipToFreshScopes -- a shape a future writer could
+// as easily miss as get right by hand.
+//
+// Deliberately state-specific: persistFreshProviderOwnership's existing-
+// pending-record block uses the pending/not-pending split to decide intent
+// selection and conflict detection for an init that's still in flight, and
+// a READY record there means something different (the scope already has a
+// committed topology, which is a conflicting-intent error, not a resume).
+// A caller that only needs "is this scope owned at all, regardless of
+// state" wants cityHasProviderOwnershipRecord instead.
+func pendingProviderOwnership(cityPath, scopeRoot string) (providerScopeIntent, bool, error) {
+	entry, owned, err := providerScopeOwnership(cityPath, scopeRoot)
+	if err != nil {
+		return providerScopeIntent{}, false, err
+	}
+	return entry.Intent, owned && entry.State == providerScopeInitializing, nil
+}
+
+// cityHasProviderOwnershipRecord reports whether cityPath carries ANY
+// provider-ownership record for itself, pending or ready. Used only by
+// cityGrantsProviderOwnershipToFreshScopes's uninitialized-city branch,
+// where a ready record is just as real an ownership signal as a pending
+// one -- unlike pendingProviderOwnership, which intentionally stays
+// state-specific for the in-flight-init semantics persistFreshProvider-
+// Ownership needs.
+func cityHasProviderOwnershipRecord(cityPath string) (bool, error) {
+	_, owned, err := providerScopeOwnership(cityPath, cityPath)
+	return owned, err
+}
+
 // freshScopeProviderOwnershipIntent keeps every fresh rig on the city's
 // durable pending intent while first initialization is incomplete. Falling
 // back to the default here would silently turn an explicit direct/external
 // city into a proxied/local rig after a failed preflight.
-func freshScopeProviderOwnershipIntent(cityPath string, cfg config.City) (providerScopeIntent, error) {
-	entry, owned, err := providerScopeOwnership(cityPath, cityPath)
+func freshScopeProviderOwnershipIntent(cityPath string) (providerScopeIntent, error) {
+	intent, pending, err := pendingProviderOwnership(cityPath, cityPath)
 	if err != nil {
 		return providerScopeIntent{}, err
 	}
-	if owned && entry.State == providerScopeInitializing {
-		return normalizeProviderScopeIntent(entry.Intent)
+	if pending {
+		return normalizeProviderScopeIntent(intent)
 	}
-	return (hostedDoltInitOptions{}).providerOwnershipIntent(cfg)
+	// Both callers (ensureFreshRigProviderOwnership, ensureProviderScope-
+	// OwnershipBeforeInit's rig branch) reach this function only for an
+	// uninitialized city that cityGrantsProviderOwnershipToFreshScopes has
+	// already confirmed holds a pending (providerScopeInitializing) record
+	// -- that is the ONLY way an uninitialized city grants ownership to a
+	// fresh scope at all, since ga-m07q9/ga-wuda3 removed the unconditional
+	// "!cityInitialized implies grant" default. So the branch above always
+	// fires in practice; reaching here means that invariant broke between
+	// the caller's check and this one, which calling providerOwnershipIntent
+	// here would silently paper over with a provider-default value nothing
+	// asked for.
+	return providerScopeIntent{}, fmt.Errorf("fresh scope ownership intent requested for uninitialized city %q with no pending provider-owned record; this violates the cityGrantsProviderOwnershipToFreshScopes invariant", cityPath)
 }
 
 // ensureProviderScopeOwnershipBeforeInit is the common Provision boundary for
@@ -937,7 +988,7 @@ func ensureProviderScopeOwnershipBeforeInit(cityPath, scopeRoot string) error {
 		if cityInitialized {
 			intent, err = providerOwnershipIntentFromPersistedCity(cityPath)
 		} else {
-			intent, err = freshScopeProviderOwnershipIntent(cityPath, *cfg)
+			intent, err = freshScopeProviderOwnershipIntent(cityPath)
 		}
 	}
 	if err != nil {
@@ -973,11 +1024,19 @@ func ensureProviderScopeOwnershipBeforeInit(cityPath, scopeRoot string) error {
 // classic gc-managed.
 func cityGrantsProviderOwnershipToFreshScopes(cityPath string, cityInitialized bool) (bool, error) {
 	if !cityInitialized {
-		entry, owned, err := providerScopeOwnership(cityPath, cityPath)
-		if err != nil {
-			return false, err
-		}
-		return owned && entry.State == providerScopeInitializing, nil
+		// A pending record is the normal case; a READY one here (rather
+		// than the more common pending state) is only reachable through
+		// out-of-band interference -- a crash, a doctor repair, or
+		// something deleting .beads/metadata.json -- between
+		// markProviderScopeOwnershipReady committing the ownership journal
+		// and the scope's own identity write landing (normally the same
+		// operation, in that order, inside initAndHookDir). Either way,
+		// grant: a ready record is, if anything, a STRONGER signal than a
+		// pending one, so this checks for any owned record at all rather
+		// than reusing pendingProviderOwnership, which deliberately stays
+		// state-specific for persistFreshProviderOwnership's in-flight-init
+		// intent/conflict handling.
+		return cityHasProviderOwnershipRecord(cityPath)
 	}
 	return cityScopeProviderOwned(cityPath)
 }
