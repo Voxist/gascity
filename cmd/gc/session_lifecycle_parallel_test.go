@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	goruntime "runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -8312,5 +8313,163 @@ func TestPrepareStartCandidateForCity_ClearsStaleNamedTriggerEnv(t *testing.T) {
 	}
 	if v := after.Metadata[beadmeta.TriggerBeadIDMetadataKey]; v != "" {
 		t.Errorf("durable trigger stamp = %q, want cleared", v)
+	}
+}
+
+// staggerRecordingProvider records the wall-clock time of every Start call so
+// a test can assert that starts inside one wave are spaced rather than fired
+// back-to-back. Only Start is overridden; everything else falls through to
+// the fake.
+type staggerRecordingProvider struct {
+	*runtime.Fake
+	mu     sync.Mutex
+	starts []time.Time
+	// signals receives one token per recorded start so tests can wait on the
+	// provider's lifecycle signal instead of polling the slice on a timer.
+	signals chan struct{}
+}
+
+func newStaggerRecordingProvider(signalCapacity int) *staggerRecordingProvider {
+	return &staggerRecordingProvider{
+		Fake:    runtime.NewFake(),
+		signals: make(chan struct{}, signalCapacity),
+	}
+}
+
+func (p *staggerRecordingProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	p.mu.Lock()
+	p.starts = append(p.starts, time.Now())
+	if p.signals != nil {
+		select {
+		case p.signals <- struct{}{}:
+		default:
+		}
+	}
+	p.mu.Unlock()
+	return p.Fake.Start(ctx, name, cfg)
+}
+
+func (p *staggerRecordingProvider) startTimes() []time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]time.Time(nil), p.starts...)
+}
+
+func staggerTestPrepared(n int) []preparedStart {
+	prepared := make([]preparedStart, n)
+	for i := range prepared {
+		name := fmt.Sprintf("worker-%d", i)
+		prepared[i] = preparedStart{
+			candidate: startCandidate{info: sessionpkg.Info{SessionName: name, SessionNameMetadata: name}},
+			// A start requires a non-empty runtime command to pass the
+			// pre-Start launch gate.
+			cfg: runtime.Config{Command: "sleep"},
+		}
+	}
+	return prepared
+}
+
+func sortedStartGaps(times []time.Time) []time.Duration {
+	if len(times) < 2 {
+		return nil
+	}
+	sorted := append([]time.Time(nil), times...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Before(sorted[j]) })
+	gaps := make([]time.Duration, 0, len(sorted)-1)
+	for i := 1; i < len(sorted); i++ {
+		gaps = append(gaps, sorted[i].Sub(sorted[i-1]))
+	}
+	return gaps
+}
+
+// startStaggerPausesLaunches is the wiring proof for [daemon]
+// session_start_stagger: with the knob set, starts inside ONE wave are spaced
+// by at least ~the configured pause instead of firing simultaneously. This is
+// the class of wiring test whose absence let the on_boot stagger
+// (OnBootStaggerDuration, 04e692d25) sit unconsumed: an accessor nobody calls
+// passes every config-unit test.
+func TestExecutePreparedStartWaveForCity_SessionStartStaggerSpacesStarts(t *testing.T) {
+	sp := &staggerRecordingProvider{Fake: runtime.NewFake()}
+	city := &config.City{Daemon: config.DaemonConfig{SessionStartStagger: "200ms"}}
+	results := executePreparedStartWaveForCity(
+		context.Background(), staggerTestPrepared(4), "", sp, nil, city, time.Second, 4)
+	if len(results) != 4 {
+		t.Fatalf("len(results) = %d, want 4", len(results))
+	}
+	times := sp.startTimes()
+	if len(times) != 4 {
+		outcomes := make([]string, 0, len(results))
+		for _, r := range results {
+			outcomes = append(outcomes, fmt.Sprintf("%s/%v", r.outcome, r.err))
+		}
+		t.Fatalf("provider Start calls = %d, want 4 (outcomes: %s)", len(times), strings.Join(outcomes, "; "))
+	}
+	gaps := sortedStartGaps(times)
+	if len(gaps) != 3 {
+		t.Fatalf("len(gaps) = %d, want 3", len(gaps))
+	}
+	for i, gap := range gaps {
+		// A consecutive gap is pause minus the previous member's wake-to-record
+		// lateness, which is an absolute scheduler cost and grows with host
+		// load (a 6-way-shard gate run measured ~24ms). 60ms on a 200ms pause
+		// tolerates ~140ms of lateness per member while still excluding the
+		// back-to-back shape the zero case produces.
+		if gap < 60*time.Millisecond {
+			t.Errorf("gap[%d] between consecutive starts = %v, want >= 60ms (200ms pause minus scheduler lateness)", i, gap)
+		}
+	}
+}
+
+func TestExecutePreparedStartWaveForCity_SessionStartStaggerZeroKeepsBackToBack(t *testing.T) {
+	sp := &staggerRecordingProvider{Fake: runtime.NewFake()}
+	city := &config.City{Daemon: config.DaemonConfig{SessionStartStagger: "0"}}
+	results := executePreparedStartWaveForCity(
+		context.Background(), staggerTestPrepared(4), "", sp, nil, city, time.Second, 4)
+	if len(results) != 4 {
+		t.Fatalf("len(results) = %d, want 4", len(results))
+	}
+	times := sp.startTimes()
+	if len(times) != 4 {
+		t.Fatalf("provider Start calls = %d, want 4", len(times))
+	}
+	// Total spread, not per-gap: all four back-to-back launches cost a few
+	// milliseconds of in-process call latency; 150ms is the total a stall
+	// would have to reach before this reads as spacing, and it sits below the
+	// >=180ms spread the 200ms stagger case guarantees (3 x 60ms floor).
+	spread := times[len(times)-1].Sub(times[0])
+	if spread >= 150*time.Millisecond {
+		t.Errorf("start spread = %v, want < 150ms (explicit zero restores back-to-back)", spread)
+	}
+}
+
+func TestEnqueuePreparedStartWaveForCity_SessionStartStaggerSpacesStarts(t *testing.T) {
+	sp := newStaggerRecordingProvider(4)
+	city := &config.City{Daemon: config.DaemonConfig{SessionStartStagger: "200ms"}}
+	syncPrepared := staggerTestPrepared(4)
+	asyncPrepared := make([]asyncPreparedStart, len(syncPrepared))
+	for i, item := range syncPrepared {
+		asyncPrepared[i] = asyncPreparedStart{item: item}
+	}
+	enqueuePreparedStartWaveForCity(
+		context.Background(), asyncPrepared, "", sp, nil, city, clock.Real{},
+		events.NewFake(), time.Second, 0, io.Discard, io.Discard, nil, nil, nil, nil, nil)
+	for i := 0; i < 4; i++ {
+		select {
+		case <-sp.signals:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("provider Start calls = %d of 4 after 5s (lifecycle signal %d never arrived)", i, i)
+		}
+	}
+	times := sp.startTimes()
+	if len(times) != 4 {
+		t.Fatalf("provider Start calls = %d, want 4", len(times))
+	}
+	for i, gap := range sortedStartGaps(times) {
+		// Same tolerance as the sync case above: wake-to-record lateness is
+		// absolute and load-dependent; 60ms on a 200ms pause still excludes
+		// back-to-back firing.
+		if gap < 60*time.Millisecond {
+			t.Errorf("gap[%d] between consecutive async starts = %v, want >= 60ms (200ms pause minus scheduler lateness)", i, gap)
+		}
 	}
 }
