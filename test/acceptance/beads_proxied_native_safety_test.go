@@ -327,8 +327,9 @@ func TestProxiedNativeSafety(t *testing.T) {
 		// return External whenever BEADS_DOLT_SERVER_PORT or BEADS_DOLT_PORT is
 		// set, and an External scope never auto-starts: any explicit port
 		// (env or metadata) makes auto-start unreachable, so the control can no
-		// longer share the negative row's dead port. It picks its own port and
-		// spawns, which is why the leak check below stays. The differences from
+		// longer share the negative row's dead port. With no port it reaches
+		// the owned-mode auto-start path, whose first dolt exec the sentinel
+		// records, which is why the leak check below stays. The differences from
 		// the row below are the two gate keys, the two port keys and the mode
 		// that makes the library server-backed without them.
 		sentinel.Reset()

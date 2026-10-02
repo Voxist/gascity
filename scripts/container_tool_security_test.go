@@ -103,7 +103,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		// v1.3.0 is not such a release: it tops out at schema 0066.
 		// BD_VERSION is the string the pinned commit declares (1.94.0). bdSourceRef
 		// is the commit the fork's annotated v1.94.0 tag names (1522bdb01)
-		// -- CI SIGNAL ONLY, not yet deployed; see deps.env.
+		// -- see deps.env.
 		bdSourceRef    = "1522bdb01ba8c863dc30eb9384cc9a7ab69df486"
 		bdSourceSHA256 = "2118f9f52c83a6ea59cc8f041a7cd3bddd3cb22e6e3279e803dacb645bb0fe27"
 		bdBuild        = "1522bdb01"

@@ -26,7 +26,7 @@ FROM golang:1.26.8-bookworm@sha256:9fdc884aacc3bec89b20ffc69f4bb369c78210e3e4f60
 # Voxist/beads fork tip, whose newest upstream ancestor (BD_LIB_REF
 # 46e670abbfd4) is the commit gc's go.mod links — same schema, no skew.
 # BD_SOURCE_REF is the commit the fork's annotated v1.94.0 tag names
-# (1522bdb01) — CI SIGNAL ONLY, not yet deployed; see deps.env.
+# (1522bdb01); see deps.env.
 # Retire the bridge once a release >= 0069 exists on a module-resolvable repo:
 # set BD_VERSION to that tag and drop BD_SOURCE_REF/BD_SOURCE_SHA256.
 ARG BD_VERSION=v1.94.0

@@ -27,7 +27,14 @@ set -euo pipefail
 # by the main module per `go mod why -m`). The cap stays at 740 -- the three
 # modules of headroom are deliberate slack for the next beads bump, not a
 # ratchet target.
-max_modules="${GC_NATIVE_DEP_MAX_MODULES:-740}"
+#
+# Re-baselined 740 -> 761 on 2026-10-02 (ga-b2q0c) for the schema-69 repin
+# (BD_LIB_REF 46e670abb, main was 737): the newer beads library adds 24
+# modules and removes none -- the go-openapi family, 13 swag/* submodules,
+# gowebpki/jcs, oapi-codegen/nullable and oklog/ulid/v2, mostly via beads'
+# oapi-codegen `tool` dependency. Module-graph entries, not linked into gc;
+# the binary stays well under its size cap below.
+max_modules="${GC_NATIVE_DEP_MAX_MODULES:-761}"
 # max_binary_bytes re-baselined 2026-08-29 (ga-iuznq2). The build below now
 # adds -trimpath and CGO_ENABLED=0, which removes cross-host path-embedding
 # and native C-object (dolthub/gozstd, ICU) variance that previously made
