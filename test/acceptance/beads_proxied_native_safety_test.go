@@ -322,8 +322,14 @@ func TestProxiedNativeSafety(t *testing.T) {
 		// opened in-process. So the control is a scratch scope whose metadata
 		// says plain dolt_mode "server" with no port (ResolveServerMode:
 		// owned), opened through the SAME production window, with the SAME
-		// endpoint map less the two gate keys, against the SAME dead port. The
-		// only differences from the row below are the two keys and the mode
+		// endpoint map less the two gate keys and the two port keys. The port
+		// keys go because beads #5934 (0950db065) made ResolveServerMode
+		// return External whenever BEADS_DOLT_SERVER_PORT or BEADS_DOLT_PORT is
+		// set, and an External scope never auto-starts: any explicit port
+		// (env or metadata) makes auto-start unreachable, so the control can no
+		// longer share the negative row's dead port. It picks its own port and
+		// spawns, which is why the leak check below stays. The differences from
+		// the row below are the two gate keys, the two port keys and the mode
 		// that makes the library server-backed without them.
 		sentinel.Reset()
 		sentinel.TrapThisProcess(t)
@@ -342,14 +348,15 @@ func TestProxiedNativeSafety(t *testing.T) {
 		}
 		delete(controlEnv, "BEADS_DOLT_SERVER_MODE")
 		delete(controlEnv, "BEADS_DOLT_AUTO_START")
+		delete(controlEnv, "BEADS_DOLT_SERVER_PORT")
+		delete(controlEnv, "BEADS_DOLT_PORT")
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		store, err := beads.OpenNativeDoltStoreAtProxied(ctx, scratch, controlEnv)
 		if err == nil {
 			store.CloseStore() //nolint:errcheck // unexpected handle
-			t.Fatalf("the control's open SUCCEEDED against the stopped proxy's port %s, so something is serving it and neither row below is about a dead port",
-				productionEnv["BEADS_DOLT_SERVER_PORT"])
+			t.Fatalf("the control's open SUCCEEDED, so the library reached a server without the sentinel being asked to start one and neither row below is about a dead port")
 		}
 		t.Logf("control open error: %v", err)
 
