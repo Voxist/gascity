@@ -200,7 +200,7 @@ func emit(ctx context.Context, body string, sev otellog.Severity, attrs ...attri
 	logger.Emit(ctx, r)
 }
 
-// errKV returns a log KeyValue with the error message, or empty string if nil.
+// errKV returns an attribute KeyValue with the error message, or empty string if nil.
 func errKV(err error) attribute.KeyValue {
 	if err != nil {
 		return attribute.String("error", err.Error())
