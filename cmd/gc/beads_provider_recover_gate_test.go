@@ -571,6 +571,62 @@ func TestGuardedRecoverWindowIsSharedAcrossEvidenceKinds(t *testing.T) {
 	}
 }
 
+// A losing op_recover on the shell fallback (no GC_BIN) finds LOCK_FILE
+// already held and exits unobservable (3, die_unobservable) rather than
+// running a second stop/start -- this guard's OWN decline semantics
+// reappearing one layer down inside the provider script, not a
+// transport fault. Before this mapping, runGuardedManagedDoltRecover
+// returned that exit-3 error as a plain failure: the bd-runner path
+// (bd_env.go) counted it against the breaker and the health path
+// reported "recovery failed", even though no server was destroyed and
+// the caller that won the lock already is (or will be) running the
+// real recover.
+func TestGuardedRecoverMapsUnobservableRecoverExitToDeclined(t *testing.T) {
+	cityPath := t.TempDir()
+	stubRecoverGateClock(t)
+	stubRecoverLiveness(t, managedDoltLivenessConfirmedDead)
+
+	orig := managedDoltRecoverRunner
+	t.Cleanup(func() { managedDoltRecoverRunner = orig })
+	managedDoltRecoverRunner = func(context.Context, string, []string) error {
+		return providerOpExitErrorForTest(t, providerOpExitUnobservable, "dolt recovery lock held by another process; declining to run a concurrent stop/start")
+	}
+
+	err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed)
+	if !errors.Is(err, errManagedDoltRecoverDeclined) {
+		t.Fatalf("err = %v, want errManagedDoltRecoverDeclined: an unobservable (exit 3) recover op is this guard's own "+
+			"decline reappearing one layer down, not a transport fault", err)
+	}
+	if code, ok := providerOpExitCode(err); !ok || code != providerOpExitUnobservable {
+		t.Fatalf("providerOpExitCode(err) = (%d, %v), want (%d, true): the underlying exit code must survive the wrap "+
+			"(callers like the bd-runner's breaker still need to tell this apart from other declines if they ever care to)",
+			code, ok, providerOpExitUnobservable)
+	}
+}
+
+// A recover op that fails for a REAL reason (not exit 3) must still be a
+// plain failure, not swallowed into "declined" -- the mapping in
+// runGuardedManagedDoltRecover is specific to providerOpExitUnobservable.
+func TestGuardedRecoverDoesNotMapOrdinaryRecoverFailureToDeclined(t *testing.T) {
+	cityPath := t.TempDir()
+	stubRecoverGateClock(t)
+	stubRecoverLiveness(t, managedDoltLivenessConfirmedDead)
+
+	orig := managedDoltRecoverRunner
+	t.Cleanup(func() { managedDoltRecoverRunner = orig })
+	managedDoltRecoverRunner = func(context.Context, string, []string) error {
+		return providerOpExitErrorForTest(t, 1, "dolt start failed: port already in use")
+	}
+
+	err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed)
+	if errors.Is(err, errManagedDoltRecoverDeclined) {
+		t.Fatalf("err = %v, want a plain failure, NOT errManagedDoltRecoverDeclined: exit 1 is a real recover failure", err)
+	}
+	if err == nil {
+		t.Fatal("err = nil, want the recover op's real failure to propagate")
+	}
+}
+
 // ---------------------------------------------------------------------
 // The bd runner's route
 // ---------------------------------------------------------------------

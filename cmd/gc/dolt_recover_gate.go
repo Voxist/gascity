@@ -257,7 +257,28 @@ func runGuardedManagedDoltRecover(ctx context.Context, cityPath, script string, 
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return managedDoltRecoverRunner(ctx, script, environ)
+	err := managedDoltRecoverRunner(ctx, script, environ)
+	if err == nil {
+		return nil
+	}
+	// The provider's "recover" op can itself exit unobservable (3,
+	// providerOpExitUnobservable / die_unobservable) on the shell
+	// fallback's own concurrent-recover guard (ga-iv2l2): a losing
+	// op_recover that finds LOCK_FILE already held declines rather than
+	// running a second stop/start. That is this guard's own decline
+	// semantics reappearing one layer down, not a transport fault --
+	// treating it as a plain failure (as before) made the bd-runner path
+	// count it against the breaker and the health path report "recovery
+	// failed", when no server was destroyed and the caller that WON the
+	// lock already is (or will be) running the real recover. Map it to
+	// errManagedDoltRecoverDeclined so callers that already special-case
+	// a decline (both do) treat this the same way: a losing caller's 0
+	// return and an unobservable-mapped-to-declined return both mean "a
+	// concurrent recover is already being handled."
+	if code, ok := providerOpExitCode(err); ok && code == providerOpExitUnobservable {
+		return fmt.Errorf("%w: provider declined concurrent recover: %w", errManagedDoltRecoverDeclined, err)
+	}
+	return err
 }
 
 // managedDoltReplaceLiveness answers whether cityPath has a managed Dolt
