@@ -1713,6 +1713,23 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 			return openExecStoreAtForCityWithConfig(provider, scopeRoot, runtimeCityPath, cfg)
 		},
 		OpenNativeStore: func() (beads.Store, error) {
+			// ga-vwupk: defense in depth. internal/beads/factory.go's
+			// OpenStoreAtForCity now checks CheckMigrationFreeze before it
+			// ever calls opts.OpenNativeStore (this closure) at all, so in
+			// production a frozen scope never reaches this line -- the
+			// factory-level check is what actually decides. This check
+			// stays so a caller that constructs StoreOpenOptions directly,
+			// bypassing the factory, is not silently unprotected. Scoped
+			// claim, not an absolute one: this closure, and the
+			// native-open/reopen/admission layer generally, never trigger
+			// recovery when frozen -- but once the factory falls through
+			// to the BdStore/bd-CLI fallback (which it now does immediately
+			// for a frozen scope), THAT path's own env resolution can still
+			// restart a stopped managed Dolt on its first bd command
+			// (ga-lc97s, not yet fixed).
+			if err := beads.CheckMigrationFreeze(scopeRoot); err != nil {
+				return nil, fmt.Errorf("project native store env %s: %w", scopeRoot, err)
+			}
 			// Reuse the config this call already loaded. Passing nil made the
 			// rig-scoped projection load the whole city config a second time,
 			// pack expansion included, for the same city at the same moment.
@@ -1738,6 +1755,14 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 			// direct native path (which bypasses the factory preflight/identity
 			// gate, so an absent scope project_id cannot block the reconnect).
 			reopen := func(ctx context.Context) (beads.NativeStorage, error) {
+				// ga-vwupk: checked BEFORE re-resolving the env below, which can
+				// trigger managed-Dolt recovery/restart (allowRecovery=true) --
+				// the native lane must never have gc restart a database an
+				// operator deliberately stopped on the way to
+				// OpenNativeStorage's own choke-point refusal a few lines down.
+				if err := beads.CheckMigrationFreeze(scopeRoot); err != nil {
+					return nil, fmt.Errorf("re-resolve native store env %s: %w", scopeRoot, err)
+				}
 				var freshEnv map[string]string
 				var rerr error
 				if longLived {
