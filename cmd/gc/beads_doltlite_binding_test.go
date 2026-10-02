@@ -523,6 +523,33 @@ func TestEnsureProviderScopeOwnershipBeforeInitLeavesNoSignalCityGCManaged(t *te
 	}
 }
 
+// TestEnsureProviderScopeOwnershipBeforeInitJournalsCityOnExplicitLegacyEndpoint
+// is the above test's complement (ga-fo5mg): a legacy city.toml [dolt] host
+// (configDoltInitIntent's compat signal) IS an explicit signal, so the city
+// branch must still journal a pending provider-owned entry for it. Nothing in
+// the no-signal regression test exercises this branch at all -- a mutation
+// that made it never journal, regardless of signal, would have survived
+// every test added for ga-wuda3 undetected.
+func TestEnsureProviderScopeOwnershipBeforeInitJournalsCityOnExplicitLegacyEndpoint(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := "[workspace]\nname = \"dolt-city\"\nprefix = \"gc\"\n[beads]\nprovider = \"bd\"\n[dolt]\nhost = \"x\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ensureProviderScopeOwnershipBeforeInit(cityPath, cityPath); err != nil {
+		t.Fatalf("ensureProviderScopeOwnershipBeforeInit: %v", err)
+	}
+
+	entry, owned, err := providerScopeOwnership(cityPath, cityPath)
+	if err != nil || !owned || entry.State != providerScopeInitializing || entry.Intent != (providerScopeIntent{Transport: "direct", Target: "external"}) {
+		t.Fatalf("city ownership after ensureProviderScopeOwnershipBeforeInit = (%+v, %t, %v), want pending direct/external", entry, owned, err)
+	}
+}
+
 // TestCityGrantsProviderOwnershipToFreshScopesDeclinesForUnjournaledFreshCity
 // pins cityGrantsProviderOwnershipToFreshScopes directly: an uninitialized
 // city (no .beads identity yet) with no pending ownership journal entry must
@@ -575,5 +602,59 @@ func TestCityGrantsProviderOwnershipToFreshScopesAcceptsPendingUninitializedCity
 	}
 	if !inherits {
 		t.Fatal("cityGrantsProviderOwnershipToFreshScopes = false for a pending provider-owned uninitialized city, want true")
+	}
+}
+
+// TestCityGrantsProviderOwnershipToFreshScopesRefusesReadyUninitializedCity
+// (ga-fo5mg follow-up, option (a)) covers the third ownership state
+// cityGrantsProviderOwnershipToFreshScopes's !cityInitialized branch must
+// recognize: a READY record (not merely a pending one) on a city whose own
+// .beads identity is, nonetheless, still absent.
+//
+// An earlier version of this test (and of the function) treated this as
+// grantable, reasoning that a ready record is a STRONGER ownership signal
+// than a pending one. That reasoning does not survive contact with the
+// caller: markProviderScopeOwnershipReady clears the record's Intent to its
+// zero value on commit, so even a granted ownership here has no intent left
+// for freshScopeProviderOwnershipIntent to inherit -- the fresh-scope path
+// only ever has a PENDING record to fall back to. Granting ownership here
+// just moves the failure one layer up, into freshScopeProviderOwnershipIntent's
+// own invariant-violation error, which is less specific about what actually
+// went wrong. This function must report the state directly instead.
+//
+// Two things can produce this state: out-of-band interference (a crash, a
+// doctor repair, or something deleting .beads/metadata.json or config.yaml
+// after markProviderScopeOwnershipReady already committed the journal entry
+// -- gc only calls markProviderScopeOwnershipReady after the provider's init
+// op succeeds and is EXPECTED to have written that identity as part of it,
+// though that expectation is the provider's contract, not something gc
+// enforces structurally), or a narrow concurrent-init race between this
+// city's own init committing ready and a caller's ownership check landing
+// mid-commit. See cityGrantsProviderOwnershipToFreshScopes's doc comment for
+// both in full.
+func TestCityGrantsProviderOwnershipToFreshScopesRefusesReadyUninitializedCity(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := persistProviderScopeOwnership(cityPath, cityPath, providerScopeIntent{Transport: "direct", Target: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := markProviderScopeOwnershipReady(cityPath, cityPath); err != nil {
+		t.Fatal(err)
+	}
+	// No .beads/metadata.json or config.yaml written: the city stays
+	// uninitialized despite its ownership record being ready, one of the two
+	// scenarios described above.
+
+	inherits, err := cityGrantsProviderOwnershipToFreshScopes(cityPath, false)
+	if err == nil {
+		t.Fatalf("cityGrantsProviderOwnershipToFreshScopes = (%v, nil) for a ready-but-uninitialized city, want an actionable error", inherits)
+	}
+	if inherits {
+		t.Fatal("cityGrantsProviderOwnershipToFreshScopes = true for a ready-but-uninitialized city, want false alongside the error")
+	}
+	if !strings.Contains(err.Error(), "ready provider-ownership record but no .beads identity") {
+		t.Fatalf("error = %v, want it to name the ready-but-uninitialized state", err)
 	}
 }

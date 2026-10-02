@@ -353,14 +353,14 @@ func persistFreshProviderOwnership(cityPath string, opts hostedDoltInitOptions) 
 		intent = persisted
 		explicit = true
 	}
-	if existing, owned, ownershipErr := providerScopeOwnership(cityPath, cityPath); ownershipErr != nil {
-		return ownershipErr
-	} else if owned && existing.State == providerScopeInitializing {
+	if existingIntent, pending, err := pendingProviderOwnership(cityPath, cityPath); err != nil {
+		return err
+	} else if pending {
 		if !opts.selectorRequested() && !opts.enabled() {
 			// A resume path has no one-shot selector input. Its durable pending
 			// record is the only topology authority until bd writes metadata.
-			intent = existing.Intent
-		} else if existing.Intent != intent {
+			intent = existingIntent
+		} else if existingIntent != intent {
 			return fmt.Errorf("conflicting provider initialization intent for scope %q", cityPath)
 		}
 		// A pending record already committed this scope to provider ownership
