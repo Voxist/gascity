@@ -34,6 +34,11 @@ const (
 	// on this value, so the factory owns it and they read it.
 	BeadsGateProxiedProvider = "proxied_provider"
 
+	// BeadsGateMigrationFreeze is the preflight gate recorded when an active
+	// MIGRATION-FREEZE marker sends a scope to the bd fallback. Doctor matches
+	// on it so a deliberate freeze is not reported as a fault.
+	BeadsGateMigrationFreeze = "migration_freeze"
+
 	storeNameBdStore         = BeadsStoreNameBdStore
 	storeNameFileStore       = BeadsStoreNameFileStore
 	storeNameExecStore       = BeadsStoreNameExecStore
@@ -41,6 +46,7 @@ const (
 	nativeForceFallbackEnv   = "GC_BEADS_FORCE_FALLBACK"
 	nativeForceFallbackGate  = "force_fallback"
 	nativeHooksGate          = "bd_hooks"
+	migrationFreezeGate      = BeadsGateMigrationFreeze
 	proxiedProviderGate      = BeadsGateProxiedProvider
 	nativeUnavailableMessage = "native_store_unavailable"
 
@@ -262,6 +268,21 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 	case strings.HasPrefix(provider, "exec:") && !contract.ProviderUsesBDContract(provider):
 		store, err := callStoreOpen("exec store", opts.OpenExecStore)
 		return opts.stampedResult(StoreOpenResult{Store: store, Diagnostic: BeadsDiagnostic{Store: storeNameExecStore}}, err)
+	}
+
+	// A frozen scope goes straight to the bd fallback, before preflight's
+	// recovery-capable bd-context probe or the proxied admission ladder can
+	// run. It deliberately masks every other gate name. See
+	// native_dolt_migration_freeze.go.
+	if _, err := migrationFreezeRefusal(opts.ScopeRoot); err != nil {
+		diag := BeadsDiagnostic{
+			Store:               storeNameBdStore,
+			NativeStoreEligible: false,
+			PreflightGate:       migrationFreezeGate,
+			PreflightReason:     err.Error(),
+		}
+		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
+		return opts.openBdFallback(provider, diag)
 	}
 
 	if forceNativeFallback() {

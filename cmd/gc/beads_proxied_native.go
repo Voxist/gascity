@@ -382,6 +382,12 @@ func (o *proxiedNativeOpener) storeOpener() func(context.Context, bool) (beads.S
 // caller that assembled the env map by hand has nothing to pass to
 // beads.NewProxiedStore.
 func (o *proxiedNativeOpener) open(parent context.Context, longLived bool) (beads.Store, beads.ProxiedOpenReport, error) {
+	// Same guard as reopen, before admission's recover rung can fork a bd
+	// command for a scope an operator froze.
+	if err := beads.CheckMigrationFreeze(o.scopeRoot); err != nil {
+		return nil, beads.ProxiedOpenReport{}, err
+	}
+
 	ctx, cancel := context.WithTimeout(parent, proxiedAdmissionBudget(longLived))
 	defer cancel()
 
@@ -652,6 +658,15 @@ func (o *proxiedNativeOpener) admissionInput(longLived bool, ops beads.ProviderO
 // spending the whole read budget re-learning the same refusal.
 func (o *proxiedNativeOpener) reopen(longLived bool) beads.NativeReopenFunc {
 	return func(ctx context.Context) (beads.NativeStorage, error) {
+		// ga-vwupk round 2: checked BEFORE admission below. admit's ladder
+		// can escalate to a recover rung that forks a bd command (e.g. to
+		// re-establish an absent proxy ownership record) -- the same
+		// managed-Dolt-adjacent recovery hazard the direct lane's reopen
+		// closures gate, reached here before o.openNativeStorage ever gets
+		// to run this scope's own choke-point check.
+		if err := beads.CheckMigrationFreeze(o.scopeRoot); err != nil {
+			return nil, err
+		}
 		pin, err := o.admit(ctx, longLived)
 		if err != nil {
 			return nil, err

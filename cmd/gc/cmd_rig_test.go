@@ -2973,12 +2973,17 @@ func TestDoRigAdd_AdoptWithBdContractProvider_NonAdoptControlInvokesInit(t *test
 	var initCalls []string
 	initDirIfReadyInitAndHookDir = func(_, dir, _ string) error {
 		initCalls = append(initCalls, dir)
-		// No selector was requested, so the fresh rig gets the no-signal
-		// default, which is direct/local (ga-m07q9) -- not upstream's
-		// proxied/local default.
+		// No selector was requested, and the city itself is uninitialized
+		// with no pending ownership journal entry (writeSchema2RigCity
+		// writes no .beads identity), so ga-m07q9's no-signal default
+		// applies: classic gc-managed, not provider-owned. Before ga-wuda3's
+		// second fix, cityGrantsProviderOwnershipToFreshScopes granted
+		// ownership to any fresh scope under an uninitialized city
+		// unconditionally, so this rig got journaled as provider-owned even
+		// though the city was never going to become one.
 		entry, owned, err := providerScopeOwnership(cityPath, dir)
-		if err != nil || !owned || entry.State != providerScopeInitializing || entry.Intent != (providerScopeIntent{Transport: "direct", Target: "local"}) {
-			t.Fatalf("new rig ownership before provider init = (%+v, %t, %v)", entry, owned, err)
+		if err != nil || owned {
+			t.Fatalf("new rig ownership before provider init = (%+v, %t, %v), want not owned (classic gc-managed)", entry, owned, err)
 		}
 		return nil
 	}

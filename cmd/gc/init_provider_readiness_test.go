@@ -625,14 +625,16 @@ func TestFinalizeInitReportsConfigLoadErrorDuringProviderPreflight(t *testing.T)
 
 func TestFinalizeInitRecordsProviderOwnershipBeforeReadinessPreflight(t *testing.T) {
 	for _, tt := range []struct {
-		name string
-		opts initFinalizeOptions
-		want providerScopeIntent
+		name  string
+		opts  initFinalizeOptions
+		owned bool
+		want  providerScopeIntent
 	}{
-		// No selector: the no-signal default is direct/local (ga-m07q9), not
-		// upstream's proxied/local default.
-		{name: "default", opts: initFinalizeOptions{commandName: "gc init"}, want: providerScopeIntent{Transport: "direct", Target: "local"}},
-		{name: "direct external", opts: initFinalizeOptions{commandName: "gc init", hostedDolt: hostedDoltInitOptions{Host: "127.0.0.1", Port: "3306", Database: "new_city", ProjectID: "new-city", Transport: "direct", Target: "external"}}, want: providerScopeIntent{Transport: "direct", Target: "external"}},
+		// No selector: ga-m07q9's no-signal default is classic gc-managed, so
+		// this leaves the scope unjournaled rather than pending any
+		// transport/target flavor.
+		{name: "default", opts: initFinalizeOptions{commandName: "gc init"}, owned: false},
+		{name: "direct external", opts: initFinalizeOptions{commandName: "gc init", hostedDolt: hostedDoltInitOptions{Host: "127.0.0.1", Port: "3306", Database: "new_city", ProjectID: "new-city", Transport: "direct", Target: "external"}}, owned: true, want: providerScopeIntent{Transport: "direct", Target: "external"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			configureIsolatedRuntimeEnv(t)
@@ -672,11 +674,20 @@ base = "builtin:claude"
 				t.Fatalf("readiness preflight did not reach its probe: called=%t stderr=%s", probeCalled, stderr.String())
 			}
 			entry, owned, err := providerScopeOwnership(cityPath, cityPath)
-			if err != nil || !owned || entry.State != providerScopeInitializing || entry.Intent != tt.want {
+			if err != nil || owned != tt.owned {
+				t.Fatalf("ownership = (%+v, %t, %v), want owned=%t; stderr=%s", entry, owned, err, tt.owned, stderr.String())
+			}
+			if tt.owned && (entry.State != providerScopeInitializing || entry.Intent != tt.want) {
 				t.Fatalf("pending ownership = (%+v, %t, %v), want %+v; stderr=%s", entry, owned, err, tt.want, stderr.String())
 			}
-			if _, err := os.Stat(filepath.Join(cityPath, ".beads", "config.yaml")); !os.IsNotExist(err) {
-				t.Fatalf("provider-owned preflight seeded legacy config.yaml: %v", err)
+			if tt.owned {
+				// Only a genuinely provider-owned pending scope defers its
+				// legacy scaffold to bd; the no-signal/classic gc-managed case
+				// seeds config.yaml as part of ordinary bootstrap regardless of
+				// this preflight failure, so it is not asserted here.
+				if _, err := os.Stat(filepath.Join(cityPath, ".beads", "config.yaml")); !os.IsNotExist(err) {
+					t.Fatalf("provider-owned preflight seeded legacy config.yaml: %v", err)
+				}
 			}
 		})
 	}
@@ -694,11 +705,11 @@ func TestFinalizeInitRecordsProviderOwnershipBeforeDependencyFailure(t *testing.
 	if code := finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{commandName: "gc init"}); code != 1 {
 		t.Fatalf("finalizeInit = %d, want dependency failure: %s", code, stderr.String())
 	}
-	// No selector: the no-signal default is direct/local (ga-m07q9), not
-	// upstream's proxied/local default.
+	// No selector: ga-m07q9's no-signal default is classic gc-managed, so
+	// this leaves the scope unjournaled.
 	entry, owned, err := providerScopeOwnership(cityPath, cityPath)
-	if err != nil || !owned || entry.State != providerScopeInitializing || entry.Intent != (providerScopeIntent{Transport: "direct", Target: "local"}) {
-		t.Fatalf("pending ownership after dependency failure = (%+v, %t, %v)", entry, owned, err)
+	if err != nil || owned {
+		t.Fatalf("ownership after dependency failure = (%+v, %t, %v), want not owned (classic gc-managed)", entry, owned, err)
 	}
 }
 
@@ -1479,14 +1490,22 @@ func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlock(t *testing
 		if !fresh {
 			t.Fatal("finalizeInit should force a fresh readiness probe")
 		}
-		entry, owned, err := providerScopeOwnership(cityPath, cityPath)
-		if err != nil || !owned || entry.State != providerScopeInitializing {
-			t.Fatalf("pending provider ownership before readiness block = (%+v, %t, %v)", entry, owned, err)
+		// ga-m07q9: no selector was requested, so this `doInit` took the
+		// no-signal fresh-scope default, which is classic gc-managed, not
+		// provider-owned -- there is no pending ownership record to check,
+		// and (unlike a provider-owned scope, which defers bd init until
+		// readiness passes) seedDeferredManagedBeadsBeforeProviderReadiness
+		// already seeded the classic store synchronously earlier in this
+		// same finalizeInit call, so the canonical store this test's name
+		// refers to already exists by the time the probe fires. See
+		// TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlockProviderOwned
+		// below for the provider-owned sibling, where seeding is deferred
+		// instead.
+		if entry, owned, err := providerScopeOwnership(cityPath, cityPath); err != nil || owned {
+			t.Fatalf("ownership before readiness block = (%+v, %t, %v), want not owned (classic gc-managed)", entry, owned, err)
 		}
-		for _, name := range []string{"metadata.json", "config.yaml"} {
-			if _, err := os.Stat(filepath.Join(cityPath, ".beads", name)); !os.IsNotExist(err) {
-				t.Fatalf("provider-owned preflight seeded legacy %s: %v", name, err)
-			}
+		if _, err := os.Stat(filepath.Join(cityPath, ".beads", "metadata.json")); err != nil {
+			t.Fatalf("classic gc-managed store not canonicalized before readiness block: %v", err)
 		}
 		return map[string]api.ReadinessItem{
 			"claude": {
@@ -1515,9 +1534,70 @@ func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlock(t *testing
 	if calledRegister {
 		t.Fatal("registerCityWithSupervisor should not run when provider readiness blocks init")
 	}
-	entry, owned, err := providerScopeOwnership(cityPath, cityPath)
-	if err != nil || !owned || entry.State != providerScopeInitializing {
-		t.Fatalf("pending provider ownership after readiness block = (%+v, %t, %v)", entry, owned, err)
+	if entry, owned, err := providerScopeOwnership(cityPath, cityPath); err != nil || owned {
+		t.Fatalf("ownership after readiness block = (%+v, %t, %v), want not owned (classic gc-managed)", entry, owned, err)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "metadata.json")); err != nil {
+		t.Fatalf("classic gc-managed store not canonicalized after readiness block: %v", err)
+	}
+}
+
+// TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlockProviderOwned
+// is the provider-owned sibling of the test above, restoring coverage the
+// gc-managed assertions above replaced: an explicit --beads-transport
+// direct --beads-target local selector still produces a pending
+// provider-owned scope (ga-m07q9's no-signal default never overrides a real
+// signal), and a provider-owned scope defers bd init to bd itself rather
+// than seeding its legacy files up front, so neither metadata.json nor
+// config.yaml exists yet when the readiness probe blocks init.
+func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlockProviderOwned(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+	stubInitDependencyChecks(t)
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	var initStdout, initStderr bytes.Buffer
+	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
+		configName: "minimal",
+		provider:   "claude",
+		hostedDolt: hostedDoltInitOptions{Transport: "direct", Target: "local"},
+	}, "", &initStdout, &initStderr, false)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
+	}
+
+	oldProbe := initProbeProvidersReadiness
+	initProbeProvidersReadiness = func(_ context.Context, _ []string, fresh bool) (map[string]api.ReadinessItem, error) {
+		if !fresh {
+			t.Fatal("finalizeInit should force a fresh readiness probe")
+		}
+		if entry, owned, err := providerScopeOwnership(cityPath, cityPath); err != nil || !owned || entry.State != providerScopeInitializing {
+			t.Fatalf("pending ownership before readiness block = (%+v, %t, %v), want pending direct/local", entry, owned, err)
+		}
+		for _, name := range []string{"metadata.json", "config.yaml"} {
+			if _, err := os.Stat(filepath.Join(cityPath, ".beads", name)); !os.IsNotExist(err) {
+				t.Fatalf("provider-owned preflight seeded legacy %s: %v", name, err)
+			}
+		}
+		return map[string]api.ReadinessItem{
+			"claude": {
+				Name:        "claude",
+				Kind:        api.ProbeKindProvider,
+				DisplayName: "Claude Code",
+				Status:      api.ProbeStatusNeedsAuth,
+			},
+		}, nil
+	}
+	t.Cleanup(func() { initProbeProvidersReadiness = oldProbe })
+
+	var stdout, stderr bytes.Buffer
+	code = finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{commandName: "gc init", hostedDolt: hostedDoltInitOptions{Transport: "direct", Target: "local"}})
+	if code != 1 {
+		t.Fatalf("finalizeInit = %d, want 1", code)
+	}
+	if entry, owned, err := providerScopeOwnership(cityPath, cityPath); err != nil || !owned || entry.State != providerScopeInitializing {
+		t.Fatalf("pending ownership after readiness block = (%+v, %t, %v), want pending direct/local", entry, owned, err)
 	}
 	for _, name := range []string{"metadata.json", "config.yaml"} {
 		if _, err := os.Stat(filepath.Join(cityPath, ".beads", name)); !os.IsNotExist(err) {
@@ -2011,9 +2091,78 @@ func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlockWithoutSkip
 		if !fresh {
 			t.Fatal("finalizeInit should force a fresh readiness probe")
 		}
-		entry, owned, err := providerScopeOwnership(cityPath, cityPath)
-		if err != nil || !owned || entry.State != providerScopeInitializing {
-			t.Fatalf("pending provider ownership before readiness block = (%+v, %t, %v)", entry, owned, err)
+		// ga-m07q9: no selector was requested, so this `doInit` took the
+		// no-signal fresh-scope default, which is classic gc-managed, not
+		// provider-owned -- there is no pending ownership record to check,
+		// and (unlike a provider-owned scope, which defers bd init until
+		// readiness passes) seedDeferredManagedBeadsBeforeProviderReadiness
+		// already seeded the classic store synchronously earlier in this
+		// same finalizeInit call, so the canonical store this test's name
+		// refers to already exists by the time the probe fires. See
+		// TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlockWithoutSkipProviderOwned
+		// below for the provider-owned sibling, where seeding is deferred
+		// instead.
+		if entry, owned, err := providerScopeOwnership(cityPath, cityPath); err != nil || owned {
+			t.Fatalf("ownership before readiness block = (%+v, %t, %v), want not owned (classic gc-managed)", entry, owned, err)
+		}
+		if _, err := os.Stat(filepath.Join(cityPath, ".beads", "metadata.json")); err != nil {
+			t.Fatalf("classic gc-managed store not canonicalized before readiness block: %v", err)
+		}
+		return map[string]api.ReadinessItem{
+			"claude": {
+				Name:        "claude",
+				Kind:        api.ProbeKindProvider,
+				DisplayName: "Claude Code",
+				Status:      api.ProbeStatusNeedsAuth,
+			},
+		}, nil
+	}
+	t.Cleanup(func() { initProbeProvidersReadiness = oldProbe })
+
+	var stdout, stderr bytes.Buffer
+	code = finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{commandName: "gc init"})
+	if code != 1 {
+		t.Fatalf("finalizeInit = %d, want 1", code)
+	}
+	if entry, owned, err := providerScopeOwnership(cityPath, cityPath); err != nil || owned {
+		t.Fatalf("ownership after readiness block = (%+v, %t, %v), want not owned (classic gc-managed)", entry, owned, err)
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".beads", "metadata.json")); err != nil {
+		t.Fatalf("classic gc-managed store not canonicalized after readiness block: %v", err)
+	}
+}
+
+// TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlockWithoutSkipProviderOwned
+// is TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlockProviderOwned's
+// counterpart for the "without --skip-provider-readiness" setup above:
+// restores the original provider-owned (no-seed) coverage alongside it.
+func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlockWithoutSkipProviderOwned(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	configureIsolatedRuntimeEnv(t)
+	stubInitDependencyChecks(t)
+	stubInitDoltAuthorIdentity(t, map[string]string{
+		"user.name":  "gc-test",
+		"user.email": "gc-test@test.local",
+	})
+
+	cityPath := filepath.Join(t.TempDir(), "bright-lights")
+	var initStdout, initStderr bytes.Buffer
+	code := doInit(fsys.OSFS{}, cityPath, wizardConfig{
+		configName: "minimal",
+		provider:   "claude",
+		hostedDolt: hostedDoltInitOptions{Transport: "direct", Target: "local"},
+	}, "", &initStdout, &initStderr, false)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0: %s", code, initStderr.String())
+	}
+
+	oldProbe := initProbeProvidersReadiness
+	initProbeProvidersReadiness = func(_ context.Context, _ []string, fresh bool) (map[string]api.ReadinessItem, error) {
+		if !fresh {
+			t.Fatal("finalizeInit should force a fresh readiness probe")
+		}
+		if entry, owned, err := providerScopeOwnership(cityPath, cityPath); err != nil || !owned || entry.State != providerScopeInitializing {
+			t.Fatalf("pending ownership before readiness block = (%+v, %t, %v), want pending direct/local", entry, owned, err)
 		}
 		for _, name := range []string{"metadata.json", "config.yaml"} {
 			if _, err := os.Stat(filepath.Join(cityPath, ".beads", name)); !os.IsNotExist(err) {
@@ -2032,13 +2181,12 @@ func TestFinalizeInitCanonicalizesBdStoreBeforeProviderReadinessBlockWithoutSkip
 	t.Cleanup(func() { initProbeProvidersReadiness = oldProbe })
 
 	var stdout, stderr bytes.Buffer
-	code = finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{commandName: "gc init"})
+	code = finalizeInit(cityPath, &stdout, &stderr, initFinalizeOptions{commandName: "gc init", hostedDolt: hostedDoltInitOptions{Transport: "direct", Target: "local"}})
 	if code != 1 {
 		t.Fatalf("finalizeInit = %d, want 1", code)
 	}
-	entry, owned, err := providerScopeOwnership(cityPath, cityPath)
-	if err != nil || !owned || entry.State != providerScopeInitializing {
-		t.Fatalf("pending provider ownership after readiness block = (%+v, %t, %v)", entry, owned, err)
+	if entry, owned, err := providerScopeOwnership(cityPath, cityPath); err != nil || !owned || entry.State != providerScopeInitializing {
+		t.Fatalf("pending ownership after readiness block = (%+v, %t, %v), want pending direct/local", entry, owned, err)
 	}
 	for _, name := range []string{"metadata.json", "config.yaml"} {
 		if _, err := os.Stat(filepath.Join(cityPath, ".beads", name)); !os.IsNotExist(err) {

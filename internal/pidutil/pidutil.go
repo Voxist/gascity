@@ -232,6 +232,46 @@ func StartTime(pid int) (string, error) {
 	return startTimeMechProc + ":" + fields[starttimeIndexAfterComm], nil
 }
 
+// ParentPIDOf returns pid's parent PID, trying — in order — the Linux /proc
+// reader (subreaper.go's ParentPID), the darwin kernel-record reader
+// (procParentPID), and finally a `ps -o ppid=` fork/exec. It differs from
+// subreaper.go's ParentPID (which is /proc-only, and used there to walk the
+// CALLER's own ancestry hunting for a systemd --user manager) by answering
+// for an ARBITRARY pid on every platform this project builds for — the
+// question a caller asks when it already knows one specific process and
+// wants to know whether it is still owned by a live parent or has been
+// reparented (ga-3bwmf: the managed-Dolt watchdog-liveness doctor check).
+func ParentPIDOf(pid int) (int, error) {
+	if pid <= 0 {
+		return 0, fmt.Errorf("pidutil: invalid PID %d", pid)
+	}
+	if ppid, err := ParentPID(pid); err == nil {
+		return ppid, nil
+	}
+	if ppid, ok := procParentPID(pid); ok {
+		return ppid, nil
+	}
+	return psParentPID(pid)
+}
+
+// psParentPID is ParentPIDOf's last-resort fallback, reached only when
+// neither /proc nor the darwin kernel-record reader answered.
+func psParentPID(pid int) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), psTimeout())
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "ppid=").Output()
+	if err != nil {
+		return 0, fmt.Errorf("reading parent pid for pid %d via ps: %w", pid, err)
+	}
+	trimmed := strings.TrimSpace(string(out))
+	ppid, err := strconv.Atoi(trimmed)
+	if err != nil {
+		return 0, fmt.Errorf("parsing ps ppid output %q for pid %d: %w", trimmed, pid, err)
+	}
+	return ppid, nil
+}
+
 // AliveWithStartTime reports whether pid is alive AND still the same process
 // identified by startTime. It closes the PID-reuse hole in Alive: during a
 // post-SIGKILL reap wait the target's PID can be reaped and recycled to an

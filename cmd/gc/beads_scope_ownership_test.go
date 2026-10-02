@@ -723,6 +723,69 @@ func TestEnsureProviderScopeOwnershipBeforeInitInheritsPendingCityIntent(t *test
 	}
 }
 
+// TestEnsureProviderScopeOwnershipAndFreshRigRefuseReadyUninitializedCity is
+// the end-to-end regression guard for the ga-fo5mg follow-up (option (a)):
+// a city whose provider-ownership record is READY but whose own .beads
+// identity is still absent must refuse both callers that reach
+// cityGrantsProviderOwnershipToFreshScopes's !cityInitialized branch, with
+// the same actionable error, rather than falling through into
+// freshScopeProviderOwnershipIntent's generic invariant-violation error.
+//
+// A prior version of cityGrantsProviderOwnershipToFreshScopes granted
+// ownership in this state. The reviewer reproduced the actual failure that
+// caused: markProviderScopeOwnershipReady clears the record's Intent on
+// commit, so freshScopeProviderOwnershipIntent -- reached only because the
+// grant said yes -- found no pending record to inherit and hit its own
+// invariant error anyway. Both ensureProviderScopeOwnershipBeforeInit(city,
+// rig) and ensureFreshRigProviderOwnership failed either way; this test
+// pins the specific, actionable error both must now return instead.
+func TestEnsureProviderScopeOwnershipAndFreshRigRefuseReadyUninitializedCity(t *testing.T) {
+	city := t.TempDir()
+	rig := filepath.Join(city, "rigs", "fresh")
+	if err := os.MkdirAll(rig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(
+		"[workspace]\nname = \"demo\"\n[beads]\nprovider = \"bd\"\n[[rigs]]\nname = \"fresh\"\npath = \"rigs/fresh\"\n",
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := persistProviderScopeOwnership(city, city, providerScopeIntent{Transport: "direct", Target: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := markProviderScopeOwnershipReady(city, city); err != nil {
+		t.Fatal(err)
+	}
+	// No .beads/metadata.json or config.yaml written: the city's own
+	// identity stays absent despite its ownership record being ready. Per
+	// cityGrantsProviderOwnershipToFreshScopes's doc comment, this models
+	// out-of-band interference (a crash, a doctor repair, or something
+	// deleting the identity files) after the journal committed ready -- one
+	// of the two ways this state is reachable.
+
+	const wantSubstring = "ready provider-ownership record but no .beads identity"
+
+	if err := ensureProviderScopeOwnershipBeforeInit(city, rig); err == nil {
+		t.Fatal("ensureProviderScopeOwnershipBeforeInit succeeded for a ready-but-uninitialized city, want an actionable error")
+	} else if !strings.Contains(err.Error(), wantSubstring) {
+		t.Fatalf("ensureProviderScopeOwnershipBeforeInit error = %v, want it to contain %q", err, wantSubstring)
+	}
+
+	cfg, err := loadCityConfig(city, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureFreshRigProviderOwnership(city, cfg); err == nil {
+		t.Fatal("ensureFreshRigProviderOwnership succeeded for a ready-but-uninitialized city, want an actionable error")
+	} else if !strings.Contains(err.Error(), wantSubstring) {
+		t.Fatalf("ensureFreshRigProviderOwnership error = %v, want it to contain %q", err, wantSubstring)
+	}
+
+	if _, owned, err := providerScopeOwnership(city, rig); err != nil || owned {
+		t.Fatalf("fresh rig ownership = (owned=%t, %v), want untouched: neither refusal may journal the rig", owned, err)
+	}
+}
+
 func TestProviderOwnedLifecycleRejectsProviderExitTwo(t *testing.T) {
 	city := t.TempDir()
 	script := writeTestScript(t, "start", 2, "provider unavailable")

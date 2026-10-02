@@ -42,6 +42,14 @@ const bdEnvPrefix = "BD_"
 // statement of what the window decides, which is what a reader auditing the
 // hermetic claim needs.
 //
+// (BD_ALLOW_REMOTE_MIGRATE is ALSO withheld on the direct lane now, via
+// native_dolt_store.go's directNativeOpenWithheldKeys/directNativeOpenEnvKeys
+// — a separate list rather than an addition here, precisely so this list and
+// that one never both name the same key; see that file's comment. This one
+// stays as originally written because the proxied window's own belt-and-
+// braces claim is about ITS five unlocks, independent of what the direct
+// lane later grew to withhold by a different route.)
+//
 // The last two are the AUTHOR PAIR, and they are projected with values. They
 // are here because the projection reaches commit time, which is not obvious:
 // beads' applyConfigDefaults reads GIT_AUTHOR_NAME and GIT_AUTHOR_EMAIL during
@@ -140,6 +148,13 @@ func OpenNativeStorageAtProxied(ctx context.Context, scopeRoot string, env map[s
 }
 
 func openNativeStorageProxied(ctx context.Context, scopeRoot string, env map[string]string, readPrefix bool) (beadslib.Storage, string, error) {
+	// ga-vwupk: the choke-point freeze check, covering both the initial
+	// proxied open (OpenNativeDoltStoreAtProxied) and its reopen hook
+	// (OpenNativeStorageAtProxied). See checkMigrationFreezeForNativeOpen's
+	// doc comment.
+	if err := checkMigrationFreezeForNativeOpen(scopeRoot); err != nil {
+		return nil, "", err
+	}
 	nativeDoltOpenEnvMu.Lock()
 	defer nativeDoltOpenEnvMu.Unlock()
 
