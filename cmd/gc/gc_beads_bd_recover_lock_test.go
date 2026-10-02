@@ -53,7 +53,7 @@ import (
 //   - op_health: healthy or failing, per healthOK -- a losing recover
 //     re-probes it after losing the lock race, and whether that probe
 //     passes decides whether the loser exits 0 (someone else already
-//     fixed it) or 3 (unobservable: it could not confirm health AND
+//     fixed it) or 4 (recover declined: it could not confirm health AND
 //     could not get the lock to check for itself).
 //   - op_stop_impl / op_start: instrumented stubs that append a
 //     start/sleep/end triple to a shared, process-tagged log file instead
@@ -107,6 +107,7 @@ func opRecoverConcurrencyScript(t *testing.T, logFile string, healthOK bool) str
 		"set -e",
 		extractShellFunction(t, text, "die"),
 		extractShellFunction(t, text, "die_unobservable"),
+		extractShellFunction(t, text, "die_recover_declined"),
 		recoverLockStubs(logFile, healthOK),
 		extractShellFunction(t, text, "op_recover"),
 		"op_recover",
@@ -173,7 +174,7 @@ func TestConcurrentOpRecoverSerializesStopAndStart(t *testing.T) {
 	for i, code := range exitCodes {
 		// A lock loser that finds a healthy server (the op_health stub
 		// here always succeeds) is expected to exit 0 (nothing left to
-		// do): see TestConcurrentOpRecoverLoserExitsUnobservableWhenHealthFails
+		// do): see TestConcurrentOpRecoverLoserDeclinesWithOwnExitWhenHealthFails
 		// for the exact-exit-3 case when the re-probe itself fails.
 		if code != 0 {
 			t.Fatalf("op_recover run %d exited %d, want 0 (op_health stub is always healthy here)", i, code)
@@ -193,15 +194,15 @@ func TestConcurrentOpRecoverSerializesStopAndStart(t *testing.T) {
 	}
 }
 
-// TestConcurrentOpRecoverLoserExitsUnobservableWhenHealthFails is the
-// precise-exit-code companion to the test above, requested in review: with
-// op_health stubbed FAILING (server down mid-stop) rather than healthy,
-// the loser's re-probe cannot confirm health either, so it must exit
-// EXACTLY 3 (die_unobservable) -- not "0 or 3", which could not tell a
-// correctly-declining loser from one that took some other exit path
-// entirely. Both the stop/start serialization (still exactly one of
-// each) and the loser's exact exit code are asserted together.
-func TestConcurrentOpRecoverLoserExitsUnobservableWhenHealthFails(t *testing.T) {
+// TestConcurrentOpRecoverLoserDeclinesWithOwnExitWhenHealthFails is the
+// precise-exit-code companion to the test above: with op_health stubbed
+// FAILING (server down mid-stop), the loser's re-probe cannot confirm
+// health, so it must exit EXACTLY 4 (die_recover_declined), while the
+// lock WINNER -- which really ran stop/start and whose final health
+// verification then fails -- must exit 3 (die_unobservable), a code that
+// must never be confused with the decline. Exactly one of each, plus
+// exactly one stop/start sequence, are asserted together.
+func TestConcurrentOpRecoverLoserDeclinesWithOwnExitWhenHealthFails(t *testing.T) {
 	requireFlock(t)
 	dir := t.TempDir()
 	logFile := filepath.Join(dir, "recover.log")
@@ -220,17 +221,20 @@ func TestConcurrentOpRecoverLoserExitsUnobservableWhenHealthFails(t *testing.T) 
 	}
 	wg.Wait()
 
-	// Every run's final step is its own "Verify health" op_health call,
-	// which also fails here -- so BOTH the winner (after a real
-	// stop/start) and the loser (which never reaches stop/start at all)
-	// exit exactly 3 in this scenario. That is expected and does not
-	// weaken the test: the stop/start log counts below are what prove
-	// only one of the two actually ran the sequence.
+	winners, losers := 0, 0
 	for i, code := range exitCodes {
-		if code != 3 {
-			t.Fatalf("op_recover run %d exited %d, want exactly 3 (die_unobservable): op_health is stubbed failing, "+
-				"so neither a winner's final verify nor a loser's lock-loss re-probe can report healthy", i, code)
+		switch code {
+		case 3:
+			winners++
+		case 4:
+			losers++
+		default:
+			t.Fatalf("op_recover run %d exited %d, want 3 (winner's failed final verify) or 4 (loser's decline)", i, code)
 		}
+	}
+	if winners != 1 || losers != 1 {
+		t.Fatalf("exit codes = %v, want exactly one 3 (winner, failed post-restart verify) and one 4 (loser, declined): "+
+			"the two cases must be distinguishable", exitCodes)
 	}
 
 	raw, err := os.ReadFile(logFile)
@@ -242,7 +246,7 @@ func TestConcurrentOpRecoverLoserExitsUnobservableWhenHealthFails(t *testing.T) 
 	startStarts := strings.Count(log, "start start pid=")
 	if stopStarts != 1 || startStarts != 1 {
 		t.Fatalf("two concurrent op_recover runs (failing op_health) produced %d stop and %d start sequences, want "+
-			"exactly 1 of each -- the loser must still never touch stop/start even though it also exits 3:\n%s",
+			"exactly 1 of each -- the loser must never touch stop/start:\n%s",
 			stopStarts, startStarts, log)
 	}
 }
@@ -394,14 +398,12 @@ func holdLockFileForTest(t *testing.T, lockFile string, dur time.Duration) {
 	}
 }
 
-// TestOpStartTrustsCallerHeldLockInsteadOfReacquiring is the ga-iv2l2
-// re-entrancy regression guard for op_start's half of the fix: called with
-// the "lock-held" ARGUMENT against a LOCK_FILE some OTHER process
-// genuinely holds, op_start must succeed via its normal fast path instead
-// of trying (and failing) to flock fd 9 itself. The no-claim control case
-// proves the external holder really did hold the lock -- without any
-// trust claim, op_start must fail to acquire it and die.
-func TestOpStartTrustsCallerHeldLockInsteadOfReacquiring(t *testing.T) {
+// TestOpStartWithoutTrustClaimContendsForRealLock proves a plain op_start
+// (no "lock-held" argument) really contends for a LOCK_FILE some OTHER
+// process holds: it spends its ~3s retry loop and fails. The positive
+// trust path is covered by TestOpStartArgumentTrustPathSkipsReacquisitionWithoutGap
+// and the env-forgery case by TestOpStartEnvironmentCannotForgeLockHeldClaim.
+func TestOpStartWithoutTrustClaimContendsForRealLock(t *testing.T) {
 	requireFlock(t)
 	dir := t.TempDir()
 	lockFile := filepath.Join(dir, "dolt.lock")
@@ -455,24 +457,17 @@ load_existing_managed_from_gc() {
 save_state() { :; }
 `
 
-	// The harness signals HANDOFF_DONE_FILE the instant op_start returns,
-	// still holding fd 9, and then blocks on HANDOFF_PROCEED_FILE before
-	// actually exiting (which is what releases the lock, by closing fd
-	// 9). This gives the Go test a race-free point to stop probing:
-	// anything it observes before HANDOFF_DONE_FILE appears happened
-	// while the subprocess was provably still alive and still holding
-	// the lock, by construction -- unlike waiting on cmd.Wait() to
-	// return, which races against the probe goroutine's own
-	// already-in-flight attempt (the process can release the lock
-	// microseconds before the goroutine notices and stops, and that
-	// attempt then succeeds for a completely ordinary reason: op_start
-	// already finished and the process is exiting on schedule).
+	// Right after the harness locks fd 9 it replaces LOCK_FILE with a
+	// DIRECTORY. That makes the check deterministic: a re-exec
+	// (`exec 9>"$LOCK_FILE"`) inside op_start now fails hard with "Is a
+	// directory", whereas the trusted inherited-fd path never touches the
+	// pathname and still succeeds. (Probing the lock from outside is not
+	// used: it only catches a re-exec's brief gap by luck.)
 	harness := `
-trap 'trap_rc=$?; : > "$HANDOFF_DONE_FILE"; while [ ! -f "$HANDOFF_PROCEED_FILE" ]; do sleep 0.01; done; exit "$trap_rc"' EXIT
 exec 9>"$LOCK_FILE"
 flock -n 9 || { echo "test harness: could not pre-acquire LOCK_FILE" >&2; exit 90; }
-: > "$HANDOFF_READY_FILE"
-sleep 0.2
+rm -f "$LOCK_FILE"
+mkdir "$LOCK_FILE"
 op_start lock-held
 `
 
@@ -506,9 +501,6 @@ func TestOpStartArgumentTrustPathSkipsReacquisitionWithoutGap(t *testing.T) {
 	dir := t.TempDir()
 	lockFile := filepath.Join(dir, "dolt.lock")
 	dataDir := t.TempDir()
-	doneFile := filepath.Join(dir, "handoff-done")
-	proceedFile := filepath.Join(dir, "handoff-proceed")
-	readyFile := filepath.Join(dir, "handoff-ready")
 	path := stubDoltBin(t)
 	composed := opStartTrustedHandoffScript(t)
 
@@ -519,66 +511,17 @@ func TestOpStartArgumentTrustPathSkipsReacquisitionWithoutGap(t *testing.T) {
 		"DATA_DIR="+dataDir,
 		"PID_FILE="+filepath.Join(dataDir, "dolt.pid"),
 		"DOLT_PORT=1",
-		"HANDOFF_DONE_FILE="+doneFile,
-		"HANDOFF_PROCEED_FILE="+proceedFile,
-		"HANDOFF_READY_FILE="+readyFile,
 	)
 	start := time.Now()
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start harness: %v", err)
-	}
-
-	// Probe until HANDOFF_DONE_FILE appears: the harness creates it only
-	// after op_start returns, and only THEN blocks waiting for
-	// HANDOFF_PROCEED_FILE before exiting (which is what actually
-	// releases the lock) -- so every probe up to that point runs while
-	// the subprocess is provably still alive and still holding fd 9.
-	gapFound := false
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, statErr := os.Stat(doneFile); statErr == nil {
-			break
-		}
-		// Probing before the harness has acquired fd 9 would report the
-		// harmless pre-lock startup window as a false "gap".
-		if _, statErr := os.Stat(readyFile); statErr != nil {
-			if time.Now().After(deadline) {
-				_ = cmd.Process.Kill()
-				_ = cmd.Wait()
-				t.Fatal("harness never acquired fd 9 (HANDOFF_READY_FILE never appeared)")
-			}
-			time.Sleep(2 * time.Millisecond)
-			continue
-		}
-		if time.Now().After(deadline) {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-			t.Fatal("harness never signaled completion (HANDOFF_DONE_FILE never appeared)")
-		}
-		probe := exec.Command("flock", "-n", lockFile, "true")
-		if err := probe.Run(); err == nil {
-			gapFound = true
-			break
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
+	out, runErr := cmd.CombinedOutput()
 	elapsed := time.Since(start)
-
-	if err := os.WriteFile(proceedFile, nil, 0o644); err != nil {
-		t.Fatalf("signal harness to proceed: %v", err)
-	}
-	waitErr := cmd.Wait()
-
-	if gapFound {
-		t.Fatal("an external flock probe acquired LOCK_FILE while the harness-held fd 9 was handed to op_start; " +
-			"op_start must have re-exec'd fd 9 instead of trusting and verifying the inherited one, ga-iv2l2")
-	}
-	if exitCode := commandExitCode(waitErr); exitCode != 0 {
-		t.Fatalf("op_start lock-held (real pre-acquired fd 9) exited %d, want 0: %v", exitCode, waitErr)
+	if exitCode := commandExitCode(runErr); exitCode != 0 {
+		t.Fatalf("op_start lock-held (real pre-acquired fd 9, LOCK_FILE replaced by a directory) exited %d, want 0: "+
+			"op_start must trust and verify the inherited fd instead of re-exec'ing fd 9 on the pathname (ga-iv2l2):\n%s",
+			exitCode, out)
 	}
 	if elapsed >= 2*time.Second {
-		t.Fatalf("op_start lock-held took %s; want it to skip the lock-acquisition retry loop entirely instead of "+
-			"attempting its own acquire", elapsed)
+		t.Fatalf("op_start lock-held took %s; want it to skip the lock-acquisition retry loop entirely", elapsed)
 	}
 }
 
@@ -659,18 +602,15 @@ load_existing_managed_from_gc() {
 save_state() { :; }
 op_stop_impl() {
   : > %[1]q
-  sleep 0.3
+  rm -f "$LOCK_FILE"
+  mkdir "$LOCK_FILE"
   return 0
 }
 `, markerFile)
 
-	// Same race-free handshake as opStartTrustedHandoffScript: signal
-	// HANDOFF_DONE_FILE the instant the real op_recover (through the
-	// real op_start) returns, still holding whatever it holds, then
-	// block on HANDOFF_PROCEED_FILE before actually exiting -- so the Go
-	// test has a point to stop probing that is provably before any
-	// release, not racing cmd.Wait()'s own asynchronous return.
-	trap := `trap 'trap_rc=$?; : > "$HANDOFF_DONE_FILE"; while [ ! -f "$HANDOFF_PROCEED_FILE" ]; do sleep 0.01; done; exit "$trap_rc"' EXIT` + "\n"
+	// op_stop_impl (run by the real op_recover AFTER it locks fd 9)
+	// replaces LOCK_FILE with a directory, so a re-exec of fd 9 by the real
+	// op_start fails hard instead of silently opening a fresh unlocked fd.
 	return strings.Join([]string{
 		"set -e",
 		extractShellFunction(t, text, "die"),
@@ -679,7 +619,7 @@ op_stop_impl() {
 		stubs,
 		extractShellFunction(t, text, "op_start"),
 		extractShellFunction(t, text, "op_recover"),
-		trap + "op_recover",
+		"op_recover",
 	}, "\n")
 }
 
@@ -689,8 +629,6 @@ func TestOpRecoverHandsRealFdNineLockToOpStartWithoutGap(t *testing.T) {
 	lockFile := filepath.Join(dir, "dolt.lock")
 	dataDir := t.TempDir()
 	markerFile := filepath.Join(dir, "stop-started")
-	doneFile := filepath.Join(dir, "handoff-done")
-	proceedFile := filepath.Join(dir, "handoff-proceed")
 	path := stubDoltBin(t)
 
 	composed := realOpRecoverThroughOpStartScript(t, markerFile)
@@ -702,64 +640,14 @@ func TestOpRecoverHandsRealFdNineLockToOpStartWithoutGap(t *testing.T) {
 		"DATA_DIR="+dataDir,
 		"PID_FILE="+filepath.Join(dataDir, "dolt.pid"),
 		"DOLT_PORT=1",
-		"HANDOFF_DONE_FILE="+doneFile,
-		"HANDOFF_PROCEED_FILE="+proceedFile,
 	)
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start op_recover: %v", err)
+	out, runErr := cmd.CombinedOutput()
+	if exitCode := commandExitCode(runErr); exitCode != 0 {
+		t.Fatalf("real op_recover -> real op_start exited %d, want 0: op_start must trust and verify the inherited fd 9 "+
+			"even though op_stop_impl replaced LOCK_FILE with a directory (a re-exec on the pathname would fail), ga-iv2l2:\n%s",
+			exitCode, out)
 	}
-
-	// Wait for op_stop_impl's own marker before probing starts: the lock
-	// is only a meaningful thing to probe for from this point on.
-	// Probing before this would catch the harmless pre-lock startup
-	// window (is_remote/enospc-check/etc. all run before op_recover ever
-	// touches fd 9) as a false "gap".
-	markerDeadline := time.Now().Add(3 * time.Second)
-	for {
-		if _, err := os.Stat(markerFile); err == nil {
-			break
-		}
-		if time.Now().After(markerDeadline) {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-			t.Fatal("op_recover never reached its stop step (markerFile never appeared)")
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-
-	// Probe until HANDOFF_DONE_FILE appears: see
-	// realOpRecoverThroughOpStartScript's doc comment for why this is
-	// the race-free stopping point, not cmd.Wait() returning.
-	gapFound := false
-	doneDeadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, err := os.Stat(doneFile); err == nil {
-			break
-		}
-		if time.Now().After(doneDeadline) {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-			t.Fatal("op_recover->op_start sequence never signaled completion (HANDOFF_DONE_FILE never appeared)")
-		}
-		probe := exec.Command("flock", "-n", lockFile, "true")
-		if err := probe.Run(); err == nil {
-			gapFound = true
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-
-	if err := os.WriteFile(proceedFile, nil, 0o644); err != nil {
-		t.Fatalf("signal harness to proceed: %v", err)
-	}
-	waitErr := cmd.Wait()
-
-	if gapFound {
-		t.Fatal("an external flock probe acquired LOCK_FILE WHILE the real op_recover -> op_start sequence was " +
-			"still running (after op_stop_impl had already started); the fd-9 handoff must never leave a gap, " +
-			"ga-iv2l2 -- op_start likely re-exec'd fd 9 instead of trusting and verifying the inherited one")
-	}
-	if exitCode := commandExitCode(waitErr); exitCode != 0 {
-		t.Fatalf("real op_recover -> real op_start (uncontended) exited %d, want 0: %v", exitCode, waitErr)
+	if _, err := os.Stat(markerFile); err != nil {
+		t.Fatalf("op_recover never reached its stop step: %v", err)
 	}
 }

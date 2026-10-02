@@ -109,6 +109,19 @@ die_unobservable() {
     exit 3
 }
 
+# die_recover_declined reports that op_recover LOST the recovery lock race
+# and could not confirm health either, so it declined to run a concurrent
+# stop/start (ga-iv2l2). It has its own exit code (4) on purpose: exit 3
+# (die_unobservable) is also what a lock WINNER's final health verification
+# exits when the freshly restarted server is not reachable yet, and gc must
+# be able to tell "declined, someone else is recovering" from "recovered but
+# unverified". Keep in sync with providerOpExitRecoverDeclined in
+# cmd/gc/dolt_recover_gate.go.
+die_recover_declined() {
+    echo "$@" >&2
+    exit 4
+}
+
 # trace_bd_argv records one bd invocation this script is about to fork, as a
 # single line appended to the file named by $GC_BD_TRACE. No-op when the
 # variable is unset, which is every ordinary run.
@@ -4253,7 +4266,7 @@ op_recover() {
         if (op_health) >/dev/null 2>&1; then
             return 0
         fi
-        die_unobservable "dolt recovery lock ($LOCK_FILE) held by another process; declining to run a concurrent stop/start"
+        die_recover_declined "dolt recovery lock ($LOCK_FILE) held by another process; declining to run a concurrent stop/start"
     fi
 
     # Stop.
