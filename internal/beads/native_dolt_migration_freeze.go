@@ -289,11 +289,10 @@ var ErrNativeOpenFrozen = errors.New("beads: migration freeze is active; refusin
 // gap this bead exists to close). See this file's header for the marker
 // format and the drift-risk note.
 func checkMigrationFreezeForNativeOpen(scopeRoot string) error {
-	result := findMigrationFreezeFrom(filepath.Join(scopeRoot, ".beads"))
-	if !result.Frozen() {
+	detail, err := migrationFreezeRefusal(scopeRoot)
+	if err == nil {
 		return nil
 	}
-	detail := migrationFreezeDetail(result, readMigrationFreezeInfo(result.Path))
 	// No logger is threaded through this choke point (its callers are the
 	// low-level native-open functions, several layers below anything that
 	// carries a *slog.Logger today), so this matches this package's own
@@ -301,7 +300,21 @@ func checkMigrationFreezeForNativeOpen(scopeRoot string) error {
 	// than a bespoke log.Printf line.
 	slog.Default().Warn("gc: refusing a native (in-process) beads open",
 		slog.String("scope", scopeRoot), slog.String("detail", detail))
-	return fmt.Errorf("%w: %s", ErrNativeOpenFrozen, detail)
+	return err
+}
+
+// migrationFreezeRefusal is the non-logging core of the freeze check: nil
+// error when scopeRoot is not frozen, otherwise the ErrNativeOpenFrozen
+// error plus its detail string (detail first, error last). Callers that log the refusal themselves
+// (OpenStoreAtForCity, via logNativeUnavailable) use this directly so a
+// frozen open logs once, not twice.
+func migrationFreezeRefusal(scopeRoot string) (string, error) {
+	result := findMigrationFreezeFrom(filepath.Join(scopeRoot, ".beads"))
+	if !result.Frozen() {
+		return "", nil
+	}
+	detail := migrationFreezeDetail(result, readMigrationFreezeInfo(result.Path))
+	return detail, fmt.Errorf("%w: %s", ErrNativeOpenFrozen, detail)
 }
 
 // MigrationFrozen reports whether an active MIGRATION-FREEZE marker covers
@@ -348,19 +361,11 @@ func MigrationFrozen(scopeRoot string) bool {
 // instead of a hand-written message that would have to be kept in sync by
 // hand.
 //
-// Multiple layers now call this (or MigrationFrozen) for the same scope as
-// defense in depth -- factory.go's OpenStoreAtForCity, then, only if that
-// somehow did not run, each native-open/reopen/admission closure in cmd/gc.
-// This is not a double-logging risk IN PRACTICE, because every one of
-// those callers is itself an early-return guard: whichever layer is
-// reached FIRST in a given call chain returns immediately on a frozen
-// result, so no later layer (including checkMigrationFreezeForNativeOpen's
-// own choke point) is ever reached in that SAME chain to log again. It
-// would double-log only if something called more than one of these layers
-// back to back outside that normal chain (e.g. a test or a future caller
-// probing the scope manually before also triggering an open) -- a case
-// that is, by construction, an unusual use of these functions rather than
-// the production call graph.
+// Multiple layers call this (or MigrationFrozen) for the same scope as
+// defense in depth. Each one early-returns on a frozen result, so a normal
+// call chain reaches only the first. The factory uses the non-logging
+// migrationFreezeRefusal and logs once through logNativeUnavailable; this
+// function and the native-open choke point log their own WARN.
 func CheckMigrationFreeze(scopeRoot string) error {
 	return checkMigrationFreezeForNativeOpen(scopeRoot)
 }

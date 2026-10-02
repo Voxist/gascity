@@ -382,6 +382,12 @@ func (o *proxiedNativeOpener) storeOpener() func(context.Context, bool) (beads.S
 // caller that assembled the env map by hand has nothing to pass to
 // beads.NewProxiedStore.
 func (o *proxiedNativeOpener) open(parent context.Context, longLived bool) (beads.Store, beads.ProxiedOpenReport, error) {
+	// Same guard as reopen, before admission's recover rung can fork a bd
+	// command for a scope an operator froze.
+	if err := beads.CheckMigrationFreeze(o.scopeRoot); err != nil {
+		return nil, beads.ProxiedOpenReport{}, err
+	}
+
 	ctx, cancel := context.WithTimeout(parent, proxiedAdmissionBudget(longLived))
 	defer cancel()
 

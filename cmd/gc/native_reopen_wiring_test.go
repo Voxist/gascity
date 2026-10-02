@@ -105,6 +105,13 @@ func TestNativeStoreOpensCheckMigrationFreezeBeforeRecovery(t *testing.T) {
 		},
 		{
 			file:        "beads_proxied_native.go",
+			site:        "proxiedNativeOpener.open",
+			anchor:      "func (o *proxiedNativeOpener) open(parent context.Context, longLived bool) (beads.Store, beads.ProxiedOpenReport, error) {",
+			guardCall:   "beads.CheckMigrationFreeze(o.scopeRoot)",
+			recoverCall: "o.admit(ctx, longLived)",
+		},
+		{
+			file:        "beads_proxied_native.go",
 			site:        "proxiedNativeOpener.reopen",
 			anchor:      "func (o *proxiedNativeOpener) reopen(longLived bool) beads.NativeReopenFunc {",
 			guardCall:   "beads.CheckMigrationFreeze(o.scopeRoot)",
