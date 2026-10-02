@@ -64,12 +64,13 @@ type TemplateParams struct {
 	// of Env that excludes passthrough and generated agentEnv plumbing.
 	// Carried to runtime.Config.OperatorEnv (launch-tier fingerprint) so a
 	// resolved config env change drives a warm-box relaunch instead of a
-	// no-op.
+	// no-op. The fingerprint skips its credential-shaped keys.
 	OperatorEnv map[string]string
 	// Upstream is the selected model-serving endpoint name (a key in [upstreams],
 	// Phase C). Carried to runtime.Config.Upstream (launch-half fingerprint) so a
 	// switch relaunches the warm box; the resolved serving env is already merged
-	// into Env (and is not fingerprinted).
+	// into Env, where its serving identity (base URL, model) is fingerprinted
+	// and its credentials are not.
 	Upstream string
 	// Hints contains startup behavior (pre_start, session_setup, etc.).
 	Hints agent.StartupHints
@@ -501,10 +502,11 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// ScrubTokenEnv so its credential refs survive — which is exactly why the
 	// controller-only re-pin below has to come after this block. The env-ref
 	// values ($VAR)
-	// resolve from the controller environment via expandEnvMap; the resolved
-	// credentials are NOT fingerprinted (the Config.Env allow-list excludes
-	// them), only the selected NAME — carried to runtime.Config.Upstream
-	// (launch-half) so switching upstream relaunches the agent in the warm box.
+	// resolve from the controller environment via expandEnvMap. The selected
+	// NAME is carried to runtime.Config.Upstream (launch-half) and the rendered
+	// base URL is serving identity (runtime servingIdentityEnvKeys, launch-half),
+	// so switching upstream, or repointing one, relaunches the agent in the warm
+	// box; the resolved credentials are never fingerprinted.
 	if upstreamName := cfgAgent.Upstream; upstreamName != "" {
 		var upstreams map[string]config.UpstreamSpec
 		if p.city != nil {

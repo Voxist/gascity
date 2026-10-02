@@ -17,9 +17,10 @@ package config
 //
 // Values (abstract and raw) may reference controller env vars via $VAR/${VAR},
 // expanded at resolution — so SECRETS ARE NEVER INLINED, e.g. api_key =
-// "$ANTHROPIC_API_KEY". The resolved serving env is excluded from the fingerprint
-// (the env allow-list); only the selected NAME is hashed (runtime.Config.Upstream,
-// launch-half) to drive a warm-box relaunch on a switch.
+// "$ANTHROPIC_API_KEY". The selected NAME is hashed (runtime.Config.Upstream,
+// launch-half) to drive a warm-box relaunch on a switch, and so is the resolved
+// serving identity (the base URL and model env keys), so repointing an upstream
+// in place relaunches too. The resolved credentials are never hashed.
 //
 //	[upstreams.bedrock]
 //	base_url = "https://bedrock.example.com/anthropic"

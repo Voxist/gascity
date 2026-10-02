@@ -659,13 +659,18 @@ type Config struct {
 	// Upstream is the model-serving selection identity ("anthropic", "bedrock",
 	// "proxy:<name>") — WHO serves+resolves the model. It is hashed into the
 	// LAUNCH half of the fingerprint (Phase C), so switching upstream relaunches
-	// the agent in the warm box (B2.3) rather than reprovisioning; the resolved
-	// serving env (ANTHROPIC_BASE_URL/_API_KEY, injected into Env) is deliberately
-	// NOT hashed, so a credential rotation never moves a fingerprint. Empty = no
+	// the agent in the warm box (B2.3) rather than reprovisioning. Of the
+	// resolved serving env injected into Env, the serving identity (base URL,
+	// model: ANTHROPIC_BASE_URL, ANTHROPIC_MODEL, ...) is hashed into the same
+	// LAUNCH half, so a content change behind an unchanged name also relaunches;
+	// the credentials (ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, ...) are never
+	// hashed, so a credential rotation never moves a fingerprint. Empty = no
 	// upstream selected (behavior-identical; contributes nothing to the hash).
 	Upstream string
 
-	// Env is additional environment variables set in the session.
+	// Env is additional environment variables set in the session. The
+	// fingerprint reads only its allow-listed keys (PROVISION half) and its
+	// serving identity keys (LAUNCH half); credentials are never hashed.
 	Env map[string]string
 
 	// OperatorEnv carries the effective operator-authored environment values
@@ -678,8 +683,10 @@ type Config struct {
 	// data) — widening either would misclassify config-authored env as
 	// Provision-tier. Hashed into the LAUNCH half of the fingerprint, so a
 	// change relaunches the agent in the existing warm box rather than
-	// triggering a reprovision. Nil and empty are equivalent (no keys set
-	// contributes nothing to the hash).
+	// triggering a reprovision. Credential-shaped keys (*_TOKEN, *_KEY,
+	// *SECRET*) are left out of that hash, so rotating a credential written in
+	// a provider block relaunches nothing. Nil and empty are equivalent (no
+	// keys set contributes nothing to the hash).
 	OperatorEnv map[string]string
 
 	// MCPServers is the effective ACP session/new MCP server list for this
