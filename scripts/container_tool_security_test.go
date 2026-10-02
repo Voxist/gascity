@@ -101,12 +101,12 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		// a published release >= 0069 on a module-resolvable repo retires
 		// the bridge (one change: BD_VERSION=tag, drop the refs). Upstream
 		// v1.3.0 is not such a release: it tops out at schema 0066.
-		// BD_VERSION is the string the pinned commit declares (1.93.0). bdSourceRef
-		// is Voxist/beads 5cc9948c7 on branch resync/upstream-0927 (PR #60,
-		// ga-b2q0c) -- CI SIGNAL ONLY, not yet deployed; see deps.env.
-		bdSourceRef    = "5cc9948c78044c1181f18e7b6c4f99bb2e347198"
-		bdSourceSHA256 = "f9e80f956b2b805c67522b68b8165f6e633aaa0374900f8f42a9ec4f063afca0"
-		bdBuild        = "5cc9948c7"
+		// BD_VERSION is the string the pinned commit declares (1.94.0). bdSourceRef
+		// is the commit the fork's annotated v1.94.0 tag names (1522bdb01)
+		// -- CI SIGNAL ONLY, not yet deployed; see deps.env.
+		bdSourceRef    = "1522bdb01ba8c863dc30eb9384cc9a7ab69df486"
+		bdSourceSHA256 = "2118f9f52c83a6ea59cc8f041a7cd3bddd3cb22e6e3279e803dacb645bb0fe27"
+		bdBuild        = "1522bdb01"
 		bdBranch       = "HEAD"
 		grpcVersion    = "1.83.2"
 		// Floors, not exact pins: each must be >= what the pinned source
@@ -162,8 +162,8 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		}
 	}
 	bdVersion := env["BD_VERSION"]
-	if bdVersion != "v1.93.0" {
-		t.Fatalf("deps.env BD_VERSION = %q, want v1.93.0 for the pinned source build", bdVersion)
+	if bdVersion != "v1.94.0" {
+		t.Fatalf("deps.env BD_VERSION = %q, want v1.94.0 for the pinned source build", bdVersion)
 	}
 
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")

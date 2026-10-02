@@ -139,7 +139,22 @@ const (
 	// BD_VERSION (v1.92.0 -> v1.93.0) moved at the same five pin sites and
 	// nothing else. Taken from the candidate digest TestCurrentWorkflowsMatchPolicy
 	// printed for the changed workflow.
-	expectedCIExecutionHash     = "3e00094ee949285493c3f087f4b9448bd2258f450a3c695ac17e3c609059b828"
+	// Re-derived for ga-w7nyj's preflight-static review fix-up: added the
+	// "Verify errorlint --fix regression guard (ga-w7nyj)" step
+	// (`go test -run TestErrorlintStockFixDropsTypeAssertionNegation -v
+	// ./scripts/...`) after the two lint steps, so the one test proving
+	// errorlint's stock --fix drops a negation on this repo's pinned
+	// toolchain runs on every PR (preflight-static), not only on push
+	// (preflight-unit-cover-noncmdgc). Taken from the candidate digest
+	// TestCurrentWorkflowsMatchPolicy printed for the changed workflow.
+	// Re-derived again merging Voxist/main (98b743e41) into the schema-69
+	// repin branch (ga-b2q0c): both this ga-w7nyj step and the repin's
+	// BD_SOURCE_REF/BD_VERSION pin sites land in the merged ci.yml, so
+	// neither side's prior hash is correct on its own. Taken from the
+	// candidate digest TestCurrentWorkflowsMatchPolicy printed for the
+	// merged+repinned workflow (the v1.94.0/1522bdb01 pin, after the
+	// v1.93.0/5cc9948c7 CI-signal pin moved to the tagged release).
+	expectedCIExecutionHash     = "24e60a18cd24cc6429997ebd5829f45b3abbd8f94e5569ad67de3009c053a1eb"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
@@ -174,7 +189,7 @@ const (
 	// changed mid-review): the same two pin sites, same two keys, nothing
 	// else. Taken from the candidate digest TestCurrentWorkflowsMatchPolicy
 	// printed for the changed workflow.
-	expectedNightlyExecutionHash = "9f2fc726fffbe18a25e5e34a45d3e009ec91a60dc5273b1b43b46e5df3d239cc"
+	expectedNightlyExecutionHash = "04f0269a28463a01df067b41562f40813689151210cbfd4ee2673bed25ce25d9"
 	// Re-derived at the 2026-08-31 resync: the composite setup actions under
 	// .github/actions/setup-gascity-* auto-merged both sides as well, moving
 	// this pin along with the two workflow execution pins above.

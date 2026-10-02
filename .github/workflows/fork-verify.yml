@@ -27,9 +27,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.93.0" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
+      BD_VERSION: "v1.94.0" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
       BD_REPO: "Voxist/beads"
-      BD_SOURCE_REF: "5cc9948c78044c1181f18e7b6c4f99bb2e347198" # fork-tip bd commit (schema 0069) — built from BD_REPO source by install-bd-archive.sh
+      BD_SOURCE_REF: "1522bdb01ba8c863dc30eb9384cc9a7ab69df486" # fork-tip bd commit (schema 0069) — built from BD_REPO source by install-bd-archive.sh
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
