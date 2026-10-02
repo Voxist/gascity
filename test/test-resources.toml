@@ -28,8 +28,8 @@ resource = "subprocess"
 # Merged total (ga-3bwmf round-5 resync onto fork/main): 716 + 4
 # (ga-3bwmf, +1 file) + 3 (ga-w7nyj, +0 files) = 723 calls, 209 files --
 # matches resourcecensus.bootstrapPolicy's merged resolution.
-baseline_calls = 723
-baseline_files = 209
+baseline_calls = 729
+baseline_files = 210
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-cp3hwi"
@@ -47,8 +47,8 @@ resource = "fixed_sleep"
 # matching poll in its own test (time.Sleep(10ms)) -- both are the sleep
 # INTERVAL inside an already deadline-bounded polling loop, not an
 # unbounded fixed wait.
-baseline_calls = 487
-baseline_files = 178
+baseline_calls = 488
+baseline_files = 179
 reported_calls = 447
 reported_files = 157
 owner_bead = "ga-cp3hwi"
@@ -83,8 +83,8 @@ resource = "subprocess"
 #
 # Merged total: 479 + 4 (ga-3bwmf, +1 file) + 3 (ga-w7nyj, +0 files) =
 # 486 calls, 138 files.
-baseline_calls = 486
-baseline_files = 138
+baseline_calls = 492
+baseline_files = 139
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-cp3hwi"
@@ -98,8 +98,8 @@ scope = "untagged"
 resource = "fixed_sleep"
 # Bumped 319->321 calls, 121->122 files for ga-3bwmf's #227 rework (see the
 # matching audit_baseline fixed_sleep comment above for the source).
-baseline_calls = 321
-baseline_files = 122
+baseline_calls = 322
+baseline_files = 123
 reported_calls = 295
 reported_files = 114
 owner_bead = "ga-cp3hwi"
@@ -463,8 +463,8 @@ resource = "subprocess"
 #
 # Merged total: 461 + 4 (ga-3bwmf, +1 file) + 3 (ga-w7nyj, +0 files) =
 # 468 calls, 132 files.
-baseline_calls = 468
-baseline_files = 132
+baseline_calls = 474
+baseline_files = 133
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-cp3hwi"
@@ -478,8 +478,8 @@ scope = "untagged"
 resource = "fixed_sleep"
 # Bumped 319->321 calls, 121->122 files for ga-3bwmf's #227 rework (see the
 # matching audit_baseline fixed_sleep comment above for the source).
-baseline_calls = 321
-baseline_files = 122
+baseline_calls = 322
+baseline_files = 123
 reported_calls = 287
 reported_files = 113
 owner_bead = "ga-cp3hwi"

@@ -181,8 +181,8 @@ var bootstrapPolicy = Ledger{
 			// calls, 209 files -- both sides' call sites are real and
 			// independent, so the resync sums both deltas from the shared
 			// 716/208 ancestor rather than taking either side alone.
-			BaselineCalls:   723,
-			BaselineFiles:   209,
+			BaselineCalls:   729,
+			BaselineFiles:   210,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-cp3hwi",
@@ -201,8 +201,8 @@ var bootstrapPolicy = Ledger{
 			// poll in its own test (time.Sleep(10ms)) -- both are the
 			// sleep INTERVAL inside an already deadline-bounded polling
 			// loop, not an unbounded fixed wait.
-			BaselineCalls:   487,
-			BaselineFiles:   178,
+			BaselineCalls:   488,
+			BaselineFiles:   179,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
 			OwnerBead:       "ga-cp3hwi",
@@ -249,8 +249,8 @@ var bootstrapPolicy = Ledger{
 			// Merged total (ga-3bwmf round-5 resync onto fork/main):
 			// 479 + 4 (ga-3bwmf, +1 file) + 3 (ga-w7nyj, +0 files) = 486
 			// calls, 138 files.
-			BaselineCalls:   486,
-			BaselineFiles:   138,
+			BaselineCalls:   492,
+			BaselineFiles:   139,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-cp3hwi",
@@ -265,8 +265,8 @@ var bootstrapPolicy = Ledger{
 			// Bumped 319->321 calls, 121->122 files for ga-3bwmf's #227
 			// rework (see the matching audit_baseline fixed_sleep comment
 			// above for the source).
-			BaselineCalls:   321,
-			BaselineFiles:   122,
+			BaselineCalls:   322,
+			BaselineFiles:   123,
 			ReportedCalls:   295,
 			ReportedFiles:   114,
 			OwnerBead:       "ga-cp3hwi",
@@ -645,8 +645,8 @@ var bootstrapPolicy = Ledger{
 			// Merged total (ga-3bwmf round-5 resync onto fork/main):
 			// 461 + 4 (ga-3bwmf, +1 file) + 3 (ga-w7nyj, +0 files) = 468
 			// calls, 132 files.
-			BaselineCalls:   468,
-			BaselineFiles:   132,
+			BaselineCalls:   474,
+			BaselineFiles:   133,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
 			OwnerBead:       "ga-cp3hwi",
@@ -661,8 +661,8 @@ var bootstrapPolicy = Ledger{
 			// Bumped 319->321 calls, 121->122 files for ga-3bwmf's #227
 			// rework (see the matching audit_baseline fixed_sleep comment
 			// above for the source).
-			BaselineCalls:   321,
-			BaselineFiles:   122,
+			BaselineCalls:   322,
+			BaselineFiles:   123,
 			ReportedCalls:   287,
 			ReportedFiles:   113,
 			OwnerBead:       "ga-cp3hwi",
