@@ -907,7 +907,23 @@ func ensureProviderScopeOwnershipBeforeInit(cityPath, scopeRoot string) error {
 	}
 	var intent providerScopeIntent
 	if samePath(cityPath, scopeRoot) {
-		intent, err = (hostedDoltInitOptions{}).providerOwnershipIntent(*cfg)
+		// This is the second writer that can journal the CITY itself as
+		// provider-owned (persistFreshProviderOwnership, in
+		// init_hosted_dolt.go, is the first -- reached when `gc init` defers
+		// store seeding, e.g. --skip-provider-readiness with GC_DOLT unset,
+		// so initAndHookDir reaches here before the city's own .beads
+		// identity exists). ga-m07q9 (ga-wuda3): the no-signal fresh-scope
+		// default is classic gc-managed, so this must use the sourced
+		// resolution and skip journaling when ResolveInitIntent had no real
+		// signal to act on, exactly like persistFreshProviderOwnership does.
+		// The ownership guard at the top of this function already returns
+		// early when a persisted/pending record exists, so there is nothing
+		// further to check here for that case.
+		var explicit bool
+		intent, explicit, err = (hostedDoltInitOptions{}).providerOwnershipIntentSourced(*cfg)
+		if err == nil && !explicit {
+			return nil
+		}
 	} else {
 		cityInitialized, inspectErr := scopeHasPersistedBeadsIdentity(cityPath)
 		if inspectErr != nil {
@@ -946,10 +962,22 @@ func ensureProviderScopeOwnershipBeforeInit(cityPath, scopeRoot string) error {
 // §0/§4 keeps those cities working unchanged until the journaled handoff.
 //
 // An uninitialized city is not grandfathered: it has no durable binding yet,
-// and `gc init` records the pending intent that this function's caller reads.
+// so this checks for the one thing that CAN exist before that binding does --
+// a pending ownership record `gc init` journals for an explicit or persisted
+// signal. ga-m07q9 (ga-wuda3): a no-signal `gc init` now leaves a fresh city
+// unjournaled rather than writing a pending record it never got a real
+// signal for, so "uninitialized" alone no longer implies "about to become
+// provider-owned" -- a later caller (gc rig add, gc start) reaching this
+// function before the city's own store exists must tell the two cases
+// apart, or it hands ownership to a rig under a city that is, and stays,
+// classic gc-managed.
 func cityGrantsProviderOwnershipToFreshScopes(cityPath string, cityInitialized bool) (bool, error) {
 	if !cityInitialized {
-		return true, nil
+		entry, owned, err := providerScopeOwnership(cityPath, cityPath)
+		if err != nil {
+			return false, err
+		}
+		return owned && entry.State == providerScopeInitializing, nil
 	}
 	return cityScopeProviderOwned(cityPath)
 }
