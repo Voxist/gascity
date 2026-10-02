@@ -38,6 +38,24 @@ else
 	exit 1
 fi
 
+if date -v-1M '+%Y' >/dev/null 2>&1; then
+	old_stamp_minutes() { date -v-"$1"M '+%Y%m%d%H%M'; }
+else
+	old_stamp_minutes() { date -d "$1 minutes ago" '+%Y%m%d%H%M'; }
+fi
+
+# wait_window <outfile> -- block until the trim under test has opened its
+# snapshot-to-delete window (the script announces it), so the caller can touch
+# an entry strictly after selection. A fixed sleep is flaky under host load.
+wait_window() {
+	local i
+	for i in $(seq 1 600); do
+		grep -q 'trim-test-seam: window open' "$1" 2>/dev/null && return 0
+		sleep 0.5
+	done
+	fail "trim never opened its test window: $(cat "$1" 2>/dev/null)"
+}
+
 # mkbytes <n> -- n bytes of content on stdout. Used by the size-cap cases
 # below, which need entries of exact, known byte size so a TRIM_MAX_GIB cap
 # can be placed precisely between two cumulative sums.
@@ -426,9 +444,9 @@ cold="$root11/ff/$(hex64 3ff)-a"       # stale, never touched: control
 [ -f "$hot" ] && [ -f "$cold" ] || fail "CASE 11 fixture missing"
 
 TRIM_DAYS=3 GO_BUILD_CACHE_DIR="$root11" TRIM_LOG="$WORK/log11" \
-	TRIM_DELAY_BEFORE_DELETE=3 "$TRIM" >"$WORK/out11" 2>&1 &
+	TRIM_DELAY_BEFORE_DELETE=6 "$TRIM" >"$WORK/out11" 2>&1 &
 trim_pid=$!
-sleep 1
+wait_window "$WORK/out11"
 touch "$hot"                           # a build resolves it: markUsed() bumps mtime
 wait "$trim_pid" || fail "trim failed: $(cat "$WORK/out11")"
 
@@ -498,9 +516,9 @@ touch -t "$(old_stamp 5)"  "$root13/aa/${h13_cold}-a"  # next-oldest
 cap_gib13="$(gib_of 1500)"
 
 TRIM_DAYS=9999 TRIM_MAX_GIB="$cap_gib13" GO_BUILD_CACHE_DIR="$root13" \
-	TRIM_LOG="$WORK/log13" TRIM_SIZE_DELAY_BEFORE_DELETE=3 "$TRIM" >"$WORK/out13" 2>&1 &
+	TRIM_LOG="$WORK/log13" TRIM_SIZE_DELAY_BEFORE_DELETE=6 "$TRIM" >"$WORK/out13" 2>&1 &
 trim13=$!
-sleep 1
+wait_window "$WORK/out13"
 touch "$root13/aa/${h13_hot}-a"       # a build resolves the chosen entry: mtime bumped
 wait "$trim13" || fail "CASE 13 run failed: $(cat "$WORK/out13")"
 
@@ -587,6 +605,12 @@ fi
 if TRIM_HOURS=0 GO_BUILD_CACHE_DIR="$root17" TRIM_LOG="$WORK/log17c" "$TRIM" >/dev/null 2>&1; then
 	fail "CASE 17: TRIM_HOURS=0 was accepted"
 fi
+if TRIM_HOURS=2 GO_BUILD_CACHE_DIR="$root17" TRIM_LOG="$WORK/log17e" "$TRIM" >/dev/null 2>&1; then
+	fail "CASE 17: TRIM_HOURS=2 was accepted (no margin over Go's 1h touch interval)"
+fi
+if TRIM_CAP_MIN_AGE_HOURS=1 TRIM_MAX_GIB=1 GO_BUILD_CACHE_DIR="$root17" TRIM_LOG="$WORK/log17f" "$TRIM" >/dev/null 2>&1; then
+	fail "CASE 17: TRIM_CAP_MIN_AGE_HOURS=1 was accepted"
+fi
 if TRIM_HOURS=notanumber GO_BUILD_CACHE_DIR="$root17" TRIM_LOG="$WORK/log17d" "$TRIM" >/dev/null 2>&1; then
 	fail "CASE 17: a non-numeric TRIM_HOURS was accepted"
 fi
@@ -605,10 +629,30 @@ touch -t "$(old_stamp_hours 5)" "$root18/aa/${h18}-a"   # 5 hours old
 TRIM_DAYS=3 GO_BUILD_CACHE_DIR="$root18" TRIM_LOG="$WORK/log18a" "$TRIM" >/dev/null
 [ -e "$root18/aa/${h18}-a" ] || fail "CASE 18: TRIM_DAYS=3 removed a 5-hour-old entry"
 
-# TRIM_HOURS=1 must remove it.
-TRIM_HOURS=1 GO_BUILD_CACHE_DIR="$root18" TRIM_LOG="$WORK/log18b" "$TRIM" >/dev/null
-[ ! -e "$root18/aa/${h18}-a" ] || fail "CASE 18: TRIM_HOURS=1 did not remove a 5-hour-old entry"
+# TRIM_HOURS=3 must remove it.
+TRIM_HOURS=3 GO_BUILD_CACHE_DIR="$root18" TRIM_LOG="$WORK/log18b" "$TRIM" >/dev/null
+[ ! -e "$root18/aa/${h18}-a" ] || fail "CASE 18: TRIM_HOURS=3 did not remove a 5-hour-old entry"
 pass "CASE 18: TRIM_HOURS overrides TRIM_DAYS for the age cutoff"
+
+# --------------------------------------------------------------- CASE 19
+# The size cap has a hard age floor: fresh entries (~10 min old, which Go has
+# NOT mtime-refreshed since it only touches entries >= 1h old) survive a
+# near-zero cap; the pass reports UNMET and exits non-zero. Old entries in the
+# same cache are still evicted.
+root19="$WORK/case19/go-build"
+mkdir -p "$root19/aa"
+h19_fresh="$(hex64 case19-fresh)"; h19_old="$(hex64 case19-old)"
+mkbytes 1000 > "$root19/aa/${h19_fresh}-a"; mkbytes 1000 > "$root19/aa/${h19_old}-a"
+touch -t "$(old_stamp_minutes 10)" "$root19/aa/${h19_fresh}-a"
+touch -t "$(old_stamp 2)" "$root19/aa/${h19_old}-a"
+rc19=0
+TRIM_DAYS=9999 TRIM_MAX_GIB=0.000000001 GO_BUILD_CACHE_DIR="$root19" \
+	TRIM_LOG="$WORK/log19" "$TRIM" >"$WORK/out19" 2>&1 || rc19=$?
+[ -e "$root19/aa/${h19_fresh}-a" ] || fail "CASE 19: a 10-minute-old entry was evicted by the size cap"
+[ ! -e "$root19/aa/${h19_old}-a" ] || fail "CASE 19: an old entry was not evicted"
+[ "$rc19" -ne 0 ] || fail "CASE 19: unmet cap exited 0"
+grep -q 'sizecap UNMET' "$WORK/out19" "$WORK/log19" || fail "CASE 19: no UNMET report"
+pass "CASE 19: size cap never evicts entries younger than the age floor; unmet cap is loud and non-zero"
 
 echo
 echo "all trim-go-build-cache tests passed"
