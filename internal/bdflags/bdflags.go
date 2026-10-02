@@ -4,8 +4,8 @@
 // templates, so the two call sites cannot drift apart from each other.
 //
 // Sourced from bd <sub> --help output (2026-07-13, bd v1.1.0); kept current
-// against the pinned bd by TestBdFlagManifestCurrent (latest: bd v1.93.0 at
-// 5cc9948c7, 2026-10-01).
+// against the pinned bd by TestBdFlagManifestCurrent (latest: bd v1.94.0 at
+// 1522bdb01, 2026-10-02).
 package bdflags
 
 import (
