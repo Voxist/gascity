@@ -64,6 +64,22 @@ func procStartTime(pid int) (string, bool) {
 	return fmt.Sprintf("%d.%06d", kp.Proc.P_starttime.Sec, kp.Proc.P_starttime.Usec), true
 }
 
+// procParentPID returns pid's parent PID from the same kernel process record
+// used by procStateDead/procStartTime — kern.proc.pid's eproc.e_ppid — instead
+// of forking `ps -o ppid= -p <pid>`. Same rationale as procStartTime: a single
+// syscall with no deadline and no child process, versus a fork/exec that
+// starves under exactly the host load a liveness/ownership check is likely to
+// run under (ga-3bwmf: the managed-Dolt watchdog-liveness doctor check reads
+// this to tell an orphaned dolt sql-server, reparented to ppid 1, from one a
+// live scope watchdog still owns).
+func procParentPID(pid int) (int, bool) {
+	kp, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+	if err != nil || kp == nil {
+		return 0, false
+	}
+	return int(kp.Eproc.Ppid), true
+}
+
 // sysctlChildPIDs returns the live direct children of parent from the kernel
 // process table via sysctl(kern.proc.all), replacing a `ps -axo pid=,ppid=`
 // fork/exec. ok is false when the table cannot be read, which leaves the caller

@@ -313,12 +313,13 @@ func startManagedDoltProcessWithConfig(cityPath, host, port, user, logLevel stri
 			terminateManagedDoltStartedProcess(started)
 			return report, fmt.Errorf("write pid file: %w", err)
 		}
-		if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
+		if err := writeDoltRuntimeStateFileSpawnAuthoritative(layout.StateFile, doltRuntimeState{
 			Running:   true,
 			PID:       started.PID,
 			Port:      currentPort,
 			DataDir:   layout.DataDir,
 			StartedAt: time.Now().UTC().Format(time.RFC3339),
+			Watchdog:  started.WatchdogPID > 0,
 		}); err != nil {
 			terminateManagedDoltStartedProcess(started)
 			_ = os.Remove(layout.PIDFile)

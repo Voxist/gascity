@@ -110,6 +110,61 @@ func TestDispatchSeamFiresExecViaDispatchOne(t *testing.T) {
 	}
 }
 
+// TestDispatchSeamSingleFlightGuardYieldsQuietly pins the round-5 review's
+// LOW: before this fix, Dispatch wrapped EVERY launchResolvedDispatch error
+// -- including errRecoverOnStoreUnavailableExecAlreadyRunning, the
+// single-flight sentinel -- in "creating tracking bead for %s: %w" and
+// returned it as a genuine error. That sentinel is the guard working as
+// intended (ga-3bwmf), not a failure: dispatchOrders' own fireCandidate
+// already recognizes it and yields quietly (no error, no fallback call),
+// and the webhook seam must match that, not surface a misleading "failed
+// to create tracking bead" for a webhook-triggered RecoverOnStoreUnavailable
+// order whose one exec slot is already taken.
+func TestDispatchSeamSingleFlightGuardYieldsQuietly(t *testing.T) {
+	store := beads.NewMemStore()
+	var rec memRecorder
+	ranExec := false
+	execRun := func(context.Context, string, string, []string) ([]byte, error) {
+		ranExec = true
+		return nil, nil
+	}
+	filler := orders.Order{Name: "filler", Trigger: "cooldown", Interval: "1h", Exec: "true"}
+	mad := buildOrderDispatcherFromListExec([]orders.Order{filler}, store, nil, execRun, &rec).(*memoryOrderDispatcher)
+	mad.cityPath = t.TempDir()
+
+	order := orders.Order{
+		Name:                      "recover-order",
+		Trigger:                   "webhook",
+		Exec:                      "true",
+		RecoverOnStoreUnavailable: true,
+	}
+
+	// Simulate the one exec slot already being taken -- by an earlier
+	// webhook delivery, the tick loop's normal path, or the storeless
+	// fallback; Dispatch cannot tell which, and must not try to.
+	if !mad.singleFlight().tryAcquire(order.ScopedName()) {
+		t.Fatal("tryAcquire on a fresh guard must succeed")
+	}
+	t.Cleanup(func() { mad.singleFlight().release(order.ScopedName()) })
+
+	res, err := mad.Dispatch(context.Background(), orderdispatch.DispatchRequest{
+		Order:  order,
+		Source: orderdispatch.SourceWebhook,
+	})
+	if err != nil {
+		t.Fatalf("Dispatch returned an error for the single-flight guard yield: %v", err)
+	}
+	if res.Fired {
+		t.Fatalf("Dispatch result = %+v, want Fired false", res)
+	}
+	if res.TrackingID != "" {
+		t.Fatalf("Dispatch result = %+v, want no tracking id (nothing launched)", res)
+	}
+	if ranExec {
+		t.Fatal("exec ran despite the single-flight guard already being held")
+	}
+}
+
 // TestDispatchSeamRefusesMissingRequiredParam proves the seam itself fail-closes
 // on a missing required param (defense in depth beneath the E6 sink guard):
 // nothing is written and no order fires.

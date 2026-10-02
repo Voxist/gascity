@@ -289,7 +289,7 @@ func TestDispatchOneRefusesMissingRequiredParam(t *testing.T) {
 
 	// nil vars → the required "repo" param is missing → dispatch must refuse.
 	mad.addInflight()
-	mad.dispatchOne(context.Background(), store, execStoreTarget{ScopeRoot: t.TempDir()}, mad.aa[0], t.TempDir(), tracking.ID, nil, nil)
+	mad.dispatchOne(context.Background(), store, execStoreTarget{ScopeRoot: t.TempDir()}, mad.aa[0], t.TempDir(), tracking.ID, nil, nil, nil)
 
 	if !rec.hasType(events.OrderFailed) {
 		t.Fatal("missing order.failed event for missing required param")
@@ -419,7 +419,7 @@ func TestDispatchWispAcceptsSuppliedRequiredVar(t *testing.T) {
 
 	mad.addInflight()
 	mad.dispatchOne(context.Background(), store, execStoreTarget{ScopeRoot: t.TempDir()}, mad.aa[0],
-		t.TempDir(), tracking.ID, map[string]string{"target": "srvcity"}, nil)
+		t.TempDir(), tracking.ID, map[string]string{"target": "srvcity"}, nil, nil)
 
 	if rec.hasType(events.OrderFailed) {
 		rec.mu.Lock()
