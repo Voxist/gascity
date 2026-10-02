@@ -92,6 +92,67 @@ func TestOpenStoreAtForCityEligibleNativeReturnsInjectedNativeStore(t *testing.T
 	}
 }
 
+// TestOpenStoreAtForCityRefusesWhenFrozenBeforePreflightOrProxiedAdmission is
+// ga-vwupk round 3's regression. Round 1/2 gated the native-open and
+// reopen/admit closures, but the factory itself reaches two OTHER
+// recovery-triggering calls before any of those ever run:
+// PreflightChecker.Check's bd-context probe (BDContext, which maps to
+// bdRuntimeEnvFor with allowRecovery=true and can restart a managed Dolt an
+// operator deliberately stopped) and, for a proxied-server scope,
+// OpenProxiedStore's admission ladder (which can fork a bd command to bring
+// a stopped proxy back). This scope is frozen, so NEITHER must ever be
+// called -- both are wired to t.Fatal, matching the review's explicit ask
+// for "a fake PreflightChecker and a fake OpenProxiedStore that both
+// t.Fatal if called while frozen" -- and the factory must fall back to bd
+// directly with the migrationFreezeGate diagnostic.
+func TestOpenStoreAtForCityRefusesWhenFrozenBeforePreflightOrProxiedAdmission(t *testing.T) {
+	clearAmbientMigrationFreezeEnv(t)
+	t.Setenv(nativeForceFallbackEnv, "")
+	scope := t.TempDir()
+	writeMigrationFreezeMarker(t, scope, "ga-vwupk round 3 factory test")
+
+	checker := factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"})
+	checker.BDContext = func(string) (contract.PreflightBDContext, error) {
+		t.Fatal("PreflightChecker.BDContext called for a frozen scope -- this is the recovery-triggering bd " +
+			"subprocess call a MIGRATION-FREEZE must prevent from ever running")
+		return contract.PreflightBDContext{}, nil
+	}
+
+	fallback := NewMemStore()
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        scope,
+		Provider:         "bd",
+		PreflightChecker: checker,
+		OpenBdStore: func() (Store, error) {
+			return fallback, nil
+		},
+		OpenNativeStore: func() (Store, error) {
+			t.Fatal("OpenNativeStore called for a frozen scope")
+			return nil, nil
+		},
+		OpenProxiedStore: func(_ context.Context, _ bool) (Store, ProxiedOpenReport, error) {
+			t.Fatal("OpenProxiedStore called for a frozen scope -- its admission ladder can fork a bd command " +
+				"before this scope's own choke point ever runs")
+			return nil, ProxiedOpenReport{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity() error = %v", err)
+	}
+	if result.Store != fallback {
+		t.Fatalf("Store = %T, want the bd fallback store", result.Store)
+	}
+	if result.Diagnostic.PreflightGate != migrationFreezeGate {
+		t.Fatalf("preflight_gate = %q, want %q", result.Diagnostic.PreflightGate, migrationFreezeGate)
+	}
+	if result.Diagnostic.NativeStoreEligible {
+		t.Fatal("native_store_eligible = true, want false for a frozen scope")
+	}
+	if !strings.Contains(result.Diagnostic.PreflightReason, scope) {
+		t.Fatalf("preflight_reason = %q, want it to carry the marker's own detail (scope path)", result.Diagnostic.PreflightReason)
+	}
+}
+
 func TestOpenStoreAtForCityIneligibleProviderSkipsPreflight(t *testing.T) {
 	t.Setenv(nativeForceFallbackEnv, "")
 	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,8 +86,8 @@ func TestCheckMigrationFreezeForNativeOpen_FrozenWhenMarkerPresent(t *testing.T)
 	writeMigrationFreezeMarker(t, scopeRoot, "dolt v2 migration")
 
 	err := checkMigrationFreezeForNativeOpen(scopeRoot)
-	if !errors.Is(err, errNativeOpenFrozen) {
-		t.Fatalf("checkMigrationFreezeForNativeOpen = %v, want errNativeOpenFrozen", err)
+	if !errors.Is(err, ErrNativeOpenFrozen) {
+		t.Fatalf("checkMigrationFreezeForNativeOpen = %v, want ErrNativeOpenFrozen", err)
 	}
 }
 
@@ -112,8 +113,8 @@ func TestCheckMigrationFreezeForNativeOpen_MarkerInAncestorDirFreezes(t *testing
 	}
 
 	err := checkMigrationFreezeForNativeOpen(scopeRoot)
-	if !errors.Is(err, errNativeOpenFrozen) {
-		t.Fatalf("checkMigrationFreezeForNativeOpen with an ancestor marker = %v, want errNativeOpenFrozen", err)
+	if !errors.Is(err, ErrNativeOpenFrozen) {
+		t.Fatalf("checkMigrationFreezeForNativeOpen with an ancestor marker = %v, want ErrNativeOpenFrozen", err)
 	}
 }
 
@@ -140,8 +141,8 @@ func TestCheckMigrationFreezeForNativeOpen_EnvOverrideWins(t *testing.T) {
 	t.Setenv(migrationFreezeEnvFile, overridePath)
 	unrelatedScope := t.TempDir()
 	err := checkMigrationFreezeForNativeOpen(unrelatedScope)
-	if !errors.Is(err, errNativeOpenFrozen) {
-		t.Fatalf("env override to an existing marker = %v, want errNativeOpenFrozen", err)
+	if !errors.Is(err, ErrNativeOpenFrozen) {
+		t.Fatalf("env override to an existing marker = %v, want ErrNativeOpenFrozen", err)
 	}
 }
 
@@ -163,8 +164,8 @@ func TestOpenNativeDoltStoreAtRefusesWhenFrozen(t *testing.T) {
 	}
 
 	_, err := OpenNativeDoltStoreAt(context.Background(), scopeRoot, nil)
-	if !errors.Is(err, errNativeOpenFrozen) {
-		t.Fatalf("OpenNativeDoltStoreAt while frozen = %v, want errNativeOpenFrozen", err)
+	if !errors.Is(err, ErrNativeOpenFrozen) {
+		t.Fatalf("OpenNativeDoltStoreAt while frozen = %v, want ErrNativeOpenFrozen", err)
 	}
 }
 
@@ -216,8 +217,8 @@ func TestOpenNativeStorageReconnectRefusesWhenFrozen(t *testing.T) {
 	}
 
 	_, err := OpenNativeStorage(context.Background(), scopeRoot, nil)
-	if !errors.Is(err, errNativeOpenFrozen) {
-		t.Fatalf("OpenNativeStorage (reconnect) while frozen = %v, want errNativeOpenFrozen", err)
+	if !errors.Is(err, ErrNativeOpenFrozen) {
+		t.Fatalf("OpenNativeStorage (reconnect) while frozen = %v, want ErrNativeOpenFrozen", err)
 	}
 }
 
@@ -261,11 +262,11 @@ func TestOpenNativeDoltStoreAtProxiedRefusesWhenFrozen(t *testing.T) {
 		return nil, nil
 	}
 
-	if _, err := OpenNativeDoltStoreAtProxied(context.Background(), scopeRoot, nil); !errors.Is(err, errNativeOpenFrozen) {
-		t.Fatalf("OpenNativeDoltStoreAtProxied while frozen = %v, want errNativeOpenFrozen", err)
+	if _, err := OpenNativeDoltStoreAtProxied(context.Background(), scopeRoot, nil); !errors.Is(err, ErrNativeOpenFrozen) {
+		t.Fatalf("OpenNativeDoltStoreAtProxied while frozen = %v, want ErrNativeOpenFrozen", err)
 	}
-	if _, err := OpenNativeStorageAtProxied(context.Background(), scopeRoot, nil); !errors.Is(err, errNativeOpenFrozen) {
-		t.Fatalf("OpenNativeStorageAtProxied (reopen hook) while frozen = %v, want errNativeOpenFrozen", err)
+	if _, err := OpenNativeStorageAtProxied(context.Background(), scopeRoot, nil); !errors.Is(err, ErrNativeOpenFrozen) {
+		t.Fatalf("OpenNativeStorageAtProxied (reopen hook) while frozen = %v, want ErrNativeOpenFrozen", err)
 	}
 }
 
@@ -290,8 +291,8 @@ func TestOpenNativeDoltStoreAtWithoutAmbientEnvRefusesWhenFrozen(t *testing.T) {
 		return nil, nil
 	}
 
-	if _, err := OpenNativeDoltStoreAtWithoutAmbientEnv(context.Background(), scopeRoot); !errors.Is(err, errNativeOpenFrozen) {
-		t.Fatalf("OpenNativeDoltStoreAtWithoutAmbientEnv while frozen = %v, want errNativeOpenFrozen", err)
+	if _, err := OpenNativeDoltStoreAtWithoutAmbientEnv(context.Background(), scopeRoot); !errors.Is(err, ErrNativeOpenFrozen) {
+		t.Fatalf("OpenNativeDoltStoreAtWithoutAmbientEnv while frozen = %v, want ErrNativeOpenFrozen", err)
 	}
 }
 
@@ -468,8 +469,8 @@ func TestCheckMigrationFreezeForNativeOpen_TrustedSymlinkViaEnvOverrideIsFollowe
 	t.Setenv(migrationFreezeEnvFile, linkPath)
 
 	scopeRoot := t.TempDir()
-	if err := checkMigrationFreezeForNativeOpen(scopeRoot); !errors.Is(err, errNativeOpenFrozen) {
-		t.Fatalf("checkMigrationFreezeForNativeOpen with a trusted symlinked marker = %v, want errNativeOpenFrozen", err)
+	if err := checkMigrationFreezeForNativeOpen(scopeRoot); !errors.Is(err, ErrNativeOpenFrozen) {
+		t.Fatalf("checkMigrationFreezeForNativeOpen with a trusted symlinked marker = %v, want ErrNativeOpenFrozen", err)
 	}
 }
 
@@ -540,8 +541,8 @@ func TestCheckMigrationFreezeForNativeOpen_EACCESIsUndeterminableAndFailsClosed(
 		t.Fatalf("chmod locked: %v", err)
 	}
 
-	if err := checkMigrationFreezeForNativeOpen(scopeRoot); !errors.Is(err, errNativeOpenFrozen) {
-		t.Fatalf("checkMigrationFreezeForNativeOpen with an unsearchable ancestor (EACCES) = %v, want errNativeOpenFrozen (fail closed)", err)
+	if err := checkMigrationFreezeForNativeOpen(scopeRoot); !errors.Is(err, ErrNativeOpenFrozen) {
+		t.Fatalf("checkMigrationFreezeForNativeOpen with an unsearchable ancestor (EACCES) = %v, want ErrNativeOpenFrozen (fail closed)", err)
 	}
 }
 
@@ -607,8 +608,19 @@ func TestCheckMigrationFreeze(t *testing.T) {
 	t.Run("frozen", func(t *testing.T) {
 		scopeRoot := t.TempDir()
 		writeMigrationFreezeMarker(t, scopeRoot, "frozen case")
-		if err := CheckMigrationFreeze(scopeRoot); !errors.Is(err, errNativeOpenFrozen) {
-			t.Fatalf("CheckMigrationFreeze with a marker present = %v, want errNativeOpenFrozen", err)
+		err := CheckMigrationFreeze(scopeRoot)
+		if !errors.Is(err, ErrNativeOpenFrozen) {
+			t.Fatalf("CheckMigrationFreeze with a marker present = %v, want ErrNativeOpenFrozen", err)
+		}
+		// ga-vwupk round 3 LOW: this is exactly the detail a caller
+		// propagating this error (every guarded closure in cmd/gc) relies
+		// on to tell an operator WHO froze the scope and WHY, not just
+		// THAT it is frozen.
+		if !strings.Contains(err.Error(), `operator="migrator"`) {
+			t.Fatalf("CheckMigrationFreeze error = %q, want it to contain the marker's operator= detail", err.Error())
+		}
+		if !strings.Contains(err.Error(), `reason="frozen case"`) {
+			t.Fatalf("CheckMigrationFreeze error = %q, want it to contain the marker's reason= detail", err.Error())
 		}
 	})
 

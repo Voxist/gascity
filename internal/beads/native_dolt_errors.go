@@ -268,7 +268,7 @@ func classifyNativeDoltReadError(err error, lane nativeReadLane) nativeReadClass
 	// (ProxiedVerdictNone): this is not an endpoint fact for the proxied lane
 	// to name, so proxiedReadVerdict discards it and returns the cause
 	// unchanged on both lanes, same as nativeReadUnclassified would.
-	if errors.Is(err, errNativeOpenFrozen) {
+	if errors.Is(err, ErrNativeOpenFrozen) {
 		return nativeReadClass{disposition: nativeReadTerminal}
 	}
 

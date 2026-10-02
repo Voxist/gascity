@@ -1713,15 +1713,20 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 			return openExecStoreAtForCityWithConfig(provider, scopeRoot, runtimeCityPath, cfg)
 		},
 		OpenNativeStore: func() (beads.Store, error) {
-			// ga-vwupk round 2: checked BEFORE the env projection below,
-			// which can trigger managed-Dolt recovery/restart -- the native
-			// lane must never have gc restart a database an operator
-			// deliberately stopped on the way to a factory fallback (or the
-			// choke point inside OpenNativeDoltStoreAt itself) that would
-			// have refused anyway. This was the gap the round-1 fix missed:
-			// it gated the RECONNECT closure below but not this initial
-			// open, which every ordinary `gc hook --claim` / `gc ready`
-			// reaches on ITS very first native store construction.
+			// ga-vwupk: defense in depth. internal/beads/factory.go's
+			// OpenStoreAtForCity now checks CheckMigrationFreeze before it
+			// ever calls opts.OpenNativeStore (this closure) at all, so in
+			// production a frozen scope never reaches this line -- the
+			// factory-level check is what actually decides. This check
+			// stays so a caller that constructs StoreOpenOptions directly,
+			// bypassing the factory, is not silently unprotected. Scoped
+			// claim, not an absolute one: this closure, and the
+			// native-open/reopen/admission layer generally, never trigger
+			// recovery when frozen -- but once the factory falls through
+			// to the BdStore/bd-CLI fallback (which it now does immediately
+			// for a frozen scope), THAT path's own env resolution can still
+			// restart a stopped managed Dolt on its first bd command
+			// (ga-lc97s, not yet fixed).
 			if err := beads.CheckMigrationFreeze(scopeRoot); err != nil {
 				return nil, fmt.Errorf("project native store env %s: %w", scopeRoot, err)
 			}

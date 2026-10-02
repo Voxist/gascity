@@ -512,9 +512,9 @@ func TestClassifyNativeDoltReadErrorOrder(t *testing.T) {
 			// of the nine substrings isNativeDoltTransientReadError carries
 			// ("connection refused" among them) must not fall through to that
 			// rung and get treated as a reconnect-and-retry signal.
-			err:  fmt.Errorf("%w: /city/.beads/MIGRATION-FREEZE (operator=migrator, reason=\"after connection refused incident\")", errNativeOpenFrozen),
+			err:  fmt.Errorf("%w: /city/.beads/MIGRATION-FREEZE (operator=migrator, reason=\"after connection refused incident\")", ErrNativeOpenFrozen),
 			want: nativeReadTerminal,
-			why:  "errNativeOpenFrozen must outrank every retryable text signature, the same way ErrCommitIndeterminate does",
+			why:  "ErrNativeOpenFrozen must outrank every retryable text signature, the same way ErrCommitIndeterminate does",
 		},
 		{
 			name: "an indeterminate commit wrapping a deadlock is NOT a serialization retry",

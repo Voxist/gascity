@@ -41,6 +41,7 @@ const (
 	nativeForceFallbackEnv   = "GC_BEADS_FORCE_FALLBACK"
 	nativeForceFallbackGate  = "force_fallback"
 	nativeHooksGate          = "bd_hooks"
+	migrationFreezeGate      = "migration_freeze"
 	proxiedProviderGate      = BeadsGateProxiedProvider
 	nativeUnavailableMessage = "native_store_unavailable"
 
@@ -262,6 +263,28 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 	case strings.HasPrefix(provider, "exec:") && !contract.ProviderUsesBDContract(provider):
 		store, err := callStoreOpen("exec store", opts.OpenExecStore)
 		return opts.stampedResult(StoreOpenResult{Store: store, Diagnostic: BeadsDiagnostic{Store: storeNameExecStore}}, err)
+	}
+
+	// ga-vwupk round 3: checked before EVERYTHING below that can trigger
+	// recovery on its way to a verdict — forceNativeFallback is a pure env
+	// read, but persistedDoltModeRefusal's proxied arm (openProxiedNative)
+	// admits against bd's proxy (which can fork a bd command to bring a
+	// stopped proxy back) and PreflightChecker.Check's bd-context probe
+	// (bdRuntimeEnvFor, allowRecovery=true) can restart a managed Dolt an
+	// operator deliberately stopped. Both were reachable BEFORE this scope's
+	// own native-open choke point (checkMigrationFreezeForNativeOpen) ever
+	// ran, which is the gap round 1 and round 2 closed at the native-open
+	// and reopen/admit layer but missed here, one layer up. One check here
+	// closes both: neither path is reached at all for a frozen scope.
+	if err := CheckMigrationFreeze(opts.ScopeRoot); err != nil {
+		diag := BeadsDiagnostic{
+			Store:               storeNameBdStore,
+			NativeStoreEligible: false,
+			PreflightGate:       migrationFreezeGate,
+			PreflightReason:     err.Error(),
+		}
+		logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
+		return opts.openBdFallback(provider, diag)
 	}
 
 	if forceNativeFallback() {

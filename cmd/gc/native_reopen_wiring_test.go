@@ -1,9 +1,13 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // TestNativeReopenHookWiredAtBothStoreOpenSites pins the two production sites
@@ -54,8 +58,10 @@ func TestNativeReopenHookWiredAtBothStoreOpenSites(t *testing.T) {
 // same guard and is not added here would defeat the WHOLE POINT of a
 // regression test, so this table IS the allowlist ga-vwupk's review asked
 // for -- a full non-test-file census (scanning for every future
-// WithNativeReopen(/NativeReopenFunc/OpenNativeStore site automatically) is
-// a further hardening left for a follow-up rather than attempted here.
+// WithNativeReopen(/NativeReopenFunc/OpenNativeStore site automatically,
+// AST-based, in the style of dolt_recover_gate_funnel_test.go's provider-op
+// census) is a further hardening left for ga-ju39w rather than attempted
+// here.
 //
 // Like its predecessor, this is a structural/textual pin (the established
 // style for this file), not a live-recovery behavioral test: exercising a
@@ -115,7 +121,10 @@ func TestNativeStoreOpensCheckMigrationFreezeBeforeRecovery(t *testing.T) {
 			if anchorAt < 0 {
 				t.Fatalf("%s (%s): could not find the closure (anchor %q)", tc.file, tc.site, tc.anchor)
 			}
-			body := src[anchorAt:]
+			body, ok := closureBody(src, anchorAt+len(tc.anchor))
+			if !ok {
+				t.Fatalf("%s (%s): could not find the closure's matching closing brace (anchor %q)", tc.file, tc.site, tc.anchor)
+			}
 			guardAt := strings.Index(body, tc.guardCall)
 			if guardAt < 0 {
 				t.Fatalf("%s (%s): must check %s before triggering recovery — an active MIGRATION-FREEZE must never let gc "+
@@ -133,4 +142,61 @@ func TestNativeStoreOpensCheckMigrationFreezeBeforeRecovery(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCheckMigrationFreezeErrorSurvivesClosureWrapping pins, from cmd/gc's
+// own package, the exact error-wrapping idiom every guarded closure in this
+// file uses: `if err := beads.CheckMigrationFreeze(scopeRoot); err != nil {
+// return nil, fmt.Errorf("...: %w", err) }`. beads.ErrNativeOpenFrozen was
+// exported in ga-vwupk round 3 precisely so a caller here can
+// errors.Is(err, beads.ErrNativeOpenFrozen) after that wrapping instead of
+// string-matching an error message; this proves the %w verb actually
+// carries it through, the same wrapping every closure in this file (main.go,
+// api_state.go, beads_proxied_native.go) performs.
+func TestCheckMigrationFreezeErrorSurvivesClosureWrapping(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := dir + "/.beads"
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	if err := os.WriteFile(beadsDir+"/MIGRATION-FREEZE", []byte(""), 0o644); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+
+	err := beads.CheckMigrationFreeze(dir)
+	if err == nil {
+		t.Fatal("CheckMigrationFreeze with a marker present = nil, want an error")
+	}
+	wrapped := fmt.Errorf("project native store env %s: %w", dir, err)
+	if !errors.Is(wrapped, beads.ErrNativeOpenFrozen) {
+		t.Fatalf("errors.Is(wrapped, beads.ErrNativeOpenFrozen) = false after %%w-wrapping %v; "+
+			"every guarded closure in this file relies on this surviving", err)
+	}
+}
+
+// closureBody returns the text of a closure whose opening brace sits at
+// (or is the last character before) openAt, up to its MATCHING closing
+// brace, found by counting brace depth. ga-vwupk round 3 LOW: the previous
+// version of TestNativeStoreOpensCheckMigrationFreezeBeforeRecovery scanned
+// from an anchor to END OF FILE, so a guardCall/recoverCall pair belonging
+// to a LATER, unrelated closure in the same file could satisfy an earlier
+// site's check by coincidence. Bounding to the matching brace is a plain
+// depth count, not a real parser, so it does not account for a brace
+// appearing inside a string literal or comment -- a known, accepted gap
+// matching this file's other textual-pin tests, and not a risk in the
+// specific closures this table scans today.
+func closureBody(src string, openAt int) (string, bool) {
+	depth := 0
+	for i := openAt - 1; i < len(src); i++ {
+		switch src[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return src[openAt : i+1], true
+			}
+		}
+	}
+	return "", false
 }

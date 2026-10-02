@@ -269,7 +269,7 @@ func parseMigrationFreezeInfo(content string) *migrationFreezeInfo {
 	return info
 }
 
-// errNativeOpenFrozen is returned by checkMigrationFreezeForNativeOpen when
+// ErrNativeOpenFrozen is returned by checkMigrationFreezeForNativeOpen when
 // an active MIGRATION-FREEZE marker covers scopeRoot. Every caller of it
 // treats this as "do not open natively" and lets the error propagate to
 // whatever the existing native-open failure path already does: for the
@@ -281,7 +281,7 @@ func parseMigrationFreezeInfo(content string) *migrationFreezeInfo {
 // bypasses that factory path and its preflight entirely) there is no
 // mid-operation fallback to fail over to, so the reconnect simply fails
 // closed and the read it was serving returns this error.
-var errNativeOpenFrozen = errors.New("beads: migration freeze is active; refusing a native (in-process) open")
+var ErrNativeOpenFrozen = errors.New("beads: migration freeze is active; refusing a native (in-process) open")
 
 // checkMigrationFreezeForNativeOpen is the ga-vwupk choke-point guard. Call
 // it immediately before every native open — including a reconnect, which
@@ -301,7 +301,7 @@ func checkMigrationFreezeForNativeOpen(scopeRoot string) error {
 	// than a bespoke log.Printf line.
 	slog.Default().Warn("gc: refusing a native (in-process) beads open",
 		slog.String("scope", scopeRoot), slog.String("detail", detail))
-	return fmt.Errorf("%w: %s", errNativeOpenFrozen, detail)
+	return fmt.Errorf("%w: %s", ErrNativeOpenFrozen, detail)
 }
 
 // MigrationFrozen reports whether an active MIGRATION-FREEZE marker covers
@@ -309,20 +309,32 @@ func checkMigrationFreezeForNativeOpen(scopeRoot string) error {
 // above remains the actual choke-point gate for every native open and is
 // what every caller in this package relies on; this export exists for a
 // caller OUTSIDE this package whose own path has an irreversible side
-// effect earlier than any native open -- specifically the native (direct
-// and proxied) read-path reopen and initial-open closures in cmd/gc, which
-// re-resolve the current managed-Dolt env (or, on the proxied lane,
-// re-admit against bd's proxy) before ever reaching a native open, and can
-// trigger recovery/restart as part of that resolution. The NATIVE lane must
-// never have gc restart a database an operator deliberately stopped, even
-// briefly on the way to the choke point's own refusal a few lines later --
-// so those closures call this (or CheckMigrationFreeze below) FIRST and
-// skip straight to returning an error without touching recovery at all when
-// it reports true. This claim is scoped to the native lane on purpose: the
-// BdStore/CLI fallback's OWN env resolution (bdRuntimeEnvWithErrorRecoveryContext,
+// effect earlier than any native open.
+//
+// The PRIMARY gate, as of ga-vwupk round 3, is factory.go's
+// OpenStoreAtForCity: it checks CheckMigrationFreeze before the preflight
+// checker's bd-context probe (BDContext, which maps to bdRuntimeEnvFor with
+// allowRecovery=true) or a proxied scope's admission ladder (which can fork
+// a bd command to bring a stopped proxy back) ever run, both of which sit
+// upstream of any native open. cmd/gc's native (direct and proxied)
+// read-path reopen and initial-open closures ALSO call this (or
+// CheckMigrationFreeze below) first, as defense in depth for a caller that
+// constructs beads.StoreOpenOptions directly rather than through the
+// factory -- in production the factory-level check means they never reach
+// a frozen scope's own copy of this call at all.
+//
+// This claim is scoped to the native-open/reopen/admission layer and the
+// factory's own preflight/admission gating on purpose: the BdStore/CLI
+// FALLBACK's own env resolution (bdRuntimeEnvWithErrorRecoveryContext,
 // reached via bdCommandRunnerWithManagedRetryFor whenever a bd command
-// actually runs) is a separate, currently UNGATED recovery trigger -- see
-// ga-lc97s.
+// actually runs) is a separate, currently UNGATED recovery trigger -- once
+// a frozen scope reaches the fallback (which it now does immediately), that
+// path's first bd command can still restart a stopped managed Dolt, and on
+// the proxied lane bd's own front door can still bring a stopped proxy back
+// on its next read. See ga-lc97s, which names both: the preflight runner
+// (bdCommandRunnerForCity / bdCommandRunnerWithManagedRetryFor, cmd/gc/bd_env.go)
+// and the proxied front door (bd's own CLI, reached once gc has fallen back
+// to BdStore for a proxied scope).
 func MigrationFrozen(scopeRoot string) bool {
 	return findMigrationFreezeFrom(filepath.Join(scopeRoot, ".beads")).Frozen()
 }
@@ -330,13 +342,25 @@ func MigrationFrozen(scopeRoot string) bool {
 // CheckMigrationFreeze is MigrationFrozen's error-returning sibling: nil
 // when scopeRoot is not frozen, otherwise the same detail-carrying,
 // errors.Is(err, ...)-comparable error checkMigrationFreezeForNativeOpen
-// itself would return (including the slog.Warn line -- a frozen result from
-// here always short-circuits a caller before it ever reaches the choke
-// point, so there is no double-logging risk in reusing it). Prefer this over
-// the bare-bool MigrationFrozen when the caller is about to propagate an
-// error anyway: it carries the marker's own operator/reason detail via %w
+// itself would return (including its slog.Warn line). Prefer this over the
+// bare-bool MigrationFrozen when the caller is about to propagate an error
+// anyway: it carries the marker's own operator/reason detail via %w
 // instead of a hand-written message that would have to be kept in sync by
 // hand.
+//
+// Multiple layers now call this (or MigrationFrozen) for the same scope as
+// defense in depth -- factory.go's OpenStoreAtForCity, then, only if that
+// somehow did not run, each native-open/reopen/admission closure in cmd/gc.
+// This is not a double-logging risk IN PRACTICE, because every one of
+// those callers is itself an early-return guard: whichever layer is
+// reached FIRST in a given call chain returns immediately on a frozen
+// result, so no later layer (including checkMigrationFreezeForNativeOpen's
+// own choke point) is ever reached in that SAME chain to log again. It
+// would double-log only if something called more than one of these layers
+// back to back outside that normal chain (e.g. a test or a future caller
+// probing the scope manually before also triggering an open) -- a case
+// that is, by construction, an unusual use of these functions rather than
+// the production call graph.
 func CheckMigrationFreeze(scopeRoot string) error {
 	return checkMigrationFreezeForNativeOpen(scopeRoot)
 }
