@@ -80,17 +80,49 @@
 # (AGENTS.md, "Build Cache Conventions"). "go clean -testcache" is allowed but
 # is not needed here and is not used.
 #
+# SIZE CAP (TRIM_MAX_GIB)
+#
+# Age alone does not bound size: at this fleet's build volume, even a 1-day
+# cutoff can leave ~70 GiB resident, and the host has filled before the next
+# scheduled run (ga-zqc34, 2026-10-01: 108 GiB free, cache at 114 GiB, 98%
+# disk). When TRIM_MAX_GIB is set, a second pass runs after the age-based
+# pass: if the cache is still above the cap, it removes candidate entries
+# oldest-first, by mtime, until at or under the cap. It reuses the identical
+# candidate filter as the age-based pass (<cache>/<xx>/<hash>-{a,d} only, via
+# the same -mindepth/-maxdepth confinement) and the identical re-stat-before-
+# unlink guard against the 2026-09-05 race described above -- an entry a build
+# resolves between the sizing pass and the delete pass is skipped, not
+# removed, and the next-oldest entry is evicted in its place so the cap is
+# still met.
+#
+# Ordering uses mtime, not atime, and this is a deliberate choice, not an
+# oversight: a touch+read probe on this volume (APFS) showed atime does NOT
+# update on a plain read, so it cannot distinguish hot from cold entries here.
+# mtime does not have that problem for this purpose -- Go's own markUsed()
+# bumps an entry's mtime on every cache lookup (see above), so "oldest mtime"
+# already means "least recently used" for exactly the files this script
+# touches, with no dependence on filesystem mount options.
+#
 # Usage:
 #   trim-go-build-cache.sh [--dry-run]
 #
 # Environment:
 #   TRIM_DAYS           entries unused for longer than this are removed (default 3)
+#   TRIM_HOURS          same cutoff as TRIM_DAYS but in hours; overrides
+#                       TRIM_DAYS for the age-based pass when set (no default)
+#   TRIM_MAX_GIB        after the age-based pass, if the cache is still above
+#                       this many GiB, remove candidates oldest-first (by
+#                       mtime) until at or under it (no default: unset means
+#                       no size cap, age-only, matching prior behavior)
 #   GO_BUILD_CACHE_DIR  cache to trim (default $HOME/Library/Caches/go-build)
 #   TRIM_LOG            log file (default $HOME/Library/Logs/gocache-trim.log)
 #   TRIM_LOG_MAX_LINES  log is truncated to this many lines each run (default 365)
-#   TRIM_DELAY_BEFORE_DELETE  TEST ONLY. Seconds to widen the snapshot-to-delete
-#                       window so the regression test can refresh an entry
-#                       inside it. Always 0 in production.
+#   TRIM_DELAY_BEFORE_DELETE  TEST ONLY. Seconds to widen the age-based pass's
+#                       snapshot-to-delete window so the regression test can
+#                       refresh an entry inside it. Always 0 in production.
+#   TRIM_SIZE_DELAY_BEFORE_DELETE  TEST ONLY. Same, for the size-cap pass's
+#                       window. A separate knob because the two passes run
+#                       sequentially in one invocation. Always 0 in production.
 #
 # This script deliberately sets neither GOCACHE nor TMPDIR.
 
@@ -106,6 +138,8 @@ export LC_ALL=C
 FIND="${TRIM_FIND:-/usr/bin/find}"
 
 TRIM_DAYS="${TRIM_DAYS:-3}"
+TRIM_HOURS="${TRIM_HOURS:-}"
+TRIM_MAX_GIB="${TRIM_MAX_GIB:-}"
 CACHE_DIR="${GO_BUILD_CACHE_DIR:-$HOME/Library/Caches/go-build}"
 LOG="${TRIM_LOG:-$HOME/Library/Logs/gocache-trim.log}"
 LOG_MAX_LINES="${TRIM_LOG_MAX_LINES:-365}"
@@ -174,6 +208,31 @@ fi
 [ -n "$TRIM_DAYS" ] && [ "$TRIM_DAYS" -ge 1 ] 2>/dev/null \
 	|| die "TRIM_DAYS must be an integer >= 1 (got: ${TRIM_DAYS})"
 
+# TRIM_HOURS, when set, is a finer-grained override of the same cutoff that
+# TRIM_DAYS otherwise provides -- AGE_SPEC/AGE_DESC below are the single
+# place that choice is resolved, so the find predicate and every log/report
+# line downstream agree with each other.
+if [ -n "$TRIM_HOURS" ]; then
+	[ "$TRIM_HOURS" -ge 1 ] 2>/dev/null \
+		|| die "TRIM_HOURS must be an integer >= 1 (got: ${TRIM_HOURS})"
+	AGE_SPEC="${TRIM_HOURS} hours ago"
+	AGE_DESC="${TRIM_HOURS}h"
+else
+	AGE_SPEC="${TRIM_DAYS} days ago"
+	AGE_DESC="${TRIM_DAYS}d"
+fi
+
+# TRIM_MAX_GIB is optional (unset = no size cap, age-only, matching prior
+# behavior). When set it must be a positive number; awk does the numeric
+# comparison so this also accepts decimals (e.g. "40.5"), which plain [ -ge ]
+# cannot.
+if [ -n "$TRIM_MAX_GIB" ]; then
+	echo "$TRIM_MAX_GIB" | grep -qE '^[0-9]+(\.[0-9]+)?$' \
+		|| die "TRIM_MAX_GIB must be a positive number of GiB (got: ${TRIM_MAX_GIB})"
+	awk -v v="$TRIM_MAX_GIB" 'BEGIN { exit !(v + 0 > 0) }' \
+		|| die "TRIM_MAX_GIB must be a positive number of GiB (got: ${TRIM_MAX_GIB})"
+fi
+
 [ -d "$CACHE_DIR" ] || die "cache dir does not exist: $CACHE_DIR"
 
 # Refuse to run against anything that is not shaped like a Go build cache, so a
@@ -202,7 +261,7 @@ CACHE_DIR="$(cd "$CACHE_DIR" && pwd -P)"
 list="$probe_dir/candidates"
 "$FIND" "$CACHE_DIR" -mindepth 2 -maxdepth 2 \
 	\( -name '*-a' -o -name '*-d' \) \
-	! -newermt "${TRIM_DAYS} days ago" \
+	! -newermt "$AGE_SPEC" \
 	-print0 > "$list" 2>/dev/null || true
 
 # Selection above produced a SNAPSHOT. Between that snapshot and the unlink
@@ -228,16 +287,28 @@ list="$probe_dir/candidates"
 # and skips anything whose mtime moved, which is exactly Go's check. Because
 # markUsed() leaves an mtime at most one hour stale after any lookup, an entry
 # still older than TRIM_DAYS at that instant cannot be held by a live build.
+# AGE_CUTOFF_EPOCH is the single place TRIM_DAYS/TRIM_HOURS become a concrete
+# instant, computed once in bash (via the already-validated AGE_SPEC) and
+# handed to the python phases below as a number, so the selection predicate
+# above and the re-stat check in delete_phase can never disagree with each
+# other about what "stale" means.
+if [ -n "$TRIM_HOURS" ]; then
+	AGE_CUTOFF_EPOCH="$(date -v-"${TRIM_HOURS}"H '+%s' 2>/dev/null \
+		|| date -d "${TRIM_HOURS} hours ago" '+%s')"
+else
+	AGE_CUTOFF_EPOCH="$(date -v-"${TRIM_DAYS}"d '+%s' 2>/dev/null \
+		|| date -d "${TRIM_DAYS} days ago" '+%s')"
+fi
+
 delete_phase() {
-	CACHE_DIR="$CACHE_DIR" TRIM_DAYS="$TRIM_DAYS" DRY_RUN="$DRY_RUN" \
+	CACHE_DIR="$CACHE_DIR" AGE_CUTOFF_EPOCH="$AGE_CUTOFF_EPOCH" DRY_RUN="$DRY_RUN" \
 	TRIM_DELAY_BEFORE_DELETE="${TRIM_DELAY_BEFORE_DELETE:-0}" \
 	python3 -c '
 import os, re, shutil, sys, time
 
 cache = os.environ["CACHE_DIR"]
-days  = int(os.environ["TRIM_DAYS"])
 dry   = os.environ["DRY_RUN"] == "1"
-cutoff = time.time() - days * 86400
+cutoff = float(os.environ["AGE_CUTOFF_EPOCH"])
 
 entry_re = re.compile(r"^" + re.escape(cache) + r"/[0-9a-f]{2}/[0-9a-f]{64}-[ad]$")
 
@@ -299,8 +370,125 @@ print("%d %d %d %d" % (removed, freed, skipped, gone))
 '
 }
 
+# size_cap_phase implements the TRIM_MAX_GIB pass described at the top of this
+# file. It takes the SAME null-delimited candidate list shape as delete_phase
+# (and applies the identical fail-closed path validation), but unlike
+# delete_phase it is handed every surviving candidate, not just the
+# age-stale ones -- it has to know the cache's current total size to decide
+# whether to do anything at all.
+#
+# Ordering is oldest mtime first (see the top-of-file rationale for why mtime
+# and not atime). The re-stat-immediately-before-unlink guard is the same one
+# delete_phase uses for the same reason: a build can resolve a candidate
+# between the sizing pass and the delete, Go's markUsed() bumps its mtime when
+# that happens, and deleting it anyway is the 2026-09-05 incident. Unlike
+# delete_phase, skipping a refreshed entry here does not end the work for that
+# entry's "slot" -- the loop continues to the next-oldest candidate, because
+# the goal is a cache at or under the cap, not "every stale entry visited
+# once".
+size_cap_phase() {
+	# Deliberately its OWN delay knob (TRIM_SIZE_DELAY_BEFORE_DELETE), not
+	# TRIM_DELAY_BEFORE_DELETE: the two phases run sequentially in the same
+	# invocation, so sharing one knob would mean a test exercising this
+	# phase's race window also pays delete_phase's delay first, making the
+	# timing of "touch during the window" depend on both phases' delays
+	# instead of just this one's. Always 0 in production either way.
+	CACHE_DIR="$CACHE_DIR" CAP_GIB="$TRIM_MAX_GIB" DRY_RUN="$DRY_RUN" \
+	TRIM_DELAY_BEFORE_DELETE="${TRIM_SIZE_DELAY_BEFORE_DELETE:-0}" \
+	python3 -c '
+import os, re, shutil, sys, time
+
+cache = os.environ["CACHE_DIR"]
+cap_bytes = float(os.environ["CAP_GIB"]) * 1073741824
+dry = os.environ["DRY_RUN"] == "1"
+
+entry_re = re.compile(r"^" + re.escape(cache) + r"/[0-9a-f]{2}/[0-9a-f]{64}-[ad]$")
+
+paths = [p for p in sys.stdin.buffer.read().split(b"\0") if p]
+
+# Fail closed, identical to delete_phase: one unexpected path aborts the
+# whole run rather than being silently skipped or blindly deleted.
+decoded = []
+for raw in paths:
+    p = raw.decode("utf-8", "surrogateescape")
+    if not entry_re.match(p):
+        sys.stderr.write("refusing to delete unexpected path: %s\n" % p)
+        sys.exit(3)
+    decoded.append(p)
+
+def entry_size(p, isdir):
+    if not isdir:
+        return os.lstat(p).st_size
+    size = 0
+    for root, _, files in os.walk(p):
+        for f in files:
+            try: size += os.lstat(os.path.join(root, f)).st_size
+            except OSError: pass
+    return size
+
+# Single stat pass over every surviving candidate: (mtime, path, isdir). This
+# is also where the current total size comes from -- summed here rather than
+# via a separate `du`, since every entry is visited anyway.
+entries = []
+total = 0.0
+for p in decoded:
+    try:
+        st = os.lstat(p)
+    except FileNotFoundError:
+        continue
+    isdir = os.path.isdir(p) and not os.path.islink(p)
+    size = entry_size(p, isdir) if isdir else st.st_size
+    total += size
+    entries.append((st.st_mtime, p, isdir))
+
+if total <= cap_bytes:
+    print("0 0 0 %d" % total)
+    sys.exit(0)
+
+# Oldest mtime first. markUsed() bumps mtime on every cache lookup (see the
+# top-of-file rationale), so "oldest mtime" is "least recently used" for
+# exactly the files this script touches.
+entries.sort(key=lambda e: e[0])
+
+# Test-only seam, same as delete_phase: widens the snapshot-to-delete window
+# so the regression test can refresh an entry inside it. Always 0 in
+# production.
+delay = float(os.environ.get("TRIM_DELAY_BEFORE_DELETE", "0") or 0)
+if delay:
+    time.sleep(delay)
+
+removed = skipped = 0
+freed = 0.0
+remaining = total
+for mtime, p, isdir in entries:
+    if remaining <= cap_bytes:
+        break
+    try:
+        st = os.lstat(p)            # fresh stat, immediately before removal
+    except FileNotFoundError:
+        continue
+    if st.st_mtime > mtime:         # refreshed since the sizing pass: now hot, leave it
+        skipped += 1
+        continue                    # cap not yet met: evict the next-oldest instead
+    size = entry_size(p, isdir) if isdir else st.st_size
+    if dry:
+        removed += 1; freed += size; remaining -= size
+        continue
+    try:
+        shutil.rmtree(p) if isdir else os.remove(p)
+    except FileNotFoundError:
+        continue
+    except OSError as e:
+        sys.stderr.write("remove %s: %s\n" % (p, e))
+        continue
+    removed += 1; freed += size; remaining -= size
+
+print("%d %d %d %d" % (removed, freed, skipped, total))
+'
+}
+
 candidates="$(tr -cd '\0' < "$list" | wc -c | tr -d ' ')"
-log_line "start candidates=$candidates days=$TRIM_DAYS cache=$CACHE_DIR"
+log_line "start candidates=$candidates age=$AGE_DESC cache=$CACHE_DIR"
 
 if ! result="$(delete_phase < "$list")"; then
 	die "delete phase refused to run (see message above); nothing was removed"
@@ -313,13 +501,56 @@ skipped="${rest%% *}"
 gone="${rest#* }"
 
 if [ "$DRY_RUN" -eq 1 ]; then
-	printf 'dry-run: would remove %d entries (%d bytes, %s GiB) older than %s days from %s\n' \
-		"$count" "$bytes" "$(gib "$bytes")" "$TRIM_DAYS" "$CACHE_DIR"
-	exit 0
+	printf 'dry-run: would remove %d entries (%d bytes, %s GiB) older than %s from %s\n' \
+		"$count" "$bytes" "$(gib "$bytes")" "$AGE_DESC" "$CACHE_DIR"
+else
+	log_line "$(printf 'trimmed=%d bytes=%d gib=%s skipped_hot=%d already_gone=%d age=%s cache=%s' \
+		"$count" "$bytes" "$(gib "$bytes")" "$skipped" "$gone" "$AGE_DESC" "$CACHE_DIR")"
+
+	printf 'trimmed %d entries (%d bytes), skipped %d refreshed, %d already gone, older than %s from %s\n' \
+		"$count" "$bytes" "$skipped" "$gone" "$AGE_DESC" "$CACHE_DIR"
 fi
 
-log_line "$(printf 'trimmed=%d bytes=%d gib=%s skipped_hot=%d already_gone=%d days=%s cache=%s' \
-	"$count" "$bytes" "$(gib "$bytes")" "$skipped" "$gone" "$TRIM_DAYS" "$CACHE_DIR")"
+# ---------------------------------------------------------------------------
+# SIZE CAP (TRIM_MAX_GIB). Runs after the age-based pass above, whether or not
+# that pass found anything to do: age-only trimming does not bound size (see
+# the top-of-file rationale), so this pass is what actually keeps the cache
+# under TRIM_MAX_GIB when the age cutoff alone does not get there.
+#
+# Skipped entirely when TRIM_MAX_GIB is unset, which is the default and
+# preserves the prior (age-only) behavior exactly.
+if [ -n "$TRIM_MAX_GIB" ]; then
+	# A fresh listing: the age-based pass above may have just removed some of
+	# these candidates, and new entries may have appeared since the first
+	# find ran. Same selector, same depth confinement, same name filter --
+	# this is not a new candidate definition, just a re-scan of it.
+	size_list="$probe_dir/size_candidates"
+	"$FIND" "$CACHE_DIR" -mindepth 2 -maxdepth 2 \
+		\( -name '*-a' -o -name '*-d' \) \
+		-print0 > "$size_list" 2>/dev/null || true
 
-printf 'trimmed %d entries (%d bytes), skipped %d refreshed, %d already gone, older than %s days from %s\n' \
-	"$count" "$bytes" "$skipped" "$gone" "$TRIM_DAYS" "$CACHE_DIR"
+	if ! size_result="$(size_cap_phase < "$size_list")"; then
+		die "size-cap phase refused to run (see message above); nothing further was removed"
+	fi
+	sc_removed="${size_result%% *}"
+	sc_rest="${size_result#* }"
+	sc_freed="${sc_rest%% *}"
+	sc_rest="${sc_rest#* }"
+	sc_skipped="${sc_rest%% *}"
+	sc_total="${sc_rest#* }"
+
+	total_gib="$(gib "$sc_total")"
+
+	if [ "$DRY_RUN" -eq 1 ]; then
+		printf 'dry-run: cache is %s GiB (cap %s GiB); would remove %d more entries (%d bytes, %s GiB) oldest-first to reach the cap\n' \
+			"$total_gib" "$TRIM_MAX_GIB" "$sc_removed" "$sc_freed" "$(gib "$sc_freed")"
+	else
+		log_line "$(printf 'sizecap total_before_gib=%s cap_gib=%s removed=%d bytes=%d gib=%s skipped_hot=%d cache=%s' \
+			"$total_gib" "$TRIM_MAX_GIB" "$sc_removed" "$sc_freed" "$(gib "$sc_freed")" "$sc_skipped" "$CACHE_DIR")"
+
+		printf 'size cap: cache was %s GiB (cap %s GiB), removed %d more entries (%d bytes, %s GiB) oldest-first, skipped %d refreshed\n' \
+			"$total_gib" "$TRIM_MAX_GIB" "$sc_removed" "$sc_freed" "$(gib "$sc_freed")" "$sc_skipped"
+	fi
+fi
+
+exit 0

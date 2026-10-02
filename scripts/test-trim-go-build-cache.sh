@@ -28,6 +28,29 @@ else
 	exit 1
 fi
 
+# Same BSD/GNU split, at hour granularity, for the TRIM_HOURS case.
+if date -v-1H '+%Y' >/dev/null 2>&1; then
+	old_stamp_hours() { date -v-"$1"H '+%Y%m%d%H%M'; }
+elif date -d '1 hour ago' '+%Y' >/dev/null 2>&1; then
+	old_stamp_hours() { date -d "$1 hours ago" '+%Y%m%d%H%M'; }
+else
+	echo "FATAL: neither BSD nor GNU date accepted a relative hour offset" >&2
+	exit 1
+fi
+
+# mkbytes <n> -- n bytes of content on stdout. Used by the size-cap cases
+# below, which need entries of exact, known byte size so a TRIM_MAX_GIB cap
+# can be placed precisely between two cumulative sums.
+mkbytes() { python3 -c "import sys; sys.stdout.buffer.write(b'x' * $1)"; }
+
+# gib_of <bytes> -- convert a byte count to a GiB value with enough decimal
+# precision that TRIM_MAX_GIB can target a cap of a few hundred bytes exactly,
+# without writing multi-GiB fixtures just to get round numbers. Fixed-point,
+# not python's default repr: a plain print() switches to scientific notation
+# below about 1e-4, which the script's TRIM_MAX_GIB validator (deliberately
+# strict, to reject TRIM_MAX_GIB=1e5 meaning something other than GiB) rejects.
+gib_of() { python3 -c "print(f'{$1 / 1073741824:.20f}')"; }
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 TRIM="$SCRIPT_DIR/trim-go-build-cache.sh"
 
@@ -416,6 +439,176 @@ wait "$trim_pid" || fail "trim failed: $(cat "$WORK/out11")"
 grep -q 'skipped 1 refreshed' "$WORK/out11" \
 	|| fail "trim did not report the skipped entry: $(cat "$WORK/out11")"
 pass "CASE 11: an entry refreshed after selection survives (build-breakage regression)"
+
+# --------------------------------------------------------------- CASE 12
+# TRIM_MAX_GIB: the oldest entries go first, until the cache is at or under
+# the cap; entries that are not the oldest are left alone; metadata survives.
+root12="$WORK/case12/go-build"
+mkdir -p "$root12/aa"
+: > "$root12/trim.txt"; : > "$root12/testexpire.txt"; : > "$root12/README"
+
+# Five 1000-byte entries, oldest (1) to newest (5). TRIM_DAYS is set huge
+# below so the age-based pass cannot touch any of them -- this isolates the
+# size-cap pass as the only thing under test.
+declare -a h12
+for i in 1 2 3 4 5; do
+	h12[$i]="$(hex64 "case12-$i")"
+	mkbytes 1000 > "$root12/aa/${h12[$i]}-a"
+	touch -t "$(old_stamp $((6 - i)))" "$root12/aa/${h12[$i]}-a"
+done
+
+# Total is 5000 bytes. The cap is satisfied once REMAINING <= cap, i.e. once
+# enough has been REMOVED -- not once the removed total merely exceeds the
+# cap value. Removing the 2 oldest leaves 3000; removing the 3 oldest leaves
+# 2000. A cap of 3500 is satisfied by 3000 (2 removed) but not by 4000 (1
+# removed), so exactly entries 1 and 2 must be evicted to reach it.
+cap_gib12="$(gib_of 3500)"
+
+TRIM_DAYS=9999 TRIM_MAX_GIB="$cap_gib12" GO_BUILD_CACHE_DIR="$root12" \
+	TRIM_LOG="$WORK/log12" "$TRIM" >"$WORK/out12" 2>&1 \
+	|| fail "CASE 12 run failed: $(cat "$WORK/out12")"
+
+[ ! -e "$root12/aa/${h12[1]}-a" ] || fail "CASE 12: oldest entry (1) survived the size cap"
+[ ! -e "$root12/aa/${h12[2]}-a" ] || fail "CASE 12: 2nd-oldest entry (2) survived the size cap"
+for i in 3 4 5; do
+	[ -e "$root12/aa/${h12[$i]}-a" ] || fail "CASE 12: entry $i was removed but is not among the oldest"
+done
+for f in trim.txt testexpire.txt README; do
+	[ -f "$root12/$f" ] || fail "CASE 12: metadata $f was deleted by the size-cap pass"
+done
+grep -q 'removed 2 more entries' "$WORK/out12" \
+	|| fail "CASE 12: did not report removing exactly 2 entries: $(cat "$WORK/out12")"
+pass "CASE 12: size cap removes the oldest entries first, keeps the rest, never touches metadata"
+
+# --------------------------------------------------------------- CASE 13
+# THE SAME RACE AS CASE 11, for the size-cap pass. An entry chosen for
+# eviction because it is the oldest, but refreshed before the delete fires,
+# must survive -- and the pass must still reach the cap by evicting the
+# next-oldest candidate instead.
+root13="$WORK/case13/go-build"
+mkdir -p "$root13/aa"
+h13_hot="$(hex64 case13-hot)"
+h13_cold="$(hex64 case13-cold)"
+mkbytes 1000 > "$root13/aa/${h13_hot}-a"
+mkbytes 1000 > "$root13/aa/${h13_cold}-a"
+touch -t "$(old_stamp 10)" "$root13/aa/${h13_hot}-a"   # oldest: selected first
+touch -t "$(old_stamp 5)"  "$root13/aa/${h13_cold}-a"  # next-oldest
+
+# Cap requires exactly one eviction (2000 bytes total -> under 1500).
+cap_gib13="$(gib_of 1500)"
+
+TRIM_DAYS=9999 TRIM_MAX_GIB="$cap_gib13" GO_BUILD_CACHE_DIR="$root13" \
+	TRIM_LOG="$WORK/log13" TRIM_SIZE_DELAY_BEFORE_DELETE=3 "$TRIM" >"$WORK/out13" 2>&1 &
+trim13=$!
+sleep 1
+touch "$root13/aa/${h13_hot}-a"       # a build resolves the chosen entry: mtime bumped
+wait "$trim13" || fail "CASE 13 run failed: $(cat "$WORK/out13")"
+
+[ -e "$root13/aa/${h13_hot}-a" ] \
+	|| fail "CASE 13: size-cap pass deleted an entry refreshed after it was chosen for eviction"
+[ ! -e "$root13/aa/${h13_cold}-a" ] \
+	|| fail "CASE 13: size-cap pass did not fall through to the next-oldest entry to still reach the cap"
+grep -q 'skipped 1 refreshed' "$WORK/out13" \
+	|| fail "CASE 13: did not report the skipped entry: $(cat "$WORK/out13")"
+pass "CASE 13: size-cap pass re-stats before deleting; a refreshed entry survives and the cap is still met"
+
+# --------------------------------------------------------------- CASE 14
+# --dry-run with TRIM_MAX_GIB reports without deleting.
+root14="$WORK/case14/go-build"
+mkdir -p "$root14/aa"
+for i in 1 2 3; do
+	h="$(hex64 "case14-$i")"
+	mkbytes 1000 > "$root14/aa/${h}-a"
+	touch -t "$(old_stamp $((4 - i)))" "$root14/aa/${h}-a"
+done
+before14="$(/usr/bin/find "$root14" -mindepth 2 | wc -l)"
+cap_gib14="$(gib_of 500)"
+out14="$(TRIM_DAYS=9999 TRIM_MAX_GIB="$cap_gib14" GO_BUILD_CACHE_DIR="$root14" \
+	TRIM_LOG="$WORK/log14" "$TRIM" --dry-run)"
+after14="$(/usr/bin/find "$root14" -mindepth 2 | wc -l)"
+[ "$before14" -eq "$after14" ] || fail "CASE 14: --dry-run deleted size-cap entries"
+echo "$out14" | grep -q 'would remove .* oldest-first' \
+	|| fail "CASE 14: dry-run did not report a size-cap plan: $out14"
+[ ! -f "$WORK/log14" ] || fail "CASE 14: dry-run wrote to the log"
+pass "CASE 14: --dry-run with TRIM_MAX_GIB reports without deleting"
+
+# --------------------------------------------------------------- CASE 15
+# A cap above the current cache size is a no-op.
+root15="$WORK/case15/go-build"
+mkdir -p "$root15/aa"
+for i in 1 2; do
+	h="$(hex64 "case15-$i")"
+	mkbytes 1000 > "$root15/aa/${h}-a"
+	touch -t "$(old_stamp $((3 - i)))" "$root15/aa/${h}-a"
+done
+cap_gib15="$(gib_of 1000000)"   # far above the 2000-byte total
+out15="$(TRIM_DAYS=9999 TRIM_MAX_GIB="$cap_gib15" GO_BUILD_CACHE_DIR="$root15" \
+	TRIM_LOG="$WORK/log15" "$TRIM" 2>&1)"
+for i in 1 2; do
+	h="$(hex64 "case15-$i")"
+	[ -e "$root15/aa/${h}-a" ] || fail "CASE 15: cap above current size still deleted entries"
+done
+echo "$out15" | grep -q 'removed 0 more entries' \
+	|| fail "CASE 15: expected a no-op size-cap report: $out15"
+pass "CASE 15: a cap above the current cache size deletes nothing"
+
+# --------------------------------------------------------------- CASE 16
+# Even a cap of ~0 (evict everything it can) never touches depth-1 metadata.
+root16="$WORK/case16/go-build"
+mkdir -p "$root16/aa"
+: > "$root16/trim.txt"; : > "$root16/testexpire.txt"; : > "$root16/README"
+for i in 1 2 3; do
+	h="$(hex64 "case16-$i")"
+	mkbytes 1000 > "$root16/aa/${h}-a"
+	touch -t "$(old_stamp $((4 - i)))" "$root16/aa/${h}-a"
+done
+TRIM_DAYS=9999 TRIM_MAX_GIB=0.000000001 GO_BUILD_CACHE_DIR="$root16" \
+	TRIM_LOG="$WORK/log16" "$TRIM" >"$WORK/out16" 2>&1 \
+	|| fail "CASE 16 run failed: $(cat "$WORK/out16")"
+for f in trim.txt testexpire.txt README; do
+	[ -f "$root16/$f" ] || fail "CASE 16: metadata $f deleted when cap forced near-total eviction"
+done
+for i in 1 2 3; do
+	h="$(hex64 "case16-$i")"
+	[ ! -e "$root16/aa/${h}-a" ] || fail "CASE 16: entry $i survived a near-zero cap"
+done
+pass "CASE 16: a near-zero cap evicts every candidate but never touches metadata"
+
+# --------------------------------------------------------------- CASE 17
+# TRIM_MAX_GIB and TRIM_HOURS validate their input.
+root17="$WORK/case17/go-build"
+make_cache "$root17"
+if TRIM_MAX_GIB=notanumber GO_BUILD_CACHE_DIR="$root17" TRIM_LOG="$WORK/log17a" "$TRIM" >/dev/null 2>&1; then
+	fail "CASE 17: an invalid TRIM_MAX_GIB was accepted"
+fi
+if TRIM_MAX_GIB=0 GO_BUILD_CACHE_DIR="$root17" TRIM_LOG="$WORK/log17b" "$TRIM" >/dev/null 2>&1; then
+	fail "CASE 17: TRIM_MAX_GIB=0 was accepted"
+fi
+if TRIM_HOURS=0 GO_BUILD_CACHE_DIR="$root17" TRIM_LOG="$WORK/log17c" "$TRIM" >/dev/null 2>&1; then
+	fail "CASE 17: TRIM_HOURS=0 was accepted"
+fi
+if TRIM_HOURS=notanumber GO_BUILD_CACHE_DIR="$root17" TRIM_LOG="$WORK/log17d" "$TRIM" >/dev/null 2>&1; then
+	fail "CASE 17: a non-numeric TRIM_HOURS was accepted"
+fi
+pass "CASE 17: TRIM_MAX_GIB and TRIM_HOURS reject invalid values"
+
+# --------------------------------------------------------------- CASE 18
+# TRIM_HOURS, when set, overrides TRIM_DAYS for the age-based cutoff -- a
+# finer granularity than the whole-day-only TRIM_DAYS can express.
+root18="$WORK/case18/go-build"
+mkdir -p "$root18/aa"
+h18="$(hex64 case18)"
+mkbytes 1000 > "$root18/aa/${h18}-a"
+touch -t "$(old_stamp_hours 5)" "$root18/aa/${h18}-a"   # 5 hours old
+
+# TRIM_DAYS=3 alone must not touch a 5-hour-old entry.
+TRIM_DAYS=3 GO_BUILD_CACHE_DIR="$root18" TRIM_LOG="$WORK/log18a" "$TRIM" >/dev/null
+[ -e "$root18/aa/${h18}-a" ] || fail "CASE 18: TRIM_DAYS=3 removed a 5-hour-old entry"
+
+# TRIM_HOURS=1 must remove it.
+TRIM_HOURS=1 GO_BUILD_CACHE_DIR="$root18" TRIM_LOG="$WORK/log18b" "$TRIM" >/dev/null
+[ ! -e "$root18/aa/${h18}-a" ] || fail "CASE 18: TRIM_HOURS=1 did not remove a 5-hour-old entry"
+pass "CASE 18: TRIM_HOURS overrides TRIM_DAYS for the age cutoff"
 
 echo
 echo "all trim-go-build-cache tests passed"
