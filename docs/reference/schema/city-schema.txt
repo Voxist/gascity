@@ -1617,6 +1617,10 @@
           },
           "type": "array",
           "description": "FailoverChain is the ordered list of provider names the controller walks\nwhen the primary provider is red in the live health registry. The first\nhealthy entry is used; if all entries are red the spawn is skipped.\nWhen empty, failover is disabled and the primary provider is used directly."
+        },
+        "session_start_stagger": {
+          "type": "string",
+          "description": "SessionStartStagger is the pause inserted between successive session\nstarts inside one reconciler start wave. A mass scale-up (city restart,\ndispatcher fan-out, pool scale-from-zero) starts every wave member the\nmoment a worker slot frees; each session's first act runs startup reads\n(bd prime, gc hook) against the shared beads store, so N starts inside a\nfew seconds burst one serialization point — measured 2026-08-07 as ~28\nsessions inside an 18s window with load 14.7x cores while CPU sat idle\n(vp-whtzg). A small pause spaces the same N starts across N×pause\ninstead: identical throughput, flattened startup-read peak. Duration\nstring (e.g., \"80ms\", \"250ms\"). This knob is OPT-IN: empty (unset),\ninvalid, negative, or an explicit \"0\"/\"0s\" all keep the historical\nback-to-back behavior — a load-shaping pause must never be imposed by\na typo, and a typo must never silently impose one. Verify the live\nvalue via `gc config explain session_start_stagger`. Mirrors the\non_boot_stagger shape (same burst, boot-time surface)."
         }
       },
       "additionalProperties": false,

@@ -3102,6 +3102,22 @@ type DaemonConfig struct {
 	// healthy entry is used; if all entries are red the spawn is skipped.
 	// When empty, failover is disabled and the primary provider is used directly.
 	FailoverChain []string `toml:"failover_chain,omitempty"`
+	// SessionStartStagger is the pause inserted between successive session
+	// starts inside one reconciler start wave. A mass scale-up (city restart,
+	// dispatcher fan-out, pool scale-from-zero) starts every wave member the
+	// moment a worker slot frees; each session's first act runs startup reads
+	// (bd prime, gc hook) against the shared beads store, so N starts inside a
+	// few seconds burst one serialization point — measured 2026-08-07 as ~28
+	// sessions inside an 18s window with load 14.7x cores while CPU sat idle
+	// (vp-whtzg). A small pause spaces the same N starts across N×pause
+	// instead: identical throughput, flattened startup-read peak. Duration
+	// string (e.g., "80ms", "250ms"). This knob is OPT-IN: empty (unset),
+	// invalid, negative, or an explicit "0"/"0s" all keep the historical
+	// back-to-back behavior — a load-shaping pause must never be imposed by
+	// a typo, and a typo must never silently impose one. Verify the live
+	// value via `gc config explain session_start_stagger`. Mirrors the
+	// on_boot_stagger shape (same burst, boot-time surface).
+	SessionStartStagger string `toml:"session_start_stagger,omitempty"`
 }
 
 // AutoRestartOnDriftEnabled reports whether the supervisor should be
@@ -3327,6 +3343,21 @@ func (d *DaemonConfig) OnBootStaggerDuration() time.Duration {
 		return DefaultOnBootStagger
 	}
 	return v // may be 0 (disabled)
+}
+
+// SessionStartStaggerDuration returns the pause inserted between successive
+// session starts inside one reconciler start wave. OPT-IN: empty (unset),
+// invalid, or negative all return 0 — the historical back-to-back behavior —
+// because a load-shaping pause must never be imposed (or disabled) by a typo.
+// Only an explicit non-negative duration enables the pause; "0"/"0s" is the
+// documented rollback value. See SessionStartStagger for the failure class
+// this shapes (vp-whtzg).
+func (d *DaemonConfig) SessionStartStaggerDuration() time.Duration {
+	v, err := time.ParseDuration(d.SessionStartStagger)
+	if err != nil || v < 0 {
+		return 0
+	}
+	return v
 }
 
 // DefaultMaxWakesPerTick is the per-tick wake budget the reconciler uses

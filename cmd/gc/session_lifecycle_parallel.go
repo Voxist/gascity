@@ -1617,9 +1617,12 @@ func executePreparedStartWaveForCity(
 	results := make([]startResult, len(prepared))
 	sem := make(chan struct{}, maxParallel)
 	done := make(chan int, len(prepared))
+	waveStart := time.Now()
+	stagger := daemonSessionStartStagger(cfg)
 	for i, item := range prepared {
 		i, item := i, item
 		sem <- struct{}{}
+		sleepUntilStartSlot(ctx, waveStart.Add(time.Duration(i)*stagger))
 		go func() {
 			defer func() {
 				<-sem
@@ -1632,6 +1635,39 @@ func executePreparedStartWaveForCity(
 		<-done
 	}
 	return results
+}
+
+// daemonSessionStartStagger resolves [daemon].session_start_stagger for a
+// start wave. A nil cfg (unit tests, callers outside a city context) means no
+// pause; an unset/invalid value resolves to 0 in the accessor.
+func daemonSessionStartStagger(cfg *config.City) time.Duration {
+	if cfg == nil {
+		return 0
+	}
+	return cfg.Daemon.SessionStartStaggerDuration()
+}
+
+// sleepUntilStartSlot parks the caller until the wave's per-index launch slot
+// (waveStart + offset), or ctx is canceled — whichever comes first. The
+// offset form (not a flat sleep per launch) keeps spacing exact even when the
+// semaphore already consumed part of the wait, and never double-waits.
+func sleepUntilStartSlot(ctx context.Context, target time.Time) {
+	d := time.Until(target)
+	if d <= 0 {
+		return
+	}
+	if ctx == nil {
+		// context.Background(), not time.Sleep: a timer is interruptible by
+		// construction, and time.Sleep is a fixed_sleep census resource this
+		// package does not carry baseline rows for.
+		ctx = context.Background()
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
+	}
 }
 
 func runPreparedStartCandidate(
@@ -1880,6 +1916,8 @@ func enqueuePreparedStartWaveForCity(
 	}
 	stabilityWaiter = resolveStartStabilityWaiter(stabilityWaiter)
 	results := make([]startResult, len(prepared))
+	waveStart := time.Now()
+	stagger := daemonSessionStartStagger(cfg)
 	for i, reserved := range prepared {
 		item := clonePreparedStartForAsync(reserved.item)
 		release := reserved.release
@@ -1891,7 +1929,11 @@ func enqueuePreparedStartWaveForCity(
 			finished: now,
 		}
 		done := reserved.done
-		go func(item preparedStart, release func(), done func()) {
+		go func(item preparedStart, release func(), done func(), offset time.Duration) {
+			// Same stagger contract as the synchronous wave: member i of the
+			// wave starts at waveStart + i×pause, so a mass enqueuing spreads
+			// its startup reads instead of firing them all at once.
+			sleepUntilStartSlot(ctx, waveStart.Add(offset))
 			if done != nil {
 				defer done()
 			}
@@ -1903,7 +1945,7 @@ func enqueuePreparedStartWaveForCity(
 			if asyncFollowUp != nil {
 				asyncFollowUp()
 			}
-		}(item, release, done)
+		}(item, release, done, time.Duration(i)*stagger)
 	}
 	return results
 }
