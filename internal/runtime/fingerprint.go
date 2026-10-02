@@ -52,14 +52,24 @@ type BreakdownCopyEntry struct {
 // its own dedicated Launch-tier identity field (Config.OperatorEnv), separate
 // from Env and FingerprintExtra (Option A', ga-3a42sp). The bump rebaselines
 // existing v5 hashes silently rather than draining the fleet. (ga-i91hrn)
-const FingerprintVersion = "v6"
+//
+// v7: the provider's serving identity (the resolved values of
+// servingIdentityEnvKeys: base URL and model selection) is hashed into the
+// Launch half, and credential-shaped keys (isCredentialEnvKey) are dropped
+// from the OperatorEnv hash. A failover that rewrites the content of a
+// stable-named provider or upstream now relaunches its sessions; a credential
+// rotation moves no fingerprint. The bump rebaselines existing v6 hashes
+// silently instead of relaunching every session that carries a credential in
+// its provider env on rollout.
+const FingerprintVersion = "v7"
 
 // ConfigFingerprint returns a deterministic hash of the Config fields that
 // define an agent's behavioral identity. Changes to these fields indicate
 // the agent should be restarted (via drain when drain ops are available).
 //
-// Included: Command, Lifecycle, Env, OperatorEnv (config-authored env
-// identity), FingerprintExtra (pool config, etc.), PreStart, SessionSetup,
+// Included: Command, Lifecycle, Env (allow-listed keys plus the serving
+// identity keys), OperatorEnv (config-authored env identity, credentials
+// excluded), FingerprintExtra (pool config, etc.), PreStart, SessionSetup,
 // SessionSetupScript, OverlayDir, effective provider overlay slots, CopyFiles,
 // AcceptStartupDialogs, MouseOn, SessionLive.
 //
@@ -209,6 +219,89 @@ func envFingerprintInclude(key string) bool {
 	return envFingerprintAllow[key]
 }
 
+// servingIdentityEnvKeys names the env keys whose resolved values say WHO
+// serves the agent's model: the endpoint and the model selection. They are
+// hashed from the final Env into the LAUNCH half, so a failover that rewrites
+// the content of a stable-named [providers.*] or [upstreams.*] block (same
+// name, different vendor) relaunches the agent instead of leaving it on the
+// old vendor. None of them is a credential; the credential half of the same
+// blocks (API keys, auth tokens) is never hashed, so a rotation moves no
+// fingerprint.
+//
+// The ANTHROPIC_* model keys are the selection surface of the Claude harness.
+// The *_BASE_URL/AMP_URL keys are the per-harness serving base URL that the
+// builtin provider profiles declare as their upstream_env.base_url binding
+// (worker/builtin UpstreamBaseURLEnv, pinned by a test), i.e. the names the
+// Upstream axis renders base_url onto.
+var servingIdentityEnvKeys = map[string]bool{
+	"ANTHROPIC_BASE_URL":             true,
+	"ANTHROPIC_MODEL":                true,
+	"ANTHROPIC_DEFAULT_OPUS_MODEL":   true,
+	"ANTHROPIC_DEFAULT_SONNET_MODEL": true,
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL":  true,
+	"ANTHROPIC_SMALL_FAST_MODEL":     true,
+
+	"OPENAI_BASE_URL":           true,
+	"GOOGLE_GEMINI_BASE_URL":    true,
+	"KIMI_BASE_URL":             true,
+	"COPILOT_PROVIDER_BASE_URL": true,
+	"AMP_URL":                   true,
+	"ZCODE_BASE_URL":            true,
+}
+
+func servingIdentityInclude(key string) bool {
+	return servingIdentityEnvKeys[key]
+}
+
+// isCredentialEnvKey reports whether key is shaped like a secret (*_TOKEN,
+// *_KEY, *_TOKEN_*, *_KEY_*, *SECRET*). The infix forms catch per-vendor
+// variants such as ANTHROPIC_AUTH_TOKEN_ZAI. Such values never enter a
+// fingerprint preimage: rotating a credential must not relaunch or drain a
+// session.
+func isCredentialEnvKey(key string) bool {
+	k := strings.ToUpper(key)
+	return strings.HasSuffix(k, "_TOKEN") || strings.HasSuffix(k, "_KEY") ||
+		strings.Contains(k, "_TOKEN_") || strings.Contains(k, "_KEY_") ||
+		strings.Contains(k, "SECRET")
+}
+
+func operatorEnvFingerprintInclude(key string) bool {
+	return !isCredentialEnvKey(key)
+}
+
+// hashOperatorEnv writes the config-authored env identity, credentials
+// excluded. Prefixed with "operator_env" so its framing cannot collide with
+// FingerprintExtra, even when both carry the same key/value pairs.
+// Conditional, so an empty/nil OperatorEnv contributes nothing.
+func hashOperatorEnv(h hash.Hash, env map[string]string) {
+	if len(env) == 0 {
+		return
+	}
+	h.Write([]byte("operator_env")) //nolint:errcheck // hash.Write never errors
+	h.Write([]byte{0})              //nolint:errcheck // hash.Write never errors
+	hashSortedMapIncluded(h, env, operatorEnvFingerprintInclude)
+}
+
+// hashServingIdentity writes the resolved serving identity from env.
+// Conditional on at least one serving key being set, so a config that sets
+// none (non-Claude harness without a base URL override, tests) contributes
+// nothing.
+func hashServingIdentity(h hash.Hash, env map[string]string) {
+	present := false
+	for k := range env {
+		if servingIdentityEnvKeys[k] {
+			present = true
+			break
+		}
+	}
+	if !present {
+		return
+	}
+	h.Write([]byte("serving_identity")) //nolint:errcheck // hash.Write never errors
+	h.Write([]byte{0})                  //nolint:errcheck // hash.Write never errors
+	hashSortedMapIncluded(h, env, servingIdentityInclude)
+}
+
 // hashCoreFields writes all config fields except SessionLive to the hash.
 func hashCoreFields(h hash.Hash, cfg Config) {
 	h.Write([]byte(cfg.Command)) //nolint:errcheck // hash.Write never errors
@@ -279,24 +372,22 @@ func hashCoreFields(h hash.Hash, cfg Config) {
 
 	// Upstream (Phase C — the model-serving selection identity). LAUNCH-half:
 	// also hashed by hashLaunchFields, so switching upstream relaunches the agent
-	// in the warm box (B2.3) rather than reprovisioning. The resolved serving env
-	// (ANTHROPIC_*) lives in Env and is NOT hashed (the allow-list excludes it),
-	// so a credential rotation moves no fingerprint. Optional/conditional, so an
-	// unset Upstream leaves every existing config's fingerprint byte-identical.
+	// in the warm box (B2.3) rather than reprovisioning. Optional/conditional, so
+	// an unset Upstream contributes nothing.
 	hashOptionalString(h, "upstream", cfg.Upstream)
 
 	// OperatorEnv (Option A', ga-3a42sp — config-authored env identity).
 	// LAUNCH-half: also hashed by hashLaunchFields, so a config-authored env
 	// change relaunches the agent in the warm box rather than reprovisioning.
-	// Prefixed with "operator_env" so its framing cannot collide with the
-	// FingerprintExtra map hashed above, even when both carry the same
-	// key/value pairs. Conditional, so an empty/nil OperatorEnv leaves every
-	// existing config's fingerprint byte-identical.
-	if len(cfg.OperatorEnv) > 0 {
-		h.Write([]byte("operator_env")) //nolint:errcheck // hash.Write never errors
-		h.Write([]byte{0})              //nolint:errcheck // hash.Write never errors
-		hashSortedMap(h, cfg.OperatorEnv)
-	}
+	// Credential-shaped keys are excluded.
+	hashOperatorEnv(h, cfg.OperatorEnv)
+
+	// Serving identity (v7). LAUNCH-half: also hashed by hashLaunchFields. The
+	// resolved base URL and model keys of Env are hashed so a same-name
+	// provider/upstream content flip relaunches the agent; the credentials in
+	// the same env (ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, ...) are not, so a
+	// credential rotation moves no fingerprint.
+	hashServingIdentity(h, cfg.Env)
 }
 
 // hashOptionalString contributes name+value to the hash only when value is
@@ -479,6 +570,9 @@ func CoreFingerprintBreakdown(cfg Config) BreakdownV1 {
 		"MouseOn": fieldHash(func(h hash.Hash) {
 			hashBool(h, "mouse_on", cfg.MouseOn)
 		}),
+		"ServingIdentity": fieldHash(func(h hash.Hash) {
+			hashServingIdentity(h, cfg.Env)
+		}),
 		"CopyFiles": fieldHash(func(h hash.Hash) {
 			for _, cf := range cfg.CopyFiles {
 				if cf.Probed {
@@ -581,6 +675,8 @@ func LogCoreFingerprintDrift(w io.Writer, name string, storedJSON string, curren
 			fmt.Fprintf(w, "    OverlayDir: %q\n", current.OverlayDir) //nolint:errcheck // best-effort diag
 		case "OverlayProviders":
 			fmt.Fprintf(w, "    OverlayProviders: %v\n", OverlayProviderNames(current)) //nolint:errcheck // best-effort diag
+		case "ServingIdentity":
+			fmt.Fprintf(w, "    ServingIdentity: %v\n", servingIdentityEnv(current.Env)) //nolint:errcheck // best-effort diag
 		case "SessionSetup":
 			fmt.Fprintf(w, "    SessionSetup: %v\n", current.SessionSetup) //nolint:errcheck // best-effort diag
 		case "SessionSetupScript":
@@ -735,6 +831,18 @@ func renderCopyEntry(e BreakdownCopyEntry) string {
 		return fmt.Sprintf("%s (probed)", hash)
 	}
 	return fmt.Sprintf("src=%s", e.Src)
+}
+
+// servingIdentityEnv returns only the serving identity keys for diagnostic
+// output. None of them is a credential.
+func servingIdentityEnv(env map[string]string) map[string]string {
+	out := make(map[string]string)
+	for k, v := range env {
+		if servingIdentityEnvKeys[k] {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // filteredEnv returns only the allow-listed env keys for diagnostic output.

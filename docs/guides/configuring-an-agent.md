@@ -206,8 +206,14 @@ gateways supply the name themselves.
   env vars with `$VAR` / `${VAR}`, expanded at resolution — so `api_key =
   "$ANTHROPIC_API_KEY"` keeps the secret out of `city.toml`.
 - **Switching the upstream name** relaunches the agent in the warm box (it is a
-  launch-half fingerprint change). **Rotating the key** within the same upstream
-  moves no fingerprint — the resolved serving env is excluded from the hash, so a
+  launch-half fingerprint change).
+- **Repointing a provider or upstream in place** — same name, new base URL or
+  model (`ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, the `ANTHROPIC_DEFAULT_*_MODEL`
+  keys, `ANTHROPIC_SMALL_FAST_MODEL`, or a harness's `upstream_env.base_url`
+  target) — also relaunches the agent in the warm box: the resolved serving
+  identity is a launch-half fingerprint input.
+- **Rotating the key** moves no fingerprint — credential-shaped env (`*_TOKEN`,
+  `*_KEY`, `*_TOKEN_*`, `*_KEY_*`, `*SECRET*`) is excluded from the hash wherever it is set, so a
   credential rotation never churns live sessions.
 
 ## Axis 4 — Transport (`session`)

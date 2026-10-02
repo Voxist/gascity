@@ -177,6 +177,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Rotating a credential in a provider block relaunched every session on that
+  provider, and an upstream repointed in place relaunched none.** The
+  operator-env launch identity (v6) hashed every key of a provider's `env`,
+  `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY` included, so a key rotation
+  read as config drift; while the serving env an `[upstreams.*]` block renders
+  into the session was hashed by name only, so a same-name upstream whose
+  `base_url` moved never drifted. The fingerprint (now **v7**) hashes the
+  resolved serving identity (`ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, the
+  `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` keys,
+  `ANTHROPIC_SMALL_FAST_MODEL`, and each builtin harness's
+  `upstream_env.base_url` target) into the Launch half, and drops
+  credential-shaped keys (`*_TOKEN`, `*_KEY`, `*_TOKEN_*`, `*_KEY_*`,
+  `*SECRET*`) from it: a vendor
+  failover that rewrites a stable-named provider or upstream relaunches its
+  sessions in the warm box, and a credential rotation moves no fingerprint.
+  Drift diagnostics name the new `ServingIdentity` field. Stored v6 hashes are
+  rebaselined silently on the first reconcile tick after upgrade, so the bump
+  relaunches nothing; a drift that is still deferred on a session at that
+  moment is absorbed into the new baseline.
+
 - **A tmux agent pane's default shell could silently clobber the PATH the
   controller assigned it, on every start and every warm relaunch.**
   `internal/runtime/tmux` sets `-e PATH=...` on `new-session`, but the

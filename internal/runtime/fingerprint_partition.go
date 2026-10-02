@@ -28,9 +28,14 @@ import (
 //
 //	PROVISION (box):  Env (allow-listed), FingerprintExtra, PreStart,
 //	                  OverlayDir, OverlayProviders, CopyFiles.
-//	LAUNCH (agent):   Command, Lifecycle, Upstream, OperatorEnv, MCPServers,
-//	                  AcceptStartupDialogs, MouseOn, SessionSetup,
+//	LAUNCH (agent):   Command, Lifecycle, Upstream, OperatorEnv (credentials
+//	                  excluded), Env serving identity (servingIdentityEnvKeys),
+//	                  MCPServers, AcceptStartupDialogs, MouseOn, SessionSetup,
 //	                  SessionSetupScript.
+//
+// Env is the one field split across both halves: its allow-listed keys are box
+// identity, its serving identity keys (base URL, model) are agent identity —
+// the agent reads them at launch, so a vendor flip is a warm-box relaunch.
 //
 // SessionSetup/SessionSetupScript are LAUNCH-half as of B2: the carriers now
 // replay them idempotently on relaunch (tmux launchOrchestration; ssh/k8s
@@ -127,17 +132,19 @@ func hashLaunchFields(h hash.Hash, cfg Config) {
 	// serving env is consumed by the agent at launch, so switching upstream
 	// relaunches the agent in the warm box (B2.3) without reprovisioning. Same
 	// conditional framing as hashCoreFields, so an unset Upstream contributes
-	// nothing. The resolved credentials in Env are NOT hashed (allow-list).
+	// nothing.
 	hashOptionalString(h, "upstream", cfg.Upstream)
 
 	// OperatorEnv (Option A', ga-3a42sp) is LAUNCH-half: the agent reads
 	// config-authored env at invoke time, so a change relaunches the agent in
-	// the existing warm box rather than reprovisioning. Same conditional
-	// "operator_env" framing as hashCoreFields, so an unset OperatorEnv
-	// contributes nothing.
-	if len(cfg.OperatorEnv) > 0 {
-		h.Write([]byte("operator_env")) //nolint:errcheck // hash.Write never errors
-		h.Write([]byte{0})              //nolint:errcheck // hash.Write never errors
-		hashSortedMap(h, cfg.OperatorEnv)
-	}
+	// the existing warm box rather than reprovisioning. Credential-shaped keys
+	// are excluded, so a rotation relaunches nothing.
+	hashOperatorEnv(h, cfg.OperatorEnv)
+
+	// Serving identity (v7) is LAUNCH-half: the resolved base URL and model
+	// keys select the vendor the agent talks to, read at launch. Hashing their
+	// values (not just the provider/upstream NAME) is what makes a same-name
+	// failover flip relaunch the agent. Credentials are not serving identity
+	// and are never hashed.
+	hashServingIdentity(h, cfg.Env)
 }
