@@ -983,7 +983,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | BreakerStateChangedPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ControllerTickCompletedPayload | DoctorAlertPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderGateTimeoutFailOpenPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | ProxyReapedPayload | QuotaObservedPayload | QuotaPollFailedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDegradedPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | StoreProbeFailedPayload | StoreRecoveredPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | BreakerStateChangedPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ControllerTickCompletedPayload | DoctorAlertPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | ManagedDoltRecoverAdmittedPayload | MoleculeResolvedPayload | NoPayload | OrderGateTimeoutFailOpenPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | ProxyReapedPayload | QuotaObservedPayload | QuotaPollFailedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDegradedPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | StoreProbeFailedPayload | StoreRecoveredPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -2022,6 +2022,33 @@ export type MaintenanceTriggerBody = {
      * RFC3339 start time of the triggered run; doubles as a run identifier for async callers.
      */
     started_at?: string;
+};
+
+export type ManagedDoltRecoverAdmittedPayload = {
+    /**
+     * Which call site admitted the recover: recoverManagedBDCommand or healthBeadsProviderContext.
+     */
+    caller_site: string;
+    /**
+     * Evidence classification the admission rested on: call-failed or health-op-answered.
+     */
+    evidence: string;
+    /**
+     * The triggering health op's process exit code, when evidence came from a provider health-op run.
+     */
+    health_op_exit_code?: number;
+    /**
+     * Truncated stderr from the triggering health op, when available.
+     */
+    health_op_stderr?: string;
+    /**
+     * Liveness verdict at admission time, when the liveness check applied: alive, confirmed-dead, or unknown.
+     */
+    liveness?: string;
+    /**
+     * Canonical scope root path (the city path) the recover ran against.
+     */
+    scope: string;
 };
 
 export type Message = {
@@ -5561,6 +5588,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeMailReplied) | ({
     type: 'mail.sent';
 } & TypedEventStreamEnvelopeMailSent) | ({
+    type: 'managed_dolt.recover_admitted';
+} & TypedEventStreamEnvelopeManagedDoltRecoverAdmitted) | ({
     type: 'molecule.resolved';
 } & TypedEventStreamEnvelopeMoleculeResolved) | ({
     type: 'order.completed';
@@ -6683,6 +6712,24 @@ export type TypedEventStreamEnvelopeMailSent = {
 };
 
 /**
+ * TypedEventStreamEnvelope managed_dolt.recover_admitted
+ */
+export type TypedEventStreamEnvelopeManagedDoltRecoverAdmitted = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: ManagedDoltRecoverAdmittedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'managed_dolt.recover_admitted';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope molecule.resolved
  */
 export type TypedEventStreamEnvelopeMoleculeResolved = {
@@ -7788,6 +7835,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeMailReplied) | ({
     type: 'mail.sent';
 } & TypedTaggedEventStreamEnvelopeMailSent) | ({
+    type: 'managed_dolt.recover_admitted';
+} & TypedTaggedEventStreamEnvelopeManagedDoltRecoverAdmitted) | ({
     type: 'molecule.resolved';
 } & TypedTaggedEventStreamEnvelopeMoleculeResolved) | ({
     type: 'order.completed';
@@ -8962,6 +9011,25 @@ export type TypedTaggedEventStreamEnvelopeMailSent = {
     subject?: string;
     ts: string;
     type: 'mail.sent';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope managed_dolt.recover_admitted
+ */
+export type TypedTaggedEventStreamEnvelopeManagedDoltRecoverAdmitted = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: ManagedDoltRecoverAdmittedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'managed_dolt.recover_admitted';
     workflow?: WorkflowEventProjection;
 };
 
