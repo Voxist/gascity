@@ -468,16 +468,12 @@ save_state() { :; }
 	// attempt then succeeds for a completely ordinary reason: op_start
 	// already finished and the process is exiting on schedule).
 	harness := `
+trap 'trap_rc=$?; : > "$HANDOFF_DONE_FILE"; while [ ! -f "$HANDOFF_PROCEED_FILE" ]; do sleep 0.01; done; exit "$trap_rc"' EXIT
 exec 9>"$LOCK_FILE"
 flock -n 9 || { echo "test harness: could not pre-acquire LOCK_FILE" >&2; exit 90; }
+: > "$HANDOFF_READY_FILE"
 sleep 0.2
 op_start lock-held
-op_start_exit=$?
-: > "$HANDOFF_DONE_FILE"
-while [ ! -f "$HANDOFF_PROCEED_FILE" ]; do
-  sleep 0.01
-done
-exit "$op_start_exit"
 `
 
 	return strings.Join([]string{
@@ -512,6 +508,7 @@ func TestOpStartArgumentTrustPathSkipsReacquisitionWithoutGap(t *testing.T) {
 	dataDir := t.TempDir()
 	doneFile := filepath.Join(dir, "handoff-done")
 	proceedFile := filepath.Join(dir, "handoff-proceed")
+	readyFile := filepath.Join(dir, "handoff-ready")
 	path := stubDoltBin(t)
 	composed := opStartTrustedHandoffScript(t)
 
@@ -524,6 +521,7 @@ func TestOpStartArgumentTrustPathSkipsReacquisitionWithoutGap(t *testing.T) {
 		"DOLT_PORT=1",
 		"HANDOFF_DONE_FILE="+doneFile,
 		"HANDOFF_PROCEED_FILE="+proceedFile,
+		"HANDOFF_READY_FILE="+readyFile,
 	)
 	start := time.Now()
 	if err := cmd.Start(); err != nil {
@@ -540,6 +538,17 @@ func TestOpStartArgumentTrustPathSkipsReacquisitionWithoutGap(t *testing.T) {
 	for {
 		if _, statErr := os.Stat(doneFile); statErr == nil {
 			break
+		}
+		// Probing before the harness has acquired fd 9 would report the
+		// harmless pre-lock startup window as a false "gap".
+		if _, statErr := os.Stat(readyFile); statErr != nil {
+			if time.Now().After(deadline) {
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+				t.Fatal("harness never acquired fd 9 (HANDOFF_READY_FILE never appeared)")
+			}
+			time.Sleep(2 * time.Millisecond)
+			continue
 		}
 		if time.Now().After(deadline) {
 			_ = cmd.Process.Kill()
@@ -661,6 +670,7 @@ op_stop_impl() {
 	// block on HANDOFF_PROCEED_FILE before actually exiting -- so the Go
 	// test has a point to stop probing that is provably before any
 	// release, not racing cmd.Wait()'s own asynchronous return.
+	trap := `trap 'trap_rc=$?; : > "$HANDOFF_DONE_FILE"; while [ ! -f "$HANDOFF_PROCEED_FILE" ]; do sleep 0.01; done; exit "$trap_rc"' EXIT` + "\n"
 	return strings.Join([]string{
 		"set -e",
 		extractShellFunction(t, text, "die"),
@@ -669,13 +679,7 @@ op_stop_impl() {
 		stubs,
 		extractShellFunction(t, text, "op_start"),
 		extractShellFunction(t, text, "op_recover"),
-		`op_recover
-op_recover_exit=$?
-: > "$HANDOFF_DONE_FILE"
-while [ ! -f "$HANDOFF_PROCEED_FILE" ]; do
-  sleep 0.01
-done
-exit "$op_recover_exit"`,
+		trap + "op_recover",
 	}, "\n")
 }
 

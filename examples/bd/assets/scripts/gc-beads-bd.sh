@@ -3976,6 +3976,20 @@ op_init() {
         die "bd schema not visible for $dolt_database after init"
     fi
 
+    # A visible config table proves bd init ran, not that its migrations
+    # finished: bd's --force/--reinit-local arm bounds its own internal
+    # schema-migration attempt (observed ~5s against a full migration's ~30s
+    # under load, ga-2hgoz), so a forced reinit can report success with its
+    # schema behind. wait_for_bd_runtime_schema above only confirms `config`
+    # is queryable; it has no notion of migration version. Finish any
+    # pending migration before reporting the scope ready, the same
+    # completion step the metadata-present adopt branch and the
+    # GC_SCOPE_METADATA_PRESEEDED branch above already run after their own
+    # schema-present checks -- otherwise the next bd client to open this
+    # database on the shared server hits beads' #5920 shared-server guard
+    # ("refusing to auto-apply N pending schema migrations").
+    finish_bd_schema_migrations "$dir" "$dolt_database"
+
     # Configure custom bead types without invoking `bd config set`, which can
     # spend tens of seconds in auto-migrate on populated stores. The canonical
     # .beads/config.yaml types.custom line is now Go-owned (EnsureCanonicalConfig);
