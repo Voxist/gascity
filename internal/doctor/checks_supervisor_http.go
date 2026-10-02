@@ -75,6 +75,20 @@ func (c *SupervisorHTTPCheck) Run(_ *CheckContext) *CheckResult {
 
 	resp, err := c.client.Do(req)
 	if err != nil {
+		if isPortExhaustion(err) {
+			// Client-side ephemeral-port exhaustion (EADDRNOTAVAIL), not
+			// evidence the supervisor is down: the OS couldn't find a free
+			// local port to originate this dial, which says nothing about
+			// whether anything is listening on the far end (ga-4k2m7).
+			// StatusError here would read as "supervisor unreachable" during
+			// exactly the host-wide port-churn storms this check should stay
+			// quiet about; StatusWarning says the probe itself was
+			// inconclusive, matching the same classification #227 gave this
+			// error shape for the Dolt connection path.
+			r.Status = StatusWarning
+			r.Message = fmt.Sprintf("supervisor HTTP API on port %d: client-side port exhaustion (EADDRNOTAVAIL) — not a liveness signal", port)
+			return r
+		}
 		if isConnectionRefused(err) {
 			r.Status = StatusError
 			r.Message = fmt.Sprintf("supervisor HTTP API on port %d: connection refused", port)
@@ -107,6 +121,21 @@ func isConnectionRefused(err error) bool {
 		return true
 	}
 	return strings.Contains(err.Error(), "connection refused")
+}
+
+// isPortExhaustion reports whether err is EADDRNOTAVAIL — the OS refusing to
+// originate a connection because it found no free local ephemeral port, NOT
+// because anything refused or timed out on the far end. Under a host-wide
+// connection-churn storm (ga-4k2m7: dozens of orders failed this way when
+// voxist-city's Dolt client connections exhausted the ephemeral range) this
+// can hit ANY outbound dial from the process, including this check's own
+// probe of the supervisor's HTTP port — a client-side symptom that must not
+// be read as the supervisor being down.
+func isPortExhaustion(err error) bool {
+	if errors.Is(err, syscall.EADDRNOTAVAIL) {
+		return true
+	}
+	return strings.Contains(err.Error(), "can't assign requested address")
 }
 
 func isTimeout(err error) bool {
