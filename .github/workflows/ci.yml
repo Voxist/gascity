@@ -311,6 +311,15 @@ jobs:
         env:
           GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
         run: make lint
+      - name: Verify errorlint --fix regression guard (ga-w7nyj)
+        # Runs unconditionally: both lint steps above install the pinned
+        # golangci-lint via their shared `$(GOLANGCI_LINT)` Makefile
+        # prerequisite regardless of which one the scope check picked.
+        # scripts/*_test.go only runs on push (preflight-unit-cover-noncmdgc),
+        # so without this step the one test that proves errorlint's stock
+        # --fix still drops the `if _, ok := x.(*T); !ok` negation on this
+        # repo's pinned toolchain would never run on a PR.
+        run: go test -run TestErrorlintStockFixDropsTypeAssertionNegation -v ./scripts/...
       - name: Format changed files
         if: steps.static-scope.outputs.scope == 'changed'
         env:
