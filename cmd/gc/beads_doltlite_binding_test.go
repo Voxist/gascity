@@ -622,12 +622,16 @@ func TestCityGrantsProviderOwnershipToFreshScopesAcceptsPendingUninitializedCity
 // own invariant-violation error, which is less specific about what actually
 // went wrong. This function must report the state directly instead.
 //
-// The state itself is reachable only through out-of-band interference -- a
-// crash, a doctor repair, or something deleting .beads/metadata.json or
-// config.yaml -- after markProviderScopeOwnershipReady already committed the
-// journal entry: initAndHookDir writes the scope's own identity BEFORE
-// calling markProviderScopeOwnershipReady, in that order, as one operation,
-// so an ordinary crash mid-init cannot produce ready-but-no-identity.
+// Two things can produce this state: out-of-band interference (a crash, a
+// doctor repair, or something deleting .beads/metadata.json or config.yaml
+// after markProviderScopeOwnershipReady already committed the journal entry
+// -- gc only calls markProviderScopeOwnershipReady after the provider's init
+// op succeeds and is EXPECTED to have written that identity as part of it,
+// though that expectation is the provider's contract, not something gc
+// enforces structurally), or a narrow concurrent-init race between this
+// city's own init committing ready and a caller's ownership check landing
+// mid-commit. See cityGrantsProviderOwnershipToFreshScopes's doc comment for
+// both in full.
 func TestCityGrantsProviderOwnershipToFreshScopesRefusesReadyUninitializedCity(t *testing.T) {
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
@@ -640,8 +644,8 @@ func TestCityGrantsProviderOwnershipToFreshScopesRefusesReadyUninitializedCity(t
 		t.Fatal(err)
 	}
 	// No .beads/metadata.json or config.yaml written: the city stays
-	// uninitialized despite its ownership record being ready, the
-	// out-of-band scenario described above.
+	// uninitialized despite its ownership record being ready, one of the two
+	// scenarios described above.
 
 	inherits, err := cityGrantsProviderOwnershipToFreshScopes(cityPath, false)
 	if err == nil {
@@ -650,7 +654,7 @@ func TestCityGrantsProviderOwnershipToFreshScopesRefusesReadyUninitializedCity(t
 	if inherits {
 		t.Fatal("cityGrantsProviderOwnershipToFreshScopes = true for a ready-but-uninitialized city, want false alongside the error")
 	}
-	if !strings.Contains(err.Error(), "ready provider-ownership record") {
+	if !strings.Contains(err.Error(), "ready provider-ownership record but no .beads identity") {
 		t.Fatalf("error = %v, want it to name the ready-but-uninitialized state", err)
 	}
 }

@@ -1023,18 +1023,36 @@ func ensureProviderScopeOwnershipBeforeInit(cityPath, scopeRoot string) error {
 // classic gc-managed.
 //
 // A pending record is the only grantable signal here (ga-fo5mg follow-up):
-// a READY record on a city that is STILL uninitialized cannot be served. It
-// is reachable only through out-of-band interference -- a crash, a doctor
-// repair, or something deleting .beads/metadata.json/config.yaml -- after
-// markProviderScopeOwnershipReady already committed the journal entry,
-// because initAndHookDir writes the scope's own identity BEFORE calling
-// markProviderScopeOwnershipReady, in that order, as one operation; an
-// ordinary crash mid-init cannot leave ready-but-no-identity behind.
-// markProviderScopeOwnershipReady also clears entry.Intent to its zero value
-// on commit, so even if this granted ownership here, there would be no
-// intent left for the caller to inherit (fresh-scope resolution has nothing
-// but a pending record to fall back to). Report the state plainly instead of
+// a READY record on a city that is STILL uninitialized cannot be served.
+// markProviderScopeOwnershipReady clears entry.Intent to its zero value on
+// commit, so even if this granted ownership here, there would be no intent
+// left for the caller to inherit (fresh-scope resolution has nothing but a
+// pending record to fall back to). Report the state plainly instead of
 // silently falling through to that invariant error one layer up.
+//
+// Two distinct things can produce this state, and the error below covers
+// both without distinguishing them (neither is cheap to tell apart from
+// here):
+//   - Out-of-band interference -- a crash, a doctor repair, or something
+//     deleting .beads/metadata.json/config.yaml -- after
+//     markProviderScopeOwnershipReady already committed the journal entry.
+//     initAndHookDir (cmd/gc/beads_provider_lifecycle.go) only calls
+//     markProviderScopeOwnershipReady after the exec provider's own init op
+//     has already run and is EXPECTED to have written the scope's identity as
+//     part of it -- the ordering is gc's, but the write itself is the
+//     provider's contract, not something gc enforces structurally. A
+//     well-behaved provider (gc's own bd-based one included) writing that
+//     identity before returning success means an ordinary crash mid-init
+//     cannot produce this state; a third-party exec provider that reports
+//     success without writing it could, though, and gc has no way to detect
+//     that short of what this branch already does: refuse at the next
+//     ownership check instead of silently treating a scope with no beads
+//     identity as readable.
+//   - A narrow concurrent-init race: another `gc init` can commit
+//     markProviderScopeOwnershipReady and write the city's own .beads
+//     identity between this function's caller reading cityInitialized=false
+//     and the read a few lines below landing. The error says so and that a
+//     retry may resolve it.
 func cityGrantsProviderOwnershipToFreshScopes(cityPath string, cityInitialized bool) (bool, error) {
 	if !cityInitialized {
 		_, pending, err := pendingProviderOwnership(cityPath, cityPath)
@@ -1049,13 +1067,9 @@ func cityGrantsProviderOwnershipToFreshScopes(cityPath string, cityInitialized b
 			return false, err
 		}
 		if owned {
-			// Narrow race: a concurrent `gc init` can commit markProviderScope-
-			// OwnershipReady and write the city's own .beads identity between
-			// this function's caller reading cityInitialized=false and this
-			// read landing here. That window is real but short, so the error
-			// says so rather than claiming a permanent break -- a retry after
-			// the concurrent init finishes resolves it via the cityInitialized
-			// branch below instead.
+			// See the two bullets in this function's doc comment above for
+			// what can put a city in this state, and why the error covers
+			// both without distinguishing them.
 			return false, fmt.Errorf("city %q has a ready provider-ownership record but no .beads identity (metadata.json/config.yaml missing); if this city is actively being initialized by another process, retry once that finishes, otherwise restore the city's beads metadata before adding rigs", cityPath)
 		}
 		return false, nil

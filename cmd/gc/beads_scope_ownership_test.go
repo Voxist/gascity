@@ -758,13 +758,12 @@ func TestEnsureProviderScopeOwnershipAndFreshRigRefuseReadyUninitializedCity(t *
 	}
 	// No .beads/metadata.json or config.yaml written: the city's own
 	// identity stays absent despite its ownership record being ready. Per
-	// cityGrantsProviderOwnershipToFreshScopes's doc comment, an ordinary
-	// crash mid-init cannot produce this -- initAndHookDir writes the
-	// identity BEFORE calling markProviderScopeOwnershipReady -- so this
-	// models out-of-band interference (a crash, a doctor repair, or
-	// something deleting the identity files) after the journal committed.
+	// cityGrantsProviderOwnershipToFreshScopes's doc comment, this models
+	// out-of-band interference (a crash, a doctor repair, or something
+	// deleting the identity files) after the journal committed ready -- one
+	// of the two ways this state is reachable.
 
-	const wantSubstring = "ready provider-ownership record"
+	const wantSubstring = "ready provider-ownership record but no .beads identity"
 
 	if err := ensureProviderScopeOwnershipBeforeInit(city, rig); err == nil {
 		t.Fatal("ensureProviderScopeOwnershipBeforeInit succeeded for a ready-but-uninitialized city, want an actionable error")
