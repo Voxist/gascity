@@ -1688,8 +1688,21 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 	sessStore := cliSessionStore(store, target.cfg, target.cityPath)
 	obs, err := workerObserveNudgeTarget(target, sessStore, sp)
 	running := err == nil && obs.Running
+	// A wait-idle nudge to a RUNNING-but-busy seat must not block the sling
+	// caller in the worker's synchronous WaitForIdle (runtimeHandleWaitIdle-
+	// Timeout, 30s): the seat never reports idle for the whole window, and
+	// sling is the fleet's prescribed pool-delivery instrument, so this is the
+	// stall that matters. Mail's sibling of the session-nudge pre-check
+	// (gco-90ui): detect busy without blocking (LastActivity, the poller's
+	// quiescence signal) and enqueue straight into the durable queue — the
+	// tail below keeps `running`, so a busy seat gets the poller (delivery at
+	// the next idle boundary) without the asleep poke: it is not asleep.
+	// Restricted to the shapes nudgeWaitIdle can actually block on
+	// (nudgeWaitIdleMayBlock: claude, non-ACP, idle-wait-capable runtime); an
+	// unknown LastActivity is treated as not-busy. (vp-rqs8q)
+	liveEligible := running && (!nudgeWaitIdleMayBlock(target, sp) || !nudgeObservationBusy(obs))
 	now := time.Now()
-	if running {
+	if liveEligible {
 		handle, err := workerHandleForNudgeTarget(target, sessStore, sp)
 		if err == nil {
 			result, nudgeErr := handle.Nudge(context.Background(), worker.NudgeRequest{
