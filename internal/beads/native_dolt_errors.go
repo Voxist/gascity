@@ -254,6 +254,24 @@ func classifyNativeDoltReadError(err error, lane nativeReadLane) nativeReadClass
 		return nativeReadClass{disposition: nativeReadUnclassified}
 	}
 
+	// 0. ga-vwupk: a migration-freeze refusal is GC'S OWN policy answer,
+	// decided before any socket was touched -- never a fact about the
+	// endpoint, and never safe to retry. This MUST be checked before rung 7's
+	// free-text table: checkMigrationFreezeForNativeOpen's error embeds the
+	// operator's free-text freeze reason verbatim (native_dolt_migration_freeze.go),
+	// and an operator who wrote a reason like "waiting for the connection
+	// refused incident to clear" would otherwise match one of the nine
+	// substrings isNativeDoltTransientReadError carries ("connection refused"
+	// among them) and send withReadRetry into a 90s loop of reconnects --
+	// including managed-Dolt recovery -- for an error a fresh pool answers
+	// identically every time. The verdict is left at its zero value
+	// (ProxiedVerdictNone): this is not an endpoint fact for the proxied lane
+	// to name, so proxiedReadVerdict discards it and returns the cause
+	// unchanged on both lanes, same as nativeReadUnclassified would.
+	if errors.Is(err, ErrNativeOpenFrozen) {
+		return nativeReadClass{disposition: nativeReadTerminal}
+	}
+
 	// 1. An indeterminate commit is never replayed, whatever else it looks like.
 	// Both lanes: replaying a write whose outcome nobody knows is not a proxied
 	// hazard, it is a hazard.

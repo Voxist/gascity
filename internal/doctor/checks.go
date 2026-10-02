@@ -807,6 +807,10 @@ func (c *BeadsStoreCheck) Run(_ *CheckContext) *CheckResult {
 			r.FixHint = "expected for dolt_mode=proxied-server: bd still pools through the db-proxy, so this is not a fault and needs no repair. Do NOT switch to dolt_mode=server to clear this gate"
 			return r
 		}
+		if result.Diagnostic.PreflightGate == beads.BeadsGateMigrationFreeze {
+			r.FixHint = "MIGRATION-FREEZE active; expected until the migrator removes the marker. Do NOT delete the marker mid-migration"
+			return r
+		}
 		r.FixHint = "native store unavailable; repair the named preflight gate, then restart the process to pick up native store eligibility"
 		return r
 	}

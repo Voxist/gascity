@@ -13,6 +13,7 @@ package integration
 // This test passes against current main (post-#1477) and guards against future regressions of #1670.
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,6 +22,88 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 )
+
+// redactedMetadataJSONKeyNeedles is the set of substrings a metadata.json key
+// must not contain in a diagnostics dump. Mirrors
+// internal/beads/contract/preflight.go's own redaction needle list
+// (password, passwd, secret, token, key) so the two stay in agreement about
+// what counts as sensitive in this file.
+var redactedMetadataJSONKeyNeedles = []string{"password", "passwd", "secret", "token", "key"}
+
+// dumpScopeMetadataJSON reads a scope's .beads/metadata.json and renders it
+// with any sensitive-looking field (anything matching
+// redactedMetadataJSONKeyNeedles, case-insensitively -- metadata.json can
+// carry dolt_password for an external endpoint) replaced with "[redacted]"
+// rather than printed verbatim into a CI log.
+func dumpScopeMetadataJSON(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Sprintf("%v", err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(data, &fields); err != nil {
+		// Not valid JSON (or not a JSON object). Seeing less than the raw
+		// bytes is an acceptable loss, but printing the raw bytes risks a
+		// secret that happens to live in a file that didn't parse as
+		// expected -- report only that it failed to parse.
+		return fmt.Sprintf("(unparseable as a JSON object: %v)", err)
+	}
+	for key := range fields {
+		lower := strings.ToLower(key)
+		for _, needle := range redactedMetadataJSONKeyNeedles {
+			if strings.Contains(lower, needle) {
+				fields[key] = "[redacted]"
+				break
+			}
+		}
+	}
+	redacted, err := json.Marshal(fields)
+	if err != nil {
+		return fmt.Sprintf("(failed to re-marshal after redaction: %v)", err)
+	}
+	return string(redacted)
+}
+
+// dumpRigDoltDiagnostics summarizes the on-disk state that distinguishes a
+// classic gc-managed rig (sharing the city's one Dolt server) from a
+// provider-owned one (its own, separately-seeded server) at failure time. It
+// reads best-effort: a missing file is reported as such rather than failing
+// the dump itself, since the diagnostic's whole point is to explain a prior
+// failure, not introduce a new one.
+//
+// Three files answer "which server, if any, was this rig pointed at, and did
+// the city think it owned that server itself": .beads/dolt-server.port
+// (which port a scope's own bd process bound, when it ran one),
+// .beads/metadata.json (backend/dolt_mode, which distinguishes classic
+// "server" mode from an embedded or provider-owned scope -- redacted, since
+// it can carry dolt_password for an external endpoint), and
+// .gc/scope-ownership.json (the journal that actually tells gc-managed from
+// provider-owned, read by cityScopeProviderOwned/scopeProviderOwned -- the
+// ownership VALUE both metadata.json and dolt-server.port are only indirect
+// evidence of). ga-wuda3's root cause was exactly this: a rig silently got
+// its own unseeded provider-owned Dolt server instead of sharing the city's.
+func dumpRigDoltDiagnostics(cityDir, rigDir string) string {
+	var b strings.Builder
+	dumpRawFile := func(label, path string) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			fmt.Fprintf(&b, "  %s (%s): %v\n", label, path, err)
+			return
+		}
+		fmt.Fprintf(&b, "  %s (%s): %s\n", label, path, strings.TrimSpace(string(data)))
+	}
+	dumpMetadata := func(label, path string) {
+		fmt.Fprintf(&b, "  %s (%s): %s\n", label, path, dumpScopeMetadataJSON(path))
+	}
+	fmt.Fprintf(&b, "city dir: %s\n", cityDir)
+	dumpRawFile("city dolt-server.port", filepath.Join(cityDir, ".beads", "dolt-server.port"))
+	dumpMetadata("city metadata.json", filepath.Join(cityDir, ".beads", "metadata.json"))
+	dumpRawFile("city scope-ownership.json", filepath.Join(cityDir, ".gc", "scope-ownership.json"))
+	fmt.Fprintf(&b, "rig dir: %s\n", rigDir)
+	dumpRawFile("rig dolt-server.port", filepath.Join(rigDir, ".beads", "dolt-server.port"))
+	dumpMetadata("rig metadata.json", filepath.Join(rigDir, ".beads", "metadata.json"))
+	return b.String()
+}
 
 // bdDoltInRig runs the bd binary in rigDir using the managed Dolt endpoint
 // from cityDir. The rig and the city share the same Dolt server; the database
@@ -92,11 +175,11 @@ func TestCleanInstallTutorialPath(t *testing.T) {
 	// Regression: rig Dolt DB was never seeded so this returned "" before the fix.
 	prefixOut, err := bdDoltInRig(cityDir, rigDir, "config", "get", "issue_prefix")
 	if err != nil {
-		t.Fatalf("bd config get issue_prefix in rig failed: %v\noutput: %s\n(regression: issue #1670 — rig Dolt DB not seeded during gc rig add)", err, prefixOut)
+		t.Fatalf("bd config get issue_prefix in rig failed: %v\noutput: %s\n(regression: issue #1670 — rig Dolt DB not seeded during gc rig add)\n%s", err, prefixOut, dumpRigDoltDiagnostics(cityDir, rigDir))
 	}
 	gotPrefix := strings.TrimSpace(prefixOut)
 	if gotPrefix != wantPrefix {
-		t.Errorf("bd config get issue_prefix = %q, want %q\n(regression: issue #1670 — rig Dolt DB not seeded during gc rig add)", gotPrefix, wantPrefix)
+		t.Errorf("bd config get issue_prefix = %q, want %q\n(regression: issue #1670 — rig Dolt DB not seeded during gc rig add)\n%s", gotPrefix, wantPrefix, dumpRigDoltDiagnostics(cityDir, rigDir))
 	}
 
 	// --- Assertion 2: rig-scoped bead creation succeeds ---
@@ -106,9 +189,9 @@ func TestCleanInstallTutorialPath(t *testing.T) {
 	beadOut, err := bdDoltInRig(cityDir, rigDir, "create", beadTitle)
 	if err != nil {
 		if strings.Contains(strings.ToLower(beadOut+err.Error()), "not initialized") {
-			t.Fatalf("bd create in rig failed with database-not-initialized (regression issue #1670): %v\noutput: %s", err, beadOut)
+			t.Fatalf("bd create in rig failed with database-not-initialized (regression issue #1670): %v\noutput: %s\n%s", err, beadOut, dumpRigDoltDiagnostics(cityDir, rigDir))
 		}
-		t.Fatalf("bd create in rig failed: %v\noutput: %s", err, beadOut)
+		t.Fatalf("bd create in rig failed: %v\noutput: %s\n%s", err, beadOut, dumpRigDoltDiagnostics(cityDir, rigDir))
 	}
 	// Bead ID should carry the rig prefix, e.g. "mp-abc".
 	if !strings.Contains(beadOut, wantPrefix+"-") {
