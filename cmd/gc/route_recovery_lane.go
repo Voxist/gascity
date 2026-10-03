@@ -714,8 +714,13 @@ func (l *routeRecoveryLane) backstopLeg(leg planeLeg) routeRecoveryReport {
 		}
 		// Belt-and-braces with the Status:"open" query so the guarantee holds
 		// regardless of store-level filtering semantics: an assigned bead is
-		// already claimed and needs no route.
-		if carriedPoolRoute(b) == "" || b.Status != "open" || strings.TrimSpace(b.Assignee) != "" {
+		// already claimed and needs no route, and a parked bead's empty
+		// gc.routed_to is a deliberate discharge, not a loss — excluding it
+		// here keeps the discharge off the re-verify (a dropped candidate
+		// would otherwise drift toward a recheck-failure quarantine) and off
+		// the tick's live-read budget entirely (vp-o2hx2).
+		if carriedPoolRoute(b) == "" || b.Status != "open" || strings.TrimSpace(b.Assignee) != "" ||
+			beadmeta.IsParkedMetadata(b.Metadata) {
 			continue
 		}
 		ids = append(ids, b.ID)
@@ -825,6 +830,15 @@ type routeRestoreOutcome struct {
 // ga-bgu).
 func (l *routeRecoveryLane) restoreRoute(store beads.Store, live beads.Bead, backstop bool) routeRestoreOutcome {
 	route := carriedPoolRoute(live)
+	// A parked bead's empty gc.routed_to is the amended ADR-0066 D3 discharge
+	// shape, not data loss: the route was cleared WITH the park, and restoring
+	// it would re-arm human-gated work every pack-layer router exempts
+	// (gclib.is_parked; vp-dbck). The check precedes the guard below so the
+	// backstop does not read the discharge as a recheck failure — a parked
+	// bead must never accumulate a route-recovery quarantine (vp-o2hx2).
+	if beadmeta.IsParkedMetadata(live.Metadata) {
+		return routeRestoreOutcome{}
+	}
 	if route == "" || live.Status != "open" || strings.TrimSpace(live.Assignee) != "" {
 		if backstop {
 			marked, err := l.noteRecheckFailure(store, live.ID)
