@@ -571,6 +571,86 @@ func TestGuardedRecoverWindowIsSharedAcrossEvidenceKinds(t *testing.T) {
 	}
 }
 
+// A losing op_recover on the shell fallback (no GC_BIN) finds LOCK_FILE
+// already held and exits recover-declined (4, die_recover_declined) rather than
+// running a second stop/start -- this guard's OWN decline semantics
+// reappearing one layer down inside the provider script, not a
+// transport fault. Before this mapping, runGuardedManagedDoltRecover
+// returned that exit-3 error as a plain failure: the bd-runner path
+// (bd_env.go) counted it against the breaker and the health path
+// reported "recovery failed", even though no server was destroyed and
+// the caller that won the lock already is (or will be) running the
+// real recover.
+func TestGuardedRecoverMapsRecoverDeclinedExitToDeclined(t *testing.T) {
+	cityPath := t.TempDir()
+	stubRecoverGateClock(t)
+	stubRecoverLiveness(t, managedDoltLivenessConfirmedDead)
+
+	orig := managedDoltRecoverRunner
+	t.Cleanup(func() { managedDoltRecoverRunner = orig })
+	managedDoltRecoverRunner = func(context.Context, string, []string) error {
+		return providerOpExitErrorForTest(t, providerOpExitRecoverDeclined, "dolt recovery lock held by another process; declining to run a concurrent stop/start")
+	}
+
+	err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed)
+	if !errors.Is(err, errManagedDoltRecoverDeclined) {
+		t.Fatalf("err = %v, want errManagedDoltRecoverDeclined: a recover-declined (exit 4) recover op is this guard's own "+
+			"decline reappearing one layer down, not a transport fault", err)
+	}
+	if code, ok := providerOpExitCode(err); !ok || code != providerOpExitRecoverDeclined {
+		t.Fatalf("providerOpExitCode(err) = (%d, %v), want (%d, true): the underlying exit code must survive the wrap "+
+			"(callers like the bd-runner's breaker still need to tell this apart from other declines if they ever care to)",
+			code, ok, providerOpExitRecoverDeclined)
+	}
+}
+
+// A lock WINNER that really stopped and restarted the server but whose final
+// health verification fails (new server not reachable yet) exits 3
+// (die_unobservable) -- the same code a loser used to share. It must NOT be
+// mapped to declined: it did a recover, and the breaker should see the failure.
+func TestGuardedRecoverDoesNotMapWinnerPostRestartUnobservableToDeclined(t *testing.T) {
+	cityPath := t.TempDir()
+	stubRecoverGateClock(t)
+	stubRecoverLiveness(t, managedDoltLivenessConfirmedDead)
+
+	orig := managedDoltRecoverRunner
+	t.Cleanup(func() { managedDoltRecoverRunner = orig })
+	managedDoltRecoverRunner = func(context.Context, string, []string) error {
+		return providerOpExitErrorForTest(t, providerOpExitUnobservable, "dolt server not reachable after restart")
+	}
+
+	err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed)
+	if err == nil {
+		t.Fatal("err = nil, want the winner's failed post-restart verification to propagate")
+	}
+	if errors.Is(err, errManagedDoltRecoverDeclined) {
+		t.Fatalf("err = %v: exit 3 from a lock winner's failed final verify must not read as a concurrent-recover decline", err)
+	}
+}
+
+// A recover op that fails for a REAL reason (not exit 3) must still be a
+// plain failure, not swallowed into "declined" -- the mapping in
+// runGuardedManagedDoltRecover is specific to providerOpExitUnobservable.
+func TestGuardedRecoverDoesNotMapOrdinaryRecoverFailureToDeclined(t *testing.T) {
+	cityPath := t.TempDir()
+	stubRecoverGateClock(t)
+	stubRecoverLiveness(t, managedDoltLivenessConfirmedDead)
+
+	orig := managedDoltRecoverRunner
+	t.Cleanup(func() { managedDoltRecoverRunner = orig })
+	managedDoltRecoverRunner = func(context.Context, string, []string) error {
+		return providerOpExitErrorForTest(t, 1, "dolt start failed: port already in use")
+	}
+
+	err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed)
+	if errors.Is(err, errManagedDoltRecoverDeclined) {
+		t.Fatalf("err = %v, want a plain failure, NOT errManagedDoltRecoverDeclined: exit 1 is a real recover failure", err)
+	}
+	if err == nil {
+		t.Fatal("err = nil, want the recover op's real failure to propagate")
+	}
+}
+
 // ---------------------------------------------------------------------
 // The bd runner's route
 // ---------------------------------------------------------------------

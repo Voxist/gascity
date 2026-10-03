@@ -12,3 +12,5 @@ func procStartTime(int) (string, bool) { return "", false }
 func sysctlChildPIDs(int) ([]int, bool) { return nil, false }
 
 func procCmdline(int) ([]string, bool) { return nil, false }
+
+func procParentPID(int) (int, bool) { return 0, false }

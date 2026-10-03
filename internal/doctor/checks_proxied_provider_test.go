@@ -284,3 +284,29 @@ func TestBeadsStoreCheck_PingFailureKeepsTheProxiedPayload(t *testing.T) {
 		t.Errorf("the payload does not carry the pinned generation: %s", rendered)
 	}
 }
+
+// TestBeadsStoreCheck_MigrationFreezeGateHintsExpected pins that a deliberate
+// MIGRATION-FREEZE is not presented as a fault to repair: an operator following
+// "repair the named preflight gate" could delete the marker mid-migration.
+func TestBeadsStoreCheck_MigrationFreezeGateHintsExpected(t *testing.T) {
+	dir := setupCity(t, "[workspace]\nname = \"test\"\n\n[beads]\nprovider = \"file\"\n")
+	spy := &spyPingStore{pingFunc: func() error { return nil }}
+	c := NewBeadsStoreCheck(dir, func(_ string) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{
+			Store: spy,
+			Diagnostic: beads.BeadsDiagnostic{
+				Store:               beads.BeadsStoreNameBdStore,
+				NativeStoreEligible: false,
+				PreflightGate:       beads.BeadsGateMigrationFreeze,
+				PreflightReason:     "freeze marker present",
+			},
+		}, nil
+	})
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.FixHint, "MIGRATION-FREEZE active") || strings.Contains(r.FixHint, "repair the named preflight gate") {
+		t.Errorf("FixHint = %q, want the expected-freeze hint, not the repair hint", r.FixHint)
+	}
+}

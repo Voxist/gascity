@@ -58,8 +58,14 @@ FLOCK_AVAILABLE=true
 if ! command -v flock >/dev/null 2>&1; then
     FLOCK_AVAILABLE=false
     case "${1:-}" in
-        start|ensure-ready|stop|shutdown|recover)
+        start|ensure-ready|stop|shutdown)
             echo "warning: flock unavailable; dolt store lock guard disabled (gastownhall/gascity#3174)" >&2
+            ;;
+        recover)
+            # op_recover serializes stop -> cleanup -> start under this
+            # same flock and refuses to run without it (ga-iv2l2), so
+            # "guard disabled" would understate it: recover will die.
+            echo "warning: flock unavailable; dolt recover requires flock and will fail (ga-iv2l2, gastownhall/gascity#3174)" >&2
             ;;
     esac
 fi
@@ -101,6 +107,19 @@ die() {
 die_unobservable() {
     echo "$@" >&2
     exit 3
+}
+
+# die_recover_declined reports that op_recover LOST the recovery lock race
+# and could not confirm health either, so it declined to run a concurrent
+# stop/start (ga-iv2l2). It has its own exit code (4) on purpose: exit 3
+# (die_unobservable) is also what a lock WINNER's final health verification
+# exits when the freshly restarted server is not reachable yet, and gc must
+# be able to tell "declined, someone else is recovering" from "recovered but
+# unverified". Keep in sync with providerOpExitRecoverDeclined in
+# cmd/gc/dolt_recover_gate.go.
+die_recover_declined() {
+    echo "$@" >&2
+    exit 4
 }
 
 # trace_bd_argv records one bd invocation this script is about to fork, as a
@@ -287,7 +306,7 @@ run_with_timeout() {
     (
         sleep "$timeout_seconds" 2>/dev/null || sleep 1
         kill "$cmd_pid" 2>/dev/null || true
-    ) </dev/null >/dev/null 2>&1 &
+    ) </dev/null >/dev/null 2>&1 9>&- &
     local watchdog_pid=$!
     local status=0
     wait "$cmd_pid" || status=$?
@@ -2838,7 +2857,18 @@ attempt_journal_corruption_recovery() {
 }
 
 # op_start starts the dolt server if not already running.
+#
+# A single optional positional argument, "lock-held", tells op_start the
+# caller already holds LOCK_FILE's flock on fd 9 (op_recover, across its
+# own stop -> cleanup -> start sequence, ga-iv2l2). This MUST be an
+# argument, not an environment variable: gc passes its whole process
+# environment through to provider ops (see bd_env.go), so an env flag
+# here would let any inherited GC_DOLT_START_LOCK_HELD=true make a plain
+# `start`/`ensure-ready` call skip the lock entirely -- the environment
+# cannot inject a positional argument the same way.
 op_start() {
+    local lock_held_arg="${1:-}"
+
     if is_remote; then
         # Remote server — nothing to start locally.
         exit 2
@@ -2865,22 +2895,47 @@ op_start() {
     # recreating the lock file after retry exhaustion is unsafe because flock
     # attaches to the inode, not the pathname, so a second starter could bypass
     # a live holder by acquiring a brand-new file.
-    exec 9>"$LOCK_FILE"
+    #
+    # ga-iv2l2: op_recover holds this same LOCK_FILE flock on fd 9 across its
+    # own stop -> cleanup -> start sequence, and passes "lock-held" as
+    # op_start's argument to say so. Do not re-exec fd 9 in that case:
+    # flock is scoped to the open file description, not the pathname, so
+    # `exec 9>"$LOCK_FILE"` here would close the caller's locked fd and
+    # open a fresh, unlocked one -- silently dropping the lock for the
+    # window between that exec and the flock call below, reopening
+    # exactly the concurrent-recover race op_recover's own lock exists to
+    # close.
+    #
+    # The argument is trusted only after verification, not blindly:
+    # `flock -n 9` on the INHERITED fd (no exec first) is how that
+    # verification works. Re-locking a fd this same process already holds
+    # the lock on is a documented no-op that always succeeds; attempting
+    # it when fd 9 is not actually open and locked fails immediately (a
+    # plain `start` call never opens fd 9 at all before this point, and a
+    # caller that merely passed the argument without a real locked fd
+    # behind it has nothing at fd 9 either). A bare claim with no real
+    # locked fd therefore falls through to the real acquire path below
+    # instead of being trusted on the argument's word alone.
     local lock_acquired=false
-    local attempt=0
-    while [ "$attempt" -lt 6 ]; do
-        if flock -n 9 2>/dev/null; then
-            lock_acquired=true
-            break
+    if [ "$lock_held_arg" = "lock-held" ] && flock -n 9 2>/dev/null; then
+        lock_acquired=true
+    else
+        exec 9>"$LOCK_FILE"
+        local attempt=0
+        while [ "$attempt" -lt 6 ]; do
+            if flock -n 9 2>/dev/null; then
+                lock_acquired=true
+                break
+            fi
+            sleep 0.5 2>/dev/null || sleep 1
+            attempt=$((attempt + 1))
+        done
+        if [ "$lock_acquired" = "false" ]; then
+            if wait_for_concurrent_start_ready; then
+                exit 0
+            fi
+            die "could not acquire dolt start lock ($LOCK_FILE)"
         fi
-        sleep 0.5 2>/dev/null || sleep 1
-        attempt=$((attempt + 1))
-    done
-    if [ "$lock_acquired" = "false" ]; then
-        if wait_for_concurrent_start_ready; then
-            exit 0
-        fi
-        die "could not acquire dolt start lock ($LOCK_FILE)"
     fi
 
     # Check if a dolt process is already serving our data dir (any port).
@@ -3934,6 +3989,20 @@ op_init() {
         die "bd schema not visible for $dolt_database after init"
     fi
 
+    # A visible config table proves bd init ran, not that its migrations
+    # finished: bd's --force/--reinit-local arm bounds its own internal
+    # schema-migration attempt (observed ~5s against a full migration's ~30s
+    # under load, ga-2hgoz), so a forced reinit can report success with its
+    # schema behind. wait_for_bd_runtime_schema above only confirms `config`
+    # is queryable; it has no notion of migration version. Finish any
+    # pending migration before reporting the scope ready, the same
+    # completion step the metadata-present adopt branch and the
+    # GC_SCOPE_METADATA_PRESEEDED branch above already run after their own
+    # schema-present checks -- otherwise the next bd client to open this
+    # database on the shared server hits beads' #5920 shared-server guard
+    # ("refusing to auto-apply N pending schema migrations").
+    finish_bd_schema_migrations "$dir" "$dolt_database"
+
     # Configure custom bead types without invoking `bd config set`, which can
     # spend tens of seconds in auto-migrate on populated stores. The canonical
     # .beads/config.yaml types.custom line is now Go-owned (EnsureCanonicalConfig);
@@ -4166,6 +4235,40 @@ op_recover() {
         fi
     fi
 
+    # Serialize the whole stop -> cleanup -> start sequence under the same
+    # LOCK_FILE flock op_start uses internally, so a second concurrent
+    # op_recover (reached whenever the gc-helper fast path above is
+    # unavailable, e.g. two independent `gc beads health` processes, or an
+    # older/absent gc binary) cannot stop the server the first one just
+    # started (ga-iv2l2). A single non-blocking attempt, not op_start's own
+    # bounded retry: a second concurrent recover must not queue behind the
+    # first and rerun the same stop/start sequence a moment later against a
+    # server the first recover may have already fixed -- it should notice
+    # that and get out of the way instead.
+    if ! command -v flock >/dev/null 2>&1; then
+        die "flock is required but not installed. Install: brew install flock (macOS) or apt install util-linux (Linux)"
+    fi
+    mkdir -p "$(dirname "$LOCK_FILE")"
+    exec 9>"$LOCK_FILE"
+    if ! flock -n 9 2>/dev/null; then
+        # Someone else -- another recover, or a concurrent op_start -- holds
+        # the lock. Re-probe instead of blindly failing: if health now
+        # passes, the lock holder already fixed things and this recover has
+        # nothing left to do. Run op_health in a subshell: it calls
+        # die/die_unobservable on failure, which would otherwise exit this
+        # whole process instead of just failing the probe.
+        #
+        # A losing recover's exit 0 therefore means "already being
+        # handled / already healthy", not "this call recovered anything".
+        # op_stop is deliberately NOT under this lock: a stop must stay
+        # able to run while a wedged recover holds it (tracked as a
+        # follow-up if that ever needs serializing).
+        if (op_health) >/dev/null 2>&1; then
+            return 0
+        fi
+        die_recover_declined "dolt recovery lock ($LOCK_FILE) held by another process; declining to run a concurrent stop/start"
+    fi
+
     # Stop.
     op_stop_impl || true
 
@@ -4175,8 +4278,15 @@ op_recover() {
     # Wait a moment for cleanup.
     sleep 1
 
-    # Restart.
-    op_start
+    # Restart. "lock-held" tells op_start the LOCK_FILE flock is already
+    # held on fd 9 by this process, so it must not try to acquire it
+    # again -- an ARGUMENT, not an environment variable, because gc
+    # passes its whole process environment through to provider ops, and
+    # an inherited env var would let any plain `start`/`ensure-ready`
+    # call skip the lock. op_start verifies the claim itself (flock -n 9
+    # on the inherited fd) rather than trusting it blindly; see its own
+    # comment.
+    op_start lock-held
 
     # Verify health.
     op_health

@@ -1028,10 +1028,21 @@ func TestBeadsProxiedDefault(t *testing.T) {
 		// that exist today: GC-managed direct servers — metadata dolt_mode
 		// server, canonical config gc.endpoint_origin managed_city, no
 		// scope-ownership journal, gc's own sql-server under
-		// .gc/runtime/packs/dolt. No gc on this branch can create one, because
-		// `gc init` journals every fresh scope as provider-owned, so the
-		// fixture is built by writing the pre-PR on-disk shape and then driving
-		// the real front doors over it.
+		// .gc/runtime/packs/dolt. No gc on this branch can create one with a
+		// no-signal init, because the fork's no-signal default is classic
+		// gc-managed (ga-m07q9) -- not provider-owned -- so the fixture is
+		// built by writing the pre-PR on-disk shape and then driving the real
+		// front doors over it.
+		//
+		// makeCityLookLegacyManaged's first step (`bd dolt stop`) needs a
+		// bd-owned proxy to already exist, so the init below asks for one
+		// explicitly (--beads-transport proxied --beads-target local) rather
+		// than relying on a no-signal default to produce it. Before ga-m07q9
+		// this fork's own no-signal default DID resolve to a proxy (the exact
+		// leak ga-wuda3 fixes was that default resurfacing a third time), so
+		// this fixture worked by accident until that leak was closed; an
+		// explicit selector keeps it correct regardless of what the no-signal
+		// default resolves to.
 		legacy := helpers.NewCity(t, env)
 		legacyRoot := legacy.Dir
 		legacyRig := filepath.Join(filepath.Dir(createGitRig(t)), "legacy-rig")
@@ -1049,7 +1060,7 @@ func TestBeadsProxiedDefault(t *testing.T) {
 		})
 
 		out, err := helpers.RunGC(env, "", "init", "--skip-provider-readiness", "--no-start",
-			"--provider", "claude", legacyRoot)
+			"--provider", "claude", "--beads-transport", "proxied", "--beads-target", "local", legacyRoot)
 		if err != nil {
 			t.Fatalf("gc init: %v\n%s", err, out)
 		}

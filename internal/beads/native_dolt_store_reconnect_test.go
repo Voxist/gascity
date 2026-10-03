@@ -506,6 +506,17 @@ func TestClassifyNativeDoltReadErrorOrder(t *testing.T) {
 		why     string
 	}{
 		{
+			name: "a migration-freeze refusal whose reason says connection refused is terminal, not transient",
+			// ga-vwupk regression: the freeze error embeds the operator's
+			// free-text reason verbatim. A reason that happens to contain one
+			// of the nine substrings isNativeDoltTransientReadError carries
+			// ("connection refused" among them) must not fall through to that
+			// rung and get treated as a reconnect-and-retry signal.
+			err:  fmt.Errorf("%w: /city/.beads/MIGRATION-FREEZE (operator=migrator, reason=\"after connection refused incident\")", ErrNativeOpenFrozen),
+			want: nativeReadTerminal,
+			why:  "ErrNativeOpenFrozen must outrank every retryable text signature, the same way ErrCommitIndeterminate does",
+		},
+		{
 			name: "an indeterminate commit wrapping a deadlock is NOT a serialization retry",
 			// The dangerous shape: rung 2's text signature ("Error 1213") is
 			// present, so a table that looked at text first would replay a

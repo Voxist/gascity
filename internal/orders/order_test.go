@@ -234,6 +234,62 @@ interval = "24h"
 	}
 }
 
+// TestOrderRecoverOnStoreUnavailableParsed covers ga-3bwmf: an order opts into
+// the dispatcher's store-unavailable fallback via recover_on_store_unavailable
+// in TOML, with no name-based logic in Go. Every order is opted out by
+// default; today only beads-health sets it, since it is the one order whose
+// exec has its own recovery logic independent of the dispatcher's store.
+func TestOrderRecoverOnStoreUnavailableParsed(t *testing.T) {
+	on, err := Parse([]byte("[order]\nexec = \"true\"\ntrigger = \"cooldown\"\ninterval = \"30s\"\nrecover_on_store_unavailable = true\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !on.RecoverOnStoreUnavailable {
+		t.Error("RecoverOnStoreUnavailable = false, want true")
+	}
+	off, err := Parse([]byte("[order]\nexec = \"true\"\ntrigger = \"cooldown\"\ninterval = \"30s\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if off.RecoverOnStoreUnavailable {
+		t.Error("RecoverOnStoreUnavailable = true, want false (default)")
+	}
+
+	// Pin the deployed shape of beads-health by reading the file itself — an
+	// embedded copy would stay green if the shipped pack dropped the flag.
+	const path = "../bootstrap/packs/core/orders/beads-health.toml"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile %s: %v", path, err)
+	}
+	a, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse %s: %v", path, err)
+	}
+	if !a.RecoverOnStoreUnavailable {
+		t.Errorf("beads-health: RecoverOnStoreUnavailable = false, want true")
+	}
+
+	// gate-sweep and order-tracking-sweep stay opted out: gate-sweep and
+	// order-tracking-sweep both do pure bead bookkeeping, which is
+	// meaningless without a store, unlike beads-health's provider-health
+	// exec.
+	for _, name := range []string{"gate-sweep", "order-tracking-sweep"} {
+		path := "../bootstrap/packs/core/orders/" + name + ".toml"
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("%s: ReadFile %s: %v", name, path, err)
+		}
+		a, err := Parse(data)
+		if err != nil {
+			t.Fatalf("%s: Parse: %v", name, err)
+		}
+		if a.RecoverOnStoreUnavailable {
+			t.Errorf("%s: RecoverOnStoreUnavailable = true, want false", name)
+		}
+	}
+}
+
 func TestValidateCooldown(t *testing.T) {
 	a := Order{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h"}
 	if err := Validate(a); err != nil {
@@ -367,6 +423,38 @@ func TestValidateExecWithPool(t *testing.T) {
 	err := Validate(a)
 	if err == nil {
 		t.Error("Validate should fail: exec with pool")
+	}
+}
+
+// TestValidateRecoverOnStoreUnavailableRequiresCooldownExec covers the
+// MEDIUM review item on ga-3bwmf: recover_on_store_unavailable's cooldown
+// IS the order's own Interval, so it means nothing outside a
+// cooldown-triggered exec order. Validate must reject it on a formula order
+// and on event/cron/condition exec orders, and accept it on the one shape
+// it was built for.
+func TestValidateRecoverOnStoreUnavailableRequiresCooldownExec(t *testing.T) {
+	bad := []Order{
+		{Name: "formula-order", Formula: "mol-x", Trigger: "cooldown", Interval: "30s", RecoverOnStoreUnavailable: true},
+		{Name: "event-exec", Exec: "true", Trigger: "event", On: "bead.closed", RecoverOnStoreUnavailable: true},
+		{Name: "cron-exec", Exec: "true", Trigger: "cron", Schedule: "* * * * *", RecoverOnStoreUnavailable: true},
+		{Name: "condition-exec", Exec: "true", Trigger: "condition", Check: "true", RecoverOnStoreUnavailable: true},
+		{Name: "manual-exec", Exec: "true", Trigger: "manual", RecoverOnStoreUnavailable: true},
+	}
+	for _, a := range bad {
+		t.Run(a.Name, func(t *testing.T) {
+			err := Validate(a)
+			if err == nil {
+				t.Fatalf("Validate should reject recover_on_store_unavailable on a %s-triggered %s order", a.Trigger, map[bool]string{true: "formula", false: "exec"}[a.Formula != ""])
+			}
+			if !strings.Contains(err.Error(), "recover_on_store_unavailable") {
+				t.Errorf("error %q does not name recover_on_store_unavailable", err.Error())
+			}
+		})
+	}
+
+	good := Order{Name: "beads-health-like", Exec: "gc beads health --quiet", Trigger: "cooldown", Interval: "30s", RecoverOnStoreUnavailable: true}
+	if err := Validate(good); err != nil {
+		t.Errorf("Validate should accept recover_on_store_unavailable on a cooldown-triggered exec order: %v", err)
 	}
 }
 
