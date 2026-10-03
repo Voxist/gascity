@@ -1,6 +1,8 @@
 package scripts_test
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -45,9 +47,20 @@ func TestParseSkipExpression(t *testing.T) {
 			want: []string{"TestA", "TestB/x", "TestB/y"},
 		},
 		{
-			name: "surrounding whitespace on clauses and alternatives is trimmed",
-			expr: " TestFoo/( bar | baz ) ",
+			name: "surrounding whitespace on the whole clause is trimmed",
+			expr: "  TestFoo/(bar|baz)  ",
 			want: []string{"TestFoo/bar", "TestFoo/baz"},
+		},
+		{
+			// ga-1ebvc LOW: whitespace INSIDE an alternative used to be
+			// trimmed here too, but go test's real -skip matching does not
+			// trim the regex it builds from each alternative -- a literal
+			// " bar " never matches a subtest actually named "bar", so
+			// trimming it silently reported a row as skipped that go test
+			// itself would never actually deselect. Reject it instead.
+			name:    "whitespace inside an alternative is rejected, not trimmed",
+			expr:    "TestFoo/( bar | baz )",
+			wantErr: "not a plain name",
 		},
 		{
 			// LOW: plain Name/row without parentheses is accepted.
@@ -269,6 +282,35 @@ func TestRequiredJobEnv(t *testing.T) {
 	}
 }
 
+// TestListAcceptanceWorkflowFiles is ga-1ebvc's LOW: the required-job scan
+// used to read exactly ["ci.yml", "nightly.yml"], hardcoded. A required job
+// (one setting GC_REQUIRE_ACCEPTANCE_TOOLING) added to any OTHER workflow
+// file -- and this repo has several (fork-verify.yml, mac-regression.yml,
+// ollama-acceptance-c.yml, rc-gate.yml, review-formulas.yml as of this
+// writing) -- was outside this guard's scope no matter what its -skip said.
+// listAcceptanceWorkflowFiles replaces the hardcoded pair with a glob of
+// every .github/workflows/*.yml and *.yaml file.
+func TestListAcceptanceWorkflowFiles(t *testing.T) {
+	dir := t.TempDir()
+	workflowsDir := filepath.Join(dir, ".github", "workflows")
+	if err := os.MkdirAll(workflowsDir, 0o755); err != nil {
+		t.Fatalf("mkdir workflows dir: %v", err)
+	}
+	for _, name := range []string{"ci.yml", "nightly.yml", "extra.yaml", "not-a-workflow.md", "README"} {
+		if err := os.WriteFile(filepath.Join(workflowsDir, name), []byte("jobs: {}\n"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	got, err := listAcceptanceWorkflowFiles(dir)
+	if err != nil {
+		t.Fatalf("listAcceptanceWorkflowFiles: %v", err)
+	}
+	want := []string{"ci.yml", "extra.yaml", "nightly.yml"}
+	if !equalStringSlices(got, want) {
+		t.Fatalf("listAcceptanceWorkflowFiles = %v, want %v (only *.yml/*.yaml, sorted, no other extensions)", got, want)
+	}
+}
+
 func TestCheckSkipAmbiguity(t *testing.T) {
 	universe := acceptanceTestUniverse{
 		TopLevel: []string{"TestProxiedNativeLifecycle", "TestProxiedNativeSafety"},
@@ -280,7 +322,7 @@ func TestCheckSkipAmbiguity(t *testing.T) {
 
 	t.Run("an unambiguous bare top-level clause is clean", func(t *testing.T) {
 		clause := skipClause{TestName: "TestProxiedNativeLifecycle", TestNamePattern: "TestProxiedNativeLifecycle"}
-		if err := checkSkipAmbiguity(clause, universe); err != nil {
+		if _, err := checkSkipAmbiguity(clause, universe); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
@@ -290,7 +332,7 @@ func TestCheckSkipAmbiguity(t *testing.T) {
 			TestName: "TestProxiedNativeLifecycle", TestNamePattern: "TestProxiedNativeLifecycle",
 			Alts: []string{"child-term-zombie"}, AltPatterns: []string{"child-term-zombie"},
 		}
-		if err := checkSkipAmbiguity(clause, universe); err != nil {
+		if _, err := checkSkipAmbiguity(clause, universe); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
@@ -300,7 +342,7 @@ func TestCheckSkipAmbiguity(t *testing.T) {
 		// subtest group, no anchor) reaches BOTH TestProxiedNativeLifecycle
 		// and TestProxiedNativeSafety via go test's unanchored regexp match.
 		clause := skipClause{TestName: "TestProxiedNative", TestNamePattern: "TestProxiedNative"}
-		err := checkSkipAmbiguity(clause, universe)
+		_, err := checkSkipAmbiguity(clause, universe)
 		if err == nil {
 			t.Fatal("expected an ambiguity error, got nil")
 		}
@@ -318,7 +360,7 @@ func TestCheckSkipAmbiguity(t *testing.T) {
 			TestName: "TestProxiedNativeLifecycle", TestNamePattern: "TestProxiedNativeLifecycle",
 			Alts: []string{"root-move"}, AltPatterns: []string{"root-move"},
 		}
-		err := checkSkipAmbiguity(clause, universe)
+		_, err := checkSkipAmbiguity(clause, universe)
 		if err == nil {
 			t.Fatal("expected an ambiguity error, got nil")
 		}
@@ -332,7 +374,7 @@ func TestCheckSkipAmbiguity(t *testing.T) {
 			TestName: "TestProxiedNativeLifecycle", TestNamePattern: "TestProxiedNativeLifecycle",
 			Alts: []string{"no-such-subtest"}, AltPatterns: []string{"no-such-subtest"},
 		}
-		err := checkSkipAmbiguity(clause, universe)
+		_, err := checkSkipAmbiguity(clause, universe)
 		if err == nil {
 			t.Fatal("expected an error for a pattern matching no known subtest, got nil")
 		}
@@ -348,7 +390,7 @@ func TestCheckSkipAmbiguity(t *testing.T) {
 			TestName: "TestProxiedNativeSafety", TestNamePattern: "TestProxiedNativeSafety",
 			Alts: []string{"no-spawn-control"}, AltPatterns: []string{"no-spawn-control"},
 		}
-		err := checkSkipAmbiguity(clause, universe)
+		_, err := checkSkipAmbiguity(clause, universe)
 		if err == nil {
 			t.Fatal("expected an ambiguity error, got nil")
 		}
@@ -365,7 +407,7 @@ func TestCheckSkipAmbiguity(t *testing.T) {
 			TestName: "TestProxiedNativeSafety", TestNamePattern: "TestProxiedNativeSafety",
 			Alts: []string{"no-spawn-control"}, AltPatterns: []string{"^no-spawn-control$"},
 		}
-		if err := checkSkipAmbiguity(clause, universe); err != nil {
+		if _, err := checkSkipAmbiguity(clause, universe); err != nil {
 			t.Fatalf("anchoring should have disambiguated this pattern, got: %v", err)
 		}
 	})
@@ -383,7 +425,7 @@ func TestCheckSkipAmbiguity(t *testing.T) {
 			TestName: "TestProxiedNativeLifecycle", TestNamePattern: "TestProxiedNativeLifecycle",
 			Alts: []string{"child-term-zombie"}, AltPatterns: []string{"child-term-zombie"},
 		}
-		err := checkSkipAmbiguity(clause, universeWithFutureSibling)
+		_, err := checkSkipAmbiguity(clause, universeWithFutureSibling)
 		if err == nil {
 			t.Fatal("expected an ambiguity error for the top-level fragment, got nil")
 		}
@@ -479,6 +521,59 @@ func TestSkipAllowlistProblems(t *testing.T) {
 		}
 		if len(problems) != 0 {
 			t.Fatalf("problems = %v, want none: every deselected row is allowlisted", problems)
+		}
+	})
+
+	t.Run("an unanchored prefix is tracked under the row it actually matches, not the literal text", func(t *testing.T) {
+		// ga-1ebvc MEDIUM/LOW: the real subtest is "barbaz"; the -skip
+		// pattern "bar" is an unanchored PREFIX that unambiguously matches
+		// it via substring (checkPatternMatchesExactlyOne finds exactly one
+		// candidate, so this is NOT the ambiguity case). go test's own
+		// -skip matching is the same unanchored regexp match, so at
+		// runtime "bar" really does deselect "barbaz" too. The allowlist
+		// entry below is written against "TestFoo/barbaz" -- the row
+		// actually skipped -- and must be recognized as covering it, not
+		// reported as unlisted (recording "TestFoo/bar", the literal text,
+		// instead of the matched candidate) or as stale (nothing recorded
+		// under "TestFoo/barbaz").
+		universe := acceptanceTestUniverse{
+			TopLevel: []string{"TestFoo"},
+			Subtests: map[string][]string{"TestFoo": {"barbaz"}},
+		}
+		allowlistForBarbaz := []skipAllowlistEntry{
+			{Row: "TestFoo/barbaz", Reason: "some reason", Bead: "ga-abc12"},
+		}
+		workflow := fixtureWorkflow(true, "TestFoo/(bar)")
+		problems, err := skipAllowlistProblems(map[string][]byte{"ci.yml": workflow}, allowlistForBarbaz, universe)
+		if err != nil {
+			t.Fatalf("unexpected parse error: %v", err)
+		}
+		if len(problems) != 0 {
+			t.Fatalf("problems = %v, want none: the allowlist entry for TestFoo/barbaz (the row \"bar\" actually "+
+				"matches) should cover this skip", problems)
+		}
+	})
+
+	t.Run("a required switch set via GITHUB_ENV still brings the job into scope", func(t *testing.T) {
+		// ga-1ebvc LOW: the job's YAML has no env: block naming
+		// GC_REQUIRE_ACCEPTANCE_TOOLING at all -- it sets the switch by
+		// writing to $GITHUB_ENV at runtime, a common Actions idiom for a
+		// LATER step (or job, via outputs) to pick up. requiredJobEnv only
+		// reads the YAML env: maps, so a job that becomes required only
+		// this way used to be invisible to this guard entirely -- its
+		// -skip, however written, was never scanned or required to be
+		// allowlisted.
+		workflow := fixtureWorkflowRaw(false,
+			`echo "GC_REQUIRE_ACCEPTANCE_TOOLING=1" >> "$GITHUB_ENV"`,
+			`go test -run 'TestFoo$' -skip 'TestFoo/bar' ./test/acceptance/`,
+		)
+		problems, err := skipAllowlistProblems(map[string][]byte{"ci.yml": workflow}, nil, fixtureUniverse())
+		if err != nil {
+			t.Fatalf("unexpected parse error: %v", err)
+		}
+		if len(problems) != 1 || !strings.Contains(problems[0], "TestFoo/bar") {
+			t.Fatalf("problems = %v, want exactly one problem naming the unlisted TestFoo/bar skip -- "+
+				"the GITHUB_ENV-set required switch must still bring this job into scope", problems)
 		}
 	})
 
@@ -685,6 +780,53 @@ func TestSkipAllowlistProblems(t *testing.T) {
 				wantErr: "",
 			},
 			{
+				// ga-1ebvc MEDIUM: the full-line-only rule from the round
+				// above still had no memory of an open quote spanning
+				// MULTIPLE lines. `true "` opens a double-quoted string on
+				// line 1 that is not closed until the `"` on line 2 --
+				// line 2's leading '#' is literal string content, not a
+				// comment start, but the previous rule had no way to know
+				// that and deleted the WHOLE line, including the real
+				// -skip=X sitting right after the closing quote, with no
+				// trace left for the fallback scan.
+				name: `a '#' that begins inside a double quote opened on a PRIOR line is not a comment start`,
+				run: []string{
+					`true "`,
+					`# " ; go test -run 'TestFoo$' -skip=TestFoo/bar ./test/acceptance/`,
+				},
+				wantErr: "skip-flag-shaped token",
+			},
+			{
+				// Control: the same shape, but the quote from line 1 IS
+				// closed before line 2 -- line 2's '#' is a real full-line
+				// comment and must still be blanked exactly as before.
+				name: `a '#' after a quote that closes on the SAME line is still a real comment`,
+				run: []string{
+					`true "closed"`,
+					`# -skip 'TestFoo/bar' mentioned in prose only, not real code`,
+					`go test -run 'TestFoo$' ./test/acceptance/`,
+				},
+				wantErr: "",
+			},
+			{
+				// ga-1ebvc MEDIUM, heredoc form: a heredoc body line
+				// starting with '#' (a shebang is the realistic case) is
+				// literal body content, not a comment, and must not be
+				// blanked -- though in this fixture that only matters if a
+				// -skip were hiding there. Here it proves the heredoc's
+				// own end delimiter is still recognized (the line AFTER
+				// the heredoc body must be scanned normally): the real
+				// -skip=X after the heredoc must still be caught.
+				name: `a heredoc body line starting with '#' is not a comment, and the end delimiter still ends it`,
+				run: []string{
+					`cat <<'EOF' > script.sh`,
+					`#!/bin/bash`,
+					`EOF`,
+					`go test -run 'TestFoo$' -skip=TestFoo/bar ./test/acceptance/`,
+				},
+				wantErr: "skip-flag-shaped token",
+			},
+			{
 				// HIGH round 4, glue form 1: adjacent single-quoted strings
 				// the shell concatenates into one value. Must not be read
 				// as a clean "Allowed" expression with the rest ignored.
@@ -810,6 +952,94 @@ func TestSkipAllowlistProblems(t *testing.T) {
 		_, err := skipAllowlistProblems(map[string][]byte{"ci.yml": workflow}, nil, fixtureUniverse())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	// ga-1ebvc MEDIUM: acceptanceWorkflowDoc's typed decode only sees env:
+	// and steps[].run. A -skip placed in any OTHER field of a required job
+	// -- strategy.matrix, a step's own shell:, defaults.run.shell,
+	// container.env, `with:` -- was invisible to this guard no matter what
+	// it said, because the typed struct has no field for it and the value
+	// is silently dropped during yaml.Unmarshal.
+	t.Run("a skip-flag-shaped token in a job field the typed decode does not cover errors", func(t *testing.T) {
+		cases := []struct {
+			name               string
+			jobYAML            string
+			jobYAMLHasOwnSteps bool // jobYAML already declares its own steps:, don't append the default one
+		}{
+			{
+				name: "strategy.matrix",
+				jobYAML: "    strategy:\n" +
+					"      matrix:\n" +
+					"        flags: [\"-skip=TestFoo/bar\"]\n",
+			},
+			{
+				name: "a step's own shell:",
+				jobYAML: "    steps:\n" +
+					"      - name: run\n" +
+					"        shell: 'env GOFLAGS=-skip=TestFoo/bar bash -e {0}'\n" +
+					"        run: go test -run 'TestFoo$' ./test/acceptance/\n",
+				jobYAMLHasOwnSteps: true,
+			},
+			{
+				name: "defaults.run.shell",
+				jobYAML: "    defaults:\n" +
+					"      run:\n" +
+					"        shell: 'env GOFLAGS=-skip=TestFoo/bar bash -e {0}'\n",
+			},
+			{
+				name: "container.env",
+				jobYAML: "    container:\n" +
+					"      image: golang\n" +
+					"      env:\n" +
+					"        GOFLAGS: \"-skip=TestFoo/bar\"\n",
+			},
+			{
+				name: "with: on a step",
+				jobYAML: "    steps:\n" +
+					"      - name: run\n" +
+					"        uses: some/action@v1\n" +
+					"        with:\n" +
+					"          args: \"-skip=TestFoo/bar\"\n",
+				jobYAMLHasOwnSteps: true,
+			},
+		}
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				body := "jobs:\n" +
+					"  probe:\n" +
+					"    env:\n" +
+					"      GC_REQUIRE_ACCEPTANCE_TOOLING: \"1\"\n" +
+					c.jobYAML
+				if !c.jobYAMLHasOwnSteps {
+					body += "    steps:\n" +
+						"      - name: run\n" +
+						"        run: go test -run 'TestFoo$' ./test/acceptance/\n"
+				}
+				workflow := []byte(body)
+				_, err := skipAllowlistProblems(map[string][]byte{"ci.yml": workflow}, nil, fixtureUniverse())
+				if err == nil {
+					t.Fatalf("expected an error for a skip-flag-shaped token in %s, got nil "+
+						"(this is the silent-pass hole ga-1ebvc found)", c.name)
+				}
+				if !strings.Contains(err.Error(), "skip-flag-shaped token") {
+					t.Fatalf("error = %q, want it to contain %q", err.Error(), "skip-flag-shaped token")
+				}
+			})
+		}
+	})
+
+	// Control: steps[].run keeps its canonical treatment through the raw
+	// scalar scan -- a properly-written -skip '<expr>' there must NOT
+	// double-error just because the generic scan also walks the job node.
+	t.Run("a canonical -skip in steps[].run is not double-flagged by the raw scalar scan", func(t *testing.T) {
+		workflow := fixtureWorkflow(true, "TestFoo/(bar|baz)")
+		problems, err := skipAllowlistProblems(map[string][]byte{"ci.yml": workflow}, allowlisted, fixtureUniverse())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(problems) != 0 {
+			t.Fatalf("problems = %v, want none", problems)
 		}
 	})
 }
