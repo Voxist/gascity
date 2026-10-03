@@ -175,12 +175,6 @@ var bootstrapPolicy = Ledger{
 			// "GOPATH")` and `exec.Command(bin, "--version")`, to resolve
 			// and verify the pinned golangci-lint binary instead of
 			// whatever "golangci-lint" happened to resolve to on PATH.
-			//
-			// Merged total (ga-3bwmf round-5 resync onto fork/main):
-			// 716 + 4 (ga-3bwmf, +1 file) + 3 (ga-w7nyj, +0 files) = 723
-			// calls, 209 files -- both sides' call sites are real and
-			// independent, so the resync sums both deltas from the shared
-			// 716/208 ancestor rather than taking either side alone.
 			BaselineCalls:   729,
 			BaselineFiles:   210,
 			ReportedCalls:   495,
@@ -245,10 +239,6 @@ var bootstrapPolicy = Ledger{
 			// Bumped 480->482 calls (files unchanged, 137) for the same
 			// bead's review fix-up (see the matching audit_baseline
 			// subprocess comment above for the source).
-			//
-			// Merged total (ga-3bwmf round-5 resync onto fork/main):
-			// 479 + 4 (ga-3bwmf, +1 file) + 3 (ga-w7nyj, +0 files) = 486
-			// calls, 138 files.
 			BaselineCalls:   492,
 			BaselineFiles:   139,
 			ReportedCalls:   380,
@@ -641,10 +631,6 @@ var bootstrapPolicy = Ledger{
 			// Bumped 462->464 calls (files unchanged, 131) for the same
 			// bead's review fix-up (see the matching audit_baseline
 			// subprocess comment above for the source).
-			//
-			// Merged total (ga-3bwmf round-5 resync onto fork/main):
-			// 461 + 4 (ga-3bwmf, +1 file) + 3 (ga-w7nyj, +0 files) = 468
-			// calls, 132 files.
 			BaselineCalls:   474,
 			BaselineFiles:   133,
 			ReportedCalls:   394,
