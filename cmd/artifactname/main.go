@@ -19,7 +19,9 @@
 //	ARTIFACT_NAME='gc-main-20260716-eb743642c'
 //	ARTIFACT_HEAD_SHA='eb743642c...'
 //	ARTIFACT_COMMIT_STAMP='eb743642c...'          (gains -dirty when the tree is dirty)
-//	ARTIFACT_BASE_STAMP='Voxist/main@eb743642c+0-0'
+//	ARTIFACT_BASE_STAMP='main@eb743642c+0-0'      (branch@sha+ahead-behind; the remote
+//	                                              name is deliberately absent — it is
+//	                                              clone-relative, see provenance.BaseStamp)
 //
 // -format name prints just the artifact filename.
 //
