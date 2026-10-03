@@ -329,6 +329,65 @@ trigger = "manual"
 	}
 }
 
+// TestScanAllValidationHandlerSkipsOrderOverriddenIncompatibleWithRecoverOnStoreUnavailable
+// covers the ga-3bwmf review's vp-ia7c check: a legitimate
+// [[orders.overrides]] entry that changes an order's trigger away from
+// "cooldown" — like beads-health's, if an operator ever overrode it —
+// while recover_on_store_unavailable stays true on the base definition
+// makes the merged order fail orders.Validate (recover_on_store_unavailable
+// requires trigger = "cooldown"). vp-ia7c's own incident was a stale
+// override crashing the WHOLE order config to 0 orders; this pins that a
+// Validate failure surfacing through this NEW field takes the same
+// warn-and-skip path every other Validate failure already does (wired via
+// OnValidateError at every real cmd/gc and doctor call site) rather than
+// reintroducing a fatal city-startup failure through a different field.
+func TestScanAllValidationHandlerSkipsOrderOverriddenIncompatibleWithRecoverOnStoreUnavailable(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "backup", `[order]
+exec = "scripts/backup.sh"
+trigger = "cooldown"
+interval = "1h"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "beads-health", `[order]
+exec = "scripts/beads-health.sh"
+trigger = "cooldown"
+interval = "30s"
+recover_on_store_unavailable = true
+`)
+
+	cronTrigger := "cron"
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+		},
+		Orders: config.OrdersConfig{
+			Overrides: []config.OrderOverride{
+				{Name: "beads-health", Trigger: &cronTrigger},
+			},
+		},
+	}
+
+	var handled string
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{
+		OnValidateError: func(orderName string, err error) error {
+			handled = orderName + ": " + err.Error()
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v (must warn-and-skip, not fail the whole config load)", err)
+	}
+	if !strings.Contains(handled, "beads-health") || !strings.Contains(handled, "recover_on_store_unavailable requires an exec order with trigger") {
+		t.Fatalf("handled validation error = %q, want the recover_on_store_unavailable/trigger diagnostic for beads-health", handled)
+	}
+	if len(aa) != 1 {
+		t.Fatalf("got %d orders, want only the valid order (the whole config must not fail to load, vp-ia7c)", len(aa))
+	}
+	if aa[0].Name != "backup" {
+		t.Fatalf("remaining order = %q, want backup", aa[0].Name)
+	}
+}
+
 func TestScanAllValidationHandlerSkipsInvalidCitySourceOrder(t *testing.T) {
 	cityPath, cityLayer := orderDiscoveryCity(t)
 	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "backup", `[order]

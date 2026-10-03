@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/gastownhall/gascity/internal/orderdispatch"
@@ -61,6 +62,14 @@ func (m *memoryOrderDispatcher) Dispatch(ctx context.Context, req orderdispatch.
 	trackingRun, err := m.launchResolvedDispatch(ctx, store, target, a, m.cityPath, req.Vars, req.ExecEnv, closeStore)
 	if err != nil {
 		closeStore() // nothing launched; release the handle we opened
+		if errors.Is(err, errRecoverOnStoreUnavailableExecAlreadyRunning) {
+			// Single-flight yield, not a store failure: mirror
+			// dispatchOrders' own fireCandidate handling of this sentinel
+			// (ga-3bwmf review round 5) -- no error, no "creating tracking
+			// bead" wording, just a quiet Fired:false. launchResolvedDispatch
+			// has already logged this at the dispatch error stream.
+			return orderdispatch.DispatchResult{ScopedName: scoped, Fired: false}, nil
+		}
 		return orderdispatch.DispatchResult{ScopedName: scoped}, fmt.Errorf("creating tracking bead for %s: %w", scoped, err)
 	}
 	return orderdispatch.DispatchResult{ScopedName: scoped, TrackingID: trackingRun.ID, Fired: true}, nil

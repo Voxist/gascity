@@ -59,6 +59,36 @@ var nativeDoltOpenEnvKeys = []string{
 	"BEADS_DOLT_SHARED_SERVER",
 }
 
+// directNativeOpenWithheldKeys are keys withheld (never projected with a
+// value, always unset for the open window) from every direct native open, in
+// addition to nativeDoltOpenEnvKeys.
+//
+// ga-vwupk: the direct lane otherwise leaves an ambient BD_ALLOW_REMOTE_MIGRATE
+// (a fork-bd variable that unlocks a numbered schema migration, unrelated to
+// anything gc itself sets) untouched — inherited straight from whatever shell
+// or supervisor launched gc — while the proxied lane already withholds the
+// whole BD_ namespace (native_dolt_proxied_open.go, withWithheldPrefixesLocked
+// with bdEnvPrefix). This is a SEPARATE list rather than an addition to
+// nativeDoltOpenEnvKeys on purpose: that list is pinned to exactly the
+// fourteen BEADS_-namespace keys the direct/proxied split test
+// (TestDirectNativeOpenEnvKeyListUnchanged) asserts, and BD_ALLOW_REMOTE_MIGRATE
+// is also already listed in proxiedOnlyOpenEnvKeys — adding it here too would
+// put the same key in both lists, which that test independently forbids.
+// directNativeOpenEnvKeys below merges the two only at the point of use.
+var directNativeOpenWithheldKeys = []string{
+	"BD_ALLOW_REMOTE_MIGRATE",
+}
+
+// directNativeOpenEnvKeys is the open-env key list every direct native open
+// (both the plain window and the WithoutAmbientEnv hermetic window) projects:
+// nativeDoltOpenEnvKeys plus directNativeOpenWithheldKeys. env never sets the
+// latter, so per withProjectedOpenEnvLocked's "absent from env" rule they are
+// always unset for the duration of the open — the shared-store gate the
+// upstream library's migration path checks (store.go) is the one place
+// BD_ALLOW_REMOTE_MIGRATE could otherwise slip a migration in past the
+// ga-vwupk freeze check above it.
+var directNativeOpenEnvKeys = append(append([]string(nil), nativeDoltOpenEnvKeys...), directNativeOpenWithheldKeys...)
+
 func nativeDoltOperationContext(parent context.Context) (context.Context, context.CancelFunc) {
 	if parent == nil {
 		parent = context.Background()
@@ -136,7 +166,7 @@ func withNativeDoltOpenEnvAndCredentialCommand(env map[string]string, credential
 // form is used by hermetic opens, which must withhold the whole BEADS_ namespace
 // and project the selected keys as one indivisible environment transition.
 func withNativeDoltOpenEnvAndCredentialCommandLocked(env map[string]string, credentialCommand string) (func(), error) {
-	return withProjectedOpenEnvLocked(nativeDoltOpenEnvKeys, env, credentialCommand)
+	return withProjectedOpenEnvLocked(directNativeOpenEnvKeys, env, credentialCommand)
 }
 
 // withProjectedOpenEnvLocked is the projection itself, parameterised by the key
@@ -279,6 +309,12 @@ func withWithheldPrefixesLocked(prefixes ...string) (func(), error) {
 // the selected scoped values are projected, and both restorations happen
 // before the lock is released.
 func openNativeStorageWithoutAmbientEnvWithCredentialCommand(ctx context.Context, scopeRoot, credentialCommand string, readPrefix bool) (beadslib.Storage, string, error) {
+	// ga-vwupk: the choke-point freeze check, before anything else touches
+	// this scope. See checkMigrationFreezeForNativeOpen's doc comment.
+	if err := checkMigrationFreezeForNativeOpen(scopeRoot); err != nil {
+		return nil, "", err
+	}
+
 	nativeDoltOpenEnvMu.Lock()
 	defer nativeDoltOpenEnvMu.Unlock()
 
@@ -662,6 +698,14 @@ func openNativeStorage(ctx context.Context, scopeRoot string, env map[string]str
 }
 
 func openNativeStorageWithCredentialCommand(ctx context.Context, scopeRoot string, env map[string]string, credentialCommand string, readPrefix bool) (beadslib.Storage, string, error) {
+	// ga-vwupk: the choke-point freeze check. This function serves BOTH the
+	// initial open (via OpenNativeDoltStoreAt) and the read-path reconnect
+	// (via OpenNativeStorage as a NativeReopenFunc, which bypasses the
+	// factory's preflight check entirely) — checking here, before anything
+	// else touches this scope, covers both.
+	if err := checkMigrationFreezeForNativeOpen(scopeRoot); err != nil {
+		return nil, "", err
+	}
 	restoreEnv, err := withNativeDoltOpenEnvAndCredentialCommand(env, credentialCommand)
 	if err != nil {
 		return nil, "", err

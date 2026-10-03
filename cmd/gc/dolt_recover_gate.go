@@ -91,6 +91,14 @@ func (e managedDoltRecoverEvidence) mustProveDeath() bool {
 // produces it; see the comment there.
 const providerOpExitUnobservable = 3
 
+// providerOpExitRecoverDeclined is the provider script's "recover" exit
+// code for a recover that lost the recovery-lock race and could not
+// confirm health, so it declined to run a concurrent stop/start
+// (die_recover_declined). It is distinct from providerOpExitUnobservable
+// because a lock WINNER whose post-restart health verification fails also
+// exits 3, and that must not be read as a decline.
+const providerOpExitRecoverDeclined = 4
+
 // managedDoltHealthOpEvidence classifies what a FAILED provider health
 // op actually proves.
 //
@@ -257,7 +265,19 @@ func runGuardedManagedDoltRecover(ctx context.Context, cityPath, script string, 
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return managedDoltRecoverRunner(ctx, script, environ)
+	err := managedDoltRecoverRunner(ctx, script, environ)
+	if err == nil {
+		return nil
+	}
+	// The shell fallback's op_recover exits providerOpExitRecoverDeclined
+	// when it loses the recovery-lock race (ga-iv2l2): that is this guard's
+	// own decline semantics reappearing one layer down, not a transport
+	// fault. Only that code is mapped; exit 3 stays a plain failure because
+	// a lock winner whose final health check fails also exits 3.
+	if code, ok := providerOpExitCode(err); ok && code == providerOpExitRecoverDeclined {
+		return fmt.Errorf("%w: provider declined concurrent recover: %w", errManagedDoltRecoverDeclined, err)
+	}
+	return err
 }
 
 // managedDoltReplaceLiveness answers whether cityPath has a managed Dolt

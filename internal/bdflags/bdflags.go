@@ -4,8 +4,8 @@
 // templates, so the two call sites cannot drift apart from each other.
 //
 // Sourced from bd <sub> --help output (2026-07-13, bd v1.1.0); kept current
-// against the pinned bd by TestBdFlagManifestCurrent (latest: bd 1.2.2 at
-// 3e03250ee, 2026-09-01).
+// against the pinned bd by TestBdFlagManifestCurrent (latest: bd v1.94.0 at
+// 1522bdb01, 2026-10-02).
 package bdflags
 
 import (
@@ -136,6 +136,11 @@ var valueFlagsBySub = map[string]map[string]bool{
 		// Added 2026-08-11 against bd a75c226c9 (0062-era conditional writes);
 		// --force (bool, below) same provenance.
 		"--if-assignee": true, "--if-status": true,
+		// -l added 2026-10-01 against bd 5cc9948c7 (schema-0069 repin,
+		// Voxist/beads#60, ga-b2q0c): upstream 6530c7532 gave --add-label a
+		// -l shorthand matching `bd create -l`. Not a new flag, a new alias
+		// for the --add-label already pinned below.
+		"-l":           true,
 		"--acceptance": true, "--add-label": true, "--append-notes": true,
 		"-a": true, "--assignee": true, "--await-id": true, "--body-file": true,
 		"--defer": true, "-d": true, "--description": true, "--design": true,
@@ -248,7 +253,12 @@ var boolFlagsBySub = map[string]map[string]bool{
 		"--pretty": true, "-u": true, "--unassigned": true,
 	},
 	"list": {
-		"--all": true, "--brief": true, "--deferred": true, "--deps": true,
+		// --include-comments added 2026-10-01 against bd 5cc9948c7
+		// (schema-0069 repin, Voxist/beads#60, ga-b2q0c): upstream d14ed67f7
+		// gave `bd list` the hydration toggle `bd show --include-comments`
+		// already had — streams full comment bodies in --json output.
+		"--include-comments": true,
+		"--all":              true, "--brief": true, "--deferred": true, "--deps": true,
 		"--empty-description": true, "--flat": true, "--include-ephemeral": true,
 		"--include-gates": true, "--include-infra": true, "--include-templates": true,
 		"--long": true, "--no-assignee": true, "--no-labels": true, "--no-pager": true,

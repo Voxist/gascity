@@ -296,6 +296,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			register(newDoltDriftCheck(cityPath, cfg))
 			register(newPortFileConsistencyCheck(cityPath, cfg))
 			register(newDoltListenerDeadlineCheck(cityPath, cfg))
+			register(newDoltWatchdogLivenessCheck(cityPath, cfg))
 		}
 		register(doctor.NewConfigValidCheck(cfg))
 		register(doctor.NewLegacySuspendedFieldCheck(cfg))

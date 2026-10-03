@@ -32,6 +32,15 @@ type InitIntentResolution struct {
 	PreserveBackend bool
 }
 
+// SourceProviderDefault is the InitIntentResolution.Source value
+// ResolveInitIntent reports when no persisted, CLI, environment, or
+// city-config intent was available and it fell back to the caller-supplied
+// providerDefault argument. A caller that needs to tell "a real signal was
+// given" apart from "nothing else was configured, so the fallback value was
+// used" compares Source against this constant rather than a repeated string
+// literal.
+const SourceProviderDefault = "provider-default"
+
 // ResolveInitIntent applies the initialization precedence contract:
 // persisted state (when initialized), explicit CLI, allowed environment,
 // city policy, then provider default. Ambient BEADS_DOLT_* variables must not
@@ -91,7 +100,7 @@ func ResolveInitIntent(persisted InitScopeState, cliIntent, envIntent, configInt
 	if configIntent != (InitIntent{}) {
 		return InitIntentResolution{Intent: configIntent, Source: "city-config"}, nil
 	}
-	return InitIntentResolution{Intent: providerDefault, Source: "provider-default"}, nil
+	return InitIntentResolution{Intent: providerDefault, Source: SourceProviderDefault}, nil
 }
 
 func normalizeInitIntent(source string, intent InitIntent) (InitIntent, error) {
