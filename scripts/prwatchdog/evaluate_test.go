@@ -318,6 +318,275 @@ func TestEvaluate_ReviewFormulasOptIn(t *testing.T) {
 	})
 }
 
+func TestEvaluate_BaseRedPassThrough(t *testing.T) {
+	// vp-2lr9 D2: when CI / required fails at the head because the BASE
+	// branch is red, the watchdog must pass the PR through with a distinct,
+	// non-blocking verdict instead of publishing a failure the PR author
+	// cannot fix by changing their diff.
+	observed := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	const baseSHA = "base0123456"
+
+	headRed := []CheckRun{
+		{Name: CheckName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: observed},
+		{Name: CIRequiredName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionFailure, StartedAt: observed},
+	}
+
+	tests := []struct {
+		name            string
+		elapsed         time.Duration
+		baseSHA         string
+		baseRuns        []CheckRun
+		baseErr         error
+		wantTerm        bool
+		wantPass        bool
+		wantInherited   bool
+		wantReasonParts []string
+	}{
+		{
+			name:          "base also red: non-blocking pass-through",
+			elapsed:       time.Minute,
+			baseSHA:       baseSHA,
+			baseRuns:      []CheckRun{{Name: CIRequiredName, HeadSHA: baseSHA, Status: StatusCompleted, Conclusion: ConclusionFailure, StartedAt: observed}},
+			wantTerm:      true,
+			wantPass:      true,
+			wantInherited: true,
+			wantReasonParts: []string{
+				`CI / required concluded "failure" at head`,
+				"base " + baseSHA[:7],
+				"base-inherited",
+				"non-blocking",
+			},
+		},
+		{
+			name:          "base timed out counts as red: pass-through",
+			elapsed:       time.Minute,
+			baseSHA:       baseSHA,
+			baseRuns:      []CheckRun{{Name: CIRequiredName, HeadSHA: baseSHA, Status: StatusCompleted, Conclusion: ConclusionTimedOut, StartedAt: observed}},
+			wantTerm:      true,
+			wantPass:      true,
+			wantInherited: true,
+		},
+		{
+			name:     "base green: head failure blocks as before",
+			elapsed:  time.Minute,
+			baseSHA:  baseSHA,
+			baseRuns: []CheckRun{{Name: CIRequiredName, HeadSHA: baseSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: observed}},
+			wantTerm: true,
+			wantPass: false,
+		},
+		{
+			name:     "base run cancelled: proves nothing, head failure blocks",
+			elapsed:  time.Minute,
+			baseSHA:  baseSHA,
+			baseRuns: []CheckRun{{Name: CIRequiredName, HeadSHA: baseSHA, Status: StatusCompleted, Conclusion: ConclusionCancelled, StartedAt: observed}},
+			wantTerm: true,
+			wantPass: false,
+		},
+		{
+			name:     "base run stale: proves nothing, head failure blocks",
+			elapsed:  time.Minute,
+			baseSHA:  baseSHA,
+			baseRuns: []CheckRun{{Name: CIRequiredName, HeadSHA: baseSHA, Status: StatusCompleted, Conclusion: ConclusionStale, StartedAt: observed}},
+			wantTerm: true,
+			wantPass: false,
+		},
+		{
+			name:     "no base SHA configured: behavior unchanged, blocks",
+			elapsed:  time.Minute,
+			baseSHA:  "",
+			baseRuns: nil,
+			wantTerm: true,
+			wantPass: false,
+		},
+		{
+			name:     "base absent at deadline: fail closed",
+			elapsed:  ObservationDeadline,
+			baseSHA:  baseSHA,
+			baseRuns: nil,
+			wantTerm: true,
+			wantPass: false,
+		},
+		{
+			name:     "base absent before deadline: keep observing, base may still conclude",
+			elapsed:  time.Minute,
+			baseSHA:  baseSHA,
+			baseRuns: nil,
+			wantTerm: false,
+		},
+		{
+			name:     "base still running at deadline: fail closed",
+			elapsed:  ObservationDeadline,
+			baseSHA:  baseSHA,
+			baseRuns: []CheckRun{{Name: CIRequiredName, HeadSHA: baseSHA, Status: StatusInProgress, StartedAt: observed}},
+			wantTerm: true,
+			wantPass: false,
+		},
+		{
+			name:     "base still running before deadline: keep observing",
+			elapsed:  time.Minute,
+			baseSHA:  baseSHA,
+			baseRuns: []CheckRun{{Name: CIRequiredName, HeadSHA: baseSHA, Status: StatusInProgress, StartedAt: observed}},
+			wantTerm: false,
+		},
+		{
+			name:            "base lookup failed at deadline: fail closed, verdict unavailable noted",
+			elapsed:         ObservationDeadline,
+			baseSHA:         baseSHA,
+			baseRuns:        nil,
+			baseErr:         errors.New("rate limited"),
+			wantTerm:        true,
+			wantPass:        false,
+			wantReasonParts: []string{"base verdict unavailable", "rate limited"},
+		},
+		{
+			name:     "base lookup failed before deadline: keep observing",
+			elapsed:  time.Minute,
+			baseSHA:  baseSHA,
+			baseRuns: nil,
+			baseErr:  errors.New("rate limited"),
+			wantTerm: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			eval := Evaluate(Input{
+				HeadSHA:        testHeadSHA,
+				CheckRuns:      headRed,
+				Elapsed:        tt.elapsed,
+				Deadline:       ObservationDeadline,
+				BaseSHA:        tt.baseSHA,
+				BaseCheckRuns:  tt.baseRuns,
+				BaseFetchError: tt.baseErr,
+			})
+			if eval.Terminal != tt.wantTerm {
+				t.Fatalf("Terminal = %v, want %v (eval=%+v)", eval.Terminal, tt.wantTerm, eval)
+			}
+			if !tt.wantTerm {
+				return
+			}
+			if eval.Pass != tt.wantPass {
+				t.Fatalf("Pass = %v, want %v (eval=%+v)", eval.Pass, tt.wantPass, eval)
+			}
+			if eval.BaseInheritedFailure != tt.wantInherited {
+				t.Fatalf("BaseInheritedFailure = %v, want %v (eval=%+v)", eval.BaseInheritedFailure, tt.wantInherited, eval)
+			}
+			if !tt.wantPass && eval.BaseInheritedFailure {
+				t.Fatalf("a blocking failure must never carry the base-inherited flag, got %+v", eval)
+			}
+			for _, part := range tt.wantReasonParts {
+				if !strings.Contains(eval.Reason, part) {
+					t.Fatalf("Reason = %q, want it to contain %q", eval.Reason, part)
+				}
+			}
+		})
+	}
+}
+
+func TestEvaluate_BaseRunsAreScopedToBaseSHA(t *testing.T) {
+	observed := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	const baseSHA = "base0123456"
+
+	eval := Evaluate(Input{
+		HeadSHA: testHeadSHA,
+		CheckRuns: []CheckRun{
+			{Name: CheckName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: observed},
+			{Name: CIRequiredName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionFailure, StartedAt: observed},
+		},
+		Elapsed:  time.Minute,
+		Deadline: ObservationDeadline,
+		BaseSHA:  baseSHA,
+		// A red CI / required run scoped to some OTHER commit must not open
+		// the pass-through; only a run at the configured base SHA counts.
+		BaseCheckRuns: []CheckRun{{Name: CIRequiredName, HeadSHA: "some-other-sha", Status: StatusCompleted, Conclusion: ConclusionFailure, StartedAt: observed}},
+	})
+
+	if eval.Pass || eval.BaseInheritedFailure {
+		t.Fatalf("a base-red run at a different SHA must not open the pass-through, got %+v", eval)
+	}
+}
+
+func TestEvaluate_BaseRedDoesNotAffectAHealthyHead(t *testing.T) {
+	observed := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	const baseSHA = "base0123456"
+
+	eval := Evaluate(Input{
+		HeadSHA: testHeadSHA,
+		CheckRuns: []CheckRun{
+			{Name: CheckName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: observed},
+			{Name: CIRequiredName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: observed},
+		},
+		Elapsed:       time.Minute,
+		Deadline:      ObservationDeadline,
+		BaseSHA:       baseSHA,
+		BaseCheckRuns: []CheckRun{{Name: CIRequiredName, HeadSHA: baseSHA, Status: StatusCompleted, Conclusion: ConclusionFailure, StartedAt: observed}},
+	})
+
+	if !eval.Pass || !eval.Terminal {
+		t.Fatalf("expected a plain pass, got %+v", eval)
+	}
+	if eval.BaseInheritedFailure {
+		t.Fatalf("a green head must not be flagged base-inherited, got %+v", eval)
+	}
+}
+
+func TestEvaluate_BaseRedPassThroughOnlyCoversCIRequired(t *testing.T) {
+	observed := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	const baseSHA = "base0123456"
+	baseRed := []CheckRun{{Name: CheckName, HeadSHA: baseSHA, Status: StatusCompleted, Conclusion: ConclusionFailure, StartedAt: observed}}
+
+	t.Run("red preflight at head with red base Check still blocks", func(t *testing.T) {
+		eval := Evaluate(Input{
+			HeadSHA: testHeadSHA,
+			CheckRuns: []CheckRun{
+				{Name: CheckName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionFailure, StartedAt: observed},
+			},
+			Elapsed:       time.Minute,
+			Deadline:      ObservationDeadline,
+			BaseSHA:       baseSHA,
+			BaseCheckRuns: baseRed,
+		})
+		if eval.Pass {
+			t.Fatalf("the pass-through is scoped to CI / required; a red preflight must still block, got %+v", eval)
+		}
+	})
+
+	t.Run("incomplete CI / required at deadline with red base still blocks", func(t *testing.T) {
+		eval := Evaluate(Input{
+			HeadSHA: testHeadSHA,
+			CheckRuns: []CheckRun{
+				{Name: CheckName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: observed},
+			},
+			Elapsed:       ObservationDeadline,
+			Deadline:      ObservationDeadline,
+			BaseSHA:       baseSHA,
+			BaseCheckRuns: baseRed,
+		})
+		if eval.Pass {
+			t.Fatalf("the pass-through needs a concluded head failure; an incomplete head must still block, got %+v", eval)
+		}
+	})
+}
+
+func TestEvaluationBanner(t *testing.T) {
+	t.Run("plain pass", func(t *testing.T) {
+		if got := (Evaluation{Pass: true}).Banner(); got != "PR evidence watchdog: PASS" {
+			t.Fatalf("Banner = %q", got)
+		}
+	})
+	t.Run("base-red pass-through", func(t *testing.T) {
+		got := (Evaluation{Pass: true, BaseInheritedFailure: true}).Banner()
+		if got != "PR evidence watchdog: BASE-RED PASS-THROUGH (non-blocking)" {
+			t.Fatalf("Banner = %q", got)
+		}
+	})
+	t.Run("fail", func(t *testing.T) {
+		if got := (Evaluation{}).Banner(); got != "PR evidence watchdog: FAIL" {
+			t.Fatalf("Banner = %q", got)
+		}
+	})
+}
+
 func TestEvaluate_HumanReadableSummaryStates(t *testing.T) {
 	base := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
 

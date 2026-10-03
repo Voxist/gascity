@@ -70,6 +70,19 @@ type Input struct {
 	NeedsMacLabel            bool
 	NeedsReviewFormulasLabel bool
 	FetchError               error
+	// BaseSHA is the base-branch commit the PR's changes land on top of.
+	// When non-empty and the head's CIRequiredName run concludes non-success,
+	// the same check is consulted at BaseSHA to distinguish a base-inherited
+	// failure from one attributable to this PR (vp-2lr9 D2). Empty disables
+	// the comparison entirely; evaluation is then identical to a watchdog
+	// that never knew about bases.
+	BaseSHA string
+	// BaseCheckRuns holds check-run observations scoped to BaseSHA.
+	BaseCheckRuns []CheckRun
+	// BaseFetchError reports a failure to obtain BaseCheckRuns. It leaves the
+	// evaluation non-terminal (keep observing) until the deadline, then
+	// fails closed: an unattributable head failure still blocks, as before.
+	BaseFetchError error
 }
 
 // Summary is a human-readable rendering of each tracked check's state.
@@ -86,6 +99,25 @@ type Evaluation struct {
 	Terminal bool
 	Reason   string
 	Summary  Summary
+	// BaseInheritedFailure marks a terminal pass granted because
+	// CIRequiredName failed at the head while the same check is also failing
+	// at BaseSHA: the failure is inherited from the base branch, cannot be
+	// fixed from this PR, and must not block it.
+	BaseInheritedFailure bool
+}
+
+// Banner is the Markdown headline for the evaluation. A base-red
+// pass-through must be visually distinct from a plain pass: it publishes a
+// non-blocking verdict while naming the condition that produced it.
+func (e Evaluation) Banner() string {
+	switch {
+	case e.Pass && e.BaseInheritedFailure:
+		return "PR evidence watchdog: BASE-RED PASS-THROUGH (non-blocking)"
+	case e.Pass:
+		return "PR evidence watchdog: PASS"
+	default:
+		return "PR evidence watchdog: FAIL"
+	}
 }
 
 // checkState classifies the latest observed run for one tracked check name.
@@ -173,6 +205,67 @@ func evaluateGate(runs []CheckRun, headSHA, name, absentWord, inProgressWord str
 	}
 }
 
+// baseRedOutcome classifies what the base-side evidence says about a red
+// base, for a head whose CIRequiredName run just concluded non-success.
+type baseRedOutcome int
+
+const (
+	// baseRedDisabled: no BaseSHA configured. The comparison is off; the
+	// caller fails the PR closed immediately, exactly as a watchdog that
+	// never knew about bases would.
+	baseRedDisabled baseRedOutcome = iota
+	// baseRedConfirmed: the base's CIRequiredName run concluded failure or
+	// timed_out. The head failure is inherited from the base branch; the
+	// caller passes the PR through non-blocking.
+	baseRedConfirmed
+	// baseRedDisproved: the base's CIRequiredName run concluded and is not
+	// red (success, cancelled, stale, ...). The head failure is not
+	// attributable to the base; the caller fails the PR closed immediately.
+	baseRedDisproved
+	// baseRedUnknown: the base picture is incomplete -- the base run has not
+	// concluded yet, or the base lookup failed. The caller keeps observing
+	// (bounded by the deadline) rather than latching a verdict off an
+	// incomplete picture, then fails closed at the deadline.
+	baseRedUnknown
+)
+
+// classifyBaseRed implements the base-red comparison (vp-2lr9 D2): a head
+// failure of CIRequiredName that the same check also exhibits at BaseSHA was
+// inherited from the base branch, is not attributable to this PR's diff, and
+// must not block it.
+func classifyBaseRed(in Input) baseRedOutcome {
+	if in.BaseSHA == "" {
+		return baseRedDisabled
+	}
+	if in.BaseFetchError != nil {
+		return baseRedUnknown
+	}
+	state, run := stateOf(in.BaseCheckRuns, in.BaseSHA, CIRequiredName)
+	switch state {
+	case stateCompletedSuccess:
+		// The base is green: the head failure is not attributable to it.
+		return baseRedDisproved
+	case stateCompletedOther:
+		// Cancelled, stale, skipped and neutral runs are deliberately not
+		// red: a cancelled or superseded run proves nothing about base
+		// health, and the pass-through must not open on ambiguity.
+		if run.Conclusion == ConclusionFailure || run.Conclusion == ConclusionTimedOut {
+			return baseRedConfirmed
+		}
+		return baseRedDisproved
+	default: // absent, queued, in progress
+		return baseRedUnknown
+	}
+}
+
+// shortSHA renders a SHA the way GitHub renders them in check output.
+func shortSHA(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
+}
+
 // Evaluate inspects the observed check runs for in.HeadSHA and decides
 // whether the watchdog should keep observing, or stop with a pass/fail
 // verdict.
@@ -203,7 +296,34 @@ func Evaluate(in Input) Evaluation {
 	case v == verdictFail && fk == failNotConcluded:
 		return Evaluation{Terminal: true, Reason: "incomplete comprehensive evidence", Summary: summary}
 	case v == verdictFail:
-		return Evaluation{Terminal: true, Reason: fmt.Sprintf("%s concluded %q, not success", CIRequiredName, word), Summary: summary}
+		switch baseOutcome := classifyBaseRed(in); baseOutcome {
+		case baseRedConfirmed:
+			return Evaluation{
+				Terminal:             true,
+				Pass:                 true,
+				BaseInheritedFailure: true,
+				Reason: fmt.Sprintf("%s concluded %q at head %s but the same check is failing at base %s -- base-inherited failure, non-blocking; re-evaluated on the next event once base recovers",
+					CIRequiredName, word, shortSHA(in.HeadSHA), shortSHA(in.BaseSHA)),
+				Summary: summary,
+			}
+		case baseRedUnknown:
+			if atDeadline {
+				if in.BaseFetchError != nil {
+					return Evaluation{
+						Terminal: true,
+						Reason:   fmt.Sprintf("%s concluded %q at the head, not success; base verdict unavailable: %v", CIRequiredName, word, in.BaseFetchError),
+						Summary:  summary,
+					}
+				}
+				return Evaluation{Terminal: true, Reason: fmt.Sprintf("%s concluded %q, not success", CIRequiredName, word), Summary: summary}
+			}
+			// The base picture is still incomplete and the deadline has not
+			// passed: keep observing, a later poll may still resolve the
+			// attribution either way.
+			return Evaluation{Summary: summary}
+		default: // baseRedDisabled, baseRedDisproved
+			return Evaluation{Terminal: true, Reason: fmt.Sprintf("%s concluded %q, not success", CIRequiredName, word), Summary: summary}
+		}
 	}
 
 	if !in.NeedsMacLabel {

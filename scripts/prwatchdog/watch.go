@@ -25,8 +25,13 @@ type PollOptions struct {
 	HeadSHA                  string
 	NeedsMacLabel            bool
 	NeedsReviewFormulasLabel bool
-	Deadline                 time.Duration
-	Interval                 time.Duration
+	// BaseSHA, when non-empty, is fetched alongside HeadSHA on every poll
+	// and handed to Evaluate as BaseCheckRuns for the base-red comparison.
+	// A failed base fetch is reported through Input.BaseFetchError and never
+	// interrupts the observation loop on its own.
+	BaseSHA  string
+	Deadline time.Duration
+	Interval time.Duration
 }
 
 // Watch polls fetcher for check runs on opts.HeadSHA, evaluating after each
@@ -37,6 +42,12 @@ func Watch(ctx context.Context, fetcher Fetcher, clock Clock, sleeper Sleeper, o
 		elapsed := clock.Now().Sub(start)
 		runs, err := fetcher.FetchCheckRuns(ctx, opts.HeadSHA)
 
+		var baseRuns []CheckRun
+		var baseErr error
+		if opts.BaseSHA != "" {
+			baseRuns, baseErr = fetcher.FetchCheckRuns(ctx, opts.BaseSHA)
+		}
+
 		eval := Evaluate(Input{
 			HeadSHA:                  opts.HeadSHA,
 			CheckRuns:                runs,
@@ -45,6 +56,9 @@ func Watch(ctx context.Context, fetcher Fetcher, clock Clock, sleeper Sleeper, o
 			NeedsMacLabel:            opts.NeedsMacLabel,
 			NeedsReviewFormulasLabel: opts.NeedsReviewFormulasLabel,
 			FetchError:               err,
+			BaseSHA:                  opts.BaseSHA,
+			BaseCheckRuns:            baseRuns,
+			BaseFetchError:           baseErr,
 		})
 		if eval.Terminal {
 			return eval
