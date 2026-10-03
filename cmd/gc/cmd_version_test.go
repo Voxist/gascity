@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"runtime/debug"
 	"testing"
 )
@@ -219,5 +220,105 @@ func TestResolveBuildMetadataDirtinessFollowsCommitIdentity(t *testing.T) {
 				t.Fatalf("commit = %q, want %q", commit, tt.want)
 			}
 		})
+	}
+}
+
+// TestFormatShortVersion pins the default (no-flag) output contract
+// (vp-9ry5w AC1/AC3): an unstamped "dev" build carries its commit in the
+// same 9-char form artifact names use, never claims a semver it does not
+// have, and reports whether the build carried no provenance at all so the
+// caller can point the reader at --long/--json.
+func TestFormatShortVersion(t *testing.T) {
+	tests := []struct {
+		name            string
+		version, commit string
+		want            string
+		wantUnprov      bool
+	}{
+		{"dev full sha", "dev", "06e394c56b5ddeadbeef06e394c56b5ddeadbeef", "dev (06e394c56)", false},
+		{"dev 9-char sha", "dev", "06e394c56", "dev (06e394c56)", false},
+		{"dev dirty", "dev", "06e394c56b5ddeadbeef06e394c56b5ddeadbeef-dirty", "dev (06e394c56-dirty)", false},
+		{"dev short hash kept whole", "dev", "abc1234", "dev (abc1234)", false},
+		{"dev short hash dirty kept whole", "dev", "abc1234-dirty", "dev (abc1234-dirty)", false},
+		{"dev unknown commit hints", "dev", "unknown", "dev", true},
+		{"dev empty commit hints", "dev", "", "dev", true},
+		{"stamped version unchanged", "1.2.3", "unknown", "1.2.3", false},
+		{"stamped version ignores commit", "1.2.3", "06e394c56b5d", "1.2.3", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, unprov := formatShortVersion(tt.version, tt.commit)
+			if got != tt.want {
+				t.Errorf("formatShortVersion(%q, %q) = %q, want %q", tt.version, tt.commit, got, tt.want)
+			}
+			if unprov != tt.wantUnprov {
+				t.Errorf("formatShortVersion(%q, %q) unprovenanced = %v, want %v", tt.version, tt.commit, unprov, tt.wantUnprov)
+			}
+		})
+	}
+}
+
+func TestAbbreviateCommit(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"06e394c56b5ddeadbeef06e394c56b5ddeadbeef", "06e394c56"},
+		{"06e394c56", "06e394c56"},
+		{"abc1234", "abc1234"},
+		{"06e394c56b5ddeadbeef06e394c56b5ddeadbeef-dirty", "06e394c56-dirty"},
+		{"abc1234-dirty", "abc1234-dirty"},
+	}
+	for _, tt := range tests {
+		if got := abbreviateCommit(tt.in); got != tt.want {
+			t.Errorf("abbreviateCommit(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// TestVersionCmdShortFormUnstamped exercises the command wiring end to
+// end: the default output carries the commit and the stderr hint stays
+// quiet when the build knows what it is (vp-9ry5w AC1).
+func TestVersionCmdShortFormUnstamped(t *testing.T) {
+	savedVersion, savedCommit := version, commit
+	version, commit = "dev", "06e394c56b5ddeadbeef06e394c56b5ddeadbeef"
+	defer func() { version, commit = savedVersion, savedCommit }()
+
+	var stdout, stderr bytes.Buffer
+	cmd := newVersionCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{})
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got, want := stdout.String(), "dev (06e394c56)\n"; got != want {
+		t.Errorf("stdout = %q, want %q", got, want)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+// The unprovenanced corner (no ldflags, no VCS info): the output stays
+// honest "dev" but must TELL the reader where provenance lives when it
+// exists (vp-9ry5w AC1 "or tells them how to").
+func TestVersionCmdShortFormUnprovenanced(t *testing.T) {
+	savedVersion, savedCommit := version, commit
+	version, commit = "dev", "unknown"
+	defer func() { version, commit = savedVersion, savedCommit }()
+
+	var stdout, stderr bytes.Buffer
+	cmd := newVersionCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{})
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got, want := stdout.String(), "dev\n"; got != want {
+		t.Errorf("stdout = %q, want %q", got, want)
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("--long")) {
+		t.Errorf("stderr = %q, want a pointer at --long", stderr.String())
 	}
 }
