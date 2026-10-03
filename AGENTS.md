@@ -461,7 +461,8 @@ These decisions are final. Do not revisit them.
 - **`engdocs/archive/backlogs/worktree-roadmap.md`** — Worktree isolation roadmap, polecat
   lifecycle analysis, and Gas Town cleanup bug lessons.
 - **`engdocs/contributors/release-gate-criteria-conventions.md`** — What the
-  "Tests pass" criterion in a `release-gates/*.md` file must cite. Apply this
+  "Tests pass" criterion in a `release-gates/*.md` file must cite, including
+  the evidence bar for citing a previously red test as fixed. Apply this
   before signing off that criterion on any deploy gate.
 
 ## Key design principles

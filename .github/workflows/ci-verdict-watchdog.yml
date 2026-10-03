@@ -6,6 +6,19 @@
 # with no CI check at all -- which looks identical to "everything passed" to
 # anyone glancing at the commit or PR checks list.
 #
+# The second job covers the other silent-verdict class (vp-15qfy D2): a
+# failure in one of ci.yml's push-only lanes (Preflight / unit cover,
+# Integration / rest-full-*). Those suites are gated
+# `if: github.event_name == 'push'`, so they are structurally incapable of
+# failing a pull request -- their red exists only as one failed job in a
+# main-branch run that everything else scrolls past. Measured: main went red
+# on 2026-09-09 at 02:19Z in `Preflight / unit cover (cmd/gc 3 of 6)` and
+# nothing surfaced it for ~90 minutes. The job flags such a failure as a
+# failing check-run on the head commit -- the surface release gates and
+# reviewers already read -- because post-merge alerting is the only lever a
+# push-only lane has (the lanes are unreachable from PR branches by design,
+# so there is no "pre-run it on the branch" workaround).
+#
 # SECURITY MODEL: workflow_run-triggered workflows always execute the
 # workflow file version committed on the default branch, never the head
 # branch of whatever push indirectly triggered them. That is what makes
@@ -52,3 +65,62 @@ jobs:
             -f details_url="${RUN_URL}" \
             -f output[title]="CI produced no verdict (run cancelled)" \
             -f output[summary]="This commit's CI run was cancelled (a manual cancel, a GitHub incident, or a concurrency-group collision), most often while still queued. Some jobs may have executed, or none. Either way this commit has no CI verdict. This check exists so a cancelled run shows up as an explicit non-verdict instead of silence that could be mistaken for a pass. See the run: ${RUN_URL}"
+
+  flag-push-only-lane-failure:
+    name: Flag failed push-only lane on main
+    if: >
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post failing check-run for the push-only lane jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          set -euo pipefail
+          # Scope: the three push-only job families in ci.yml
+          # (preflight-unit-cover-noncmdgc, preflight-unit-cover-cmdgc,
+          # integration-rest-full). A failure in a PR-gated lane on main is
+          # out of scope here -- that red surfaces through the normal
+          # PR/review path; this watchdog exists for the lanes that have no
+          # such path.
+          FAILED_JOBS="$(gh api \
+            "/repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs?per_page=100" \
+            --paginate \
+            --jq '.jobs[] | select(.conclusion == "failure") | .name' | sort -u)"
+          PUSH_ONLY_FAILED="$(printf '%s\n' "${FAILED_JOBS}" \
+            | grep -E '^Preflight / unit cover \(noncmdgc |^Preflight / unit cover \(cmd/gc |^Integration / rest-full-' \
+            || true)"
+          if [ -z "${PUSH_ONLY_FAILED}" ]; then
+            echo "No push-only lane job failed; nothing to flag."
+            if [ -n "${FAILED_JOBS}" ]; then
+              echo "Failed jobs outside the push-only families (out of scope):"
+              printf '%s\n' "${FAILED_JOBS}"
+            fi
+            exit 0
+          fi
+          {
+            echo '::error::Push-only lane failed on main -- these suites never gate a PR, so this red was otherwise silent (vp-15qfy D2):'
+            printf '%s\n' "${PUSH_ONLY_FAILED}" | sed 's/^/::error::  /'
+          }
+          SUMMARY="$(printf '%s\n' "${PUSH_ONLY_FAILED}" | sed 's/^/* `/;s/$/`/')"
+          BODY="The following push-only lane jobs failed on main. These job families are gated if: github.event_name == 'push' in ci.yml and are structurally incapable of failing a pull request, so this failure surfaced nowhere else (vp-15qfy D2). Main-red in a push-only lane is a release blocker for the fleet binary roll. Fix before rolling; treat the associated test per the deterministic-red evidence bar (engdocs/contributors/release-gate-criteria-conventions.md).
+
+          ${SUMMARY}
+
+          See the run: ${RUN_URL}"
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/check-runs" \
+            -f name="CI verdict: push-only lane failed (no pre-merge gate)" \
+            -f head_sha="${HEAD_SHA}" \
+            -f status="completed" \
+            -f conclusion="failure" \
+            -f completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -f details_url="${RUN_URL}" \
+            -f output[title]="Push-only lane failed on main (silent-gate class)" \
+            -f output[summary]="${BODY}"

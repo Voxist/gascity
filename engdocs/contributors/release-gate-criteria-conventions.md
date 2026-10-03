@@ -34,6 +34,40 @@ The general principle behind the example: "tests pass" must mean "the
 gate's actual required checks passed," not "a command I chose passed."
 Don't let convenience substitute for coverage.
 
+## A previously red test cited as fixed
+
+A green run is evidence only relative to the failure it claims to fix. When
+a test failed and a change claims to fix it, one green re-run does not:
+a nondeterministic failure passes about half the time with no fix at all.
+Measured instance: PR #183 merged on a single green re-run of a test that
+had gone red 37 minutes earlier; the mis-fix left the failure probability
+at 50% and the regression landed on main (bead `vp-15qfy`, mechanism in
+`vp-fyyz9`).
+
+Before citing "Tests pass" for a fix of a red test, satisfy one of:
+
+- **Deterministic red at the parent.** Run the regression test against the
+  unfixed code (the fix branch's parent commit) and show it fails, then
+  green at the fix commit. One red plus one green is then decisive: it
+  demonstrates the test's red is reproducible and that this change is what
+  turns it off.
+- **Repeated greens where a red cannot be produced.** If the failure cannot
+  be reproduced deterministically (environment gone, timing no longer
+  observable), re-run the failing test at the fix commit at least 10
+  consecutive times and cite the command. Ten greens of a 50/50 draw have
+  p ≈ 0.1% — evidence of a real fix, unlike one.
+
+State which of the two you did in the criterion. A single green re-run of a
+test that went red earlier in the same PR is not acceptable evidence for a
+release gate or a merge decision.
+
+Related silent-gate class: a failure in a push-only lane (`Preflight /
+unit cover`, `Integration / rest-full-*`) never gates a PR at all — it can
+only turn main red post-merge. Main-red in a push-only lane is a release
+blocker for the fleet binary roll; the CI Verdict Watchdog
+(`.github/workflows/ci-verdict-watchdog.yml`) flags it as a failing
+check-run on the head commit.
+
 ## Why this doc exists
 
 Two independent gate files recorded "Tests pass: PASS" against suites
