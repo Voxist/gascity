@@ -135,9 +135,9 @@ func DeriveArtifact(repoPath, baseRef string) (Artifact, error) {
 		Dirty:      dirty,
 		BaseRef:    baseRef,
 		BaseBranch: parts[1],
-		BaseSHA:  baseSHA,
-		Ahead:    ahead,
-		Behind:   behind,
+		BaseSHA:    baseSHA,
+		Ahead:      ahead,
+		Behind:     behind,
 	}, nil
 }
 
