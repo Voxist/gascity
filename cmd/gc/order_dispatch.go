@@ -409,6 +409,58 @@ type memoryOrderDispatcher struct {
 	lastRunCache        map[string]time.Time
 	gateBackoffUntil    map[string]time.Time
 	openWorkSuppression map[string]orderOpenWorkSuppression
+	// recoverSF is the single-flight guard for RecoverOnStoreUnavailable
+	// orders: it marks, per scoped order name, that an exec is currently in
+	// flight -- whether launched by the normal tracked path
+	// (launchResolvedDispatch) or by the storeless fallback
+	// (maybeFireStoreUnavailableFallback). Acquired before the launching
+	// goroutine starts and released once dispatchOne (or
+	// dispatchExecStoreless) has fully finished. Guarded by ITS OWN mutex,
+	// deliberately separate from cacheMu: a dispatcher swap (config reload
+	// or order rescan) shares this SAME object, by pointer, between the
+	// retiring and the replacing memoryOrderDispatcher instance (ga-3bwmf
+	// review round 5 -- see CityRuntime.replaceOrderDispatcher), and those
+	// two instances do not share a cacheMu, so serializing this through
+	// cacheMu would not serialize across instances at all. Access it only
+	// through the singleFlight() accessor, which lazily creates a private
+	// instance for a dispatcher CityRuntime never wired one into (a test, or
+	// the webhook seam's per-delivery dispatcher in api_state.go -- see the
+	// KNOWN GAP note below).
+	//
+	// This is the ONE fact both paths consult, so they can never overlap
+	// for the same order (ga-3bwmf review round 3): the fallback exec
+	// writes no tracking bead (the store is down while it runs), so the
+	// normal path's store-backed open-work gates cannot see it running, and
+	// symmetrically a normal dispatch's own tracking bead is invisible to
+	// the fallback while the store stays down. An in-memory fact checked by
+	// both is the only thing either path can consult regardless of store
+	// reachability. Independently needed even ignoring that gap:
+	// beads-health's own timeout (60s) exceeds its cooldown interval (30s),
+	// so without this a store that stays down across two ticks could have a
+	// second `gc beads health` admitted before the first one exits -- true
+	// for either path alone, and doubly true across the two.
+	//
+	// SCOPE: this fact lives entirely in THIS controller process's memory,
+	// shared by pointer across every memoryOrderDispatcher instance that can
+	// run on behalf of the SAME CityRuntime (the active one and any still
+	// draining in retiredOrderDispatchers after a swap) -- not across
+	// processes. It does not, and cannot, serialize against a
+	// `gc beads health` started by hand, by a different automation, or by
+	// another gc process entirely -- each such process has its own empty
+	// object. The cross-process guard for the same "never overlap" invariant
+	// is gc-beads-bd.sh's op_start LOCK_FILE flock; ga-iv2l2 tracks that
+	// op_recover's own stop call runs BEFORE that flock is acquired, so it
+	// is not yet a complete guard either.
+	//
+	// KNOWN GAP: the webhook seam (api_state.go's controllerWebhookDispatcher.
+	// dispatcher) builds a brand-new memoryOrderDispatcher per delivery, which
+	// CityRuntime never wires into this sharing -- each delivery's singleFlight()
+	// call lazily creates its own private, single-use instance. A
+	// RecoverOnStoreUnavailable order fired only via webhook would not be
+	// guarded across deliveries or against the tick loop's cr.od. Not
+	// exercised by beads-health (tick-triggered), and out of scope for this
+	// round; tracked as a follow-up, not fixed here.
+	recoverSF *recoverSingleFlight
 
 	dispatchCtx    context.Context
 	dispatchCancel context.CancelFunc
@@ -416,6 +468,63 @@ type memoryOrderDispatcher struct {
 	inflightMu   sync.Mutex
 	inflightN    int
 	inflightDone chan struct{} // closed when inflightN returns to 0; nil when idle
+}
+
+// recoverSingleFlight is the single-flight guard for RecoverOnStoreUnavailable
+// orders. It is designed to be shared, by pointer, across every
+// memoryOrderDispatcher instance that can run on behalf of the same
+// CityRuntime -- see the doc comment on memoryOrderDispatcher.recoverSF and
+// CityRuntime.replaceOrderDispatcher (ga-3bwmf review round 5). Its own
+// mutex is independent of any dispatcher's cacheMu for exactly that reason:
+// sharing only the map, not the lock guarding it, would not be safe sharing
+// at all once two dispatcher instances are both in play.
+type recoverSingleFlight struct {
+	mu      sync.Mutex
+	running map[string]bool
+}
+
+// tryAcquire reports whether scoped was not already marked running, and if
+// true, marks it running as part of the same critical section (check and
+// set are atomic together). The caller must release scoped, via a defer on
+// every exit path, once the exec this acquire represents has fully
+// finished -- see dispatchOne's preInflightRelease hook and
+// maybeFireStoreUnavailableFallback's matching defer order for why that
+// release must happen no later than the dispatcher's own doneInflight.
+func (sf *recoverSingleFlight) tryAcquire(scoped string) bool {
+	sf.mu.Lock()
+	defer sf.mu.Unlock()
+	if sf.running[scoped] {
+		return false
+	}
+	if sf.running == nil {
+		sf.running = make(map[string]bool)
+	}
+	sf.running[scoped] = true
+	return true
+}
+
+// release clears scoped's running mark. Safe to call even when scoped was
+// never acquired, or was already released -- both are no-ops.
+func (sf *recoverSingleFlight) release(scoped string) {
+	sf.mu.Lock()
+	defer sf.mu.Unlock()
+	delete(sf.running, scoped)
+}
+
+// singleFlight returns m's recoverSingleFlight guard, lazily creating a
+// private, dispatcher-scoped instance if CityRuntime never wired one in
+// (a test, or the webhook seam's per-delivery dispatcher -- see the KNOWN
+// GAP note on memoryOrderDispatcher.recoverSF). The lazy creation itself is
+// guarded by cacheMu, which is safe: cacheMu only ever protects THIS
+// instance's recoverSF field (the pointer itself), never the shared map the
+// pointer may point to once set.
+func (m *memoryOrderDispatcher) singleFlight() *recoverSingleFlight {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if m.recoverSF == nil {
+		m.recoverSF = &recoverSingleFlight{}
+	}
+	return m.recoverSF
 }
 
 type orderDispatchTrackingIndex struct {
@@ -807,6 +916,15 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			store, err = m.storeFn(target)
 			if err != nil {
 				logDispatchError(m.stderr, "gc: order dispatch: opening %s store for %s: %v", target.ScopeKind, a.ScopedName(), err)
+				// ga-3bwmf: an order that opts in may still run its exec here,
+				// store-free, when the store itself is what's unavailable — see
+				// maybeFireStoreUnavailableFallback for why and its own
+				// cooldown. In practice a bd-contract provider's
+				// OpenStoreAtForCity does not fail this way today (a dead
+				// native open falls back to a BdStore constructor, which
+				// cannot error) — this stays wired for whatever provider or
+				// future path CAN fail here.
+				m.maybeFireStoreUnavailableFallback(ctx, a, target, cityPath, now, err)
 				continue
 			}
 			stores[storeKey] = store
@@ -845,6 +963,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 						// contended Dolt every tick (#3688 #3770).
 						m.setGateBackoff(scoped, time.Now().Add(orderGateBackoffDuration))
 					}
+					m.maybeFireStoreUnavailableFallback(ctx, a, target, cityPath, now, err)
 					continue
 				}
 			}
@@ -969,7 +1088,7 @@ func (m *memoryOrderDispatcher) logUnreachedCandidates(unreached []*orderDispatc
 // starve the orders behind it, and a timeout that fails closed also arms the
 // per-order backoff. NoWorkGate orders skip the gate entirely (see the matching
 // open-tracking skip in dispatch's phase 1).
-func (m *memoryOrderDispatcher) openWorkGateShut(ctx context.Context, cand *orderDispatchCandidate, trackingIndex *orderDispatchTrackingIndex, now time.Time) bool {
+func (m *memoryOrderDispatcher) openWorkGateShut(ctx context.Context, cand *orderDispatchCandidate, trackingIndex *orderDispatchTrackingIndex, cityPath string, now time.Time) bool {
 	a := cand.order
 	scoped := cand.scoped
 	if a.NoWorkGate {
@@ -985,6 +1104,7 @@ func (m *memoryOrderDispatcher) openWorkGateShut(ctx context.Context, cand *orde
 				// using the tick-start 'now' would set a deadline that has already passed.
 				m.setGateBackoff(scoped, time.Now().Add(orderGateBackoffDuration))
 			}
+			m.maybeFireStoreUnavailableFallback(ctx, a, cand.target, cityPath, now, err)
 			return true
 		}
 	}
@@ -1130,7 +1250,7 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 		}
 	}
 
-	if m.openWorkGateShut(ctx, cand, trackingIndex, now) {
+	if m.openWorkGateShut(ctx, cand, trackingIndex, cityPath, now) {
 		return false
 	}
 
@@ -1147,11 +1267,322 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 	trackingBead, err := m.launchResolvedDispatch(ctx, store, target, a, cityPath, nil, nil, inFlight.Done)
 	if err != nil {
 		inFlight.Done()
+		if errors.Is(err, errRecoverOnStoreUnavailableExecAlreadyRunning) {
+			// Single-flight yield, not a store failure: the fallback (or
+			// another normal dispatch of this order) already owns the one
+			// exec slot the recoverSF single-flight guard enforces. No
+			// fallback call and no error log here — this is the guard
+			// working, not a failure.
+			return false
+		}
 		logDispatchError(m.stderr, "gc: order dispatch: creating tracking bead for %s: %v", scoped, err)
+		m.maybeFireStoreUnavailableFallback(ctx, a, target, cityPath, now, err)
 		return false
 	}
 	m.rememberLastRun(scoped, storeKeysForGate, trackingBead.CreatedAt)
 	return true
+}
+
+// storeUnavailableFallbackMinCooldown floors maybeFireStoreUnavailableFallback's
+// cooldown when an order's own Interval is unset, unparseable, or shorter
+// than this, so a misconfigured order can never fire this path every tick.
+const storeUnavailableFallbackMinCooldown = 30 * time.Second
+
+// storeUnavailableFallbackCooldown resolves how often an order is allowed to
+// fire through the store-unavailable fallback. It reuses the order's own
+// cooldown Interval — the cadence the operator already chose for this order
+// — floored at storeUnavailableFallbackMinCooldown.
+func storeUnavailableFallbackCooldown(a orders.Order) time.Duration {
+	d, err := time.ParseDuration(a.Interval)
+	if err != nil || d < storeUnavailableFallbackMinCooldown {
+		return storeUnavailableFallbackMinCooldown
+	}
+	return d
+}
+
+// classifyStoreUnavailableFallbackTrigger reports whether err carries death
+// evidence for the beads store — an actively refused or unresolvable
+// endpoint (the ga-xuapz shape: a dolt sql-server that is not listening at
+// all) — as distinct from a store call that merely timed out against
+// something still listening, or that failed transiently under load against
+// a store that is otherwise alive.
+//
+// This deliberately does NOT reuse classifyWorkQueryStoreUnavailable (gc
+// hook's own classifier), which treats context.DeadlineExceeded as
+// store-unavailable on purpose (a wedged-but-listening Dolt is gc hook's
+// dominant outage shape, and reading it as no-work is the dead-drop that
+// classifier exists to close). maybeFireStoreUnavailableFallback is not gc
+// hook: firing it launches a bare exec with no tracking bead and no
+// open-work gate, and a live-but-slow store recovering mid-fallback is
+// exactly the one-directional-clock hazard the SHARED CLOCK section below
+// describes. The first round of this fallback reused gc hook's own broader
+// marker table (isTransportClassMessage / bdTransportRetryableMarkers); the
+// round-3 review reproduced that firing against a live store under load
+// (see storeUnavailableFallbackTimeoutMarkers and
+// storeUnavailableFallbackDeathMarkers below), so this classifier now keeps
+// its own, deliberately narrower, two-stage check instead.
+//
+// storeUnavailableFallbackTimeoutMarkers mark an error as TIMEOUT-shaped
+// rather than death evidence: a live-but-slow or contended store produces
+// these too, so none of them may authorize this fallback regardless of what
+// OTHER marker also appears in the same message. Checked first and
+// unconditionally (ga-3bwmf review round 3, M1: at load 200, a live Dolt's
+// filled accept backlog produced "dial tcp …: i/o timeout" and "connect:
+// operation timed out" — both matched by the broader marker table this
+// fallback used to reuse, firing it against a live store).
+var storeUnavailableFallbackTimeoutMarkers = []string{
+	"timeout",
+	"timed out",
+	"deadline",
+}
+
+// storeUnavailableFallbackDeathMarkers are the only substrings this
+// fallback treats as death evidence: an actively refused or unresolvable
+// endpoint. Deliberately narrower than bdTransportRetryableMarkers/
+// isTransportClassMessage (gc hook's own classifier): the round-3 review
+// reproduced "driver: bad connection", "broken pipe", "unexpected EOF", and
+// "use of closed network connection" all firing against a LIVE store under
+// load — a filled accept backlog can reset or half-close a connection
+// exactly like each of these, so none of them is decisive death evidence.
+// Only an endpoint that actively refused the connection or could not be
+// resolved is.
+var storeUnavailableFallbackDeathMarkers = []string{
+	"connection refused",
+	"no such host",
+	"server unreachable",
+}
+
+func classifyStoreUnavailableFallbackTrigger(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range storeUnavailableFallbackTimeoutMarkers {
+		if strings.Contains(msg, marker) {
+			return false
+		}
+	}
+	for _, marker := range storeUnavailableFallbackDeathMarkers {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	// bd's silent on-disk fallback markers are allowed only once the
+	// timeout check above has already cleared: they mean bd itself gave up
+	// reaching the managed server and fell back to an on-disk store, not
+	// that this one call merely timed out.
+	return strings.Contains(msg, bdSilentFallbackMarkerImport) || strings.Contains(msg, bdSilentFallbackMarkerEmptyDB)
+}
+
+// maybeFireStoreUnavailableFallback is the ga-3bwmf escape hatch. Call it
+// from every point in the dispatch pipeline where a beads-store operation
+// can fail for an order — the store-open itself, either open-work gate, and
+// the tracking-bead CreateRun — with the error each one actually produced.
+// For an order that opted in with RecoverOnStoreUnavailable, and only when
+// err classifies via classifyStoreUnavailableFallbackTrigger as death
+// evidence, it runs that order's exec directly.
+//
+// WHY THIS EXISTS. Every other path to dispatching an order needs a beads
+// store: the due-check reads order-tracking beads, both open-work gates
+// query it, and a normal dispatch writes a tracking bead before running the
+// exec (launchResolvedDispatch → CreateRun). So a fully-down store makes
+// every order fail closed before its exec ever runs — including the one
+// order whose entire job is noticing the store is down and recovering it
+// (beads-health → gc beads health --quiet → runGuardedManagedDoltRecover).
+// This function is the one place that breaks that chicken-and-egg, and ONLY
+// for orders that explicitly ask for it: it runs the bare exec, with no
+// tracking bead and no open-work gate, gated by its own cooldown (shared
+// with the normal path's clock, see below) and a single-flight guard.
+//
+// WHAT IT DOES NOT DO. It never touches the managed-dolt recover invariants
+// ga-amol9 landed: this function does not call runGuardedManagedDoltRecover
+// or any recover primitive directly. It only ensures the order's own exec —
+// which may or may not decide to recover anything — actually gets to run.
+// The liveness check, the "never replace a live server" rule, and the single
+// cooldown-throttled recover route all still live entirely inside that
+// exec's own process (gc beads health), untouched by this path.
+//
+// It deliberately does NOT fire for a context.DeadlineExceeded from a store
+// call that ran to completion against a slow-but-LIVE store (see
+// classifyStoreUnavailableFallbackTrigger above) — a real regression this PR
+// closes: before it, this fired there too, and until ga-z3c6p's fix landed
+// (gc dolt-state's query probe timing out was misclassified as an answered,
+// confirmed-bad server rather than an unobservable one — see that bead) the
+// exec this fallback launches could reach a live-server replace on nothing
+// but slowness. ga-z3c6p made that exec's own liveness check honest again in
+// the general case, but this fallback still has no business firing a
+// store-free exec against a store that is merely slow; only a genuinely dead
+// store — connection refused, no such host, server unreachable
+// (storeUnavailableFallbackDeathMarkers above) — is worth bypassing the
+// tracking bead and open-work gate for. See
+// TestGuardedRecoverDeclinesAgainstALiveServer
+// (beads_provider_recover_gate_test.go, pre-dating this PR) for the pinned
+// proof that call-failed evidence against a confirmed-live server is
+// declined by the exec anyway, in case some other message this function
+// does key on ever turns out to reach a live server too.
+//
+// SHARED CLOCK. The due-check and the fire both read/write the same
+// lastRunCache the normal tracking-bead path uses (peekLastRunLocked /
+// rememberLastRunLocked, under one cacheMu critical section so the two
+// cannot race each other): a fallback fire advances the clock the normal
+// path's cooldown trigger also consults, and a normal dispatch that manages
+// to complete advances the clock this function consults. Carried across a
+// dispatcher rebuild automatically, since it rides carryLastRunCacheFrom.
+//
+// It silently no-ops for a non-exec (formula) order (materializing a wisp
+// needs a store) and for an err that does not classify as death evidence.
+func (m *memoryOrderDispatcher) maybeFireStoreUnavailableFallback(ctx context.Context, a orders.Order, target execStoreTarget, cityPath string, now time.Time, err error) {
+	if !a.RecoverOnStoreUnavailable || !a.IsExec() {
+		return
+	}
+	if ctx.Err() != nil {
+		// A canceled/expired dispatch context (shutdown, reload, tick
+		// deadline) is not a signal about the STORE at all; racing a bare
+		// exec launch against a context already on its way out only adds an
+		// orphaned goroutine with nothing to cancel it cleanly.
+		return
+	}
+	if !classifyStoreUnavailableFallbackTrigger(err) {
+		return
+	}
+	scoped := a.ScopedName()
+	cooldown := storeUnavailableFallbackCooldown(a)
+	key := orderHistoryCacheKey(scoped, nil)
+	timeout := effectiveTimeout(a, m.maxTimeout)
+
+	// Acquire the shared running fact FIRST (its own lock, not cacheMu --
+	// see recoverSingleFlight's doc comment), then the cooldown check and
+	// the clock write under cacheMu. If the order isn't actually due yet,
+	// release immediately below: the acquire was only ever provisional
+	// until the cooldown check passes. Nothing risky (the OrderFired
+	// Record, timeout computation) happens between the flag being set and
+	// the goroutine starting -- that work moved INSIDE the goroutine below,
+	// after the flag is already durably set, so a panic there cannot leave
+	// the flag stuck true with no goroutine left to clear it, and a yield
+	// here can never emit a false OrderFired event for a fire that didn't
+	// happen (ga-3bwmf review round 3, L1).
+	sf := m.singleFlight()
+	if !sf.tryAcquire(scoped) {
+		// Visible, not an error: see the matching log call in
+		// launchResolvedDispatch's own single-flight check.
+		logDispatchError(m.stderr, "gc: order dispatch: %s: single-flight guard: a recover-on-store-unavailable exec is already running for this order (normal dispatch or an earlier fallback fire); skipping the fallback", scoped)
+		return
+	}
+	acquired := true
+	defer func() {
+		// Safety net: releases the flag on any exit before `committed` is
+		// set below -- the cooldown-not-due return, or a panic unwinding
+		// through this function before the goroutine starts.
+		if acquired {
+			sf.release(scoped)
+		}
+	}()
+	m.cacheMu.Lock()
+	if last, ok := m.peekLastRunLocked(scoped); ok && now.Sub(last) < cooldown {
+		m.cacheMu.Unlock()
+		return
+	}
+	m.rememberLastRunLocked(key, now)
+	m.cacheMu.Unlock()
+
+	m.addInflight()
+	acquired = false // ownership moves to the goroutine's own release below
+	go func() {
+		// Defer order matters, same as dispatchOne's preInflightRelease: the
+		// flag-release is registered AFTER doneInflight, so by LIFO it
+		// unwinds BEFORE doneInflight — on every exit path, including the
+		// recover below. That makes the flag's release visible no later
+		// than drain() can observe this goroutine as finished. See the
+		// launchResolvedDispatch/dispatchOne comment for the bug this
+		// ordering avoids on the normal-path half of this same guard.
+		defer m.doneInflight()
+		defer sf.release(scoped)
+		defer func() {
+			if p := recover(); p != nil {
+				logDispatchError(m.stderr, "gc: order %s: store-unavailable fallback dispatch panic: %v", scoped, p)
+			}
+		}()
+		m.rec.Record(events.Event{
+			Type:    events.OrderFired,
+			Actor:   "controller",
+			Subject: scoped,
+			Message: "dispatched via store-unavailable fallback: beads store is down, running exec without a tracking bead (ga-3bwmf)",
+		})
+		// Derive from m.dispatchCtx like launchDispatchOne, so a shutdown or
+		// reload cancels this goroutine even when the caller's tick ctx is
+		// context.Background() (test sites without a live dispatchCtx).
+		fireCtx := ctx
+		if m.dispatchCtx != nil {
+			mergedCtx, cancelMerged := context.WithCancel(ctx)
+			stopAfter := context.AfterFunc(m.dispatchCtx, cancelMerged)
+			defer stopAfter()
+			defer cancelMerged()
+			fireCtx = mergedCtx
+		}
+		childCtx, cancel := context.WithTimeout(fireCtx, timeout)
+		defer cancel()
+		m.dispatchExecStoreless(childCtx, target, a, cityPath, nil)
+	}()
+}
+
+// dispatchExecStoreless is dispatchExec with every beads-store touch removed:
+// no tracking-bead outcome label, no event-cursor persistence. That is safe
+// regardless of which of maybeFireStoreUnavailableFallback's call sites
+// reached it — the store-open failure and the hasOpenTracking gate failure
+// in dispatch's per-order loop (both before a candidate exists), or the
+// hasOpenWork gate failure (openWorkGateShut) and the tracking-bead
+// CreateRun failure (both after a candidate exists, and so, for an
+// event-triggered order, after its cursor read already succeeded — a
+// cursor-read failure returns fireCandidate early, before either of those
+// two gates, so this path never runs FOR that failure). An event-triggered
+// order that does reach this function simply has its cursor left where it
+// was: the next normal-path tick re-evaluates from the same position, which
+// is at-least-once, not silently-skipped — the semantics event orders
+// already tolerate elsewhere. It still builds the order's real exec
+// environment and runs the real command, and still records the same
+// OrderFailed/OrderCompleted events dispatchExec does — the event bus is
+// independent of beads and stays available exactly when this path is used.
+func (m *memoryOrderDispatcher) dispatchExecStoreless(ctx context.Context, target execStoreTarget, a orders.Order, cityPath string, vars map[string]string) {
+	scoped := a.ScopedName()
+	env, err := orderExecEnvWithError(cityPath, m.cfg, target, a, vars)
+	if err != nil {
+		redactionEnv := append(os.Environ(), env...)
+		redacted := redactOrderEnvError(err, redactionEnv)
+		logDispatchError(m.stderr, "gc: order exec %s env failed (store-unavailable fallback): %s", scoped, redacted)
+		m.rec.Record(events.Event{
+			Type:    events.OrderFailed,
+			Actor:   "controller",
+			Subject: scoped,
+			Message: "exec env failed: " + redacted,
+		})
+		return
+	}
+	output, err := m.execRun(ctx, a.Exec, target.ScopeRoot, env)
+	if err != nil {
+		redactionEnv := append(os.Environ(), env...)
+		execErrMsg := execenv.RedactText(err.Error(), redactionEnv)
+		logDispatchError(m.stderr, "gc: order exec %s failed (store-unavailable fallback): %s", scoped, execErrMsg)
+		if len(output) > 0 {
+			redactedOutput := execenv.RedactText(string(output), redactionEnv)
+			logDispatchError(m.stderr, "gc: order exec %s output: %s", scoped, redactedOutput)
+			execErrMsg += ": " + tailForOrderFailureEvent(redactedOutput)
+		}
+		m.rec.Record(events.Event{
+			Type:    events.OrderFailed,
+			Actor:   "controller",
+			Subject: scoped,
+			Message: execErrMsg,
+		})
+		return
+	}
+	m.rec.Record(events.Event{
+		Type:    events.OrderCompleted,
+		Actor:   "controller",
+		Subject: scoped,
+	})
 }
 
 // launchDispatchOne spawns dispatchOne with a context that cancels when
@@ -1162,14 +1593,25 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 // once after dispatchOne returns — i.e. after this goroutine's final store
 // call — so the caller can hold per-tick store handles open until the
 // goroutine releases them (gascity#3157). A nil onDone is treated as a no-op.
-func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars, execEnv map[string]string, onDone func()) {
+//
+// preInflightRelease, if non-nil, is threaded down to dispatchOne and runs as
+// one of ITS OWN defers, strictly before dispatchOne's own doneInflight —
+// i.e. before m.drain() can observe this dispatch as finished. This matters
+// because onDone above fires only after dispatchOne has fully returned
+// (including its own doneInflight), one full function-return later than
+// doneInflight itself: a caller that calls drain() and then races a new
+// decision on "is this order's prior exec done" can observe drain's return
+// before onDone has run. preInflightRelease exists so state that MUST be
+// visible no later than drain() (ga-3bwmf's single-flight flag) is not
+// wired through onDone, which is too late for that purpose.
+func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars, execEnv map[string]string, onDone func(), preInflightRelease func()) {
 	if onDone == nil {
 		onDone = func() {}
 	}
 	if m.dispatchCtx == nil {
 		go func() {
 			defer onDone()
-			m.runDispatchGuarded(ctx, store, target, a, cityPath, trackingID, vars, execEnv)
+			m.runDispatchGuarded(ctx, store, target, a, cityPath, trackingID, vars, execEnv, preInflightRelease)
 		}()
 		return
 	}
@@ -1182,7 +1624,7 @@ func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store bea
 		defer onDone()
 		defer stopAfter()
 		defer cancelMerged()
-		m.runDispatchGuarded(mergedCtx, store, target, a, cityPath, trackingID, vars, execEnv)
+		m.runDispatchGuarded(mergedCtx, store, target, a, cityPath, trackingID, vars, execEnv, preInflightRelease)
 	}()
 }
 
@@ -1193,14 +1635,27 @@ func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store bea
 // webhook-derived args) would otherwise crash the whole supervisor. dispatchOne's
 // own defers close the tracking bead as the stack unwinds before recovery here;
 // this boundary logs the panic and contains it to the single dispatch.
-func (m *memoryOrderDispatcher) runDispatchGuarded(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars, execEnv map[string]string) {
+// preInflightRelease is passed straight through to dispatchOne; see its doc
+// comment on launchDispatchOne.
+func (m *memoryOrderDispatcher) runDispatchGuarded(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars, execEnv map[string]string, preInflightRelease func()) {
 	defer func() {
 		if p := recover(); p != nil {
 			logDispatchError(m.stderr, "gc: order %s: dispatch goroutine panic (tracking %s): %v", a.ScopedName(), trackingID, p)
 		}
 	}()
-	m.dispatchOne(ctx, store, target, a, cityPath, trackingID, vars, execEnv)
+	m.dispatchOne(ctx, store, target, a, cityPath, trackingID, vars, execEnv, preInflightRelease)
 }
+
+// errRecoverOnStoreUnavailableExecAlreadyRunning marks launchResolvedDispatch
+// declining to launch a RecoverOnStoreUnavailable order because
+// the recoverSF single-flight guard already says one is in flight — either
+// the storeless fallback, or an earlier normal dispatch of the same order
+// still running past its own cooldown (beads-health's 60s timeout exceeds
+// its 30s interval). Callers must recognize this sentinel and skip quietly:
+// it is not a store failure, so it must never itself reach
+// maybeFireStoreUnavailableFallback (which would defeat the guard this
+// sentinel exists to enforce) or a "failed to create tracking bead" log.
+var errRecoverOnStoreUnavailableExecAlreadyRunning = errors.New("recover-on-store-unavailable exec already running for this order")
 
 // launchResolvedDispatch is the single fire path shared by the controller tick
 // loop and the webhook dispatch seam (memoryOrderDispatcher.Dispatch). It writes
@@ -1212,13 +1667,68 @@ func (m *memoryOrderDispatcher) runDispatchGuarded(ctx context.Context, store be
 // tick loop passes its per-tick store barrier; the seam passes its store-close).
 // A caller tracking its own WaitGroup must register it before calling and
 // release it in onDone (and, on a returned error, itself — nothing launched).
+//
+// For a RecoverOnStoreUnavailable order, this is also the normal path's half
+// of the single running fact it shares with maybeFireStoreUnavailableFallback
+// (ga-3bwmf review round 3): it acquires the recoverSF single-flight guard
+// BEFORE CreateRun, so a tracking bead
+// is never created while the fallback (or another normal dispatch of the
+// same order) already owns that order's one exec slot, and returns
+// errRecoverOnStoreUnavailableExecAlreadyRunning when it does. The flag is
+// released via dispatchOne's preInflightRelease hook — NOT via onDone.
+// onDone fires only after dispatchOne has fully returned (one full function
+// return later than dispatchOne's own doneInflight), so a caller that calls
+// drain() and then immediately re-evaluates this order could observe
+// drain's return before an onDone-wired release had run; preInflightRelease
+// is guaranteed to have already run by then on every dispatchOne exit path
+// (normal completion, ctx cancel, the exec timeout, a panic dispatchOne's
+// own recover already catches). This was found and fixed during the
+// guards-hardening pass after team-lead's review round 3 (ga-3bwmf): the
+// intermittent ~30% leak-safety test failure on the panic path traced to
+// exactly this onDone-vs-doneInflight ordering gap.
 func (m *memoryOrderDispatcher) launchResolvedDispatch(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath string, vars, execEnv map[string]string, onDone func()) (orders.OrderRun, error) {
+	scoped := a.ScopedName()
+	trackSingleFlight := a.RecoverOnStoreUnavailable
+	var sf *recoverSingleFlight
+	committed := false
+	if trackSingleFlight {
+		sf = m.singleFlight()
+		if !sf.tryAcquire(scoped) {
+			// Visible, not an error: the guard is working as intended, and
+			// an operator debugging "why didn't beads-health run" needs to
+			// see this rather than have it vanish silently.
+			logDispatchError(m.stderr, "gc: order dispatch: %s: single-flight guard: a recover-on-store-unavailable exec is already running for this order (normal dispatch or the storeless fallback); skipping this launch", scoped)
+			return orders.OrderRun{}, errRecoverOnStoreUnavailableExecAlreadyRunning
+		}
+		// Safety net: releases the flag on ANY exit before `committed` is
+		// set, including a panic unwinding through this function (e.g. an
+		// addInflight/launchDispatchOne internal failure) -- so the flag
+		// can never leak from this half even in a case this function does
+		// not otherwise anticipate. The CreateRun-error return below and a
+		// panic both hit this; a successful launch sets `committed` first,
+		// handing ownership to preInflightRelease below (which fires once
+		// dispatchOne has fully finished, on every one of ITS exit paths
+		// too: normal completion, ctx cancel, the exec timeout, and a
+		// panic dispatchOne's own recover already catches).
+		defer func() {
+			if !committed {
+				sf.release(scoped)
+			}
+		}()
+	}
 	trackingRun, err := m.orderFrontDoorFor(store).CreateRun(a.ScopedName(), orders.RunOpts{Generation: m.generation})
 	if err != nil {
 		return orders.OrderRun{}, err
 	}
+	var preInflightRelease func()
+	if trackSingleFlight {
+		preInflightRelease = func() {
+			sf.release(scoped)
+		}
+	}
 	m.addInflight()
-	m.launchDispatchOne(ctx, store, target, a, cityPath, trackingRun.ID, vars, execEnv, onDone)
+	committed = true
+	m.launchDispatchOne(ctx, store, target, a, cityPath, trackingRun.ID, vars, execEnv, onDone, preInflightRelease)
 	return trackingRun, nil
 }
 
@@ -1579,13 +2089,35 @@ func (m *memoryOrderDispatcher) legacyCityStoreForTarget(cityPath string, target
 func (m *memoryOrderDispatcher) cachedLastRun(orderName string, storeKeys []string, read orders.LastRunFunc) (time.Time, bool, error) {
 	key := orderHistoryCacheKey(orderName, storeKeys)
 	m.cacheMu.Lock()
-	if m.lastRunCache != nil {
-		if last, ok := m.lastRunCache[key]; ok {
-			m.cacheMu.Unlock()
-			return last, true, nil
-		}
-	}
+	exact, exactOK := m.lastRunCache[key]
+	// ga-3bwmf: ALWAYS also consult the freshest entry cached under ANY
+	// store-key combo for this order, not only on an exact-key miss — a
+	// warm exact-key entry from an earlier normal dispatch must not shadow
+	// a LATER fallback fire. This closes a one-directional clock gap:
+	// maybeFireStoreUnavailableFallback records its fire under
+	// orderHistoryCacheKey(orderName, nil) — it has no storeKeys, since it
+	// runs storeless — which this function's own exact key (scoped by
+	// storeKeys) never matches. Reviewed timeline (round 3, HIGH #1): a
+	// normal run at t0 warms the exact-key entry; the fallback fires at
+	// t0+61s and is still running when the store returns at t0+62s; an
+	// exact-key-first read would return the STALE t0 entry, see the order
+	// as overdue (the fallback wrote no tracking bead), and launch a
+	// second, tracked dispatch while the fallback's is still in flight.
+	// peekLastRunLocked only ever returns a value rememberLastRunLocked
+	// already accepted as the freshest for this order (values there only
+	// move forward), so taking the max of the two here can only make an
+	// order look MORE recently run than either alone — the conservative
+	// direction for avoiding a double-fire, never the one that risks
+	// skipping a genuinely due run.
+	peek, peekOK := m.peekLastRunLocked(orderName)
 	m.cacheMu.Unlock()
+	if exactOK || peekOK {
+		best := exact
+		if peekOK && (!exactOK || peek.After(best)) {
+			best = peek
+		}
+		return best, true, nil
+	}
 
 	last, err := read(orderName)
 	if err != nil {
@@ -1599,6 +2131,14 @@ func (m *memoryOrderDispatcher) rememberLastRun(orderName string, storeKeys []st
 	key := orderHistoryCacheKey(orderName, storeKeys)
 	m.cacheMu.Lock()
 	defer m.cacheMu.Unlock()
+	m.rememberLastRunLocked(key, last)
+}
+
+// rememberLastRunLocked is rememberLastRun's core, for callers that already
+// hold cacheMu (maybeFireStoreUnavailableFallback reads-then-writes this same
+// cache under one lock so its due-check and the normal tracking-bead path's
+// due-check can never both observe a stale value and both fire).
+func (m *memoryOrderDispatcher) rememberLastRunLocked(key string, last time.Time) {
 	if m.lastRunCache == nil {
 		m.lastRunCache = make(map[string]time.Time)
 	}
@@ -1799,13 +2339,22 @@ func orderHistoryCacheKey(orderName string, storeKeys []string) string {
 }
 
 // peekLastRun returns the freshest cached last-run for a scoped order name
-// across any store-key combination, without touching a store. Used only for
-// admission ordering — the dispatch loop still resolves the authoritative
-// last-run per order.
+// across any store-key combination, without touching a store. Used for
+// admission ordering, and — since ga-3bwmf — as cachedLastRun's fallback for
+// bridging the store-unavailable fallback's storeKeys-less cache entry into
+// a store-key-scoped due-check (see cachedLastRun). The dispatch loop still
+// resolves the authoritative last-run per order when neither cache path
+// hits.
 func (m *memoryOrderDispatcher) peekLastRun(scoped string) (time.Time, bool) {
-	prefix := scoped + "\x00"
 	m.cacheMu.Lock()
 	defer m.cacheMu.Unlock()
+	return m.peekLastRunLocked(scoped)
+}
+
+// peekLastRunLocked is peekLastRun's core, for callers that already hold
+// cacheMu.
+func (m *memoryOrderDispatcher) peekLastRunLocked(scoped string) (time.Time, bool) {
+	prefix := scoped + "\x00"
 	var best time.Time
 	found := false
 	for key, last := range m.lastRunCache {
@@ -1880,10 +2429,18 @@ func orderTriggerUsesLastRun(a orders.Order) bool {
 // namespaced execEnv (GC_WEBHOOK_ARG_*) so an untrusted payload can never shadow
 // a controller-owned or static [order.env] key (R4); the tick loop and CLI pass
 // nil (raw overlay), preserving existing semantics.
-func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars, execEnv map[string]string) {
+func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars, execEnv map[string]string, preInflightRelease func()) {
 	// Defer order matters: doneInflight runs last, after Close makes the
-	// tracking bead outcome observable to a waiting drain.
+	// tracking bead outcome observable to a waiting drain. preInflightRelease
+	// is registered right after doneInflight (i.e. it unwinds right BEFORE
+	// doneInflight, on every exit path including a panic from the exec call
+	// below) so a caller using it can guarantee its own state update is
+	// already visible by the time drain() returns — see the doc comment on
+	// launchDispatchOne for why that ordering matters.
 	defer m.doneInflight()
+	if preInflightRelease != nil {
+		defer preInflightRelease()
+	}
 	defer func() {
 		// The tracking bead was born in the orders store, so its close has to
 		// address that store: closing through the target scope on a split city

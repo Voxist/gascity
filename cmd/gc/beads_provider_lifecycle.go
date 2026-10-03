@@ -2524,6 +2524,16 @@ type doltRuntimeState struct {
 	Port      int    `json:"port"`
 	DataDir   string `json:"data_dir"`
 	StartedAt string `json:"started_at"`
+	// Watchdog records whether this start spawned PID under the production
+	// scope watchdog (dolt_scope_watchdog.go), i.e. whether
+	// managedDoltStartedProcess.WatchdogPID was > 0 at start time. It is the
+	// durable ground truth the dolt-watchdog-liveness doctor check reads
+	// instead of the CURRENT GC_DOLT_SCOPE_WATCHDOG env (ga-3bwmf review):
+	// direct-mode (watchdog disabled) and watchdog-enabled-but-since-died
+	// both leave PID orphaned to the same ppid, so only a fact fixed AT
+	// SPAWN TIME can tell them apart — env read later can have changed, and
+	// process topology alone cannot.
+	Watchdog bool `json:"watchdog,omitempty"`
 }
 
 // currentDoltPort returns the controller-managed Dolt port for the city.

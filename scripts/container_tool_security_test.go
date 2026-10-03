@@ -93,21 +93,20 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	const (
 		// FORK DIVERGENCE — FORK-FIRST BRIDGE (ga-zzcjs; supersedes the
 		// ADR-0026 C5 upstream bridge). The image builds bd from the
-		// Voxist/beads fork tip (schema 0067 plus fork-only fixes; the
-		// 0066->0067 store migration was rehearsed and cut over
+		// Voxist/beads fork tip (schema 0069 plus fork-only fixes; the
+		// 0067->0069 store migration was rehearsed and cut over
 		// deliberately). go.mod links BD_LIB_REF — the fork tip's newest
 		// upstream ancestor — because fork commits do not resolve on the
 		// module path. These values move together with deps.env and go.mod;
-		// a published release >= 0067 on a module-resolvable repo retires
+		// a published release >= 0069 on a module-resolvable repo retires
 		// the bridge (one change: BD_VERSION=tag, drop the refs). Upstream
 		// v1.3.0 is not such a release: it tops out at schema 0066.
-		// BD_VERSION is the string the pinned commit declares (1.93.0). bdSourceRef
-		// is the commit the fork's annotated v1.93.0 tag names (384c2ccca, the
-		// merge of Voxist/beads#63 -- a merge commit, not the bump commit); see
-		// deps.env.
-		bdSourceRef    = "384c2ccca43f64051c067c1d963fc13a4f958690"
-		bdSourceSHA256 = "da471f3e0dc999a057105adb2b49c6ce66e2090942fd21f0503c6fec002de208"
-		bdBuild        = "384c2ccca"
+		// BD_VERSION is the string the pinned commit declares (1.94.0). bdSourceRef
+		// is the commit the fork's annotated v1.94.0 tag names (1522bdb01)
+		// -- see deps.env.
+		bdSourceRef    = "1522bdb01ba8c863dc30eb9384cc9a7ab69df486"
+		bdSourceSHA256 = "2118f9f52c83a6ea59cc8f041a7cd3bddd3cb22e6e3279e803dacb645bb0fe27"
+		bdBuild        = "1522bdb01"
 		bdBranch       = "HEAD"
 		grpcVersion    = "1.83.2"
 		// Floors, not exact pins: each must be >= what the pinned source
@@ -163,8 +162,8 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		}
 	}
 	bdVersion := env["BD_VERSION"]
-	if bdVersion != "v1.93.0" {
-		t.Fatalf("deps.env BD_VERSION = %q, want v1.93.0 for the pinned source build", bdVersion)
+	if bdVersion != "v1.94.0" {
+		t.Fatalf("deps.env BD_VERSION = %q, want v1.94.0 for the pinned source build", bdVersion)
 	}
 
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")

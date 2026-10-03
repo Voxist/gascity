@@ -113,6 +113,31 @@ type Order struct {
 	// is implemented separately (gastownhall/gascity ga-1ocm3f); this field
 	// only declares eligibility.
 	ReservedDispatch bool `toml:"reserved_dispatch,omitempty"`
+	// RecoverOnStoreUnavailable opts a cooldown-triggered exec order into a
+	// narrow fallback path when a beads-store operation the dispatcher needs
+	// to schedule it (the store-open, either open-work gate, or the
+	// tracking-bead CreateRun) fails and classifies as
+	// beads.ErrStoreUnavailable: the dispatcher runs the order's exec
+	// directly, without the tracking bead or open-work gate that normally
+	// single-flight it, since all of those need the very store that is
+	// down. It is gated by its own cooldown — the order's own Interval,
+	// floored at a small minimum — shared with the normal path's clock, plus
+	// a single-flight guard, so a persistently down store cannot make it
+	// loop faster than its declared cadence or overlap two runs of its exec
+	// (gastownhall/gascity ga-3bwmf).
+	//
+	// This exists for exactly one shape of order: a cooldown-triggered exec
+	// order whose exec has its OWN internal recovery logic that does not
+	// itself depend on this store (gc beads health's provider-health-op →
+	// guarded recover route is the motivating case) — without it, the one
+	// periodic mechanism that could restart a fully-dead beads store can
+	// never run its own recovery exec, because scheduling it needs the
+	// store it exists to heal. Validate rejects it on anything else
+	// (formula orders, and event/cron/condition exec orders) rather than
+	// letting it silently no-op: a formula order has no store-free exec to
+	// run, and the cooldown shape this field's own semantics depend on
+	// (Interval) does not exist on the other trigger kinds.
+	RecoverOnStoreUnavailable bool `toml:"recover_on_store_unavailable,omitempty"`
 	// Env is a map of environment variables exported into an exec
 	// order's child process. Use the `[order.env]` TOML table to
 	// override thresholds (e.g. GC_DOCTOR_LATENCY_WARN_S) without
@@ -153,28 +178,29 @@ func (a *Order) ScopedName() string {
 }
 
 type orderDecode struct {
-	Description      string                `toml:"description,omitempty"`
-	Formula          string                `toml:"formula,omitempty"`
-	Exec             string                `toml:"exec,omitempty"`
-	Scope            string                `toml:"scope,omitempty"`
-	RunOn            string                `toml:"run_on,omitempty"`
-	Trigger          string                `toml:"trigger,omitempty"`
-	Gate             string                `toml:"gate,omitempty"`
-	Interval         string                `toml:"interval,omitempty"`
-	Schedule         string                `toml:"schedule,omitempty"`
-	TZ               string                `toml:"tz,omitempty"`
-	Check            string                `toml:"check,omitempty"`
-	On               string                `toml:"on,omitempty"`
-	Pool             string                `toml:"pool,omitempty"`
-	Timeout          string                `toml:"timeout,omitempty"`
-	CheckTimeout     string                `toml:"check_timeout,omitempty"`
-	Enabled          *bool                 `toml:"enabled,omitempty"`
-	Idempotent       bool                  `toml:"idempotent,omitempty"`
-	NoWorkGate       bool                  `toml:"no_work_gate,omitempty"`
-	ReservedDispatch bool                  `toml:"reserved_dispatch,omitempty"`
-	Env              map[string]string     `toml:"env,omitempty"`
-	Params           map[string]OrderParam `toml:"params,omitempty"`
-	SkipAliases      []string              `toml:"skip_aliases,omitempty"`
+	Description               string                `toml:"description,omitempty"`
+	Formula                   string                `toml:"formula,omitempty"`
+	Exec                      string                `toml:"exec,omitempty"`
+	Scope                     string                `toml:"scope,omitempty"`
+	RunOn                     string                `toml:"run_on,omitempty"`
+	Trigger                   string                `toml:"trigger,omitempty"`
+	Gate                      string                `toml:"gate,omitempty"`
+	Interval                  string                `toml:"interval,omitempty"`
+	Schedule                  string                `toml:"schedule,omitempty"`
+	TZ                        string                `toml:"tz,omitempty"`
+	Check                     string                `toml:"check,omitempty"`
+	On                        string                `toml:"on,omitempty"`
+	Pool                      string                `toml:"pool,omitempty"`
+	Timeout                   string                `toml:"timeout,omitempty"`
+	CheckTimeout              string                `toml:"check_timeout,omitempty"`
+	Enabled                   *bool                 `toml:"enabled,omitempty"`
+	Idempotent                bool                  `toml:"idempotent,omitempty"`
+	NoWorkGate                bool                  `toml:"no_work_gate,omitempty"`
+	ReservedDispatch          bool                  `toml:"reserved_dispatch,omitempty"`
+	RecoverOnStoreUnavailable bool                  `toml:"recover_on_store_unavailable,omitempty"`
+	Env                       map[string]string     `toml:"env,omitempty"`
+	Params                    map[string]OrderParam `toml:"params,omitempty"`
+	SkipAliases               []string              `toml:"skip_aliases,omitempty"`
 }
 
 func (d orderDecode) normalized() Order {
@@ -183,27 +209,28 @@ func (d orderDecode) normalized() Order {
 		trigger = d.Gate
 	}
 	return Order{
-		Description:      d.Description,
-		Formula:          d.Formula,
-		Exec:             d.Exec,
-		Scope:            d.Scope,
-		RunOn:            d.RunOn,
-		Trigger:          trigger,
-		Interval:         d.Interval,
-		Schedule:         d.Schedule,
-		TZ:               d.TZ,
-		Check:            d.Check,
-		On:               d.On,
-		Pool:             d.Pool,
-		Timeout:          d.Timeout,
-		CheckTimeout:     d.CheckTimeout,
-		Enabled:          d.Enabled,
-		Idempotent:       d.Idempotent,
-		NoWorkGate:       d.NoWorkGate,
-		ReservedDispatch: d.ReservedDispatch,
-		Env:              d.Env,
-		Params:           d.Params,
-		skipAliases:      d.SkipAliases,
+		Description:               d.Description,
+		Formula:                   d.Formula,
+		Exec:                      d.Exec,
+		Scope:                     d.Scope,
+		RunOn:                     d.RunOn,
+		Trigger:                   trigger,
+		Interval:                  d.Interval,
+		Schedule:                  d.Schedule,
+		TZ:                        d.TZ,
+		Check:                     d.Check,
+		On:                        d.On,
+		Pool:                      d.Pool,
+		Timeout:                   d.Timeout,
+		CheckTimeout:              d.CheckTimeout,
+		Enabled:                   d.Enabled,
+		Idempotent:                d.Idempotent,
+		NoWorkGate:                d.NoWorkGate,
+		ReservedDispatch:          d.ReservedDispatch,
+		RecoverOnStoreUnavailable: d.RecoverOnStoreUnavailable,
+		Env:                       d.Env,
+		Params:                    d.Params,
+		skipAliases:               d.SkipAliases,
 	}
 }
 
@@ -290,6 +317,17 @@ func Validate(a Order) error {
 	// Exec orders must not have a pool (no agent pipeline).
 	if a.Exec != "" && a.Pool != "" {
 		return fmt.Errorf("order %q: exec orders cannot have a pool", a.Name)
+	}
+	// recover_on_store_unavailable's cooldown IS the order's own Interval
+	// (see cmd/gc order_dispatch.go's storeUnavailableFallbackCooldown), so
+	// it means nothing outside a cooldown-triggered exec order: an event,
+	// cron, or condition order has no Interval field at all, and on a
+	// formula order there is no store-free exec to run. Without this an
+	// event/cron/condition order that set the flag by copy-paste would fire
+	// on whatever floor cooldown applies, on a 30s+ timer unrelated to its
+	// declared trigger, silently.
+	if a.RecoverOnStoreUnavailable && (a.Exec == "" || a.Trigger != "cooldown") {
+		return fmt.Errorf("order %q: recover_on_store_unavailable requires an exec order with trigger = \"cooldown\"", a.Name)
 	}
 	for key := range a.Env {
 		if strings.TrimSpace(key) == "" {

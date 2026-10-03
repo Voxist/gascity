@@ -146,6 +146,19 @@ var bootstrapPolicy = Ledger{
 			// from found could not tell correct code from the bug it
 			// meant to catch).
 			//
+			// Bumped 716->720 calls, 208->209 files for ga-3bwmf's #227
+			// rework: doctor_dolt_watchdog_liveness_test.go's
+			// spawnOrphanedChild (one exec.Command("sh", "-c", "sleep 60 &
+			// echo $!; wait")) and two exec.Command("sleep", "5")
+			// fixtures, plus internal/pidutil_test.go's own
+			// exec.Command("sleep", "5") fixture -- all real subprocesses
+			// are load-bearing: this suite proves genuine OS-level process
+			// reparenting (orphaning to ppid 1) and live-vs-reused-pid
+			// argv reads, neither of which a fake can stand in for.
+			// (internal/pidutil.go's own ps-based ParentPIDOf fallback is
+			// production code, not test source, and is not counted by
+			// this census.)
+			//
 			// Bumped 716->717 calls (files unchanged, 208) for ga-w7nyj's
 			// TestErrorlintStockFixDropsTypeAssertionNegation
 			// (scripts/precommit_contract_test.go): one new
@@ -162,8 +175,14 @@ var bootstrapPolicy = Ledger{
 			// "GOPATH")` and `exec.Command(bin, "--version")`, to resolve
 			// and verify the pinned golangci-lint binary instead of
 			// whatever "golangci-lint" happened to resolve to on PATH.
-			BaselineCalls:   719,
-			BaselineFiles:   208,
+			//
+			// Merged total (ga-3bwmf round-5 resync onto fork/main):
+			// 716 + 4 (ga-3bwmf, +1 file) + 3 (ga-w7nyj, +0 files) = 723
+			// calls, 209 files -- both sides' call sites are real and
+			// independent, so the resync sums both deltas from the shared
+			// 716/208 ancestor rather than taking either side alone.
+			BaselineCalls:   729,
+			BaselineFiles:   210,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-cp3hwi",
@@ -173,10 +192,17 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-10-31",
 		},
 		{
-			Scope:           ScopeAll,
-			Resource:        ResourceFixedSleep,
-			BaselineCalls:   485,
-			BaselineFiles:   177,
+			Scope:    ScopeAll,
+			Resource: ResourceFixedSleep,
+			// Bumped 485->487 calls, 177->178 files for ga-3bwmf's #227
+			// rework: the same spawnOrphanedChild helper's bounded
+			// reparenting-detection poll (time.Sleep(20ms) between
+			// deadline-bounded checks) and internal/pidutil's matching
+			// poll in its own test (time.Sleep(10ms)) -- both are the
+			// sleep INTERVAL inside an already deadline-bounded polling
+			// loop, not an unbounded fixed wait.
+			BaselineCalls:   488,
+			BaselineFiles:   179,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
 			OwnerBead:       "ga-cp3hwi",
@@ -207,6 +233,10 @@ var bootstrapPolicy = Ledger{
 			// TestOpHealthPropagatesQueryProbeExitCode (see the matching
 			// audit_baseline subprocess comment above for the source).
 			//
+			// Bumped 479->483 calls, 137->138 files for ga-3bwmf's #227
+			// rework (see the matching audit_baseline subprocess comment
+			// above for the source).
+			//
 			// Bumped 479->480 calls (files unchanged, 137) for ga-w7nyj's
 			// TestErrorlintStockFixDropsTypeAssertionNegation (see the
 			// matching audit_baseline subprocess comment above for the
@@ -215,8 +245,12 @@ var bootstrapPolicy = Ledger{
 			// Bumped 480->482 calls (files unchanged, 137) for the same
 			// bead's review fix-up (see the matching audit_baseline
 			// subprocess comment above for the source).
-			BaselineCalls:   482,
-			BaselineFiles:   137,
+			//
+			// Merged total (ga-3bwmf round-5 resync onto fork/main):
+			// 479 + 4 (ga-3bwmf, +1 file) + 3 (ga-w7nyj, +0 files) = 486
+			// calls, 138 files.
+			BaselineCalls:   492,
+			BaselineFiles:   139,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-cp3hwi",
@@ -226,10 +260,13 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-10-31",
 		},
 		{
-			Scope:           ScopeUntagged,
-			Resource:        ResourceFixedSleep,
-			BaselineCalls:   319,
-			BaselineFiles:   121,
+			Scope:    ScopeUntagged,
+			Resource: ResourceFixedSleep,
+			// Bumped 319->321 calls, 121->122 files for ga-3bwmf's #227
+			// rework (see the matching audit_baseline fixed_sleep comment
+			// above for the source).
+			BaselineCalls:   322,
+			BaselineFiles:   123,
 			ReportedCalls:   295,
 			ReportedFiles:   114,
 			OwnerBead:       "ga-cp3hwi",
@@ -592,6 +629,10 @@ var bootstrapPolicy = Ledger{
 			// TestOpHealthPropagatesQueryProbeExitCode (see the matching
 			// audit_baseline subprocess comment above for the source).
 			//
+			// Bumped 461->465 calls, 131->132 files for ga-3bwmf's #227
+			// rework (see the matching audit_baseline subprocess comment
+			// above for the source).
+			//
 			// Bumped 461->462 calls (files unchanged, 131) for ga-w7nyj's
 			// TestErrorlintStockFixDropsTypeAssertionNegation (see the
 			// matching audit_baseline subprocess comment above for the
@@ -600,8 +641,12 @@ var bootstrapPolicy = Ledger{
 			// Bumped 462->464 calls (files unchanged, 131) for the same
 			// bead's review fix-up (see the matching audit_baseline
 			// subprocess comment above for the source).
-			BaselineCalls:   464,
-			BaselineFiles:   131,
+			//
+			// Merged total (ga-3bwmf round-5 resync onto fork/main):
+			// 461 + 4 (ga-3bwmf, +1 file) + 3 (ga-w7nyj, +0 files) = 468
+			// calls, 132 files.
+			BaselineCalls:   474,
+			BaselineFiles:   133,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
 			OwnerBead:       "ga-cp3hwi",
@@ -611,10 +656,13 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-10-31",
 		},
 		{
-			Scope:           ScopeUntagged,
-			Resource:        ResourceFixedSleep,
-			BaselineCalls:   319,
-			BaselineFiles:   121,
+			Scope:    ScopeUntagged,
+			Resource: ResourceFixedSleep,
+			// Bumped 319->321 calls, 121->122 files for ga-3bwmf's #227
+			// rework (see the matching audit_baseline fixed_sleep comment
+			// above for the source).
+			BaselineCalls:   322,
+			BaselineFiles:   123,
 			ReportedCalls:   287,
 			ReportedFiles:   113,
 			OwnerBead:       "ga-cp3hwi",

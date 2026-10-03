@@ -140,11 +140,23 @@ type CityRuntime struct {
 	// tier entirely — fail-safe, never aggressive.
 	controllerGeneration    string
 	retiredOrderDispatchers []orderDispatcher
-	orderSet                []orders.Order
-	orderSetSignature       string
-	orderRescanEnabled      bool
-	orderRescanLast         time.Time
-	trace                   *sessionReconcilerTraceManager
+	// recoverSF is the canonical recoverSingleFlight guard for this
+	// CityRuntime's RecoverOnStoreUnavailable orders, shared by pointer with
+	// every memoryOrderDispatcher instance replaceOrderDispatcher installs
+	// or retires -- the active cr.od AND anything still draining in
+	// retiredOrderDispatchers. Without this, a dispatcher swap (config
+	// reload or order rescan) loses track of an exec the outgoing
+	// dispatcher is still running, so the incoming dispatcher starts with
+	// an empty map and can admit a second, concurrent exec of the same
+	// order (ga-3bwmf review round 5). Lazily created and adopted from the
+	// outgoing dispatcher in replaceOrderDispatcher; nil until the first
+	// swap.
+	recoverSF          *recoverSingleFlight
+	orderSet           []orders.Order
+	orderSetSignature  string
+	orderRescanEnabled bool
+	orderRescanLast    time.Time
+	trace              *sessionReconcilerTraceManager
 
 	// routeRecovery is the route-repair lane: an event-fed delta pass in the
 	// tick and a cadenced authoritative scan behind it. Created on first use so
@@ -1656,6 +1668,19 @@ func (cr *CityRuntime) rescanOrderDispatcherIfDue(ctx context.Context, cityRoot 
 // streaks from the outgoing dispatcher so a rebuild (reload or rescan) reuses
 // them instead of cold-starting (#3201).
 // Call after draining the outgoing dispatcher.
+//
+// Unlike those three, the recoverSingleFlight guard is SHARED (by pointer),
+// not carried (by copy): the outgoing dispatcher may still have an exec
+// running past this call (its drain budget can time out, leaving it parked
+// in retiredOrderDispatchers with the exec still in flight), and that exec's
+// eventual release must land in the SAME object the new dispatcher
+// consults, or a RecoverOnStoreUnavailable order could be admitted twice
+// concurrently across the swap (ga-3bwmf review round 5). cr.recoverSF is
+// the canonical instance for this CityRuntime's whole lifetime; if the
+// outgoing dispatcher already has its own (lazily created on first use,
+// before any swap ever adopted cr.recoverSF), that one is adopted as
+// canonical instead of creating an empty one that would silently lose
+// whatever it was already tracking.
 func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
 	if prev, ok := cr.od.(*memoryOrderDispatcher); ok {
 		if nextMem, ok := next.(*memoryOrderDispatcher); ok {
@@ -1663,6 +1688,19 @@ func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
 			nextMem.carryGateBackoffFrom(prev, time.Now())
 			nextMem.carryOpenWorkSuppressionFrom(prev)
 		}
+		// Adopt the outgoing dispatcher's guard as canonical via its own
+		// singleFlight() accessor (cacheMu-guarded lazy create), rather
+		// than reading prev.recoverSF directly: that field can be
+		// concurrently set by prev's own in-flight dispatch goroutines
+		// calling singleFlight() for the first time, and reading it here
+		// unlocked would race against that write.
+		cr.recoverSF = prev.singleFlight()
+	}
+	if cr.recoverSF == nil {
+		cr.recoverSF = &recoverSingleFlight{}
+	}
+	if nextMem, ok := next.(*memoryOrderDispatcher); ok {
+		nextMem.recoverSF = cr.recoverSF
 	}
 	cr.od = next
 }
