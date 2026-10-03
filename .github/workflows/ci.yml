@@ -174,7 +174,19 @@ jobs:
               - 'Makefile'
               - 'cmd/gc/**'
               - 'internal/**'
-              - 'examples/gastown/**'
+              - 'examples/**'
+              # The cmd/gc process lane reads the published contracts and pack
+              # assets from the working tree at test runtime, outside cmd/gc/:
+              # schemas/hook/result.schema.json and schemas/ready/result.schema.json
+              # (hook_claim_drain_reason_schema_test.go, cmd_ready_test.go) and
+              # examples/bd/assets/scripts/gc-beads-bd.sh
+              # (beads_proxied_idle_timeout_test.go). A schemas/-only or
+              # examples-only change therefore changes what this lane executes
+              # and must trigger it — before vp-15qfy D1 a schemas-only edit ran
+              # no cmd/gc job at all. examples/** (not just examples/gastown/**)
+              # because prompt_test.go reads the hyperscale and swarm prompt
+              # templates and cmd/gc tests import examples/bd as a Go package.
+              - 'schemas/**'
             credential_provider:
               - 'go.mod'
               - 'go.sum'

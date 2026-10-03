@@ -154,7 +154,12 @@ const (
 	// candidate digest TestCurrentWorkflowsMatchPolicy printed for the
 	// merged+repinned workflow (the v1.94.0/1522bdb01 pin, after the
 	// v1.93.0/5cc9948c7 CI-signal pin moved to the tagged release).
-	expectedCIExecutionHash     = "24e60a18cd24cc6429997ebd5829f45b3abbd8f94e5569ad67de3009c053a1eb"
+	// Re-derived for vp-15qfy D1: the changes job's cmd_gc_process
+	// paths-filter gained schemas/** and examples/** — filter data inside
+	// the paths-filter step only, no job, step, trigger or permission
+	// changes. Taken from the candidate digest
+	// TestCurrentWorkflowsMatchPolicy printed for the changed workflow.
+	expectedCIExecutionHash     = "e684e5a7eed45101f282f23b2d51d3e65cd541f5ab5e3ae46621c269e8fef933"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
 	// value: nightly.yml merged to the fork's execution shape, so wholesale
@@ -272,7 +277,13 @@ var requiredFilterPaths = map[string][]string{
 		"Makefile",
 		"cmd/gc/**",
 		"internal/**",
-		"examples/gastown/**",
+		// Mirror of the ci.yml filter (vp-15qfy D1): the lane reads published
+		// contracts and pack assets from the working tree at test runtime
+		// (schemas/hook/result.schema.json, schemas/ready/result.schema.json,
+		// examples/bd/assets/scripts/gc-beads-bd.sh), so schemas/** and the
+		// whole examples/ tree must trigger it like cmd/gc/** does.
+		"examples/**",
+		"schemas/**",
 	},
 	"credential_provider": {
 		"go.mod",
