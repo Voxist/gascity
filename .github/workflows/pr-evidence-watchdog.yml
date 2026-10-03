@@ -43,6 +43,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Enables the base-red comparison (vp-2lr9 D2): when CI / required
+          # fails at the head, the watchdog consults the same check at the
+          # base commit and passes the PR through non-blocking if the base is
+          # red too -- a head failure inherited from main is not fixable from
+          # the PR diff and must not block it.
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           NEEDS_MAC_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'needs-mac') }}
           NEEDS_REVIEW_FORMULAS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'needs-review-formulas') }}
         run: go run ./scripts/prwatchdog/cmd/watchdog

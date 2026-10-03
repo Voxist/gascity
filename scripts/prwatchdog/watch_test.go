@@ -3,6 +3,7 @@ package prwatchdog
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -27,17 +28,29 @@ type fetchResponse struct {
 }
 
 type scriptedFetcher struct {
-	responses []fetchResponse
-	calls     []string
+	// responses scripts the fetches for the head SHA; baseResponses, when
+	// baseSHA is set, scripts the fetches for that SHA. The final entry of
+	// each script repeats once exhausted.
+	responses     []fetchResponse
+	baseResponses []fetchResponse
+	baseSHA       string
+	headIdx       int
+	baseIdx       int
+	calls         []string
 }
 
-func (f *scriptedFetcher) FetchCheckRuns(_ context.Context, headSHA string) ([]CheckRun, error) {
-	f.calls = append(f.calls, headSHA)
-	idx := len(f.calls) - 1
-	if idx >= len(f.responses) {
-		idx = len(f.responses) - 1
+func (f *scriptedFetcher) FetchCheckRuns(_ context.Context, sha string) ([]CheckRun, error) {
+	f.calls = append(f.calls, sha)
+	script, idx := f.responses, &f.headIdx
+	if f.baseSHA != "" && sha == f.baseSHA {
+		script, idx = f.baseResponses, &f.baseIdx
 	}
-	r := f.responses[idx]
+	i := *idx
+	if i >= len(script) {
+		i = len(script) - 1
+	}
+	*idx++
+	r := script[i]
 	return r.runs, r.err
 }
 
@@ -126,6 +139,108 @@ func TestWatch_APIErrorStopsImmediatelyWithoutRetry(t *testing.T) {
 	}
 	if len(sleeper.calls) != 0 {
 		t.Fatalf("expected no sleep/retry after an API error, got %d sleeps", len(sleeper.calls))
+	}
+}
+
+func TestWatch_FetchesBaseRunsAndPassesThroughOnBaseRed(t *testing.T) {
+	base := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	const baseSHA = "base0123456"
+	clock := &fakeClock{now: base}
+	sleeper := &fakeSleeper{clock: clock}
+	// Poll 1 sees a red head with a base run still in flight -- inconclusive,
+	// so the watchdog keeps observing. Poll 2 sees base red and terminates.
+	headRed := []CheckRun{
+		{Name: CheckName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: base},
+		{Name: CIRequiredName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionFailure, StartedAt: base},
+	}
+	fetcher := &scriptedFetcher{
+		responses: []fetchResponse{{runs: headRed}},
+		baseSHA:   baseSHA,
+		baseResponses: []fetchResponse{
+			{runs: []CheckRun{{Name: CIRequiredName, HeadSHA: baseSHA, Status: StatusInProgress, StartedAt: base}}},
+			{runs: []CheckRun{{Name: CIRequiredName, HeadSHA: baseSHA, Status: StatusCompleted, Conclusion: ConclusionFailure, StartedAt: base}}},
+		},
+	}
+
+	eval := Watch(context.Background(), fetcher, clock, sleeper, PollOptions{
+		HeadSHA:  testHeadSHA,
+		BaseSHA:  baseSHA,
+		Deadline: ObservationDeadline,
+		Interval: 30 * time.Second,
+	})
+
+	if !eval.Pass || !eval.Terminal || !eval.BaseInheritedFailure {
+		t.Fatalf("expected a base-red pass-through, got %+v", eval)
+	}
+	if len(fetcher.calls) != 4 {
+		t.Fatalf("expected 4 fetches (head+base per poll, 2 polls), got %d: %v", len(fetcher.calls), fetcher.calls)
+	}
+	wantOrder := []string{testHeadSHA, baseSHA, testHeadSHA, baseSHA}
+	for i, want := range wantOrder {
+		if fetcher.calls[i] != want {
+			t.Fatalf("fetch call %d = %q, want %q", i, fetcher.calls[i], want)
+		}
+	}
+}
+
+func TestWatch_BaseFetchErrorKeepsObservingThenFailsClosedAtDeadline(t *testing.T) {
+	base := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	const baseSHA = "base0123456"
+	clock := &fakeClock{now: base}
+	sleeper := &fakeSleeper{clock: clock}
+	fetcher := &scriptedFetcher{
+		responses: []fetchResponse{{runs: []CheckRun{
+			{Name: CheckName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: base},
+			{Name: CIRequiredName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionFailure, StartedAt: base},
+		}}},
+		baseSHA:       baseSHA,
+		baseResponses: []fetchResponse{{err: errors.New("base lookup exploded")}},
+	}
+
+	// A short deadline keeps the unit test bounded: the base lookup fails on
+	// every poll, so the observation loop must run until the deadline and
+	// only then fail closed with the base verdict explicitly unavailable.
+	deadline := 2 * time.Minute
+	eval := Watch(context.Background(), fetcher, clock, sleeper, PollOptions{
+		HeadSHA:  testHeadSHA,
+		BaseSHA:  baseSHA,
+		Deadline: deadline,
+		Interval: 30 * time.Second,
+	})
+
+	if eval.Pass || !eval.Terminal {
+		t.Fatalf("a permanently unavailable base verdict must fail closed on a red head, got %+v", eval)
+	}
+	if !strings.Contains(eval.Reason, "base verdict unavailable") {
+		t.Fatalf("Reason = %q, want it to note the base verdict was unavailable", eval.Reason)
+	}
+	if len(sleeper.calls) != 4 {
+		t.Fatalf("expected 4 sleeps across 5 polls before the 2m deadline, got %d", len(sleeper.calls))
+	}
+}
+
+func TestWatch_WithoutBaseSHAFetchesHeadOnly(t *testing.T) {
+	base := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	clock := &fakeClock{now: base}
+	sleeper := &fakeSleeper{clock: clock}
+	fetcher := &scriptedFetcher{responses: []fetchResponse{
+		{runs: []CheckRun{
+			{Name: CheckName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: base},
+			{Name: CIRequiredName, HeadSHA: testHeadSHA, Status: StatusCompleted, Conclusion: ConclusionSuccess, StartedAt: base},
+		}},
+	}}
+
+	eval := Watch(context.Background(), fetcher, clock, sleeper, PollOptions{
+		HeadSHA:  testHeadSHA,
+		Deadline: ObservationDeadline,
+		Interval: 30 * time.Second,
+	})
+
+	if !eval.Pass || !eval.Terminal {
+		t.Fatalf("expected a pass, got %+v", eval)
+	}
+	if len(fetcher.calls) != 1 || fetcher.calls[0] != testHeadSHA {
+		t.Fatalf("BaseSHA unset must leave the fetch pattern untouched (single head fetch), got %v", fetcher.calls)
 	}
 }
 
