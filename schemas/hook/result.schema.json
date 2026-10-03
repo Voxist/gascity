@@ -36,7 +36,6 @@
         "claims_errored",
         "stale_session",
         "non_turn_context",
-        "drain_pending",
         "missing_session_registration"
       ]
     },
@@ -103,7 +102,6 @@
               "claims_errored",
               "stale_session",
               "non_turn_context",
-              "drain_pending",
               "missing_session_registration"
             ]
           }
