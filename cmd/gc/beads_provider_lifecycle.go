@@ -2352,7 +2352,8 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 			// observed nothing, and on a saturated host that is the
 			// common case — it is treated exactly like a bd transport
 			// timeout and may only start a server that is not there.
-			if recErr := runGuardedManagedDoltRecover(ctx, cityPath, script, providerEnv, managedDoltHealthOpEvidence(ctx, err)); recErr != nil {
+			recoverCallCtx := managedDoltRecoverCallContext{CallerSite: "healthBeadsProviderContext", HealthOpErr: err}
+			if recErr := runGuardedManagedDoltRecover(ctx, cityPath, script, providerEnv, managedDoltHealthOpEvidence(ctx, err), recoverCallCtx); recErr != nil {
 				if errors.Is(recErr, errManagedDoltRecoverDeclined) {
 					return fmt.Errorf("unhealthy (%w): %w", err, recErr)
 				}

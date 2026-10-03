@@ -2658,6 +2658,27 @@ type MaintenanceTriggerBody struct {
 	StartedAt *string `json:"started_at,omitempty"`
 }
 
+// ManagedDoltRecoverAdmittedPayload defines model for ManagedDoltRecoverAdmittedPayload.
+type ManagedDoltRecoverAdmittedPayload struct {
+	// CallerSite Which call site admitted the recover: recoverManagedBDCommand or healthBeadsProviderContext.
+	CallerSite string `json:"caller_site"`
+
+	// Evidence Evidence classification the admission rested on: call-failed or health-op-answered.
+	Evidence string `json:"evidence"`
+
+	// HealthOpExitCode The triggering health op's process exit code, when evidence came from a provider health-op run.
+	HealthOpExitCode *int64 `json:"health_op_exit_code,omitempty"`
+
+	// HealthOpStderr Truncated stderr from the triggering health op, when available.
+	HealthOpStderr *string `json:"health_op_stderr,omitempty"`
+
+	// Liveness Liveness verdict at admission time, when the liveness check applied: alive, confirmed-dead, or unknown.
+	Liveness *string `json:"liveness,omitempty"`
+
+	// Scope Canonical scope root path (the city path) the recover ran against.
+	Scope string `json:"scope"`
+}
+
 // Message defines model for Message.
 type Message struct {
 	Body      string    `json:"body"`
@@ -6425,6 +6446,22 @@ type TypedEventStreamEnvelopeMailSent struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeManagedDoltRecoverAdmitted defines model for TypedEventStreamEnvelopeManagedDoltRecoverAdmitted.
+type TypedEventStreamEnvelopeManagedDoltRecoverAdmitted struct {
+	Actor            string                            `json:"actor"`
+	DependsOnStepIds *[]string                         `json:"depends_on_step_ids,omitempty"`
+	Message          *string                           `json:"message,omitempty"`
+	Payload          ManagedDoltRecoverAdmittedPayload `json:"payload"`
+	RunId            *string                           `json:"run_id,omitempty"`
+	Seq              int64                             `json:"seq"`
+	SessionId        *string                           `json:"session_id,omitempty"`
+	StepId           *string                           `json:"step_id,omitempty"`
+	Subject          *string                           `json:"subject,omitempty"`
+	Ts               time.Time                         `json:"ts"`
+	Type             string                            `json:"type"`
+	Workflow         *WorkflowEventProjection          `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeMoleculeResolved defines model for TypedEventStreamEnvelopeMoleculeResolved.
 type TypedEventStreamEnvelopeMoleculeResolved struct {
 	Actor            string                   `json:"actor"`
@@ -8260,6 +8297,23 @@ type TypedTaggedEventStreamEnvelopeMailSent struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeManagedDoltRecoverAdmitted defines model for TypedTaggedEventStreamEnvelopeManagedDoltRecoverAdmitted.
+type TypedTaggedEventStreamEnvelopeManagedDoltRecoverAdmitted struct {
+	Actor            string                            `json:"actor"`
+	City             string                            `json:"city"`
+	DependsOnStepIds *[]string                         `json:"depends_on_step_ids,omitempty"`
+	Message          *string                           `json:"message,omitempty"`
+	Payload          ManagedDoltRecoverAdmittedPayload `json:"payload"`
+	RunId            *string                           `json:"run_id,omitempty"`
+	Seq              int64                             `json:"seq"`
+	SessionId        *string                           `json:"session_id,omitempty"`
+	StepId           *string                           `json:"step_id,omitempty"`
+	Subject          *string                           `json:"subject,omitempty"`
+	Ts               time.Time                         `json:"ts"`
+	Type             string                            `json:"type"`
+	Workflow         *WorkflowEventProjection          `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeMoleculeResolved defines model for TypedTaggedEventStreamEnvelopeMoleculeResolved.
@@ -11427,6 +11481,32 @@ func (t *EventPayload) FromMailEventPayload(v MailEventPayload) error {
 
 // MergeMailEventPayload performs a merge with any union data inside the EventPayload, using the provided MailEventPayload
 func (t *EventPayload) MergeMailEventPayload(v MailEventPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsManagedDoltRecoverAdmittedPayload returns the union data inside the EventPayload as a ManagedDoltRecoverAdmittedPayload
+func (t EventPayload) AsManagedDoltRecoverAdmittedPayload() (ManagedDoltRecoverAdmittedPayload, error) {
+	var body ManagedDoltRecoverAdmittedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromManagedDoltRecoverAdmittedPayload overwrites any union data inside the EventPayload as the provided ManagedDoltRecoverAdmittedPayload
+func (t *EventPayload) FromManagedDoltRecoverAdmittedPayload(v ManagedDoltRecoverAdmittedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeManagedDoltRecoverAdmittedPayload performs a merge with any union data inside the EventPayload, using the provided ManagedDoltRecoverAdmittedPayload
+func (t *EventPayload) MergeManagedDoltRecoverAdmittedPayload(v ManagedDoltRecoverAdmittedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -15744,6 +15824,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeMailSent(v Typed
 	return err
 }
 
+// AsTypedEventStreamEnvelopeManagedDoltRecoverAdmitted returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeManagedDoltRecoverAdmitted
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeManagedDoltRecoverAdmitted() (TypedEventStreamEnvelopeManagedDoltRecoverAdmitted, error) {
+	var body TypedEventStreamEnvelopeManagedDoltRecoverAdmitted
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeManagedDoltRecoverAdmitted overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeManagedDoltRecoverAdmitted
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeManagedDoltRecoverAdmitted(v TypedEventStreamEnvelopeManagedDoltRecoverAdmitted) error {
+	v.Type = "managed_dolt.recover_admitted"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeManagedDoltRecoverAdmitted performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeManagedDoltRecoverAdmitted
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeManagedDoltRecoverAdmitted(v TypedEventStreamEnvelopeManagedDoltRecoverAdmitted) error {
+	v.Type = "managed_dolt.recover_admitted"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeMoleculeResolved returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeMoleculeResolved
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeMoleculeResolved() (TypedEventStreamEnvelopeMoleculeResolved, error) {
 	var body TypedEventStreamEnvelopeMoleculeResolved
@@ -17438,6 +17546,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeMailReplied()
 	case "mail.sent":
 		return t.AsTypedEventStreamEnvelopeMailSent()
+	case "managed_dolt.recover_admitted":
+		return t.AsTypedEventStreamEnvelopeManagedDoltRecoverAdmitted()
 	case "molecule.resolved":
 		return t.AsTypedEventStreamEnvelopeMoleculeResolved()
 	case "order.completed":
@@ -19093,6 +19203,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeMailS
 // MergeTypedTaggedEventStreamEnvelopeMailSent performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeMailSent
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeMailSent(v TypedTaggedEventStreamEnvelopeMailSent) error {
 	v.Type = "mail.sent"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeManagedDoltRecoverAdmitted returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeManagedDoltRecoverAdmitted
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeManagedDoltRecoverAdmitted() (TypedTaggedEventStreamEnvelopeManagedDoltRecoverAdmitted, error) {
+	var body TypedTaggedEventStreamEnvelopeManagedDoltRecoverAdmitted
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeManagedDoltRecoverAdmitted overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeManagedDoltRecoverAdmitted
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeManagedDoltRecoverAdmitted(v TypedTaggedEventStreamEnvelopeManagedDoltRecoverAdmitted) error {
+	v.Type = "managed_dolt.recover_admitted"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeManagedDoltRecoverAdmitted performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeManagedDoltRecoverAdmitted
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeManagedDoltRecoverAdmitted(v TypedTaggedEventStreamEnvelopeManagedDoltRecoverAdmitted) error {
+	v.Type = "managed_dolt.recover_admitted"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -20797,6 +20935,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeMailReplied()
 	case "mail.sent":
 		return t.AsTypedTaggedEventStreamEnvelopeMailSent()
+	case "managed_dolt.recover_admitted":
+		return t.AsTypedTaggedEventStreamEnvelopeManagedDoltRecoverAdmitted()
 	case "molecule.resolved":
 		return t.AsTypedTaggedEventStreamEnvelopeMoleculeResolved()
 	case "order.completed":

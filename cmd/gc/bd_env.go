@@ -1305,7 +1305,8 @@ var recoverManagedBDCommand = func(cityPath string) error {
 	// sufficient evidence to destroy a running server. The bd runner
 	// carries recoverEvidenceCallFailed because all it knows is that its
 	// own call did not come back. See dolt_recover_gate.go.
-	return runGuardedManagedDoltRecover(context.Background(), cityPath, script, environ, recoverEvidenceCallFailed)
+	return runGuardedManagedDoltRecover(context.Background(), cityPath, script, environ, recoverEvidenceCallFailed,
+		managedDoltRecoverCallContext{CallerSite: "recoverManagedBDCommand"})
 }
 
 func setProjectedDoltEnvEmpty(env map[string]string) {

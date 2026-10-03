@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 // stubRecoverGateClock pins providerRecoverNow to a movable instant,
@@ -866,5 +868,175 @@ provider = "exec:/opt/custom/beads-provider.sh"
 	}
 	if *runs != 1 {
 		t.Fatalf("recover runs = %d, want 1", *runs)
+	}
+}
+
+// ---------------------------------------------------------------------
+// ga-zfgsh: an ADMITTED recover must be as observable as a DECLINED one.
+// Forensics on the 2026-09-30 live-server replacement could not identify
+// which caller triggered it -- runGuardedManagedDoltRecover only logged
+// when it declined.
+// ---------------------------------------------------------------------
+
+// stubRecoverEventRecorder substitutes a capturing events.Recorder for
+// managedDoltRecoverEventRecorderForCity, so a test can assert on the
+// event runGuardedManagedDoltRecover emits without touching a real
+// events.jsonl file.
+func stubRecoverEventRecorder(t *testing.T) *memRecorder {
+	t.Helper()
+	orig := managedDoltRecoverEventRecorderForCity
+	t.Cleanup(func() { managedDoltRecoverEventRecorderForCity = orig })
+	rec := &memRecorder{}
+	managedDoltRecoverEventRecorderForCity = func(string) events.Recorder { return rec }
+	return rec
+}
+
+// firstManagedDoltRecoverAdmittedPayload finds the first
+// managed_dolt.recover_admitted event in rec and decodes its payload.
+func firstManagedDoltRecoverAdmittedPayload(t *testing.T, rec *memRecorder) events.ManagedDoltRecoverAdmittedPayload {
+	t.Helper()
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	for _, e := range rec.events {
+		if e.Type != events.ManagedDoltRecoverAdmitted {
+			continue
+		}
+		var payload events.ManagedDoltRecoverAdmittedPayload
+		if err := json.Unmarshal(e.Payload, &payload); err != nil {
+			t.Fatalf("unmarshal %s payload: %v", events.ManagedDoltRecoverAdmitted, err)
+		}
+		return payload
+	}
+	t.Fatalf("no %s event recorded; have %d event(s)", events.ManagedDoltRecoverAdmitted, len(rec.events))
+	return events.ManagedDoltRecoverAdmittedPayload{}
+}
+
+// TestAdmittedRecoverEmitsEventWithCallerAndHealthOpContext is the
+// healthBeadsProviderContext half: a health op that ran and answered
+// unhealthy (exit 1, real stderr via providerOpExitErrorForTest) admits a
+// recover that replaces even a live server (ga-fkidk), and the admitted
+// event must carry the caller site, the scope, the evidence
+// classification, and the health op's own exit code and stderr.
+func TestAdmittedRecoverEmitsEventWithCallerAndHealthOpContext(t *testing.T) {
+	cityPath := t.TempDir()
+	stubRecoverGateClock(t)
+	stubRecoverLiveness(t, managedDoltLivenessAlive)
+	countRecoverRuns(t)
+	rec := stubRecoverEventRecorder(t)
+
+	healthErr := providerOpExitErrorForTest(t, 1, "dolt query probe failed (information_schema.SCHEMATA)")
+	evidence := managedDoltHealthOpEvidence(context.Background(), healthErr)
+	if evidence != recoverEvidenceHealthOpAnswered {
+		t.Fatalf("evidence = %v, want recoverEvidenceHealthOpAnswered (test premise)", evidence)
+	}
+
+	callCtx := managedDoltRecoverCallContext{CallerSite: "healthBeadsProviderContext", HealthOpErr: healthErr}
+	if err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, evidence, callCtx); err != nil {
+		t.Fatalf("err = %v, want the recover to run", err)
+	}
+
+	payload := firstManagedDoltRecoverAdmittedPayload(t, rec)
+	if payload.CallerSite != "healthBeadsProviderContext" {
+		t.Fatalf("CallerSite = %q, want %q", payload.CallerSite, "healthBeadsProviderContext")
+	}
+	if payload.Scope != cityPath {
+		t.Fatalf("Scope = %q, want %q", payload.Scope, cityPath)
+	}
+	if payload.Evidence != "health-op-answered" {
+		t.Fatalf("Evidence = %q, want %q", payload.Evidence, "health-op-answered")
+	}
+	if payload.HealthOpExitCode != 1 {
+		t.Fatalf("HealthOpExitCode = %d, want 1", payload.HealthOpExitCode)
+	}
+	if !strings.Contains(payload.HealthOpStderr, "dolt query probe failed") {
+		t.Fatalf("HealthOpStderr = %q, want it to contain the health op's own stderr", payload.HealthOpStderr)
+	}
+	// health-op-answered evidence skips the liveness check entirely by
+	// design (op_health is the only observer that can see a
+	// wedged-but-listening server) -- there is no liveness verdict to
+	// report.
+	if payload.Liveness != "" {
+		t.Fatalf("Liveness = %q, want empty: health-op-answered evidence never runs the liveness check", payload.Liveness)
+	}
+}
+
+// TestAdmittedRecoverEmitsEventForBdRunnerCallerWithNoHealthOp is the
+// recoverManagedBDCommand half: the bd-runner path has no health op at
+// all (it reacts to a bd transport failure), so its admitted event must
+// still carry the caller site, scope, evidence and liveness verdict, with
+// the health-op fields left empty/zero rather than fabricated.
+func TestAdmittedRecoverEmitsEventForBdRunnerCallerWithNoHealthOp(t *testing.T) {
+	cityPath := t.TempDir()
+	stubRecoverGateClock(t)
+	stubRecoverLiveness(t, managedDoltLivenessConfirmedDead)
+	countRecoverRuns(t)
+	rec := stubRecoverEventRecorder(t)
+
+	callCtx := managedDoltRecoverCallContext{CallerSite: "recoverManagedBDCommand"}
+	if err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed, callCtx); err != nil {
+		t.Fatalf("err = %v, want the recover to run", err)
+	}
+
+	payload := firstManagedDoltRecoverAdmittedPayload(t, rec)
+	if payload.CallerSite != "recoverManagedBDCommand" {
+		t.Fatalf("CallerSite = %q, want %q", payload.CallerSite, "recoverManagedBDCommand")
+	}
+	if payload.Scope != cityPath {
+		t.Fatalf("Scope = %q, want %q", payload.Scope, cityPath)
+	}
+	if payload.Evidence != "call-failed" {
+		t.Fatalf("Evidence = %q, want %q", payload.Evidence, "call-failed")
+	}
+	if payload.Liveness != "confirmed-dead" {
+		t.Fatalf("Liveness = %q, want %q (the liveness check runs for call-failed evidence)", payload.Liveness, "confirmed-dead")
+	}
+	if payload.HealthOpExitCode != 0 {
+		t.Fatalf("HealthOpExitCode = %d, want 0: the bd-runner path has no health op", payload.HealthOpExitCode)
+	}
+	if payload.HealthOpStderr != "" {
+		t.Fatalf("HealthOpStderr = %q, want empty: the bd-runner path has no health op", payload.HealthOpStderr)
+	}
+}
+
+// TestAdmittedRecoverCallerContextIsOptional confirms existing callers
+// that omit managedDoltRecoverCallContext (every pre-ga-zfgsh test in this
+// file) keep working unchanged -- the new parameter is backward
+// compatible, not a breaking signature change.
+func TestAdmittedRecoverCallerContextIsOptional(t *testing.T) {
+	cityPath := t.TempDir()
+	stubRecoverGateClock(t)
+	stubRecoverLiveness(t, managedDoltLivenessConfirmedDead)
+	runs := countRecoverRuns(t)
+
+	if err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed); err != nil {
+		t.Fatalf("err = %v, want the recover to run", err)
+	}
+	if *runs != 1 {
+		t.Fatalf("recover runs = %d, want 1", *runs)
+	}
+}
+
+// TestDeclinedRecoverLogsTheSameFieldsAsAdmitted is the symmetry half:
+// a DECLINED recover (both the liveness decline and the cooldown decline)
+// must produce a log line naming the same fields an admitted one does --
+// caller site, scope, evidence, and (for the liveness decline) the
+// liveness verdict -- not a bespoke one-off message. It asserts on the
+// returned error's text, which already must name the decline reason
+// (errManagedDoltRecoverDeclined's contract), extended to also require
+// the caller site now that callers can supply one.
+func TestDeclinedRecoverLogsTheSameFieldsAsAdmitted(t *testing.T) {
+	cityPath := t.TempDir()
+	stubRecoverGateClock(t)
+	stubRecoverLiveness(t, managedDoltLivenessAlive)
+	countRecoverRuns(t)
+
+	callCtx := managedDoltRecoverCallContext{CallerSite: "healthBeadsProviderContext"}
+	err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed, callCtx)
+	if !errors.Is(err, errManagedDoltRecoverDeclined) {
+		t.Fatalf("err = %v, want errManagedDoltRecoverDeclined", err)
+	}
+	if !strings.Contains(err.Error(), "healthBeadsProviderContext") {
+		t.Fatalf("decline error = %q, want it to name the caller site %q for symmetry with the admitted log line",
+			err.Error(), "healthBeadsProviderContext")
 	}
 }
