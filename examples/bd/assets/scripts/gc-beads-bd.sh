@@ -4258,6 +4258,10 @@ op_recover() {
         # die/die_unobservable on failure, which would otherwise exit this
         # whole process instead of just failing the probe.
         #
+        # Known gap (ga-08wuk): when the lock holder reaches op_start's reuse
+        # fast path, that path exits the whole process, so the holder's final
+        # health verification never runs.
+        #
         # A losing recover's exit 0 therefore means "already being
         # handled / already healthy", not "this call recovered anything".
         # op_stop is deliberately NOT under this lock: a stop must stay

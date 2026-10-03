@@ -11,27 +11,20 @@ import (
 	"time"
 )
 
-// ga-iv2l2. op_recover's own stop (op_stop_impl) and cleanup
-// (run_preflight_cleanup) run before op_start, which is the ONLY place that
-// acquires the LOCK_FILE flock (fd 9). Two concurrent op_recover
-// invocations -- two separate OS processes, so the Go-side
-// admitManagedDoltRecover single-flight (an in-process sync.Map, see
-// dolt_recover_gate.go) cannot see across them -- can both reach that
-// unprotected stop step around the same time. Whichever one reaches
-// op_start's flock second may find the first process's freshly started
-// server "not reusable" and stop-then-restart it again, killing a server
-// the first process just legitimately started.
+// ga-iv2l2. op_recover takes the LOCK_FILE flock (fd 9) before its own stop
+// (op_stop_impl) and cleanup (run_preflight_cleanup), then calls
+// `op_start lock-held`. Two concurrent op_recover invocations are two
+// separate OS processes, so the Go-side admitManagedDoltRecover single-flight
+// (an in-process sync.Map, see dolt_recover_gate.go) cannot see across them;
+// the flock is what serializes them, so that one process's stop/start
+// sequence never kills a server the other just started.
 //
-// Found during ga-3bwmf's #227 round-3 review. Review follow-up (same
-// bead): the first cut of the fix signaled "caller already holds the
-// lock" via GC_DOLT_START_LOCK_HELD, an environment variable -- and gc
-// passes its whole process environment through to provider ops, so any
-// inherited GC_DOLT_START_LOCK_HELD=true let a plain `start`/
-// `ensure-ready` call skip the lock entirely. Fixed by passing it as an
-// argument ("lock-held") instead, which the environment cannot reach,
-// verified by op_start itself via `flock -n 9` on the INHERITED fd
-// (never re-exec'd): that succeeds only if fd 9 really is the caller's
-// locked descriptor.
+// "caller already holds the lock" is signaled to op_start as the argument
+// "lock-held", never an environment variable: gc passes its whole process
+// environment through to provider ops, so an inherited variable would let a
+// plain `start`/`ensure-ready` call skip the lock. op_start verifies the
+// claim itself via `flock -n 9` on the INHERITED fd (never re-exec'd), which
+// succeeds only if fd 9 really is the caller's locked descriptor.
 //
 // All composed scripts run under `sh -c`, not `bash -c`: the real
 // provider script's shebang is #!/bin/sh and op_start/op_recover must
@@ -93,7 +86,8 @@ op_start() {
 
 // opRecoverConcurrencyScript extracts the real op_recover (plus die and
 // die_unobservable, which a lock-loser's unobservable exit depends on) out
-// of the bundled provider script and layers recoverLockStubs underneath it.
+// of the bundled provider script (plus the die, die_unobservable and
+// die_recover_declined helpers its exits depend on) and layers recoverLockStubs underneath it.
 func opRecoverConcurrencyScript(t *testing.T, logFile string, healthOK bool) string {
 	t.Helper()
 	script := filepath.Join("..", "..", "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
@@ -145,13 +139,11 @@ func requireFlock(t *testing.T) {
 // concurrent recover does not get to stop the server the first one is in
 // the middle of (re)starting.
 //
-// Before the fix, op_recover's own op_stop_impl call is not under any
-// flock (only op_start's internal "Acquire exclusive start lock" block
-// is), so both processes reach op_stop_impl unprotected and this test's
-// log shows two "stop start" entries. After the fix, only the flock winner
-// ever calls op_stop_impl/op_start; the loser's non-blocking lock attempt
-// fails, it re-probes op_health (stubbed healthy here) and returns 0
-// without ever touching stop/start.
+// Only the flock winner ever calls op_stop_impl/op_start; the loser's
+// non-blocking lock attempt fails, it re-probes op_health (stubbed healthy
+// here) and returns 0 without ever touching stop/start. Were op_recover's
+// stop not under the flock, both processes would stop unprotected and the
+// log would show two "stop start" entries.
 func TestConcurrentOpRecoverSerializesStopAndStart(t *testing.T) {
 	requireFlock(t)
 	dir := t.TempDir()
@@ -175,7 +167,8 @@ func TestConcurrentOpRecoverSerializesStopAndStart(t *testing.T) {
 		// A lock loser that finds a healthy server (the op_health stub
 		// here always succeeds) is expected to exit 0 (nothing left to
 		// do): see TestConcurrentOpRecoverLoserDeclinesWithOwnExitWhenHealthFails
-		// for the exact-exit-3 case when the re-probe itself fails.
+		// for the exit-4 (declined) loser and exit-3 (winner) cases when
+		// health cannot be confirmed.
 		if code != 0 {
 			t.Fatalf("op_recover run %d exited %d, want 0 (op_health stub is always healthy here)", i, code)
 		}
@@ -482,16 +475,10 @@ op_start lock-held
 }
 
 // TestOpStartArgumentTrustPathSkipsReacquisitionWithoutGap is the positive
-// half TestOpStartTrustsCallerHeldLockInsteadOfReacquiring's
-// "argument_trusts_the_caller" subtest got wrong in an earlier revision:
-// that subtest called op_start standalone against a lock held by a
-// SEPARATE external process, with nothing at fd 9 in op_start's own
-// process at all -- so its verification (flock -n 9) had nothing real to
-// verify and always failed closed, making the subtest pass only by
-// accident (when it happened to also exercise the correctly-slow
-// contended path) or fail on timing noise, never actually proving the
-// trust path. This test instead has the harness genuinely acquire fd 9
-// itself (as op_recover does) before calling `op_start lock-held`, and
+// half of TestOpStartWithoutTrustClaimContendsForRealLock: the harness
+// genuinely acquires fd 9 itself (as op_recover does) before calling
+// `op_start lock-held`, so op_start's verification (flock -n 9) has a real
+// locked descriptor to verify, and
 // an external probe confirms LOCK_FILE is never acquirable by anyone
 // else for the whole lifetime of that single process -- proving op_start
 // trusted the inherited, already-locked fd instead of re-exec'ing it
@@ -557,7 +544,8 @@ func TestOpStartEnvironmentCannotForgeLockHeldClaim(t *testing.T) {
 
 // ---------------------------------------------------------------------
 // End to end: the real op_recover handing its real, genuinely-held fd-9
-// lock to the real op_start, with no stub standing in for either. An
+// lock to the real op_start (the surrounding environment is stubbed; see
+// realOpRecoverThroughOpStartScript). An
 // external, continuously-polling flock probe must never once succeed
 // between the moment op_recover's stop begins and the moment the whole
 // sequence (through op_start) exits -- any gap would mean op_start

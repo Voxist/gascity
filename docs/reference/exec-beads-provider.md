@@ -63,6 +63,8 @@ process to manage.
 | 0 | Success (stdout holds the result, when any) |
 | 1 | Failure (stderr holds the error message) |
 | 2 | Unknown operation (treated as success — forward compatible) |
+| 3 | Unobservable (lifecycle ops `health` and `recover` only): the operation ran but the server's state could not be confirmed |
+| 4 | Recover declined (lifecycle op `recover` only): another recovery holds the lock and health could not be confirmed, so this call did not run a concurrent stop/start. Any `exec:` provider's `recover` exit 4 is treated as declined |
 
 Exit code 2 is the forward-compatibility mechanism: when Gas City adds an
 operation, an older script returns exit 2 and the provider treats it as a
