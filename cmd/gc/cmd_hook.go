@@ -33,7 +33,9 @@ func newHookCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Find routed work for an agent",
 		Long: `Finds routed work using the agent's work_query config.
 
-Without --inject: prints normalized ready-only output, exits 0 if work exists, 1 if empty.
+Without --inject: prints normalized ready-only output, exits 0 if work exists, 1 if empty,
+3 if the routed pool tier was refused by the session-origin gate (routed work was NOT
+considered — an empty result is not a drain verdict; vc-0sub).
 With --inject: silent legacy Stop-hook compatibility; skips the work query and always exits 0.
 With --claim: runs the standard startup claim protocol for one work item.
 
@@ -457,7 +459,12 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// stderr must reach the operator on the SUCCESS path too, or an
 	// origin-gate refusal (vc-ozanp5) is indistinguishable from a drained
 	// queue. The claim path below binds the same runner.
-	queryRunner := hookWorkQueryRunner(stderr)
+	//
+	// vc-0sub S1: the discovery door additionally TRACKS the refusal, so an
+	// empty answer can be relabeled on the exit code — the one channel a
+	// caller that discards stderr still sees.
+	var originGateRefused bool
+	queryRunner := hookWorkQueryRunnerTracking(stderr, &originGateRefused)
 	runner := func(command, _ string) (string, error) {
 		// ADR-0076 D3: collect what the front door actually showed. The stats
 		// are stderr, not stdout — stdout's shape is the bead rows agents and
@@ -518,7 +525,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	}
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
-	return doHookDiscovery(workQuery, workDir, false, hookClaimOptions{
+	code := doHookDiscovery(workQuery, workDir, false, hookClaimOptions{
 		Env:      queryEnv,
 		DrainAck: opts.DrainAck,
 		JSON:     opts.JSON,
@@ -526,6 +533,12 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		Identities:   identityCandidates,
 		RouteTargets: routeTargets,
 	})
+	// vc-0sub S1: an empty discovery answer on an invocation the origin gate
+	// refused is NOT a drain verdict — the pool tier was never probed, so
+	// "empty" was never proven. The claim door keeps its own drain contract
+	// (its callers route exit 1 to `gc runtime drain-ack`); only the discovery
+	// door relabels.
+	return hookDiscoveryExitCode(code, originGateRefused)
 }
 
 // emitHookSelectionStats prints the ADR-0076 D3 selection telemetry as one
@@ -1533,6 +1546,29 @@ func shellWorkQueryWithEnvDiag(command, dir string, env []string, diag io.Writer
 // query never reaches this path: its stderr rides the error instead.
 const hookWorkQueryDiagPrefix = "gc hook: work_query (exit 0) stderr: "
 
+// hookExitPoolTierGated is the discovery door's exit code for an empty run
+// whose routed (pool-demand) tier was REFUSED by the session-origin gate
+// (vc-0sub S1). Exit 1 already means two things (no-work, failed read) and is
+// disambiguated only through stderr text — which the role templates' own
+// startup idiom discards (`gc hook 2>/dev/null`). Until the idiom is fixed
+// fleet-wide, the exit code is the one channel a stderr-discarding caller
+// still sees. Stdout stays the empty JSON array vc-ozanp5 pinned, and the
+// claim door keeps its drain contract: 3 is produced only by the discovery
+// path, only on exit 1, and only when the gate actually refused.
+const hookExitPoolTierGated = 3
+
+// hookDiscoveryExitCode rewrites a discovery-door exit for the gated case: an
+// empty result (1) becomes hookExitPoolTierGated when the origin gate refused
+// this invocation; every other exit passes through untouched, because work
+// found (0), an unavailable store (2), and a failed read's error shape are
+// answers in their own right and must not be relabeled.
+func hookDiscoveryExitCode(code int, gateRefused bool) int {
+	if code == 1 && gateRefused {
+		return hookExitPoolTierGated
+	}
+	return code
+}
+
 // hookWorkQueryRunner returns the work-query runner `gc hook` uses: the
 // production shell runner, with each query's own stderr diagnostics forwarded
 // to diag under hookWorkQueryDiagPrefix so a successful-but-gated query is not
@@ -1543,6 +1579,17 @@ const hookWorkQueryDiagPrefix = "gc hook: work_query (exit 0) stderr: "
 // origin-gate refusal is a property of the session rather than of any one
 // store — without this it would be repeated once per store.
 func hookWorkQueryRunner(diag io.Writer) hookStoreRunner {
+	return hookWorkQueryRunnerTracking(diag, nil)
+}
+
+// hookWorkQueryRunnerTracking is hookWorkQueryRunner with an optional refusal
+// recorder (vc-0sub S1): gateRefused, when non-nil, is set the first time a
+// work query's exit-0 stderr carries the pool-demand origin gate's refusal
+// prefix. The refusal is a property of the session rather than of any one
+// store — the dedup below already collapses it to one line — so a single bool
+// per hook invocation is the whole state the discovery door needs to relabel
+// its empty answer as gated.
+func hookWorkQueryRunnerTracking(diag io.Writer, gateRefused *bool) hookStoreRunner {
 	seen := make(map[string]bool)
 	return func(command, dir string, env []string) (string, error) {
 		var captured bytes.Buffer
@@ -1553,6 +1600,9 @@ func hookWorkQueryRunner(diag io.Writer) hookStoreRunner {
 				continue
 			}
 			seen[line] = true
+			if gateRefused != nil && strings.HasPrefix(line, config.PoolDemandOriginGateRefusalPrefix) {
+				*gateRefused = true
+			}
 			fmt.Fprintln(diag, hookWorkQueryDiagPrefix+line) //nolint:errcheck // best-effort diagnostic
 		}
 		return out, err

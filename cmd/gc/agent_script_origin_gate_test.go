@@ -41,6 +41,29 @@ func TestAgentScriptTreatsOriginGateRefusalAsNoWork(t *testing.T) {
 // text changes shape, this fails here instead of silently re-breaking every
 // idle named script agent.
 
+// TestAgentScriptTreatsGatedExitCodeAsNoWork pins the script-mode reading of
+// vc-0sub S1's distinct exit code. The discovery door now exits
+// hookExitPoolTierGated when a run is empty because the origin gate refused
+// the pool tier; script mode consumes exit codes directly, so the classifier
+// must take that code as the graceful empty turn — but ONLY when the refusal
+// actually rode the stderr. An exit 3 from anything else is an unknown code
+// and keeps the fail-closed reading ("any exit other than 1/3-with-refusal is
+// never the empty turn").
+func TestAgentScriptTreatsGatedExitCodeAsNoWork(t *testing.T) {
+	t.Parallel()
+	if !agentScriptHookExitIsNoWork(hookExitPoolTierGated, "", hookWorkQueryDiagPrefix+originGateRefusalSample+"\n") {
+		t.Fatal("gated exit code with the refusal line classified as a hook FAILURE; every gated " +
+			"manual script-mode seat reports \"gc hook failed\" instead of the graceful empty turn")
+	}
+	// Fail closed: exit 3 without the refusal is not the gated contract. If a
+	// future exit-3 producer appears, it must teach the classifier, not inherit
+	// the benign reading.
+	if agentScriptHookExitIsNoWork(hookExitPoolTierGated, "", "") {
+		t.Fatal("exit 3 without any origin-gate refusal was classified as no-work; " +
+			"the gated reading must require the refusal on stderr")
+	}
+}
+
 // mysqlDriverChatterSample is the shape of benign stderr a federated city's bd
 // legs emit on a successful poll: go-sql-driver logging a dropped connection
 // before its retry succeeds. The query exits 0 with "[]"; only stderr is noisy.
