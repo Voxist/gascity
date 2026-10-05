@@ -448,7 +448,16 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 
 	suspendedNames := computeSuspendedNames(p.Cfg, p.CityName, p.CityPath)
 
+	// The guard is minted at boot, not lazily at the first dispatcher swap,
+	// so controllerState can hand the same pointer to the webhook seam's
+	// per-delivery dispatchers (ga-w3bkx).
+	recoverSF := &recoverSingleFlight{}
+	if mem, ok := od.(*memoryOrderDispatcher); ok {
+		mem.recoverSF = recoverSF
+	}
+
 	cr := &CityRuntime{
+		recoverSF:               recoverSF,
 		storageRoutes:           routes,
 		cityPath:                p.CityPath,
 		cityName:                p.CityName,

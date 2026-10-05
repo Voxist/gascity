@@ -1404,6 +1404,7 @@ func runController(
 	// id to stamp a webhook-fired tracking marker the same way a tick-fired
 	// one is stamped.
 	cs.controllerGeneration = cr.controllerGeneration
+	cs.recoverSF = cr.recoverSF // ga-w3bkx: webhook dispatchers share the tick guard
 	cs.emergencyCh = make(chan emergency.Record, 64)
 	cr.setControllerState(cs)
 

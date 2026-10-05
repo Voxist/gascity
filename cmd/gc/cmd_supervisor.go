@@ -2490,6 +2490,7 @@ func startOneCity(
 		// webhook seam's per-delivery dispatcher stamps markers from this
 		// controllerState's generation.
 		cs.controllerGeneration = cityRuntime.controllerGeneration
+		cs.recoverSF = cityRuntime.recoverSF // ga-w3bkx: webhook dispatchers share the tick guard
 		return nil
 	}); err != nil {
 		// The runtime is already built, and it holds this city's storage

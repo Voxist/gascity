@@ -424,8 +424,7 @@ type memoryOrderDispatcher struct {
 	// cacheMu would not serialize across instances at all. Access it only
 	// through the singleFlight() accessor, which lazily creates a private
 	// instance for a dispatcher CityRuntime never wired one into (a test, or
-	// the webhook seam's per-delivery dispatcher in api_state.go -- see the
-	// KNOWN GAP note below).
+	// a webhook seam built from a controllerState with no runtime).
 	//
 	// This is the ONE fact both paths consult, so they can never overlap
 	// for the same order (ga-3bwmf review round 3): the fallback exec
@@ -452,14 +451,10 @@ type memoryOrderDispatcher struct {
 	// op_recover's own stop call runs BEFORE that flock is acquired, so it
 	// is not yet a complete guard either.
 	//
-	// KNOWN GAP: the webhook seam (api_state.go's controllerWebhookDispatcher.
-	// dispatcher) builds a brand-new memoryOrderDispatcher per delivery, which
-	// CityRuntime never wires into this sharing -- each delivery's singleFlight()
-	// call lazily creates its own private, single-use instance. A
-	// RecoverOnStoreUnavailable order fired only via webhook would not be
-	// guarded across deliveries or against the tick loop's cr.od. Not
-	// exercised by beads-health (tick-triggered), and out of scope for this
-	// round; tracked as a follow-up, not fixed here.
+	// The webhook seam (api_state.go's controllerWebhookDispatcher.dispatcher)
+	// builds a brand-new memoryOrderDispatcher per delivery; it adopts the
+	// CityRuntime's guard through controllerState.recoverSF so concurrent
+	// deliveries and the tick loop all consult this one fact (ga-w3bkx).
 	recoverSF *recoverSingleFlight
 
 	dispatchCtx    context.Context
@@ -513,8 +508,8 @@ func (sf *recoverSingleFlight) release(scoped string) {
 
 // singleFlight returns m's recoverSingleFlight guard, lazily creating a
 // private, dispatcher-scoped instance if CityRuntime never wired one in
-// (a test, or the webhook seam's per-delivery dispatcher -- see the KNOWN
-// GAP note on memoryOrderDispatcher.recoverSF). The lazy creation itself is
+// (a test, or a webhook seam built from a controllerState with no runtime --
+// see the note on memoryOrderDispatcher.recoverSF). The lazy creation itself is
 // guarded by cacheMu, which is safe: cacheMu only ever protects THIS
 // instance's recoverSF field (the pointer itself), never the shared map the
 // pointer may point to once set.
