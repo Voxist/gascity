@@ -1109,6 +1109,12 @@ func listAcceptanceWorkflowFiles(root string) ([]string, error) {
 //   - A flag split across two matrix values or env entries is invisible.
 //   - A GITHUB_ENV write inside a composite action is out of scope.
 //   - A heredoc body that merely prints `-skip` is flagged (fails closed).
+//   - Any command is scanned, not only `go test`: `git rebase --skip` or
+//     `codespell --skip=` in a required job is flagged and must be reworded.
+//   - The wildcard reading has no word boundary, so `${NAME}kipper` is
+//     flagged although it cannot spell the flag.
+//   - Brace expansion (`-s{k,}ip=X`) is not expanded; it would fail at run
+//     time as `-sip` anyway.
 //
 // A related deselection vector is explicitly OUT of scope: `-run` can drop
 // rows the same way `-skip` can (`-run 'TestX/(a|b)$'` in a required job

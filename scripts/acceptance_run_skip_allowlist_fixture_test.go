@@ -1036,6 +1036,37 @@ func TestSkipAllowlistProblems(t *testing.T) {
 				stepYAML: "    steps:\n      - name: x\n        run: |\n          echo foo\\\n          #; go test -skip=TestFoo/bar ./x\n",
 			},
 			{
+				name: "run key under matrix.steps is not a job step", wantErr: true,
+				job: "    strategy:\n      matrix:\n        steps:\n          - run: \"-skip=TestFoo/bar\"\n",
+			},
+			{
+				name: "run key under with.steps is not a job step", wantErr: true,
+				stepYAML: "    steps:\n      - name: x\n        uses: a/b@v1\n        with:\n          steps:\n            - run: \"-skip=TestFoo/bar\"\n",
+			},
+			{
+				name: "flag produced by a needed non-required job", wantErr: true,
+				extraJobs: "  gen:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo \"f=-skip=TestFoo/bar\" >> \"$GITHUB_OUTPUT\"\n",
+				job:       "    needs: [gen]\n",
+			},
+			{
+				name: "needs chain is transitive", wantErr: true,
+				extraJobs: "  gen:\n    needs: gen2\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n  gen2:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo \"f=-skip=TestFoo/bar\" >> \"$GITHUB_OUTPUT\"\n",
+				job:       "    needs: gen\n",
+			},
+			{
+				name: "canonical skip in a needed non-required job", wantErr: true,
+				extraJobs: "  gen:\n    runs-on: ubuntu-latest\n    steps:\n      - run: go test -skip 'TestFoo/bar' ./x\n",
+				job:       "    needs: [gen]\n",
+			},
+			{
+				name: "workflow_dispatch input default", wantErr: true,
+				header: "on:\n  workflow_dispatch:\n    inputs:\n      f:\n        default: '-skip=TestFoo/bar'\n",
+			},
+			{
+				name: "unrelated job with a skip is not scanned", wantErr: false,
+				extraJobs: "  other:\n    runs-on: ubuntu-latest\n    steps:\n      - run: go test -skip=TestFoo/bar ./x\n",
+			},
+			{
 				name: "step name mentioning -skip is fine", wantErr: false,
 				stepYAML: "    steps:\n      - name: \"explain -skip=TestFoo/bar\"\n        run: go test -run 'TestFoo$' ./test/acceptance/\n",
 			},
@@ -1068,6 +1099,22 @@ func TestSkipAllowlistProblems(t *testing.T) {
 					t.Fatalf("unexpected error: %v", err)
 				}
 			})
+		}
+	})
+
+	// `${{ github.env }}` expands to the GITHUB_ENV path: a job that turns the
+	// required switch on that way is required, so its canonical -skip must be
+	// reported as unlisted.
+	t.Run("required switch set via ${{ github.env }} puts the job in scope", func(t *testing.T) {
+		workflow := []byte("jobs:\n  probe:\n    steps:\n      - name: x\n        run: |\n" +
+			"          echo GC_REQUIRE_ACCEPTANCE_TOOLING=1 >> ${{ github.env }}\n" +
+			"          go test -skip 'TestFoo/bar' ./test/acceptance/\n")
+		problems, err := skipAllowlistProblems(map[string][]byte{"ci.yml": workflow}, nil, fixtureUniverse())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !anyContains(problems, "TestFoo/bar") {
+			t.Fatalf("problems = %v, want the unlisted TestFoo/bar skip reported", problems)
 		}
 	})
 
