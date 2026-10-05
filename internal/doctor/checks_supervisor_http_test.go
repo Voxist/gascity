@@ -163,6 +163,45 @@ func TestSupervisorHTTPCheck_ErrorNonTwoXX(t *testing.T) {
 	}
 }
 
+// TestSupervisorHTTPCheck_PortExhaustionIsNotALivenessSignal pins ga-4k2m7:
+// an EADDRNOTAVAIL dial error (client-side ephemeral-port exhaustion, seen
+// fleet-wide on 2026-09-30 when Dolt client connection churn exhausted the
+// host's ephemeral range) must not be reported as "connection refused" or
+// any other wording implying the supervisor itself is down. It produces
+// StatusWarning (the probe was inconclusive), not StatusError, and the
+// message says "not a liveness signal" rather than naming the supervisor
+// as unreachable.
+func TestSupervisorHTTPCheck_PortExhaustionIsNotALivenessSignal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"syscall.EADDRNOTAVAIL", syscall.EADDRNOTAVAIL},
+		{"wrapped dial error text", fmt.Errorf("dial tcp 127.0.0.1:8372: connect: can't assign requested address")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const port = 9001
+			c := makeSupervisorHTTPCheck(true, port, &mockHTTPDoer{err: tc.err})
+			r := c.Run(&CheckContext{})
+			if r.Status != StatusWarning {
+				t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+			}
+			if strings.Contains(r.Message, "connection refused") {
+				t.Errorf("message = %q, must not say 'connection refused' for port exhaustion", r.Message)
+			}
+			if !strings.Contains(r.Message, "port exhaustion") {
+				t.Errorf("message = %q, want 'port exhaustion'", r.Message)
+			}
+			if !strings.Contains(r.Message, "not a liveness signal") {
+				t.Errorf("message = %q, want 'not a liveness signal'", r.Message)
+			}
+			if !strings.Contains(r.Message, fmt.Sprintf("%d", port)) {
+				t.Errorf("message = %q, want port %d", r.Message, port)
+			}
+		})
+	}
+}
+
 // TestSupervisorHTTPCheck_ErrorConfigLoad verifies that a config-load failure
 // produces a StatusError even before the HTTP probe.
 func TestSupervisorHTTPCheck_ErrorConfigLoad(t *testing.T) {
