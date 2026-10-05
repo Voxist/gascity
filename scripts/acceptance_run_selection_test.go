@@ -508,6 +508,12 @@ func splitTopLevelAlternation(expr string) []string {
 // over-trigger (mark a job required that was not, which is the safe
 // direction for this guard), never under-trigger on the shape it targets.
 func setsRequiredSwitchViaGithubEnv(run string) bool {
+	// `${{ github.env }}` expands to the GITHUB_ENV path, so it is the same
+	// target; it is invisible to the shell parser (replaced by a
+	// placeholder), hence the raw-text check.
+	if strings.Contains(run, "github.env") && scriptMentionsAll(run, "GC_REQUIRE_ACCEPTANCE_TOOLING") {
+		return true
+	}
 	return scriptMentionsAll(run, "GC_REQUIRE_ACCEPTANCE_TOOLING", "GITHUB_ENV")
 }
 
@@ -794,20 +800,16 @@ func walkYAMLNode(node *yaml.Node, path string, visit func(string, string) error
 // checking each against universe for the unanchored-matching ambiguity
 // checkSkipAmbiguity guards.
 //
-// DENY BY DEFAULT, not an enumeration of known-bad spellings: for each
-// step, extractAndBlankCanonicalSkips removes every canonical
-// `-skip '<expr>'` occurrence from the (comment-stripped,
-// continuation-joined) run text, and ANYTHING skip-flag-shaped
-// (skipFlagTokenPattern) still present in what remains -- or in ANY env
-// value in scope, workflow/job/step, under ANY key name -- is a hard error.
-// This closes the class rather than chasing individual spellings: it also
-// catches `'-skip' 'X'`, `-skip"" X`, an env var carrying `-skip=X` under a
-// name that is not GOFLAGS or ACCEPTANCE_GO_TEST_FLAGS, and anything else
-// that looks like the flag, without needing to have been told about it in
-// advance. It returns an error -- not a partial result -- the moment
+// DENY BY DEFAULT, not an enumeration of known-bad spellings: each step's
+// run script is parsed as bash (scanRunScriptSkips), the canonical
+// `-skip '<expr>'` call arguments are taken from the AST, and ANYTHING
+// else skip-flag-shaped in any word of the script -- or in ANY env value in
+// scope, workflow/job/step, under ANY key name -- is a hard error. Jobs a
+// required job transitively needs are scanned too, but may not use even the
+// canonical form. It returns an error -- not a partial result -- the moment
 // anything about a step's -skip cannot be trusted: a leftover skip-flag-
-// shaped token in the run script or an env value, an unparseable clause, or
-// an ambiguous one.
+// shaped token, an unparseable script, an unparseable clause, or an
+// ambiguous one.
 func requiredJobSkipsFromDoc(workflowName string, doc acceptanceWorkflowDoc, root *yaml.Node, universe acceptanceTestUniverse) ([]skippedRow, error) {
 	var out []skippedRow
 	required := map[string]bool{}
@@ -866,18 +868,22 @@ func requiredJobSkipsFromDoc(workflowName string, doc acceptanceWorkflowDoc, roo
 		if err := scanJobNodeForBypassSkips(workflowName, jobName, findJobNode(root, jobName)); err != nil {
 			return nil, err
 		}
+		envs := []map[string]any{doc.Env, job.Env}
 		for _, step := range job.Steps {
-			for _, env := range []map[string]any{doc.Env, job.Env, step.Env} {
-				for key, value := range env {
-					s := fmt.Sprint(value)
-					if window, found := findSkipFlagToken(s); found {
-						return nil, fmt.Errorf("%s job %q: env %s=%q contains a skip-flag-shaped token (%q) outside the "+
-							"recognized -skip '<expr>' form; this guard cannot see inside an env value's content -- "+
-							"rewrite the skip as an explicit -skip '<expr>' argument on the go test line instead",
-							workflowName, jobName, key, s, window)
-					}
+			envs = append(envs, step.Env)
+		}
+		for _, env := range envs {
+			for key, value := range env {
+				v := fmt.Sprint(value)
+				if window, found := findSkipFlagToken(v); found {
+					return nil, fmt.Errorf("%s job %q: env %s=%q contains a skip-flag-shaped token (%q) outside the "+
+						"recognized -skip '<expr>' form; this guard cannot see inside an env value's content -- "+
+						"rewrite the skip as an explicit -skip '<expr>' argument on the go test line instead",
+						workflowName, jobName, key, v, window)
 				}
 			}
+		}
+		for _, step := range job.Steps {
 			exprs, flagged, err := scanRunScriptSkips(step.Run)
 			if err != nil {
 				return nil, fmt.Errorf("%s job %q: %w", workflowName, jobName, err)
@@ -889,6 +895,13 @@ func requiredJobSkipsFromDoc(workflowName string, doc acceptanceWorkflowDoc, roo
 					workflowName, jobName, flagged)
 			}
 			if !required[jobName] {
+				// A job that is only in scope because a required job needs it
+				// may not skip anything, canonical form included: the guard
+				// does not track which rows its skips would deselect.
+				if len(exprs) > 0 {
+					return nil, fmt.Errorf("%s job %q: -skip %q in a job a required job depends on (needs:); "+
+						"only required jobs may use the canonical -skip form", workflowName, jobName, exprs[0])
+				}
 				continue
 			}
 			for _, expr := range exprs {
@@ -1072,55 +1085,30 @@ func listAcceptanceWorkflowFiles(root string) ([]string, error) {
 // other workflow file is in scope from the moment it exists, not from the
 // next time someone remembers to extend a hardcoded list.
 //
-// Deny by default, not an enumeration: requiredJobSkipsFromDoc removes every
-// canonical `-skip '<expr>'` occurrence and hard-errors on anything
-// skip-flag-shaped left in the run script OR in any env value in scope
-// (workflow, job, or step, under any key name -- not only GOFLAGS or
-// ACCEPTANCE_GO_TEST_FLAGS). That closes `'-skip' 'X'`, `"-skip" "X"`,
-// `-skip"" X`, an unquoted value, `-test.skip`, a shell variable holding the
-// flag (`ARGS=-skip=X; go test $ARGS`), a bash array
-// (`args=(-skip=X); go test "${args[@]}"`), `GOFLAGS+='-skip=X'`, a glued
-// quote-concatenation (`-skip 'Allowed”|TestOther'`, `-skip 'Allowed'"|X"`,
-// `-skip 'Allowed'$E`, `-skip 'Allowed'\|X`), and an env entry under any
-// name (`env: EXTRA: -skip=X`) -- see acceptance_run_skip_allowlist_fixture_test.go
-// for a fixture proving each one. stripShellComments only blanks a FULL-LINE
-// comment (first non-whitespace character is `#`, outside any quote or line
-// continuation); it never touches a `#`
-// that shares a line with real content, so `echo "step #1"; go test -skip=X`
-// (ci.yml has this exact shape: `echo "## ..."`) cannot have its trailing
-// `-skip=X` swallowed by mistaking a quoted `#` for a comment start.
+// Deny by default, not an enumeration: requiredJobSkipsFromDoc reads each
+// run script with a real bash parser (mvdan.cc/sh), accepts exactly the
+// canonical `-skip '<expr>'` call arguments, and hard-errors on any other
+// skip-flag-shaped word, however quoted, escaped, ANSI-C encoded or glued
+// to an expansion (`-skip=X`, `'-skip' 'X'`, `-test.skip`, `ARGS=-skip=X`,
+// `GOFLAGS+='-skip=X'`, `-skip 'A'"|B"`, `-s\kip`, `$'\x2dskip'`, and a
+// skip-shaped word in an env value under any name). Comments, quoting,
+// heredocs, command substitution and line continuations are the parser's
+// business, not this file's. Scalars elsewhere in a required job's YAML
+// (matrix, with:, shell:, container, defaults, on.* inputs, needed jobs) are
+// scanned as plain text for the same token.
 //
-// Known remaining limits, stated rather than silently assumed, not silently
-// claimed away:
-//   - This guard reads `step.run:` text and job/step/workflow `env:` maps --
-//     it does not execute shell, so it has no notion of what a script the
-//     run: text merely INVOKES (rather than inlines) does; nothing about
-//     invoking a checked-in script mentions "skip".
-//   - `${{ }}` expansion is not resolved: `go test ${{ inputs.flags }}`, an
-//     `env:` value like `F: ${{ vars.F }}`, and a `with:` input all reach
-//     this scan as the literal, unresolved `${{ ... }}` text. A `-skip`
-//     hiding inside one is not visible as `-skip` at all, canonical or
-//     otherwise -- this is a true gap, not a caught-for-the-wrong-reason
-//     case, because the literal text contains no skip-flag-shaped token to
-//     trip skipFlagTokenPattern either.
-//   - GITHUB_ENV: a step that appends to it for a LATER step to read moves
-//     the value out of the `env:` maps this guard scans entirely.
-//   - Runtime construction the scan cannot decode -- `printf`, ANSI-C
-//     quoting (`$'\x2d skip'`), `eval`, or a base64/decode round trip --
-//     can build the flag text at run time from characters that never spell
-//     "-skip" in the checked-in YAML.
-//   - Quote-splicing WITHOUT a glued right-hand alternation still parses
-//     (`-s”kip 'X'`, `-sk\ip 'X'`, `"-sk""ip" 'X'`): the shell reassembles
-//     these into `-skip 'X'`, but neither skipArgPattern nor
-//     skipFlagTokenPattern's literal `-skip`/`--skip`/`-test.skip` spelling
-//     recognizes the split form, so it is invisible to both the canonical
-//     parser and its deny-by-default fallback -- not merely caught for the
-//     wrong reason, but not caught at all.
-//
-// This list replaces an earlier, broader "never miss" claim this comment
-// used to make; review's MEDIUM found it did not hold once quote-splicing
-// and `${{ }}` were tried against the actual parser, and a limits section
-// that overstates its own reach is worse than a shorter, accurate one.
+// Known remaining limits, stated rather than claimed away:
+//   - Nothing is executed. A script the run: text merely INVOKES, `eval`,
+//     `bash -c` with a computed string, or a base64 round trip can build the
+//     flag at run time from text that never spells it.
+//   - `${{ }}` expressions are not evaluated. A skip-shaped token written
+//     inside one, or glued to one, is caught; a flag assembled across a
+//     `${{ }}` or parameter expansion is caught only when one character
+//     stands in for the expansion (`${{ '-s' }}kip`, `-s${X:-k}ip`), not
+//     when it expands to several or none.
+//   - A flag split across two matrix values or env entries is invisible.
+//   - A GITHUB_ENV write inside a composite action is out of scope.
+//   - A heredoc body that merely prints `-skip` is flagged (fails closed).
 //
 // A related deselection vector is explicitly OUT of scope: `-run` can drop
 // rows the same way `-skip` can (`-run 'TestX/(a|b)$'` in a required job

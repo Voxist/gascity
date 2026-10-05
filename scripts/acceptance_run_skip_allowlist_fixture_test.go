@@ -169,6 +169,13 @@ func TestScanRunScriptSkips(t *testing.T) {
 			"backtick form of the same",
 			"x=\"`echo \"a # \"`\"; y='\n#'; go test -skip=TestFoo/bar ./x", nil, true,
 		},
+		{"gha expression glued before -skip=", "go test ${{ env.E }}-skip=X ./x", nil, true},
+		{"gha expression glued before canonical -skip", "go test ${{ env.E }}-skip 'TestFoo/bar'", nil, true},
+		{"backslash inside the flag", `go test -s\kip=X ./x`, nil, true},
+		{"default-value expansion rebuilds the flag", "go test -s${UNSET:-k}ip=X ./x", nil, true},
+		{"ANSI-C encoded dash", `go test $'\x2dskip=X' ./x`, nil, true},
+		{"gha expression supplies part of the flag", "go test ${{ '-s' }}kip=X ./x", nil, true},
+		{"unrelated expansion is fine", `go test -run "$PATTERN" ./x`, nil, false},
 		{"comment mentioning -skip is prose", "# -skip is prose\ngo test ./x", nil, false},
 		{"prose after a command", "go test ./x # don't -skip", nil, false},
 	}
