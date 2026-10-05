@@ -84,10 +84,10 @@ op_start() {
 `, logFile, healthBody)
 }
 
-// opRecoverConcurrencyScript extracts the real op_recover (plus die and
-// die_unobservable, which a lock-loser's unobservable exit depends on) out
-// of the bundled provider script (plus the die, die_unobservable and
-// die_recover_declined helpers its exits depend on) and layers recoverLockStubs underneath it.
+// opRecoverConcurrencyScript extracts the real op_recover (plus die,
+// die_unobservable and die_recover_declined, which a lock-loser's exits
+// depend on) out of the bundled provider script and layers recoverLockStubs
+// underneath it.
 func opRecoverConcurrencyScript(t *testing.T, logFile string, healthOK bool) string {
 	t.Helper()
 	script := filepath.Join("..", "..", "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
