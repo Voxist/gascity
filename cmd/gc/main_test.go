@@ -109,10 +109,18 @@ func mustLoadTestSiteBinding(t *testing.T, fs fsys.FS, cityPath string) *config.
 	return binding
 }
 
+// noLifecycleIntentTestEnv, when set in a child gc process of the test binary,
+// keeps configureSupervisorHooksForTests from declaring lifecycle intent so the
+// implicit-recovery gate is active in that process.
+const noLifecycleIntentTestEnv = "GC_TEST_NO_LIFECYCLE_INTENT"
+
 func configureSupervisorHooksForTests() {
 	// Existing tests exercise implicit managed-dolt recovery without a live
-	// controller; the gate has its own tests that reset this.
-	declareLifecycleIntent()
+	// controller; the gate has its own tests that reset this. A process-level
+	// test that needs the gate ACTIVE in a child gc sets noLifecycleIntentTestEnv.
+	if os.Getenv(noLifecycleIntentTestEnv) == "" {
+		declareLifecycleIntent()
+	}
 	ensureSupervisorRunningHook = func(_, _ io.Writer) int { return 0 }
 	reloadSupervisorHook = func(_, _ io.Writer) int { return 0 }
 	supervisorAliveHook = func() int { return 0 }
