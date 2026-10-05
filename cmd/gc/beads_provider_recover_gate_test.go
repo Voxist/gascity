@@ -1108,15 +1108,35 @@ func TestRedactRecoverStderr(t *testing.T) {
 	for in, want := range map[string]string{
 		`dolt --password hunter2 sql`:                 `dolt --password REDACTED sql`,
 		`dolt --password=hunter2 sql`:                 `dolt --password=REDACTED sql`,
+		"dolt --password\thunter2 sql":                "dolt --password\tREDACTED sql",
+		`dolt --password 'my secret' sql`:             `dolt --password REDACTED sql`,
+		`dolt --password "my secret" sql`:             `dolt --password REDACTED sql`,
 		`DOLT_PASSWORD=hunter2 failed`:                `DOLT_PASSWORD=REDACTED failed`,
 		`dial mysql://root:hunter2@127.0.0.1:3307/db`: `dial mysql://root:REDACTED@127.0.0.1:3307/db`,
+		`root:hunter2@tcp(127.0.0.1:3307)/db`:         `root:REDACTED@tcp(127.0.0.1:3307)/db`,
+		`{"user":"root","password":"my secret"}`:      `{"user":"root","password":REDACTED}`,
+		`password: hunter2`:                           `password: REDACTED`,
 		`GC_DOLT_PASSWORD=hunter2`:                    `GC_DOLT_PASSWORD=REDACTED`,
+		`GC_DOLT_PASSWORD='my secret'`:                `GC_DOLT_PASSWORD=REDACTED`,
+		`http://127.0.0.1:8372/v0/x?q=a@b`:            `http://127.0.0.1:8372/v0/x?q=a@b`,
 		`plain failure`:                               `plain failure`,
 	} {
 		if got := redactRecoverStderr(in); got != want {
 			t.Errorf("redact(%q) = %q, want %q", in, got, want)
 		}
 	}
+}
+
+type failingAckRecorder struct{ err error }
+
+func (f failingAckRecorder) Record(events.Event)          {}
+func (f failingAckRecorder) RecordAck(events.Event) error { return f.err }
+
+func TestAckManagedDoltRecoverEventLogsRecordFailure(t *testing.T) {
+	r := captureRecoverReports(t)
+	ackManagedDoltRecoverEvent(failingAckRecorder{err: errors.New("lock: timed out")},
+		events.Event{Type: events.ManagedDoltRecoverDecision})
+	wantLogContains(t, r, "recording "+events.ManagedDoltRecoverDecision+" event", "lock: timed out")
 }
 
 func TestRecoverReportRedactsSecretsBeforeLoggingAndEmitting(t *testing.T) {

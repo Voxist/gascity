@@ -277,10 +277,12 @@ var recoverSecretPatterns = []struct {
 	re   *regexp.Regexp
 	repl string
 }{
-	{regexp.MustCompile(`(?i)(--password[ =])\S+`), "${1}REDACTED"},
-	{regexp.MustCompile(`(?i)(password=)\S+`), "${1}REDACTED"},
-	{regexp.MustCompile(`(://[^:@/\s]+:)[^@\s]+@`), "${1}REDACTED@"},
-	{regexp.MustCompile(`(GC_DOLT_PASSWORD=)\S+`), "${1}REDACTED"},
+	{regexp.MustCompile(`(?i)(--password[\s=]+)('[^']*'|"[^"]*"|\S+)`), "${1}REDACTED"},
+	{regexp.MustCompile(`(?i)(password=)('[^']*'|"[^"]*"|\S+)`), "${1}REDACTED"},
+	{regexp.MustCompile(`(?i)("?password"?\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,}]+)`), "${1}REDACTED"},
+	{regexp.MustCompile(`(://[^:@/\s]+:)[^@\s/?#]+@`), "${1}REDACTED@"},
+	{regexp.MustCompile(`([^\s:/@]+:)[^@\s]+@tcp\(`), "${1}REDACTED@tcp("},
+	{regexp.MustCompile(`(GC_DOLT_PASSWORD=)('[^']*'|"[^"]*"|\S+)`), "${1}REDACTED"},
 }
 
 // redactRecoverStderr masks credentials in provider stderr before it is
@@ -340,9 +342,19 @@ func realRecordManagedDoltRecoverEvent(cityPath string, e events.Event) {
 		log.Printf("gc: managed dolt recover: opening event log for %s: %v", cityPath, err)
 		return
 	}
-	rec.Record(e)
+	ackManagedDoltRecoverEvent(rec, e)
 	if err := rec.Close(); err != nil {
 		log.Printf("gc: managed dolt recover: closing event log for %s: %v", cityPath, err)
+	}
+}
+
+// ackManagedDoltRecoverEvent records e and logs the failure RecordAck
+// reports (a flock timeout or a write error). Record would drop it
+// silently, losing the forensic trail under exactly the host load this
+// event exists for.
+func ackManagedDoltRecoverEvent(rec events.AckRecorder, e events.Event) {
+	if err := rec.RecordAck(e); err != nil {
+		log.Printf("gc: managed dolt recover: recording %s event: %v", e.Type, err)
 	}
 }
 
