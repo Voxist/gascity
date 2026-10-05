@@ -110,6 +110,9 @@ func mustLoadTestSiteBinding(t *testing.T, fs fsys.FS, cityPath string) *config.
 }
 
 func configureSupervisorHooksForTests() {
+	// Existing tests exercise implicit managed-dolt recovery without a live
+	// controller; the gate has its own tests that reset this.
+	declareLifecycleIntent()
 	ensureSupervisorRunningHook = func(_, _ io.Writer) int { return 0 }
 	reloadSupervisorHook = func(_, _ io.Writer) int { return 0 }
 	supervisorAliveHook = func() int { return 0 }

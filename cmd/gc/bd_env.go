@@ -1280,6 +1280,9 @@ var (
 )
 
 var recoverManagedBDCommand = func(cityPath string) error {
+	if err := implicitManagedDoltRecoveryCheck(cityPath); err != nil {
+		return fmt.Errorf("%w: %w", errManagedDoltRecoverDeclined, err)
+	}
 	script := gcBeadsBdScriptPath(cityPath)
 	overrides := cityRuntimeEnvMapForCity(cityPath)
 	// Recovering the legacy managed server is the path an in-place gc upgrade
@@ -1512,6 +1515,9 @@ func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, 
 		return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
 	}
 	if allowRecovery {
+		if err := implicitManagedDoltRecoveryCheck(cityPath); err != nil {
+			return contract.DoltConnectionTarget{}, false, err
+		}
 		if err := healthBeadsProviderContext(ctx, cityPath, false); err == nil {
 			resetRecoveryCache()
 			if port := recoveredManagedDoltPort(); port != "" {
