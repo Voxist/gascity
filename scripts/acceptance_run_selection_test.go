@@ -282,37 +282,14 @@ type skippedRow struct {
 	Job string
 }
 
-// skipArgPattern matches the body of the ONE canonical `-skip '<expr>'`
-// spelling this parser accepts: single-quoted, the same convention runPattern
-// relies on for `-run`, with a left boundary that excludes it matching mid-
-// identifier (an "...x-skip" tail cannot masquerade as the flag) AND a right
-// boundary requiring the closing `'` be followed by end-of-text, whitespace,
-// or one of `;&|)` -- go test's actual -skip flag also accepts --skip,
-// -skip=X, -skip "X", an unquoted value, -test.skip/--test.skip, and reads
-// GOFLAGS -- none of those are parsed here. Rather than enumerate and parse
-// every one of them, requiredJobSkipsFromDoc DENIES BY DEFAULT: it removes
-// every canonical occurrence this pattern finds, then hard-errors if anything
-// matching skipFlagTokenPattern remains anywhere in the run script or any env
-// value in scope. Unlike a missed `-run` (which a green CI run makes visible
-// by never running), a missed `-skip` fails OPEN: the row runs -- or a shared
-// resource the allowlist assumed was staying off does not.
+// The canonical -skip spelling is `-skip '<expr>'` (a plain single-quoted
+// word, read from the shell AST by scanRunScriptSkips). go test's flag also
+// accepts --skip, -skip=X, -skip "X", an unquoted value, -test.skip and
+// GOFLAGS; none of those are parsed. requiredJobSkipsFromDoc DENIES BY
+// DEFAULT: any other skip-shaped word is a hard error. Unlike a missed
+// `-run` (which a green CI run makes visible by never running), a missed
+// `-skip` fails OPEN.
 //
-// The right boundary closes a glued-suffix hole review found: without it,
-// `-skip 'Allowed”|TestOther'` (two adjacent single-quoted shell strings,
-// which the shell concatenates into one -skip 'Allowed|TestOther') matches
-// this pattern as if "Allowed" were the whole expression, blanks exactly
-// that much, and leaves the trailing `'|TestOther'` looking like ordinary
-// quoted text -- not skip-flag-shaped, so it never reaches
-// skipFlagTokenPattern's fallback scan either. TestOther silently skips with
-// no allowlist entry and no error, from a spelling nobody was asked to
-// recognize. `-skip 'Allowed'"|X"`, `-skip 'Allowed'$E`, and
-// `-skip 'Allowed'\|X` are the same hole through a double-quoted glue, a
-// shell variable, and an escaped pipe respectively. Go's regexp (RE2) has no
-// lookahead, so the right boundary is a captured, consumed group like the
-// left one; extractAndBlankCanonicalSkips re-emits it unchanged, the same
-// way it already re-emits the left boundary character.
-var skipArgPattern = regexp.MustCompile(`(^|[^A-Za-z0-9_.-])-skip\s+'([^']*)'($|[\s;&|)])`)
-
 // skipFlagTokenPattern finds anything that LOOKS like a go test skip flag, in
 // any spelling and quoting: -skip/--skip/-test.skip/--test.skip, with or
 // without '=', any quote style or none. The left boundary excludes identifier
@@ -324,208 +301,6 @@ var skipArgPattern = regexp.MustCompile(`(^|[^A-Za-z0-9_.-])-skip\s+'([^']*)'($|
 // OVER-detects, never under-detects, which is the fail-closed direction this
 // guard wants.
 var skipFlagTokenPattern = regexp.MustCompile(`(^|[^A-Za-z0-9_.-])--?(test\.)?skip([^A-Za-z0-9_-]|$)`)
-
-// backslashContinuationPattern matches a shell line continuation, so a
-// `-skip` split across a `\`-continued line for readability parses the same
-// as one written on a single line.
-var backslashContinuationPattern = regexp.MustCompile(`\\[ \t]*\n[ \t]*`)
-
-// joinBackslashContinuations collapses `cmd \<newline>  arg` into `cmd arg`
-// -- the shell's own continuation semantics -- before either pattern above
-// sees the text.
-func joinBackslashContinuations(s string) string {
-	return backslashContinuationPattern.ReplaceAllString(s, " ")
-}
-
-// fullLineCommentPattern matches a line whose first non-whitespace character
-// is '#' -- a FULL-LINE shell comment, and only that, PROVIDED the scanner
-// is not already inside a quote or heredoc body carried over from an
-// earlier line (see shellLexState below). review's HIGH-2 found this
-// guard's previous word-start rule ("'#' at line-start or after whitespace
-// starts a comment") had a false match: a '#' preceded by whitespace INSIDE
-// a double-quoted string is not a shell comment at all, so
-// `echo "step #1"; go test -skip=X` had its word-start rule fire on the '#'
-// in "step #1" and truncate the rest of the line -- including the real
-// `; go test -skip=X` -- and ci.yml already has this shape (`echo "## ..."`).
-// Restricting to whole-line comments fixed the SAME-line case, but
-// review's ga-1ebvc MEDIUM found the multi-line version of the same hole:
-// a quote OPENED on an earlier line and not yet closed makes a '#' at the
-// START of a later line just as much NOT a comment, and the previous rule
-// had no memory of that -- it deleted the whole line, real -skip included,
-// with nothing left for the fallback scan to catch. shellLexState is the
-// minimal state (open single/double quote, open heredoc) needed to answer
-// "am I at a real command-start position" one line at a time.
-var fullLineCommentPattern = regexp.MustCompile(`^\s*#`)
-
-// heredocStartPattern finds a heredoc redirect (`<<`, `<<-`) and its
-// delimiter, optionally quoted. It is only consulted on text known (by
-// shellLexState) to be OUTSIDE any open quote already, so it cannot itself
-// misfire on a `<<` that is merely quoted string content.
-var heredocStartPattern = regexp.MustCompile(`<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)['"]?`)
-
-// shellLexState is the minimal shell lexical state stripShellComments needs
-// to track ACROSS lines: whether the scanner is inside an open single
-// quote, an open double quote, or an open heredoc body, and (for a heredoc
-// opened with `<<-`) whether the end delimiter's leading tabs are
-// stripped. It is a state machine over QUOTING and HEREDOCS only -- not a
-// shell parser.
-//
-// It tracks single, double and $'...' (ANSI-C) quotes, an unquoted trailing
-// backslash (the next line is joined, so a leading '#' there is not a
-// comment), and stops at an unquoted word-start '#'.
-//
-// Known gaps, stated rather than assumed away: it does not track
-// command substitution $(...) or backtick nesting, a
-// heredoc delimiter that itself needs more than one layer of quote
-// removal, or `<<<` here-strings (harmless: they take no body). Each is a
-// narrower vector than the multi-line-quote hole this fixes. These gaps do
-// NOT all fail safe: a construct the scanner mis-reads can flip quote state
-// and blank a line that is really code. Replace this tracker with an exact
-// allowlist or mvdan.cc/sh if it keeps growing.
-type shellLexState struct {
-	singleQuoted bool
-	doubleQuoted bool
-	heredocEnd   string // non-empty while inside a heredoc body
-	heredocStrip bool   // <<- : strip leading tabs from the end-delimiter line
-	ansiQuoted   bool   // inside $'...' (backslash escapes, including \')
-	continued    bool   // previous line ended in an unquoted '\': this line cannot start a comment
-}
-
-// scanLine updates st to reflect line's effect on shell quote/heredoc
-// state. It never modifies line; stripShellComments decides separately,
-// using the state as of the START of a line, whether that line is a
-// comment to blank.
-func (st *shellLexState) scanLine(line string) {
-	st.continued = false
-	i := 0
-	for i < len(line) {
-		c := line[i]
-		switch {
-		case st.ansiQuoted:
-			if c == '\\' && i+1 < len(line) {
-				i += 2
-				continue
-			}
-			if c == '\'' {
-				st.ansiQuoted = false
-			}
-			i++
-		case st.singleQuoted:
-			if c == '\'' {
-				st.singleQuoted = false
-			}
-			i++
-		case st.doubleQuoted:
-			if c == '\\' && i+1 < len(line) {
-				i += 2
-				continue
-			}
-			if c == '"' {
-				st.doubleQuoted = false
-			}
-			i++
-		case c == '$' && i+1 < len(line) && line[i+1] == '\'':
-			st.ansiQuoted = true
-			i += 2
-		case c == '\'':
-			st.singleQuoted = true
-			i++
-		case c == '#' && (i == 0 || strings.ContainsRune(" \t;&|(", rune(line[i-1]))):
-			// An unquoted word-start '#' begins a real comment: nothing after
-			// it can open a quote or heredoc.
-			return
-		case c == '\\' && i+1 == len(line):
-			st.continued = true
-			i++
-		case c == '"':
-			st.doubleQuoted = true
-			i++
-		case c == '\\' && i+1 < len(line):
-			i += 2
-		case c == '<' && i+1 < len(line) && line[i+1] == '<':
-			// A here-string (`<<<word`) does not match heredocStartPattern
-			// (the identifier class excludes '<'), so it naturally falls
-			// through to the i++ below and is never mistaken for a heredoc
-			// -- it opens no body and needs no end-delimiter tracking.
-			if m := heredocStartPattern.FindStringSubmatchIndex(line[i:]); m != nil && m[0] == 0 {
-				st.heredocEnd = line[i+m[4] : i+m[5]]
-				st.heredocStrip = strings.HasPrefix(line[i:], "<<-")
-				i += m[1]
-				continue
-			}
-			i++
-		default:
-			i++
-		}
-	}
-}
-
-// stripShellComments blanks every FULL-LINE shell comment, tracking quote
-// and heredoc state across lines (shellLexState) so a '#' that only LOOKS
-// like a line-start comment -- because it is inside a quote opened on an
-// earlier line, or inside a heredoc body -- is left untouched instead of
-// being deleted. A real full-line comment (outside any quote or heredoc,
-// first non-whitespace character '#') lets a comment that MENTIONS "-skip"
-// in prose (exactly how the real beads-proxied-native-acceptance step
-// documents its own deselection: "# -skip excludes child-term-zombie and
-// root-move: ...") not be counted as a skip-flag token. A '#' that shares a
-// line with real content -- commented-out trailing code, or one that is
-// merely inside a same-line quote -- is deliberately left untouched, same
-// as before. Applied before joinBackslashContinuations: a real shell
-// comment absorbs any trailing '\' too, so line-joining must not cross one.
-func stripShellComments(s string) string {
-	lines := strings.Split(s, "\n")
-	var st shellLexState
-	for i, line := range lines {
-		if st.heredocEnd != "" {
-			end := line
-			if st.heredocStrip {
-				end = strings.TrimLeft(end, "\t")
-			}
-			if end == st.heredocEnd {
-				st.heredocEnd = ""
-				st.heredocStrip = false
-			}
-			continue // heredoc body lines are never comments, never blanked
-		}
-		if !st.singleQuoted && !st.doubleQuoted && !st.ansiQuoted && !st.continued && fullLineCommentPattern.MatchString(line) {
-			lines[i] = ""
-			continue
-		}
-		st.scanLine(line)
-	}
-	return strings.Join(lines, "\n")
-}
-
-// extractAndBlankCanonicalSkips finds every canonical -skip '<expr>'
-// occurrence skipArgPattern recognizes, returning the expressions in
-// left-to-right order and TEXT with those occurrences replaced (both
-// boundary characters kept, the rest blanked) so a subsequent scan for
-// anything skip-flag-shaped does not re-flag what this parser already
-// accounted for. The right boundary (end-of-text, whitespace, or one of
-// `;&|)`) is consumed by the match the same way the left one is -- RE2 has
-// no lookahead -- so it is re-emitted here exactly like the left boundary,
-// rather than dropped: dropping it would silently delete a real separator
-// (e.g. the `;` between two shell commands) from the blanked text a later
-// scan still has to read correctly.
-func extractAndBlankCanonicalSkips(text string) (exprs []string, blanked string) {
-	var b strings.Builder
-	last := 0
-	for _, m := range skipArgPattern.FindAllStringSubmatchIndex(text, -1) {
-		b.WriteString(text[last:m[0]])
-		if m[2] >= 0 {
-			b.WriteString(text[m[2]:m[3]]) // keep the left boundary character
-		}
-		b.WriteByte(' ')
-		exprs = append(exprs, text[m[4]:m[5]])
-		if m[6] >= 0 {
-			b.WriteString(text[m[6]:m[7]]) // keep the right boundary character (empty at end-of-text)
-		}
-		last = m[1]
-	}
-	b.WriteString(text[last:])
-	return exprs, b.String()
-}
 
 // findSkipFlagToken reports a short window of text around the first
 // skip-flag-shaped token remaining in s, if any -- enough to identify it in
@@ -733,8 +508,7 @@ func splitTopLevelAlternation(expr string) []string {
 // over-trigger (mark a job required that was not, which is the safe
 // direction for this guard), never under-trigger on the shape it targets.
 func setsRequiredSwitchViaGithubEnv(run string) bool {
-	run = stripShellComments(run)
-	return strings.Contains(run, "GC_REQUIRE_ACCEPTANCE_TOOLING") && strings.Contains(run, "GITHUB_ENV")
+	return scriptMentionsAll(run, "GC_REQUIRE_ACCEPTANCE_TOOLING", "GITHUB_ENV")
 }
 
 // requiredJobEnv reports whether GC_REQUIRE_ACCEPTANCE_TOOLING is on in the
@@ -959,15 +733,14 @@ func scanJobNodeForBypassSkips(workflowName, jobName string, jobNode *yaml.Node)
 	})
 }
 
-// stepItemPathPattern matches the breadcrumb of a steps[i] mapping, the only
-// place a scalar "run" (the script) or "name" is exempt from the raw scan.
-var stepItemPathPattern = regexp.MustCompile(`(^|\.)steps\[\d+\]$`)
+// stepItemPathPattern matches the breadcrumb of a job's own steps[i] mapping
+// (anchored at the job root), the only place a scalar "run" X
+var stepItemPathPattern = regexp.MustCompile(`^steps\[\d+\]$`)
 
 // walkYAMLNode recursively visits every scalar value under node, calling
 // visit(path, value) for each one except a steps[i] item's own run and name
 // scalars. path is a dotted/bracketed breadcrumb (e.g.
 // "strategy.matrix.flags[0]") used only for error messages.
-
 func walkYAMLNode(node *yaml.Node, path string, visit func(string, string) error) error {
 	if node == nil {
 		return nil
@@ -1037,7 +810,7 @@ func walkYAMLNode(node *yaml.Node, path string, visit func(string, string) error
 // an ambiguous one.
 func requiredJobSkipsFromDoc(workflowName string, doc acceptanceWorkflowDoc, root *yaml.Node, universe acceptanceTestUniverse) ([]skippedRow, error) {
 	var out []skippedRow
-	anyRequired := false
+	required := map[string]bool{}
 	for jobName, job := range doc.Jobs {
 		// LOW (ga-may9k round 4): a job is in scope if ANY of its steps sets
 		// the required-tooling env, not only the specific step being
@@ -1053,20 +826,43 @@ func requiredJobSkipsFromDoc(workflowName string, doc acceptanceWorkflowDoc, roo
 			}
 			jobRequired = requiredJobEnv(step.Env) || setsRequiredSwitchViaGithubEnv(step.Run)
 		}
-		if !jobRequired {
+		if jobRequired {
+			required[jobName] = true
+		}
+	}
+	if len(required) == 0 {
+		return nil, nil
+	}
+
+	// A required job can consume values another job produced
+	// (`${{ needs.gen.outputs.f }}` fed by `echo f=-skip=X >> $GITHUB_OUTPUT`),
+	// so every job a required job transitively `needs:` is scanned for a
+	// hiding -skip too. Only a REQUIRED job's own canonical skips count as
+	// deselected rows.
+	scope := map[string]bool{}
+	var visit func(name string)
+	visit = func(name string) {
+		if scope[name] {
+			return
+		}
+		scope[name] = true
+		for _, dep := range jobNeeds(findJobNode(root, name)) {
+			visit(dep)
+		}
+	}
+	for name := range required {
+		visit(name)
+	}
+
+	for jobName := range scope {
+		job, ok := doc.Jobs[jobName]
+		if !ok {
 			continue
 		}
-		anyRequired = true
-		// ga-1ebvc MEDIUM: everything below this point (env: maps,
-		// steps[].run) is exactly what acceptanceWorkflowDoc's typed
-		// struct has fields for. A -skip hiding anywhere ELSE in this
-		// job's YAML -- strategy.matrix, a step's own shell:,
-		// defaults.run.shell, container.env, with: -- is invisible to all
-		// of it, because the typed decode silently dropped that field.
-		// scanJobNodeForBypassSkips walks the job's RAW node instead,
-		// catching every scalar the typed struct does not, while leaving
-		// "run" values (which are handled below, with the canonical
-		// -skip '<expr>' parser) alone.
+		// ga-1ebvc MEDIUM: acceptanceWorkflowDoc's typed struct only has
+		// fields for env: maps and steps[].run. A -skip hiding anywhere ELSE
+		// in the job's YAML is scanned from the RAW node, except a job's own
+		// steps[i].run and name (handled below with the shell parser).
 		if err := scanJobNodeForBypassSkips(workflowName, jobName, findJobNode(root, jobName)); err != nil {
 			return nil, err
 		}
@@ -1082,13 +878,18 @@ func requiredJobSkipsFromDoc(workflowName string, doc acceptanceWorkflowDoc, roo
 					}
 				}
 			}
-			joined := joinBackslashContinuations(stripShellComments(step.Run))
-			exprs, blanked := extractAndBlankCanonicalSkips(joined)
-			if window, found := findSkipFlagToken(blanked); found {
+			exprs, flagged, err := scanRunScriptSkips(step.Run)
+			if err != nil {
+				return nil, fmt.Errorf("%s job %q: %w", workflowName, jobName, err)
+			}
+			if flagged != "" {
 				return nil, fmt.Errorf("%s job %q: run script contains a skip-flag-shaped token (%q) outside the "+
 					"recognized -skip '<expr>' form; every -skip/-test.skip must be written exactly as "+
 					"-skip '<expr>' (single-quoted) -- any other spelling fails open and is refused here",
-					workflowName, jobName, window)
+					workflowName, jobName, flagged)
+			}
+			if !required[jobName] {
+				continue
 			}
 			for _, expr := range exprs {
 				clauses, err := parseSkipExpression(expr)
@@ -1107,33 +908,51 @@ func requiredJobSkipsFromDoc(workflowName string, doc acceptanceWorkflowDoc, roo
 			}
 		}
 	}
-	// Workflow-level keys (defaults.run.shell, ...) apply to every job, so
-	// when any job is required they are scanned too; jobs are scanned above
-	// and `on` carries no execution content.
-	if anyRequired && root != nil {
-		top := root
-		if top.Kind == yaml.DocumentNode && len(top.Content) > 0 {
-			top = top.Content[0]
-		}
-		if top.Kind == yaml.MappingNode {
-			for i := 0; i+1 < len(top.Content); i += 2 {
-				key := top.Content[i].Value
-				if key == "jobs" || key == "on" {
-					continue
+	// Workflow-level keys (defaults.run.shell, on.*.inputs.*.default, ...)
+	// feed every job, so with any job required they are scanned too; jobs
+	// are scanned above.
+	top := root
+	if top != nil && top.Kind == yaml.DocumentNode && len(top.Content) > 0 {
+		top = top.Content[0]
+	}
+	if top != nil && top.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(top.Content); i += 2 {
+			key := top.Content[i].Value
+			if key == "jobs" {
+				continue
+			}
+			if err := walkYAMLNode(top.Content[i+1], key, func(path, value string) error {
+				if window, found := findSkipFlagToken(value); found {
+					return fmt.Errorf("%s: workflow-level %s contains a skip-flag-shaped token (%q) that applies to required jobs; "+
+						"this guard only parses -skip inside steps[].run", workflowName, path, window)
 				}
-				if err := walkYAMLNode(top.Content[i+1], key, func(path, value string) error {
-					if window, found := findSkipFlagToken(value); found {
-						return fmt.Errorf("%s: workflow-level %s contains a skip-flag-shaped token (%q) that applies to required jobs; "+
-							"this guard only parses -skip inside steps[].run", workflowName, path, window)
-					}
-					return nil
-				}); err != nil {
-					return nil, err
-				}
+				return nil
+			}); err != nil {
+				return nil, err
 			}
 		}
 	}
 	return out, nil
+}
+
+// jobNeeds returns the job names listed in a job node's `needs:` (a scalar
+// or a sequence).
+func jobNeeds(jobNode *yaml.Node) []string {
+	needs := mappingValue(jobNode, "needs")
+	if needs == nil {
+		return nil
+	}
+	switch needs.Kind {
+	case yaml.ScalarNode:
+		return []string{needs.Value}
+	case yaml.SequenceNode:
+		var names []string
+		for _, c := range needs.Content {
+			names = append(names, c.Value)
+		}
+		return names
+	}
+	return nil
 }
 
 // skipAllowlistProblems is TestRequiredJobSkipsAreAllowlisted's engine,

@@ -140,86 +140,49 @@ func TestParseSkipExpression(t *testing.T) {
 	}
 }
 
-// TestExtractAndBlankCanonicalSkips is the direct, parser-level regression
-// for HIGH round 4's right-boundary fix: skipArgPattern must accept a
-// canonical -skip whose closing quote is followed by end-of-text,
-// whitespace, or one of `;&|)`, and must REJECT (not match at all) one
-// glued to more text via another quote, a shell variable, or an escaped
-// pipe -- the four concrete forms review probed. A rejection here means the
-// text is left for skipFlagTokenPattern's fallback scan to catch as
-// skip-flag-shaped, which TestSkipAllowlistProblems's "every probed bypass"
-// table proves end to end; this test isolates the boundary decision itself.
-func TestExtractAndBlankCanonicalSkips(t *testing.T) {
+// TestScanRunScriptSkips pins the shell-AST reader: which spellings are the
+// canonical `-skip '<expr>'` form (recognized) and which are left over as
+// skip-shaped (flagged), including the glued-suffix forms review found.
+func TestScanRunScriptSkips(t *testing.T) {
 	cases := []struct {
-		name      string
-		text      string
-		wantExprs []string
-		wantLeft  string // substring that must survive unblanked, "" to skip the check
+		name        string
+		script      string
+		wantExprs   []string
+		wantFlagged bool
 	}{
+		{"canonical at end", "go test -skip 'TestFoo/bar'", []string{"TestFoo/bar"}, false},
+		{"canonical before a path", "go test -skip 'TestFoo/bar' ./test/acceptance/", []string{"TestFoo/bar"}, false},
+		{"canonical before a semicolon", "go test -skip 'TestFoo/bar';echo done", []string{"TestFoo/bar"}, false},
+		{"canonical in a subshell", "(go test -skip 'TestFoo/bar'); echo done", []string{"TestFoo/bar"}, false},
+		{"glued: adjacent single-quoted strings", "go test -skip 'Allowed''|TestOther'", nil, true},
+		{"glued: double-quoted continuation", `go test -skip 'Allowed'"|TestOther"`, nil, true},
+		{"glued: shell variable", "go test -skip 'Allowed'$EXTRA", nil, true},
+		{"glued: escaped pipe", `go test -skip 'Allowed'\|TestOther`, nil, true},
+		{"equals form", "go test -skip=TestFoo/bar ./x", nil, true},
+		{"quoted flag word", `go test '-skip' 'X'`, nil, true},
+		{"-test.skip", "go test -test.skip=X ./x", nil, true},
 		{
-			name:      "canonical, followed by end-of-text",
-			text:      "go test -skip 'TestFoo/bar'",
-			wantExprs: []string{"TestFoo/bar"},
+			"command substitution with inner quotes then quote spanning lines",
+			"x=\"$(echo \"a # \")\"; y='\n#'; go test -skip=TestFoo/bar ./x", nil, true,
 		},
 		{
-			name:      "canonical, followed by whitespace",
-			text:      "go test -skip 'TestFoo/bar' ./test/acceptance/",
-			wantExprs: []string{"TestFoo/bar"},
+			"backtick form of the same",
+			"x=\"`echo \"a # \"`\"; y='\n#'; go test -skip=TestFoo/bar ./x", nil, true,
 		},
-		{
-			name:      "canonical, followed by a semicolon",
-			text:      "go test -skip 'TestFoo/bar';echo done",
-			wantExprs: []string{"TestFoo/bar"},
-			wantLeft:  ";echo done",
-		},
-		{
-			name:      "canonical, followed by a closing paren",
-			text:      "if true; then go test -skip 'TestFoo/bar'); fi",
-			wantExprs: []string{"TestFoo/bar"},
-		},
-		{
-			// review's glue form 1: two adjacent single-quoted shell
-			// strings, which the shell concatenates into one -skip value
-			// ("Allowed|TestOther"). The right-boundary fix must refuse to
-			// treat "Allowed" as the whole expression.
-			name:      "glued: adjacent single-quoted strings",
-			text:      "go test -skip 'Allowed''|TestOther'",
-			wantExprs: nil,
-			wantLeft:  "-skip 'Allowed''|TestOther'",
-		},
-		{
-			// review's glue form 2: a double-quoted continuation.
-			name:      "glued: double-quoted continuation",
-			text:      `go test -skip 'Allowed'"|TestOther"`,
-			wantExprs: nil,
-			wantLeft:  `-skip 'Allowed'"|TestOther"`,
-		},
-		{
-			// review's glue form 3: a shell variable reference glued on.
-			name:      "glued: shell variable glued on",
-			text:      "go test -skip 'Allowed'$EXTRA",
-			wantExprs: nil,
-			wantLeft:  "-skip 'Allowed'$EXTRA",
-		},
-		{
-			// review's glue form 4: an escaped pipe glued on.
-			name:      `glued: escaped pipe glued on`,
-			text:      `go test -skip 'Allowed'\|TestOther`,
-			wantExprs: nil,
-			wantLeft:  `-skip 'Allowed'\|TestOther`,
-		},
+		{"comment mentioning -skip is prose", "# -skip is prose\ngo test ./x", nil, false},
+		{"prose after a command", "go test ./x # don't -skip", nil, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			exprs, blanked := extractAndBlankCanonicalSkips(c.text)
+			exprs, flagged, err := scanRunScriptSkips(c.script)
+			if err != nil {
+				t.Fatalf("scanRunScriptSkips(%q) error: %v", c.script, err)
+			}
 			if !equalStringSlices(exprs, c.wantExprs) {
-				t.Fatalf("extractAndBlankCanonicalSkips(%q) exprs = %v, want %v", c.text, exprs, c.wantExprs)
+				t.Fatalf("exprs = %v, want %v", exprs, c.wantExprs)
 			}
-			if c.wantLeft != "" && !strings.Contains(blanked, c.wantLeft) {
-				t.Fatalf("extractAndBlankCanonicalSkips(%q) blanked = %q, want it to still contain %q", c.text, blanked, c.wantLeft)
-			}
-			if len(c.wantExprs) > 0 && strings.Contains(blanked, c.wantExprs[0]) {
-				t.Fatalf("extractAndBlankCanonicalSkips(%q) blanked = %q, a recognized expression must not survive in the blanked text", c.text, blanked)
+			if (flagged != "") != c.wantFlagged {
+				t.Fatalf("flagged = %q, want flagged=%v", flagged, c.wantFlagged)
 			}
 		})
 	}
@@ -1034,11 +997,12 @@ func TestSkipAllowlistProblems(t *testing.T) {
 	t.Run("round-2 bypasses error and false positives stay quiet", func(t *testing.T) {
 		const step = "    steps:\n      - name: run\n        run: go test -run 'TestFoo$' ./test/acceptance/\n"
 		cases := []struct {
-			name     string
-			header   string // workflow-level YAML before jobs:
-			job      string // job fields before steps
-			stepYAML string // overrides the default steps block when set
-			wantErr  bool
+			name      string
+			header    string // workflow-level YAML before jobs:
+			job       string // job fields before steps
+			stepYAML  string // overrides the default steps block when set
+			extraJobs string // additional jobs appended after probe
+			wantErr   bool
 		}{
 			{
 				name: "run key inside strategy.matrix.include", wantErr: true,
@@ -1088,6 +1052,7 @@ func TestSkipAllowlistProblems(t *testing.T) {
 				if strings.HasPrefix(c.name, "GITHUB_ENV") {
 					body = strings.Replace(body, "    env:\n      GC_REQUIRE_ACCEPTANCE_TOOLING: \"1\"\n", "", 1)
 				}
+				body += c.extraJobs
 				_, err := skipAllowlistProblems(map[string][]byte{"ci.yml": []byte(body)}, nil, fixtureUniverse())
 				if c.wantErr && err == nil {
 					t.Fatal("expected an error (silent bypass), got nil")
