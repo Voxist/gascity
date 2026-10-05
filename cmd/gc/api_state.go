@@ -100,23 +100,16 @@ type controllerState struct {
 	// construct a controllerState directly — those dispatchers get the D1
 	// foreign tier disabled, same fail-safe as an empty CityRuntime.controllerGeneration.
 	controllerGeneration string
-	// recoverSF is the owning CityRuntime's recoverSingleFlight guard
-	// (ga-w3bkx). Every per-delivery webhook dispatcher adopts it so
-	// concurrent deliveries of a webhook-triggered
-	// recover_on_store_unavailable order cannot both exec. Nil for an API
-	// state built without a runtime; each dispatcher then falls back to a
-	// private guard.
-	recoverSF           *recoverSingleFlight
-	ct                  crashTracker  // nil if crash tracking disabled
-	pokeCh              chan struct{} // nil when poke is not available; triggers immediate reconciler tick
-	configDirty         *atomic.Bool  // optional dirty flag shared with the reconciler reload path
-	services            workspacesvc.Registry
-	extmsgSvc           *extmsg.Services
-	adapterReg          *extmsg.AdapterRegistry
-	maintenanceLoop     *supervisor.StoreMaintenanceLoop // nil when [maintenance.dolt] enabled=false
-	updateMu            sync.Mutex                       // serializes rebuild+swap so stale reloads cannot overtake newer mutations
-	beadEventStartSeq   uint64
-	beadEventStartSeqOK bool // false when LatestSeq errored at construction; 0+true = genuinely empty log
+	ct                   crashTracker  // nil if crash tracking disabled
+	pokeCh               chan struct{} // nil when poke is not available; triggers immediate reconciler tick
+	configDirty          *atomic.Bool  // optional dirty flag shared with the reconciler reload path
+	services             workspacesvc.Registry
+	extmsgSvc            *extmsg.Services
+	adapterReg           *extmsg.AdapterRegistry
+	maintenanceLoop      *supervisor.StoreMaintenanceLoop // nil when [maintenance.dolt] enabled=false
+	updateMu             sync.Mutex                       // serializes rebuild+swap so stale reloads cannot overtake newer mutations
+	beadEventStartSeq    uint64
+	beadEventStartSeqOK  bool // false when LatestSeq errored at construction; 0+true = genuinely empty log
 
 	// completionsDeltaIndex is the tick delta pass's warm completion-fact
 	// idempotency record: loaded from the journal once, then kept current by the
@@ -156,6 +149,14 @@ type controllerState struct {
 	// rolloutLogf, when non-nil, receives noteRolloutDrift's transition lines
 	// (tests capture it); nil falls back to os.Stderr via rolloutWarnf.
 	rolloutLogf func(format string, args ...any)
+
+	// recoverSF is the owning CityRuntime's recoverSingleFlight guard
+	// (ga-w3bkx), set by wireControllerStateFromRuntime. Every per-delivery
+	// webhook dispatcher adopts it so concurrent deliveries of a
+	// webhook-triggered recover_on_store_unavailable order cannot both exec.
+	// Nil for an API state built without a runtime; each dispatcher then
+	// falls back to a private guard and says so on stderr.
+	recoverSF *recoverSingleFlight
 }
 
 var controllerStateInitRigDirIfReady = initDirIfReady
@@ -3146,6 +3147,8 @@ func (d controllerWebhookDispatcher) dispatcher() *memoryOrderDispatcher {
 	// recover_on_store_unavailable order would all exec.
 	if recoverSF != nil {
 		md.recoverSF = recoverSF
+	} else {
+		fmt.Fprintln(os.Stderr, "gc: webhook dispatch: no runtime recover single-flight guard wired; using a private one (concurrent deliveries are not serialized)")
 	}
 	return md
 }
