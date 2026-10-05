@@ -370,21 +370,25 @@ var heredocStartPattern = regexp.MustCompile(`<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9
 // stripped. It is a state machine over QUOTING and HEREDOCS only -- not a
 // shell parser.
 //
-// Known gaps, stated rather than assumed away: it does not track $'...'
-// ANSI-C quoting, command substitution $(...) or backtick nesting, a
+// It tracks single, double and $'...' (ANSI-C) quotes, an unquoted trailing
+// backslash (the next line is joined, so a leading '#' there is not a
+// comment), and stops at an unquoted word-start '#'.
+//
+// Known gaps, stated rather than assumed away: it does not track
+// command substitution $(...) or backtick nesting, a
 // heredoc delimiter that itself needs more than one layer of quote
 // removal, or `<<<` here-strings (harmless: they take no body). Each is a
-// narrower vector than the multi-line-quote hole this fixes, and each
-// still fails toward "this line is not blanked" -- the default when this
-// scanner cannot classify a construct is to leave quote state unchanged,
-// which biases toward treating more text as still-quoted (not a comment)
-// rather than less, the same fail-closed direction the rest of this guard
-// takes.
+// narrower vector than the multi-line-quote hole this fixes. These gaps do
+// NOT all fail safe: a construct the scanner mis-reads can flip quote state
+// and blank a line that is really code. Replace this tracker with an exact
+// allowlist or mvdan.cc/sh if it keeps growing.
 type shellLexState struct {
 	singleQuoted bool
 	doubleQuoted bool
 	heredocEnd   string // non-empty while inside a heredoc body
 	heredocStrip bool   // <<- : strip leading tabs from the end-delimiter line
+	ansiQuoted   bool   // inside $'...' (backslash escapes, including \')
+	continued    bool   // previous line ended in an unquoted '\': this line cannot start a comment
 }
 
 // scanLine updates st to reflect line's effect on shell quote/heredoc
@@ -392,10 +396,20 @@ type shellLexState struct {
 // using the state as of the START of a line, whether that line is a
 // comment to blank.
 func (st *shellLexState) scanLine(line string) {
+	st.continued = false
 	i := 0
 	for i < len(line) {
 		c := line[i]
 		switch {
+		case st.ansiQuoted:
+			if c == '\\' && i+1 < len(line) {
+				i += 2
+				continue
+			}
+			if c == '\'' {
+				st.ansiQuoted = false
+			}
+			i++
 		case st.singleQuoted:
 			if c == '\'' {
 				st.singleQuoted = false
@@ -410,8 +424,18 @@ func (st *shellLexState) scanLine(line string) {
 				st.doubleQuoted = false
 			}
 			i++
+		case c == '$' && i+1 < len(line) && line[i+1] == '\'':
+			st.ansiQuoted = true
+			i += 2
 		case c == '\'':
 			st.singleQuoted = true
+			i++
+		case c == '#' && (i == 0 || strings.ContainsRune(" \t;&|(", rune(line[i-1]))):
+			// An unquoted word-start '#' begins a real comment: nothing after
+			// it can open a quote or heredoc.
+			return
+		case c == '\\' && i+1 == len(line):
+			st.continued = true
 			i++
 		case c == '"':
 			st.doubleQuoted = true
@@ -464,7 +488,7 @@ func stripShellComments(s string) string {
 			}
 			continue // heredoc body lines are never comments, never blanked
 		}
-		if !st.singleQuoted && !st.doubleQuoted && fullLineCommentPattern.MatchString(line) {
+		if !st.singleQuoted && !st.doubleQuoted && !st.ansiQuoted && !st.continued && fullLineCommentPattern.MatchString(line) {
 			lines[i] = ""
 			continue
 		}
@@ -696,14 +720,6 @@ func splitTopLevelAlternation(expr string) []string {
 	return parts
 }
 
-// requiredJobEnv reports whether GC_REQUIRE_ACCEPTANCE_TOOLING is on in the
-// merged env of a workflow/job/step. This mirrors
-// test/acceptance/helpers/tooling.go's requireSwitchOn exactly -- unset,
-// empty, and "0" are off, anything else is on -- because that is the
-// existing guard's own source for what a "required job" means
-// (helpers.MissingTooling / helpers.MissingPrecondition fail rather than
-// skip precisely when this switch is on), and this guard has to agree with
-// it or it is checking the wrong jobs.
 // setsRequiredSwitchViaGithubEnv reports whether run script text looks like
 // it writes GC_REQUIRE_ACCEPTANCE_TOOLING to $GITHUB_ENV -- the standard
 // Actions idiom (`echo "KEY=value" >> "$GITHUB_ENV"`) for setting an env var
@@ -717,9 +733,18 @@ func splitTopLevelAlternation(expr string) []string {
 // over-trigger (mark a job required that was not, which is the safe
 // direction for this guard), never under-trigger on the shape it targets.
 func setsRequiredSwitchViaGithubEnv(run string) bool {
+	run = stripShellComments(run)
 	return strings.Contains(run, "GC_REQUIRE_ACCEPTANCE_TOOLING") && strings.Contains(run, "GITHUB_ENV")
 }
 
+// requiredJobEnv reports whether GC_REQUIRE_ACCEPTANCE_TOOLING is on in the
+// merged env of a workflow/job/step. This mirrors
+// test/acceptance/helpers/tooling.go's requireSwitchOn exactly -- unset,
+// empty, and "0" are off, anything else is on -- because that is the
+// existing guard's own source for what a "required job" means
+// (helpers.MissingTooling / helpers.MissingPrecondition fail rather than
+// skip precisely when this switch is on), and this guard has to agree with
+// it or it is checking the wrong jobs.
 func requiredJobEnv(envs ...map[string]any) bool {
 	const key = "GC_REQUIRE_ACCEPTANCE_TOOLING"
 	for _, env := range envs {
@@ -880,26 +905,6 @@ func checkPatternMatchesExactlyOne(pattern, row string, candidates []string, wha
 	}
 }
 
-// requiredJobSkipsFromDoc walks every step of every REQUIRED job (per
-// requiredJobEnv) in one workflow document and expands each recognized
-// `-skip` argument on its `go test` invocations into explicit row names,
-// checking each against universe for the unanchored-matching ambiguity
-// checkSkipAmbiguity guards.
-//
-// DENY BY DEFAULT, not an enumeration of known-bad spellings: for each
-// step, extractAndBlankCanonicalSkips removes every canonical
-// `-skip '<expr>'` occurrence from the (comment-stripped,
-// continuation-joined) run text, and ANYTHING skip-flag-shaped
-// (skipFlagTokenPattern) still present in what remains -- or in ANY env
-// value in scope, workflow/job/step, under ANY key name -- is a hard error.
-// This closes the class rather than chasing individual spellings: it also
-// catches `'-skip' 'X'`, `-skip"" X`, an env var carrying `-skip=X` under a
-// name that is not GOFLAGS or ACCEPTANCE_GO_TEST_FLAGS, and anything else
-// that looks like the flag, without needing to have been told about it in
-// advance. It returns an error -- not a partial result -- the moment
-// anything about a step's -skip cannot be trusted: a leftover skip-flag-
-// shaped token in the run script or an env value, an unparseable clause, or
-// an ambiguous one.
 // findJobNode returns the raw YAML node for jobName under root's top-level
 // "jobs:" mapping, or nil if root is nil or shaped in a way that could not
 // be navigated (the typed decode elsewhere already rejects a workflow that
@@ -935,16 +940,14 @@ func mappingValue(mapping *yaml.Node, key string) *yaml.Node {
 }
 
 // scanJobNodeForBypassSkips walks every scalar in a job's raw YAML node,
-// except a "run" key's value (steps[].run gets the canonical -skip '<expr>'
-// treatment in requiredJobSkipsFromDoc's own loop instead), and hard-errors
+// except a steps[i] item's own run and name (steps[].run gets the canonical
+// -skip '<expr>' treatment in requiredJobSkipsFromDoc's own loop), and hard-errors
 // on anything skip-flag-shaped. ga-1ebvc MEDIUM: this is what closes the
 // door acceptanceWorkflowDoc's typed decode leaves open on strategy.matrix,
 // a step's own shell:, defaults.run.shell, container.env, with:, and
-// anywhere else the struct has no field for. Excluding by the bare key name
-// "run" wherever it appears (not only steps[].run specifically) is
-// deliberately approximate rather than YAML-path-precise -- consistent with
-// this guard's "checkable, not a full YAML-semantics evaluator" stance
-// elsewhere (see skipArgPattern's own doc comment).
+// anywhere else the struct has no field for. The run/name exemption is
+// path-precise: a "run" key anywhere else (matrix.include, with:,
+// container.env) is scanned.
 func scanJobNodeForBypassSkips(workflowName, jobName string, jobNode *yaml.Node) error {
 	return walkYAMLNode(jobNode, "", func(path, value string) error {
 		if window, found := findSkipFlagToken(value); found {
@@ -956,10 +959,15 @@ func scanJobNodeForBypassSkips(workflowName, jobName string, jobNode *yaml.Node)
 	})
 }
 
+// stepItemPathPattern matches the breadcrumb of a steps[i] mapping, the only
+// place a scalar "run" (the script) or "name" is exempt from the raw scan.
+var stepItemPathPattern = regexp.MustCompile(`(^|\.)steps\[\d+\]$`)
+
 // walkYAMLNode recursively visits every scalar value under node, calling
-// visit(path, value) for each one not under a "run" key. path is a
-// dotted/bracketed breadcrumb (e.g. "strategy.matrix.flags[0]") used only
-// for error messages.
+// visit(path, value) for each one except a steps[i] item's own run and name
+// scalars. path is a dotted/bracketed breadcrumb (e.g.
+// "strategy.matrix.flags[0]") used only for error messages.
+
 func walkYAMLNode(node *yaml.Node, path string, visit func(string, string) error) error {
 	if node == nil {
 		return nil
@@ -986,7 +994,7 @@ func walkYAMLNode(node *yaml.Node, path string, visit func(string, string) error
 			// one child, rather than propagating a flag through the rest
 			// of the subtree, is what keeps defaults.run.shell in scope
 			// while steps[].run itself stays out of it.
-			if key == "run" && value.Kind == yaml.ScalarNode {
+			if value.Kind == yaml.ScalarNode && stepItemPathPattern.MatchString(path) && (key == "run" || key == "name") {
 				continue
 			}
 			if err := walkYAMLNode(value, childPath, visit); err != nil {
@@ -1007,8 +1015,29 @@ func walkYAMLNode(node *yaml.Node, path string, visit func(string, string) error
 	return nil
 }
 
+// requiredJobSkipsFromDoc walks every step of every REQUIRED job (per
+// requiredJobEnv) in one workflow document and expands each recognized
+// `-skip` argument on its `go test` invocations into explicit row names,
+// checking each against universe for the unanchored-matching ambiguity
+// checkSkipAmbiguity guards.
+//
+// DENY BY DEFAULT, not an enumeration of known-bad spellings: for each
+// step, extractAndBlankCanonicalSkips removes every canonical
+// `-skip '<expr>'` occurrence from the (comment-stripped,
+// continuation-joined) run text, and ANYTHING skip-flag-shaped
+// (skipFlagTokenPattern) still present in what remains -- or in ANY env
+// value in scope, workflow/job/step, under ANY key name -- is a hard error.
+// This closes the class rather than chasing individual spellings: it also
+// catches `'-skip' 'X'`, `-skip"" X`, an env var carrying `-skip=X` under a
+// name that is not GOFLAGS or ACCEPTANCE_GO_TEST_FLAGS, and anything else
+// that looks like the flag, without needing to have been told about it in
+// advance. It returns an error -- not a partial result -- the moment
+// anything about a step's -skip cannot be trusted: a leftover skip-flag-
+// shaped token in the run script or an env value, an unparseable clause, or
+// an ambiguous one.
 func requiredJobSkipsFromDoc(workflowName string, doc acceptanceWorkflowDoc, root *yaml.Node, universe acceptanceTestUniverse) ([]skippedRow, error) {
 	var out []skippedRow
+	anyRequired := false
 	for jobName, job := range doc.Jobs {
 		// LOW (ga-may9k round 4): a job is in scope if ANY of its steps sets
 		// the required-tooling env, not only the specific step being
@@ -1027,6 +1056,7 @@ func requiredJobSkipsFromDoc(workflowName string, doc acceptanceWorkflowDoc, roo
 		if !jobRequired {
 			continue
 		}
+		anyRequired = true
 		// ga-1ebvc MEDIUM: everything below this point (env: maps,
 		// steps[].run) is exactly what acceptanceWorkflowDoc's typed
 		// struct has fields for. A -skip hiding anywhere ELSE in this
@@ -1073,6 +1103,32 @@ func requiredJobSkipsFromDoc(workflowName string, doc acceptanceWorkflowDoc, roo
 					for _, row := range rows {
 						out = append(out, skippedRow{Row: row, Job: jobName})
 					}
+				}
+			}
+		}
+	}
+	// Workflow-level keys (defaults.run.shell, ...) apply to every job, so
+	// when any job is required they are scanned too; jobs are scanned above
+	// and `on` carries no execution content.
+	if anyRequired && root != nil {
+		top := root
+		if top.Kind == yaml.DocumentNode && len(top.Content) > 0 {
+			top = top.Content[0]
+		}
+		if top.Kind == yaml.MappingNode {
+			for i := 0; i+1 < len(top.Content); i += 2 {
+				key := top.Content[i].Value
+				if key == "jobs" || key == "on" {
+					continue
+				}
+				if err := walkYAMLNode(top.Content[i+1], key, func(path, value string) error {
+					if window, found := findSkipFlagToken(value); found {
+						return fmt.Errorf("%s: workflow-level %s contains a skip-flag-shaped token (%q) that applies to required jobs; "+
+							"this guard only parses -skip inside steps[].run", workflowName, path, window)
+					}
+					return nil
+				}); err != nil {
+					return nil, err
 				}
 			}
 		}
@@ -1152,6 +1208,30 @@ func skipAllowlistProblems(workflows map[string][]byte, allowlist []skipAllowlis
 	return problems, nil
 }
 
+// listAcceptanceWorkflowFiles returns the base names of every workflow file
+// (*.yml, *.yaml) directly under root/.github/workflows, sorted. ga-1ebvc
+// LOW: this replaces a hardcoded ["ci.yml", "nightly.yml"] pair that made a
+// required job in any other workflow file invisible to this guard.
+func listAcceptanceWorkflowFiles(root string) ([]string, error) {
+	dir := filepath.Join(root, ".github", "workflows")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", dir, err)
+	}
+	var names []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		switch strings.ToLower(filepath.Ext(entry.Name())) {
+		case ".yml", ".yaml":
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
 // TestRequiredJobSkipsAreAllowlisted is TestProxiedAcceptanceRowsNeverSkipInRow's
 // CI-selection counterpart (ga-may9k). That test closes the in-row t.Skip
 // door; this one closes the door beside it: a required job's own
@@ -1185,7 +1265,8 @@ func skipAllowlistProblems(workflows map[string][]byte, allowlist []skipAllowlis
 // `-skip 'Allowed'$E`, `-skip 'Allowed'\|X`), and an env entry under any
 // name (`env: EXTRA: -skip=X`) -- see acceptance_run_skip_allowlist_fixture_test.go
 // for a fixture proving each one. stripShellComments only blanks a FULL-LINE
-// comment (first non-whitespace character is `#`); it never touches a `#`
+// comment (first non-whitespace character is `#`, outside any quote or line
+// continuation); it never touches a `#`
 // that shares a line with real content, so `echo "step #1"; go test -skip=X`
 // (ci.yml has this exact shape: `echo "## ..."`) cannot have its trailing
 // `-skip=X` swallowed by mistaking a quoted `#` for a comment start.
@@ -1229,30 +1310,6 @@ func skipAllowlistProblems(workflows map[string][]byte, allowlist []skipAllowlis
 // tracks reusing this parser against `-run`; until it ships, a `-run` that
 // narrows a required job's subtests is not checked by anything in this
 // file.
-// listAcceptanceWorkflowFiles returns the base names of every workflow file
-// (*.yml, *.yaml) directly under root/.github/workflows, sorted. ga-1ebvc
-// LOW: this replaces a hardcoded ["ci.yml", "nightly.yml"] pair that made a
-// required job in any other workflow file invisible to this guard.
-func listAcceptanceWorkflowFiles(root string) ([]string, error) {
-	dir := filepath.Join(root, ".github", "workflows")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", dir, err)
-	}
-	var names []string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		switch strings.ToLower(filepath.Ext(entry.Name())) {
-		case ".yml", ".yaml":
-			names = append(names, entry.Name())
-		}
-	}
-	sort.Strings(names)
-	return names, nil
-}
-
 func TestRequiredJobSkipsAreAllowlisted(t *testing.T) {
 	root := repoRoot(t)
 	names, err := listAcceptanceWorkflowFiles(root)

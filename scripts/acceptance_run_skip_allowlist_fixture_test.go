@@ -1029,6 +1029,76 @@ func TestSkipAllowlistProblems(t *testing.T) {
 		}
 	})
 
+	// ga-1ebvc round 2: the raw scan used to skip EVERY scalar "run" key and
+	// never walked workflow-level keys, so these shapes passed silently.
+	t.Run("round-2 bypasses error and false positives stay quiet", func(t *testing.T) {
+		const step = "    steps:\n      - name: run\n        run: go test -run 'TestFoo$' ./test/acceptance/\n"
+		cases := []struct {
+			name     string
+			header   string // workflow-level YAML before jobs:
+			job      string // job fields before steps
+			stepYAML string // overrides the default steps block when set
+			wantErr  bool
+		}{
+			{
+				name: "run key inside strategy.matrix.include", wantErr: true,
+				job: "    strategy:\n      matrix:\n        include:\n          - run: \"-skip=TestFoo/bar\"\n",
+			},
+			{
+				name: "run key inside with:", wantErr: true,
+				stepYAML: "    steps:\n      - name: x\n        uses: a/b@v1\n        with:\n          run: \"-skip=TestFoo/bar\"\n",
+			},
+			{
+				name: "run key inside container.env", wantErr: true,
+				job: "    container:\n      image: golang\n      env:\n        run: \"-skip=TestFoo/bar\"\n",
+			},
+			{
+				name: "workflow-level defaults.run.shell", wantErr: true,
+				header: "defaults:\n  run:\n    shell: 'env GOFLAGS=-skip=TestFoo/bar bash -e {0}'\n",
+			},
+			{
+				name: "ANSI-C quote hides a comment-looking line", wantErr: true,
+				stepYAML: "    steps:\n      - name: x\n        run: |\n          echo $'a\\'\n          #'; go test -skip=TestFoo/bar ./x\n",
+			},
+			{
+				name: "trailing backslash joins a # line", wantErr: true,
+				stepYAML: "    steps:\n      - name: x\n        run: |\n          echo foo\\\n          #; go test -skip=TestFoo/bar ./x\n",
+			},
+			{
+				name: "step name mentioning -skip is fine", wantErr: false,
+				stepYAML: "    steps:\n      - name: \"explain -skip=TestFoo/bar\"\n        run: go test -run 'TestFoo$' ./test/acceptance/\n",
+			},
+			{
+				name: "trailing comment with an apostrophe does not open a quote", wantErr: false,
+				stepYAML: "    steps:\n      - name: x\n        run: |\n          true # don't retry\n          # -skip is prose here\n          go test -run 'TestFoo$' ./x\n",
+			},
+			{
+				name: "GITHUB_ENV named only in a comment does not mark the job required", wantErr: false,
+				stepYAML: "    steps:\n      - name: x\n        run: |\n          # GC_REQUIRE_ACCEPTANCE_TOOLING via GITHUB_ENV\n          go test -skip=TestFoo/bar ./x\n",
+			},
+		}
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				body := c.header + "jobs:\n  probe:\n    env:\n      GC_REQUIRE_ACCEPTANCE_TOOLING: \"1\"\n" + c.job
+				if c.stepYAML != "" {
+					body += c.stepYAML
+				} else {
+					body += step
+				}
+				if strings.HasPrefix(c.name, "GITHUB_ENV") {
+					body = strings.Replace(body, "    env:\n      GC_REQUIRE_ACCEPTANCE_TOOLING: \"1\"\n", "", 1)
+				}
+				_, err := skipAllowlistProblems(map[string][]byte{"ci.yml": []byte(body)}, nil, fixtureUniverse())
+				if c.wantErr && err == nil {
+					t.Fatal("expected an error (silent bypass), got nil")
+				}
+				if !c.wantErr && err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			})
+		}
+	})
+
 	// Control: steps[].run keeps its canonical treatment through the raw
 	// scalar scan -- a properly-written -skip '<expr>' there must NOT
 	// double-error just because the generic scan also walks the job node.
