@@ -83,10 +83,10 @@ func (c *SupervisorHTTPCheck) Run(_ *CheckContext) *CheckResult {
 			// StatusError here would read as "supervisor unreachable" during
 			// exactly the host-wide port-churn storms this check should stay
 			// quiet about; StatusWarning says the probe itself was
-			// inconclusive, matching the same classification #227 gave this
-			// error shape for the Dolt connection path.
+			// inconclusive, consistent with #227 treating EADDRNOTAVAIL as not
+			// death evidence.
 			r.Status = StatusWarning
-			r.Message = fmt.Sprintf("supervisor HTTP API on port %d: client-side port exhaustion (EADDRNOTAVAIL) — not a liveness signal", port)
+			r.Message = fmt.Sprintf("supervisor HTTP API on port %d: probe inconclusive — client-side ephemeral-port exhaustion (EADDRNOTAVAIL), likely host connection churn; not a liveness signal", port)
 			return r
 		}
 		if isConnectionRefused(err) {
@@ -135,7 +135,10 @@ func isPortExhaustion(err error) bool {
 	if errors.Is(err, syscall.EADDRNOTAVAIL) {
 		return true
 	}
-	return strings.Contains(err.Error(), "can't assign requested address")
+	// macOS and Linux word the same errno differently.
+	msg := err.Error()
+	return strings.Contains(msg, "can't assign requested address") ||
+		strings.Contains(msg, "cannot assign requested address")
 }
 
 func isTimeout(err error) bool {

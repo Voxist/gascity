@@ -2,9 +2,13 @@ package doctor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"strings"
 	"syscall"
 	"testing"
@@ -197,6 +201,36 @@ func TestSupervisorHTTPCheck_PortExhaustionIsNotALivenessSignal(t *testing.T) {
 			}
 			if !strings.Contains(r.Message, fmt.Sprintf("%d", port)) {
 				t.Errorf("message = %q, want port %d", r.Message, port)
+			}
+		})
+	}
+}
+
+// TestSupervisorHTTPCheck_DialErrorClassification pins each dial-error shape
+// to its status on both OSes: the errno branch (errors.Is EADDRNOTAVAIL) and
+// the string fallback (macOS and Linux wording) are exercised independently,
+// and refused/timeout stay StatusError.
+func TestSupervisorHTTPCheck_DialErrorClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		err        error
+		wantStatus CheckStatus
+		wantInMsg  string
+	}{
+		{"errno wrapped in url.Error/net.OpError", &url.Error{Op: "Get", URL: "http://127.0.0.1:1/", Err: &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.EADDRNOTAVAIL)}}, StatusWarning, "ephemeral-port exhaustion"},
+		{"macOS wording only", errors.New("dial tcp 127.0.0.1:8372: connect: can't assign requested address"), StatusWarning, "ephemeral-port exhaustion"},
+		{"Linux wording only", errors.New("dial tcp 127.0.0.1:8372: connect: cannot assign requested address"), StatusWarning, "ephemeral-port exhaustion"},
+		{"connection refused", errors.New("dial tcp 127.0.0.1:8372: connect: connection refused"), StatusError, "connection refused"},
+		{"timeout", context.DeadlineExceeded, StatusError, "timeout"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := makeSupervisorHTTPCheck(true, 9001, &mockHTTPDoer{err: tc.err})
+			r := c.Run(&CheckContext{})
+			if r.Status != tc.wantStatus {
+				t.Fatalf("status = %d, want %d; msg = %s", r.Status, tc.wantStatus, r.Message)
+			}
+			if !strings.Contains(r.Message, tc.wantInMsg) {
+				t.Errorf("message = %q, want it to contain %q", r.Message, tc.wantInMsg)
 			}
 		})
 	}
