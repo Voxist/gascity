@@ -175,7 +175,11 @@ var bootstrapPolicy = Ledger{
 			// "GOPATH")` and `exec.Command(bin, "--version")`, to resolve
 			// and verify the pinned golangci-lint binary instead of
 			// whatever "golangci-lint" happened to resolve to on PATH.
-			BaselineCalls:   729,
+			//
+			// Bumped 729->730 calls (files unchanged, 210) for ga-g6fjp:
+			// examples/bd/dolt/recover_host_test.go runs the recover script
+			// via `exec.Command("sh", ...)` to pin the host-default fallback.
+			BaselineCalls:   730,
 			BaselineFiles:   210,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
@@ -239,7 +243,11 @@ var bootstrapPolicy = Ledger{
 			// Bumped 480->482 calls (files unchanged, 137) for the same
 			// bead's review fix-up (see the matching audit_baseline
 			// subprocess comment above for the source).
-			BaselineCalls:   492,
+			//
+			// Bumped 492->493 calls (files unchanged, 139) for ga-g6fjp:
+			// examples/bd/dolt/recover_host_test.go runs the recover script
+			// via `exec.Command("sh", ...)` to pin the host-default fallback.
+			BaselineCalls:   493,
 			BaselineFiles:   139,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
@@ -631,7 +639,11 @@ var bootstrapPolicy = Ledger{
 			// Bumped 462->464 calls (files unchanged, 131) for the same
 			// bead's review fix-up (see the matching audit_baseline
 			// subprocess comment above for the source).
-			BaselineCalls:   474,
+			//
+			// Bumped 474->475 calls (files unchanged, 133) for ga-g6fjp:
+			// examples/bd/dolt/recover_host_test.go runs the recover script
+			// via `exec.Command("sh", ...)` to pin the host-default fallback.
+			BaselineCalls:   475,
 			BaselineFiles:   133,
 			ReportedCalls:   394,
 			ReportedFiles:   105,

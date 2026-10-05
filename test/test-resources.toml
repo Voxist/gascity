@@ -24,7 +24,7 @@ resource = "subprocess"
 # Bumped 716->719 calls (files unchanged, 208) for ga-w7nyj's
 # TestErrorlintStockFixDropsTypeAssertionNegation and its review fix-up
 # (scripts/precommit_contract_test.go).
-baseline_calls = 729
+baseline_calls = 730
 baseline_files = 210
 reported_calls = 495
 reported_files = 135
@@ -76,7 +76,7 @@ resource = "subprocess"
 #
 # Bumped 479->482 calls (files unchanged, 137) for ga-w7nyj's
 # TestErrorlintStockFixDropsTypeAssertionNegation and its review fix-up.
-baseline_calls = 492
+baseline_calls = 493
 baseline_files = 139
 reported_calls = 380
 reported_files = 98
@@ -453,7 +453,7 @@ resource = "subprocess"
 #
 # Bumped 461->464 calls (files unchanged, 131) for ga-w7nyj's
 # TestErrorlintStockFixDropsTypeAssertionNegation and its review fix-up.
-baseline_calls = 474
+baseline_calls = 475
 baseline_files = 133
 reported_calls = 394
 reported_files = 105
