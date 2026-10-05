@@ -854,6 +854,27 @@ export const zMaintenanceTriggerBody = z.object({
     started_at: z.string().optional()
 });
 
+export const zManagedDoltRecoverDecisionPayload = z.object({
+    caller_site: z.string(),
+    evidence: z.string(),
+    health_op_exit_code: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    health_op_ran: z.boolean(),
+    health_op_stderr: z.string().optional(),
+    liveness: z.string().optional(),
+    outcome: z.enum([
+        'admitted',
+        'declined-liveness',
+        'declined-cooldown',
+        'declined-by-provider',
+        'succeeded',
+        'failed'
+    ]),
+    reason: z.string().optional(),
+    recover_exit_code: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    recover_stderr: z.string().optional(),
+    scope: z.string()
+});
+
 export const zMessage = z.object({
     body: z.string(),
     cc: z.array(z.string()).nullish(),
@@ -3447,6 +3468,7 @@ export const zEventPayload = z.union([
     zHookClaimReclaimedStalePayload,
     zInboundEventPayload,
     zMailEventPayload,
+    zManagedDoltRecoverDecisionPayload,
     zMoleculeResolvedPayload,
     zNoPayload,
     zOrderGateTimeoutFailOpenPayload,
@@ -4590,6 +4612,24 @@ export const zTypedEventStreamEnvelopeMailSent = z.object({
 });
 
 /**
+ * TypedEventStreamEnvelope managed_dolt.recover_decision
+ */
+export const zTypedEventStreamEnvelopeManagedDoltRecoverDecision = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zManagedDoltRecoverDecisionPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('managed_dolt.recover_decision'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedEventStreamEnvelope molecule.resolved
  */
 export const zTypedEventStreamEnvelopeMoleculeResolved = z.object({
@@ -5640,6 +5680,7 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeMailRead.extend({ type: z.literal('mail.read') }),
     zTypedEventStreamEnvelopeMailReplied.extend({ type: z.literal('mail.replied') }),
     zTypedEventStreamEnvelopeMailSent.extend({ type: z.literal('mail.sent') }),
+    zTypedEventStreamEnvelopeManagedDoltRecoverDecision.extend({ type: z.literal('managed_dolt.recover_decision') }),
     zTypedEventStreamEnvelopeMoleculeResolved.extend({ type: z.literal('molecule.resolved') }),
     zTypedEventStreamEnvelopeOrderCompleted.extend({ type: z.literal('order.completed') }),
     zTypedEventStreamEnvelopeOrderFailed.extend({ type: z.literal('order.failed') }),
@@ -6771,6 +6812,25 @@ export const zTypedTaggedEventStreamEnvelopeMailSent = z.object({
 });
 
 /**
+ * TypedTaggedEventStreamEnvelope managed_dolt.recover_decision
+ */
+export const zTypedTaggedEventStreamEnvelopeManagedDoltRecoverDecision = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zManagedDoltRecoverDecisionPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('managed_dolt.recover_decision'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedTaggedEventStreamEnvelope molecule.resolved
  */
 export const zTypedTaggedEventStreamEnvelopeMoleculeResolved = z.object({
@@ -7876,6 +7936,7 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeMailRead.extend({ type: z.literal('mail.read') }),
     zTypedTaggedEventStreamEnvelopeMailReplied.extend({ type: z.literal('mail.replied') }),
     zTypedTaggedEventStreamEnvelopeMailSent.extend({ type: z.literal('mail.sent') }),
+    zTypedTaggedEventStreamEnvelopeManagedDoltRecoverDecision.extend({ type: z.literal('managed_dolt.recover_decision') }),
     zTypedTaggedEventStreamEnvelopeMoleculeResolved.extend({ type: z.literal('molecule.resolved') }),
     zTypedTaggedEventStreamEnvelopeOrderCompleted.extend({ type: z.literal('order.completed') }),
     zTypedTaggedEventStreamEnvelopeOrderFailed.extend({ type: z.literal('order.failed') }),

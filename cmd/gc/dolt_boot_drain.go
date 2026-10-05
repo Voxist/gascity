@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Boot-time backlog drain for the managed Dolt store (vp-6hb8).
@@ -100,6 +101,10 @@ func truncateForLog(s string, n int) string {
 	s = strings.TrimSpace(s)
 	if len(s) <= n {
 		return s
+	}
+	// Back up to a rune boundary so the cut never splits a multibyte rune.
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n] + "…"
 }

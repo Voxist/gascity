@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -11,8 +14,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 // stubRecoverGateClock pins providerRecoverNow to a movable instant,
@@ -456,7 +461,7 @@ func TestGuardedRecoverDeclinesAgainstALiveServer(t *testing.T) {
 	stubRecoverLiveness(t, managedDoltLivenessAlive)
 	runs := countRecoverRuns(t)
 
-	err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed)
+	err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed, testRecoverCall)
 	if !errors.Is(err, errManagedDoltRecoverDeclined) {
 		t.Fatalf("err = %v, want a declined recover", err)
 	}
@@ -475,7 +480,7 @@ func TestGuardedRecoverDeclinesWhenLivenessIsUnknown(t *testing.T) {
 	stubRecoverLiveness(t, managedDoltLivenessUnknown)
 	runs := countRecoverRuns(t)
 
-	err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed)
+	err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed, testRecoverCall)
 	if !errors.Is(err, errManagedDoltRecoverDeclined) {
 		t.Fatalf("err = %v, want a declined recover", err)
 	}
@@ -490,7 +495,7 @@ func TestGuardedRecoverRunsWhenTheServerIsConfirmedDead(t *testing.T) {
 	stubRecoverLiveness(t, managedDoltLivenessConfirmedDead)
 	runs := countRecoverRuns(t)
 
-	if err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed); err != nil {
+	if err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed, testRecoverCall); err != nil {
 		t.Fatalf("err = %v, want the recover to run against a confirmed-dead server", err)
 	}
 	if *runs != 1 {
@@ -505,14 +510,14 @@ func TestGuardedRecoverThrottlesASecondAttemptInsideTheWindow(t *testing.T) {
 	runs := countRecoverRuns(t)
 
 	for i := 0; i < 5; i++ {
-		_ = runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed)
+		_ = runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed, testRecoverCall)
 	}
 	if *runs != 1 {
 		t.Fatalf("recover runs = %d across 5 attempts inside the window, want 1", *runs)
 	}
 
 	advance(providerRecoverCooldown() + time.Second)
-	if err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed); err != nil {
+	if err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed, testRecoverCall); err != nil {
 		t.Fatalf("err = %v, want the recover to run after the window elapsed", err)
 	}
 	if *runs != 2 {
@@ -529,7 +534,7 @@ func TestGuardedRecoverReplacesALiveServerWhenTheHealthOpAnswered(t *testing.T) 
 	stubRecoverLiveness(t, managedDoltLivenessAlive)
 	runs := countRecoverRuns(t)
 
-	if err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceHealthOpAnswered); err != nil {
+	if err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceHealthOpAnswered, testRecoverCall); err != nil {
 		t.Fatalf("err = %v, want the recover to run on a completed health op's verdict", err)
 	}
 	if *runs != 1 {
@@ -545,7 +550,7 @@ func TestGuardedRecoverThrottlesHealthOpEvidenceToo(t *testing.T) {
 	runs := countRecoverRuns(t)
 
 	for i := 0; i < 4; i++ {
-		_ = runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceHealthOpAnswered)
+		_ = runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceHealthOpAnswered, testRecoverCall)
 	}
 	if *runs != 1 {
 		t.Fatalf("recover runs = %d across 4 health-evidence attempts inside the window, want 1", *runs)
@@ -559,10 +564,10 @@ func TestGuardedRecoverWindowIsSharedAcrossEvidenceKinds(t *testing.T) {
 	stubRecoverLiveness(t, managedDoltLivenessConfirmedDead)
 	runs := countRecoverRuns(t)
 
-	if err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceHealthOpAnswered); err != nil {
+	if err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceHealthOpAnswered, testRecoverCall); err != nil {
 		t.Fatalf("health-evidence recover: %v", err)
 	}
-	err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed)
+	err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed, testRecoverCall)
 	if !errors.Is(err, errManagedDoltRecoverDeclined) {
 		t.Fatalf("err = %v, want the transport path to see the window the health path just took", err)
 	}
@@ -592,7 +597,7 @@ func TestGuardedRecoverMapsRecoverDeclinedExitToDeclined(t *testing.T) {
 		return providerOpExitErrorForTest(t, providerOpExitRecoverDeclined, "dolt recovery lock held by another process; declining to run a concurrent stop/start")
 	}
 
-	err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed)
+	err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed, testRecoverCall)
 	if !errors.Is(err, errManagedDoltRecoverDeclined) {
 		t.Fatalf("err = %v, want errManagedDoltRecoverDeclined: a recover-declined (exit 4) recover op is this guard's own "+
 			"decline reappearing one layer down, not a transport fault", err)
@@ -619,7 +624,7 @@ func TestGuardedRecoverDoesNotMapWinnerPostRestartUnobservableToDeclined(t *test
 		return providerOpExitErrorForTest(t, providerOpExitUnobservable, "dolt server not reachable after restart")
 	}
 
-	err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed)
+	err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed, testRecoverCall)
 	if err == nil {
 		t.Fatal("err = nil, want the winner's failed post-restart verification to propagate")
 	}
@@ -642,7 +647,7 @@ func TestGuardedRecoverDoesNotMapOrdinaryRecoverFailureToDeclined(t *testing.T) 
 		return providerOpExitErrorForTest(t, 1, "dolt start failed: port already in use")
 	}
 
-	err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed)
+	err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed, testRecoverCall)
 	if errors.Is(err, errManagedDoltRecoverDeclined) {
 		t.Fatalf("err = %v, want a plain failure, NOT errManagedDoltRecoverDeclined: exit 1 is a real recover failure", err)
 	}
@@ -861,10 +866,345 @@ provider = "exec:/opt/custom/beads-provider.sh"
 		t.Fatal("fixture city should not use the managed-dolt beads lifecycle")
 	}
 
-	if err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed); err != nil {
+	if err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed, testRecoverCall); err != nil {
 		t.Fatalf("err = %v, want the recover to run: a managed-dolt liveness verdict must not gate a city gc runs no managed dolt for", err)
 	}
 	if *runs != 1 {
 		t.Fatalf("recover runs = %d, want 1", *runs)
+	}
+}
+
+// ---------------------------------------------------------------------
+// ga-zfgsh: an ADMITTED recover must be as observable as a DECLINED one.
+// Forensics on the 2026-09-30 live-server replacement could not identify
+// which caller triggered it -- runGuardedManagedDoltRecover only logged
+// when it declined.
+// ---------------------------------------------------------------------
+
+// testRecoverCall is the caller context for tests that do not assert on it.
+var testRecoverCall = managedDoltRecoverCallContext{CallerSite: recoverCallerBDRunner}
+
+// captureRecoverReports captures the log lines and the
+// managed_dolt.recover_decision events the guard produces. The log writer
+// is restored on cleanup.
+type recoverReports struct {
+	rec *memRecorder
+	buf *bytes.Buffer
+}
+
+func captureRecoverReports(t *testing.T) *recoverReports {
+	t.Helper()
+	rec := &memRecorder{}
+	orig := recordManagedDoltRecoverEvent
+	t.Cleanup(func() { recordManagedDoltRecoverEvent = orig })
+	recordManagedDoltRecoverEvent = func(_ string, e events.Event) { rec.Record(e) }
+	buf := &bytes.Buffer{}
+	origOut, origFlags := log.Writer(), log.Flags()
+	log.SetOutput(buf)
+	t.Cleanup(func() { log.SetOutput(origOut); log.SetFlags(origFlags) })
+	return &recoverReports{rec: rec, buf: buf}
+}
+
+// payloads decodes every recorded recover-decision event in order.
+func (r *recoverReports) payloads(t *testing.T) []events.ManagedDoltRecoverDecisionPayload {
+	t.Helper()
+	r.rec.mu.Lock()
+	defer r.rec.mu.Unlock()
+	var out []events.ManagedDoltRecoverDecisionPayload
+	for _, e := range r.rec.events {
+		if e.Type != events.ManagedDoltRecoverDecision {
+			t.Fatalf("unexpected event type %q", e.Type)
+		}
+		var p events.ManagedDoltRecoverDecisionPayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			t.Fatalf("unmarshal payload: %v", err)
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func (r *recoverReports) outcomes(t *testing.T) []events.ManagedDoltRecoverOutcome {
+	var out []events.ManagedDoltRecoverOutcome
+	for _, p := range r.payloads(t) {
+		out = append(out, p.Outcome)
+	}
+	return out
+}
+
+func wantOutcomes(t *testing.T, r *recoverReports, want ...events.ManagedDoltRecoverOutcome) []events.ManagedDoltRecoverDecisionPayload {
+	t.Helper()
+	got := r.outcomes(t)
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("outcomes = %v, want %v\nlog:\n%s", got, want, r.buf.String())
+	}
+	return r.payloads(t)
+}
+
+func wantLogContains(t *testing.T, r *recoverReports, subs ...string) {
+	t.Helper()
+	for _, sub := range subs {
+		if !strings.Contains(r.buf.String(), sub) {
+			t.Fatalf("log missing %q:\n%s", sub, r.buf.String())
+		}
+	}
+}
+
+// Health path, live server replaced on health-op-answered evidence:
+// admitted then succeeded, each carrying the health op's exit and stderr.
+func TestRecoverReportsAdmittedThenSucceededWithHealthOpContext(t *testing.T) {
+	cityPath := t.TempDir()
+	stubRecoverGateClock(t)
+	stubRecoverLiveness(t, managedDoltLivenessAlive)
+	countRecoverRuns(t)
+	r := captureRecoverReports(t)
+
+	healthErr := providerOpExitErrorForTest(t, 1, "dolt query probe failed (information_schema.SCHEMATA)")
+	evidence := managedDoltHealthOpEvidence(context.Background(), healthErr)
+	cc := managedDoltRecoverCallContext{CallerSite: recoverCallerHealthCheck, HealthOpRan: true, HealthOpErr: healthErr}
+	if err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, evidence, cc); err != nil {
+		t.Fatalf("err = %v", err)
+	}
+
+	ps := wantOutcomes(t, r, events.ManagedDoltRecoverAdmitted, events.ManagedDoltRecoverSucceeded)
+	for _, p := range ps {
+		if p.CallerSite != "healthBeadsProviderContext" || p.Scope != normalizePathForCompare(cityPath) ||
+			p.Evidence != "health-op-answered" || !p.HealthOpRan || p.HealthOpExitCode != 1 ||
+			!strings.Contains(p.HealthOpStderr, "dolt query probe failed") || p.Liveness != "" {
+			t.Fatalf("payload = %+v", p)
+		}
+	}
+	wantLogContains(t, r, "recover admitted", "recover succeeded", "caller=healthBeadsProviderContext",
+		"evidence=health-op-answered", "health_op=exit=1", "dolt query probe failed")
+}
+
+// Bd-runner path: no health op ran, liveness was checked.
+func TestRecoverReportsBdRunnerCallerHasNoHealthOp(t *testing.T) {
+	cityPath := t.TempDir()
+	stubRecoverGateClock(t)
+	stubRecoverLiveness(t, managedDoltLivenessConfirmedDead)
+	countRecoverRuns(t)
+	r := captureRecoverReports(t)
+
+	if err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed, testRecoverCall); err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	ps := wantOutcomes(t, r, events.ManagedDoltRecoverAdmitted, events.ManagedDoltRecoverSucceeded)
+	p := ps[0]
+	if p.CallerSite != "recoverManagedBDCommand" || p.Evidence != "call-failed" || p.Liveness != "confirmed-dead" ||
+		p.HealthOpRan || p.HealthOpExitCode != 0 || p.HealthOpStderr != "" {
+		t.Fatalf("payload = %+v", p)
+	}
+	wantLogContains(t, r, "caller=recoverManagedBDCommand", "liveness=confirmed-dead", "health_op=n/a")
+}
+
+func TestRecoverReportsLivenessDecline(t *testing.T) {
+	cityPath := t.TempDir()
+	stubRecoverGateClock(t)
+	stubRecoverLiveness(t, managedDoltLivenessAlive)
+	runs := countRecoverRuns(t)
+	r := captureRecoverReports(t)
+
+	err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed, testRecoverCall)
+	if !errors.Is(err, errManagedDoltRecoverDeclined) || *runs != 0 {
+		t.Fatalf("err = %v runs = %d", err, *runs)
+	}
+	ps := wantOutcomes(t, r, events.ManagedDoltRecoverDeclinedLiveness)
+	if ps[0].Liveness != "alive" || !strings.Contains(ps[0].Reason, "liveness alive") || ps[0].CallerSite != "recoverManagedBDCommand" {
+		t.Fatalf("payload = %+v", ps[0])
+	}
+	wantLogContains(t, r, "recover declined-liveness", "caller=recoverManagedBDCommand", "liveness=alive", "reason=")
+}
+
+func TestRecoverReportsCooldownDecline(t *testing.T) {
+	cityPath := t.TempDir()
+	stubRecoverGateClock(t)
+	stubRecoverLiveness(t, managedDoltLivenessConfirmedDead)
+	countRecoverRuns(t)
+	r := captureRecoverReports(t)
+
+	for i := 0; i < 2; i++ {
+		_ = runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed, testRecoverCall)
+	}
+	ps := wantOutcomes(t, r, events.ManagedDoltRecoverAdmitted, events.ManagedDoltRecoverSucceeded, events.ManagedDoltRecoverDeclinedCooldown)
+	if !strings.Contains(ps[2].Reason, "another recover was admitted") {
+		t.Fatalf("payload = %+v", ps[2])
+	}
+	wantLogContains(t, r, "recover declined-cooldown", "reason=")
+}
+
+// Exit 4 from the provider: the admitted event is followed by a
+// declined-by-provider correction carrying the recover op's exit and stderr.
+func TestRecoverReportsProviderDeclineAfterAdmission(t *testing.T) {
+	cityPath := t.TempDir()
+	stubRecoverGateClock(t)
+	stubRecoverLiveness(t, managedDoltLivenessConfirmedDead)
+	setRecoverRunner(t, providerOpExitErrorForTest(t, providerOpExitRecoverDeclined, "recovery lock held by pid 42"))
+	r := captureRecoverReports(t)
+
+	err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed, testRecoverCall)
+	if !errors.Is(err, errManagedDoltRecoverDeclined) {
+		t.Fatalf("err = %v", err)
+	}
+	ps := wantOutcomes(t, r, events.ManagedDoltRecoverAdmitted, events.ManagedDoltRecoverDeclinedByProvider)
+	if ps[1].RecoverExitCode != providerOpExitRecoverDeclined || !strings.Contains(ps[1].RecoverStderr, "recovery lock held") {
+		t.Fatalf("payload = %+v", ps[1])
+	}
+	wantLogContains(t, r, "recover declined-by-provider", "recover_exit=4", "recovery lock held")
+}
+
+func TestRecoverReportsFailureWithExitAndStderr(t *testing.T) {
+	cityPath := t.TempDir()
+	stubRecoverGateClock(t)
+	stubRecoverLiveness(t, managedDoltLivenessConfirmedDead)
+	setRecoverRunner(t, providerOpExitErrorForTest(t, 1, "dolt start failed: port already in use"))
+	r := captureRecoverReports(t)
+
+	err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed, testRecoverCall)
+	if err == nil || errors.Is(err, errManagedDoltRecoverDeclined) {
+		t.Fatalf("err = %v, want a plain failure", err)
+	}
+	ps := wantOutcomes(t, r, events.ManagedDoltRecoverAdmitted, events.ManagedDoltRecoverFailed)
+	if ps[1].RecoverExitCode != 1 || !strings.Contains(ps[1].RecoverStderr, "port already in use") {
+		t.Fatalf("payload = %+v", ps[1])
+	}
+	wantLogContains(t, r, "recover failed", "recover_exit=1", "port already in use")
+}
+
+func setRecoverRunner(t *testing.T, err error) {
+	t.Helper()
+	orig := managedDoltRecoverRunner
+	t.Cleanup(func() { managedDoltRecoverRunner = orig })
+	managedDoltRecoverRunner = func(context.Context, string, []string) error { return err }
+}
+
+// A health op killed by a signal is not "no health op" and not exit 0.
+func TestRecoverReportsSignalKilledHealthOp(t *testing.T) {
+	cityPath := t.TempDir()
+	stubRecoverGateClock(t)
+	countRecoverRuns(t)
+	r := captureRecoverReports(t)
+
+	script := filepath.Join(t.TempDir(), "provider.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nkill -KILL $$\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	healthErr := runProviderOpWithEnvContext(context.Background(), script, nil, "health")
+	if healthErr == nil {
+		t.Fatal("want an error from the killed script")
+	}
+	cc := managedDoltRecoverCallContext{CallerSite: recoverCallerHealthCheck, HealthOpRan: true, HealthOpErr: healthErr}
+	if err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceHealthOpAnswered, cc); err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	ps := wantOutcomes(t, r, events.ManagedDoltRecoverAdmitted, events.ManagedDoltRecoverSucceeded)
+	if !ps[0].HealthOpRan || ps[0].HealthOpExitCode != -1 {
+		t.Fatalf("payload = %+v", ps[0])
+	}
+	wantLogContains(t, r, "health_op=exit=signal")
+}
+
+func TestRedactRecoverStderr(t *testing.T) {
+	for in, want := range map[string]string{
+		`dolt --password hunter2 sql`:                 `dolt --password REDACTED sql`,
+		`dolt --password=hunter2 sql`:                 `dolt --password=REDACTED sql`,
+		"dolt --password\thunter2 sql":                "dolt --password\tREDACTED sql",
+		`dolt --password 'my secret' sql`:             `dolt --password REDACTED sql`,
+		`dolt --password "my secret" sql`:             `dolt --password REDACTED sql`,
+		`DOLT_PASSWORD=hunter2 failed`:                `DOLT_PASSWORD=REDACTED failed`,
+		`dial mysql://root:hunter2@127.0.0.1:3307/db`: `dial mysql://root:REDACTED@127.0.0.1:3307/db`,
+		`root:hunter2@tcp(127.0.0.1:3307)/db`:         `root:REDACTED@tcp(127.0.0.1:3307)/db`,
+		`{"user":"root","password":"my secret"}`:      `{"user":"root","password":REDACTED}`,
+		`password: hunter2`:                           `password: REDACTED`,
+		`GC_DOLT_PASSWORD=hunter2`:                    `GC_DOLT_PASSWORD=REDACTED`,
+		`GC_DOLT_PASSWORD='my secret'`:                `GC_DOLT_PASSWORD=REDACTED`,
+		`http://127.0.0.1:8372/v0/x?q=a@b`:            `http://127.0.0.1:8372/v0/x?q=a@b`,
+		`plain failure`:                               `plain failure`,
+	} {
+		if got := redactRecoverStderr(in); got != want {
+			t.Errorf("redact(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+type failingAckRecorder struct{ err error }
+
+func (f failingAckRecorder) Record(events.Event)          {}
+func (f failingAckRecorder) RecordAck(events.Event) error { return f.err }
+
+func TestAckManagedDoltRecoverEventLogsRecordFailure(t *testing.T) {
+	r := captureRecoverReports(t)
+	ackManagedDoltRecoverEvent(failingAckRecorder{err: errors.New("lock: timed out")},
+		events.Event{Type: events.ManagedDoltRecoverDecision})
+	wantLogContains(t, r, "recording "+events.ManagedDoltRecoverDecision+" event", "lock: timed out")
+}
+
+func TestRecoverReportRedactsSecretsBeforeLoggingAndEmitting(t *testing.T) {
+	cityPath := t.TempDir()
+	stubRecoverGateClock(t)
+	stubRecoverLiveness(t, managedDoltLivenessConfirmedDead)
+	setRecoverRunner(t, providerOpExitErrorForTest(t, 1, "dolt sql --password hunter2 failed"))
+	r := captureRecoverReports(t)
+
+	_ = runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, recoverEvidenceCallFailed, testRecoverCall)
+	ps := r.payloads(t)
+	if strings.Contains(ps[1].RecoverStderr, "hunter2") || strings.Contains(r.buf.String(), "hunter2") {
+		t.Fatalf("secret leaked: %+v\n%s", ps[1], r.buf.String())
+	}
+	if !strings.Contains(ps[1].RecoverStderr, "--password REDACTED") {
+		t.Fatalf("stderr = %q", ps[1].RecoverStderr)
+	}
+}
+
+func TestTruncateForLogKeepsMultibyteRunesWhole(t *testing.T) {
+	in := strings.Repeat("é", 10) // 2 bytes per rune
+	for n := 1; n < 20; n++ {
+		got := truncateForLog(in, n)
+		if !utf8.ValidString(got) {
+			t.Fatalf("truncateForLog(%d) = %q is not valid UTF-8", n, got)
+		}
+	}
+	if got := truncateForLog(in, 5); got != "éé…" {
+		t.Fatalf("truncateForLog(5) = %q, want %q", got, "éé…")
+	}
+}
+
+// The real emitter opens the log on every emit, so a rotation between two
+// emits (another process renaming events.jsonl away) lands the second
+// event in the NEW file instead of an unlinked inode.
+func TestRecordManagedDoltRecoverEventSurvivesRotation(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(cityPath, ".gc", "events.jsonl")
+	emit := func() {
+		recordManagedDoltRecoverEvent(cityPath, events.Event{Type: events.ManagedDoltRecoverDecision, Actor: "test", Subject: cityPath, Payload: json.RawMessage(`{}`)})
+	}
+	emit()
+	if err := os.Rename(path, path+".1"); err != nil {
+		t.Fatal(err)
+	}
+	emit()
+	data, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(data), events.ManagedDoltRecoverDecision) {
+		t.Fatalf("rotated-in log = %q, err = %v; the second event was lost", data, err)
+	}
+}
+
+func TestRecordManagedDoltRecoverEventLogsOpenFailure(t *testing.T) {
+	r := captureRecoverReports(t)
+	orig := recordManagedDoltRecoverEvent
+	_ = r
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Re-resolve the real emitter: captureRecoverReports replaced it.
+	recordManagedDoltRecoverEvent = realRecordManagedDoltRecoverEvent
+	t.Cleanup(func() { recordManagedDoltRecoverEvent = orig })
+	recordManagedDoltRecoverEvent(blocker, events.Event{Type: events.ManagedDoltRecoverDecision})
+	if !strings.Contains(r.buf.String(), "opening event log") {
+		t.Fatalf("open failure not logged:\n%s", r.buf.String())
 	}
 }
