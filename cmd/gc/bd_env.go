@@ -1306,7 +1306,7 @@ var recoverManagedBDCommand = func(cityPath string) error {
 	// carries recoverEvidenceCallFailed because all it knows is that its
 	// own call did not come back. See dolt_recover_gate.go.
 	return runGuardedManagedDoltRecover(context.Background(), cityPath, script, environ, recoverEvidenceCallFailed,
-		managedDoltRecoverCallContext{CallerSite: "recoverManagedBDCommand"})
+		managedDoltRecoverCallContext{CallerSite: recoverCallerBDRunner})
 }
 
 func setProjectedDoltEnvEmpty(env map[string]string) {

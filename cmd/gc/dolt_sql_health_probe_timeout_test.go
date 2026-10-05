@@ -352,7 +352,7 @@ func TestQueryProbeTimeoutEndsInADeclinedRecoverAgainstALiveServer(t *testing.T)
 	runs := countRecoverRuns(t)
 
 	cityPath := t.TempDir()
-	recoverErr := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, evidence)
+	recoverErr := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, evidence, testRecoverCall)
 	if !errors.Is(recoverErr, errManagedDoltRecoverDeclined) {
 		t.Fatalf("runGuardedManagedDoltRecover for a timed-out query probe against a LIVE server = %v, want declined", recoverErr)
 	}
@@ -380,7 +380,7 @@ func TestQueryProbeAnsweredBadStillRecoversAgainstALiveServer(t *testing.T) {
 	runs := countRecoverRuns(t)
 
 	cityPath := t.TempDir()
-	if err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, evidence); err != nil {
+	if err := runGuardedManagedDoltRecover(context.Background(), cityPath, "script", nil, evidence, testRecoverCall); err != nil {
 		t.Fatalf("runGuardedManagedDoltRecover for an answered-bad query probe = %v, want it to run (this bead must not touch this path)", err)
 	}
 	if *runs != 1 {

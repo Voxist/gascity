@@ -10,11 +10,13 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -83,7 +85,7 @@ const (
 )
 
 // String renders the evidence classification for logging and the
-// managed_dolt.recover_admitted event payload (ga-zfgsh).
+// managed_dolt.recover_decision event payload (ga-zfgsh).
 func (e managedDoltRecoverEvidence) String() string {
 	if e == recoverEvidenceHealthOpAnswered {
 		return "health-op-answered"
@@ -238,126 +240,171 @@ var managedDoltRecoverRunner = func(ctx context.Context, script string, environ 
 	return runProviderOpWithEnvContext(ctx, script, environ, managedDoltRecoverOpName)
 }
 
-// managedDoltRecoverCallContext carries caller-identifying and
-// health-op diagnostic context through runGuardedManagedDoltRecover,
-// purely for observability (ga-zfgsh). It carries no decision weight:
-// the liveness check, the cooldown, and the evidence classification are
-// computed exactly as before regardless of what it contains.
-//
-// Optional (a trailing variadic parameter on
-// runGuardedManagedDoltRecover) so the many existing tests that don't
-// care about caller identity keep compiling unchanged.
+// managedDoltRecoverCaller names a call site that asks for a recover.
+type managedDoltRecoverCaller string
+
+const (
+	// recoverCallerBDRunner is the bd runner's transport-failure retry
+	// path (recoverManagedBDCommand).
+	recoverCallerBDRunner managedDoltRecoverCaller = "recoverManagedBDCommand"
+	// recoverCallerHealthCheck is the provider health-check path
+	// (healthBeadsProviderContext).
+	recoverCallerHealthCheck managedDoltRecoverCaller = "healthBeadsProviderContext"
+)
+
+// managedDoltRecoverCallContext carries caller-identifying and health-op
+// diagnostic context through runGuardedManagedDoltRecover, purely for
+// observability (ga-zfgsh). It carries no decision weight: the liveness
+// check, the cooldown, and the evidence classification are computed
+// exactly as before regardless of what it contains.
 type managedDoltRecoverCallContext struct {
-	// CallerSite names the call site: "recoverManagedBDCommand" (the
-	// bd-runner's transport-failure retry path) or
-	// "healthBeadsProviderContext" (the health-check path).
-	CallerSite string
+	CallerSite managedDoltRecoverCaller
 	// HealthOpErr is the error the provider's "health" op returned, when
-	// evidence came from an actual health-op run
-	// (healthBeadsProviderContext). Nil for the bd-runner path
-	// (recoverManagedBDCommand), which has no health op at all: its
-	// evidence is always recoverEvidenceCallFailed from a bd transport
-	// failure, not a provider script exit.
+	// evidence came from an actual health-op run. HealthOpRan says whether
+	// one ran at all: the bd-runner path has no health op, and a nil
+	// HealthOpErr on the health path would mean the op succeeded.
+	HealthOpRan bool
 	HealthOpErr error
 }
 
-// managedDoltRecoverEventRecorders caches one best-effort events.Recorder
-// per city, keyed the same way admitManagedDoltRecover's cooldown map is.
-var managedDoltRecoverEventRecorders sync.Map
+// managedDoltRecoverLogStderrMax bounds the stderr carried in a log line
+// or event payload.
+const managedDoltRecoverLogStderrMax = 500
 
-// managedDoltRecoverEventRecorderForCity returns a best-effort
-// events.Recorder for cityPath's own event log
-// (<cityPath>/.gc/events.jsonl), lazily opened once per city and cached
-// for the process's lifetime.
-//
-// Opened directly here rather than threaded through from a caller
-// because this guard runs from many different process shapes — a
-// one-shot `gc` CLI command retrying a bd call (recoverManagedBDCommand),
-// the health-check path (healthBeadsProviderContext), the controller's
-// own patrol — most of which have no events.Provider available at this
-// depth at all, and threading one through every caller between here and
-// whichever command started is out of scope for ga-zfgsh (this file and
-// beads_provider_lifecycle.go only). A var so tests can substitute a
-// capturing Recorder.
-var managedDoltRecoverEventRecorderForCity = func(cityPath string) events.Recorder {
-	cityKey := normalizePathForCompare(cityPath)
-	if v, ok := managedDoltRecoverEventRecorders.Load(cityKey); ok {
-		return v.(events.Recorder)
-	}
-	// Best-effort: emission must never block or fail the recover path.
-	// A failed open (e.g. an unwritable .gc dir) caches Discard so a
-	// broken events.jsonl doesn't retry opening it on every subsequent
-	// recover decision.
-	rec := events.Discard
-	eventsPath := filepath.Join(cityPath, ".gc", "events.jsonl")
-	if r, err := events.NewFileRecorder(eventsPath, io.Discard, events.WithoutStartupSweep()); err == nil {
-		rec = r
-	}
-	managedDoltRecoverEventRecorders.Store(cityKey, rec)
-	return rec
+// recoverSecretPatterns match credentials the provider scripts can echo
+// into stderr (gc-beads-bd.sh passes --password "${DOLT_PASSWORD}").
+var recoverSecretPatterns = []struct {
+	re   *regexp.Regexp
+	repl string
+}{
+	{regexp.MustCompile(`(?i)(--password[ =])\S+`), "${1}REDACTED"},
+	{regexp.MustCompile(`(?i)(password=)\S+`), "${1}REDACTED"},
+	{regexp.MustCompile(`(://[^:@/\s]+:)[^@\s]+@`), "${1}REDACTED@"},
+	{regexp.MustCompile(`(GC_DOLT_PASSWORD=)\S+`), "${1}REDACTED"},
 }
 
-// managedDoltHealthOpExitAndStderr extracts the triggering health op's
-// exit code and stderr from err, for the admitted-recover log line and
-// event. Both are zero/empty for a nil err (the bd-runner path has no
-// health op at all).
-func managedDoltHealthOpExitAndStderr(err error) (exitCode int, stderr string) {
+// redactRecoverStderr masks credentials in provider stderr before it is
+// logged or persisted to events.jsonl, which the API, SSE and dashboard
+// serve.
+func redactRecoverStderr(s string) string {
+	for _, p := range recoverSecretPatterns {
+		s = p.re.ReplaceAllString(s, p.repl)
+	}
+	return s
+}
+
+// managedDoltOpResult extracts an op error's exit code and redacted,
+// truncated stderr. The code is -1 when the process did not exit
+// normally (killed by a signal) or err carries no exit code. Both are
+// zero for a nil err.
+func managedDoltOpResult(err error) (exitCode int, stderr string) {
 	if err == nil {
 		return 0, ""
 	}
-	exitCode, _ = providerOpExitCode(err)
+	code, ok := providerOpExitCode(err)
+	if !ok {
+		code = -1
+	}
+	msg := err.Error()
 	var opErr *providerOpError
 	if errors.As(err, &opErr) {
-		return exitCode, truncateForLog(opErr.msg, 500)
+		msg = opErr.msg
 	}
-	return exitCode, truncateForLog(err.Error(), 500)
+	return code, truncateForLog(redactRecoverStderr(msg), managedDoltRecoverLogStderrMax)
 }
 
-// logManagedDoltRecoverDecision logs one line for every
-// runGuardedManagedDoltRecover decision — admitted or declined — with
-// the same field set (ga-zfgsh): the caller site, the evidence
-// classification, the liveness verdict (when the liveness check ran),
-// and the triggering health op's exit code and stderr (when there was
-// one). Before this, only a decline was logged at all, and an admission
-// -- the most consequential thing this subsystem does -- left no trace
-// of which caller triggered it.
-func logManagedDoltRecoverDecision(cityPath string, cc managedDoltRecoverCallContext, evidence managedDoltRecoverEvidence, liveness managedDoltLiveness, livenessKnown, admitted bool, declineReason string) {
-	livenessField := "n/a"
-	if livenessKnown {
-		livenessField = liveness.String()
+// exitField renders an exit code for a log line.
+func exitField(code int) string {
+	if code < 0 {
+		return "signal"
 	}
-	healthExit, healthStderr := managedDoltHealthOpExitAndStderr(cc.HealthOpErr)
-	if admitted {
-		log.Printf("gc: admitted managed dolt recover for %s: caller=%s evidence=%s liveness=%s health_op_exit=%d health_op_stderr=%q",
-			cityPath, cc.CallerSite, evidence, livenessField, healthExit, healthStderr)
+	return strconv.Itoa(code)
+}
+
+// recordManagedDoltRecoverEvent appends e to the city's own event log
+// (<cityPath>/.gc/events.jsonl). The log is opened, written and closed
+// on every emit, as bd_resilience.go does: a long-lived recorder would
+// keep appending to an unlinked inode after another process rotates the
+// file. Admitted recovers are rare and cooldown-gated, so the open is
+// cheap. It is a var so tests can capture events.
+//
+// Opened directly because this guard runs from many process shapes (a
+// one-shot CLI retrying a bd call, the health check, the controller's
+// patrol) that have no events.Provider at this depth. Failures are
+// logged, never returned: emission must not block or fail a recover.
+var recordManagedDoltRecoverEvent = realRecordManagedDoltRecoverEvent
+
+func realRecordManagedDoltRecoverEvent(cityPath string, e events.Event) {
+	rec, err := events.NewFileRecorder(filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl"), io.Discard, events.WithoutStartupSweep())
+	if err != nil {
+		log.Printf("gc: managed dolt recover: opening event log for %s: %v", cityPath, err)
 		return
 	}
-	log.Printf("gc: declining managed dolt recover for %s: caller=%s evidence=%s liveness=%s health_op_exit=%d health_op_stderr=%q reason=%s",
-		cityPath, cc.CallerSite, evidence, livenessField, healthExit, healthStderr, declineReason)
+	rec.Record(e)
+	if err := rec.Close(); err != nil {
+		log.Printf("gc: managed dolt recover: closing event log for %s: %v", cityPath, err)
+	}
 }
 
-// emitManagedDoltRecoverAdmitted records one managed_dolt.recover_admitted
-// event for an ADMITTED recover (ga-zfgsh). Best-effort: a marshal
-// failure is a silent no-op, matching every other best-effort emitter in
-// cmd/gc (e.g. emitDoctorAlert).
-func emitManagedDoltRecoverAdmitted(cityPath string, cc managedDoltRecoverCallContext, evidence managedDoltRecoverEvidence, liveness managedDoltLiveness, livenessKnown bool) {
-	payload := events.ManagedDoltRecoverAdmittedPayload{
-		CallerSite: cc.CallerSite,
-		Scope:      cityPath,
-		Evidence:   evidence.String(),
+// managedDoltRecoverDecision describes one decision for the log line and
+// the event payload.
+type managedDoltRecoverDecision struct {
+	outcome       events.ManagedDoltRecoverOutcome
+	evidence      managedDoltRecoverEvidence
+	liveness      managedDoltLiveness
+	livenessKnown bool
+	reason        string
+	recoverErr    error
+}
+
+// reportManagedDoltRecover logs one line and emits one
+// managed_dolt.recover_decision event for d (ga-zfgsh). Every outcome
+// carries the same field set: the caller site, scope, evidence
+// classification, the liveness verdict (when the check ran), and the
+// triggering health op's exit code and stderr (when one ran).
+func reportManagedDoltRecover(cityPath string, cc managedDoltRecoverCallContext, d managedDoltRecoverDecision) {
+	scope := normalizePathForCompare(cityPath)
+	payload := events.ManagedDoltRecoverDecisionPayload{
+		Outcome:     d.outcome,
+		CallerSite:  string(cc.CallerSite),
+		Scope:       scope,
+		Evidence:    d.evidence.String(),
+		Reason:      d.reason,
+		HealthOpRan: cc.HealthOpRan,
 	}
-	if livenessKnown {
-		payload.Liveness = liveness.String()
+	livenessField := "n/a"
+	if d.livenessKnown {
+		livenessField = d.liveness.String()
+		payload.Liveness = livenessField
 	}
-	payload.HealthOpExitCode, payload.HealthOpStderr = managedDoltHealthOpExitAndStderr(cc.HealthOpErr)
+	healthField := "n/a"
+	if cc.HealthOpRan {
+		payload.HealthOpExitCode, payload.HealthOpStderr = managedDoltOpResult(cc.HealthOpErr)
+		healthField = "exit=" + exitField(payload.HealthOpExitCode)
+		if cc.HealthOpErr == nil {
+			healthField = "exit=0"
+		}
+	}
+	line := fmt.Sprintf("gc: managed dolt recover %s for %s: caller=%s evidence=%s liveness=%s health_op=%s health_op_stderr=%q",
+		d.outcome, scope, cc.CallerSite, d.evidence, livenessField, healthField, payload.HealthOpStderr)
+	if d.reason != "" {
+		line += fmt.Sprintf(" reason=%q", d.reason)
+	}
+	if d.recoverErr != nil {
+		payload.RecoverExitCode, payload.RecoverStderr = managedDoltOpResult(d.recoverErr)
+		line += fmt.Sprintf(" recover_exit=%s recover_stderr=%q", exitField(payload.RecoverExitCode), payload.RecoverStderr)
+	}
+	log.Print(line)
+
 	raw, err := json.Marshal(payload)
 	if err != nil {
+		log.Printf("gc: managed dolt recover: marshaling %s event: %v", events.ManagedDoltRecoverDecision, err)
 		return
 	}
-	managedDoltRecoverEventRecorderForCity(cityPath).Record(events.Event{
-		Type:    events.ManagedDoltRecoverAdmitted,
+	recordManagedDoltRecoverEvent(cityPath, events.Event{
+		Type:    events.ManagedDoltRecoverDecision,
 		Actor:   eventActor(),
-		Subject: cityPath,
+		Subject: scope,
 		Payload: raw,
 	})
 }
@@ -370,18 +417,12 @@ func emitManagedDoltRecoverAdmitted(cityPath string, cc managedDoltRecoverCallCo
 // A refusal returns an error wrapping errManagedDoltRecoverDeclined and
 // names the reason, so the decision is legible in the logs of whichever
 // process made it — which, on 2026-09-22, was an order process nobody
-// expected to be restarting servers at all. callCtx is optional
-// (variadic) caller-identifying context (ga-zfgsh); every decision —
-// admitted or declined — is logged with the same field set, and an
-// ADMITTED recover additionally emits a managed_dolt.recover_admitted
-// event, so forensics on a live-server replacement can always find which
-// caller triggered it.
-func runGuardedManagedDoltRecover(ctx context.Context, cityPath, script string, environ []string, evidence managedDoltRecoverEvidence, callCtx ...managedDoltRecoverCallContext) error {
-	var cc managedDoltRecoverCallContext
-	if len(callCtx) > 0 {
-		cc = callCtx[0]
-	}
-
+// expected to be restarting servers at all. Every decision, and the
+// result of an admitted run, is logged and emitted as a
+// managed_dolt.recover_decision event carrying cc (ga-zfgsh), so
+// forensics on a live-server replacement can always find which caller
+// triggered it and how it ended.
+func runGuardedManagedDoltRecover(ctx context.Context, cityPath, script string, environ []string, evidence managedDoltRecoverEvidence, cc managedDoltRecoverCallContext) error {
 	// The liveness check is a MANAGED-DOLT probe, so it may only gate a
 	// city whose beads lifecycle gc actually runs. Without this scope,
 	// a city on a custom exec provider and no managed dolt at all could
@@ -396,42 +437,51 @@ func runGuardedManagedDoltRecover(ctx context.Context, cityPath, script string, 
 	// Scoping here rather than carving an exception into the liveness
 	// function keeps "unknown declines" absolute inside that function,
 	// and makes the scope legible at the decision point.
-	var liveness managedDoltLiveness
-	var livenessKnown bool
+	d := managedDoltRecoverDecision{evidence: evidence}
 	if evidence.mustProveDeath() && cityUsesManagedDoltBeadsLifecycle(cityPath) {
 		var reason string
-		liveness, reason = managedDoltReplaceLiveness(cityPath)
-		livenessKnown = true
-		if liveness != managedDoltLivenessConfirmedDead {
-			logManagedDoltRecoverDecision(cityPath, cc, evidence, liveness, livenessKnown, false,
-				fmt.Sprintf("liveness %s (%s)", liveness, reason))
+		d.liveness, reason = managedDoltReplaceLiveness(cityPath)
+		d.livenessKnown = true
+		if d.liveness != managedDoltLivenessConfirmedDead {
+			d.outcome = events.ManagedDoltRecoverDeclinedLiveness
+			d.reason = fmt.Sprintf("liveness %s (%s)", d.liveness, reason)
+			reportManagedDoltRecover(cityPath, cc, d)
 			return fmt.Errorf("%w: caller=%s server liveness is %s (%s); only a confirmed-dead server may be replaced on this evidence",
-				errManagedDoltRecoverDeclined, cc.CallerSite, liveness, reason)
+				errManagedDoltRecoverDeclined, cc.CallerSite, d.liveness, reason)
 		}
 	}
 	if !admitManagedDoltRecover(cityPath) {
-		logManagedDoltRecoverDecision(cityPath, cc, evidence, liveness, livenessKnown, false,
-			fmt.Sprintf("another recover was admitted for this city within the last %s", providerRecoverCooldown()))
+		d.outcome = events.ManagedDoltRecoverDeclinedCooldown
+		d.reason = fmt.Sprintf("another recover was admitted for this city within the last %s", providerRecoverCooldown())
+		reportManagedDoltRecover(cityPath, cc, d)
 		return fmt.Errorf("%w: caller=%s another recover was admitted for this city within the last %s",
 			errManagedDoltRecoverDeclined, cc.CallerSite, providerRecoverCooldown())
 	}
-	logManagedDoltRecoverDecision(cityPath, cc, evidence, liveness, livenessKnown, true, "")
-	emitManagedDoltRecoverAdmitted(cityPath, cc, evidence, liveness, livenessKnown)
+	d.outcome = events.ManagedDoltRecoverAdmitted
+	reportManagedDoltRecover(cityPath, cc, d)
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	err := managedDoltRecoverRunner(ctx, script, environ)
 	if err == nil {
+		d.outcome = events.ManagedDoltRecoverSucceeded
+		reportManagedDoltRecover(cityPath, cc, d)
 		return nil
 	}
+	d.recoverErr = err
 	// The shell fallback's op_recover exits providerOpExitRecoverDeclined
 	// when it loses the recovery-lock race (ga-iv2l2): that is this guard's
 	// own decline semantics reappearing one layer down, not a transport
 	// fault. Only that code is mapped; exit 3 stays a plain failure because
 	// a lock winner whose final health check fails also exits 3.
 	if code, ok := providerOpExitCode(err); ok && code == providerOpExitRecoverDeclined {
+		d.outcome = events.ManagedDoltRecoverDeclinedByProvider
+		d.reason = "provider lost the recovery-lock race to a concurrent recover"
+		reportManagedDoltRecover(cityPath, cc, d)
 		return fmt.Errorf("%w: provider declined concurrent recover: %w", errManagedDoltRecoverDeclined, err)
 	}
+	d.outcome = events.ManagedDoltRecoverFailed
+	reportManagedDoltRecover(cityPath, cc, d)
 	return err
 }
 
