@@ -4,13 +4,16 @@
 fastmcp>=3.2.0
 authlib>=1.6.9
 
-# Security floor: CVE-2026-48526 (HIGH, auth bypass) in PyJWT < 2.13.0.
+# Security floor: PyJWT < 2.14.0 (CVE-2026-102268 CRITICAL, CVE-2026-102266 and
+# four more HIGH auth-bypass/token-forgery issues) and urllib3 < 2.8.0
+# (CVE-2026-97687, CVE-2026-97689). Both are transitive.
 # CVEs in cryptography < 50.0.0 — raised from 48.0.1 to clear CVE-2026-69247 /
 # GHSA-g6cj-pr64-35w5 (HIGH, PKCS#7 EnvelopedData decryption exposes a
 # Bleichenbacher oracle through distinguishable errors and timing, fixed
 # 50.0.0). python-multipart and starlette lower-severity issues in the same
 # Trivy scan. Remove once transitive deps carry fixed versions.
-pyjwt>=2.13.0
+pyjwt>=2.14.0
+urllib3>=2.8.0
 cryptography>=50.0.0
 python-multipart>=0.0.30
 starlette>=1.1.0
