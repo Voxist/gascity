@@ -55,10 +55,19 @@ fi
 echo "Dolt server is in read-only state. Attempting recovery..."
 
 if [ -x "$beads_bd" ]; then
-  "$beads_bd" recover || {
-    echo "gc dolt recover: recovery failed" >&2
-    exit 1
-  }
+  rc=0
+  "$beads_bd" recover || rc=$?
+  case "$rc" in
+    0) ;;
+    4)
+      echo "gc dolt recover: recovery already in progress elsewhere" >&2
+      exit 4
+      ;;
+    *)
+      echo "gc dolt recover: recovery failed" >&2
+      exit 1
+      ;;
+  esac
 else
   echo "gc dolt recover: gc-beads-bd script not found at $beads_bd" >&2
   exit 1
