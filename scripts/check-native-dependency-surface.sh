@@ -34,7 +34,12 @@ set -euo pipefail
 # gowebpki/jcs, oapi-codegen/nullable and oklog/ulid/v2, mostly via beads'
 # oapi-codegen `tool` dependency. Module-graph entries, not linked into gc;
 # the binary stays well under its size cap below.
-max_modules="${GC_NATIVE_DEP_MAX_MODULES:-761}"
+#
+# Re-baselined 761 -> 765 on 2026-10-05 (ga-1ebvc) for mvdan.cc/sh/v3, the
+# bash parser the acceptance -skip guard (scripts/acceptance_shell_skips_test.go)
+# uses in place of a hand-rolled quote tracker. Test-only import: the 4 new
+# module-graph entries are not linked into gc, so the binary cap is unaffected.
+max_modules="${GC_NATIVE_DEP_MAX_MODULES:-765}"
 # max_binary_bytes re-baselined 2026-08-29 (ga-iuznq2). The build below now
 # adds -trimpath and CGO_ENABLED=0, which removes cross-host path-embedding
 # and native C-object (dolthub/gozstd, ICU) variance that previously made

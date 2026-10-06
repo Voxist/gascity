@@ -15,6 +15,11 @@ func InitGitRepo(t testing.TB) (string, string) {
 	RunGit(t, dir, "init")
 	RunGit(t, dir, "config", "user.email", "test@test.com")
 	RunGit(t, dir, "config", "user.name", "Test")
+	// Background maintenance (spawned detached after commit) briefly creates
+	// objects/maintenance.lock, which races tests that snapshot the git dir
+	// and diff it. Disable it before the first commit so none ever starts.
+	RunGit(t, dir, "config", "maintenance.auto", "false")
+	RunGit(t, dir, "config", "gc.auto", "0")
 	RunGit(t, dir, "commit", "--allow-empty", "-m", "init")
 	return dir, RunGit(t, dir, "rev-parse", "--abbrev-ref", "HEAD")
 }

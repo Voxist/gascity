@@ -2785,6 +2785,9 @@
             "$ref": "#/components/schemas/MailEventPayload"
           },
           {
+            "$ref": "#/components/schemas/ManagedDoltRecoverDecisionPayload"
+          },
+          {
             "$ref": "#/components/schemas/MoleculeResolvedPayload"
           },
           {
@@ -5035,6 +5038,73 @@
         },
         "required": [
           "accepted"
+        ],
+        "type": "object"
+      },
+      "ManagedDoltRecoverDecisionPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "caller_site": {
+            "description": "Which call site asked for the recover: recoverManagedBDCommand or healthBeadsProviderContext.",
+            "type": "string"
+          },
+          "evidence": {
+            "description": "Evidence classification the decision rested on: call-failed or health-op-answered.",
+            "type": "string"
+          },
+          "health_op_exit_code": {
+            "description": "The triggering health op's exit code; -1 when it was killed by a signal.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "health_op_ran": {
+            "description": "Whether a provider health op produced the triggering evidence.",
+            "type": "boolean"
+          },
+          "health_op_stderr": {
+            "description": "Redacted, truncated stderr of the triggering health op.",
+            "type": "string"
+          },
+          "liveness": {
+            "description": "Liveness verdict, when the liveness check applied: alive, confirmed-dead, or unknown.",
+            "type": "string"
+          },
+          "outcome": {
+            "description": "What the guard decided, or how an admitted recover ended.",
+            "enum": [
+              "admitted",
+              "declined-liveness",
+              "declined-cooldown",
+              "declined-by-provider",
+              "succeeded",
+              "failed"
+            ],
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why the recover was declined.",
+            "type": "string"
+          },
+          "recover_exit_code": {
+            "description": "The recover op's exit code; -1 when it did not exit normally.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "recover_stderr": {
+            "description": "Redacted, truncated stderr of the recover op.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "Normalized city path the recover was decided for.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome",
+          "caller_site",
+          "scope",
+          "evidence",
+          "health_op_ran"
         ],
         "type": "object"
       },
@@ -12842,6 +12912,7 @@
             "mail.read": "#/components/schemas/TypedEventStreamEnvelopeMailRead",
             "mail.replied": "#/components/schemas/TypedEventStreamEnvelopeMailReplied",
             "mail.sent": "#/components/schemas/TypedEventStreamEnvelopeMailSent",
+            "managed_dolt.recover_decision": "#/components/schemas/TypedEventStreamEnvelopeManagedDoltRecoverDecision",
             "molecule.resolved": "#/components/schemas/TypedEventStreamEnvelopeMoleculeResolved",
             "order.completed": "#/components/schemas/TypedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedEventStreamEnvelopeOrderFailed",
@@ -13065,6 +13136,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeMailSent"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeManagedDoltRecoverDecision"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeMoleculeResolved"
@@ -14743,6 +14817,7 @@
                 "store.recovered",
                 "store.probe_failed",
                 "breaker.state_changed",
+                "managed_dolt.recover_decision",
                 "proxy.reaped",
                 "controller.tick_completed",
                 "doctor.alert",
@@ -16538,6 +16613,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope mail.sent",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeManagedDoltRecoverDecision": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ManagedDoltRecoverDecisionPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "managed_dolt.recover_decision",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope managed_dolt.recover_decision",
         "type": "object"
       },
       "TypedEventStreamEnvelopeMoleculeResolved": {
@@ -19734,6 +19866,7 @@
             "mail.read": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailRead",
             "mail.replied": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailReplied",
             "mail.sent": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailSent",
+            "managed_dolt.recover_decision": "#/components/schemas/TypedTaggedEventStreamEnvelopeManagedDoltRecoverDecision",
             "molecule.resolved": "#/components/schemas/TypedTaggedEventStreamEnvelopeMoleculeResolved",
             "order.completed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFailed",
@@ -19957,6 +20090,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailSent"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeManagedDoltRecoverDecision"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeMoleculeResolved"
@@ -21734,6 +21870,7 @@
                 "store.recovered",
                 "store.probe_failed",
                 "breaker.state_changed",
+                "managed_dolt.recover_decision",
                 "proxy.reaped",
                 "controller.tick_completed",
                 "doctor.alert",
@@ -23654,6 +23791,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope mail.sent",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeManagedDoltRecoverDecision": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ManagedDoltRecoverDecisionPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "managed_dolt.recover_decision",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope managed_dolt.recover_decision",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeMoleculeResolved": {

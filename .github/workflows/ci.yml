@@ -312,6 +312,7 @@ jobs:
           GOLANGCI_LINT_CACHE: ${{ github.workspace }}/.cache/golangci-lint
         run: make lint
       - name: Verify errorlint --fix regression guard (ga-w7nyj)
+        if: ${{ !cancelled() }}
         # Runs unconditionally: both lint steps above install the pinned
         # golangci-lint via their shared `$(GOLANGCI_LINT)` Makefile
         # prerequisite regardless of which one the scope check picked.

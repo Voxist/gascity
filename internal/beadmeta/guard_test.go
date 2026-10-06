@@ -56,6 +56,9 @@ var allowedNonMetadata = map[string]string{
 	"gc.productmetrics.recording":   "cobra annotation: product-metrics recording policy",
 	"gc.productmetrics.resolver":    "cobra annotation: product-metrics dynamic resolver",
 
+	// Git configuration keys, not metadata keys.
+	"gc.auto": "git config key: test repos disable auto-gc (internal/testutil/git.go)",
+
 	// Generated shell-completion filenames, not metadata keys.
 	"gc.bash": "shell completion filename (cmd/gc/cmd_shell.go)",
 	"gc.fish": "shell completion filename (cmd/gc/cmd_shell.go)",

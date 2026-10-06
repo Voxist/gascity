@@ -1644,7 +1644,15 @@ func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTar
 // Split out of resolveNudgeTarget so the storeless fallback can bound it
 // (resolveNudgeTargetViaStoreBounded) without changing the default path.
 func resolveNudgeTargetViaStore(cityPath string, cfg *config.City, identifier string) (nudgeTarget, error) {
-	store := openNudgeBeadStore(cityPath)
+	return resolveNudgeTargetViaStoreOpening(openNudgeBeadStore, cityPath, cfg, identifier)
+}
+
+// resolveNudgeTargetViaStoreOpening is resolveNudgeTargetViaStore with the
+// store opener passed in, so a caller that runs the resolution on a goroutine
+// it may abandon can read the openNudgeBeadStore seam on its own goroutine
+// first instead of racing a later write to the package var.
+func resolveNudgeTargetViaStoreOpening(open func(string) beads.NudgesStore, cityPath string, cfg *config.City, identifier string) (nudgeTarget, error) {
+	store := open(cityPath)
 	if store.Store != nil {
 		// Named-session materialization is a session WRITE, and the follow-up Get
 		// reads the session bead; both route through the session-class store

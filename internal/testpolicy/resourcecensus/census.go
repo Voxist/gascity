@@ -176,12 +176,10 @@ var bootstrapPolicy = Ledger{
 			// and verify the pinned golangci-lint binary instead of
 			// whatever "golangci-lint" happened to resolve to on PATH.
 			//
-			// Merged total (ga-3bwmf round-5 resync onto fork/main):
-			// 716 + 4 (ga-3bwmf, +1 file) + 3 (ga-w7nyj, +0 files) = 723
-			// calls, 209 files -- both sides' call sites are real and
-			// independent, so the resync sums both deltas from the shared
-			// 716/208 ancestor rather than taking either side alone.
-			BaselineCalls:   729,
+			// Bumped 729->730 calls (files unchanged, 210) for ga-g6fjp:
+			// examples/bd/dolt/recover_host_test.go runs the recover script
+			// via `exec.Command("sh", ...)` to pin the host-default fallback.
+			BaselineCalls:   730,
 			BaselineFiles:   210,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
@@ -246,10 +244,10 @@ var bootstrapPolicy = Ledger{
 			// bead's review fix-up (see the matching audit_baseline
 			// subprocess comment above for the source).
 			//
-			// Merged total (ga-3bwmf round-5 resync onto fork/main):
-			// 479 + 4 (ga-3bwmf, +1 file) + 3 (ga-w7nyj, +0 files) = 486
-			// calls, 138 files.
-			BaselineCalls:   492,
+			// Bumped 492->493 calls (files unchanged, 139) for ga-g6fjp:
+			// examples/bd/dolt/recover_host_test.go runs the recover script
+			// via `exec.Command("sh", ...)` to pin the host-default fallback.
+			BaselineCalls:   493,
 			BaselineFiles:   139,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
@@ -642,10 +640,10 @@ var bootstrapPolicy = Ledger{
 			// bead's review fix-up (see the matching audit_baseline
 			// subprocess comment above for the source).
 			//
-			// Merged total (ga-3bwmf round-5 resync onto fork/main):
-			// 461 + 4 (ga-3bwmf, +1 file) + 3 (ga-w7nyj, +0 files) = 468
-			// calls, 132 files.
-			BaselineCalls:   474,
+			// Bumped 474->475 calls (files unchanged, 133) for ga-g6fjp:
+			// examples/bd/dolt/recover_host_test.go runs the recover script
+			// via `exec.Command("sh", ...)` to pin the host-default fallback.
+			BaselineCalls:   475,
 			BaselineFiles:   133,
 			ReportedCalls:   394,
 			ReportedFiles:   105,

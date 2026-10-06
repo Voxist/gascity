@@ -4286,6 +4286,9 @@ op_recover() {
     # call skip the lock. op_start verifies the claim itself (flock -n 9
     # on the inherited fd) rather than trusting it blindly; see its own
     # comment.
+    # Known gap (ga-08wuk): op_start's reuse fast path exits the whole
+    # process, so when it reuses an existing server the "Verify health" step
+    # below never runs.
     op_start lock-held
 
     # Verify health.

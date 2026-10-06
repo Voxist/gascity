@@ -931,8 +931,8 @@ func runGolangciLintFixture(t *testing.T, fixtureDir, repoRoot string, fix bool)
 }
 
 // TestErrorlintStockFixDropsTypeAssertionNegation is the RED/GREEN proof
-// behind ga-w7nyj's fix, on THIS repo's exact .golangci.yml and whatever
-// golangci-lint is on PATH: the GREEN half is the actual guard (--fix
+// behind ga-w7nyj's fix, on THIS repo's exact .golangci.yml and the pinned
+// golangci-lint binary (pinnedGolangciLintBin): the GREEN half is the actual guard (--fix
 // absent: the vulnerable pattern survives lint untouched and the run fails,
 // so the commit is blocked instead of silently rewritten); the RED half
 // proves the danger this guard exists for is real on this exact toolchain,
@@ -979,19 +979,26 @@ func TestErrorlintStockFixDropsTypeAssertionNegation(t *testing.T) {
 	// assertions could not tell a correct fix from the bug, so it could
 	// never go red even once upstream fixed this.
 	fixture = newErrorlintFixtureModule(t)
-	runGolangciLintFixture(t, fixture, repoRoot, true)
+	fixCode, fixOutput := runGolangciLintFixture(t, fixture, repoRoot, true)
 	got, err = os.ReadFile(filepath.Join(fixture, "main.go"))
 	if err != nil {
-		t.Fatalf("read fixture after lint (--fix): %v", err)
+		t.Fatalf("read fixture after lint (--fix; exit %d): %v\n%s", fixCode, err, fixOutput)
 	}
-	if !strings.Contains(string(got), "if errors.As(") {
-		t.Fatalf("expected golangci-lint --fix to reproduce the ga-w7nyj bug on this golangci-lint/errorlint "+
-			"version: an UNNEGATED `if errors.As(...) {`, inverting the original branch's meaning. Got:\n%s", got)
-	}
+	// The negated shape is checked FIRST: "if !errors.As(" does not contain
+	// "if errors.As(", so testing the unnegated shape first would report a
+	// correct upstream rewrite as "bug not reproduced" and this message
+	// could never fire.
 	if strings.Contains(string(got), "!errors.As(") {
 		t.Fatalf("golangci-lint --fix produced a NEGATED `if !errors.As(...) {` -- that is the CORRECT "+
 			"rewrite, meaning upstream has already fixed the bug this guard exists for. "+
 			"TestPreCommitLintChangedFlagsDoNotAutoFix is the only guard left, and re-enabling --fix (now "+
-			"that it is provably safe again) could be reconsidered:\n%s", got)
+			"that it is provably safe again) could be reconsidered (--fix exit %d):\n%s\n--- lint output ---\n%s",
+			fixCode, got, fixOutput)
+	}
+	if !strings.Contains(string(got), "if errors.As(") {
+		t.Fatalf("expected golangci-lint --fix to reproduce the ga-w7nyj bug on this golangci-lint/errorlint "+
+			"version: an UNNEGATED `if errors.As(...) {`, inverting the original branch's meaning "+
+			"(--fix exit %d; a crash would also land here). Got:\n%s\n--- lint output ---\n%s",
+			fixCode, got, fixOutput)
 	}
 }

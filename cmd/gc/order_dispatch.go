@@ -447,9 +447,9 @@ type memoryOrderDispatcher struct {
 	// `gc beads health` started by hand, by a different automation, or by
 	// another gc process entirely -- each such process has its own empty
 	// object. The cross-process guard for the same "never overlap" invariant
-	// is gc-beads-bd.sh's op_start LOCK_FILE flock; ga-iv2l2 tracks that
-	// op_recover's own stop call runs BEFORE that flock is acquired, so it
-	// is not yet a complete guard either.
+	// is gc-beads-bd.sh's LOCK_FILE flock, which op_start takes and op_recover
+	// holds across its own stop, cleanup and start (ga-iv2l2). It does not
+	// cover op_stop, which deliberately runs without the lock.
 	//
 	// The webhook seam (api_state.go's controllerWebhookDispatcher.dispatcher)
 	// builds a brand-new memoryOrderDispatcher per delivery; it adopts the
