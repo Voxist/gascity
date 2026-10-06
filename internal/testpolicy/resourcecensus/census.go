@@ -179,8 +179,15 @@ var bootstrapPolicy = Ledger{
 			// Bumped 729->730 calls (files unchanged, 210) for ga-g6fjp:
 			// examples/bd/dolt/recover_host_test.go runs the recover script
 			// via `exec.Command("sh", ...)` to pin the host-default fallback.
-			BaselineCalls:   730,
-			BaselineFiles:   210,
+			//
+			// Bumped 730->731 calls (files 210->211) for ga-lc97s:
+			// cmd/gc/managed_dolt_implicit_recovery_gate_process_test.go
+			// re-execs the test binary as a real gc child via exec.Command to
+			// prove the implicit-recovery gate refuses a stopped or frozen
+			// city; the one call is a checked Medium owner, so Small debt
+			// does not grow.
+			BaselineCalls:   731,
+			BaselineFiles:   211,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-cp3hwi",
@@ -247,8 +254,12 @@ var bootstrapPolicy = Ledger{
 			// Bumped 492->493 calls (files unchanged, 139) for ga-g6fjp:
 			// examples/bd/dolt/recover_host_test.go runs the recover script
 			// via `exec.Command("sh", ...)` to pin the host-default fallback.
-			BaselineCalls:   493,
-			BaselineFiles:   139,
+			//
+			// Bumped 493->494 calls (files 139->140) for ga-lc97s: the same
+			// gate child-process test (see the matching all-scope subprocess
+			// comment above for the source).
+			BaselineCalls:   494,
+			BaselineFiles:   140,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-cp3hwi",
@@ -453,6 +464,17 @@ var bootstrapPolicy = Ledger{
 			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "the controller-token withholding proof is a checked Medium subprocess owner",
 			ResourceOwner:   "the one /bin/sh subprocess is confined to TestPassthroughEnvWithholdsControllerTokenFromChildProcess, which exists to read a credential back out of a real child process: the session env is an overlay, so only a real child can prove GC_CONTROLLER_TOKEN is absent rather than merely missing from a map",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "cmd/gc",
+			PackageName:     "main",
+			Owner:           "TestManagedCityRefusesImplicitDoltRecoveryInChildProcess",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-lc97s",
+			Invariant:       "the implicit-recovery gate child-process proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the one child gc process is confined to TestManagedCityRefusesImplicitDoltRecoveryInChildProcess, which exists to re-exec the test binary as a real gc: the gate lives in the production command path, so only a real child with lifecycle intent withheld can prove a stopped or frozen city is refused before the provider script runs",
 			MigrationTarget: "P0.4b",
 			Expires:         "2026-10-31",
 		},

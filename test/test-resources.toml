@@ -24,8 +24,11 @@ resource = "subprocess"
 # Bumped 716->719 calls (files unchanged, 208) for ga-w7nyj's
 # TestErrorlintStockFixDropsTypeAssertionNegation and its review fix-up
 # (scripts/precommit_contract_test.go).
-baseline_calls = 730
-baseline_files = 210
+#
+# Bumped 730->731 calls (files 210->211) for ga-lc97s: the implicit-recovery
+# gate child-process test re-execs the test binary as a real gc.
+baseline_calls = 731
+baseline_files = 211
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-cp3hwi"
@@ -76,8 +79,11 @@ resource = "subprocess"
 #
 # Bumped 479->482 calls (files unchanged, 137) for ga-w7nyj's
 # TestErrorlintStockFixDropsTypeAssertionNegation and its review fix-up.
-baseline_calls = 493
-baseline_files = 139
+#
+# Bumped 493->494 calls (files 139->140) for ga-lc97s: the same gate
+# child-process test.
+baseline_calls = 494
+baseline_files = 140
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-cp3hwi"
@@ -276,6 +282,17 @@ resources = ["subprocess"]
 owner_bead = "ga-cp3hwi"
 invariant = "the controller-token withholding proof is a checked Medium subprocess owner"
 resource_owner = "the one /bin/sh subprocess is confined to TestPassthroughEnvWithholdsControllerTokenFromChildProcess, which exists to read a credential back out of a real child process: the session env is an overlay, so only a real child can prove GC_CONTROLLER_TOKEN is absent rather than merely missing from a map"
+migration_target = "P0.4b"
+expires = "2026-10-31"
+
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestManagedCityRefusesImplicitDoltRecoveryInChildProcess"
+resources = ["subprocess"]
+owner_bead = "ga-lc97s"
+invariant = "the implicit-recovery gate child-process proof is a checked Medium subprocess owner"
+resource_owner = "the one child gc process is confined to TestManagedCityRefusesImplicitDoltRecoveryInChildProcess, which exists to re-exec the test binary as a real gc: the gate lives in the production command path, so only a real child with lifecycle intent withheld can prove a stopped or frozen city is refused before the provider script runs"
 migration_target = "P0.4b"
 expires = "2026-10-31"
 

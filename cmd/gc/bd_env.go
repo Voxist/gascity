@@ -1280,6 +1280,9 @@ var (
 )
 
 var recoverManagedBDCommand = func(cityPath string) error {
+	if err := implicitManagedDoltRecoveryCheck(cityPath); err != nil {
+		return fmt.Errorf("%w: %w", errManagedDoltRecoverDeclined, err)
+	}
 	script := gcBeadsBdScriptPath(cityPath)
 	overrides := cityRuntimeEnvMapForCity(cityPath)
 	// Recovering the legacy managed server is the path an in-place gc upgrade
@@ -1512,8 +1515,11 @@ func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, 
 	if port := recoveredManagedDoltPort(); port != "" {
 		return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
 	}
+	var recoveryDeniedErr error
 	if allowRecovery {
-		if err := healthBeadsProviderContext(ctx, cityPath, false); err == nil {
+		if deniedErr := implicitManagedDoltRecoveryCheck(cityPath); deniedErr != nil {
+			recoveryDeniedErr = deniedErr
+		} else if err := healthBeadsProviderContext(ctx, cityPath, false); err == nil {
 			resetRecoveryCache()
 			if port := recoveredManagedDoltPort(); port != "" {
 				return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
@@ -1534,6 +1540,9 @@ func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, 
 				return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
 			}
 		}
+	}
+	if recoveryDeniedErr != nil {
+		return contract.DoltConnectionTarget{}, false, recoveryDeniedErr
 	}
 	if recoveryErr != nil {
 		return contract.DoltConnectionTarget{}, false, recoveryErr
@@ -1820,7 +1829,7 @@ func bdCommandRunnerWithManagedRetryFor(cityPath string, envFn bdManagedEnvFn) b
 		// retry below — the cheap half of this path, and the half that
 		// fixes a merely stale port without touching the server.
 		if bdTransportRecoverableError(cityPath, dir, env, err) {
-			recErr := recoverManagedBDCommand(cityPath)
+			recErr := recoverManagedBDCommandForScope(cityPath, dir)
 			if recErr != nil && !errors.Is(recErr, errManagedDoltRecoverDeclined) {
 				recordBdBreakerOutcome(breaker, true)
 				return out, err

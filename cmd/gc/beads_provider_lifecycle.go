@@ -205,6 +205,7 @@ func isRetryableManagedDoltLifecycleError(err error) bool {
 // Called by gc start and controller config reload. Rigs must have absolute
 // paths before calling (resolve relative paths first).
 func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer) error {
+	declareLifecycleIntent()
 	if err := ensureFreshRigProviderOwnership(cityPath, cfg); err != nil {
 		return err
 	}
@@ -1691,6 +1692,7 @@ func (e *providerOpExitError) Error() string { return e.text }
 func (e *providerOpExitError) Unwrap() error { return e.exit }
 
 func ensureBeadsProvider(cityPath string) error {
+	declareLifecycleIntent()
 	if owned, err := cityScopeProviderOwned(cityPath); err != nil {
 		return err
 	} else if owned {
@@ -2257,6 +2259,7 @@ func reconcileHealthyManagedRuntimePublication(ctx context.Context, cityPath str
 // Acquires a per-city semaphore to prevent concurrent health/recovery
 // operations from causing a thundering herd when dolt bounces.
 func healthBeadsProvider(cityPath string) error {
+	declareLifecycleIntent()
 	return healthBeadsProviderContext(context.Background(), cityPath, true)
 }
 

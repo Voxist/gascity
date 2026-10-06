@@ -50,6 +50,7 @@ func defaultManagedDoltRecoveryOps() managedDoltRecoveryOps {
 }
 
 func recoverManagedDoltProcess(cityPath, host, port, user, logLevel string, timeout time.Duration) (managedDoltRecoverReport, error) {
+	declareLifecycleIntent()
 	return recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel, timeout, defaultManagedDoltRecoveryOps())
 }
 
