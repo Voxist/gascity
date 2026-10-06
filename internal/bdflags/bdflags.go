@@ -5,7 +5,7 @@
 //
 // Sourced from bd <sub> --help output (2026-07-13, bd v1.1.0); kept current
 // against the pinned bd by TestBdFlagManifestCurrent (latest: bd v1.94.1 at
-// e4f98340d, 2026-10-02).
+// e4f98340d, 2026-10-06).
 package bdflags
 
 import (

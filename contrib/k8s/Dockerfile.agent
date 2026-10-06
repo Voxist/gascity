@@ -59,9 +59,10 @@ ARG THRIFT_VERSION=0.24.0
 # required. Both must be >= what the pinned source already declares — pinning
 # BELOW it silently downgrades the shipped binary (and drags x/net and x/crypto
 # back with it), which neither post-build assertion would catch. At
-# BD_SOURCE_REF e4f98340d (v1.94.1; same module graph as 1522bdb01 and 384c2ccca) the source resolves grpc
+# BD_SOURCE_REF e4f98340d the source resolves grpc
 # 1.83.2, x/text 0.41.0, x/crypto 0.56.0 and x/mod 0.40.0 on its own; the only
-# remaining lift is thrift 0.24.0. The rest are held at parity so a later source bump that
+# remaining lift is thrift 0.24.0. The module graph is unchanged from 1522bdb01
+# and 384c2ccca. The rest are held at parity so a later source bump that
 # regresses one of them is caught here rather than shipped.
 #
 # Rebuild the pinned fork source with its production CGO/pure-Go-regex
