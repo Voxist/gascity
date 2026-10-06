@@ -353,9 +353,9 @@ jobs:
         shard: [1, 2, 3]
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.94.0" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
+      BD_VERSION: "v1.94.1" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
       BD_REPO: "Voxist/beads"
-      BD_SOURCE_REF: "1522bdb01ba8c863dc30eb9384cc9a7ab69df486" # fork-tip bd commit (schema 0069) — built from BD_REPO source by install-bd-archive.sh
+      BD_SOURCE_REF: "e4f98340d71ca96744f1f3f5f50e6468066706ca" # fork-tip bd commit (schema 0069) — built from BD_REPO source by install-bd-archive.sh
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -384,9 +384,9 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_32vcpu }}
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.94.0" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
+      BD_VERSION: "v1.94.1" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
       BD_REPO: "Voxist/beads"
-      BD_SOURCE_REF: "1522bdb01ba8c863dc30eb9384cc9a7ab69df486" # fork-tip bd commit (schema 0069) — built from BD_REPO source by install-bd-archive.sh
+      BD_SOURCE_REF: "e4f98340d71ca96744f1f3f5f50e6468066706ca" # fork-tip bd commit (schema 0069) — built from BD_REPO source by install-bd-archive.sh
     strategy:
       fail-fast: false
       matrix:
@@ -741,7 +741,7 @@ jobs:
           # -skip excludes child-term-zombie and root-move: their post-
           # SIGTERM/root-move recovery ladder depends on a proxy-subsystem
           # rewrite (internal/storage/dbproxy/proxy/) upstream shipped after
-          # this fork's bd pin (1522bdb01, v1.94.0) and that no fork bd
+          # this fork's bd pin (e4f98340d, v1.94.1) and that no fork bd
           # release available today carries.
           # Building bd from upstream instead is not the fix -- upstream's
           # bd is schema-skewed against gc's linked beads library and panics
@@ -933,9 +933,9 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.94.0" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
+      BD_VERSION: "v1.94.1" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
       BD_REPO: "Voxist/beads"
-      BD_SOURCE_REF: "1522bdb01ba8c863dc30eb9384cc9a7ab69df486" # fork-tip bd commit (schema 0069) — built from BD_REPO source by install-bd-archive.sh
+      BD_SOURCE_REF: "e4f98340d71ca96744f1f3f5f50e6468066706ca" # fork-tip bd commit (schema 0069) — built from BD_REPO source by install-bd-archive.sh
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -1117,9 +1117,9 @@ jobs:
             command: ./scripts/test-integration-shard rest-smoke-2-of-2
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.94.0" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
+      BD_VERSION: "v1.94.1" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
       BD_REPO: "Voxist/beads"
-      BD_SOURCE_REF: "1522bdb01ba8c863dc30eb9384cc9a7ab69df486" # fork-tip bd commit (schema 0069) — built from BD_REPO source by install-bd-archive.sh
+      BD_SOURCE_REF: "e4f98340d71ca96744f1f3f5f50e6468066706ca" # fork-tip bd commit (schema 0069) — built from BD_REPO source by install-bd-archive.sh
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -1146,9 +1146,9 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     env:
       DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.94.0" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
+      BD_VERSION: "v1.94.1" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
       BD_REPO: "Voxist/beads"
-      BD_SOURCE_REF: "1522bdb01ba8c863dc30eb9384cc9a7ab69df486" # fork-tip bd commit (schema 0069) — built from BD_REPO source by install-bd-archive.sh
+      BD_SOURCE_REF: "e4f98340d71ca96744f1f3f5f50e6468066706ca" # fork-tip bd commit (schema 0069) — built from BD_REPO source by install-bd-archive.sh
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu

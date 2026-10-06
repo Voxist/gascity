@@ -8,9 +8,9 @@ permissions:
 
 env:
   DOLT_VERSION: "2.1.7"
-  BD_VERSION: "v1.94.0" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
+  BD_VERSION: "v1.94.1" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
   BD_REPO: "Voxist/beads"
-  BD_SOURCE_REF: "1522bdb01ba8c863dc30eb9384cc9a7ab69df486" # fork-tip bd commit (schema 0069) — built from BD_REPO source by install-bd-archive.sh
+  BD_SOURCE_REF: "e4f98340d71ca96744f1f3f5f50e6468066706ca" # fork-tip bd commit (schema 0069) — built from BD_REPO source by install-bd-archive.sh
   # Bypass the systemd gascity-test.slice re-exec on CI runners. The Blacksmith
   # runners' user systemd cannot reliably create a transient --scope for the
   # heavy acceptance workloads; gc_test_slice_reexec then exec's

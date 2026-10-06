@@ -152,7 +152,7 @@ const (
 	// BD_SOURCE_REF/BD_VERSION pin sites land in the merged ci.yml, so
 	// neither side's prior hash is correct on its own. Taken from the
 	// candidate digest TestCurrentWorkflowsMatchPolicy printed for the
-	// merged+repinned workflow (the v1.94.0/1522bdb01 pin, after the
+	// merged+repinned workflow (the v1.94.1/e4f98340d pin, after the
 	// v1.93.0/5cc9948c7 CI-signal pin moved to the tagged release).
 	expectedCIExecutionHash     = "ee74621fa63ff9db4163c1024ab4d40e4e8ed26e671a1dcf3c335fdbbc57efcc"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
