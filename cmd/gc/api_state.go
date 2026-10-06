@@ -149,6 +149,14 @@ type controllerState struct {
 	// rolloutLogf, when non-nil, receives noteRolloutDrift's transition lines
 	// (tests capture it); nil falls back to os.Stderr via rolloutWarnf.
 	rolloutLogf func(format string, args ...any)
+
+	// recoverSF is the owning CityRuntime's recoverSingleFlight guard
+	// (ga-w3bkx), set by wireControllerStateFromRuntime. Every per-delivery
+	// webhook dispatcher adopts it so concurrent deliveries of a
+	// webhook-triggered recover_on_store_unavailable order cannot both exec.
+	// Nil for an API state built without a runtime; each dispatcher then
+	// falls back to a private guard and says so on stderr.
+	recoverSF *recoverSingleFlight
 }
 
 var controllerStateInitRigDirIfReady = initDirIfReady
@@ -3103,6 +3111,10 @@ func (d controllerWebhookDispatcher) Dispatch(ctx context.Context, req orderdisp
 	return d.dispatcher().Dispatch(ctx, req)
 }
 
+// unwiredRecoverGuardWarning keeps the unwired-guard diagnostic to one line
+// per process rather than one per delivery.
+var unwiredRecoverGuardWarning sync.Once
+
 // dispatcher builds the per-delivery dispatcher Dispatch fires through, reading
 // the controller's live config, recorder and storage binding under the
 // hot-reload lock. It is separate from Dispatch so what this seam hands the
@@ -3116,6 +3128,7 @@ func (d controllerWebhookDispatcher) dispatcher() *memoryOrderDispatcher {
 	cfg := cs.cfg
 	routes := cs.storageRoutes
 	generation := cs.controllerGeneration
+	recoverSF := cs.recoverSF
 	var rec events.Recorder = cs.eventProv
 	cs.mu.RUnlock()
 	if rec == nil {
@@ -3132,7 +3145,18 @@ func (d controllerWebhookDispatcher) dispatcher() *memoryOrderDispatcher {
 	// the assignments in controller.go and cmd_supervisor.go — so a
 	// webhook-fired marker is stamped exactly like a tick-fired one, never a
 	// freshly minted generation of its own.
-	return newMemoryOrderDispatcher(routes, nil, cs.cityPath, cfg, rec, os.Stderr, generation)
+	md := newMemoryOrderDispatcher(routes, nil, cs.cityPath, cfg, rec, os.Stderr, generation)
+	// Share the runtime's single-flight guard (ga-w3bkx): without it each
+	// delivery lazily creates a private one and concurrent deliveries of a
+	// recover_on_store_unavailable order would all exec.
+	if recoverSF != nil {
+		md.recoverSF = recoverSF
+	} else {
+		unwiredRecoverGuardWarning.Do(func() {
+			fmt.Fprintln(os.Stderr, "gc: webhook dispatch: no runtime recover single-flight guard wired; using a private one (concurrent deliveries are not serialized)")
+		})
+	}
+	return md
 }
 
 // ExtMsgServices returns the external messaging services.

@@ -148,9 +148,10 @@ type CityRuntime struct {
 	// reload or order rescan) loses track of an exec the outgoing
 	// dispatcher is still running, so the incoming dispatcher starts with
 	// an empty map and can admit a second, concurrent exec of the same
-	// order (ga-3bwmf review round 5). Lazily created and adopted from the
-	// outgoing dispatcher in replaceOrderDispatcher; nil until the first
-	// swap.
+	// order (ga-3bwmf review round 5). Minted in newCityRuntime and
+	// immutable thereafter, so controllerState can hand the same pointer to
+	// webhook dispatchers (ga-w3bkx); only a directly-constructed test
+	// runtime leaves it nil until the first replaceOrderDispatcher.
 	recoverSF          *recoverSingleFlight
 	orderSet           []orders.Order
 	orderSetSignature  string
@@ -448,7 +449,16 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 
 	suspendedNames := computeSuspendedNames(p.Cfg, p.CityName, p.CityPath)
 
+	// The guard is minted at boot, not lazily at the first dispatcher swap,
+	// so controllerState can hand the same pointer to the webhook seam's
+	// per-delivery dispatchers (ga-w3bkx).
+	recoverSF := &recoverSingleFlight{}
+	if mem, ok := od.(*memoryOrderDispatcher); ok {
+		mem.recoverSF = recoverSF
+	}
+
 	cr := &CityRuntime{
+		recoverSF:               recoverSF,
 		storageRoutes:           routes,
 		cityPath:                p.CityPath,
 		cityName:                p.CityName,
@@ -1676,11 +1686,10 @@ func (cr *CityRuntime) rescanOrderDispatcherIfDue(ctx context.Context, cityRoot 
 // eventual release must land in the SAME object the new dispatcher
 // consults, or a RecoverOnStoreUnavailable order could be admitted twice
 // concurrently across the swap (ga-3bwmf review round 5). cr.recoverSF is
-// the canonical instance for this CityRuntime's whole lifetime; if the
-// outgoing dispatcher already has its own (lazily created on first use,
-// before any swap ever adopted cr.recoverSF), that one is adopted as
-// canonical instead of creating an empty one that would silently lose
-// whatever it was already tracking.
+// the canonical instance for this CityRuntime's whole lifetime and is never
+// reassigned once set (newCityRuntime mints it). Only a directly-constructed
+// runtime that has none yet adopts the outgoing dispatcher's guard, so
+// whatever it was already tracking is not silently lost.
 func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
 	if prev, ok := cr.od.(*memoryOrderDispatcher); ok {
 		if nextMem, ok := next.(*memoryOrderDispatcher); ok {
@@ -1688,13 +1697,15 @@ func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
 			nextMem.carryGateBackoffFrom(prev, time.Now())
 			nextMem.carryOpenWorkSuppressionFrom(prev)
 		}
-		// Adopt the outgoing dispatcher's guard as canonical via its own
-		// singleFlight() accessor (cacheMu-guarded lazy create), rather
-		// than reading prev.recoverSF directly: that field can be
-		// concurrently set by prev's own in-flight dispatch goroutines
-		// calling singleFlight() for the first time, and reading it here
-		// unlocked would race against that write.
-		cr.recoverSF = prev.singleFlight()
+		prevSF := prev.singleFlight() // cacheMu-guarded: prev's goroutines may create it lazily
+		switch {
+		case cr.recoverSF == nil:
+			cr.recoverSF = prevSF
+		case prevSF != cr.recoverSF:
+			// The outgoing dispatcher was never wired to the runtime's
+			// guard; any exec it still tracks is invisible to the new one.
+			fmt.Fprintf(cr.stderr, "%s: outgoing order dispatcher used a guard other than the runtime's; in-flight recover execs it tracks are not carried over\n", cr.logPrefix) //nolint:errcheck // best-effort stderr
+		}
 	}
 	if cr.recoverSF == nil {
 		cr.recoverSF = &recoverSingleFlight{}
@@ -4571,4 +4582,18 @@ func (cr *CityRuntime) preserveSessionsOnShutdown() {
 
 func (cr *CityRuntime) forceStopRequested() bool {
 	return cr != nil && cr.forceStopShutdown != nil && cr.forceStopShutdown.Load()
+}
+
+// wireControllerStateFromRuntime copies the CityRuntime-owned facts the
+// webhook dispatch seam needs onto cs: the boot id (ADR-0130 D1), so a
+// webhook-fired tracking marker is stamped like a tick-fired one, and the
+// recover single-flight guard (ga-w3bkx), so concurrent webhook deliveries
+// and the tick loop consult one fact. Every production site that pairs a
+// controllerState with a runtime must call this.
+func wireControllerStateFromRuntime(cs *controllerState, cr *CityRuntime) {
+	if cs == nil {
+		return // a runtime driven without an API state (controllerLoop tests)
+	}
+	cs.controllerGeneration = cr.controllerGeneration
+	cs.recoverSF = cr.recoverSF
 }

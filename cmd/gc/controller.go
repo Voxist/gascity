@@ -1229,6 +1229,7 @@ func controllerLoop(
 		wg:                   wg,
 		od:                   od,
 		controllerGeneration: newControllerGeneration(),
+		recoverSF:            &recoverSingleFlight{},
 		rec:                  rec,
 		cs:                   cs,
 		poolSessions:         poolSessions,
@@ -1240,6 +1241,10 @@ func controllerLoop(
 		stdout:               stdout,
 		stderr:               stderr,
 	}
+	if mem, ok := od.(*memoryOrderDispatcher); ok {
+		mem.recoverSF = cr.recoverSF
+	}
+	wireControllerStateFromRuntime(cs, cr)
 	cr.setControllerState(cs)
 	cr.run(ctx)
 }
@@ -1404,7 +1409,7 @@ func runController(
 	// dispatcher from this controllerState, so it needs the runtime's boot
 	// id to stamp a webhook-fired tracking marker the same way a tick-fired
 	// one is stamped.
-	cs.controllerGeneration = cr.controllerGeneration
+	wireControllerStateFromRuntime(cs, cr)
 	cs.emergencyCh = make(chan emergency.Record, 64)
 	cr.setControllerState(cs)
 

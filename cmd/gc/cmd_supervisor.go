@@ -2490,7 +2490,7 @@ func startOneCity(
 		// ADR-0130 D1: see the matching assignment in controller.go — the
 		// webhook seam's per-delivery dispatcher stamps markers from this
 		// controllerState's generation.
-		cs.controllerGeneration = cityRuntime.controllerGeneration
+		wireControllerStateFromRuntime(cs, cityRuntime)
 		return nil
 	}); err != nil {
 		// The runtime is already built, and it holds this city's storage
