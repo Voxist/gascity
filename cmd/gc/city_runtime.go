@@ -1697,11 +1697,14 @@ func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
 			nextMem.carryGateBackoffFrom(prev, time.Now())
 			nextMem.carryOpenWorkSuppressionFrom(prev)
 		}
-		if cr.recoverSF == nil {
-			// Via the cacheMu-guarded accessor, not prev.recoverSF
-			// directly: prev's in-flight dispatch goroutines may be
-			// lazily creating it concurrently.
-			cr.recoverSF = prev.singleFlight()
+		prevSF := prev.singleFlight() // cacheMu-guarded: prev's goroutines may create it lazily
+		switch {
+		case cr.recoverSF == nil:
+			cr.recoverSF = prevSF
+		case prevSF != cr.recoverSF:
+			// The outgoing dispatcher was never wired to the runtime's
+			// guard; any exec it still tracks is invisible to the new one.
+			fmt.Fprintf(cr.stderr, "%s: outgoing order dispatcher used a guard other than the runtime's; in-flight recover execs it tracks are not carried over\n", cr.logPrefix) //nolint:errcheck // best-effort stderr
 		}
 	}
 	if cr.recoverSF == nil {
@@ -4588,6 +4591,9 @@ func (cr *CityRuntime) forceStopRequested() bool {
 // and the tick loop consult one fact. Every production site that pairs a
 // controllerState with a runtime must call this.
 func wireControllerStateFromRuntime(cs *controllerState, cr *CityRuntime) {
+	if cs == nil {
+		return // a runtime driven without an API state (controllerLoop tests)
+	}
 	cs.controllerGeneration = cr.controllerGeneration
 	cs.recoverSF = cr.recoverSF
 }

@@ -3111,6 +3111,10 @@ func (d controllerWebhookDispatcher) Dispatch(ctx context.Context, req orderdisp
 	return d.dispatcher().Dispatch(ctx, req)
 }
 
+// unwiredRecoverGuardWarning keeps the unwired-guard diagnostic to one line
+// per process rather than one per delivery.
+var unwiredRecoverGuardWarning sync.Once
+
 // dispatcher builds the per-delivery dispatcher Dispatch fires through, reading
 // the controller's live config, recorder and storage binding under the
 // hot-reload lock. It is separate from Dispatch so what this seam hands the
@@ -3148,7 +3152,9 @@ func (d controllerWebhookDispatcher) dispatcher() *memoryOrderDispatcher {
 	if recoverSF != nil {
 		md.recoverSF = recoverSF
 	} else {
-		fmt.Fprintln(os.Stderr, "gc: webhook dispatch: no runtime recover single-flight guard wired; using a private one (concurrent deliveries are not serialized)")
+		unwiredRecoverGuardWarning.Do(func() {
+			fmt.Fprintln(os.Stderr, "gc: webhook dispatch: no runtime recover single-flight guard wired; using a private one (concurrent deliveries are not serialized)")
+		})
 	}
 	return md
 }
