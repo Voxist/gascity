@@ -21,9 +21,11 @@ var (
 	version = "dev"
 	commit  = "unknown"
 	date    = "unknown"
-	// buildBase is the fork-base lineage stamp (e.g.
-	// "Voxist/main@eb743642c+0-0") injected by `make artifact`; empty for
-	// builds that never proved their lineage.
+	// buildBase is the fork-base lineage stamp (e.g. "main@eb743642c+0-0")
+	// injected by `make artifact`; empty for builds that never proved their
+	// lineage. The remote name is deliberately absent — it is
+	// clone-relative and resolves to opposite repositories in different
+	// clones; the commit is the unambiguous anchor.
 	buildBase                = ""
 	beadsVersion             = "unknown"
 	goPseudoVersionSuffixRes = []*regexp.Regexp{
@@ -42,6 +44,11 @@ const (
 	// commit, matching git's own default abbreviation floor. Anything shorter
 	// collides too easily to prove two stamps describe the same revision.
 	minAbbrevCommitLen = 7
+	// shortFormCommitLen is the commit abbreviation the default
+	// `gc version` output carries for unstamped builds — the same 9-char
+	// form artifact names use (gc-main-20260907-06e394c56), so the two
+	// surfaces name the same build the same way.
+	shortFormCommitLen = 9
 )
 
 func init() {
@@ -207,7 +214,11 @@ via 'make artifact').`,
 				fmt.Fprintf(stdout, "%s\n", formatLongVersion(version, commit, date, beadsVersion, buildBase)) //nolint:errcheck // best-effort stdout
 				return nil
 			}
-			fmt.Fprintf(stdout, "%s\n", version) //nolint:errcheck // best-effort stdout
+			line, unprovenanced := formatShortVersion(version, commit)
+			fmt.Fprintf(stdout, "%s\n", line) //nolint:errcheck // best-effort stdout
+			if unprovenanced {
+				fmt.Fprintf(stderr, "gc version: this build carries no provenance stamp; `gc version --long` reports commit, date, linked beads library and base lineage when the build has them.\n") //nolint:errcheck // best-effort stderr
+			}
 			return nil
 		},
 	}
@@ -223,6 +234,42 @@ func formatLongVersion(version, commit, date, beads, base string) string {
 		base = "unstamped"
 	}
 	return fmt.Sprintf("%s (commit: %s, built: %s, beads: %s, base: %s)", version, commit, date, beads, base)
+}
+
+// formatShortVersion renders the default (no-flag) output. A bare "dev"
+// identifies nothing (the vp-q1ho residual): an unstamped build that knows
+// its commit carries the same 9-char abbreviation artifact names use, so
+// the obvious command answers "what is deployed" without requiring the
+// reader to know --long exists. The second return reports a dev build with
+// no commit at all, so the caller can point the reader at --long/--json on
+// stderr instead of staying silent. The form stays "dev ..." — the short
+// output must never claim a semver the build does not have (the vp-l6b8
+// label-is-not-evidence class).
+func formatShortVersion(version, commit string) (string, bool) {
+	if version != "dev" {
+		return version, false
+	}
+	if commit == "" || commit == "unknown" {
+		return version, true
+	}
+	return fmt.Sprintf("%s (%s)", version, abbreviateCommit(commit)), false
+}
+
+// abbreviateCommit shortens a build's commit stamp to the canonical 9-char
+// artifact abbreviation, keeping an explicit -dirty suffix whole — the
+// suffix is part of the build identity binary-drift detection matches
+// verbatim. A hash already shorter than the target is kept as-is: printing
+// fewer characters than the build knows is still more honest than
+// fabricated precision.
+func abbreviateCommit(commit string) string {
+	hash, dirty := strings.CutSuffix(commit, dirtySuffix)
+	if len(hash) > shortFormCommitLen {
+		hash = hash[:shortFormCommitLen]
+	}
+	if dirty {
+		hash += dirtySuffix
+	}
+	return hash
 }
 
 type versionJSONResult struct {
