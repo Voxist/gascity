@@ -3542,6 +3542,44 @@ func TestDaemonPatrolIntervalInvalid(t *testing.T) {
 	}
 }
 
+func TestDaemonSessionStartStaggerUnsetDisables(t *testing.T) {
+	d := DaemonConfig{}
+	if got := d.SessionStartStaggerDuration(); got != 0 {
+		t.Errorf("SessionStartStaggerDuration() = %v, want 0 (opt-in knob: unset keeps back-to-back starts)", got)
+	}
+}
+
+func TestDaemonSessionStartStaggerCustom(t *testing.T) {
+	d := DaemonConfig{SessionStartStagger: "250ms"}
+	if got := d.SessionStartStaggerDuration(); got != 250*time.Millisecond {
+		t.Errorf("SessionStartStaggerDuration() = %v, want 250ms", got)
+	}
+}
+
+func TestDaemonSessionStartStaggerExplicitZeroDisables(t *testing.T) {
+	d := DaemonConfig{SessionStartStagger: "0"}
+	if got := d.SessionStartStaggerDuration(); got != 0 {
+		t.Errorf("SessionStartStaggerDuration() = %v, want 0 (rollback value)", got)
+	}
+}
+
+func TestDaemonSessionStartStaggerInvalidDisables(t *testing.T) {
+	// An opt-in load-shaping knob must fail toward historical behavior: a
+	// typo'd value must never silently impose latency. Operators verify the
+	// live value via `gc config explain session_start_stagger`.
+	d := DaemonConfig{SessionStartStagger: "not-a-duration"}
+	if got := d.SessionStartStaggerDuration(); got != 0 {
+		t.Errorf("SessionStartStaggerDuration() = %v, want 0 (invalid for opt-in knob)", got)
+	}
+}
+
+func TestDaemonSessionStartStaggerNegativeDisables(t *testing.T) {
+	d := DaemonConfig{SessionStartStagger: "-5s"}
+	if got := d.SessionStartStaggerDuration(); got != 0 {
+		t.Errorf("SessionStartStaggerDuration() = %v, want 0 (negative meaningless for a pause)", got)
+	}
+}
+
 func TestParseDaemonConfig(t *testing.T) {
 	data := []byte(`
 [workspace]
