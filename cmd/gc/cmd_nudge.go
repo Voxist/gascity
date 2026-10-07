@@ -1260,6 +1260,27 @@ func nudgeObservationBusy(obs worker.LiveObservation) bool {
 	return time.Since(*obs.LastActivity) < defaultNudgePollQuiescence
 }
 
+// nudgeWaitIdleMayBlock reports whether a wait-idle Nudge through this
+// target's live handle can block the caller synchronously. It mirrors the
+// gates of RuntimeHandle.nudgeWaitIdle (internal/worker/runtime_handle.go):
+// only a claude provider over a non-ACP transport with an idle-wait-capable
+// runtime ever enters WaitForIdle's window (runtimeHandleWaitIdleTimeout) —
+// ACP delivers live in-process and every other provider returns immediately.
+// Callers combine it with nudgeObservationBusy to skip the live leg only
+// where it could stall; every other shape's live attempt already returns
+// without waiting, so short-circuiting it would downgrade live delivery to
+// queued for no gain. (vp-rqs8q, extending gco-90ui)
+func nudgeWaitIdleMayBlock(target nudgeTarget, sp runtime.Provider) bool {
+	if target.sessionTransport() == "acp" {
+		return false
+	}
+	if target.providerName() != "claude" {
+		return false
+	}
+	_, ok := sp.(runtime.IdleWaitProvider)
+	return ok
+}
+
 func canRequestManagedNudgeWake(target nudgeTarget, store beads.Store) bool {
 	return store != nil &&
 		strings.TrimSpace(target.cityPath) != "" &&
@@ -1580,7 +1601,20 @@ func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.
 	if err != nil {
 		return err
 	}
-	if obs.Running {
+	// A wait-idle nudge to a RUNNING-but-busy target must not block the caller
+	// in the worker's synchronous WaitForIdle (runtimeHandleWaitIdleTimeout,
+	// 30s): the seat never reports idle for the whole window, so the caller
+	// stalls ~30s on its critical path. This is the mail sibling of the
+	// session-nudge pre-check (gco-90ui): detect busy without blocking
+	// (LastActivity, the poller's quiescence signal) and fall through to the
+	// durable queue below — the enqueue + maybeStartNudgePoller tail owns
+	// delivery at the next idle boundary. Restricted to the shapes
+	// nudgeWaitIdle can actually block on (nudgeWaitIdleMayBlock: claude,
+	// non-ACP, idle-wait-capable runtime); every other transport's live
+	// attempt returns immediately, so it keeps the existing live attempt. An
+	// unknown LastActivity is treated as not-busy so untracked sessions keep
+	// the existing behavior. (vp-rqs8q)
+	if obs.Running && (!nudgeWaitIdleMayBlock(target, sp) || !nudgeObservationBusy(obs)) {
 		handle, err := workerHandleForNudgeTarget(target, sessStore, sp)
 		if err == nil {
 			result, nudgeErr := handle.Nudge(context.Background(), worker.NudgeRequest{
