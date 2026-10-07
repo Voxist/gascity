@@ -899,3 +899,79 @@ func TestRouteRecoveryDeltaCountsCandidatesItCouldNotResolve(t *testing.T) {
 		t.Fatalf("clean delta trace fields = %v, want no dropped key", clean.fields())
 	}
 }
+
+// parkedWorkBead is the discharged shape ADR-0066 D3 (amended) produces: the
+// same recoverable body unroutedWorkBead has, plus a park signal —
+// gc.routed_to deliberately UNSET, the route parked, not lost.
+func parkedWorkBead(id string) beads.Bead {
+	b := unroutedWorkBead(id)
+	b.Metadata[beadmeta.AwaitingHumanMetadataKey] = "karel@voxist.com"
+	return b
+}
+
+// TestRouteRecoveryBackstopSkipsAParkedDischarge pins the park exemption on the
+// convergence path: a parked bead's empty gc.routed_to is a deliberate
+// discharge (ADR-0066 D3 amended / ADR-0023 C5), not data loss, so the backstop
+// must leave it exactly as the operator left it — no restore, no write, no
+// recheck-failure quarantine. The unparked sibling is the control: the lane
+// still heals, so a green run cannot be a lane that stopped working.
+func TestRouteRecoveryBackstopSkipsAParkedDischarge(t *testing.T) {
+	cr, store := routeRecoveryRuntime(t, parkedWorkBead("T-parked"), unroutedWorkBead("T-plain"))
+
+	first := cr.runRouteRecoveryBackstop(backstopReasonCadence)
+	if first.restored != 1 {
+		t.Fatalf("first backstop restored %d, want 1 (the unparked control)", first.restored)
+	}
+	if got := mustRoutedTo(t, store, "T-plain"); got != routeRecoveryTestPool {
+		t.Fatalf("T-plain gc.routed_to = %q, want %q", got, routeRecoveryTestPool)
+	}
+	if got := mustRoutedTo(t, store, "T-parked"); got != "" {
+		t.Fatalf("T-parked gc.routed_to = %q after backstop, want empty (a parked bead is not data loss)", got)
+	}
+
+	// Two passes: a parked bead excluded only after the scan would surface as a
+	// dropped candidate and drift toward a recheck-failure quarantine — a
+	// parked bead must never accumulate one.
+	second := cr.runRouteRecoveryBackstop(backstopReasonCadence)
+	if second.restored != 0 || second.quarantined != 0 {
+		t.Fatalf("second backstop = %+v, want no restores and no quarantines", second)
+	}
+	live, err := store.Get("T-parked")
+	if err != nil {
+		t.Fatalf("get T-parked: %v", err)
+	}
+	if live.Metadata[beadmeta.RouteQuarantineMetadataKey] != "" {
+		t.Fatalf("T-parked carries route-recovery quarantine %q — a parked discharge is not a recheck failure",
+			live.Metadata[beadmeta.RouteQuarantineReasonMetadataKey])
+	}
+	if got := live.Metadata[beadmeta.AwaitingHumanMetadataKey]; got == "" {
+		t.Fatal("T-parked lost its park signal — the exemption must leave the bead exactly as parked")
+	}
+}
+
+// TestRouteRecoveryDeltaSkipsAParkedNamedCandidate pins the park exemption on
+// the delta path: the journal names the bead, the snapshot passes the
+// carriedPoolRoute filter (a discharged bead still declares gc.run_target), and
+// the delta pass today would restore the route the operator just discharged.
+// The live row decides — and the live row is parked.
+func TestRouteRecoveryDeltaSkipsAParkedNamedCandidate(t *testing.T) {
+	seed := []beads.Bead{parkedWorkBead("T-parked"), unroutedWorkBead("T-plain")}
+	cr, store := routeRecoveryRuntime(t, seed...)
+	lane := cr.routeRecoveryLaneOf()
+	lane.observe(beadCreatedEvent(t, parkedWorkBead("T-parked")))
+	lane.observe(beadCreatedEvent(t, unroutedWorkBead("T-plain")))
+
+	report := cr.recoverUnroutedWorkRoutesDelta()
+	if report.restored != 1 {
+		t.Fatalf("delta restored %d, want 1 (the unparked control)", report.restored)
+	}
+	if got := mustRoutedTo(t, store, "T-plain"); got != routeRecoveryTestPool {
+		t.Fatalf("T-plain gc.routed_to = %q, want %q", got, routeRecoveryTestPool)
+	}
+	if got := mustRoutedTo(t, store, "T-parked"); got != "" {
+		t.Fatalf("T-parked gc.routed_to = %q after a delta pass named it, want empty", got)
+	}
+	if store.writes != 1 {
+		t.Fatalf("delta pass issued %d write(s), want 1 (the control's restore only)", store.writes)
+	}
+}
