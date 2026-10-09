@@ -10,14 +10,17 @@ package main
 // such order double-fired.
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -160,48 +163,174 @@ func TestStaleOrderTrackingSweepKeepsStaleAfterFloor(t *testing.T) {
 	}
 }
 
-// TestOrderTrackingSweepResidualForResolvesTheCityOrderSet pins the CLI wiring:
-// `gc order sweep-tracking` runs in its own process, so it resolves deadlines
-// from the city's discovered order set — with [orders] max_timeout applied the
-// same way the dispatcher applies it — not from any in-process state.
-func TestOrderTrackingSweepResidualForResolvesTheCityOrderSet(t *testing.T) {
-	cases := []struct {
-		name   string
-		orders string
-		want   time.Duration
-	}{
-		{name: "order timeout", orders: "", want: 30*time.Minute + orderTrackingDeadlineGrace},
-		{name: "max_timeout caps it", orders: "\n[orders]\nmax_timeout = \"5m\"\n", want: 5*time.Minute + orderTrackingDeadlineGrace},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			cityPath := t.TempDir()
-			writeFile(t, filepath.Join(cityPath, "city.toml"), "[workspace]\nname = \"test-city\"\n"+tc.orders)
-			if err := os.MkdirAll(filepath.Join(cityPath, "orders"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			writeFile(t, filepath.Join(cityPath, "orders", "long-runner.toml"), `[order]
+const sweepTestLongRunnerOrder = `[order]
 trigger = "cooldown"
 interval = "10m"
 exec = "scripts/long-runner.sh"
 timeout = "30m"
-`)
-			cfg, err := loadCityConfig(cityPath, io.Discard)
-			if err != nil {
-				t.Fatalf("loadCityConfig: %v", err)
-			}
+`
 
-			residualFor := orderTrackingSweepResidualFor(cityPath, cfg, io.Discard)
+// writeSweepTestCity writes a city whose orders/ holds the 30m long-runner
+// order plus any extra order files, and returns its path and loaded config.
+func writeSweepTestCity(t *testing.T, cityTOMLExtra string, extraOrders map[string]string) (string, *config.City) {
+	t.Helper()
+	cityPath := t.TempDir()
+	writeFile(t, filepath.Join(cityPath, "city.toml"), "[workspace]\nname = \"test-city\"\n"+cityTOMLExtra)
+	if err := os.MkdirAll(filepath.Join(cityPath, "orders"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityPath, "orders", "long-runner.toml"), sweepTestLongRunnerOrder)
+	for name, body := range extraOrders {
+		writeFile(t, filepath.Join(cityPath, "orders", name), body)
+	}
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	return cityPath, cfg
+}
+
+// addSweepTestRigOrders gives cfg a rig named rigName whose rig-exclusive
+// formula layer carries the given order files, the way pack composition
+// stacks a rig's layers on top of the city's.
+func addSweepTestRigOrders(t *testing.T, cityPath string, cfg *config.City, rigName string, rigOrders map[string]string) {
+	t.Helper()
+	rigDir := filepath.Join(cityPath, "rigs", rigName)
+	if err := os.MkdirAll(filepath.Join(rigDir, "orders"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range rigOrders {
+		writeFile(t, filepath.Join(rigDir, "orders", name), body)
+	}
+	cityLayers := cfg.FormulaLayers.City
+	if len(cityLayers) == 0 {
+		cityLayers = []string{filepath.Join(cityPath, "formulas")}
+	}
+	if cfg.FormulaLayers.Rigs == nil {
+		cfg.FormulaLayers.Rigs = map[string][]string{}
+	}
+	cfg.FormulaLayers.Rigs[rigName] = append(append([]string(nil), cityLayers...), filepath.Join(rigDir, "formulas"))
+}
+
+// TestOrderTrackingSweepResidualForResolvesTheCityOrderSet pins the CLI wiring:
+// `gc order sweep-tracking` runs in its own process, so it resolves deadlines
+// from the city's discovered order set — with [orders] max_timeout applied the
+// same way the dispatcher applies it — not from any in-process state. A rig
+// order is matched by its scoped name, so a rig copy of a city order resolves
+// its own timeout rather than the city one's.
+func TestOrderTrackingSweepResidualForResolvesTheCityOrderSet(t *testing.T) {
+	cases := []struct {
+		name    string
+		orders  string
+		want    time.Duration
+		wantRig time.Duration
+	}{
+		{name: "order timeout", orders: "", want: 30*time.Minute + orderTrackingDeadlineGrace, wantRig: 45*time.Minute + orderTrackingDeadlineGrace},
+		{name: "max_timeout caps it", orders: "\n[orders]\nmax_timeout = \"5m\"\n", want: 5*time.Minute + orderTrackingDeadlineGrace, wantRig: 5*time.Minute + orderTrackingDeadlineGrace},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, cfg := writeSweepTestCity(t, tc.orders, nil)
+			addSweepTestRigOrders(t, cityPath, cfg, "demo", map[string]string{"long-runner.toml": `[order]
+trigger = "cooldown"
+interval = "10m"
+exec = "scripts/long-runner.sh"
+timeout = "45m"
+`})
+
+			residualFor, err := orderTrackingSweepResidualFor(cityPath, cfg, io.Discard)
+			if err != nil {
+				t.Fatalf("orderTrackingSweepResidualFor: %v", err)
+			}
 			if residualFor == nil {
 				t.Fatal("orderTrackingSweepResidualFor = nil, want a resolver over the city's orders")
 			}
 			if got := residualFor("long-runner"); got != tc.want {
 				t.Fatalf("residualFor(long-runner) = %v, want %v", got, tc.want)
 			}
+			if got := residualFor("long-runner:rig:demo"); got != tc.wantRig {
+				t.Fatalf("residualFor(long-runner:rig:demo) = %v, want %v", got, tc.wantRig)
+			}
 			if got := residualFor("deleted-order"); got != 0 {
 				t.Fatalf("residualFor(deleted-order) = %v, want 0 (falls back to --stale-after)", got)
 			}
 		})
+	}
+}
+
+// TestOrderTrackingSweepResidualForReportsARigScanFailure: one rig whose orders
+// cannot be scanned must not hide the rest of the city's deadlines, but it must
+// not pass silently either — that rig's markers fall back to --stale-after.
+func TestOrderTrackingSweepResidualForReportsARigScanFailure(t *testing.T) {
+	cityPath, cfg := writeSweepTestCity(t, "", nil)
+	addSweepTestRigOrders(t, cityPath, cfg, "broken", map[string]string{"bad.toml": "[order\n"})
+
+	residualFor, err := orderTrackingSweepResidualFor(cityPath, cfg, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "broken") {
+		t.Fatalf("orderTrackingSweepResidualFor err = %v, want the broken rig's scan error", err)
+	}
+	if residualFor == nil {
+		t.Fatal("residualFor = nil, want the city's orders still resolved")
+	}
+	if got := residualFor("long-runner"); got != 30*time.Minute+orderTrackingDeadlineGrace {
+		t.Fatalf("residualFor(long-runner) = %v, want the city order's deadline", got)
+	}
+}
+
+// swapOrderTrackingSweepStores points the sweep command at store instead of
+// the city's on-disk stores.
+func swapOrderTrackingSweepStores(t *testing.T, store beads.Store) {
+	t.Helper()
+	prev := openOrderTrackingSweepStores
+	openOrderTrackingSweepStores = func(string, *config.City, map[string][]string) ([]beads.Store, beads.Store, error) {
+		return []beads.Store{store}, nil, nil
+	}
+	t.Cleanup(func() { openOrderTrackingSweepStores = prev })
+}
+
+// TestCmdOrderSweepTrackingKeepsARunningOrdersMarker drives the command itself:
+// a 12m-old marker of a 30m order, swept with the packaged --stale-after 10m,
+// stays open.
+func TestCmdOrderSweepTrackingKeepsARunningOrdersMarker(t *testing.T) {
+	cityPath, cfg := writeSweepTestCity(t, "", nil)
+	store := beads.NewMemStore()
+	swapOrderTrackingSweepStores(t, store)
+	marker := createOpenSweepTrackingBead(t, store, "long-runner")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSweepTrackingForCity(cityPath, cfg, marker.CreatedAt.Add(12*time.Minute), defaultOrderTrackingSweepStaleAfter, false, false, false, false, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdOrderSweepTrackingForCity = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if got := beadStatus(t, store, marker.ID); got != "open" {
+		t.Fatalf("marker status = %q, want open: the sweep closed a marker whose order can still be running", got)
+	}
+	if !strings.Contains(stdout.String(), "closed 0 stale order-tracking bead") {
+		t.Fatalf("stdout = %q, want closed 0", stdout.String())
+	}
+}
+
+// TestCmdOrderSweepTrackingFailsLoudWhenOrderTimeoutsCannotBeResolved: when the
+// order scan fails the sweep still recovers stale markers against
+// --stale-after, but exits non-zero with the reason. The controller discards a
+// successful exec order's output, so only a failed run (recorded as
+// order.failed with its output) makes the degraded sweep visible.
+func TestCmdOrderSweepTrackingFailsLoudWhenOrderTimeoutsCannotBeResolved(t *testing.T) {
+	cityPath, cfg := writeSweepTestCity(t, "", map[string]string{"broken.toml": "[order\n"})
+	store := beads.NewMemStore()
+	swapOrderTrackingSweepStores(t, store)
+	marker := createOpenSweepTrackingBead(t, store, "long-runner")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSweepTrackingForCity(cityPath, cfg, marker.CreatedAt.Add(12*time.Minute), defaultOrderTrackingSweepStaleAfter, false, false, true, false, nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("cmdOrderSweepTrackingForCity = 0, want non-zero when order timeouts could not be resolved; stderr: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--stale-after") || !strings.Contains(stderr.String(), "broken") {
+		t.Fatalf("stderr = %q, want the fallback and the scan error named", stderr.String())
+	}
+	if got := beadStatus(t, store, marker.ID); got != "closed" {
+		t.Fatalf("marker status = %q, want closed: the degraded sweep must still recover against --stale-after", got)
 	}
 }
 
