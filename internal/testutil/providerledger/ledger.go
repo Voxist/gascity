@@ -152,6 +152,7 @@ type Entry struct {
 // Catalog returns fresh entries from the checked runtime-provider ledger.
 func Catalog() []Entry {
 	autoConstructor := repoSymbol("internal/runtime/auto", "New")
+	hybridConstructor := repoSymbol("internal/runtime/hybrid", "New")
 	return []Entry{
 		reusableBuiltin(
 			"fake", "exact:fake", repoSymbol("internal/runtime", "Fake"),
@@ -215,7 +216,7 @@ func Catalog() []Entry {
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
 				time.Date(2026, time.November, 5, 0, 0, 0, 0, time.UTC),
-				"the production T3 bridge composition has focused tests but no full shared runtime contract; needs a fake-double T3 server reachable from RunProviderTests",
+				"Provider.Start is idempotent by design (reuse/rebind/recreate all return nil, including the archive-and-recreate branch -- a named T3 session must survive and resume across process restarts, not error on \"already exists\"), which structurally conflicts with runtimetest.Start_DuplicateReturnsError; confirmed empirically (vp-8eqrh). Not a fake-infra gap: a fake-double T3 server exists and the rest of the surface is fakeable (see provider_test.go's t3BridgeTestServer). Escalated to platform-architect: either runtimetest.Options gains an idempotent-Start allowance, or this contract is not_applicable for Start_DuplicateReturnsError specifically -- a precedent-setting call for any future idempotent provider, not platform-engineer's to decide unilaterally",
 			),
 		),
 		builtin(
@@ -223,23 +224,25 @@ func Catalog() []Entry {
 			waivedRuntime(
 				repoSymbol("internal/runtime/k8s", "NewSeamBacked"),
 				time.Date(2026, time.November, 12, 0, 0, 0, 0, time.UTC),
-				"no runnable harness proves NewSeamBacked() against a live Kubernetes API plus pod exec lifecycle; every k8s package test drives newProviderWithOps(fake) instead of the real constructor, and no kind/integration-tagged harness exists in internal/runtime/k8s",
+				"the provider logic is now fully proved against a fake k8sOps double (internal/runtime/k8s/conformance_test.go#TestK8sSeamBackedConformance, race-clean, zero skips; vp-8eqrh) via a shared seam-wrapping path with production NewSeamBacked. But NewSeamBacked() returns (runtime.Provider, error), and providerledger.ValidateProofRefs requires a proved claim's factory to return the constructor call directly as one of three tuple elements -- Go disallows splicing a multi-value call into a larger return list (confirmed empirically), so an error-returning constructor can never satisfy DispositionProved under the current AST contract. A ledger-mechanism gap, not a missing double. Escalated to platform-architect: either proof.go gains an accommodation for error-returning constructors, or NewSeamBacked's signature changes (a production-behavior call, not platform-engineer's to make unilaterally)",
 			),
 		),
 		builtin(
 			"herdr", "exact:herdr", nil,
-			waivedRuntime(
+			provedRuntime(
 				repoSymbol("internal/runtime/herdr", "New"),
-				time.Date(2026, time.October, 31, 0, 0, 0, 0, time.UTC),
-				"the full conformance run is an opt-in live journey (make test-herdr-live, or GC_FAST_UNIT=0) and skips in the unit lane, in short mode, and when the herdr executable is absent",
+				"internal/runtime/herdr/conformance_test.go",
+				"TestHerdrConformance",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 		),
 		builtin(
 			"hybrid", "exact:hybrid", nil,
 			waivedRuntime(
 				repoSymbol("cmd/gc", "newHybridProvider"),
-				time.Date(2026, time.October, 10, 0, 0, 0, 0, time.UTC),
-				"cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract; blocked on the tmux and k8s entries it composes",
+				time.Date(2026, time.November, 19, 0, 0, 0, 0, time.UTC),
+				"tmux's own sub-gap is resolved (runtime.builtin.tmux is proved) and the routing/composition logic is now separately proved (see runtime.composition.hybrid below); the remaining blocker is runtime.builtin.k8s's own disposition, which is now a ledger-mechanism gap (ValidateProofRefs cannot accept an error-returning constructor), not a fakeability gap -- this waiver's date tracks past that one so it does not lapse first despite depending on it (vp-8eqrh)",
 			),
 		),
 		builtin(
@@ -296,6 +299,26 @@ func Catalog() []Entry {
 				"internal/runtime/auto/conformance_test.go",
 				"TestAutoConformance",
 				"default-route conformance; ACP route covered by focused auto routing tests",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				repoSymbol("internal/runtime", "NewFake"),
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
+			)},
+		},
+		{
+			ID:           "runtime.composition.hybrid",
+			Roles:        []Role{RoleProductionProvider},
+			Port:         PortRuntimeProvider,
+			Constructors: []SymbolRef{hybridConstructor},
+			Source: &SourceRef{
+				File:     "cmd/gc/providers.go",
+				Function: "newHybridProvider",
+				Reason:   "the real tmux+k8s backend composition is a registry construction boundary (runtime.builtin.hybrid), not this routing/wrapping primitive",
+			},
+			Claims: []ContractClaim{provedRuntimeScoped(
+				hybridConstructor,
+				"internal/runtime/hybrid/conformance_test.go",
+				"TestHybridConformance",
+				"default no-remote-match route proved against two internal/runtime.Fake backends; the remote-match route is covered by this package's focused tests (TestStart_RoutesToRemote and similar); the registry's real tmux+k8s backend composition in cmd/gc.newHybridProvider is not exercised by this proof -- see runtime.builtin.hybrid, runtime.builtin.tmux, and runtime.builtin.k8s",
 				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
 				repoSymbol("internal/runtime", "NewFake"),
 				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
