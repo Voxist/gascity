@@ -4039,11 +4039,11 @@ func sweepStaleOrderTrackingAcrossStores(stores []beads.Store, wispStore beads.S
 // order-tracking bead closes. Wisp subtree recovery is operator-scoped by
 // order name and closes complete stale subtrees when explicitly requested.
 func sweepStaleOrderTrackingAcrossStoresLimit(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, false)
+	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, false, nil)
 }
 
 func sweepStaleOrderTrackingAcrossStoresDryRun(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0, true)
+	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0, true, nil)
 }
 
 // sweepStaleOrderTrackingAcrossStoresLimitMode sweeps two coordination classes,
@@ -4075,7 +4075,7 @@ func sweepStaleOrderTrackingAcrossStoresDryRun(stores []beads.Store, wispStore b
 // and multiply the reported count. When it is itself one of the swept stores the
 // loop has already covered it, and the hoisted pass is skipped for the same
 // count-once reason.
-func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool) (orderTrackingSweepResult, error) {
+func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool, residualFor func(scoped string) time.Duration) (orderTrackingSweepResult, error) {
 	if staleAfter <= 0 {
 		return orderTrackingSweepResult{}, fmt.Errorf("stale-after must be positive")
 	}
@@ -4096,7 +4096,7 @@ func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, wispStor
 				break
 			}
 		}
-		partial, err := sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, perStoreWisps, remainingLimit, dryRun)
+		partial, err := sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, perStoreWisps, remainingLimit, dryRun, residualFor)
 		result.trackingClosed += partial.trackingClosed
 		result.wispClosed += partial.wispClosed
 		if err != nil {
@@ -4146,15 +4146,20 @@ func orderTrackingSweepStoreLabel(store beads.Store, index int) string {
 // sweepStaleOrderTrackingWithOptionsLimit applies limit only to
 // order-tracking bead closes. Wisp subtree recovery is order-scoped and closes
 // complete stale subtrees when includeWispSubtrees is set.
+//
+// The *Mode variants take residualFor, the per-order ADR-0130 D2 cutoff
+// (orderTrackingResidualCutoff): a marker is closed only once it is older than
+// both staleAfter and its order's residual. nil, or a 0 residual for an order
+// the resolver does not know, leaves staleAfter as the only cutoff.
 func sweepStaleOrderTrackingWithOptionsLimit(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, false)
+	return sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, false, nil)
 }
 
 func sweepStaleOrderTrackingWithOptionsLimitDryRun(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, true)
+	return sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, true, nil)
 }
 
-func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool) (orderTrackingSweepResult, error) {
+func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool, residualFor func(scoped string) time.Duration) (orderTrackingSweepResult, error) {
 	if staleAfter <= 0 {
 		return orderTrackingSweepResult{}, fmt.Errorf("stale-after must be positive")
 	}
@@ -4180,6 +4185,16 @@ func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Tim
 				continue
 			}
 			if _, ok := onlyOrders[run.Scoped]; !ok {
+				continue
+			}
+		}
+		// staleAfter is only the floor. The open marker IS the order's
+		// single-flight gate and cooldown counts from the run's start, so
+		// closing it while the run can still be going lets the order fire a
+		// second copy. Keep it until its own order's effective timeout plus
+		// grace (ADR-0130 D2) has elapsed (vp-3dyjq).
+		if residualFor != nil {
+			if residual := residualFor(run.Scoped); residual > staleAfter && now.Sub(run.CreatedAt) <= residual {
 				continue
 			}
 		}
@@ -4943,9 +4958,20 @@ func effectiveTimeout(a orders.Order, maxTimeout time.Duration) time.Duration {
 // same "doesn't know" this function is about), so no scheduled dispatch
 // waits on one.
 func (m *memoryOrderDispatcher) trackingResidualCutoff(scoped string) time.Duration {
-	for i := range m.aa {
-		if m.aa[i].ScopedName() == scoped {
-			return effectiveTimeout(m.aa[i], m.maxTimeout) + orderTrackingDeadlineGrace
+	return orderTrackingResidualCutoff(m.aa, m.maxTimeout, scoped)
+}
+
+// orderTrackingResidualCutoff is the ADR-0130 D2 cutoff over an explicit order
+// set: effectiveTimeout(order) + orderTrackingDeadlineGrace for the order in aa
+// whose scoped name matches, or 0 when aa does not know scoped. The watchdog
+// (via trackingResidualCutoff, over the dispatcher's own set) and the
+// `gc order sweep-tracking` CLI (over the city's discovered set, see
+// orderTrackingSweepResidualFor) both age markers through this one function,
+// so a marker's deadline cannot drift between the two sweeps.
+func orderTrackingResidualCutoff(aa []orders.Order, maxTimeout time.Duration, scoped string) time.Duration {
+	for i := range aa {
+		if aa[i].ScopedName() == scoped {
+			return effectiveTimeout(aa[i], maxTimeout) + orderTrackingDeadlineGrace
 		}
 	}
 	return 0

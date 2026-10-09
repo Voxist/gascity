@@ -292,7 +292,10 @@ func newOrderSweepTrackingCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Close stale open order-tracking beads and prune expired closed history.
 
 This is intended for maintenance exec orders. It only closes tracking beads
-older than --stale-after so a fresh in-flight order is not interrupted.
+older than --stale-after AND older than their order's own timeout plus a
+grace window, so an order that is still running keeps its single-flight
+marker and is not fired a second time. A bead whose order is no longer in
+the city's config ages against --stale-after alone.
 Closed order-tracking history is deleted after
 [beads.policies.order_tracking].delete_after_close, defaulting to 7d, while
 always retaining at least the latest 10 closed tracking beads per order.
@@ -1914,6 +1917,7 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 		}
 		return 1
 	}
+	residualFor := orderTrackingSweepResidualFor(cityPath, cfg, stderr)
 	now := time.Now()
 	var result orderTrackingSweepResult
 	var sweepErr error
@@ -1924,9 +1928,9 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 	// the non-zero exit is deferred to the end of the function.
 	confirmGateBlocked := false
 	if dryRun {
-		result, sweepErr = sweepStaleOrderTrackingAcrossStoresDryRun(stores, wispStore, now, staleAfter, onlyOrders, includeWisps)
+		result, sweepErr = sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWisps, 0, true, residualFor)
 	} else {
-		result, sweepErr = sweepStaleOrderTrackingAcrossStores(stores, wispStore, now, staleAfter, onlyOrders, includeWisps)
+		result, sweepErr = sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWisps, 0, false, residualFor)
 
 		// Bulk-delete confirm gate: before any retention deletions, count
 		// eligible beads and require --confirm when above
@@ -1982,6 +1986,31 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 		return 1
 	}
 	return 0
+}
+
+// orderTrackingSweepResidualFor resolves each open marker's ADR-0130 D2 cutoff
+// (its order's effective timeout plus grace) for `gc order sweep-tracking`, so
+// the stale sweep never closes the single-flight marker of a run that can
+// still legitimately be going. The command runs as its own process, apart from
+// the controller's dispatcher, so it resolves deadlines from the city's
+// discovered order set — every order, enabled or not and whatever its trigger,
+// since a marker can outlive a later disable and a manual run holds the same
+// marker — capped by [orders] max_timeout exactly as dispatch caps it.
+//
+// A scan failure is reported and returns nil: the sweep then ages every marker
+// against --stale-after alone, which is the floor it applies anyway, rather
+// than refusing to recover any stale marker at all.
+func orderTrackingSweepResidualFor(cityPath string, cfg *config.City, stderr io.Writer) func(scoped string) time.Duration {
+	const cmdName = "gc order sweep-tracking"
+	aa, err := scanAllOrders(cityPath, cfg, stderr, cmdName)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: resolving order timeouts, falling back to --stale-after for every marker: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+		return nil
+	}
+	maxTimeout := cfg.Orders.MaxTimeoutDuration()
+	return func(scoped string) time.Duration {
+		return orderTrackingResidualCutoff(aa, maxTimeout, scoped)
+	}
 }
 
 func orderTrackingSweepErrorIsFatal(result orderTrackingSweepResult, retentionResult orderTrackingRetentionSweepResult, retentionErr error) bool {
