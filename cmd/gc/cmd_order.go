@@ -292,7 +292,12 @@ func newOrderSweepTrackingCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Close stale open order-tracking beads and prune expired closed history.
 
 This is intended for maintenance exec orders. It only closes tracking beads
-older than --stale-after so a fresh in-flight order is not interrupted.
+older than --stale-after AND older than their order's own timeout plus a
+grace window, so an order that is still running keeps its single-flight
+marker and is not fired a second time. A bead whose order is no longer in
+the city's config ages against --stale-after alone. If the city's orders
+cannot be scanned, the sweep still runs against --stale-after alone and then
+exits non-zero so the degraded run is recorded.
 Closed order-tracking history is deleted after
 [beads.policies.order_tracking].delete_after_close, defaulting to 7d, while
 always retaining at least the latest 10 closed tracking beads per order.
@@ -1892,6 +1897,16 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	return cmdOrderSweepTrackingForCity(cityPath, cfg, time.Now(), staleAfter, includeWisps, dryRun, quiet, confirm, orderNames, stdout, stderr)
+}
+
+// openOrderTrackingSweepStores opens the stores `gc order sweep-tracking`
+// sweeps. Tests swap it to sweep in-memory stores.
+var openOrderTrackingSweepStores = orderTrackingSweepStoresForConfigTargets
+
+// cmdOrderSweepTrackingForCity is the sweep-tracking command over an already
+// resolved city, with the sweep's clock passed in.
+func cmdOrderSweepTrackingForCity(cityPath string, cfg *config.City, now time.Time, staleAfter time.Duration, includeWisps, dryRun, quiet, confirm bool, orderNames []string, stdout, stderr io.Writer) int {
 	onlyOrders := orderNameFilter(orderNames)
 	if includeWisps && len(onlyOrders) == 0 {
 		fmt.Fprintln(stderr, "gc order sweep-tracking: include-wisps requires at least one order name") //nolint:errcheck // best-effort stderr
@@ -1905,7 +1920,7 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 	// wispStore is the store the sweep's wisp-subtree half runs against: on a
 	// split city the wisp roots this force-closes are graph class and live in
 	// the binding, not in any of the order stores beside them.
-	stores, wispStore, openErr := orderTrackingSweepStoresForConfigTargets(cityPath, cfg, requiredTargets)
+	stores, wispStore, openErr := openOrderTrackingSweepStores(cityPath, cfg, requiredTargets)
 	if len(stores) == 0 {
 		if openErr != nil {
 			fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", openErr) //nolint:errcheck // best-effort stderr
@@ -1914,7 +1929,15 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 		}
 		return 1
 	}
-	now := time.Now()
+	// A resolution error does not stop the sweep: unresolved orders' markers
+	// age against --stale-after, the floor applied anyway. It is reported now
+	// and turned into a non-zero exit after the sweep, because the controller
+	// discards a successful exec order's output — only a failed run records
+	// it, so a silent fallback would bring back the double fire unseen.
+	residualFor, resolveErr := orderTrackingSweepResidualFor(cityPath, cfg, stderr)
+	if resolveErr != nil {
+		fmt.Fprintf(stderr, "gc order sweep-tracking: could not resolve every order's timeout; markers of unresolved orders were aged against --stale-after alone, so a still-running order among them may fire twice: %v\n", resolveErr) //nolint:errcheck // best-effort stderr
+	}
 	var result orderTrackingSweepResult
 	var sweepErr error
 	var retentionResult orderTrackingRetentionSweepResult
@@ -1924,9 +1947,9 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 	// the non-zero exit is deferred to the end of the function.
 	confirmGateBlocked := false
 	if dryRun {
-		result, sweepErr = sweepStaleOrderTrackingAcrossStoresDryRun(stores, wispStore, now, staleAfter, onlyOrders, includeWisps)
+		result, sweepErr = sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWisps, 0, true, residualFor)
 	} else {
-		result, sweepErr = sweepStaleOrderTrackingAcrossStores(stores, wispStore, now, staleAfter, onlyOrders, includeWisps)
+		result, sweepErr = sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWisps, 0, false, residualFor)
 
 		// Bulk-delete confirm gate: before any retention deletions, count
 		// eligible beads and require --confirm when above
@@ -1978,10 +2001,40 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 			fmt.Fprintf(stdout, "%s %d stale order-tracking bead(s)%s\n", verb, result.trackingClosed, deletedClause) //nolint:errcheck // best-effort stdout
 		}
 	}
-	if confirmGateBlocked {
+	if confirmGateBlocked || resolveErr != nil {
 		return 1
 	}
 	return 0
+}
+
+// orderTrackingSweepResidualFor resolves each open marker's ADR-0130 D2 cutoff
+// (its order's effective timeout plus grace) for `gc order sweep-tracking`, so
+// the stale sweep never closes the single-flight marker of a run that can
+// still legitimately be going. The command runs as its own process, apart from
+// the controller's dispatcher, so it resolves deadlines from the city's
+// discovered order set — every trigger, including orders an override disabled,
+// since a marker can outlive a later disable and a manual run holds the same
+// marker — capped by [orders] max_timeout exactly as dispatch caps it.
+//
+// A failed scan returns a nil resolver and the error; a rig whose orders could
+// not be scanned returns the resolver over everything else plus that rig's
+// error. Either way the unresolved orders' markers age against --stale-after
+// alone, and the caller must surface the error.
+func orderTrackingSweepResidualFor(cityPath string, cfg *config.City, stderr io.Writer) (func(scoped string) time.Duration, error) {
+	opts := orderScanOptions(stderr, "gc order sweep-tracking")
+	var rigErrs []error
+	opts.OnRigScanError = func(rigName string, err error) error {
+		rigErrs = append(rigErrs, fmt.Errorf("scanning orders of rig %s: %w", rigName, err))
+		return nil
+	}
+	aa, err := orderdiscovery.ScanAll(cityPath, cfg, opts)
+	if err != nil {
+		return nil, fmt.Errorf("scanning orders: %w", err)
+	}
+	maxTimeout := cfg.Orders.MaxTimeoutDuration()
+	return func(scoped string) time.Duration {
+		return orderTrackingResidualCutoff(aa, maxTimeout, scoped)
+	}, errors.Join(rigErrs...)
 }
 
 func orderTrackingSweepErrorIsFatal(result orderTrackingSweepResult, retentionResult orderTrackingRetentionSweepResult, retentionErr error) bool {
