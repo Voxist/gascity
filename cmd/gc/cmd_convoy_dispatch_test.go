@@ -4453,7 +4453,7 @@ func TestWorkflowServeControlReadyQueryIgnoresInProgressAssigned(t *testing.T) {
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "list --status in_progress --assignee=gascity--control-dispatcher --json --limit=20")
+  "list --status in_progress --sort priority --assignee=gascity--control-dispatcher --json --limit=20")
     printf '[{"id":"ga-in-progress"}]'
     ;;
   "--readonly --sandbox ready --assignee=gascity--control-dispatcher --json --limit=20")

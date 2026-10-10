@@ -616,13 +616,30 @@ func standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTop
 //     deferral time. Adoption of an in_progress row performs no status CAS, and
 //     the claim-time metadata stamp already routes through the binding.
 //     on_death/on_boot stay single-store; those remain ga-601v2's slice.
+//
+// assignedInProgressWindowLimit bounds the crash-recovery tier's candidate
+// read (vp-4dj7). It matches the candidates read's bound: a seat holding more
+// assigned in-progress beads than this is pathological, and the drain serves
+// strictly best-priority-first within the window either way.
+const assignedInProgressWindowLimit = 20
+
+// assignedInProgressTierCommand is the crash-recovery tier's candidate read.
+// The window is bounded, not one-row (vp-4dj7): a single-row read spent the
+// tier on the per-row gate's verdict for that one row, so a held or dep-blocked
+// leader shadowed every further assigned in-progress bead behind it — invisible
+// to this tier (the window closed) and to the ready tiers below (they exclude
+// in-progress rows by design). The window is drained row by row through the
+// UNCHANGED per-row gates by assignedInProgressWindowDrainScript, so exclusion
+// semantics live entirely in those gates, never in the window size. Rows come
+// back priority-sorted so the drain serves the best-priority survivor first
+// (ADR-0035's ruling against FIFO dispatch), matching the routed tier's probe.
 func assignedInProgressTierCommand(shellVar string, topo QueryTopology) string {
-	return assignedInProgressTierCommandWithLimit(shellVar, topo, 1)
+	return assignedInProgressTierCommandWithLimit(shellVar, topo, assignedInProgressWindowLimit)
 }
 
 // assignedInProgressCandidatesTierCommand is the bounded second read used only
-// after the stock one-row recovery tier has identified a graph workflow root.
-// This preserves that tier's byte and fail-open contracts while preventing the
+// after the windowed recovery tier (vp-4dj7) has identified a graph workflow
+// root. This preserves that tier's fail-open contracts while preventing the
 // root from hiding another in-progress step owned by the same session.
 func assignedInProgressCandidatesTierCommand(shellVar string, topo QueryTopology) string {
 	return assignedInProgressTierCommandWithLimit(shellVar, topo, 20)
@@ -634,8 +651,36 @@ func assignedInProgressTierCommandWithLimit(shellVar string, topo QueryTopology,
 	if fed {
 		reader = gcReadyCommand + ` --status in_progress`
 	}
-	return `r=$(` + reader + ` --assignee="$` + shellVar + `" --json --limit=` + strconv.Itoa(limit) +
+	return `r=$(` + reader + ` --sort priority --assignee="$` + shellVar + `" --json --limit=` + strconv.Itoa(limit) +
 		readyReaderStderrSink(fed) + `)` + readyReaderFailurePropagation(fed) + `; `
+}
+
+// assignedInProgressWindowDrainScript drains the widened crash-recovery window
+// (vp-4dj7) through a single-row serve gate, unmodified. The gate keeps every
+// exclusion semantic — hold labels, resolved blocked_by, fail-open enrichment —
+// because it runs once per row exactly as it used to run on the one row the old
+// --limit=1 read returned; only the number of rows it votes on changes. A row
+// the gate rejects falls through to the next row, so a held or blocked leader
+// no longer shadows actionable work behind it, and a window the gate rejects
+// wholesale still ends in the tier's ordinary fall-through to the ready tiers.
+//
+// The drain is guarded, not trusting: if the window does not parse as a JSON
+// array (log-prefixed or malformed bd stdout), the row count reads empty and
+// the gate runs ONCE on the raw read — the exact pre-window behavior — which is
+// what keeps the fail-open contract green
+// (TestInProgressTierServesUnparseableHeldCandidateFailOpen).
+func assignedInProgressWindowDrainScript(gate string) string {
+	return `gc_assigned_in_progress_window_json="$r"; ` +
+		`gc_assigned_in_progress_window_n=$(printf "%s" "$gc_assigned_in_progress_window_json" | jq -r 'if type=="array" then length else empty end' 2>/dev/null); ` +
+		`case "$gc_assigned_in_progress_window_n" in ''|*[!0-9]*) gc_assigned_in_progress_window_n="";; esac; ` +
+		`if [ -n "$gc_assigned_in_progress_window_n" ]; then ` +
+		`gc_assigned_in_progress_window_i=0; ` +
+		`while [ "$gc_assigned_in_progress_window_i" -lt "$gc_assigned_in_progress_window_n" ]; do ` +
+		`r=$(printf "%s" "$gc_assigned_in_progress_window_json" | jq -c ".[$gc_assigned_in_progress_window_i:$((gc_assigned_in_progress_window_i+1))]" 2>/dev/null); ` +
+		gate +
+		`gc_assigned_in_progress_window_i=$((gc_assigned_in_progress_window_i+1)); ` +
+		`done; ` +
+		`else ` + gate + ` fi; `
 }
 
 // standardAssignedInProgressWorkQueryScript is the crash-recovery tier.
@@ -644,7 +689,7 @@ func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 		`[ -z "$id" ] && continue; ` +
 		assignedInProgressTierCommand("id", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		inProgressBlockedByEnrichmentScript(topo.FederatedReady, true) +
+		assignedInProgressWindowDrainScript(inProgressBlockedByEnrichmentScript(topo.FederatedReady, true)) +
 		`fi; ` +
 		ephemeralAssignedInProgressProbeScript("id", topo) +
 		`done; `
@@ -834,7 +879,7 @@ func legacyControlAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo Que
 		`[ -z "$cand" ] && continue; ` +
 		assignedInProgressTierCommand("cand", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(topo.FederatedReady, true) +
+		assignedInProgressWindowDrainScript(inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(topo.FederatedReady, true)) +
 		`fi; ` +
 		`if [ -n "$gc_assigned_workflow_anchor_json" ]; then ` +
 		assignedInProgressCandidatesTierCommand("cand", topo) +
@@ -855,7 +900,7 @@ func legacyControlAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 		`[ -z "$cand" ] && continue; ` +
 		assignedInProgressTierCommand("cand", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		inProgressBlockedByEnrichmentScript(topo.FederatedReady, true) +
+		assignedInProgressWindowDrainScript(inProgressBlockedByEnrichmentScript(topo.FederatedReady, true)) +
 		`fi; ` +
 		ephemeralAssignedInProgressProbeScript("cand", topo) +
 		`done; ` +

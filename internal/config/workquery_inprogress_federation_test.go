@@ -15,7 +15,7 @@ import (
 func TestAssignedInProgressTierFederatesOnSplitTopology(t *testing.T) {
 	for _, shellVar := range []string{"id", "cand"} {
 		got := assignedInProgressTierCommand(shellVar, QueryTopology{FederatedReady: true})
-		want := `r=$(gc ready --status in_progress --assignee="$` + shellVar + `" --json --limit=1) || exit $?; `
+		want := `r=$(gc ready --status in_progress --sort priority --assignee="$` + shellVar + `" --json --limit=20) || exit $?; `
 		if got != want {
 			t.Errorf("federated tier-0 for $%s =\n  %q\nwant\n  %q", shellVar, got, want)
 		}
@@ -37,19 +37,24 @@ func TestAssignedInProgressTierFederatesOnSplitTopology(t *testing.T) {
 	}
 }
 
-// TestAssignedInProgressTierIsByteIdenticalOnSingleStore is the zero-risk
-// control: every city that relocates nothing runs character-identical bytes.
+// TestAssignedInProgressTierIsByteIdenticalOnSingleStore pins the single-store
+// read's bytes so they change only deliberately.
 //
-// This is the whole reason the swap is topology-keyed rather than unconditional.
-// The crash-recovery tier is on the hot path of every worker in every deployed
-// city, and a change to its shell that was not required by the bug is a change
-// that can only lose.
+// History: this was the ga-601v2 zero-risk control — the federation swap was
+// topology-keyed, so single-store cities ran the pre-swap bytes unchanged.
+// vp-4dj7 deliberately supersedes that freeze: the windowing defect (a held or
+// blocked leader shadowing actionable work behind it) is topology-independent,
+// so the widened, priority-sorted window is bug-REQUIRED on both shapes, the
+// same way gas-kg6's hold gate was. The invariant that survives the supersession
+// is topology keying of the FEDERATED-ONLY machinery: the single-store form
+// grows no `blocked_by` presence key (asserted below), because its `bd list`
+// rows never carry the field and the branch could only ever be dead shell.
 func TestAssignedInProgressTierIsByteIdenticalOnSingleStore(t *testing.T) {
 	for _, shellVar := range []string{"id", "cand"} {
 		got := assignedInProgressTierCommand(shellVar, QueryTopology{})
-		want := `r=$(bd list --status in_progress --assignee="$` + shellVar + `" --json --limit=1 2>/dev/null); `
+		want := `r=$(bd list --status in_progress --sort priority --assignee="$` + shellVar + `" --json --limit=20 2>/dev/null); `
 		if got != want {
-			t.Errorf("single-store tier-0 for $%s =\n  %q\nwant the pre-swap bytes\n  %q", shellVar, got, want)
+			t.Errorf("single-store tier-0 for $%s =\n  %q\nwant the windowed (vp-4dj7) bytes\n  %q", shellVar, got, want)
 		}
 	}
 	// The single-store enrichment must not grow the presence key either: its
