@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -100,7 +101,14 @@ func (r *realK8sOps) execInPod(ctx context.Context, pod, container string, cmd [
 
 // fakeK8sOps is an in-memory test double with spy capabilities.
 // Records all calls for assertions and returns configurable results.
+//
+// mu guards every field below for the conformance suite (runtimetest.
+// RunProviderTests fires concurrent Start/Stop/IsRunning/ListRunning/
+// ProcessAlive/Interrupt subtests against a single shared instance); existing
+// single-threaded tests that poke fields directly (addRunningPod and
+// friends) run before any concurrent access begins, so they don't need it.
 type fakeK8sOps struct {
+	mu    sync.Mutex
 	pods  map[string]*corev1.Pod
 	calls []fakeCall
 
@@ -130,11 +138,14 @@ func newFakeK8sOps() *fakeK8sOps {
 	}
 }
 
+// record appends a call entry. Callers must hold f.mu.
 func (f *fakeK8sOps) record(method, pod string, cmd []string) {
 	f.calls = append(f.calls, fakeCall{method: method, pod: pod, cmd: cmd})
 }
 
 func (f *fakeK8sOps) createPod(_ context.Context, pod *corev1.Pod) (*corev1.Pod, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.record("createPod", pod.Name, nil)
 	if f.createErr != nil {
 		return nil, f.createErr
@@ -146,6 +157,8 @@ func (f *fakeK8sOps) createPod(_ context.Context, pod *corev1.Pod) (*corev1.Pod,
 }
 
 func (f *fakeK8sOps) getPod(_ context.Context, name string) (*corev1.Pod, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.record("getPod", name, nil)
 	if f.getErr != nil {
 		return nil, f.getErr
@@ -158,6 +171,8 @@ func (f *fakeK8sOps) getPod(_ context.Context, name string) (*corev1.Pod, error)
 }
 
 func (f *fakeK8sOps) deletePod(_ context.Context, name string, _ int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.record("deletePod", name, nil)
 	if f.deleteErr != nil {
 		return f.deleteErr
@@ -167,6 +182,8 @@ func (f *fakeK8sOps) deletePod(_ context.Context, name string, _ int64) error {
 }
 
 func (f *fakeK8sOps) listPods(_ context.Context, selector string, fieldSelector string) ([]corev1.Pod, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, fakeCall{method: "listPods", selector: selector})
 	if f.listErr != nil {
 		return nil, f.listErr
@@ -183,6 +200,8 @@ func (f *fakeK8sOps) listPods(_ context.Context, selector string, fieldSelector 
 }
 
 func (f *fakeK8sOps) execInPod(_ context.Context, pod, container string, cmd []string, _ io.Reader) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, fakeCall{method: "execInPod", pod: pod, container: container, cmd: cmd})
 	if f.execFunc != nil {
 		return f.execFunc(pod, cmd)
