@@ -37,6 +37,8 @@ var (
 	// revision to assert against at all: every gc this repo builds is built
 	// -buildvcs=false, so the toolchain embeds none.
 	newDoctorDeployProvenanceCheck = doctor.NewDeployProvenanceCheck
+	// vp-fkrl: seam for the bundled-pack served-content provenance check.
+	newDoctorBundledPackProvenanceCheck = doctor.NewBundledPackProvenanceCheck
 	// supervisorProbePIDHook is the tri-state supervisor liveness probe: a
 	// positive pid, 0 when the probe established that none is running, and
 	// doctor.SupervisorPIDUnknown when it could not tell. A seam so a test can
@@ -372,6 +374,12 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// toolchain's stamp as a fallback in resolveBuildMetadata, for the
 	// `go install` builds that do carry one.
 	register(newDoctorDeployProvenanceCheck(commit))
+	// Bundled-pack provenance (vp-fkrl): every served bundled-pack cache's
+	// recorded content hash must match THIS binary's embedded content.
+	// Closes the shipped-but-not-served blind spot that let a fork-built
+	// binary report its packs as gastownhall@f895c0ff. No cache found is a
+	// warning, never an OK (ADR-0091/ADR-0113: unobserved is not healthy).
+	register(newDoctorBundledPackProvenanceCheck(commit))
 	// beads.role must be set before any bd command runs; check it here so
 	// the missing-role error appears before the downstream data/Dolt checks
 	// that will all fail for the same root cause.

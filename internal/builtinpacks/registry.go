@@ -43,7 +43,13 @@ const (
 	// and matches the ref the public gascity-packs tree sources use.
 	canonicalBrowseRef = "main"
 
-	syntheticMarkerFile = ".gc-bundled-pack-cache.toml"
+	// MarkerFilename is the bundled-pack cache descriptor file that
+	// MaterializeSyntheticRepo writes into every cache it materializes.
+	// Exported so external observers (the doctor's provenance check) scan
+	// for the same file this package writes, by one spelling (vp-fkrl).
+	MarkerFilename = ".gc-bundled-pack-cache.toml"
+
+	syntheticMarkerFile = MarkerFilename
 )
 
 // Pack describes a bundled pack and its canonical import source. Bundled
@@ -295,6 +301,7 @@ func MaterializeSyntheticRepo(dst, repository, commit string) error {
 		Repository:  repository,
 		Commit:      commit,
 		ContentHash: hash,
+		BuiltBy:     BuiltBy,
 	}
 	data, err := toml.Marshal(marker)
 	if err != nil {
@@ -518,7 +525,23 @@ type syntheticMarker struct {
 	Repository  string `toml:"repository"`
 	Commit      string `toml:"commit"`
 	ContentHash string `toml:"content_hash"`
+	// BuiltBy records the gc build commit that MATERIALIZED this cache —
+	// the running binary's own revision, injected by the main package via
+	// BuiltBy below. It is provenance for the served bytes, never a claim
+	// about upstream: Repository/Commit above remain the CANONICAL PIN and
+	// stay load-bearing for validation (vp-fkrl — without this field the
+	// only builder identity a cache carried was the pin, and a fork-built
+	// binary reported itself as gastownhall@f895c0ff). Older caches predate
+	// the field and read as "" ("unknown builder"), which every renderer
+	// must surface honestly rather than backfilling from the pin.
+	BuiltBy string `toml:"built_by,omitempty"`
 }
+
+// BuiltBy is the running binary's build revision, set once by the main
+// package after it resolves -X main.commit / vcs.revision (this package
+// cannot import cmd/gc). Empty means the binary shipped without the stamp —
+// recorded as empty in markers, never guessed from the pin.
+var BuiltBy string
 
 type fileEntry struct {
 	data []byte
