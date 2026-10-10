@@ -11,6 +11,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/spf13/cobra"
@@ -62,6 +63,9 @@ type ImportStatusEntry struct {
 	// Pin is the packs.lock resolution for kind "remote" entries.
 	// Omitted when the source has no lock entry (unlocked).
 	Pin *ImportStatusPin `json:"pin,omitempty"`
+	// Builtin is set for kind "builtin" entries: the bytes are served from
+	// this binary's embedded pack set, not fetched from the source URL.
+	Builtin *ImportStatusBuiltin `json:"builtin,omitempty"`
 }
 
 // ImportStatusPin is the packs.lock resolution pinned for a remote import.
@@ -69,6 +73,22 @@ type ImportStatusPin struct {
 	Version string `json:"version"`
 	Commit  string `json:"commit"`
 	Fetched string `json:"fetched,omitempty"`
+}
+
+// ImportStatusBuiltin marks an import whose bytes are SERVED from the
+// running gc binary's embedded pack set (vp-fkrl). Source for such rows
+// names a canonical pin, not a fetched tree, and Pin.Commit is the pin —
+// presenting either as provenance was the falsification this fixes: a
+// fork-built binary reported itself as gastownhall@f895c0ff.
+type ImportStatusBuiltin struct {
+	// Pack is the bundled pack name actually serving the import.
+	Pack string `json:"pack"`
+	// BuiltBy is the build revision of the RUNNING binary (which serves
+	// the bytes). Empty means the binary shipped without a stamp.
+	BuiltBy string `json:"built_by,omitempty"`
+	// ContentHash is the running binary's embedded-content digest — what
+	// these imports actually serve, as distinct from the pinned commit.
+	ContentHash string `json:"content_hash"`
 }
 
 // ImportStatusLockedPack is one packs.lock entry in the status output.
@@ -184,6 +204,21 @@ func buildImportStatus(cityPath string) (*ImportStatusJSON, error) {
 					Fetched: formatImportStatusTime(pack.Fetched),
 				}
 			}
+			// vp-fkrl: a bundled source is served from THIS binary's
+			// embedded content. Keep the authored source and lock pin
+			// (both factual), but say so — the tree URL is a browse ref,
+			// never provenance for the served bytes.
+			if packName, ok := builtinpacks.NameForSource(imp.Source); ok {
+				entry.Kind = "builtin"
+				builtin := &ImportStatusBuiltin{
+					Pack:    packName,
+					BuiltBy: commit,
+				}
+				if hash, hashErr := builtinpacks.SyntheticContentHash(); hashErr == nil {
+					builtin.ContentHash = hash
+				}
+				entry.Builtin = builtin
+			}
 		} else {
 			entry.Kind = "path"
 			if abs, pathErr := resolveImportAddPath(cityPath, imp.Source); pathErr == nil {
@@ -237,7 +272,20 @@ func writeImportStatusText(stdout io.Writer, status *ImportStatusJSON) {
 		case entry.Kind == "remote":
 			pinnedVersion = "(unlocked)"
 		}
+		// vp-fkrl: builtin rows must never render the browse tree URL or
+		// the canonical pin as provenance for the served bytes.
+		source, kind := entry.Source, entry.Kind
+		if entry.Builtin != nil {
+			builtBy := entry.Builtin.BuiltBy
+			if builtBy == "" {
+				builtBy = "unknown"
+			}
+			source = fmt.Sprintf("builtin:%s (gc %s)", entry.Builtin.Pack, builtBy)
+			if entry.Builtin.ContentHash != "" {
+				pinnedCommit = "content:" + entry.Builtin.ContentHash
+			}
+		}
 		fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%s\t%s\n", //nolint:errcheck
-			entry.Name, entry.Source, entry.Constraint, entry.Kind, pinnedVersion, pinnedCommit)
+			entry.Name, source, entry.Constraint, kind, pinnedVersion, pinnedCommit)
 	}
 }
