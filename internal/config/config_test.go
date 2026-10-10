@@ -2042,7 +2042,7 @@ func TestEffectiveAssignedInProgressQueryDefault(t *testing.T) {
 	got := a.EffectiveAssignedInProgressQuery()
 	for _, want := range []string{
 		`"$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"`,
-		`bd list --status in_progress --assignee="$id" --json --limit=1`,
+		`bd list --status in_progress --sort priority --assignee="$id" --json --limit=20`,
 		`ephemeral=true AND status=in_progress`,
 	} {
 		if !strings.Contains(got, want) {
@@ -2058,7 +2058,7 @@ func TestEffectiveAssignedInProgressQueryDefault(t *testing.T) {
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "list --status in_progress --assignee=worker-bead --json --limit=1") printf '[{"id":"assigned-in-progress","ephemeral":true}]' ;;
+  "list --status in_progress --sort priority --assignee=worker-bead --json --limit=20") printf '[{"id":"assigned-in-progress","ephemeral":true}]' ;;
   *) printf '[]' ;;
 esac
 `)
@@ -2261,7 +2261,7 @@ func TestEffectiveWorkQueryControlDispatcherClaimsLegacyAssignedWork(t *testing.
 	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
 	got := a.EffectiveWorkQuery()
 	for _, want := range []string{
-		`bd list --status in_progress --assignee="$cand"`,
+		`bd list --status in_progress --sort priority --assignee="$cand"`,
 		`bd ready --assignee="$cand"`,
 	} {
 		if !strings.Contains(got, want) {
@@ -2274,10 +2274,10 @@ func TestEffectiveWorkQueryControlDispatcherClaimsLegacyAssignedWork(t *testing.
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "list --status in_progress --assignee=gascity--control-dispatcher --json --limit=1"|\
-  "list --status in_progress --assignee=gascity/control-dispatcher --json --limit=1"|\
-  "list --status in_progress --assignee=gascity--workflow-control --json --limit=1"|\
-  "list --status in_progress --assignee=gascity/workflow-control --json --limit=1")
+  "list --status in_progress --sort priority --assignee=gascity--control-dispatcher --json --limit=20"|\
+  "list --status in_progress --sort priority --assignee=gascity/control-dispatcher --json --limit=20"|\
+  "list --status in_progress --sort priority --assignee=gascity--workflow-control --json --limit=20"|\
+  "list --status in_progress --sort priority --assignee=gascity/workflow-control --json --limit=20")
     printf '[]'
     ;;
   "ready --assignee=gascity--workflow-control --json --limit=1"|\
@@ -2322,7 +2322,7 @@ func TestEffectiveWorkQueryRoutedQueueUsesNativeCanonicalSortAcrossReadyTiers(t 
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	got := a.EffectiveWorkQuery()
 	for _, want := range []string{
-		`bd list --status in_progress --assignee="$id"`,
+		`bd list --status in_progress --sort priority --assignee="$id"`,
 		`bd ready --assignee="$id"`,
 	} {
 		if !strings.Contains(got, want) {
@@ -2470,7 +2470,7 @@ func TestEffectiveWorkQueryExcludesEpics(t *testing.T) {
 		// routed/pool tier still excludes epics (gc-udx guard)
 		`bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json`,
 		// assigned tiers carry NO epic exclusion
-		`bd list --status in_progress --assignee="$id" --json`,
+		`bd list --status in_progress --sort priority --assignee="$id" --json`,
 		`bd ready --assignee="$id" --json`,
 		`-- hello-world/worker`,
 	}
@@ -2495,7 +2495,7 @@ func TestEffectiveWorkQueryExcludesEpicsControlDispatcher(t *testing.T) {
 	got := a.EffectiveWorkQuery()
 	wantPresent := []string{
 		`bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --json`,
-		`bd list --status in_progress --assignee="$cand" --json`,
+		`bd list --status in_progress --sort priority --assignee="$cand" --json`,
 		`bd ready --assignee="$cand" --json`,
 		`-- gascity/control-dispatcher gascity/workflow-control`,
 	}
