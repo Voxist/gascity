@@ -19,7 +19,7 @@ var partitionHalfCases = []struct {
 	{"Command", "launch", func(c *Config) { c.Command += " --changed" }},
 	{"Lifecycle", "launch", func(c *Config) { c.Lifecycle = Lifecycle("persistent") }},
 	{"Upstream", "launch", func(c *Config) { c.Upstream = "bedrock" }},
-	{"OperatorEnv", "launch", func(c *Config) { c.OperatorEnv = envWith(c.OperatorEnv, "OPERATOR_KEY", "different") }},
+	{"OperatorEnv", "launch", func(c *Config) { c.OperatorEnv = envWith(c.OperatorEnv, "OPERATOR_VAR", "different") }},
 	{"MCPServers", "launch", func(c *Config) {
 		c.MCPServers = []MCPServerConfig{{Name: "mail", Transport: MCPTransport("stdio"), Command: "different-mcp"}}
 	}},

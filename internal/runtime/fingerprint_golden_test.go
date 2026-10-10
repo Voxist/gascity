@@ -35,10 +35,27 @@ func goldenFixtures() map[string]Config {
 				"GC_PUBLICATION_TENANT_BASE_DOMAIN": "t.ex.com",
 				"GC_PUBLICATION_TENANT_BASE_URL":    "https://t.ex.com",
 				"GC_PUBLICATION_TENANT_SLUG":        "acme",
+				// ... every serving identity key (LAUNCH half) ...
+				"ANTHROPIC_BASE_URL":             "https://api.example.com",
+				"ANTHROPIC_MODEL":                "model-a",
+				"ANTHROPIC_DEFAULT_OPUS_MODEL":   "model-o",
+				"ANTHROPIC_DEFAULT_SONNET_MODEL": "model-s",
+				"ANTHROPIC_DEFAULT_HAIKU_MODEL":  "model-h",
+				"ANTHROPIC_SMALL_FAST_MODEL":     "model-f",
+				"OPENAI_BASE_URL":                "https://openai.example.com",
+				"GOOGLE_GEMINI_BASE_URL":         "https://gemini.example.com",
+				"KIMI_BASE_URL":                  "https://kimi.example.com",
+				"COPILOT_PROVIDER_BASE_URL":      "https://copilot.example.com",
+				"AMP_URL":                        "https://amp.example.com",
+				"ZCODE_BASE_URL":                 "https://zcode.example.com",
 				// ... plus excluded keys that must NOT affect the hash.
 				"GC_SESSION_ID": "ignored", "GC_AGENT": "ignored", "NOT_GC": "ignored",
+				"ANTHROPIC_AUTH_TOKEN": "ignored-credential", "ANTHROPIC_API_KEY": "ignored-credential",
 			},
-			OperatorEnv: map[string]string{"OPERATOR_AUTHORED": "v1", "ANOTHER_KEY": "v2"},
+			OperatorEnv: map[string]string{
+				"OPERATOR_AUTHORED": "v1", "ANOTHER_KEY": "ignored-credential-shaped",
+				"ANTHROPIC_AUTH_TOKEN": "ignored-credential", "PROVIDER_SECRET": "ignored-credential",
+			},
 			MCPServers: []MCPServerConfig{{
 				Name: "mail", Transport: MCPTransport("stdio"), Command: "mcp-mail",
 				Args: []string{"--port", "0"}, Env: map[string]string{"K": "V"},
@@ -124,8 +141,8 @@ func TestFingerprintVersionPin(t *testing.T) {
 	// The version namespaces stored hashes; an UNINTENTIONAL bump during the
 	// de-conflation forces a city-wide metadata rebaseline. An intentional bump
 	// is a deliberate edit to this assertion + a golden regen.
-	if FingerprintVersion != "v6" {
-		t.Errorf("FingerprintVersion = %q, want v6", FingerprintVersion)
+	if FingerprintVersion != "v7" {
+		t.Errorf("FingerprintVersion = %q, want v7", FingerprintVersion)
 	}
 }
 
