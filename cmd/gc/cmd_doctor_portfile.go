@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 )
@@ -29,8 +30,6 @@ type portFileConsistencyCheck struct {
 	// Defaults to newLiveDoltPortResolver().resolve.
 	livePort func(cityPath string) (liveDoltPortResolution, error)
 }
-
-const proxiedServerClientInfoFile = "proxied_server_client_info.json"
 
 // proxiedServerClientInfo is the subset of bd's
 // .beads/proxied_server_client_info.json this check reads: an external block
@@ -141,7 +140,7 @@ func (c *portFileConsistencyCheck) WarmupEligible() bool { return false }
 func statusFilesPresent(scopes []portFileScope) []string {
 	var out []string
 	for _, scope := range scopes {
-		for _, name := range []string{"dolt-server.port", proxiedServerClientInfoFile} {
+		for _, name := range []string{"dolt-server.port", proxyendpoint.SidecarFileName} {
 			path := filepath.Join(scope.dir, ".beads", name)
 			if _, err := os.Stat(path); err == nil {
 				out = append(out, fmt.Sprintf("%s: %s", scope.label, path))
@@ -169,7 +168,7 @@ func scopePortFileMismatches(scope portFileScope, livePort int) []string {
 		}
 	}
 
-	infoFile := filepath.Join(scope.dir, ".beads", proxiedServerClientInfoFile)
+	infoFile := filepath.Join(scope.dir, ".beads", proxyendpoint.SidecarFileName)
 	if data, err := os.ReadFile(infoFile); err == nil {
 		var info proxiedServerClientInfo
 		if jsonErr := json.Unmarshal(data, &info); jsonErr != nil {

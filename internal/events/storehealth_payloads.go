@@ -1,7 +1,7 @@
 package events
 
 // Breaker, controller-heartbeat, and doctor event types and their typed
-// payloads (city-scale architecture plan items 1.5 and 1.9). These are
+// payloads (city-scale architecture plan item 1.9). These are
 // emitted by the resilience breaker registry (internal/resilience, wired
 // through the bd runner), the controller reconcile loop, and the
 // supervisor-cadence doctor.
