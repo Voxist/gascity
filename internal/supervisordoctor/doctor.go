@@ -26,7 +26,6 @@ const (
 	CheckNameTickAge              = "tick_age"
 	CheckNameSlowTicks            = "slow_ticks"
 	CheckNameAgentConfigIsolation = "agent_config_isolation"
-	CheckNameS6ConnectionCeiling  = "s6_connection_ceiling"
 )
 
 // Alert is one red doctor finding.
@@ -113,46 +112,6 @@ func CheckSlowTicksFor(in SlowTicksInput) *Alert {
 		Detail: fmt.Sprintf("%d of %d controller ticks in the last %s breached the slow-tick threshold (slowest %s); the reconcile loop is degrading",
 			in.BreachCount, in.SampleCount, in.Window.Round(time.Second),
 			(time.Duration(in.SlowestMs) * time.Millisecond).Round(time.Millisecond)),
-	}
-}
-
-// S6Input holds the connection-ceiling facts for one city.
-type S6Input struct {
-	// City is the city name (alert subject).
-	City string
-	// Scopes is the number of store scopes (city + bound rigs).
-	Scopes int
-	// PoolSize is the per-scope managed connection pool size (the proxy
-	// pool size / connections each scope can hold). The ceiling models
-	// scopes×(pool+1) total connections.
-	PoolSize int
-	// MaxConnections is the managed dolt @@max_connections value from
-	// config. A non-positive value skips the check (the ceiling cannot be
-	// evaluated without it).
-	MaxConnections int
-}
-
-// s6CeilingFraction is the fraction of @@max_connections the projected
-// connection demand must stay under (0.8×, plan items 1.9/2.7).
-const s6CeilingFraction = 0.8
-
-// CheckS6ConnectionCeiling returns an Alert when the projected connection
-// demand scopes×(pool+1) exceeds s6CeilingFraction×max_connections.
-// Returns nil when within budget or when max_connections is unknown.
-func CheckS6ConnectionCeiling(in S6Input) *Alert {
-	if in.MaxConnections <= 0 || in.Scopes <= 0 {
-		return nil
-	}
-	projected := in.Scopes * (in.PoolSize + 1)
-	ceiling := s6CeilingFraction * float64(in.MaxConnections)
-	if float64(projected) <= ceiling {
-		return nil
-	}
-	return &Alert{
-		Check:   CheckNameS6ConnectionCeiling,
-		Subject: in.City,
-		Detail: fmt.Sprintf("projected connection demand %d (%d scopes × (pool %d + 1)) exceeds 0.8×max_connections (%.0f of %d)",
-			projected, in.Scopes, in.PoolSize, ceiling, in.MaxConnections),
 	}
 }
 
