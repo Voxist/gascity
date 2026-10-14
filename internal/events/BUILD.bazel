@@ -16,7 +16,6 @@ go_library(
         "order_payloads.go",
         "payload.go",
         "payloads.go",
-        "proxy_payloads.go",
         "query.go",
         "reader.go",
         "reader_context.go",

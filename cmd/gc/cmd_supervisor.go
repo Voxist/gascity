@@ -2653,7 +2653,6 @@ func startOneCity(
 		cs.startBeadEventWatcher(cityCtx)
 		cs.startAutocloseSweep(cityCtx)
 		cs.startMaintenanceLoop(cityCtx)
-		cs.startStoreHealthPatrol(cityCtx)
 		return nil
 	})
 

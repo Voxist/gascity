@@ -30,6 +30,23 @@ type portFileConsistencyCheck struct {
 	livePort func(cityPath string) (liveDoltPortResolution, error)
 }
 
+const proxiedServerClientInfoFile = "proxied_server_client_info.json"
+
+// proxiedServerClientInfo is the subset of bd's
+// .beads/proxied_server_client_info.json this check reads: an external block
+// naming the dolt sql-server the proxy fronts. gc never reads it back for
+// endpoint resolution — gc-side resolution is live-state only
+// (dolt_port_live.go).
+type proxiedServerClientInfo struct {
+	External *proxiedServerExternal `json:"external,omitempty"`
+}
+
+type proxiedServerExternal struct {
+	Host string `json:"host,omitempty"`
+	Port int    `json:"port,omitempty"`
+	User string `json:"user,omitempty"`
+}
+
 func newPortFileConsistencyCheck(cityPath string, cfg *config.City) *portFileConsistencyCheck {
 	return &portFileConsistencyCheck{
 		cityPath: cityPath,
