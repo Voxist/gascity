@@ -30,8 +30,9 @@ type retiredKey struct {
 // classifier (classifyUndecoded), and IsRetiredKeyWarning keeps it non-fatal +
 // surfaced on the two downstream deciders that re-classify config warnings —
 // strict mode (cmd/gc/strict_warnings.go) and the agent warning-emit path
-// (cmd/gc/cmd_agent.go). It is intentionally empty until the first consumer:
-// S5-T7 retires daemon.graph_workflows (today still a live formula_v2 alias).
+// (cmd/gc/cmd_agent.go). Its first entries retire the Voxist fork's
+// [beads] proxied opt-in and its [storehealth] patrol (ga-s69mk.3); S5-T7 will
+// retire daemon.graph_workflows (today still a live formula_v2 alias).
 //
 // S5-T7 INTEGRATION NOTES (deferred to the change that adds the first entry):
 //   - Whole-table retirement needs BOTH the parent-table key and each leaf key
@@ -40,7 +41,37 @@ type retiredKey struct {
 //     site_binding.go) and `gc migrate` still refuse a file carrying a retired
 //     key (the rewrite would drop it). S5-T7 must decide whether to exempt
 //     retired keys there or reword the "upgrade gc" guidance.
-var retiredKeys = map[string]retiredKey{}
+var retiredKeys = map[string]retiredKey{
+	"beads.proxied": {
+		RemovedIn: retiredProxiedOptInAnchor,
+		Note:      "bd owns the proxied-server topology in scope metadata; migrate with `gc beads city migrate-proxied` and tune idle shutdown with [beads] proxied_idle_timeout",
+	},
+	"beads.proxy_pool_size": {
+		RemovedIn: retiredProxiedOptInAnchor,
+		Note:      "bd owns the proxied-server connection pool; migrate with `gc beads city migrate-proxied` and tune idle shutdown with [beads] proxied_idle_timeout",
+	},
+	"beads.proxy_idle_timeout": {
+		RemovedIn: retiredProxiedOptInAnchor,
+		Note:      "use [beads] proxied_idle_timeout on a city migrated with `gc beads city migrate-proxied`",
+	},
+	"storehealth":                      retiredStoreHealthKey,
+	"storehealth.enabled":              retiredStoreHealthKey,
+	"storehealth.interval":             retiredStoreHealthKey,
+	"storehealth.consecutive_fails":    retiredStoreHealthKey,
+	"storehealth.reap_cooldown":        retiredStoreHealthKey,
+	"storehealth.write_probe_interval": retiredStoreHealthKey,
+}
+
+// retiredProxiedOptInAnchor is the removal anchor for the fork's [beads]
+// proxied opt-in, superseded by upstream's bd-owned proxied-server.
+const retiredProxiedOptInAnchor = "the Voxist fork convergence (ga-s69mk.3)"
+
+// retiredStoreHealthKey retires the [storehealth] table and each of its leaf
+// keys; the patrol it configured only ran for [beads] proxied cities.
+var retiredStoreHealthKey = retiredKey{
+	RemovedIn: retiredProxiedOptInAnchor,
+	Note:      "the store-health patrol ran only with the retired [beads] proxied opt-in; delete the [storehealth] table",
+}
 
 // retiredKeyWarning renders the migration warning for a retired key.
 func retiredKeyWarning(source, key string, rk retiredKey) string {

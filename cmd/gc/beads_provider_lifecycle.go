@@ -3200,7 +3200,7 @@ func enforceCanonicalScopeMetadataForInit(fs fsys.FS, scopeRoot, doltDatabase, f
 // proxied-local UOW, so upstream's marker is a true statement about upstream.
 // This fork does not adopt that default (ga-m07q9): it pins a different
 // beads fork (Voxist/beads) with its own, pre-existing proxied-server
-// architecture, and config.Proxied stays defaulting false. A fresh bd init on
+// architecture, and new scopes stay non-proxied by default. A fresh bd init on
 // this fork's pinned beads does not default to proxied, so "proxied-server"
 // here would not be a true statement about what was just created — it would
 // be the same topology flip ga-m07q9 rejects, just written to metadata.json
@@ -3592,7 +3592,7 @@ func freshScopeCanonicalDoltMode(cityPath string) string { //nolint:unparam // t
 		return "server"
 	}
 	// This fork does not take upstream's proxied-by-default topology flip
-	// (ga-m07q9): config.Proxied stays defaulting false, so a scope with no
+	// (ga-m07q9): new scopes stay non-proxied by default, so a scope with no
 	// persisted dolt_mode and no other signal resolves to an ordinary
 	// gc-managed Dolt server, not bd's proxied-local UOW. A city that wants
 	// the proxied lane opts in explicitly (an existing proxied-server

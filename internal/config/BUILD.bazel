@@ -155,6 +155,7 @@ go_test(
         "resolve_test.go",
         "resolved_cache_test.go",
         "retired_key_test.go",
+        "retired_proxied_keys_test.go",
         "revision_test.go",
         "rig_field_sync_test.go",
         "rig_merge_strategy_test.go",

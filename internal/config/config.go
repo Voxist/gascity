@@ -294,9 +294,6 @@ type City struct {
 	// Doctor configures gc doctor thresholds and policy toggles
 	// (worktree size warnings, nested-worktree auto-prune).
 	Doctor DoctorConfig `toml:"doctor,omitempty"`
-	// StoreHealth configures the controller-internal store health patrol
-	// (probe matrix, reap rate-limit, write-path conformance probe).
-	StoreHealth StoreHealthConfig `toml:"storehealth,omitempty"`
 	// Maintenance configures periodic store-maintenance loops.
 	Maintenance MaintenanceConfig `toml:"maintenance,omitempty"`
 	// Services declares workspace-owned HTTP services mounted on the
@@ -1445,32 +1442,6 @@ type BeadsConfig struct {
 	// and avoids bd ready/list flags that are unavailable or incomplete in bd
 	// 1.0.4.
 	BDCompatibility string `toml:"bd_compatibility,omitempty" jsonschema:"enum=bd-1.0.4,enum=bd-1.0.5"`
-	// Proxied routes bd through the pooling db-proxy (ProxiedServerMode,
-	// external backend) instead of direct ServerMode, eliminating the per-call
-	// bd→dolt connection churn (#1978: ~71 new connections/sec to the managed
-	// dolt server). Defaults to false = current direct ServerMode, byte-for-byte
-	// identical, so existing cities are unaffected. Requires a bd build that
-	// supports `bd init --proxied-server` (external); when the resolved bd lacks
-	// it, gascity falls back to server mode and a doctor check flags it, so a
-	// city paired with a standard bd never breaks.
-	Proxied *bool `toml:"proxied,omitempty" jsonschema:"default=false"`
-	// ProxyPoolSize is the warm backend-connection pool size the db-proxy keeps
-	// per (capabilities, database) key when Proxied is true. Defaults to 4.
-	// The proxy is shared per workspace root, so all agents of a scope share one
-	// warm pool; the size is frozen by the first bd invocation that spawns the
-	// proxy (changing it requires restarting the db-proxy-child).
-	ProxyPoolSize *int `toml:"proxy_pool_size,omitempty" jsonschema:"default=4"`
-	// ProxyIdleTimeout is how long a db-proxy-child stays alive with no active
-	// client before it shuts down. The bd default (30s) is tuned for one busy
-	// workspace; gascity touches many scopes sparsely (controller patrol probes
-	// every rig once per interval), starving any finite timeout so the proxy
-	// spawns, serves one op, idle-dies, and respawns on the next touch — pure
-	// churn that never reaches the warm-pool steady state. gascity therefore
-	// defaults to "0" (never idle) and owns the proxy lifecycle: proxies stay
-	// warm for the city's lifetime and are reaped on `gc stop`. Operators who
-	// want gc to relinquish that ownership can set a finite Go duration string.
-	// Read by bd as BEADS_PROXY_IDLE_TIMEOUT.
-	ProxyIdleTimeout *string `toml:"proxy_idle_timeout,omitempty" jsonschema:"default=0"`
 	// ExpectedBuild pins the bd build this city expects: a token (version or
 	// build identifier) that must appear verbatim in `bd --version` output.
 	// The beads-expected-build doctor check compares them so a brew upgrade
@@ -1717,47 +1688,6 @@ func (b BeadsConfig) NativeStoreCanaryEnabledForScope(scopeName, envValue string
 // Unset preserves the current default of enabled hooks.
 func (b BeadsConfig) EventHooksEnabled() bool {
 	return b.EventHooks == nil || *b.EventHooks
-}
-
-// ProxiedEnabled reports whether bd should run in pooling ProxiedServerMode.
-// Unset preserves the current default of direct ServerMode (false).
-func (b BeadsConfig) ProxiedEnabled() bool {
-	return b.Proxied != nil && *b.Proxied
-}
-
-// defaultBeadsProxyPoolSize is the warm pool size used when Proxied is on and
-// ProxyPoolSize is unset or non-positive.
-const defaultBeadsProxyPoolSize = 4
-
-// ProxyPoolSizeOrDefault returns the configured pool size, or the default when
-// unset/non-positive.
-func (b BeadsConfig) ProxyPoolSizeOrDefault() int {
-	if b.ProxyPoolSize != nil && *b.ProxyPoolSize > 0 {
-		return *b.ProxyPoolSize
-	}
-	return defaultBeadsProxyPoolSize
-}
-
-// defaultBeadsProxyIdleTimeout is the proxy idle-shutdown timeout used when
-// Proxied is on and ProxyIdleTimeout is unset/blank. "0" disables idle
-// shutdown: gascity owns the db-proxy lifecycle (Option 2), keeping each proxy
-// warm for the city's lifetime and reaping it on `gc stop`
-// (reapProxiedChildrenForCity). A never-idle proxy eliminates the
-// spawn/serve/idle-die/respawn churn that any finite timeout suffers under
-// sparse controller probes; a crash at worst leaves a still-usable warm proxy,
-// which the next stop reaps. Operators who do not want gc to own the lifecycle
-// can still set a finite proxy_idle_timeout explicitly.
-const defaultBeadsProxyIdleTimeout = "0"
-
-// ProxyIdleTimeoutOrDefault returns the configured proxy idle timeout, or the
-// default when unset/blank.
-func (b BeadsConfig) ProxyIdleTimeoutOrDefault() string {
-	if b.ProxyIdleTimeout != nil {
-		if v := strings.TrimSpace(*b.ProxyIdleTimeout); v != "" {
-			return v
-		}
-	}
-	return defaultBeadsProxyIdleTimeout
 }
 
 const (
@@ -2850,8 +2780,8 @@ type DoctorConfig struct {
 	Checks []LocalDoctorCheck `toml:"check,omitempty"`
 
 	// SupervisorInterval is the cadence at which the supervisor evaluates
-	// the cheap doctor subset (tick-age, agent_config_isolation, S6
-	// ceiling, plus any registered provenance/port-consistency checks) and
+	// the cheap doctor subset (tick-age, slow ticks, agent_config_isolation,
+	// plus any registered provenance/port-consistency checks) and
 	// publishes doctor.alert on red. Duration string. Defaults to "10m".
 	// Without this, every doctor-based retirement is detection at human
 	// cadence — the exact vigilance gap that produced incidents 5 and 11.
@@ -2894,61 +2824,6 @@ func (c DoctorConfig) WorktreeRigErrorBytes() int64 {
 		return warn
 	}
 	return n
-}
-
-// StoreHealthConfig configures the controller-internal store health patrol
-// (city-scale architecture plan item 1.5). Every threshold is mechanical
-// (durations and counts) so the patrol holds no judgment calls in Go.
-type StoreHealthConfig struct {
-	// Enabled toggles the patrol. Defaults to true. Disabling restores the
-	// pre-patrol behavior (no two-probe matrix, no auto-reap).
-	Enabled *bool `toml:"enabled,omitempty" jsonschema:"default=true"`
-	// Interval is the per-scope probe cadence as a duration string.
-	// Defaults to "30s".
-	Interval string `toml:"interval,omitempty" jsonschema:"default=30s"`
-	// ConsecutiveFails is how many consecutive A-fail∧B-ok cycles confirm a
-	// proxy poison before forensics + reap. Defaults to 3.
-	ConsecutiveFails int `toml:"consecutive_fails,omitempty" jsonschema:"default=3"`
-	// ReapCooldown is the minimum spacing between reaps for one scope as a
-	// duration string. A second poison inside the window is alert-only with
-	// forensics kept. Defaults to "10m".
-	ReapCooldown string `toml:"reap_cooldown,omitempty" jsonschema:"default=10m"`
-	// WriteProbeInterval is the cadence of the write-path conformance probe
-	// (create+close one ephemeral bead of each RequiredCustomType) as a
-	// duration string. Defaults to "10m".
-	WriteProbeInterval string `toml:"write_probe_interval,omitempty" jsonschema:"default=10m"`
-}
-
-// StoreHealthEnabledOrDefault reports whether the patrol is enabled
-// (default true).
-func (c StoreHealthConfig) StoreHealthEnabledOrDefault() bool {
-	return c.Enabled == nil || *c.Enabled
-}
-
-// IntervalOrDefault returns the parsed probe interval, falling back to 30s.
-func (c StoreHealthConfig) IntervalOrDefault() time.Duration {
-	return positiveDurationOrDefault(c.Interval, 30*time.Second)
-}
-
-// ConsecutiveFailsOrDefault returns the confirm threshold, falling back to
-// 3 when unset or non-positive.
-func (c StoreHealthConfig) ConsecutiveFailsOrDefault() int {
-	if c.ConsecutiveFails > 0 {
-		return c.ConsecutiveFails
-	}
-	return 3
-}
-
-// ReapCooldownOrDefault returns the parsed reap cooldown, falling back to
-// 10m.
-func (c StoreHealthConfig) ReapCooldownOrDefault() time.Duration {
-	return positiveDurationOrDefault(c.ReapCooldown, 10*time.Minute)
-}
-
-// WriteProbeIntervalOrDefault returns the parsed write-probe interval,
-// falling back to 10m.
-func (c StoreHealthConfig) WriteProbeIntervalOrDefault() time.Duration {
-	return positiveDurationOrDefault(c.WriteProbeInterval, 10*time.Minute)
 }
 
 // parseHumanSize parses sizes like "10GB", "500 MB", "1024" (bytes

@@ -41,7 +41,6 @@ City is the top-level configuration for a Gas City instance.
 | `session_sleep` | SessionSleepConfig |  |  | SessionSleep configures idle sleep policy defaults for managed sessions. |
 | `convergence` | ConvergenceConfig |  |  | Convergence configures convergence loop limits. |
 | `doctor` | DoctorConfig |  |  | Doctor configures gc doctor thresholds and policy toggles (worktree size warnings, nested-worktree auto-prune). |
-| `storehealth` | StoreHealthConfig |  |  | StoreHealth configures the controller-internal store health patrol (probe matrix, reap rate-limit, write-path conformance probe). |
 | `maintenance` | MaintenanceConfig |  |  | Maintenance configures periodic store-maintenance loops. |
 | `service` | []Service |  |  | Services declares workspace-owned HTTP services mounted on the controller edge under /svc/&#123;name&#125;. |
 | `webhook` | []Webhook |  |  | Webhooks declares inbound HTTP receivers mounted on the supervisor edge under /hook/&#123;name&#125;. Composed like Services (pack concatenation + SourceDir provenance + the default-closed public pack-guard). |
@@ -303,9 +302,6 @@ BeadsConfig holds bead store settings.
 | `backend` | string |  |  | Backend selects the bd storage engine when Provider is "bd". Empty defaults to "dolt"; T3Code uses "doltlite" for local dev stores. |
 | `event_hooks` | boolean |  | `true` | EventHooks controls installation of the bead event-forwarding hooks (.beads/hooks/on_create,on_update,on_close) that shell out to `gc event emit` on every bead write. Defaults to true. Set to false once the controller's native cache-events already observe bead changes (the bd_hooks doctor gate): the lifecycle then removes the event hooks (leaving git hooks untouched) and stops reinstalling them, clearing the per-write churn and the native-store gate. |
 | `bd_compatibility` | string |  |  | BDCompatibility selects the bd CLI semantics Gas City may rely on. Empty defaults to "bd-1.0.4", which keeps claimable work history-backed and avoids bd ready/list flags that are unavailable or incomplete in bd 1.0.4. Enum: `bd-1.0.4`, `bd-1.0.5` |
-| `proxied` | boolean |  | `false` | Proxied routes bd through the pooling db-proxy (ProxiedServerMode, external backend) instead of direct ServerMode, eliminating the per-call bd→dolt connection churn (#1978: ~71 new connections/sec to the managed dolt server). Defaults to false = current direct ServerMode, byte-for-byte identical, so existing cities are unaffected. Requires a bd build that supports `bd init --proxied-server` (external); when the resolved bd lacks it, gascity falls back to server mode and a doctor check flags it, so a city paired with a standard bd never breaks. |
-| `proxy_pool_size` | integer |  | `4` | ProxyPoolSize is the warm backend-connection pool size the db-proxy keeps per (capabilities, database) key when Proxied is true. Defaults to 4. The proxy is shared per workspace root, so all agents of a scope share one warm pool; the size is frozen by the first bd invocation that spawns the proxy (changing it requires restarting the db-proxy-child). |
-| `proxy_idle_timeout` | string |  | `0` | ProxyIdleTimeout is how long a db-proxy-child stays alive with no active client before it shuts down. The bd default (30s) is tuned for one busy workspace; gascity touches many scopes sparsely (controller patrol probes every rig once per interval), starving any finite timeout so the proxy spawns, serves one op, idle-dies, and respawns on the next touch — pure churn that never reaches the warm-pool steady state. gascity therefore defaults to "0" (never idle) and owns the proxy lifecycle: proxies stay warm for the city's lifetime and are reaped on `gc stop`. Operators who want gc to relinquish that ownership can set a finite Go duration string. Read by bd as BEADS_PROXY_IDLE_TIMEOUT. |
 | `expected_build` | string |  |  | ExpectedBuild pins the bd build this city expects: a token (version or build identifier) that must appear verbatim in `bd --version` output. The beads-expected-build doctor check compares them so a brew upgrade or a rebuild from the wrong branch clobbering a custom bd is caught at doctor cadence instead of as a runtime mystery. Empty disables the check. |
 | `conditional_writes` | string |  |  | ConditionalWrites selects the bead-write discipline: "off" (legacy, byte-identical), "auto" (compare-and-swap where the store is capable, loud degrade otherwise), or "require" (CAS or a typed refusal). Empty defaults to "off". Any other value fails config load. Enum: `off`, `auto`, `require` |
 | `guarded_release` | string |  |  | GuardedRelease selects the ownership-release discipline for work beads: "off" (legacy, owner-blind bd update/unclaim), "auto" (fence-guarded release verbs where the bd binary is capable, loud degrade otherwise), or "require" (guarded release or a typed refusal). Empty defaults to "off". Any other value fails config load. Enum: `off`, `auto`, `require` |
@@ -424,7 +420,7 @@ DoctorConfig holds settings for the gc doctor surface.
 | `worktree_rig_error_size` | string |  | `50GB` | WorktreeRigErrorSize is the per-rig error threshold. When a rig worktree population exceeds this, the reporting check errors rather than warns. Empty or unparseable falls back to the default (50 GB). |
 | `nested_worktree_prune` | boolean |  | `false` | NestedWorktreePrune escalates the nested-worktree-prune check from warning to error severity when safely-prunable nested worktrees are present, so CI / scripted doctor runs fail until the operator runs `gc doctor --fix`. Actual removal still requires --fix; this flag does not auto-prune. Safety is enforced by mechanical checks (no uncommitted changes, no unpushed commits, no stashes) — never by role identity. |
 | `check` | []LocalDoctorCheck |  |  | Checks holds city-local inline doctor checks declared via [[doctor.check]] in city.toml. |
-| `supervisor_interval` | string |  | `10m` | SupervisorInterval is the cadence at which the supervisor evaluates the cheap doctor subset (tick-age, agent_config_isolation, S6 ceiling, plus any registered provenance/port-consistency checks) and publishes doctor.alert on red. Duration string. Defaults to "10m". Without this, every doctor-based retirement is detection at human cadence — the exact vigilance gap that produced incidents 5 and 11. |
+| `supervisor_interval` | string |  | `10m` | SupervisorInterval is the cadence at which the supervisor evaluates the cheap doctor subset (tick-age, slow ticks, agent_config_isolation, plus any registered provenance/port-consistency checks) and publishes doctor.alert on red. Duration string. Defaults to "10m". Without this, every doctor-based retirement is detection at human cadence — the exact vigilance gap that produced incidents 5 and 11. |
 
 ## DoltConfig
 
@@ -949,18 +945,6 @@ StorageConfig assigns each semantic storage class to a named binding and defines
 |-------|------|----------|---------|-------------|
 | `classes` | StorageClasses | **yes** |  | Classes contains the complete class-to-binding assignment. |
 | `bindings` | map[string]StorageBindingConfig |  |  | Bindings defines named provider-backed bindings. The reserved work binding is synthesized and must not appear here. |
-
-## StoreHealthConfig
-
-StoreHealthConfig configures the controller-internal store health patrol (city-scale architecture plan item 1.5).
-
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `enabled` | boolean |  | `true` | Enabled toggles the patrol. Defaults to true. Disabling restores the pre-patrol behavior (no two-probe matrix, no auto-reap). |
-| `interval` | string |  | `30s` | Interval is the per-scope probe cadence as a duration string. Defaults to "30s". |
-| `consecutive_fails` | integer |  | `3` | ConsecutiveFails is how many consecutive A-fail∧B-ok cycles confirm a proxy poison before forensics + reap. Defaults to 3. |
-| `reap_cooldown` | string |  | `10m` | ReapCooldown is the minimum spacing between reaps for one scope as a duration string. A second poison inside the window is alert-only with forensics kept. Defaults to "10m". |
-| `write_probe_interval` | string |  | `10m` | WriteProbeInterval is the cadence of the write-path conformance probe (create+close one ephemeral bead of each RequiredCustomType) as a duration string. Defaults to "10m". |
 
 ## Tier
 
