@@ -8,6 +8,15 @@
 # Use --gc to purge closed ephemeral beads before syncing.
 # Use --dry-run to preview without pushing.
 #
+# On a bd-owned proxied city (see proxied_scope.sh) there is no managed server
+# to dial: bd starts and owns each scope's sql-server. Sync then reaches every
+# bead scope — the city and each rig that is neither the HQ entry nor
+# suspended — through `gc bd --city <city> [--rig <rig>] sql --csv`, one
+# statement per call, and applies the same remote selection and fast-forward
+# rules to each scope's database. A suspended rig is left cold: any bd call
+# would restart its retired proxy. --gc is refused there (purge each scope
+# with `gc bd purge`).
+#
 # Refspec resolution (per database):
 #   1. GC_DOLT_REFSPEC_<DB_UPPER> env var override, in <local>:<remote> form
 #      (e.g. GC_DOLT_REFSPEC_GA=main:gascity-3). DB name is uppercased with
@@ -38,7 +47,7 @@
 #
 # Environment:
 #   GC_CITY_PATH                          (required) — city root
-#   GC_DOLT_PORT                          (required) — managed dolt port
+#   GC_DOLT_PORT                          (required on managed cities) — managed dolt port
 #   GC_DOLT_USER                          (default: root)
 #   GC_DOLT_PASSWORD                      (optional)
 #   GC_DOLT_REMOTE_<DB>                   (optional) — select which remote to
@@ -98,6 +107,9 @@ while [ $# -gt 0 ]; do
       echo "              new commits can arrive mid-run and read as a residual."
       echo "  --db NAME   Sync only the named database"
       echo ""
+      echo "On a bd-owned proxied city each bead scope (the city and every active"
+      echo "rig) is synced through 'gc bd sql'; --gc is refused there."
+      echo ""
       echo "Policy:"
       echo "  Create .no-sync in a database's .beads/dolt/<db>/ directory to"
       echo "  exclude it from sync (reported as 'skipped (.no-sync)')."
@@ -123,7 +135,12 @@ esac
 
 : "${GC_DOLT_USER:=root}"
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
+# Sync handles bd-owned proxied scopes itself (through gc bd) instead of
+# taking runtime.sh's lifecycle no-op.
+GC_DOLT_PROXIED_HANDLED=1
 . "$PACK_DIR/assets/scripts/runtime.sh"
+proxied=false
+[ "${GC_DOLT_SCOPE_BD_PROXIED:-0}" = "1" ] && proxied=true
 
 beads_bd="$GC_BEADS_BD_SCRIPT"
 data_dir="$DOLT_DATA_DIR"
@@ -190,6 +207,11 @@ esac
 if [ "$drain_attempts_valid" != true ]; then
   printf 'gc dolt sync: invalid GC_DOLT_SYNC_DRAIN_ATTEMPTS=%s (must be a positive integer)\n' \
     "$drain_attempts" >&2
+  exit 2
+fi
+
+if [ "$proxied" = true ] && [ "$do_gc" = true ]; then
+  echo "gc dolt sync: --gc is not supported on bd-owned proxied scopes; purge each scope with 'gc bd purge' instead" >&2
   exit 2
 fi
 
@@ -324,6 +346,39 @@ dolt_sql() {
     sql --result-format csv -q "$query"
 }
 
+# SCOPE_RIG names the rig whose bead scope scope_bd_bounded reaches; empty
+# means the city scope. Only the proxied path sets it.
+SCOPE_RIG=""
+
+# scope_bd_bounded SECS ARGS... — run `gc bd ARGS...` against the current bead
+# scope under a wall-clock bound. gc picks the scope's transport, so this works
+# without any managed Dolt endpoint.
+scope_bd_bounded() {
+  sb_secs="$1"
+  shift
+  if [ -n "$SCOPE_RIG" ]; then
+    (cd "$GC_CITY_PATH" && run_bounded "$sb_secs" gc bd --city "$GC_CITY_PATH" --rig "$SCOPE_RIG" "$@")
+  else
+    (cd "$GC_CITY_PATH" && run_bounded "$sb_secs" gc bd --city "$GC_CITY_PATH" "$@")
+  fi
+}
+
+# db_sql <db> QUERY [TIMEOUT_SECS] — run one SQL statement against database
+# <db> and print CSV. On a managed city that is the live server (dolt_sql, with
+# a USE prefix); on a proxied city it is the current scope through gc bd, whose
+# own database is <db>. bd answers a multi-statement batch with a bare "OK", so
+# QUERY must be a single statement. The timeout contract is dolt_sql's.
+db_sql() {
+  ds_db="$1"
+  ds_query="$2"
+  ds_tmo="${3:-120}"
+  if [ "$proxied" = true ]; then
+    scope_bd_bounded "$ds_tmo" sql --csv "$ds_query"
+  else
+    dolt_sql "USE \`$ds_db\`; $ds_query" "$ds_tmo"
+  fi
+}
+
 # classify_count <db> <revrange> — emit the dolt_log commit count for a revision
 # range (e.g. "remotes/origin/main..main" = commits on the remote-tracking ref
 # not on the local branch). Returns non-zero when the range cannot be resolved —
@@ -334,7 +389,7 @@ dolt_sql() {
 classify_count() {
   cc_db="$1"
   cc_range="$2"
-  cc_out=$(dolt_sql "USE \`$cc_db\`; SELECT COUNT(*) AS n FROM dolt_log('$cc_range')") || return 1
+  cc_out=$(db_sql "$cc_db" "SELECT COUNT(*) AS n FROM dolt_log('$cc_range')") || return 1
   printf '%s\n' "$cc_out" | awk -F, 'NR == 2 { gsub(/^"|"$/, "", $1); print $1; exit }'
 }
 
@@ -361,7 +416,7 @@ residual_backlog() {
   rb_remote="$2"
   rb_local="$3"
   rb_remote_branch="$4"
-  dolt_sql "USE \`$rb_db\`; CALL DOLT_FETCH('$rb_remote', '$rb_remote_branch')" "$fetch_timeout" \
+  db_sql "$rb_db" "CALL DOLT_FETCH('$rb_remote', '$rb_remote_branch')" "$fetch_timeout" \
     >/dev/null 2>&1 || return 2
   rb_ahead=$(classify_count "$rb_db" "remotes/$rb_remote/$rb_remote_branch..$rb_local") || return 2
   case "$rb_ahead" in
@@ -417,7 +472,7 @@ select_remote() {
 # — it has already printed its own, more specific reason.
 find_remote_sql() {
   db="$1"
-  remote_csv=$(dolt_sql "USE \`$db\`; SELECT name, url FROM dolt_remotes ORDER BY name") || {
+  remote_csv=$(db_sql "$db" "SELECT name, url FROM dolt_remotes ORDER BY name") || {
     echo "  $db: ERROR: failed to query remotes" >&2
     return 1
   }
@@ -444,7 +499,7 @@ resolve_refspec_sql() {
     printf '%s\n' "$parts"
     return 0
   fi
-  if active_csv=$(dolt_sql "USE \`$db\`; SELECT active_branch()" 2>/dev/null); then
+  if active_csv=$(db_sql "$db" "SELECT active_branch()" 2>/dev/null); then
     active=$(printf '%s\n' "$active_csv" | awk 'NR > 1 && $0 != "" {gsub(/^"|"$/, ""); print; exit}')
     if [ -n "$active" ] && valid_branch_name "$active"; then
       printf '%s\n%s\n' "$active" "$active"
@@ -603,7 +658,7 @@ sync_database_sql() {
     }
     fetch_rc=0
     fetch_start=$(date +%s)
-    dolt_sql "USE \`$name\`; CALL DOLT_FETCH('$remote_name', '$remote_branch')" "$fetch_timeout" \
+    db_sql "$name" "CALL DOLT_FETCH('$remote_name', '$remote_branch')" "$fetch_timeout" \
       >/dev/null 2>"$fetch_err_tmp" || fetch_rc=$?
     fetch_elapsed=$(( $(date +%s) - fetch_start ))
     if [ "$fetch_rc" -ne 0 ] && { grep -q "no branches found in remote" "$fetch_err_tmp" 2>/dev/null || grep -q "invalid ref spec" "$fetch_err_tmp" 2>/dev/null; }; then
@@ -706,9 +761,9 @@ sync_database_sql() {
   # preserves the comment in processlist.info. See reap_dolt_push_by_tag.
   push_tag=$(dolt_push_tag "$name")
   if [ "$force" = true ]; then
-    push_query="USE \`$name\`; CALL DOLT_PUSH('--force', '--set-upstream', '$remote_name', '$refspec_arg') /* $push_tag */"
+    push_query="CALL DOLT_PUSH('--force', '--set-upstream', '$remote_name', '$refspec_arg') /* $push_tag */"
   else
-    push_query="USE \`$name\`; CALL DOLT_PUSH('$remote_name', '$refspec_arg') /* $push_tag */"
+    push_query="CALL DOLT_PUSH('$remote_name', '$refspec_arg') /* $push_tag */"
   fi
   # ADR-0064 D1 step 2. Push, then in --drain mode VERIFY the store actually
   # reached a zero backlog and re-push while it has not. Bounded by
@@ -732,12 +787,13 @@ sync_database_sql() {
     # on rather than killing the run.
     push_err_tmp=$(mktemp) || {
       echo "  $name: ERROR: cannot create temp file for push diagnostics" >&2
+      last_fail_reason="cannot create temp file for push diagnostics"
       return 1
     }
     # Route push under push_timeout (not dolt_sql's 120s metadata ceiling) and
     # capture stderr so the underlying dolt diagnostic survives, preserving the
     # real exit code via `|| push_rc=$?`.
-    dolt_sql "$push_query" "$push_timeout" >/dev/null 2>"$push_err_tmp" || push_rc=$?
+    db_sql "$name" "$push_query" "$push_timeout" >/dev/null 2>"$push_err_tmp" || push_rc=$?
 
     if [ "$push_rc" -eq 0 ]; then
       rm -f "$push_err_tmp"
@@ -785,7 +841,8 @@ sync_database_sql() {
       # The client bound killed our dolt client, but the server-side push keeps
       # running orphaned — reap this run's tagged push so it stops contending on
       # the shared server (vc-ewyro). Short-bounded; never blocks the patrol.
-      reap_dolt_push_by_tag "$push_tag"
+      # Proxied: the orphan lives in bd's Dolt child, which gc does not manage.
+      [ "$proxied" != true ] && reap_dolt_push_by_tag "$push_tag"
     else
       echo "  $name: ERROR: push failed (exit $push_rc)" >&2
       # Feed the end-of-run summary (failed_summary) the same way the CLI push
@@ -899,6 +956,105 @@ sync_database_cli() {
   return 1
 }
 
+# record_failure <label> <reason> — count one failed database or scope for the
+# exit code and the closing summary line.
+record_failure() {
+  exit_code=1
+  fail_count=$((fail_count + 1))
+  failed_summary="$failed_summary$1 ($2); "
+}
+
+# replay_prefixed <label> <file> — copy a captured stderr file to stderr, each
+# line prefixed with the label. `|| [ -n "$line" ]` keeps a final line that
+# lacks a trailing newline.
+replay_prefixed() {
+  [ -s "$2" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    printf '  %s: %s\n' "$1" "$line" >&2
+  done < "$2"
+}
+
+# proxied_scope_specs — emit one "<rig>|<path>" line per bead scope to sync on a
+# proxied city: first the city ("|<city path>"), then each rig gc reports that
+# is neither the HQ entry (the city scope again) nor suspended. Returns 1 when
+# rig discovery fails, after emitting the city line.
+proxied_scope_specs() {
+  printf '|%s\n' "$GC_CITY_PATH"
+  ps_rigs=$(cd "$GC_CITY_PATH" && run_bounded "$GC_DOLT_RIG_LIST_TIMEOUT_SECS" gc rig list --json 2>/dev/null) || return 1
+  printf '%s\n' "$ps_rigs" |
+    jq -r '.rigs[]? | select((.hq // false) == false and (.suspended // false) == false) | "\(.name)|\(.path // "")"' || return 1
+}
+
+# sync_proxied_scopes — sync each proxied bead scope's database through gc bd.
+# A scope gc refuses as not bd-backed (a file or exec provider) has nothing to
+# push and is skipped; an unreachable scope fails. Two scopes that resolve to
+# the same database push it once.
+sync_proxied_scopes() {
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "gc dolt sync: jq is required to enumerate proxied bead scopes" >&2
+    exit 1
+  fi
+  ps_specs_rc=0
+  ps_specs=$(proxied_scope_specs) || ps_specs_rc=$?
+  if [ "$ps_specs_rc" -ne 0 ]; then
+    echo "  ERROR: gc rig list failed; only the city scope is synced" >&2
+    total_count=$((total_count + 1))
+    record_failure "rigs" "gc rig list failed"
+  fi
+  ps_visited=" "
+  while IFS= read -r ps_spec; do
+    [ -n "$ps_spec" ] || continue
+    SCOPE_RIG=${ps_spec%%|*}
+    ps_path=${ps_spec#*|}
+    ps_label="city"
+    [ -n "$SCOPE_RIG" ] && ps_label="rig:$SCOPE_RIG"
+
+    ps_err=$(mktemp) || {
+      echo "  $ps_label: ERROR: cannot create temp file for scope diagnostics" >&2
+      total_count=$((total_count + 1))
+      record_failure "$ps_label" "cannot create temp file for scope diagnostics"
+      continue
+    }
+    ps_rc=0
+    ps_db_csv=$(scope_bd_bounded 120 sql --csv "SELECT DATABASE()" 2>"$ps_err") || ps_rc=$?
+    if [ "$ps_rc" -ne 0 ]; then
+      if grep -q "only supported for bd-backed beads providers" "$ps_err" 2>/dev/null; then
+        echo "  $ps_label: skipped (not a bd bead store)"
+        rm -f "$ps_err"
+        continue
+      fi
+      echo "  $ps_label: ERROR: bead store unreachable (exit $ps_rc)" >&2
+      replay_prefixed "$ps_label" "$ps_err"
+      rm -f "$ps_err"
+      total_count=$((total_count + 1))
+      record_failure "$ps_label" "bead store unreachable"
+      continue
+    fi
+    rm -f "$ps_err"
+    name=$(printf '%s\n' "$ps_db_csv" | tr -d '\r' | awk 'NF { last = $0 } END { print last }')
+    if ! valid_database_name "$name"; then
+      echo "  $ps_label: ERROR: bd reported an unusable database name: $name" >&2
+      total_count=$((total_count + 1))
+      record_failure "$ps_label" "unusable database name"
+      continue
+    fi
+    [ -n "$db_filter" ] && [ "$name" != "$db_filter" ] && continue
+    case "$ps_visited" in *" $name "*) continue ;; esac
+    ps_visited="$ps_visited$name "
+    if [ -n "$ps_path" ] && [ -f "$ps_path/.beads/dolt/$name/.no-sync" ]; then
+      echo "  $name: skipped (.no-sync)"
+      continue
+    fi
+
+    total_count=$((total_count + 1))
+    last_fail_reason=""
+    sync_database_sql "$name" || record_failure "$name" "${last_fail_reason:-unknown error}"
+  done <<PROXIED_SCOPES
+$ps_specs
+PROXIED_SCOPES
+  SCOPE_RIG=""
+}
+
 # Optional GC phase: purge closed ephemerals while server is still up.
 if [ "$do_gc" = true ] && [ -d "$data_dir" ]; then
   for d in "$data_dir"/*/; do
@@ -932,7 +1088,9 @@ fail_count=0
 total_count=0
 failed_summary=""
 server_running=false
-is_running && server_running=true
+# A bd-owned proxied city has no managed server: bd owns each scope's Dolt
+# child, and sync reaches it through gc bd (sync_proxied_scopes).
+[ "$proxied" != true ] && is_running && server_running=true
 
 # ADR-0064 D3. --drain asserts a durability property, and only the SQL path can
 # verify it: the residual re-classification runs through the live server. In CLI
@@ -940,7 +1098,7 @@ is_running && server_running=true
 # still exit 0 — a window that claims delivery it never checked, which is worse
 # than no window at all because order.completed would then read as evidence of
 # freshness. Refuse instead of degrading silently.
-if [ "$drain" = true ] && [ "$server_running" != true ]; then
+if [ "$drain" = true ] && [ "$proxied" != true ] && [ "$server_running" != true ]; then
   echo "gc dolt sync --drain: no managed Dolt server reachable on port ${GC_DOLT_PORT:-?}; the delivery window cannot verify a zero backlog without it" >&2
   exit 2
 fi
@@ -983,7 +1141,9 @@ if [ "$server_running" = true ] && has_syncable_database; then
   reap_dead_owner_pushes
 fi
 
-if [ -d "$data_dir" ]; then
+if [ "$proxied" = true ]; then
+  sync_proxied_scopes
+elif [ -d "$data_dir" ]; then
   for d in "$data_dir"/*/; do
     [ ! -d "$d/.dolt" ] && continue
     name="$(basename "$d")"
@@ -1003,9 +1163,7 @@ if [ -d "$data_dir" ]; then
       sync_database_cli "$d" "$name" || call_rc=$?
     fi
     if [ "$call_rc" -ne 0 ]; then
-      exit_code=1
-      fail_count=$((fail_count + 1))
-      failed_summary="$failed_summary$name (${last_fail_reason:-unknown error}); "
+      record_failure "$name" "${last_fail_reason:-unknown error}"
     fi
   done
 fi
