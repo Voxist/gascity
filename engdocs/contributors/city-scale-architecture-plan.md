@@ -17,6 +17,14 @@ reviews** (incident-coverage, technical feasibility, completeness) that
 produced 32 findings — all folded into the items below. Residual accepted
 risks are listed at the end.
 
+> **Status 2026-10-14 (ga-s69mk.3):** the fork's `[beads] proxied` opt-in
+> (`proxy_pool_size`, `proxy_idle_timeout`, gc-side db-proxy reap), the item
+> 1.5 store health patrol with its `[storehealth]` config, the
+> `store.degraded/recovered/probe_failed` and `proxy.reaped` events, and the
+> S6 connection ceiling were retired in favour of upstream's bd-owned
+> proxied-server (`gc beads city migrate-proxied`, `[beads]
+> proxied_idle_timeout`). References to them below are historical.
+
 ---
 
 ## Thesis
@@ -232,7 +240,8 @@ gc start times), fix the creator, then replace symlinks with empty dirs.
 
 **0.5 — FS/disk/network hygiene + security posture.**
 (a) Spotlight-exclude `.beads`/dolt/proxieddb dirs; purge the 49GB
-`.beads/backup`; `proxy_pool_size` 4→2 (deferred-S6 guidance for ≤8 scopes).
+`.beads/backup`; `proxy_pool_size` 4→2 (deferred-S6 guidance for ≤8 scopes;
+`proxy_pool_size` and S6 retired 2026-10, ga-s69mk.3).
 (b) **Bind the dolt sql-server and every db-proxy-child to 127.0.0.1
 explicitly** — the production work ledger currently listens on a wildcard
 interface and is LAN-reachable with permissive auth.
@@ -276,7 +285,7 @@ slips (both gate the exit drill).
 | 1.6 | **Session-bead hygiene:** land vp-g0z1 (`reapPhantomSessionBeads`, green TDD start) + idempotent (deduped) session-bead creation per pool slot (200–415 dupes observed) | gascity session lifecycle | M | gastownhall/gascity | **6** |
 | 1.7 | **Port-file de-authority, fully:** all gc consumers resolve the dolt endpoint from the managed-server live handle → process table, *full stop* (`proxied_server_client_info.json` is itself a status file — demoted alongside, same doctor flag). **Root-cause the surviving port-file writer** (the file lies *today*: a writer outlived the pooling fix). Consistency check is hard-red at zero tolerated mismatches; schedule actual file removal once bd's direct-mode discovery resolves endpoints another way | gascity `bd_env.go` + consumers | S-M | gastownhall/gascity | **4** + the 5-amplifier; enforces our own no-status-files principle |
 | 1.8 | **Proxy log throttle + lumberjack rotation (50MB×3)** — deferred S3d, per vp-rnq0 | beads | S | cstar #5 lineage | **8** |
-| 1.9 | **Typed events + heartbeat + scheduled doctor:** register `store.degraded/recovered/probe_failed`, `proxy.reaped`, `breaker.state_changed`, `controller.tick_completed` (emitted at a patrol multiple or on threshold breach — not every tick), `order.skipped_store_unavailable`, `order.gate_timeout_fail_open`, `session.provider_throttled` (from the existing session-output scan — minimal provider-health signal now, not Phase 3), `doctor.alert`. **The supervisor evaluates the cheap doctor subset (provenance, agent_config_isolation, port-consistency, tick-age, listener_bound_localhost, secret_file_modes, S6 ceiling `scopes×(pool+1) ≤ 0.8×@@max_connections`) on startup and on a fixed interval** — without this, every doctor-based "retirement" is detection-at-human-cadence, the exact vigilance model that produced incidents 5 and 11. Subprocess admission semaphore (`max_inflight_per_scope=4`, global 16) + `gc_bd_inflight` gauge. Event-bus hygiene: explicit `archiveRetainAge` (30d); add reconciler-trace (878MB today) and sweep logs to the rotation budget | gascity events/doctor/supervisor | M | gastownhall/gascity | event bus becomes an actual detector (caught 0/19); cements 11; closes the doctor-cadence hole |
+| 1.9 | **Typed events + heartbeat + scheduled doctor:** register `store.degraded/recovered/probe_failed`, `proxy.reaped` (both retired 2026-10, ga-s69mk.3), `breaker.state_changed`, `controller.tick_completed` (emitted at a patrol multiple or on threshold breach — not every tick), `order.skipped_store_unavailable`, `order.gate_timeout_fail_open`, `session.provider_throttled` (from the existing session-output scan — minimal provider-health signal now, not Phase 3), `doctor.alert`. **The supervisor evaluates the cheap doctor subset (provenance, agent_config_isolation, port-consistency, tick-age, listener_bound_localhost, secret_file_modes, S6 ceiling `scopes×(pool+1) ≤ 0.8×@@max_connections`) on startup and on a fixed interval** — without this, every doctor-based "retirement" is detection-at-human-cadence, the exact vigilance model that produced incidents 5 and 11. Subprocess admission semaphore (`max_inflight_per_scope=4`, global 16) + `gc_bd_inflight` gauge. Event-bus hygiene: explicit `archiveRetainAge` (30d); add reconciler-trace (878MB today) and sweep logs to the rotation budget | gascity events/doctor/supervisor | M | gastownhall/gascity | event bus becomes an actual detector (caught 0/19); cements 11; closes the doctor-cadence hole |
 | 1.10 | **Flat-membership O(rigs) gate evaluation** (the deferred vc-6qh1 #1' design). The shipped fail-open means gate timeouts silently PASS gates, and O(tree) cost grows with exactly the load this plan adds — fail-open frequency would *rise* with the mission. (#3263 upstream is only a map-race guard; no flat-membership commit exists anywhere yet) | gascity orders | M | gastownhall/gascity | **12** (the real fix; 1.3's counter is the tripwire) |
 | 1.11 | **Runbooks + second operator:** `voxist-city/docs/runbooks/` — wedge remediation, deploy+cutover checklist (with provenance verification), drill procedures, the 0.1 fallback trigger, canary rollback — each PR-reviewed by a second teammate. Provider auth moved to service accounts/shared secret storage (not personal OAuth). Contribution model documented (who pushes fork/main, who deploys, escalation). *Exit gate: a second operator executes the wedge remediation end-to-end unaided on staging* | docs + ops | M | fork/Voxist org | bus factor 1 → 2+; the org move becomes real |
 
