@@ -99,7 +99,7 @@
 #       still <repo_root>/.git/gate-slots in a normal clone, but sibling
 #       linked worktrees resolve to the one shared common dir instead of a
 #       per-worktree `.git` file that cannot hold a directory
-#       (NFR4 fallback, never /tmp — see AGENTS.md Build Cache Conventions).
+#       (NFR4 fallback, never /tmp — see fork-maintainer-guide.md Build Cache Conventions).
 #       Does not create the directory (push_gate_acquire_slot does).
 #   push_gate_acquire_slot <slot_dir> <fd_out_var> [holder_label]
 #       Reads tunables from env: PUSH_GATE_MAX_CONCURRENT (default: test-local-job-count / 4, clamped to [1, 4]),

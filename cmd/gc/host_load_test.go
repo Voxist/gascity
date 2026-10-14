@@ -40,24 +40,6 @@ func (r *syncRecorder) snapshot() []events.Event {
 	return append([]events.Event(nil), r.events...)
 }
 
-// syncBuffer is a race-safe io.Writer for goroutine-emitter tests.
-type syncBuffer struct {
-	mu sync.Mutex
-	b  strings.Builder
-}
-
-func (w *syncBuffer) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.b.Write(p)
-}
-
-func (w *syncBuffer) String() string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.b.String()
-}
-
 func TestParseLoadAvgFields(t *testing.T) {
 	tests := []struct {
 		name    string

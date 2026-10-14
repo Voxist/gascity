@@ -1,6 +1,6 @@
 # Enforcing the `go clean -cache` ban
 
-AGENTS.md ("Build Cache Conventions") hard-bans `go clean -cache`. Until this
+fork-maintainer-guide.md ("Build Cache Conventions") hard-bans `go clean -cache`. Until this
 work, nothing enforced it.
 
 This page describes the two layers that now do, **what each one catches and

@@ -36,7 +36,7 @@ any_non_deletion=0
 resync_loss_merges=()
 pushed_shas=()
 pushed_refs=()
-while read -r local_ref local_sha _remote_ref remote_sha; do
+while read -r local_ref local_sha remote_ref remote_sha; do
   # Branch deletion — nothing to test, nothing to guard.
   if [ "$local_sha" = "$zero" ]; then
     continue
@@ -56,16 +56,34 @@ while read -r local_ref local_sha _remote_ref remote_sha; do
       resync_loss_merges+=("$local_sha")
     fi
   else
-    # Captured, never piped into `grep -q` (ga-gvag6): under pipefail, grep
-    # exits on the first name, git diff takes SIGPIPE writing the rest, and
-    # the pipeline reads as false — so a large Go diff skipped the suite
-    # silently. A diff that cannot be computed (remote tip not present
-    # locally) fails closed and runs the suite.
-    if ! go_diff="$(git diff --name-only "$remote_sha" "$local_sha" -- '*.go' 2>/dev/null)" ||
-      [ -n "$go_diff" ]; then
+    # git hands the hook the remote's tip even when this clone never fetched it,
+    # and rejects a non-forced push with "fetch first" only after the hook
+    # returns. Name that remedy here instead of failing on `bad object` below.
+    # Test presence, not `^{commit}`: a present tip naming a tree fails that
+    # peel, and no fetch would fix it.
+    if ! git cat-file -e "$remote_sha"; then
+      # Name the ref: a plain `git fetch <remote>` follows the remote's refspec,
+      # which can skip this tip (a --single-branch clone, a URL push, a moved
+      # tag). A URL push passes its URL as typed, so strip credentials first:
+      # the whole userinfo for http(s), where the user name can be the token,
+      # and only the password elsewhere, keeping the user an ssh fetch needs.
+      remote_display="$(printf '%s' "$1" | sed -E \
+        -e 's#^(https?://)[^/]*@#\1#' \
+        -e 's#^([A-Za-z][A-Za-z0-9+.-]*://[^/@:]*):[^/]*@#\1@#')"
+      echo "pre-push: $remote_ref is at $remote_sha on $remote_display, which this clone has not fetched; run 'git fetch $remote_display $remote_ref' and push again" >&2
+      exit 1
+    fi
+    # Read the whole result: under pipefail, grep -q can close a large diff's
+    # pipe early, turn git's SIGPIPE into a false condition, and skip the suite
+    # (ga-gvag6).
+    if ! changed_go_files="$(git diff --name-only "$remote_sha" "$local_sha" -- '*.go')"; then
+      echo "pre-push: cannot inspect Go changes for $remote_sha..$local_sha" >&2
+      exit 1
+    fi
+    if [ -n "$changed_go_files" ]; then
       go_changed=1
     fi
-    # Category-A resync-loss gate (ga-d32bn; AGENTS.md "Resync conventions"
+    # Category-A resync-loss gate (ga-d32bn; fork-maintainer-guide.md "Resync conventions"
     # rule 5): every merge commit this push introduces, not just the pushed
     # tip. AGENTS.md's own preamble records that a resync's merge commit is
     # routinely followed by a `fix(resync)`/`chore(regen)` cleanup commit on
@@ -156,12 +174,16 @@ if [ -n "${LOCAL_TESTS_ACK:-}" ]; then
     ack_reason="it does not match the pushed commit $distinct_shas (stale ack?)"
   fi
   if [ -z "$ack_reason" ]; then
-    echo "pre-push: LOCAL_TESTS_ACK=$LOCAL_TESTS_ACK — gate 3 (make test-fast-parallel) SKIPPED by operator acknowledgement for commit $distinct_shas (refs: ${pushed_refs[*]}); gates 1 (resync-loss) and 2 (bead-ownership) were not bypassed by this ack (vc-dq0b)" >&2
+    echo "pre-push: LOCAL_TESTS_ACK=$LOCAL_TESTS_ACK — gate 3 (push-time suite) SKIPPED by operator acknowledgement for commit $distinct_shas (refs: ${pushed_refs[*]}); gates 1 (resync-loss) and 2 (bead-ownership) were not bypassed by this ack (vc-dq0b)" >&2
     exit 0
   fi
   echo "pre-push: LOCAL_TESTS_ACK=$LOCAL_TESTS_ACK IGNORED — $ack_reason. Running gate 3. To skip it for this push: LOCAL_TESTS_ACK=\$(git rev-parse <pushed-ref>) git push ..." >&2
 fi
 
-# The Makefile and direct sharded runner share scripts/test-local-job-count as
-# their default policy. Do not shadow it here; an explicit override still wins.
-exec make test-fast-parallel
+# bazel test //... with CI's action keys (read-only cache, or remote execution
+# when any rc file names an executor: a maintainer's .bazelrc.local, an agent
+# host's ~/.bazelrc); make test-fast-parallel without bazel or with
+# GC_PREPUSH_SUITE=go. The Makefile and direct sharded runner share
+# scripts/test-local-job-count as their default policy. Do not shadow it here;
+# an explicit override still wins.
+exec "$repo_root/.githooks/lib/push-suite.sh"

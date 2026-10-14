@@ -83,24 +83,26 @@ func TestApplyRigPatchCoversAllFields(t *testing.T) {
 	portVal := func(s string) *PortString { p := PortString(s); return &p }
 
 	patch := RigPatch{
-		Name:                "target-rig",
-		Path:                strVal("/rigs/target"),
-		Prefix:              strVal("tr"),
-		DefaultBranch:       strVal("develop"),
-		Suspended:           boolVal(true),
-		SuspendedOnStart:    boolVal(true),
-		FormulasDir:         strVal("formulas/target"),
-		MaxActiveSessions:   intVal(7),
-		DefaultSlingTarget:  strVal("target/polecat"),
-		DefaultSlingTargets: sliceVal("target/polecat-a", "target/polecat-b"),
+		Name:                 "target-rig",
+		Path:                 strVal("/rigs/target"),
+		Prefix:               strVal("tr"),
+		DefaultBranch:        strVal("develop"),
+		DefaultMergeStrategy: strVal("rebase"),
+		Suspended:            boolVal(true),
+		SuspendedOnStart:     boolVal(true),
+		FormulasDir:          strVal("formulas/target"),
+		MaxActiveSessions:    intVal(7),
+		DefaultSlingTarget:   strVal("target/polecat"),
+		DefaultSlingTargets:  sliceVal("target/polecat-a", "target/polecat-b"),
 		SessionSleep: &SessionSleepConfig{
 			InteractiveResume: "60s",
 			InteractiveFresh:  "90s",
 			NonInteractive:    "off",
 		},
-		DoltHost:    strVal("dolt.example.com"),
-		DoltPort:    portVal("4406"),
-		FormulaVars: map[string]string{"stakes": "2"},
+		DoltHost:                strVal("dolt.example.com"),
+		DoltPort:                portVal("4406"),
+		BeadsProxiedIdleTimeout: strVal("45m"),
+		FormulaVars:             map[string]string{"stakes": "2"},
 	}
 
 	// Every RigPatch field must be exercised by the test data, so a new field

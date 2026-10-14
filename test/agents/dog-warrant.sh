@@ -10,13 +10,14 @@
 #   PATH     — must include gc and bd binaries
 
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/bead-id.sh"
 cd "$GC_CITY"
 ASSIGNEE="${GC_SESSION_NAME:-$GC_AGENT}"
 
 while true; do
     hooked=$(bd ready --assignee="$ASSIGNEE" --include-ephemeral 2>/dev/null || true)
-    if echo "$hooked" | grep -qE '^[^[:alnum:]]*gc-'; then
-        warrant_id=$(echo "$hooked" | grep -E '^[^[:alnum:]]*gc-' | head -1 | grep -oE 'gc-[[:alnum:]]+' | head -1)
+    if echo "$hooked" | sed -E 's/^[^[:alnum:]]+//' | bead_id_rows | grep -q .; then
+        warrant_id=$(echo "$hooked" | sed -E 's/^[^[:alnum:]]+//' | bead_id_rows | head -1 | awk '{print $1}')
 
         details=$(bd show "$warrant_id" 2>/dev/null || true)
         _="${details}"

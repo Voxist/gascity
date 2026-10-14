@@ -216,14 +216,16 @@
               "worktree-cleanup",
               "worktree-ensure",
               "worktree-verify",
+              "storage-preflight",
+              "nudge-drop",
+              "beads-city-migrate-proxied",
+              "storage-repair-sequence",
+              "runtime-workdir-export",
               "beads-state",
               "config-lint",
               "provider-quota",
               "provider-rotate-key",
-              "provider-credentials",
-              "storage-preflight",
-              "beads-city-migrate-proxied",
-              "nudge-drop"
+              "provider-credentials"
             ]
           },
           "event_id": {

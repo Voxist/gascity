@@ -15,6 +15,9 @@ concurrency:
 jobs:
   tap-smoke:
     name: Tap install smoke
+    # Smokes the upstream Homebrew tap on a Blacksmith macOS runner; a fork has
+    # neither, and the job would sit queued.
+    if: github.repository == 'gastownhall/gascity'
     runs-on: blacksmith-12vcpu-macos-15
     timeout-minutes: 30
     env:

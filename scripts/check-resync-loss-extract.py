@@ -47,7 +47,7 @@ side contributed it:
                 mechanical fix.
 
 A pair whose file carries the `linguist-generated` .gitattributes attribute
-(AGENTS.md "Resync conventions" rule 1) is reported EXEMPT instead: that
+(fork-maintainer-guide.md "Resync conventions" rule 1) is reported EXEMPT instead: that
 file is licensed to be taken wholesale from upstream, so a "missing"
 declaration there is the intended outcome, not a defect, and never fails
 the gate.
@@ -154,7 +154,7 @@ def is_generated(repo, path):
     """True iff `path` carries the `linguist-generated` .gitattributes
     attribute — the same check scripts/check-resync-loss.sh's Gate 1
     is_exempt() makes, applied here so Gate 2 stops failing on declarations
-    "lost" from a file AGENTS.md rule 1 already licenses taking wholesale
+    "lost" from a file fork-maintainer-guide.md rule 1 already licenses taking wholesale
     from upstream (e.g. internal/api/genclient/client_gen.go)."""
     proc = subprocess.run(
         ["git", "-C", repo, "check-attr", "linguist-generated", "--", path],
@@ -233,7 +233,7 @@ def analyze_direction(repo, base, ours, theirs, missing_pairs, cache, verdict_pr
     detail_lines = []
     for name, fname in missing_pairs:
         if is_generated(repo, fname):
-            # AGENTS.md rule 1 licenses taking this file wholesale from
+            # fork-maintainer-guide.md rule 1 licenses taking this file wholesale from
             # upstream; Gate 1 already exempts the file itself, and a
             # declaration "lost" from it is that same licensed outcome,
             # not a resync-resolution defect. Reported for visibility,
@@ -241,7 +241,7 @@ def analyze_direction(repo, base, ours, theirs, missing_pairs, cache, verdict_pr
             # fails the gate.
             exempt += 1
             verdict = verdict_prefix + "EXEMPT"
-            report_lines.append(f"  {verdict:16s} {name}  ({fname})  (generated, AGENTS.md rule 1)")
+            report_lines.append(f"  {verdict:16s} {name}  ({fname})  (generated, fork-maintainer-guide.md rule 1)")
             detail_lines.append(f"{verdict}\t{name}\t{fname}")
             continue
         clean_text = three_way_merge_text(repo, base, ours, theirs, fname, cache)

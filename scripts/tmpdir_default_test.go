@@ -10,7 +10,7 @@ import (
 // wantTestTMPDirDefault is the fallback TMPDIR the test-running wrappers
 // (Makefile TEST_ENV, and the shard scripts below) must use when the calling
 // shell has not already set TMPDIR itself. It must stay off the shared,
-// size-capped /tmp tmpfs (see AGENTS.md "Build Cache Conventions") and it
+// size-capped /tmp tmpfs (see fork-maintainer-guide.md "Build Cache Conventions") and it
 // must stay short: internal/testutil.ShortTempDir roots test-owned socket
 // directories at os.TempDir() (== $TMPDIR on Linux), and Unix socket paths
 // built under it must stay under the sun_path limit (104 bytes on macOS, 108

@@ -23,10 +23,16 @@ var (
 	statusWarmBuildTimeout = 60 * time.Second
 )
 
-// statusWarmEntry is a built status body and the time it was built.
+// statusWarmEntry is a built status body, the time it was built, and the
+// event index captured before the build began (hasIndex false when unknown).
+// A served warm body reports that index as X-GC-Index, never the current head:
+// a head newer than the body would let a client resuming from it skip the
+// changes the body lacks (#7661).
 type statusWarmEntry struct {
-	body    StatusBody
-	builtAt time.Time
+	body     StatusBody
+	builtAt  time.Time
+	index    uint64
+	hasIndex bool
 }
 
 // warmStatusBody returns the current warm entry for the full or lite variant.
@@ -43,11 +49,17 @@ func (s *Server) warmStatusBody(lite bool) (*statusWarmEntry, bool) {
 	return e, true
 }
 
-// setWarmStatusBody records a freshly built body as the warm entry.
+// setWarmStatusBody records a freshly built body as the warm entry, with no
+// known build index.
 func (s *Server) setWarmStatusBody(lite bool, body StatusBody, builtAt time.Time) {
+	s.setWarmStatusEntry(lite, statusWarmEntry{body: body, builtAt: builtAt})
+}
+
+// setWarmStatusEntry records entry as the warm entry for the variant.
+func (s *Server) setWarmStatusEntry(lite bool, entry statusWarmEntry) {
 	s.statusWarmMu.Lock()
 	defer s.statusWarmMu.Unlock()
-	e := &statusWarmEntry{body: body, builtAt: builtAt}
+	e := &entry
 	if lite {
 		s.statusWarmLite = e
 	} else {
@@ -62,6 +74,12 @@ func (s *Server) setWarmStatusBody(lite bool, body StatusBody, builtAt time.Time
 // stampeding the store with abandoned scans. Blocks until the build completes;
 // callers that must not block use refreshStatusBodyAsync.
 func (s *Server) buildAndStoreStatus(lite bool) StatusBody {
+	return s.buildAndStoreStatusEntry(lite).body
+}
+
+// buildAndStoreStatusEntry is buildAndStoreStatus returning the whole entry,
+// so a caller serving the body can report the index it was built at.
+func (s *Server) buildAndStoreStatusEntry(lite bool) statusWarmEntry {
 	key := "status"
 	if lite {
 		key = "status?lite"
@@ -83,16 +101,19 @@ func (s *Server) buildAndStoreStatus(lite bool) StatusBody {
 		// and completing it warms the cache even if the triggering client left.
 		ctx, cancel := context.WithTimeout(context.Background(), statusWarmBuildTimeout)
 		defer cancel()
+		// Captured before the build reads any state, so a change committed
+		// mid-build is above the reported index and a resuming client sees it.
+		index := s.latestIndex()
 		body := s.buildStatusBody(ctx, lite)
-		now := nowFunc()
-		s.setWarmStatusBody(lite, body, now)
-		s.storeResponse(key, responseCacheTimeBucket(now), body)
-		return body, nil
+		entry := statusWarmEntry{body: body, builtAt: nowFunc(), index: index, hasIndex: true}
+		s.setWarmStatusEntry(lite, entry)
+		s.storeResponse(key, responseCacheTimeBucket(entry.builtAt), indexedResponse[StatusBody]{Index: index, Body: body})
+		return entry, nil
 	})
 	select {
 	case res := <-ch:
-		body, _ := res.Val.(StatusBody)
-		return body
+		entry, _ := res.Val.(statusWarmEntry)
+		return entry
 	case <-time.After(statusWarmBuildTimeout):
 		// The build is wedged on an uncancellable read (Store.List / WalkSize /
 		// the version probe take no context, so the build's own ctx timeout
@@ -114,9 +135,9 @@ func (s *Server) buildAndStoreStatus(lite bool) StatusBody {
 		// it exists to handle.
 		s.storeHealthFlight.Forget(storeHealthFlightKey)
 		if entry, ok := s.warmStatusBody(lite); ok {
-			return entry.body
+			return *entry
 		}
-		return StatusBody{}
+		return statusWarmEntry{}
 	}
 }
 

@@ -14,9 +14,9 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-// scaleCheckProbeEnv is the connection-coordinate env the controller threads
+// scaleCheckCoordinateEnv is the connection-coordinate env the controller threads
 // into every scale_check probe. The checks below read GC_DOLT_PORT.
-func scaleCheckProbeEnv() map[string]string {
+func scaleCheckCoordinateEnv() map[string]string {
 	return map[string]string{
 		"GC_DOLT_HOST": "127.0.0.1",
 		"GC_DOLT_PORT": "9876",
@@ -45,7 +45,7 @@ func runScaleCheckProbe(t *testing.T, check string, env map[string]string) scale
 		poolDir:  t.TempDir(),
 		env:      env,
 	}}
-	counts, partials := evaluatePendingPools(cfg, pending, &stderr, trace)
+	counts, partials := evaluatePendingPools(cfg, pending, shellScaleCheck, &stderr, trace)
 	if len(counts) != 1 || len(partials) != 1 {
 		t.Fatalf("evaluatePendingPools returned %d counts / %d partials, want 1 each", len(counts), len(partials))
 	}
@@ -80,7 +80,7 @@ func scaleCheckTracedCommand(t *testing.T, trace *sessionReconcilerTraceCycle) s
 // the right fix.
 func TestShellScaleCheckStructuralEnvReachesChild(t *testing.T) {
 	t.Setenv("GC_DOLT_PORT", "")
-	out, err := shellScaleCheck(`printf '%s' "${GC_DOLT_PORT:-unset}"`, "", scaleCheckProbeEnv())
+	out, err := shellScaleCheck(`printf '%s' "${GC_DOLT_PORT:-unset}"`, "", scaleCheckCoordinateEnv())
 	if err != nil {
 		t.Fatalf("shellScaleCheck: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestShellScaleCheckStructuralEnvReachesChild(t *testing.T) {
 // collapses to min_active_sessions on every tick.
 func TestEvaluatePendingPoolsKeywordInitialScaleCheck(t *testing.T) {
 	t.Setenv("GC_DOLT_PORT", "")
-	got := runScaleCheckProbe(t, `if [ "$GC_DOLT_PORT" = "9876" ]; then printf 7; else printf 0; fi`, scaleCheckProbeEnv())
+	got := runScaleCheckProbe(t, `if [ "$GC_DOLT_PORT" = "9876" ]; then printf 7; else printf 0; fi`, scaleCheckCoordinateEnv())
 	if got.partial {
 		t.Fatalf("keyword-initial scale_check failed: stderr=%q command=%q", got.stderr, got.command)
 	}
@@ -109,7 +109,7 @@ func TestEvaluatePendingPoolsKeywordInitialScaleCheck(t *testing.T) {
 // wrong store and returns a plausible-looking number.
 func TestEvaluatePendingPoolsCompoundScaleCheck(t *testing.T) {
 	t.Setenv("GC_DOLT_PORT", "")
-	got := runScaleCheckProbe(t, `cd / && printf '%s' "${GC_DOLT_PORT:-0}"`, scaleCheckProbeEnv())
+	got := runScaleCheckProbe(t, `cd / && printf '%s' "${GC_DOLT_PORT:-0}"`, scaleCheckCoordinateEnv())
 	if got.partial {
 		t.Fatalf("compound scale_check failed: stderr=%q command=%q", got.stderr, got.command)
 	}
@@ -123,7 +123,7 @@ func TestEvaluatePendingPoolsCompoundScaleCheck(t *testing.T) {
 // assignment-only command, which exports nothing to anything downstream.
 func TestEvaluatePendingPoolsAssignmentFirstScaleCheck(t *testing.T) {
 	t.Setenv("GC_DOLT_PORT", "")
-	got := runScaleCheckProbe(t, `limit=0; printf '%s' "${GC_DOLT_PORT:-0}"`, scaleCheckProbeEnv())
+	got := runScaleCheckProbe(t, `limit=0; printf '%s' "${GC_DOLT_PORT:-0}"`, scaleCheckCoordinateEnv())
 	if got.partial {
 		t.Fatalf("assignment-first scale_check failed: stderr=%q command=%q", got.stderr, got.command)
 	}
@@ -138,7 +138,7 @@ func TestEvaluatePendingPoolsAssignmentFirstScaleCheck(t *testing.T) {
 // string that a process listing would expose.
 func TestEvaluatePendingPoolsScaleCheckCommandIsVerbatim(t *testing.T) {
 	t.Setenv("GC_DOLT_PORT", "")
-	env := scaleCheckProbeEnv()
+	env := scaleCheckCoordinateEnv()
 	env["GC_DOLT_PASSWORD"] = "probe-password"
 	const check = `printf 3`
 	got := runScaleCheckProbe(t, check, env)

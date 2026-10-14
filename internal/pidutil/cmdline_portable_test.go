@@ -48,15 +48,18 @@ func spawnProcess(t *testing.T, name string, args ...string) int {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	})
-	// Give the exec a moment so the argv is the sleeper's, not the shell's.
+	// Wait for the expected image — the child's own argv, not a nonempty
+	// pre-exec parent argv.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if argv, err := Cmdline(cmd.Process.Pid); err == nil && len(argv) > 0 {
-			break
+		if argv, err := Cmdline(cmd.Process.Pid); err == nil && ArgvContainsSequence(argv, cmd.Args...) {
+			return cmd.Process.Pid
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	return cmd.Process.Pid
+	argv, err := Cmdline(cmd.Process.Pid)
+	t.Fatalf("child did not exec %q before readiness deadline: argv=%q error=%v", cmd.Args, argv, err)
+	return 0
 }
 
 // TestAliveWithCmdline_RejectsLivePIDWithNonMatchingArgv is the defect, stated

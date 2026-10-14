@@ -109,8 +109,11 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	// dashboard polls reuse the built body. The ?lite variant caches under its
 	// own key.
 	bucket := responseCacheTimeBucket(time.Now())
-	if body, ok := cachedResponseAs[StatusBody](s, cacheKey, bucket); ok {
-		return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: body}, nil
+	//
+	// Every cached or warm body is served with the index captured before it
+	// was built (#7661), not the current head; see statusWarmEntry.
+	if hit, ok := cachedResponseAs[indexedResponse[StatusBody]](s, cacheKey, bucket); ok {
+		return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: cacheAgeSeconds(store), Body: hit.Body}, nil
 	}
 
 	// Warm StatusView (vp-e0hv): serve the last background-built body instead of
@@ -165,7 +168,7 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		// on a freshly reconciled store would report ~0 and silently suppress
 		// the banner on exactly the stale view the operator needs told about.
 		return &IndexOutput[StatusBody]{
-			Index:     index,
+			Index:     statusBuildIndex(*entry, index),
 			CacheAgeS: max(age.Seconds(), cacheAgeSeconds(store)),
 			Body:      entry.body,
 		}, nil
@@ -175,8 +178,8 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	// still good enough for a non-blocking caller once its time bucket rolled
 	// over. The 2026-08-31 resync dropped this, its only use site, leaving
 	// statusResponseTTLFloor declared, documented and inert.
-	if body, ok := cachedResponseWithinAgeAs[StatusBody](s, cacheKey, statusResponseTTLFloor); ok {
-		return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: body}, nil
+	if hit, ok := cachedResponseWithinAgeAs[indexedResponse[StatusBody]](s, cacheKey, statusResponseTTLFloor); ok {
+		return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: cacheAgeSeconds(store), Body: hit.Body}, nil
 	}
 
 	// Stale-while-revalidate (ra-4u2eqc): the bucket, warm and TTL-floor caches
@@ -196,7 +199,7 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	//
 	// Reachability, stated plainly: today NOTHING produces a response-cache
 	// entry without a warm entry — buildAndStoreStatus is the only writer of
-	// these keys and it calls setWarmStatusBody first — and the warm branch
+	// these keys and it seeds the warm entry first — and the warm branch
 	// above serves at any age, so this branch and the TTL floor before it are
 	// unreachable in production. They are kept as upstream's code, made inert
 	// rather than deleted: the refresher below goes through buildAndStoreStatus
@@ -214,12 +217,12 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	// lagging reconciler under-report true staleness and suppress the banner
 	// `gc status` renders above cacheAgeBannerThresholdSeconds; reporting only
 	// the store age would hide the SWR delay. The max preserves both.
-	if body, age, ok := staleResponseAs[StatusBody](s, cacheKey); ok {
+	if hit, age, ok := staleResponseAs[indexedResponse[StatusBody]](s, cacheKey); ok {
 		s.refreshStatusBodyAsync(input.Lite)
 		return &IndexOutput[StatusBody]{
-			Index:     index,
+			Index:     hit.Index,
 			CacheAgeS: max(age.Seconds(), cacheAgeSeconds(store)),
-			Body:      body,
+			Body:      hit.Body,
 		}, nil
 	}
 
@@ -228,8 +231,18 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	// warm entry. Only this first build after a (re)start pays the O(store)
 	// cost inline; every subsequent request is served from the warm entry
 	// above without blocking.
-	resp := s.buildAndStoreStatus(input.Lite)
-	return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: resp}, nil
+	built := s.buildAndStoreStatusEntry(input.Lite)
+	return &IndexOutput[StatusBody]{Index: statusBuildIndex(built, index), CacheAgeS: cacheAgeSeconds(store), Body: built.body}, nil
+}
+
+// statusBuildIndex is the X-GC-Index to serve with entry: the index captured
+// before its build, or head when the entry carries none (an entry seeded
+// without one, or the zero entry a wedged first build returns).
+func statusBuildIndex(entry statusWarmEntry, head uint64) uint64 {
+	if !entry.hasIndex {
+		return head
+	}
+	return entry.index
 }
 
 // buildStatusBody constructs the status response body. ctx bounds the
@@ -247,10 +260,20 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	sp := s.state.SessionProvider()
 	cityName := s.state.CityName()
 	sessTmpl := cfg.Workspace.SessionTemplate
-	sessionSnapshot := s.statusSessionSnapshot(ctx)
-	partialErrors := append([]string(nil), sessionSnapshot.partialErrors...)
-
 	citySt, _ := suspensionstate.Load(fsys.OSFS{}, s.state.CityPath())
+	// A suspended city's bead stores are not read: a read restarts the
+	// retired bd proxy the controller just stopped, and an open dashboard
+	// polling this would cycle it. The body says so (StoresNotRead) and
+	// carries no work, mail, session-count or store-health figures.
+	citySuspended := suspensionstate.EffectiveCitySuspended(citySt, cfg.Workspace.EffectiveSuspendedOnStart())
+	sessionSnapshot := statusSessionSnapshot{
+		bySessionName: make(map[string]statusSessionInfo),
+		byTemplate:    make(map[string][]statusSessionInfo),
+	}
+	if !citySuspended {
+		sessionSnapshot = s.statusSessionSnapshot(ctx)
+	}
+	partialErrors := append([]string(nil), sessionSnapshot.partialErrors...)
 
 	// Count agents by state and collect per-agent detail rows in a single
 	// pass. Pool expansion emits one detail row per instance with a
@@ -262,8 +285,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	suspendedRigs := make(map[string]bool, len(cfg.Rigs))
 	// cacheColdRigs mirrors the controller's per-rig cache refresh gate
 	// (rigStoreBackgroundRefresh): a rig suspended by EFFECTIVE state gets no
-	// async full prime and no reconciler, so its cache never reaches live and
-	// the cache-only Ready projection can never answer. It is deliberately not
+	// cache at all, and status does not read its store (statusWorkCounts). It is deliberately not
 	// the same set as suspendedRigs, which grows below to include rigs merely
 	// inferred suspended because every one of their agents is — those keep a
 	// refreshing cache and must still be asked for ready work.
@@ -279,14 +301,17 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	// Active graph-resident work, indexed once per request by agent session
 	// name. On a single-store city this is nil, so every lookup below misses
 	// and the counts stay byte-identical to the provider-only behavior.
-	graphWork := s.graphActiveWorkBySession()
+	var graphWork map[string]graphAgentWork
+	if !citySuspended {
+		graphWork = s.graphActiveWorkBySession()
+	}
 	for _, a := range cfg.Agents {
 		rigName := workdirutil.ConfiguredRigName(s.state.CityPath(), a, cfg.Rigs)
 		scope := "city"
 		if rigName != "" {
 			scope = "rig"
 		}
-		expanded := expandAgent(a, cityName, sessTmpl, sp)
+		expanded := expandAgent(a, cityName, sessTmpl, sp, cfg.NamedSessions)
 		expanded = appendUnlimitedPoolSessionBeads(expanded, a, cityName, sessTmpl, sessionSnapshot)
 		isPool := len(expanded) > 1 || a.SupportsInstanceExpansion()
 		groupName := a.QualifiedName()
@@ -296,7 +321,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 			if rigName != "" {
 				perRigAgentTotals[rigName]++
 			}
-			sessName := statusRuntimeSessionName(cityName, sessTmpl, ea.qualifiedName, groupName, sessionSnapshot)
+			sessName := statusRuntimeSessionName(cityName, sessTmpl, ea.qualifiedName, groupName, statusListsTemplateBeads(a), sessionSnapshot)
 			info, hasInfo := sessionSnapshot.bySessionName[sessName]
 			running := statusProviderRunning(sp, sessName)
 			// An agent whose work runs under a relocated-graph wisp session is
@@ -377,7 +402,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	// Count work items (best-effort). Skipped in lite mode: querying every
 	// rig store is one of the per-request costs the lite poll avoids.
 	var wc workCounts
-	if !lite {
+	if !lite && !citySuspended {
 		var workErrs []string
 		wc, workErrs = s.statusWorkCounts(ctx, cacheColdRigs)
 		partialErrors = append(partialErrors, workErrs...)
@@ -386,7 +411,11 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	// Count mail (best-effort).
 	var mc mailCounts
 	seenProvs := make(map[string]bool)
-	for _, mp := range s.state.MailProviders() {
+	mailProviders := s.state.MailProviders()
+	if citySuspended {
+		mailProviders = nil
+	}
+	for _, mp := range mailProviders {
 		key := fmt.Sprintf("%p", mp)
 		if seenProvs[key] {
 			continue
@@ -429,7 +458,7 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	// StoreHealth carries a full closed-history Dolt row scan (behind its
 	// sub-cache). Omitted in lite mode so a cold lite poll never triggers it.
 	var storeHealth *StatusStoreHealth
-	if !lite {
+	if !lite && !citySuspended {
 		var err error
 		storeHealth, err = s.cachedStoreHealth(ctx, time.Now())
 		if err != nil {
@@ -444,7 +473,8 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 		DoltVersion:         versions.Dolt,
 		BeadsVersion:        versions.Beads,
 		UptimeSec:           uptime,
-		Suspended:           suspensionstate.EffectiveCitySuspended(citySt, cfg.Workspace.EffectiveSuspendedOnStart()),
+		Suspended:           citySuspended,
+		StoresNotRead:       citySuspended,
 		AgentCount:          ac.Total,
 		RigCount:            rc.Total,
 		Running:             rawRunning,
@@ -495,23 +525,13 @@ func (s *Server) cityBeadsDiagnostic() *beads.BeadsDiagnostic {
 // poolScaleLabel renders the "scaled (min=N, max=M)" banner the CLI emits
 // once per pool group. Mirrors the label buildCityStatusSnapshot emits
 // client-side so human output is identical whether served via API or
-// fallback.
+// fallback: an unset max_active_sessions is unlimited, as in scaleParamsFor.
 func poolScaleLabel(a config.Agent) string {
-	minSessions := 0
-	if a.MinActiveSessions != nil {
-		minSessions = *a.MinActiveSessions
+	maxLabel := "max=unlimited"
+	if maxSessions := a.EffectiveMaxActiveSessions(); maxSessions != nil && *maxSessions >= 0 {
+		maxLabel = fmt.Sprintf("max=%d", *maxSessions)
 	}
-	maxSessions := 1
-	maxLabel := fmt.Sprintf("max=%d", maxSessions)
-	if a.MaxActiveSessions != nil {
-		maxSessions = *a.MaxActiveSessions
-		if maxSessions < 0 {
-			maxLabel = "max=unlimited"
-		} else {
-			maxLabel = fmt.Sprintf("max=%d", maxSessions)
-		}
-	}
-	return fmt.Sprintf("scaled (min=%d, %s)", minSessions, maxLabel)
+	return fmt.Sprintf("scaled (min=%d, %s)", a.EffectiveMinActiveSessions(), maxLabel)
 }
 
 // namedSessionStatus classifies a named session for the StatusBody detail
@@ -726,12 +746,13 @@ type statusWorkResult struct {
 }
 
 // statusWorkCounts tallies persisted open/in_progress work across BeadStores
-// and federates canonical Ready work the way GET /beads/ready does over the
-// work stores: the city store first, then BeadStores excluding the CityName
-// alias. Stores exposing beads.Counter answer persisted counts without
-// hydrating rows — the caching layer counts matches in memory when its cache is
-// clean (#1896). Stores are queried concurrently; results aggregate in
-// deterministic city/rig order.
+// and federates canonical Ready work over the work-store legs GET /beads/ready
+// reads, in the same order: the city store first, then BeadStores excluding the
+// CityName alias. It reads each leg from a different source, though (see
+// statusReadyStoreWithTimeout). Stores exposing beads.Counter answer persisted
+// counts without hydrating rows — the caching layer counts matches in memory
+// when its cache is clean (#1896). Stores are queried concurrently; results
+// aggregate in deterministic city/rig order.
 //
 // NOT identical to GET /beads/ready on a split city: that handler grew a
 // relocated-graph-store leg (huma_handlers_beads.go) and this one has none, so
@@ -741,12 +762,13 @@ type statusWorkResult struct {
 // by design (see cacheColdRigs below), which is the opposite of the graph leg's
 // fail-loud contract, so wiring one in is its own slice, not a rider.
 //
-// Rigs in cacheColdRigs are asked for persisted counts but not for ready work.
-// Their store runs no background cache refresh, so the cache-only Ready
-// projection is guaranteed to decline with ErrCacheUnavailable — reporting that
-// as a partial error made every city with a suspended rig permanently partial,
-// which greys out unrelated status tiles in the dashboard. Skipping the read
-// changes no count: the failing read already contributed zero ready work.
+// Rigs in cacheColdRigs (suspended rigs) are not asked at all. Their store
+// runs no cache, so every read would go to bd, and a bd read restarts a
+// suspended rig's retired proxy and Dolt; gc leaves a suspended scope
+// untouched. Their open and in-progress work is therefore not in the counts.
+// The cache-only Ready projection would decline for them anyway — reporting
+// that as a partial error made every city with a suspended rig permanently
+// partial, which greys out unrelated status tiles in the dashboard.
 func (s *Server) statusWorkCounts(ctx context.Context, cacheColdRigs map[string]bool) (workCounts, []string) {
 	stores := s.state.BeadStores()
 	// sortedRigNames deduplicates rigs sharing one store instance, so each
@@ -767,12 +789,17 @@ func (s *Server) statusWorkCounts(ctx context.Context, cacheColdRigs map[string]
 		})
 	}
 	cityName := s.state.CityName()
+	excluded := 0
 	for _, rigName := range rigNames {
+		if cacheColdRigs[rigName] {
+			excluded++
+			continue
+		}
 		queries = append(queries, workQuery{
 			label:         "rig " + rigName,
 			store:         stores[rigName],
 			includeStored: true,
-			includeReady:  rigName != cityName && !cacheColdRigs[rigName],
+			includeReady:  rigName != cityName,
 		})
 	}
 
@@ -809,6 +836,7 @@ func (s *Server) statusWorkCounts(ctx context.Context, cacheColdRigs map[string]
 		}
 		errs = append(errs, r.errs...)
 	}
+	wc.SuspendedRigsExcluded = excluded
 	return wc, errs
 }
 
@@ -1022,10 +1050,15 @@ func statusListStoreWithTimeout(ctx context.Context, state State, store beads.St
 	}
 }
 
-// statusReadyStoreWithTimeout reads the same live canonical Ready projection
-// as GET /beads/ready. Policy-aware stores retain their tier behavior through
-// ScopedStoreLike; the scoped clone binds bd subprocesses to reqCtx so timeout
-// cancellation cannot leak a child beyond the status request.
+// statusReadyStoreWithTimeout reads the canonical Ready projection of one leg
+// GET /beads/ready federates, but not from the source that endpoint uses. A
+// beads.ContextReadyReader is read through ReadyContext; for a CachingStore
+// that read is cache-only and fails with beads.ErrCacheUnavailable rather than
+// read live. Any other store is read live through ScopedStoreLike: policy-aware
+// stores retain their tier behavior, and the scoped clone binds bd subprocesses
+// to reqCtx so timeout cancellation cannot leak a child beyond the status
+// request. GET /beads/ready instead reads a leg whose cache cannot answer live
+// (beads.ReadyPreferCache).
 func statusReadyStoreWithTimeout(ctx context.Context, state State, store beads.Store) ([]beads.Bead, error) {
 	if store == nil {
 		return nil, nil
@@ -1098,9 +1131,16 @@ func statusMailCountWithTimeout(mp interface {
 	}
 }
 
-func appendUnlimitedPoolSessionBeads(expanded []expandedAgent, a config.Agent, cityName, sessTmpl string, snapshot statusSessionSnapshot) []expandedAgent {
+// statusListsTemplateBeads reports whether status lists every session bead
+// recorded against the agent's template as a row of its own: true for an
+// unlimited pool, whose instances config cannot enumerate.
+func statusListsTemplateBeads(a config.Agent) bool {
 	maxSess := a.EffectiveMaxActiveSessions()
-	if !a.SupportsInstanceExpansion() || (maxSess != nil && *maxSess >= 0) {
+	return a.SupportsInstanceExpansion() && (maxSess == nil || *maxSess < 0)
+}
+
+func appendUnlimitedPoolSessionBeads(expanded []expandedAgent, a config.Agent, cityName, sessTmpl string, snapshot statusSessionSnapshot) []expandedAgent {
+	if !statusListsTemplateBeads(a) {
 		return expanded
 	}
 
@@ -1176,10 +1216,23 @@ func statusSessionStateInfo(info session.Info) session.State {
 //  3. for a single-instance identity, the one session bead recorded against
 //     it as template.
 //
+// templateBeadsListed is statusListsTemplateBeads for the agent. When it
+// holds, every session bead recorded against the template is already listed
+// as a row of its own, so the template's own row (the named session a
+// template declares under its bare name) stops after step 1: any other bead
+// is another row's session, whether it names a sibling instance such as the
+// <template>-1 seat routed work mints or records no identity at all, and
+// taking it would count that session twice. A named session runs under its
+// canonical name anyway. A bounded template lists no beads, so steps 2 and 3
+// still find a single seat recorded under a slot-suffixed identity.
+//
 // Anything ambiguous falls back to the canonical name rather than guessing.
-func statusRuntimeSessionName(cityName, sessTmpl, qualifiedName, groupName string, snapshot statusSessionSnapshot) string {
+func statusRuntimeSessionName(cityName, sessTmpl, qualifiedName, groupName string, templateBeadsListed bool, snapshot statusSessionSnapshot) string {
 	canonical := agentSessionName(cityName, qualifiedName, sessTmpl)
 	if _, ok := snapshot.bySessionName[canonical]; ok {
+		return canonical
+	}
+	if templateBeadsListed && qualifiedName == groupName {
 		return canonical
 	}
 

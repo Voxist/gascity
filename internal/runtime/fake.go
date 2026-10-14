@@ -29,24 +29,32 @@ type Fake struct {
 	// IsTracked=true, because the tmux scanner keys tracked-ness by session id,
 	// so they cannot be modeled through OrphanedRuntimes, whose contract is that
 	// its entries are untracked orphans.
-	ExtraRuntimes           []LiveRuntime
-	Zombies                 map[string]bool      // sessions with dead agent processes
-	Attached                map[string]bool      // sessions with attached terminals
-	AttachedSequence        map[string][]bool    // scripted IsAttached results by session
-	PeekOutput              map[string]string    // session → canned peek output
-	Activity                map[string]time.Time // session → last activity time
-	StartErrors             map[string]error     // per-session Start errors for testing
-	StopErrors              map[string]error     // per-session Stop errors for testing
-	StopLeavesRunning       map[string]bool      // per-session Stop returns nil without deleting the session
+	ExtraRuntimes    []LiveRuntime
+	Zombies          map[string]bool      // sessions with dead agent processes
+	Attached         map[string]bool      // sessions with attached terminals
+	AttachedSequence map[string][]bool    // scripted IsAttached results by session
+	AttachedErrors   map[string]error     // per-session IsAttachedWithError errors for testing
+	PeekOutput       map[string]string    // session → canned peek output
+	Activity         map[string]time.Time // session → last activity time
+	// Bindings are the threads a [FullFake]'s SessionBinding reports, by
+	// session name.
+	Bindings                map[string]SessionBinding
+	StartErrors             map[string]error // per-session Start errors for testing
+	StopErrors              map[string]error // per-session Stop errors for testing
+	StopLeavesRunning       map[string]bool  // per-session Stop returns nil without deleting the session
 	PendingInteractions     map[string]*PendingInteraction
+	PendingErrors           map[string]error // per-session Pending errors for testing
 	Responses               map[string][]InteractionResponse
 	SleepCapabilityValue    SessionSleepCapability
+	TurnInterruptModeValue  TurnInterruptMode // reported by TurnInterruptMode; empty reads as keystroke
 	WaitForIdleErrors       map[string]error
 	WaitForIdleSequence     map[string][]error
 	DialogErrors            map[string]error
 	ResetTurnErrors         map[string]error
 	InterruptBoundaryErrors map[string]error
+	ClearInputErrors        map[string]error
 	RemoveMetaErrors        map[string]map[string]error // per-session/key RemoveMeta errors for testing
+	GetMetaErrors           map[string]map[string]error // per-session/key GetMeta errors for testing
 	// WaitForIdleGates blocks WaitForIdle on a per-name channel until the
 	// caller closes it. A nil or absent entry returns the configured
 	// WaitForIdleErrors value immediately. The gate is read under f.mu
@@ -66,26 +74,36 @@ type Fake struct {
 	// NudgeErrors configures Fake.Nudge/Fake.NudgeNow errors per session name;
 	// an absent entry nudges successfully.
 	NudgeErrors map[string]error
+	// ListingUnattested makes Fake.ListRunningComplete report false, modeling
+	// a provider whose ListRunning may omit live sessions.
+	ListingUnattested bool
 }
 
 var (
 	_ ProcessTableScanner = (*Fake)(nil)
 	_ RelaunchProvider    = (*Fake)(nil)
+	_ ListingAttestation  = (*Fake)(nil)
+	_ InputClearProvider  = (*Fake)(nil)
+
+	_ AttachmentObserverWithError = (*Fake)(nil)
 )
 
 // Call records a single method invocation on [Fake].
 type Call struct {
-	Method    string         // method name (e.g. "Start", "Stop", "SetMeta")
-	Name      string         // session name argument
-	Config    Config         // only set for Start calls
-	Message   string         // only set for Nudge/SendKeys calls (flattened text)
-	Content   []ContentBlock // only set for Nudge calls (structured content)
-	Key       string         // only set for meta calls
-	Value     string         // only set for SetMeta calls
-	Src       string         // only set for CopyTo calls
-	Dst       string         // only set for CopyTo calls
-	RequestID string         // only set for Respond calls
-	Action    string         // only set for Respond calls
+	Method  string         // method name (e.g. "Start", "Stop", "SetMeta")
+	Name    string         // session name argument
+	Config  Config         // only set for Start calls
+	Message string         // only set for Nudge/SendKeys calls (flattened text)
+	Content []ContentBlock // only set for Nudge calls (structured content)
+	// DeliveryKey is set for a Nudge delivered through
+	// [KeyedNudgeProvider.NudgeKeyed] (a [FullFake]'s).
+	DeliveryKey string
+	Key         string // only set for meta calls
+	Value       string // only set for SetMeta calls
+	Src         string // only set for CopyTo calls
+	Dst         string // only set for CopyTo calls
+	RequestID   string // only set for Respond calls
+	Action      string // only set for Respond calls
 }
 
 // FakeExecResult configures one [Fake.Exec] outcome.
@@ -128,6 +146,7 @@ func NewFake() *Fake {
 		OrphanedRuntimes:        make(map[string]LiveRuntime),
 		Zombies:                 make(map[string]bool),
 		Attached:                make(map[string]bool),
+		AttachedErrors:          make(map[string]error),
 		AttachedSequence:        make(map[string][]bool),
 		StartErrors:             make(map[string]error),
 		StopErrors:              make(map[string]error),
@@ -140,7 +159,10 @@ func NewFake() *Fake {
 		DialogErrors:            make(map[string]error),
 		ResetTurnErrors:         make(map[string]error),
 		InterruptBoundaryErrors: make(map[string]error),
+		ClearInputErrors:        make(map[string]error),
 		RemoveMetaErrors:        make(map[string]map[string]error),
+		GetMetaErrors:           make(map[string]map[string]error),
+		PendingErrors:           make(map[string]error),
 		WaitForIdleGates:        make(map[string]chan struct{}),
 		WaitForIdleStarted:      make(map[string]chan struct{}),
 		RelaunchErrors:          make(map[string]error),
@@ -157,6 +179,7 @@ func NewFailFake() *Fake {
 		OrphanedRuntimes:        make(map[string]LiveRuntime),
 		Zombies:                 make(map[string]bool),
 		Attached:                make(map[string]bool),
+		AttachedErrors:          make(map[string]error),
 		StartErrors:             make(map[string]error),
 		StopErrors:              make(map[string]error),
 		StopLeavesRunning:       make(map[string]bool),
@@ -168,6 +191,7 @@ func NewFailFake() *Fake {
 		DialogErrors:            make(map[string]error),
 		ResetTurnErrors:         make(map[string]error),
 		InterruptBoundaryErrors: make(map[string]error),
+		ClearInputErrors:        make(map[string]error),
 		RemoveMetaErrors:        make(map[string]map[string]error),
 		WaitForIdleGates:        make(map[string]chan struct{}),
 		WaitForIdleStarted:      make(map[string]chan struct{}),
@@ -295,6 +319,21 @@ func (f *Fake) WaitForInterruptBoundary(_ context.Context, name string, since ti
 	return nil
 }
 
+// ClearInput records the call (the restore window in Value) and returns the
+// configured result.
+func (f *Fake) ClearInput(_ context.Context, name string, restoreWindow time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "ClearInput", Name: name, Value: restoreWindow.String()})
+	if f.broken {
+		return fmt.Errorf("session unavailable")
+	}
+	if err, ok := f.ClearInputErrors[name]; ok {
+		return err
+	}
+	return nil
+}
+
 // IsRunning reports whether the fake session exists.
 // When broken, always returns false.
 func (f *Fake) IsRunning(name string) bool {
@@ -335,6 +374,24 @@ func (f *Fake) IsAttached(name string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, Call{Method: "IsAttached", Name: name})
+	return f.attachedLocked(name)
+}
+
+// IsAttachedWithError returns the configured AttachedErrors entry for the
+// named session. Without one it answers exactly as [Fake.IsAttached] with a
+// nil error, so tests that never set an error see no difference.
+func (f *Fake) IsAttachedWithError(name string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "IsAttachedWithError", Name: name})
+	if err := f.AttachedErrors[name]; err != nil {
+		return false, err
+	}
+	return f.attachedLocked(name), nil
+}
+
+// attachedLocked is the shared IsAttached answer. The caller holds f.mu.
+func (f *Fake) attachedLocked(name string) bool {
 	if f.broken {
 		return false
 	}
@@ -447,6 +504,9 @@ func (f *Fake) Pending(name string) (*PendingInteraction, error) {
 	if f.broken {
 		return nil, fmt.Errorf("session unavailable")
 	}
+	if err := f.PendingErrors[name]; err != nil {
+		return nil, err
+	}
 	pending := f.PendingInteractions[name]
 	if pending == nil {
 		return nil, nil
@@ -510,6 +570,9 @@ func (f *Fake) GetMeta(name, key string) (string, error) {
 	if f.broken {
 		return "", fmt.Errorf("session unavailable")
 	}
+	if err := f.GetMetaErrors[name][key]; err != nil {
+		return "", err
+	}
 	return f.meta[name][key], nil
 }
 
@@ -568,6 +631,14 @@ func (f *Fake) ListRunning(prefix string) ([]string, error) {
 		}
 	}
 	return names, nil
+}
+
+// ListRunningComplete implements [ListingAttestation]: the in-memory listing
+// is complete unless ListingUnattested is set.
+func (f *Fake) ListRunningComplete() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return !f.ListingUnattested
 }
 
 // Synthetic pids for the Fake's provider-owned pane root. The parent is a
@@ -788,6 +859,14 @@ func (f *Fake) SleepCapability(string) SessionSleepCapability {
 		return SessionSleepCapabilityFull
 	}
 	return f.SleepCapabilityValue
+}
+
+// TurnInterruptMode returns the configured turn-interrupt mode. It records no
+// call: like SleepCapability it reports a fixed trait of the runtime.
+func (f *Fake) TurnInterruptMode(string) TurnInterruptMode {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.TurnInterruptModeValue
 }
 
 // LastStartConfig returns the Config used in the most recent Start call for

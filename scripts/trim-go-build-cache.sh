@@ -77,7 +77,7 @@
 # directories, hot entries included, so every concurrent build misses on
 # everything at once -- the cascading-rebuild incident vp-g96b. That is a
 # different operation from an age-based trim and is banned repo-wide
-# (AGENTS.md, "Build Cache Conventions"). "go clean -testcache" is allowed but
+# (fork-maintainer-guide.md, "Build Cache Conventions"). "go clean -testcache" is allowed but
 # is not needed here and is not used.
 #
 # SIZE CAP (TRIM_MAX_GIB)

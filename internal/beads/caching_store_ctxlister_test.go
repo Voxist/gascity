@@ -23,7 +23,7 @@ func TestCachingStoreSatisfiesCtxLister(t *testing.T) {
 // consulted rather than merely accepted.
 func TestCachingStoreListCtxHonorsCanceledContext(t *testing.T) {
 	t.Parallel()
-	c := NewCachingStore(NewMemStore(), func(_, _, _, _, _ string, _ *[]string, _ json.RawMessage) {})
+	c := NewCachingStore(NewMemStore(), func(_ ChangeSource, _, _, _, _, _ string, _ *[]string, _ json.RawMessage) {})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := c.ListCtx(ctx, ListQuery{AllowScan: true}); err == nil {

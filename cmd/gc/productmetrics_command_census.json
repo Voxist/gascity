@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 214,
+  "next_id": 216,
   "permanent_ids": [
     {
       "name": "help",
@@ -252,7 +252,7 @@
       "notice_policy": "eligible",
       "classification": "beads-city-migrate-proxied",
       "owner": "immediate",
-      "id": 212
+      "id": 208
     },
     {
       "path": "gc beads city use-external",
@@ -363,7 +363,7 @@
       "notice_policy": "eligible",
       "classification": "beads-state",
       "owner": "immediate",
-      "id": 206
+      "id": 211
     },
     {
       "path": "gc build-image",
@@ -536,7 +536,7 @@
       "notice_policy": "eligible",
       "classification": "config-lint",
       "owner": "immediate",
-      "id": 207
+      "id": 212
     },
     {
       "path": "gc config show",
@@ -2656,7 +2656,7 @@
       "notice_policy": "eligible",
       "classification": "nudge-drop",
       "owner": "immediate",
-      "id": 213
+      "id": 207
     },
     {
       "path": "gc nudge poll",
@@ -3227,7 +3227,7 @@
       "notice_policy": "eligible",
       "classification": "provider-credentials",
       "owner": "immediate",
-      "id": 210
+      "id": 215
     },
     {
       "path": "gc provider quota",
@@ -3242,7 +3242,7 @@
       "notice_policy": "eligible",
       "classification": "provider-quota",
       "owner": "immediate",
-      "id": 208
+      "id": 213
     },
     {
       "path": "gc ready",
@@ -3594,6 +3594,21 @@
       "classification": "runtime-undrain",
       "owner": "immediate",
       "id": 136
+    },
+    {
+      "path": "gc runtime workdir-export",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "runtime-workdir-export",
+      "owner": "immediate",
+      "id": 210
     },
     {
       "path": "gc service",
@@ -4129,7 +4144,7 @@
       "notice_policy": "eligible",
       "classification": "storage-preflight",
       "owner": "immediate",
-      "id": 211
+      "id": 206
     },
     {
       "path": "gc storage recover-stranded",
@@ -4145,6 +4160,21 @@
       "classification": "storage-recover-stranded",
       "owner": "immediate",
       "id": 201
+    },
+    {
+      "path": "gc storage repair-sequence",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-repair-sequence",
+      "owner": "immediate",
+      "id": 209
     },
     {
       "path": "gc storage status",
@@ -4801,7 +4831,7 @@
   "tombstones": [
     {
       "name": "provider-rotate-key",
-      "id": 209,
+      "id": 214,
       "wire": "provider-rotate-key"
     }
   ]

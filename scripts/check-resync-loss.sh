@@ -13,7 +13,7 @@
 # Git did not lose them — `git merge-file` retains
 # every one of them (see Gate 2 below). They were lost because shared
 # `_test.go` files were resolved by taking upstream's blob wholesale: a rule
-# AGENTS.md's "Resync conventions" rule 1 states for GENERATED artifacts
+# fork-maintainer-guide.md's "Resync conventions" rule 1 states for GENERATED artifacts
 # only, mis-applied here to hand-authored test files. Nothing in
 # build/vet/CI catches this class of loss: deleting a test never fails a
 # build, so the suite passes because the tests that would have caught the
@@ -46,14 +46,14 @@
 # Every hit is reported and fails the gate UNLESS the path carries the
 # `linguist-generated` .gitattributes attribute (see is_exempt below), which
 # is — and must stay — the single source of truth for the generated-artifact
-# list in AGENTS.md's "Resync conventions" rule 1 ("Generated artifacts are
+# list in fork-maintainer-guide.md's "Resync conventions" rule 1 ("Generated artifacts are
 # regenerated, never merged"). That rule licenses taking upstream wholesale
 # ONLY for attributed paths; the docs-drift check
 # (scripts/check-generated-docs-drift.sh) and GitHub's own diff collapsing
 # read the same .gitattributes, so there is exactly one place to add a path
 # to this list, not three that can drift apart. A shared `_test.go` file (or
 # any other hand-authored file) is never exempt: adding the attribute to one
-# without updating AGENTS.md rule 1's prose defeats the point of the gate.
+# without updating fork-maintainer-guide.md rule 1's prose defeats the point of the gate.
 #
 # GATE 2 — declaration-level: fork-added top-level Go declarations (present
 # in OURS, absent from both BASE and THEIRS — upstream never had an opinion
@@ -216,7 +216,7 @@ failed=0
 # "Resync conventions" rule 1's generated-artifact list, also read by
 # scripts/check-generated-docs-drift.sh and GitHub's diff collapsing. Do not
 # add a bespoke glob here — add the path to .gitattributes instead, and to
-# AGENTS.md rule 1's prose so a human reading the rule sees the same list.
+# fork-maintainer-guide.md rule 1's prose so a human reading the rule sees the same list.
 # `git check-attr` reads .gitattributes from the checked-out working tree,
 # which is exactly the merge commit's content on the normal path (this
 # script runs right after `git merge`, before push).
@@ -356,7 +356,7 @@ while IFS= read -r f; do
 
 	if is_exempt "$f"; then
 		gate1_exempt=$((gate1_exempt + 1))
-		note "  EXEMPT (generated, AGENTS.md rule 1) $verdict $f"
+		note "  EXEMPT (generated, fork-maintainer-guide.md rule 1) $verdict $f"
 		continue
 	fi
 
@@ -462,7 +462,7 @@ while IFS= read -r f; do
 
 	if is_exempt "$f"; then
 		gate3_file_exempt=$((gate3_file_exempt + 1))
-		note "  EXEMPT (generated, AGENTS.md rule 1) $verdict $f"
+		note "  EXEMPT (generated, fork-maintainer-guide.md rule 1) $verdict $f"
 		continue
 	fi
 

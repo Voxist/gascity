@@ -47,7 +47,7 @@ func TestHandleStatusSWRRefreshReseedsWarmEntry(t *testing.T) {
 	seededAt := time.Now().Add(-time.Hour)
 	srv.responseCacheMu.Lock()
 	srv.responseCacheEntries = map[string]responseCacheEntry{
-		"status": {index: responseCacheTimeBucket(seededAt), storedAt: seededAt, value: StatusBody{Name: "stale-response-body"}},
+		"status": {index: responseCacheTimeBucket(seededAt), storedAt: seededAt, value: indexedResponse[StatusBody]{Body: StatusBody{Name: "stale-response-body"}}},
 	}
 	srv.responseCacheMu.Unlock()
 

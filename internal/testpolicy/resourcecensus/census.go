@@ -123,71 +123,10 @@ var bootstrapPolicy = Ledger{
 	Version: 2,
 	AuditBaseline: []Baseline{
 		{
-			Scope:    ScopeAll,
-			Resource: ResourceSubprocess,
-			// Bumped 712->715 calls, 206->207 files for ga-xwn1k's new
-			// test/acceptance/beads_dolt_autostart_config_test.go
-			// (TestBeadsDoltAutoStartConfigHonouredByLibraryConsumer):
-			// fetchAndVerifyBDSource's curl+tar and the injected probe's own
-			// `go test` invocation are exec.Command calls inherent to what
-			// the test does -- fetch and build the pinned bd source to
-			// prove the ga-rpgvw fix against a library consumer, which
-			// cannot be done any other way (see that test's own file-level
-			// doc comment). Not a sleep-polling bump; a justified one.
-			//
-			// Bumped 715->716 calls, 207->208 files for ga-z3c6p's
-			// TestOpHealthPropagatesQueryProbeExitCode
-			// (cmd/gc/dolt_sql_health_probe_timeout_test.go): one new
-			// exec.Command("bash", "-c", ...) call site running the
-			// bundled provider script's op_health as a real subprocess
-			// against a stub gc binary -- the only way to behaviorally
-			// exercise the shell script's exit-code propagation instead of
-			// grepping its source text (which the review this bead came
-			// from found could not tell correct code from the bug it
-			// meant to catch).
-			//
-			// Bumped 716->720 calls, 208->209 files for ga-3bwmf's #227
-			// rework: doctor_dolt_watchdog_liveness_test.go's
-			// spawnOrphanedChild (one exec.Command("sh", "-c", "sleep 60 &
-			// echo $!; wait")) and two exec.Command("sleep", "5")
-			// fixtures, plus internal/pidutil_test.go's own
-			// exec.Command("sleep", "5") fixture -- all real subprocesses
-			// are load-bearing: this suite proves genuine OS-level process
-			// reparenting (orphaning to ppid 1) and live-vs-reused-pid
-			// argv reads, neither of which a fake can stand in for.
-			// (internal/pidutil.go's own ps-based ParentPIDOf fallback is
-			// production code, not test source, and is not counted by
-			// this census.)
-			//
-			// Bumped 716->717 calls (files unchanged, 208) for ga-w7nyj's
-			// TestErrorlintStockFixDropsTypeAssertionNegation
-			// (scripts/precommit_contract_test.go): one new
-			// exec.Command("golangci-lint", ...) call site running the
-			// real golangci-lint binary against a throwaway fixture module
-			// to prove errorlint's stock --fix silently drops a negation
-			// on this repo's actual .golangci.yml -- the same
-			// already-tracked file this bead's structural guard test also
-			// lives in, so no new file enters the census.
-			//
-			// Bumped 717->719 calls (files unchanged, 208) for the same
-			// bead's review fix-up: pinnedGolangciLintBin added two more
-			// call sites in that file, `exec.Command("go", "env",
-			// "GOPATH")` and `exec.Command(bin, "--version")`, to resolve
-			// and verify the pinned golangci-lint binary instead of
-			// whatever "golangci-lint" happened to resolve to on PATH.
-			//
-			// Bumped 729->730 calls (files unchanged, 210) for ga-g6fjp:
-			// examples/bd/dolt/recover_host_test.go runs the recover script
-			// via `exec.Command("sh", ...)` to pin the host-default fallback.
-			//
-			// Bumped 730->731 calls (files 210->211) for ga-lc97s:
-			// cmd/gc/managed_dolt_implicit_recovery_gate_process_test.go
-			// re-execs the test binary as a real gc child via exec.Command to
-			// prove the implicit-recovery gate refuses a stopped or frozen
-			// city; the one call is a checked Medium owner, so Small debt
-			// does not grow.
-			BaselineCalls:   731,
-			BaselineFiles:   211,
+			Scope:           ScopeAll,
+			Resource:        ResourceSubprocess,
+			BaselineCalls:   785,
+			BaselineFiles:   237,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-cp3hwi",
@@ -197,17 +136,10 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-10-31",
 		},
 		{
-			Scope:    ScopeAll,
-			Resource: ResourceFixedSleep,
-			// Bumped 485->487 calls, 177->178 files for ga-3bwmf's #227
-			// rework: the same spawnOrphanedChild helper's bounded
-			// reparenting-detection poll (time.Sleep(20ms) between
-			// deadline-bounded checks) and internal/pidutil's matching
-			// poll in its own test (time.Sleep(10ms)) -- both are the
-			// sleep INTERVAL inside an already deadline-bounded polling
-			// loop, not an unbounded fixed wait.
-			BaselineCalls:   488,
-			BaselineFiles:   179,
+			Scope:           ScopeAll,
+			Resource:        ResourceFixedSleep,
+			BaselineCalls:   495,
+			BaselineFiles:   186,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
 			OwnerBead:       "ga-cp3hwi",
@@ -219,10 +151,10 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceListenerHelper,
-			BaselineCalls:   58,
-			BaselineFiles:   23,
-			ReportedCalls:   58,
-			ReportedFiles:   23,
+			BaselineCalls:   60,
+			BaselineFiles:   24,
+			ReportedCalls:   60,
+			ReportedFiles:   24,
 			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "all-source listener-helper call/file totals cannot drift without an explicit checked policy update",
 			ResourceOwner:   "ga-cp3hwi owns this all-source audit; tagged calls stay Large and receive no Medium exemption",
@@ -232,34 +164,10 @@ var bootstrapPolicy = Ledger{
 	},
 	Debt: []Baseline{
 		{
-			Scope:    ScopeUntagged,
-			Resource: ResourceSubprocess,
-			// Bumped 478->479 calls, 136->137 files for ga-z3c6p's
-			// TestOpHealthPropagatesQueryProbeExitCode (see the matching
-			// audit_baseline subprocess comment above for the source).
-			//
-			// Bumped 479->483 calls, 137->138 files for ga-3bwmf's #227
-			// rework (see the matching audit_baseline subprocess comment
-			// above for the source).
-			//
-			// Bumped 479->480 calls (files unchanged, 137) for ga-w7nyj's
-			// TestErrorlintStockFixDropsTypeAssertionNegation (see the
-			// matching audit_baseline subprocess comment above for the
-			// source).
-			//
-			// Bumped 480->482 calls (files unchanged, 137) for the same
-			// bead's review fix-up (see the matching audit_baseline
-			// subprocess comment above for the source).
-			//
-			// Bumped 492->493 calls (files unchanged, 139) for ga-g6fjp:
-			// examples/bd/dolt/recover_host_test.go runs the recover script
-			// via `exec.Command("sh", ...)` to pin the host-default fallback.
-			//
-			// Bumped 493->494 calls (files 139->140) for ga-lc97s: the same
-			// gate child-process test (see the matching all-scope subprocess
-			// comment above for the source).
-			BaselineCalls:   494,
-			BaselineFiles:   140,
+			Scope:           ScopeUntagged,
+			Resource:        ResourceSubprocess,
+			BaselineCalls:   527,
+			BaselineFiles:   159,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-cp3hwi",
@@ -269,13 +177,10 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-10-31",
 		},
 		{
-			Scope:    ScopeUntagged,
-			Resource: ResourceFixedSleep,
-			// Bumped 319->321 calls, 121->122 files for ga-3bwmf's #227
-			// rework (see the matching audit_baseline fixed_sleep comment
-			// above for the source).
+			Scope:           ScopeUntagged,
+			Resource:        ResourceFixedSleep,
 			BaselineCalls:   322,
-			BaselineFiles:   123,
+			BaselineFiles:   125,
 			ReportedCalls:   295,
 			ReportedFiles:   114,
 			OwnerBead:       "ga-cp3hwi",
@@ -287,8 +192,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   122,
-			BaselineFiles:   14,
+			BaselineCalls:   124,
+			BaselineFiles:   16,
 			ReportedCalls:   3960,
 			ReportedFiles:   184,
 			OwnerBead:       "ga-cp3hwi",
@@ -313,8 +218,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceSlowProcessGate,
-			BaselineCalls:   60,
-			BaselineFiles:   24,
+			BaselineCalls:   62,
+			BaselineFiles:   25,
 			ReportedCalls:   78,
 			ReportedFiles:   27,
 			OwnerBead:       "ga-cp3hwi",
@@ -326,8 +231,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceHTTPTestServer,
-			BaselineCalls:   333,
-			BaselineFiles:   70,
+			BaselineCalls:   334,
+			BaselineFiles:   71,
 			ReportedCalls:   255,
 			ReportedFiles:   56,
 			OwnerBead:       "ga-cp3hwi",
@@ -339,9 +244,9 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceListenerHelper,
-			BaselineCalls:   38,
+			BaselineCalls:   39,
 			BaselineFiles:   13,
-			ReportedCalls:   38,
+			ReportedCalls:   39,
 			ReportedFiles:   13,
 			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged listener-helper call/file totals cannot grow; reductions must lower this baseline",
@@ -350,17 +255,10 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-10-31",
 		},
 		{
-			Scope:    ScopeUntagged,
-			Resource: ResourceNetListen,
-			// Bumped 98->99 calls, 38->39 files for ga-z3c6p's
-			// TestManagedDoltReadOnlyStateDirectClassifiesHangAsTimeout
-			// (cmd/gc/dolt_sql_health_probe_timeout_test.go): a real
-			// net.Listen is the only way to drive the direct (sql-driver)
-			// lane's own read timeout through a genuine blocked handshake
-			// read instead of a manually-expired context, which is what
-			// the sibling query-probe test already had to settle for.
-			BaselineCalls:   99,
-			BaselineFiles:   39,
+			Scope:           ScopeUntagged,
+			Resource:        ResourceNetListen,
+			BaselineCalls:   98,
+			BaselineFiles:   38,
 			ReportedCalls:   92,
 			ReportedFiles:   34,
 			OwnerBead:       "ga-cp3hwi",
@@ -424,8 +322,8 @@ var bootstrapPolicy = Ledger{
 	},
 	Medium: []MediumOwner{
 		{
-			PackageDir:      "internal/api",
-			PackageName:     "api",
+			PackageDir:      "internal/api/apierr",
+			PackageName:     "apierr",
 			Owner:           "TestEveryEmittedErrorCodeIsRegistered",
 			Resources:       []Resource{ResourceSubprocess},
 			OwnerBead:       "ga-cp3hwi",
@@ -454,6 +352,17 @@ var bootstrapPolicy = Ledger{
 			Invariant:       "cmd/gc TestMain is the checked package-level Medium owner for process environment and tmux namespace setup",
 			ResourceOwner:   "only declared environment and tmux calls lexically inside TestMain leave Small debt",
 			MigrationTarget: "P0.4b/P0.4c-tmux",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "cmd/gc",
+			PackageName:     "main",
+			Owner:           "TestRuntimeLeaseCLIVsLegacyStart",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the CLI-vs-legacy runtime lease harness is a checked Medium subprocess owner",
+			ResourceOwner:   "the CLI process is confined to TestRuntimeLeaseCLIVsLegacyStart, which re-execs the test binary as a gc session CLI starting a row through its Manager: the lease's flock and record must exclude a second process, so only a real one proves the controller's legacy start defers to it",
+			MigrationTarget: "P0.4b",
 			Expires:         "2026-10-31",
 		},
 		{
@@ -545,6 +454,39 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-10-31",
 		},
 		{
+			PackageDir:      "internal/session",
+			PackageName:     "session",
+			Owner:           "TestRuntimeLeaseCrossProcess",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the runtime lease cross-process harness is a checked Medium subprocess owner",
+			ResourceOwner:   "the role processes are confined to TestRuntimeLeaseCrossProcess, which re-execs the test binary to prove the lease across real processes: a flock dies with its process, so only a killed process proves crash release, and the store record must fence a second process that shares nothing but the store",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "internal/session",
+			PackageName:     "session",
+			Owner:           "TestNoCityGateFailsTheRun",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the no-city gate's self-test is a checked Medium subprocess owner",
+			ResourceOwner:   "the probe processes are confined to TestNoCityGateFailsTheRun, which re-execs the test binary on its own probe: the gate decides the exit code of a whole test binary after its last test, so only a real child run shows an undeclared refusal failing a run whose tests all pass",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "internal/session/sessiontest",
+			PackageName:     "sessiontest_test",
+			Owner:           "TestNoCityRefusalWithoutTheGateExits",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the no-city gate's unarmed self-test is a checked Medium subprocess owner",
+			ResourceOwner:   "the probe process is confined to TestNoCityRefusalWithoutTheGateExits, which re-execs the test binary on its own probe: a refusal in a binary that does not run the gate exits that binary, so only a real child run shows it failing before its test can pass",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
+		{
 			PackageDir:      "scripts",
 			PackageName:     "scripts_test",
 			Owner:           "TestDockerSessionProtocol",
@@ -610,6 +552,72 @@ var bootstrapPolicy = Ledger{
 			MigrationTarget: "P0.4b",
 			Expires:         "2026-10-31",
 		},
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
+			Owner:           "TestGoModDownloadRetryScriptRetriesTransientFailures",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the CI go mod download retry proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the one bash subprocess per case is confined to TestGoModDownloadRetryScriptRetriesTransientFailures, which exists to run .github/scripts/go-mod-download-retry.sh against a PATH-injected fake go: the retry loop and GOPROXY selection are shell, so only a real shell run can prove a transient proxy error is retried and a persistent one fails",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
+			Owner:           "TestGoModVerifyCacheDetectsTamperedModules",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the CI Go module cache verification proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the go and bash subprocesses are confined to TestGoModVerifyCacheDetectsTamperedModules, which exists to run .github/scripts/go-mod-download-retry.sh and .github/scripts/go-mod-verify-cache.sh with the real go command against a file:// module proxy and an isolated module cache, then tamper with the cached zip: the claim under test is the go command's own trust of a cached .ziphash, so only the real go command can prove the verify step catches what it accepts",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
+			Owner:           "TestFreshMergeActionBehaviour",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the fresh-merge composite action's behavior proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the git and bash subprocesses are confined to TestFreshMergeActionBehaviour, which exists to run .github/actions/fresh-merge's own bash script against a scratch git origin (clean merge, workflow skew, conflict, head already containing the tip, unfetchable base): the script is git plumbing, so only real git can prove what it merges and when it fails",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
+			Owner:           "TestBazelNightlyFreshDecision",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the nightly fresh-on-drift decision proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the bash subprocess per case is confined to TestBazelNightlyFreshDecision, which exists to run bazel-nightly.yml's decide step script against a PATH-injected stub gh (shadow mode, a covered week, a new fingerprint, a key prefix, a PR-scoped cache entry, a dispatch, no canary run, a malformed fingerprint): the decision is shell and gh, so only a real shell run can prove when the nightly re-executes every test and that it fails open to fresh",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
+			Owner:           "TestCacheProbes",
+			Resources:       []Resource{ResourceHTTPTestServer},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the anonymous-cache probes' behavior proof is a checked Medium HTTP test server owner",
+			ResourceOwner:   "the loopback TLS HTTP/2 servers are confined to TestCacheProbes, whose one stand-in rbe-cache runs tools/rbe/cache-zstd-probe.sh (zstd advertised or not) and tools/rbe/cache-rrc-probe.sh (an answer or none, the action cache's and the CAS's NOT_FOUND or not, the kill switch off) through gRPC and HTTP errors, malformed answers and timeouts: the probes are curl's HTTP/2 and gRPC trailers, so only a real server can prove when fork-cache asks for zstd and when fork-cache lanes read the remote repo contents cache",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
+		{
+			PackageDir:      "internal/hooks",
+			PackageName:     "hooks",
+			Owner:           "TestProviderPluginNodeSuite",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "ga-cp3hwi",
+			Invariant:       "the embedded provider-plugin behavior proof is a checked Medium subprocess owner",
+			ResourceOwner:   "the one node subprocess is confined to TestProviderPluginNodeSuite, which exists to run the embedded OpenCode and MiMo Code plugins under node against a GC_BIN fake gc: the plugins are JavaScript the provider loads, so only a real node run can prove the system-prompt shape and the once-per-turn drain they produce",
+			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-31",
+		},
 	},
 	ReviewedHermeticBody: []ReviewedHermeticBody{
 		{
@@ -643,30 +651,10 @@ var bootstrapPolicy = Ledger{
 	},
 	SmallDebt: []Baseline{
 		{
-			Scope:    ScopeUntagged,
-			Resource: ResourceSubprocess,
-			// Bumped 460->461 calls, 130->131 files for ga-z3c6p's
-			// TestOpHealthPropagatesQueryProbeExitCode (see the matching
-			// audit_baseline subprocess comment above for the source).
-			//
-			// Bumped 461->465 calls, 131->132 files for ga-3bwmf's #227
-			// rework (see the matching audit_baseline subprocess comment
-			// above for the source).
-			//
-			// Bumped 461->462 calls (files unchanged, 131) for ga-w7nyj's
-			// TestErrorlintStockFixDropsTypeAssertionNegation (see the
-			// matching audit_baseline subprocess comment above for the
-			// source).
-			//
-			// Bumped 462->464 calls (files unchanged, 131) for the same
-			// bead's review fix-up (see the matching audit_baseline
-			// subprocess comment above for the source).
-			//
-			// Bumped 474->475 calls (files unchanged, 133) for ga-g6fjp:
-			// examples/bd/dolt/recover_host_test.go runs the recover script
-			// via `exec.Command("sh", ...)` to pin the host-default fallback.
-			BaselineCalls:   475,
-			BaselineFiles:   133,
+			Scope:           ScopeUntagged,
+			Resource:        ResourceSubprocess,
+			BaselineCalls:   498,
+			BaselineFiles:   144,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
 			OwnerBead:       "ga-cp3hwi",
@@ -676,13 +664,10 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-10-31",
 		},
 		{
-			Scope:    ScopeUntagged,
-			Resource: ResourceFixedSleep,
-			// Bumped 319->321 calls, 121->122 files for ga-3bwmf's #227
-			// rework (see the matching audit_baseline fixed_sleep comment
-			// above for the source).
+			Scope:           ScopeUntagged,
+			Resource:        ResourceFixedSleep,
 			BaselineCalls:   322,
-			BaselineFiles:   123,
+			BaselineFiles:   125,
 			ReportedCalls:   287,
 			ReportedFiles:   113,
 			OwnerBead:       "ga-cp3hwi",
@@ -694,8 +679,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceEnvironment,
-			BaselineCalls:   117,
-			BaselineFiles:   14,
+			BaselineCalls:   119,
+			BaselineFiles:   16,
 			ReportedCalls:   4348,
 			ReportedFiles:   200,
 			OwnerBead:       "ga-cp3hwi",
@@ -720,8 +705,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeCmdGCUntagged,
 			Resource:        ResourceSlowProcessGate,
-			BaselineCalls:   59,
-			BaselineFiles:   24,
+			BaselineCalls:   61,
+			BaselineFiles:   25,
 			ReportedCalls:   75,
 			ReportedFiles:   25,
 			OwnerBead:       "ga-cp3hwi",
@@ -746,9 +731,9 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceListenerHelper,
-			BaselineCalls:   38,
+			BaselineCalls:   39,
 			BaselineFiles:   13,
-			ReportedCalls:   38,
+			ReportedCalls:   39,
 			ReportedFiles:   13,
 			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "untagged Small listener-helper call/file totals cannot grow; reductions must lower this baseline",
@@ -757,14 +742,10 @@ var bootstrapPolicy = Ledger{
 			Expires:         "2026-10-31",
 		},
 		{
-			Scope:    ScopeUntagged,
-			Resource: ResourceNetListen,
-			// Bumped 96->97 calls, 37->38 files for ga-z3c6p's
-			// TestManagedDoltReadOnlyStateDirectClassifiesHangAsTimeout
-			// (see the matching debt net_listen comment above for the
-			// source).
-			BaselineCalls:   97,
-			BaselineFiles:   38,
+			Scope:           ScopeUntagged,
+			Resource:        ResourceNetListen,
+			BaselineCalls:   96,
+			BaselineFiles:   37,
 			ReportedCalls:   92,
 			ReportedFiles:   34,
 			OwnerBead:       "ga-cp3hwi",
@@ -2002,24 +1983,31 @@ func LoadLedger(name string) (Ledger, error) {
 	return ParseLedger(data)
 }
 
-// Validate checks schema ownership, expiration, and exact census baselines.
-func Validate(ledger Ledger, census Census, now time.Time, mode waiverclock.Mode) (warnings []string, err error) {
-	return validateAgainstPolicy(bootstrapPolicy, ledger, census, now, mode)
+// Validate checks schema ownership and exact census baselines. It never reads
+// or takes a clock: whether a row's date is acceptable today is answered by
+// handing PolicyExpiries to internal/testpolicy/waiverclock from the one
+// never-cached date check (internal/testpolicy/waiverexpiry). Keeping the two
+// apart is what lets this check's result be cached without going stale on the
+// calendar.
+func Validate(ledger Ledger, census Census) error {
+	return validateAgainstPolicy(bootstrapPolicy, ledger, census)
 }
 
-func validateAgainstPolicy(policy, ledger Ledger, census Census, now time.Time, mode waiverclock.Mode) (warnings []string, err error) {
-	// The clock runs separately from everything below, because a passing date is
-	// the only failure here that needs nobody to change any code. Its findings
-	// join the rest rather than short-circuiting them: neither a tolerated lapse
-	// nor a fatal one should be able to hide a real regression.
-	clock := waiverclock.Check(collectExpiries(ledger), now, mode)
-	fail := func(problems ...string) ([]string, error) {
-		problems = append(problems, clock.Fatal...)
+// PolicyExpiries returns one dated expiry per bootstrap policy row, for the
+// waiver clock to judge against today. Validate forces every row of the checked
+// ledger to equal its policy row, expires included, so these are the checked
+// ledger's dates.
+func PolicyExpiries() []waiverclock.Expiry {
+	return collectExpiries(bootstrapPolicy)
+}
+
+func validateAgainstPolicy(policy, ledger Ledger, census Census) error {
+	fail := func(problems ...string) error {
 		if len(problems) == 0 {
-			return clock.Warnings, nil
+			return nil
 		}
 		sort.Strings(problems)
-		return clock.Warnings, errors.New(strings.Join(problems, "\n"))
+		return errors.New(strings.Join(problems, "\n"))
 	}
 
 	if problems := validateManifestAgainstPolicy(policy, ledger); len(problems) > 0 {
@@ -2175,10 +2163,9 @@ func validateOwnership(prefix string, row Baseline) []string {
 
 // validateOwnershipFields checks that a row declares who owns it and when it is
 // meant to be gone. It checks that the date is well formed but deliberately does
-// not check whether it has passed: that verdict depends on an enforcement mode
-// only the top-level caller knows, and it is collected once per ledger row by
-// collectExpiries rather than at each of the two or three sites that reach a row
-// during validation. See internal/testpolicy/waiverclock.
+// not check whether it has passed: that verdict depends on today, which this
+// cached check must never read. collectExpiries hands each row to the waiver
+// clock once instead. See internal/testpolicy/waiverexpiry.
 func validateOwnershipFields(prefix, owner, invariant, resourceOwner, migration, expiryText string) []string {
 	var problems []string
 	for name, value := range map[string]string{
