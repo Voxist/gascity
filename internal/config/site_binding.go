@@ -534,7 +534,9 @@ func GuardCityRewriteKeyLoss(fs fsys.FS, path string) error {
 // GuardCityRewriteKeyLoss for city.toml and the equivalent pack.toml rewrite
 // guards (gc agent suspend, import-manifest rewrites), all of which round-trip
 // a config through a reduced struct and would otherwise drop newer or manual
-// keys at a checked-in target. A missing file is fine — there is nothing to
+// keys at a checked-in target. Retired keys (retiredKeys) are not refused:
+// they are ignored on load, so the rewrite dropping them is the intended
+// outcome. A missing file is fine — there is nothing to
 // lose. An unparsable file is refused: callers load from this same path before
 // mutating it, so unparsable content means the file changed underneath us and
 // a rewrite would destroy whatever is there now.
@@ -557,7 +559,13 @@ func GuardRewriteKeyLoss[T any](fs fsys.FS, path string) error {
 	}
 	keys := make([]string, 0, len(undecoded))
 	for _, key := range undecoded {
+		if _, retired := retiredKeys[key.String()]; retired {
+			continue
+		}
 		keys = append(keys, key.String())
+	}
+	if len(keys) == 0 {
+		return nil
 	}
 	sort.Strings(keys)
 	return fmt.Errorf("refusing to rewrite %s: it contains keys this gc binary does not recognize and the rewrite would silently drop them: %s (upgrade gc or remove the keys, then retry)", path, strings.Join(keys, ", "))

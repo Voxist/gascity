@@ -46,6 +46,7 @@ go_library(
         "reserved_prefixes.go",
         "resolve.go",
         "resolved_cache.go",
+        "retired_keys_fork.go",
         "revision.go",
         "service.go",
         "session_capacity.go",

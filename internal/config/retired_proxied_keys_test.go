@@ -1,6 +1,9 @@
 package config
 
 import (
+	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -76,5 +79,86 @@ func TestRetiredProxiedOptInKeysPointAtReplacement(t *testing.T) {
 		if !strings.Contains(rk.Note, "gc beads city migrate-proxied") || !strings.Contains(rk.Note, "proxied_idle_timeout") {
 			t.Errorf("%q note = %q, want it to name `gc beads city migrate-proxied` and proxied_idle_timeout", key, rk.Note)
 		}
+	}
+}
+
+// TestRewriteDropsRetiredProxiedOptInKeys pins that a city.toml still carrying
+// the retired keys can be rewritten (suspend, rig edits, gc migrate, doctor
+// fixes all round-trip through this guard), and that the rewrite drops them:
+// they are ignored on load, so losing them is the intended outcome.
+func TestRewriteDropsRetiredProxiedOptInKeys(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "city.toml")
+	original := []byte(`[workspace]
+name = "test-city"
+
+[beads]
+proxied = false
+proxy_pool_size = 2
+
+[storehealth]
+interval = "30s"
+`)
+	if err := os.WriteFile(cityPath, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	cfg.Workspace.Name = "renamed-city"
+
+	if err := WriteCityAndRigSiteBindingsForEdit(fsys.OSFS{}, cityPath, cfg); err != nil {
+		t.Fatalf("WriteCityAndRigSiteBindingsForEdit refused a city.toml carrying only retired keys: %v", err)
+	}
+	data, err := os.ReadFile(cityPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(data), `name = "renamed-city"`) {
+		t.Fatalf("rewrite did not apply the edit:\n%s", data)
+	}
+	for _, gone := range []string{"proxied", "proxy_pool_size", "storehealth"} {
+		if strings.Contains(string(data), gone) {
+			t.Errorf("rewritten city.toml still carries retired %q:\n%s", gone, data)
+		}
+	}
+}
+
+// TestRewriteStillRefusesUnknownKeyBesideRetiredKeys keeps the key-loss guard
+// intact for genuinely unknown keys when retired keys are also present.
+func TestRewriteStillRefusesUnknownKeyBesideRetiredKeys(t *testing.T) {
+	cityPath := filepath.Join(t.TempDir(), "city.toml")
+	original := []byte(`[workspace]
+name = "test-city"
+
+[beads]
+proxied = false
+future_unknown_knob = "keep-me"
+`)
+	if err := os.WriteFile(cityPath, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	cfg.Workspace.Name = "renamed-city"
+
+	err = WriteCityAndRigSiteBindingsForEdit(fsys.OSFS{}, cityPath, cfg)
+	if err == nil {
+		t.Fatal("WriteCityAndRigSiteBindingsForEdit succeeded, want refusal for the unknown key")
+	}
+	if !strings.Contains(err.Error(), "beads.future_unknown_knob") {
+		t.Fatalf("error = %v, want mention of beads.future_unknown_knob", err)
+	}
+	if strings.Contains(err.Error(), "beads.proxied") {
+		t.Fatalf("error = %v, must not list the retired beads.proxied key", err)
+	}
+	current, readErr := os.ReadFile(cityPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile: %v", readErr)
+	}
+	if !bytes.Equal(current, original) {
+		t.Fatalf("city.toml was rewritten despite refusal:\n%s", current)
 	}
 }

@@ -58,9 +58,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The fork's `[beads] proxied` opt-in is retired** in favour of upstream's
   bd-owned proxied-server. `[beads] proxied`, `proxy_pool_size`,
   `proxy_idle_timeout` and the whole `[storehealth]` table are ignored with a
-  load-time warning instead of an unknown-field error; delete them from
-  `city.toml` (a gc command that rewrites `city.toml` refuses while they are
-  present). Gone with them: the gc-side db-proxy reap on `gc stop`, the
+  load-time warning instead of an unknown-field error, and a gc command that
+  rewrites `city.toml` drops them; delete them from `city.toml` to silence
+  the warning. Gone with them: the gc-side db-proxy reap on `gc stop`, the
   store health patrol, the `beads-proxied-capability` doctor check, the
   `proxy.reaped`, `store.degraded`, `store.recovered` and `store.probe_failed`
   events, and the supervisor doctor's `s6_connection_ceiling` alert. Migrate a
