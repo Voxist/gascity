@@ -395,6 +395,45 @@ func sortBeadsReadyOrder(items []Bead) {
 	})
 }
 
+// hybridReadyRecency is the recency seam of bd's `--sort hybrid` policy: rows
+// created within the window are FRESH and sort by priority; rows older than it
+// are AGED and drain strictly oldest-first. It is a bd 1.1.0 constant, rendered
+// as a now-48h parameter inside sqlbuild.BuildReadyWorkOrder's hybrid branch.
+// bd is a separate module, so the constant is restated here — the two
+// orderings are held equal by TestReadySortHybridMatchesTheBDSeam and the
+// generated-flag parity test, not by this comment.
+const hybridReadyRecency = 48 * time.Hour
+
+// SortBeadsHybridOrder sorts ready results into bd's `--sort hybrid` order
+// (ADR-0035 Fix 1): rows created within the last 48h first, by (priority,
+// created_at, id); rows past the seam after them, strictly (created_at, id).
+//
+// The generated routed tier reads its hybrid lookahead under this policy, and
+// on a federated city that read is `gc ready` — so the merged, multi-store
+// answer must come out in exactly the order the single-store SQL reader would
+// have produced. The in-memory rendering mirrors the SQL CASE ladder: the
+// fresh/aged tier split first, the priority term inside the fresh tier (a nil
+// priority sorts as 2, matching sortBeadsReadyOrder's COALESCE), and the aged
+// tier's priority slot is the constant 999, which reduces it to
+// (created_at, id).
+func SortBeadsHybridOrder(items []Bead) {
+	cutoff := time.Now().UTC().Add(-hybridReadyRecency)
+	sort.Slice(items, func(i, j int) bool {
+		a, b := items[i], items[j]
+		aFresh, bFresh := !a.CreatedAt.Before(cutoff), !b.CreatedAt.Before(cutoff)
+		if aFresh != bFresh {
+			return aFresh
+		}
+		if aFresh {
+			return beadReadyLess(a, b)
+		}
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			return a.CreatedAt.Before(b.CreatedAt)
+		}
+		return a.ID < b.ID
+	})
+}
+
 // sortBeadsReadyOrderContext is the cancellation-aware form used by
 // deadline-sensitive cache projections. A local merge sort keeps cancellation
 // checks inside both comparison and copy work instead of abandoning an

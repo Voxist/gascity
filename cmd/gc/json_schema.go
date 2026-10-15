@@ -398,6 +398,14 @@ func isBDCommandPath(commandPath []string) bool {
 	return len(commandPath) > 0 && commandPath[0] == "bd"
 }
 
+// isReadyCommandPath reports whether the executed command is `gc ready`, whose
+// failure envelope is routed to stderr rather than stdout (main.go): its stdout
+// contract is a JSON array and nothing else, because the generated work queries
+// serve whatever non-empty, non-`[]` payload they capture (vp-bzeg).
+func isReadyCommandPath(commandPath []string) bool {
+	return len(commandPath) == 1 && commandPath[0] == "ready"
+}
+
 func schemaDeclaresJSONL(schema json.RawMessage) bool {
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal(schema, &object); err != nil {

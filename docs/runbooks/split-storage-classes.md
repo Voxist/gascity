@@ -238,7 +238,8 @@ query builds — **not** with all of `bd ready`. It takes `--assignee`,
 the rest of bd's ready surface (`--label`, `--label-any`, `--parent`, `--type`,
 `--priority`, `--offset`, `--has-metadata-key`, `--mol`, `--include-deferred`,
 `--gated`, `--claim`, and every single-letter shorthand such as `-u` or `-n`).
-Its `--sort` takes `oldest|newest`, not bd's `priority|hybrid|oldest`. If your
+Its `--sort` takes the same `priority|hybrid|oldest` policies bd's does, plus
+`newest` — the created-at direction bd's flag does not name. If your
 query needs a flag only bd has, narrow with `--metadata-field` or read the
 relocated class directly from the binding —
 `GC_BD_ALLOW_RELOCATED_CLASS_READ=1` runs the one-ledger read anyway when the

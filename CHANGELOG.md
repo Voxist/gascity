@@ -177,6 +177,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The federated ready reader rejected the hybrid sort its own generator
+  emits, and reported that rejection on stdout — the one stream the generated
+  work query captures.** The routed tier's pool-demand read emits `--sort
+  hybrid` unconditionally (ADR-0035 Fix 1's lookahead window), and the rank
+  union's legs emit `--sort priority`; the single-store reader (`bd ready`)
+  accepts both, but the federated replacement (`gc ready`) knew only `oldest`
+  and `newest` and refused the rest. The mismatch stayed invisible for exactly
+  as long as the federated reader stayed unselected — `FederatedReady` is
+  false on every deployed city, so every generated read still went to `bd
+  ready` — but flipping that bit, the intended rollout, would have inverted
+  the failure on every pool, on every spawn: the probe body is
+  `r=$(… 2>/dev/null); [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r"`,
+  and `gc ready`'s failure envelope is non-empty JSON written to **stdout**,
+  so the pool tier would have returned the error object as if it were the
+  work payload. Dispatch corruption, not starvation.
+
+  `gc ready` now accepts all four orders the generator can emit with `bd
+  ready`'s semantics for each: `priority` (the canonical ready order, and the
+  default for an omitted `--sort`), `hybrid` (bd's 48-hour recency seam — rows
+  created inside the window first, by priority; everything older after,
+  strictly oldest-first — rendered in-memory as `SortBeadsHybridOrder` because
+  the federated reader merges legs in Go rather than under one SQL `ORDER
+  BY`), `oldest`, and `newest`. The seam is pinned from both sides of the
+  48-hour boundary by `TestReadySortHybridMatchesTheBDSeam`, and the
+  default-is-priority equivalence by
+  `TestReadySortPriorityIsTheCanonicalDefaultOrder`.
+
+  The stdout half: a failed `gc ready` now writes its envelope to stderr.
+  `ready` joins the `bd` subcommands as a command whose stdout contract is "a
+  JSON array and nothing else" — the generated probes capture stdout
+  verbatim, so a failure there is an empty capture and a nonzero exit, which
+  is loud, instead of a well-formed JSON object a `[ -n "$r" ]` guard serves
+  as beads.
+
+  And the class, not just the instance: the claim that `gc ready` "accepts
+  every flag the queries in this file generate" was prose, checked by no
+  test — the existing conformance captures stopped at `--json` while the
+  builder appends `--sort`/`--limit` after it, which is how the rejection
+  stayed green. `TestGeneratedReadyReaderArgvIsAcceptedByGcReady` makes the
+  claim structural: it sweeps the generator over the five query kinds that
+  carry a ready read, three agent shapes and all four topologies, extracts
+  every `bd ready`/`gc ready` invocation from the generated command text up
+  to the real shell terminator, and requires the flag surface plus the reader
+  core to accept each argv verbatim. Vacuous-pass guards pin the sweep itself
+  — both reader words must appear, the three sorts that broke must be
+  observed, the crash-recovery `--status in_progress` read must appear, and
+  extraction floors keep a scanner or generator regression red instead of
+  green. The next flag added to one side without the other fails here, over
+  the generator's own output, instead of on a city's dispatch. (vp-bzeg,
+  ADR-0075, ADR-0035)
+
 - **A tmux agent pane's default shell could silently clobber the PATH the
   controller assigned it, on every start and every warm relaunch.**
   `internal/runtime/tmux` sets `-e PATH=...` on `new-session`, but the

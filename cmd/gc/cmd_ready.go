@@ -11,12 +11,21 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// readySortOldest and readySortNewest are the two orders `bd ready --sort`
-// accepts. Anything else is a typo, and a typo that silently fell back to a
-// different order is how a bounded query ends up serving the wrong prefix.
+// The sort orders `gc ready --sort` accepts. priority and hybrid are bd
+// ready's own policy names: the generated routed tier reads its ADR-0076 D4
+// best-by-priority leg (`--sort priority`) and its ADR-0035 hybrid lookahead
+// (`--sort hybrid`) through this reader on a federated city, so bd's flag
+// vocabulary has to parse here verbatim with bd's semantics (vp-bzeg; the
+// generated-flag parity test pins that claim over the generator's own
+// output). oldest and newest are the created_at directions the graph-anchor
+// probes and operators use. Anything else is a typo, and a typo that silently
+// fell back to a different order is how a bounded query ends up serving the
+// wrong prefix.
 const (
-	readySortOldest = "oldest"
-	readySortNewest = "newest"
+	readySortPriority = "priority"
+	readySortHybrid   = "hybrid"
+	readySortOldest   = "oldest"
+	readySortNewest   = "newest"
 )
 
 // readyStatusInProgress is the one status whose list must read LIVE: it is the
@@ -203,9 +212,10 @@ The flags mirror the "bd ready" contract the default work_query builds:
            --sort oldest --limit 20 --json
 
 Rows are emitted in canonical ready order (priority, created_at, id) unless
---sort selects a created_at order, and --limit is applied last, so a bounded
-read is the true top-N of the merged set rather than the top-N of whichever
-store answered first.
+--sort selects another policy — hybrid (bd's 48h-seam order) or a created_at
+direction (oldest, newest) — and --limit is applied last, so a bounded read is
+the true top-N of the merged set rather than the top-N of whichever store
+answered first.
 
 Every leg is read across both storage tiers, so the wisp/ephemeral rows an
 orchestration step runs as are claimable work here whether or not
@@ -236,7 +246,7 @@ func registerReadyFlags(cmd *cobra.Command, opts *readyOpts, includeEphemeral, j
 	cmd.Flags().StringArrayVar(&opts.metadataFields, "metadata-field", nil, "require metadata \"key=value\", or bare \"key\" for any non-empty value (repeatable)")
 	cmd.Flags().StringArrayVar(&opts.excludeTypes, "exclude-type", nil, "drop beads of this issue type (repeatable)")
 	cmd.Flags().StringArrayVar(&opts.excludeLabels, "exclude-label", nil, "drop beads carrying this label (repeatable)")
-	cmd.Flags().StringVar(&opts.sortOrder, "sort", "", "sort order: oldest|newest (default: canonical ready order)")
+	cmd.Flags().StringVar(&opts.sortOrder, "sort", "", "sort order: priority|hybrid|oldest|newest (default: canonical ready order)")
 	cmd.Flags().IntVar(&opts.limit, "limit", 0, "max beads to return (0 = unlimited)")
 	// --include-ephemeral is accepted for parity with `bd ready`, which the
 	// generated work_query carries verbatim on a bd-1.0.5 city. It selects
@@ -554,6 +564,15 @@ func beadMatchesMetadata(b beads.Bead, want []metadataFieldFilter) bool {
 // here: a second copy of a total order across a package boundary is a copy that
 // drifts, and this one decides which rows a bounded read serves.
 //
+// priority and hybrid are bd's own policy names and resolve the same way — to
+// orders defined in internal/beads, not re-derived here. `priority` IS the
+// canonical ready order (bd's flag default and this reader's default are the
+// same law); `hybrid` is bd's 48h-seam order (beads.SortBeadsHybridOrder),
+// which the generated routed tier reads on a federated city. Both were
+// rejected once, and the generator kept emitting them — the swap's
+// "same flags" claim was prose until the generated-flag parity test made it
+// structural (vp-bzeg).
+//
 // Imposing it is also what makes the merged set well-ordered at all. Each leg's
 // own order is deterministic but they are not the same order — a caching-wrapped
 // work store emits (priority, created_at, id) while the canonical relocated
@@ -564,13 +583,17 @@ func beadMatchesMetadata(b beads.Bead, want []metadataFieldFilter) bool {
 // which is how a bounded query quietly serves the wrong prefix.
 func readySortOrder(order string) (func([]beads.Bead), error) {
 	switch strings.TrimSpace(order) {
-	case "":
+	case "", readySortPriority:
+		// bd ready's flag default is priority, and the canonical ready order IS
+		// (priority, created_at, id) — one law, spelled two ways.
 		return beads.SortBeadsReadyOrder, nil
+	case readySortHybrid:
+		return beads.SortBeadsHybridOrder, nil
 	case readySortOldest:
 		return func(items []beads.Bead) { beads.SortBeads(items, beads.SortCreatedAsc) }, nil
 	case readySortNewest:
 		return func(items []beads.Bead) { beads.SortBeads(items, beads.SortCreatedDesc) }, nil
 	default:
-		return nil, fmt.Errorf("unknown --sort %q (want %s or %s)", order, readySortOldest, readySortNewest)
+		return nil, fmt.Errorf("unknown --sort %q (want %s, %s, %s or %s)", order, readySortPriority, readySortHybrid, readySortOldest, readySortNewest)
 	}
 }
