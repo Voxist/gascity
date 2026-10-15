@@ -824,14 +824,122 @@ func TestReadyFiltersAreAppliedOverTheMergedSet(t *testing.T) {
 
 // TestReadyUnknownSortIsRejected keeps a mistyped order from silently falling
 // back to a different one, which is how a bounded read serves the wrong prefix.
+//
+// The invalid value here was once "priority" — back when the reader genuinely
+// rejected bd's policy names. Then the generated routed tier started emitting
+// `--sort priority` and `--sort hybrid` (ADR-0076 D4's union legs), the reader
+// kept rejecting them, and the swap's "same flags" claim broke (vp-bzeg).
+// priority and hybrid are accepted now; the rejection this test pins is for an
+// order NEITHER side emits.
 func TestReadyUnknownSortIsRejected(t *testing.T) {
 	store := splittest.NewWorkStore(t, "gc")
 	mustCreateReadyBead(t, store, beads.Bead{Title: "work", Type: "task"})
 
-	_, err := readyBeadsForOpts([]readyLeg{readyTestLeg("city", store)}, readyOpts{sortOrder: "priority"})
+	_, err := readyBeadsForOpts([]readyLeg{readyTestLeg("city", store)}, readyOpts{sortOrder: "newest-first"})
 	if err == nil || !strings.Contains(err.Error(), "unknown --sort") {
 		t.Fatalf("readyBeadsForOpts error = %v, want a rejection naming the unknown order", err)
 	}
+}
+
+// TestReadySortPriorityIsTheCanonicalDefaultOrder pins that bd's flag default
+// and this reader's default resolve to the SAME order — the canonical ready
+// order taken from internal/beads — rather than two laws that happen to agree
+// today. The generated routed tier's best-by-priority leg (ADR-0076 D4) reads
+// `--sort priority` through this reader on a federated city, so the two
+// spellings must be interchangeable (vp-bzeg).
+func TestReadySortPriorityIsTheCanonicalDefaultOrder(t *testing.T) {
+	store := splittest.NewWorkStore(t, "gc")
+	mustCreateReadyBead(t, store, beads.Bead{Title: "urgent", Type: "task", Priority: readyPriority(1)})
+	mustCreateReadyBead(t, store, beads.Bead{Title: "no priority", Type: "task"})
+	mustCreateReadyBead(t, store, beads.Bead{Title: "backlog", Type: "task", Priority: readyPriority(3)})
+
+	legs := []readyLeg{readyTestLeg("city", store)}
+	def, err := readyBeadsForOpts(legs, readyOpts{})
+	if err != nil {
+		t.Fatalf("default order: %v", err)
+	}
+	byPriority, err := readyBeadsForOpts(legs, readyOpts{sortOrder: readySortPriority})
+	if err != nil {
+		t.Fatalf("--sort priority: %v", err)
+	}
+	gotIDs, wantIDs := readyBeadIDs(byPriority), readyBeadIDs(def)
+	if !slices.Equal(gotIDs, wantIDs) {
+		t.Fatalf("--sort priority ordered %v, want the default (canonical ready) order %v", gotIDs, wantIDs)
+	}
+}
+
+// TestReadySortHybridMatchesTheBDSeam pins the in-memory hybrid order against
+// bd's SQL rendering (sqlbuild.BuildReadyWorkOrder's hybrid branch): rows
+// created within the last 48h first, by (priority, created_at, id); rows past
+// the seam after them, strictly (created_at, id). This is the order the
+// generated routed tier's ADR-0035 lookahead leg asks for, and on a federated
+// city the merged multi-store answer must come out in it (vp-bzeg).
+//
+// The seam margins stay well clear of the 48h constant in both directions so
+// the case cannot flake on test-execution time.
+func TestReadySortHybridMatchesTheBDSeam(t *testing.T) {
+	now := time.Now().UTC()
+	rows := []beads.Bead{
+		{ID: "aged-p1", CreatedAt: now.Add(-72 * time.Hour), Priority: readyPriority(1)},
+		{ID: "fresh-p3", CreatedAt: now.Add(-30 * time.Minute), Priority: readyPriority(3)},
+		{ID: "aged-p2", CreatedAt: now.Add(-50 * time.Hour), Priority: readyPriority(2)},
+		{ID: "fresh-p1", CreatedAt: now.Add(-time.Hour), Priority: readyPriority(1)},
+		{ID: "fresh-nil", CreatedAt: now.Add(-2 * time.Hour)},
+	}
+	// One minute either side of the seam: created BEFORE (now-48h) is aged,
+	// created AFTER it is fresh — the SQL's `created >= cutoff` test.
+	rows = append(rows,
+		beads.Bead{ID: "seam-aged", CreatedAt: now.Add(-48*time.Hour - time.Minute)},
+		beads.Bead{ID: "seam-fresh", CreatedAt: now.Add(-48*time.Hour + time.Minute), Priority: readyPriority(3)},
+	)
+	beads.SortBeadsHybridOrder(rows)
+
+	// Inside the fresh tier the p3 pair pins the created_at term: both are
+	// priority 3, so created ASC puts the one a minute past the seam (older)
+	// before the half-hour-old row — newest-first here would mean the SQL's
+	// created ASC had been flipped.
+	want := []string{"fresh-p1", "fresh-nil", "seam-fresh", "fresh-p3", "aged-p1", "aged-p2", "seam-aged"}
+	got := make([]string, 0, len(rows))
+	for _, b := range rows {
+		got = append(got, b.ID)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("hybrid order = %v, want %v\n(fresh rows first by (priority, created_at, id), then aged rows by created_at)", got, want)
+	}
+}
+
+// TestReadySortHybridWiringRunsThroughTheReader pins that --sort hybrid is
+// accepted by the reader end to end (parse → readySortOrder → merged-set
+// order), not just by the pure ordering function. The seeded rows all fall on
+// the fresh side of the seam, so the wired read must agree row-for-row with
+// the canonical default order.
+func TestReadySortHybridWiringRunsThroughTheReader(t *testing.T) {
+	store := splittest.NewWorkStore(t, "gc")
+	mustCreateReadyBead(t, store, beads.Bead{Title: "urgent", Type: "task", Priority: readyPriority(1)})
+	mustCreateReadyBead(t, store, beads.Bead{Title: "backlog", Type: "task", Priority: readyPriority(3)})
+
+	legs := []readyLeg{readyTestLeg("city", store)}
+	def, err := readyBeadsForOpts(legs, readyOpts{})
+	if err != nil {
+		t.Fatalf("default order: %v", err)
+	}
+	hybrid, err := readyBeadsForOpts(legs, readyOpts{sortOrder: readySortHybrid})
+	if err != nil {
+		t.Fatalf("--sort hybrid: %v", err)
+	}
+	gotIDs, wantIDs := readyBeadIDs(hybrid), readyBeadIDs(def)
+	if !slices.Equal(gotIDs, wantIDs) {
+		t.Fatalf("--sort hybrid ordered %v, want %v for an all-fresh set (hybrid degenerates to the canonical order inside the 48h window)", gotIDs, wantIDs)
+	}
+}
+
+// readyBeadIDs extracts the row order a readyBeadsForOpts call produced.
+func readyBeadIDs(rows []readyBead) []string {
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.ID)
+	}
+	return out
 }
 
 // TestReadyDefaultOrderIsTheCanonicalReadyOrder pins that the ordering law is
@@ -1130,14 +1238,18 @@ func TestGcReadySteerDescribesTheFlagsItActuallyAccepts(t *testing.T) {
 		t.Errorf("the steer does not name the shorthand gap: %q", rejected)
 	}
 
-	// --sort is shared by NAME and incompatible by VALUE: bd defaults to
-	// "priority", which `gc ready` rejects. A steer that named --sort without
-	// that caveat would still send an operator to a dead end.
-	if _, err := readySortOrder("priority"); err == nil {
-		t.Error("`gc ready --sort priority` is accepted; the steer says the orders are oldest|newest")
-	}
-	if !strings.Contains(msg, "oldest|newest") {
-		t.Errorf("the steer names --sort without its accepted values: %q", msg)
+	// --sort is shared by NAME and by VALUE: the generated routed tier reads
+	// `--sort priority` and `--sort hybrid` through this reader on a federated
+	// city (vp-bzeg), so bd's policy names parse here with bd's semantics, and
+	// the steer names every order the reader accepts — a steer that named a
+	// narrower set would still send an operator with a valid query away.
+	for _, order := range []string{readySortPriority, readySortHybrid, readySortOldest, readySortNewest} {
+		if _, err := readySortOrder(order); err != nil {
+			t.Errorf("`gc ready --sort %s` is rejected; the generator emits it and the steer names it", order)
+		}
+		if !strings.Contains(msg, order) {
+			t.Errorf("the steer does not name the accepted order %s: %q", order, msg)
+		}
 	}
 }
 

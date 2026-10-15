@@ -3608,9 +3608,10 @@ The flags mirror the "bd ready" contract the default work_query builds:
            --sort oldest --limit 20 --json
 
 Rows are emitted in canonical ready order (priority, created_at, id) unless
---sort selects a created_at order, and --limit is applied last, so a bounded
-read is the true top-N of the merged set rather than the top-N of whichever
-store answered first.
+--sort selects another policy — hybrid (bd's 48h-seam order) or a created_at
+direction (oldest, newest) — and --limit is applied last, so a bounded read is
+the true top-N of the merged set rather than the top-N of whichever store
+answered first.
 
 Every leg is read across both storage tiers, so the wisp/ephemeral rows an
 orchestration step runs as are claimable work here whether or not
@@ -3629,7 +3630,7 @@ gc ready [flags]
 | `--json` | bool | `true` | accept --json for bd-ready parity (output is always a JSON array) |
 | `--limit` | int |  | max beads to return (0 = unlimited) |
 | `--metadata-field` | stringArray |  | require metadata "key=value", or bare "key" for any non-empty value (repeatable) |
-| `--sort` | string |  | sort order: oldest\|newest (default: canonical ready order) |
+| `--sort` | string |  | sort order: priority\|hybrid\|oldest\|newest (default: canonical ready order) |
 | `--status` | string |  | list beads in this status instead of ready work: open\|in_progress\|blocked\|closed |
 | `--unassigned` | bool |  | only unassigned work |
 

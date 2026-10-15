@@ -236,6 +236,17 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 	lifecycle.attemptFinalOutcome(resolveProductMetricsFinalOutcome(executedCommand, classification))
 	if executeErr != nil {
 		code := commandExitCode(executeErr)
+		// `gc ready` is the generated work queries' reader, and its stdout
+		// contract is a JSON array and nothing else (vp-bzeg). A failure
+		// envelope written there is non-empty, non-`[]` output that a probe
+		// tier's own `[ -n "$r" ]` guard serves as the work payload — the
+		// dispatch-corruption shape. So the envelope goes to stderr, beside
+		// the leg diagnostics, and stdout stays empty: exactly bd ready's own
+		// failure shape, which is the parity the reader swap promises.
+		if isReadyCommandPath(commandPathWords(executedCommand)) {
+			_ = writeJSONFailure(stderr, "command_failed", commandFailureMessage(executeErr), code)
+			return code
+		}
 		if bufferJSONExecution {
 			if len(bytes.TrimSpace(jsonStdout.Bytes())) > 0 {
 				if _, copyErr := io.Copy(stdout, &jsonStdout); copyErr != nil {
