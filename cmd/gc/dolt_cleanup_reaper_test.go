@@ -653,7 +653,7 @@ func TestContainerDoltServerIsClassified(t *testing.T) {
 }
 
 // TestGotmpdirTestConfigIsOnAllowlist covers ga-sm1cvj: the fleet's go shim
-// pins GOTMPDIR=/var/tmp/gotmp (see AGENTS.md Build Cache Conventions), so
+// pins GOTMPDIR=/var/tmp/gotmp (see fork-maintainer-guide.md Build Cache Conventions), so
 // `go test` scratch dirs used by dolt integration tests live there — not
 // under os.TempDir() (tempDir here is "/tmp", not "/var/tmp/gotmp").
 //

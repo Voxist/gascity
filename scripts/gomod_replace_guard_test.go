@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"gopkg.in/yaml.v3"
 )
 
 // TestCheckGomodReplaceGuard verifies the check-gomod-replace script:
@@ -269,40 +267,30 @@ func TestCheckGomodReplaceGuardWiredIntoMakefile(t *testing.T) {
 	}
 }
 
-// TestCheckGomodReplaceGuardWiredIntoCI verifies that the guard runs as a step
-// of the preflight-guards CI job, so every PR is checked.
-//
-// This parses the workflow rather than substring-matching the file: the old
-// whole-file strings.Contains passed as long as the name appeared ANYWHERE —
-// including in a comment, with the step deleted — and could not tell which job
-// ran it, so it stayed green through the job split that moved the step
-// (ga-dejjh).
-func TestCheckGomodReplaceGuardWiredIntoCI(t *testing.T) {
+// TestRepoGuardsRunAsBazelTests verifies that each repository shell guard
+// is wired as an sh_test in scripts/BUILD.bazel, so the required Bazel lane
+// (`bazel test //...`) runs it on every PR.
+func TestRepoGuardsRunAsBazelTests(t *testing.T) {
 	repoRoot := repoRoot(t)
 
-	raw, err := os.ReadFile(filepath.Join(repoRoot, ".github", "workflows", "ci.yml"))
+	build, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "BUILD.bazel"))
 	if err != nil {
-		t.Fatalf("read ci.yml: %v", err)
+		t.Fatalf("read scripts/BUILD.bazel: %v", err)
 	}
-	var workflow struct {
-		Jobs map[string]struct {
-			Steps []struct {
-				Run string `yaml:"run"`
-			} `yaml:"steps"`
-		} `yaml:"jobs"`
-	}
-	if err := yaml.Unmarshal(raw, &workflow); err != nil {
-		t.Fatalf("parse ci.yml: %v", err)
-	}
-	const job = "preflight-guards"
-	steps, ok := workflow.Jobs[job]
-	if !ok {
-		t.Fatalf("ci.yml has no %s job", job)
-	}
-	for _, step := range steps.Steps {
-		if strings.Contains(step.Run, "check-gomod-replace") {
-			return
+	for target, script := range map[string]string{
+		"check_gomod_replace_test":             "check-gomod-replace.sh",
+		"check_core_boundary_test":             "check-core-boundary.sh",
+		"check_eventexport_isolation_test":     "check-eventexport-isolation.sh",
+		"check_native_dependency_surface_test": "check-native-dependency-surface.sh",
+	} {
+		_, rule, ok := strings.Cut(string(build), "sh_test(\n    name = \""+target+"\",\n")
+		if !ok {
+			t.Errorf("scripts/BUILD.bazel has no sh_test %q", target)
+			continue
+		}
+		rule, _, _ = strings.Cut(rule, "\n)\n")
+		if !strings.Contains(rule, `srcs = ["`+script+`"]`) {
+			t.Errorf("sh_test %q does not run %s:\n%s", target, script, rule)
 		}
 	}
-	t.Errorf("ci.yml %s job is missing the check-gomod-replace step", job)
 }

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 const (
@@ -128,13 +130,21 @@ func managedPIDFromPIDFileWithOptions(pidFile string, removeStale bool) int {
 }
 
 // findPortHolderPID returns one live process listening on port, for callers
-// that are trying to DISCOVER the holder (see findManagedDoltPID). A caller
-// asking whether one PARTICULAR process holds the port must use portHeldByPID
-// instead — see portHolderPIDs for why the difference matters.
-func findPortHolderPID(port string) int {
+// that are trying to DISCOVER the holder (see findManagedDoltPID). candidates
+// are PIDs the caller expects to own it (e.g. the PID recorded in runtime
+// state); a candidate among the holders is returned in preference to whichever
+// holder the probe lists first. A caller asking whether one PARTICULAR process
+// holds the port must use portHeldByPID instead — see portHolderPIDs for why
+// the difference matters.
+func findPortHolderPID(port string, candidates ...int) int {
 	pids := portHolderPIDs(port)
 	if len(pids) == 0 {
 		return 0
+	}
+	for _, pid := range candidates {
+		if pid > 0 && slices.Contains(pids, pid) {
+			return pid
+		}
 	}
 	return pids[0]
 }
@@ -550,7 +560,7 @@ func portHolderPIDsFromProc(port string) ([]int, bool) {
 	if err != nil {
 		return nil, true
 	}
-	inodes, checked := listeningSocketInodesFromProc(uint16(portNum))
+	inodes, checked := pidutil.ListeningSocketInodes(int(portNum))
 	if !checked {
 		return nil, false
 	}
@@ -568,35 +578,9 @@ func portHolderPIDsFromProc(port string) ([]int, bool) {
 	return pids, true
 }
 
-func listeningSocketInodesFromProc(port uint16) (map[string]struct{}, bool) {
-	inodes := map[string]struct{}{}
-	checked := false
-	for _, path := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		checked = true
-		scanner := bufio.NewScanner(strings.NewReader(string(data)))
-		for scanner.Scan() {
-			fields := strings.Fields(scanner.Text())
-			if len(fields) < 10 || fields[3] != "0A" {
-				continue
-			}
-			_, portHex, ok := strings.Cut(fields[1], ":")
-			if !ok {
-				continue
-			}
-			gotPort, err := strconv.ParseUint(portHex, 16, 16)
-			if err != nil || uint16(gotPort) != port {
-				continue
-			}
-			inodes[fields[9]] = struct{}{}
-		}
-	}
-	return inodes, checked
-}
-
+// processesWithSocketInodes returns every live process holding one of inodes.
+// Unlike pidutil.ListenerPID it does not stop at the first holder: the same
+// port number can be bound by several processes (see portHolderPIDs).
 func processesWithSocketInodes(inodes map[string]struct{}) []int {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -611,21 +595,8 @@ func processesWithSocketInodes(inodes map[string]struct{}) []int {
 		if err != nil || !pidAlive(pid) {
 			continue
 		}
-		fdDir := filepath.Join("/proc", entry.Name(), "fd")
-		fds, err := os.ReadDir(fdDir)
-		if err != nil {
-			continue
-		}
-		for _, fd := range fds {
-			target, err := os.Readlink(filepath.Join(fdDir, fd.Name()))
-			if err != nil || !strings.HasPrefix(target, "socket:[") || !strings.HasSuffix(target, "]") {
-				continue
-			}
-			inode := strings.TrimSuffix(strings.TrimPrefix(target, "socket:["), "]")
-			if _, ok := inodes[inode]; ok {
-				pids = append(pids, pid)
-				break
-			}
+		if holds, _ := pidutil.ProcessHoldsSocket(pid, inodes); holds {
+			pids = append(pids, pid)
 		}
 	}
 	return pids

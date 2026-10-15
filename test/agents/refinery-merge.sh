@@ -10,13 +10,14 @@
 #   PATH     — must include gc and bd binaries
 
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/bead-id.sh"
 cd "$GC_CITY"
 ASSIGNEE="${GC_SESSION_NAME:-$GC_AGENT}"
 
 while true; do
     hooked=$(bd ready --assignee="$ASSIGNEE" --include-ephemeral 2>/dev/null || true)
-    if echo "$hooked" | grep -qE '^[^[:alnum:]]*gc-'; then
-        work_id=$(echo "$hooked" | grep -E '^[^[:alnum:]]*gc-' | head -1 | grep -oE 'gc-[[:alnum:]]+' | head -1)
+    if echo "$hooked" | sed -E 's/^[^[:alnum:]]+//' | bead_id_rows | grep -q .; then
+        work_id=$(echo "$hooked" | sed -E 's/^[^[:alnum:]]+//' | bead_id_rows | head -1 | awk '{print $1}')
 
         if [ -n "${GC_DIR:-}" ] && [ -d "$GC_DIR" ]; then
             cd "$GC_DIR"
@@ -37,8 +38,8 @@ while true; do
     fi
 
     ready=$(bd ready 2>/dev/null || true)
-    if echo "$ready" | grep -qE '^[^[:alnum:]]*gc-'; then
-        id=$(echo "$ready" | grep -E '^[^[:alnum:]]*gc-' | head -1 | grep -oE 'gc-[[:alnum:]]+' | head -1)
+    if echo "$ready" | sed -E 's/^[^[:alnum:]]+//' | bead_id_rows | grep -q .; then
+        id=$(echo "$ready" | sed -E 's/^[^[:alnum:]]+//' | bead_id_rows | head -1 | awk '{print $1}')
         bd update "$id" --assignee="$ASSIGNEE" 2>/dev/null || true
         continue
     fi

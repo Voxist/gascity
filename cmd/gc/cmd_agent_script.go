@@ -825,9 +825,11 @@ func agentScriptHookExitIsNoWork(code int, output, stderr string) bool {
 	if workQueryHasReadyWork(output) {
 		return false
 	}
-	// The store-unavailable token always travels with exit 2 (its only
-	// emitter is reportWorkQueryFailure), so the exit-code check above already
-	// covers it; there is no exit-1 path that carries the token.
+	// The store could not be read, which is not the same as no work, even
+	// when bd's own message is warning-shaped.
+	if strings.Contains(stderr, hookStoreUnavailableToken) {
+		return false
+	}
 	for _, line := range strings.Split(stderr, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {

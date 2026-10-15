@@ -1,9 +1,15 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
+
+// ErrPatchTargetNotFound reports a [patches] entry whose target is absent from
+// the merged config. Callers match it with errors.Is to tell a patch that names
+// a missing target (a client error) from other load failures.
+var ErrPatchTargetNotFound = errors.New("not found in merged config")
 
 // Patches holds all patch blocks from composition. Patches target existing
 // resources by identity key and modify specific fields. They are applied
@@ -43,9 +49,9 @@ type AgentPatch struct {
 	// Suspended overrides the agent's suspended state.
 	Suspended *bool `toml:"suspended,omitempty"`
 	// Pool overrides legacy [pool] fields that map to session scaling.
-	Pool *PoolOverride `toml:"pool,omitempty"`
+	Pool *PoolOverride `toml:"pool,omitempty" json:"Pool,omitempty"`
 	// Env adds or overrides environment variables.
-	Env map[string]string `toml:"env,omitempty"`
+	Env map[string]string `toml:"env,omitempty" json:"Env,omitempty"`
 	// EnvRemove lists env var keys to remove after merging.
 	EnvRemove []string `toml:"env_remove,omitempty"`
 	// PreStart overrides the agent's pre_start commands.
@@ -59,7 +65,7 @@ type AgentPatch struct {
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
 	// ContextAdvisory overrides context-pressure guidance for this agent.
-	ContextAdvisory *ContextAdvisory `toml:"context_advisory,omitempty"`
+	ContextAdvisory *ContextAdvisory `toml:"context_advisory,omitempty" json:"ContextAdvisory,omitempty"`
 	// Upstream overrides the model-serving endpoint selection (Phase C).
 	Upstream *string `toml:"upstream,omitempty"`
 	// Args overrides the provider's default arguments. Leave unset to keep
@@ -174,7 +180,7 @@ type AgentPatch struct {
 	// Keys are option keys, values are choice values. Merges additively
 	// (patch keys win over existing agent keys).
 	// Example: option_defaults = { model = "sonnet" }
-	OptionDefaults map[string]string `toml:"option_defaults,omitempty"`
+	OptionDefaults map[string]string `toml:"option_defaults,omitempty" json:"OptionDefaults,omitempty"`
 }
 
 // NamedSessionPatch modifies an existing named session identified by canonical
@@ -220,6 +226,10 @@ type RigPatch struct {
 	Prefix *string `toml:"prefix,omitempty"`
 	// DefaultBranch overrides the rig's recorded mainline branch.
 	DefaultBranch *string `toml:"default_branch,omitempty"`
+	// DefaultMergeStrategy overrides the merge strategy `gc sling` stamps on
+	// beads routed into this rig. Set to "" to clear the rig's default and go
+	// back to leaving merge_strategy unstamped.
+	DefaultMergeStrategy *string `toml:"default_merge_strategy,omitempty"`
 	// Suspended is the deprecated, pre-runtime-state suspension override.
 	// Parsed for backwards compatibility; `gc doctor` surfaces it as a
 	// warning and recommends the rename to SuspendedOnStart. No behavioral
@@ -241,7 +251,7 @@ type RigPatch struct {
 	DefaultSlingTargets *[]string `toml:"default_sling_targets,omitempty"`
 	// SessionSleep overrides the rig's idle-sleep defaults. Merged per
 	// class: a patch that sets only one class leaves the others alone.
-	SessionSleep *SessionSleepConfig `toml:"session_sleep,omitempty"`
+	SessionSleep *SessionSleepConfig `toml:"session_sleep,omitempty" json:"SessionSleep,omitempty"`
 	// DoltHost overrides the rig's Dolt host. Deprecated alongside
 	// Rig.DoltHost; the canonical endpoint lives in the rig's scope config.
 	DoltHost *string `toml:"dolt_host,omitempty"`
@@ -251,7 +261,9 @@ type RigPatch struct {
 	// FormulaVars adds or overrides rig-scoped formula var defaults.
 	// Additive merge: patch keys win over existing rig keys, unspecified
 	// keys are preserved.
-	FormulaVars map[string]string `toml:"formula_vars,omitempty"`
+	FormulaVars map[string]string `toml:"formula_vars,omitempty" json:"FormulaVars,omitempty"`
+	// BeadsProxiedIdleTimeout overrides the rig's beads_proxied_idle_timeout.
+	BeadsProxiedIdleTimeout *string `toml:"beads_proxied_idle_timeout,omitempty"`
 }
 
 // ProviderPatch modifies an existing provider identified by Name.
@@ -289,7 +301,7 @@ type ProviderPatch struct {
 	// AcceptStartupDialogs overrides startup dialog acceptance behavior.
 	AcceptStartupDialogs *bool `toml:"accept_startup_dialogs,omitempty"`
 	// Env adds or overrides environment variables.
-	Env map[string]string `toml:"env,omitempty"`
+	Env map[string]string `toml:"env,omitempty" json:"Env,omitempty"`
 	// EnvRemove lists env var keys to remove.
 	EnvRemove []string `toml:"env_remove,omitempty"`
 	// Replace replaces the entire provider block instead of deep-merging.
@@ -423,7 +435,7 @@ func applyNamedSessionPatch(cfg *City, patch *NamedSessionPatch) error {
 		return err
 	}
 	if len(matches) == 0 {
-		return fmt.Errorf("named_session %q not found in merged config", target)
+		return fmt.Errorf("named_session %q %w", target, ErrPatchTargetNotFound)
 	}
 	if len(matches) > 1 {
 		return fmt.Errorf("named_session patch target %q is ambiguous; set name to the named_session identity", target)
@@ -527,7 +539,7 @@ func applyAgentPatch(cfg *City, patch *AgentPatch) error {
 			}
 		}
 		if !matched {
-			return fmt.Errorf("agent %q not found in merged config", qualifiedNameFromPatch("*", patch.Name))
+			return fmt.Errorf("agent %q %w", qualifiedNameFromPatch("*", patch.Name), ErrPatchTargetNotFound)
 		}
 		return nil
 	}
@@ -550,7 +562,7 @@ func applyAgentPatch(cfg *City, patch *AgentPatch) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("agent %q not found in merged config", target)
+	return fmt.Errorf("agent %q %w", target, ErrPatchTargetNotFound)
 }
 
 func applyAgentPatchFields(a *Agent, p *AgentPatch) {
@@ -786,6 +798,9 @@ func applyRigPatch(cfg *City, patch *RigPatch) error {
 			if patch.DefaultBranch != nil {
 				r.DefaultBranch = *patch.DefaultBranch
 			}
+			if patch.DefaultMergeStrategy != nil {
+				r.DefaultMergeStrategy = *patch.DefaultMergeStrategy
+			}
 			if patch.Suspended != nil {
 				r.Suspended = *patch.Suspended
 			}
@@ -824,6 +839,10 @@ func applyRigPatch(cfg *City, patch *RigPatch) error {
 			if patch.DoltPort != nil {
 				r.DoltPort = *patch.DoltPort
 			}
+			if patch.BeadsProxiedIdleTimeout != nil {
+				v := *patch.BeadsProxiedIdleTimeout
+				r.BeadsProxiedIdleTimeout = &v
+			}
 			if len(patch.FormulaVars) > 0 {
 				if r.FormulaVars == nil {
 					r.FormulaVars = make(map[string]string, len(patch.FormulaVars))
@@ -835,7 +854,7 @@ func applyRigPatch(cfg *City, patch *RigPatch) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("rig %q not found in merged config", patch.Name)
+	return fmt.Errorf("rig %q %w", patch.Name, ErrPatchTargetNotFound)
 }
 
 // applyGitHubPRMonitorPatch finds a GitHub PR monitor by name and applies
@@ -887,7 +906,7 @@ func applyGitHubPRMonitorPatch(cfg *City, patch *GitHubPRMonitorPatch) error {
 		}
 		return nil
 	}
-	return fmt.Errorf("github pr monitor %q not found in merged config", patch.Name)
+	return fmt.Errorf("github pr monitor %q %w", patch.Name, ErrPatchTargetNotFound)
 }
 
 // applyProviderPatch modifies a provider. If Replace is true, replaces the
@@ -897,11 +916,11 @@ func applyProviderPatch(cfg *City, patch *ProviderPatch) error {
 		return fmt.Errorf("provider patch: name is required")
 	}
 	if cfg.Providers == nil {
-		return fmt.Errorf("provider %q not found in merged config", patch.Name)
+		return fmt.Errorf("provider %q %w", patch.Name, ErrPatchTargetNotFound)
 	}
 	spec, ok := cfg.Providers[patch.Name]
 	if !ok {
-		return fmt.Errorf("provider %q not found in merged config", patch.Name)
+		return fmt.Errorf("provider %q %w", patch.Name, ErrPatchTargetNotFound)
 	}
 	if patch.Replace {
 		// Full replacement — build a new spec from patch fields only.

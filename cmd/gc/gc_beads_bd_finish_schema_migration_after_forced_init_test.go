@@ -145,6 +145,9 @@ func runForcedReinitInit(t *testing.T, cityPath, binDir string) (string, string,
 // migrateMarker assertion is RED against the pre-fix script and GREEN
 // after examples/bd/assets/scripts/gc-beads-bd.sh gained the call.
 func TestGcBeadsBdInitFinishesSchemaMigrationsAfterForcedReinit(t *testing.T) {
+	// The re-init path runs under init's flock-held init lock, so without
+	// flock init dies at that guard before reaching the step pinned here.
+	requireFlockForTest(t)
 	cityPath := setUpForcedReinitCity(t)
 
 	binDir := filepath.Join(t.TempDir(), "bin")
@@ -181,6 +184,9 @@ func TestGcBeadsBdInitFinishesSchemaMigrationsAfterForcedReinit(t *testing.T) {
 // of the #4259 remote-migrate-gate shapes finish_bd_schema_migrations
 // already treats as a graceful, non-fatal degradation.
 func TestGcBeadsBdInitFailsWhenPostForcedReinitMigrationFails(t *testing.T) {
+	// The re-init path runs under init's flock-held init lock, so without
+	// flock init dies at that guard before reaching the step pinned here.
+	requireFlockForTest(t)
 	cityPath := setUpForcedReinitCity(t)
 
 	binDir := filepath.Join(t.TempDir(), "bin")

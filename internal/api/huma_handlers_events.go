@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"reflect"
 	"strings"
 	"time"
 
@@ -24,6 +25,7 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 	if bp.isBlocking() {
 		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
+	index := s.latestIndex()
 
 	ep := s.state.EventProvider()
 	if ep == nil {
@@ -62,13 +64,11 @@ func (s *Server) humaHandleEventList(ctx context.Context, input *EventListInput)
 		return nil, err
 	}
 
-	index := s.latestIndex()
-
 	// Fetch limit+1 matching events at (first page) or strictly below (cursor
 	// page) the boundary, ascending; the extra row is the has-more signal.
 	scanFilter := filter
 	scanFilter.BeforeSeq = beforeSeq
-	evts, scanned, err := fetchEventPageAscending(ep, scanFilter, limit)
+	evts, scanned, err := fetchEventPageAscending(ctx, ep, scanFilter, limit, !filterIsEmpty(filter))
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}
@@ -149,40 +149,38 @@ func parseEventBeforeSeq(cursor string) (uint64, error) {
 // has-more signal. It returns the fetched events and scanned — the best-effort
 // count of matching rows the read could see, used as the filtered Total.
 //
-// ListTail is the primary path. This handler opts into Filter.SpanArchives,
-// so for the production FileRecorder it is AUTHORITATIVE across rotation:
-// ReadFilteredTail tails the active log, then walks the .gz archives
-// newest-first, stopping as soon as `limit+1` matches are collected
-// (vp-x7x8w). So a first-page or filtered read — the cases whose
-// zero/BeforeSeq cursor once forced the oldest-first full archive scan — now
-// returns a full page from the bounded walk alone. The result is trusted when
-// it yields a full limit+1 rows, which the archive-spanning tail does whenever
-// that many matches exist anywhere in the log. The opt-in is this handler's
-// alone: ListTail's default stays active-only for the per-tick readers
-// (order triggers, `gc order check`, doctor, storehealth) that must never
-// decode the archive set on a zero cursor.
+// ListTail is the fast path: a backward scan of the ACTIVE events.jsonl only,
+// never the .gz archives, so its result is trusted ONLY when it yields a full
+// limit+1 rows. The active file holds the newest events, so a full tail page
+// there IS the newest page below the boundary. Anything short cannot
+// distinguish "log exhausted" from "active file exhausted, older matches in
+// archives/rotation" and MUST fall through to the full scan — otherwise a
+// rotation (or a selective filter) strands the older history behind an unminted
+// cursor. The scan uses the in-flight-aware read when the provider offers one
+// (listWithInFlight) so a just-rotated segment living only in a .rotating-* file
+// is not skipped; the BeforeSeq predicate keeps rotation/archive handling inside
+// the one battle-tested sequential reader instead of a bespoke reverse reader.
 //
-// The fall-through to listWithInFlight is the genuine fallback, not the hot
-// path: it covers a short tail that genuinely exhausted the log (fewer than
-// limit+1 total matches — the last page, which mints no cursor) and providers
-// that are not TailProviders. It uses the in-flight-aware read when available
-// so a just-rotated segment living only in a .rotating-* file is not skipped;
-// the BeforeSeq predicate keeps rotation/archive handling inside the one
-// battle-tested sequential reader instead of a bespoke reverse reader.
-// TestFetchEventPageFirstPageBoundedAfterRotation pins that a first-page read
-// after rotation is served by ListTail and never reaches this fallback.
-func fetchEventPageAscending(ep events.Provider, filter events.Filter, limit int) ([]events.Event, int, error) {
+// That full scan holds EVERY matching event below the boundary only to keep
+// the last limit+1, and it ignores ctx: right after a rotation, every request
+// holds the whole retained history, also after its client has gone. A
+// provider that implements [events.HistoryTailProvider] (the file-backed log)
+// gives the same rows while holding at most limit+1 events, and stops when ctx
+// is done. countMatches asks it for the full scan's match count too, which is
+// the Total of a filtered read.
+func fetchEventPageAscending(ctx context.Context, ep events.Provider, filter events.Filter, limit int, countMatches bool) ([]events.Event, int, error) {
 	fetch := limit + 1
 	if tp, ok := ep.(events.TailProvider); ok {
-		tailFilter := filter
-		tailFilter.SpanArchives = true
-		tail, err := tp.ListTail(tailFilter, fetch)
+		tail, err := tp.ListTail(filter, fetch)
 		if err != nil {
 			return nil, 0, err
 		}
 		if len(tail) == fetch {
 			return tail, limit, nil
 		}
+	}
+	if hp, ok := ep.(events.HistoryTailProvider); ok {
+		return hp.ListHistoryTail(ctx, filter, fetch, countMatches)
 	}
 	all, err := listWithInFlight(ep, filter)
 	if err != nil {
@@ -209,9 +207,11 @@ func listWithInFlight(ep events.Provider, filter events.Filter) ([]events.Event,
 	return ep.List(filter)
 }
 
+// filterIsEmpty reports whether every Filter field is at its zero value, so
+// the city and supervisor event lists may take their unfiltered paths. Filter
+// holds a slice, so it is not comparable with ==.
 func filterIsEmpty(f events.Filter) bool {
-	return f.Type == "" && f.Actor == "" && f.Subject == "" &&
-		f.Since.IsZero() && f.Until.IsZero() && f.AfterSeq == 0
+	return reflect.ValueOf(f).IsZero()
 }
 
 func parseEventSince(value string) (time.Duration, bool, error) {

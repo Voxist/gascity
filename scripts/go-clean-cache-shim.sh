@@ -12,7 +12,7 @@
 #
 # WHY THIS EXISTS
 #
-# AGENTS.md ("Build Cache Conventions") hard-bans `go clean -cache`. Until this
+# fork-maintainer-guide.md ("Build Cache Conventions") hard-bans `go clean -cache`. Until this
 # shim, nothing enforced that ban: it is a rule about what a process DOES, and
 # the repo's other guards only see what gets committed. On 2026-06-13 (bead
 # vp-g96b) and again on 2026-09-05 something ran it against the shared GOCACHE
@@ -228,7 +228,7 @@ the path to the compiler or linker, and the tool then opens a file that has
 just been unlinked. That is a hard build failure, on stdlib imports included.
 It has broken the fleet twice — bead vp-g96b (2026-06-13) and again 2026-09-05.
 
-The rule: AGENTS.md, "Build Cache Conventions".
+The rule: fork-maintainer-guide.md, "Build Cache Conventions".
 
 What you probably wanted instead:
 

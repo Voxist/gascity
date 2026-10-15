@@ -162,7 +162,7 @@ commit_file "$repo" "scripts/a.sh" "$(printf '#!/bin/sh\ntrue\ngo clean -cache\n
 rc="$(run_check "$repo")"
 [ "$rc" -ne 0 ] || fail "CASE 6: violation not blocked"
 grep -q 'scripts/a.sh:3' "$OUT" || fail "CASE 6: no file:line in the report; got: $(cat "$OUT")"
-grep -q 'AGENTS.md' "$OUT" || fail "CASE 6: report does not cite AGENTS.md"
+grep -q 'fork-maintainer-guide.md' "$OUT" || fail "CASE 6: report does not cite fork-maintainer-guide.md"
 grep -q 'gocacheguard:allow' "$OUT" || fail "CASE 6: report does not name the escape hatch"
 grep -q 'go clean -testcache' "$OUT" || fail "CASE 6: report does not name the allowed alternative"
 pass "CASE 6: report gives file:line, the rule, the alternative and the escape hatch"
@@ -256,7 +256,7 @@ HOOK="$REPO_ROOT/.githooks/pre-commit"
 grep -q 'check-go-clean-cache.sh' "$HOOK" || fail "CASE 13: pre-commit does not invoke the guard"
 grep -q -- '--staged' "$HOOK" || fail "CASE 13: pre-commit does not use --staged"
 grep -q 'check-go-clean-cache' "$REPO_ROOT/Makefile" || fail "CASE 13: no Makefile target"
-grep -q 'check-go-clean-cache' "$REPO_ROOT/.github/workflows/ci.yml" || fail "CASE 13: not wired into CI"
+grep -q 'check-go-clean-cache' "$REPO_ROOT/.github/workflows/fork-verify.yml" || fail "CASE 13: not wired into CI"
 
 # It must run BEFORE pre-commit's four-category early exit. A shell script, a
 # Makefile recipe or a CI step is in none of those categories, so a guard

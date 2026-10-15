@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // TestReapPhantomSessionBeadsMustScanTheSessionsStore executes the failure
@@ -42,10 +43,10 @@ func TestReapPhantomSessionBeadsMustScanTheSessionsStore(t *testing.T) {
 	sp := newPhantomTestProvider(nil, nil) // no live runtimes
 
 	var stderr bytes.Buffer
-	if got := reapPhantomSessionBeads(workStore, sp, newDrainTracker(), clock.Real{}, &stderr); got != 0 {
+	if got := reapPhantomSessionBeads(workStore, testSeatWork("", &config.City{}, workStore, nil), sp, newDrainTracker(), clock.Real{}, &stderr); got != 0 {
 		t.Fatalf("work store unexpectedly reaped %d; fixture is mistargeted", got)
 	}
-	if got := reapPhantomSessionBeads(sessionsStore, sp, newDrainTracker(), clock.Real{}, &stderr); got != 1 {
+	if got := reapPhantomSessionBeads(sessionsStore, testSeatWork("", &config.City{}, sessionsStore, nil), sp, newDrainTracker(), clock.Real{}, &stderr); got != 1 {
 		t.Fatalf("sessions store reaped %d, want 1 — the phantom is invisible unless the reaper is handed the SESSIONS store", got)
 	}
 }

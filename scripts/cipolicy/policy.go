@@ -5,217 +5,372 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"sort"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 const (
-	setupGoAction = "actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c"
-
 	// These are SHA-256 digests of the display-free JSON projections below.
 	// Whole-workflow execution hashes deliberately pin shell text instead of
 	// approximating shell semantics: any execution change requires explicit
 	// policy review, while workflow, job, step, and input descriptions remain
 	// free to change. A failure prints the projection and candidate digest.
-	// Re-derived at the 2026-09-13 resync (158 upstream commits, superseding
-	// the 102-commit 2026-09-11 branch): ci.yml and nightly.yml auto-merged
-	// both sides — upstream moved BD_VERSION while the fork kept the
-	// BD_REPO/BD_SOURCE_REF bridge block at every pin site — so the merged
-	// execution shape hashes to neither side's prior pin. Every value below is
-	// the candidate digest this package printed for the MERGED workflows,
-	// never adopted from a side.
-	expectedCITriggersHash = "d1a8bcd089019589658d8f154af9c26a70877285d84a384c2dcea299efc9554a"
-	// MERGE INTENT (v1.4.0 resync): re-derived, not picked. This pin is a
-	// tripwire over the CI workflow's semantic execution shape. .github/workflows/ci.yml
-	// auto-merged both sides' changes, so the resulting shape hashes to neither
-	// the fork's nor upstream's previous value — the correct action is to
-	// re-derive from the merged workflow rather than adopt either side's stale pin.
-	// Re-derived again at the v1.4.0 resync (ga-y708o follow-up): ci.yml
-	// auto-merged both sides, so the merged execution shape hashes to neither
-	// the fork's nor upstream's previous pin — re-derive, never adopt a side.
-	// Re-derived again for ga-kgluj: splitting BD_VERSION into BD_VERSION +
-	// BD_SOURCE_REF adds a job-level env key, and env is part of the execution
-	// shape this pin guards — so the tripwire firing here is correct behavior,
-	// not noise.
-	// Re-derived for the fork-first bd repin (ga-zzcjs): BD_REPO joins
-	// BD_SOURCE_REF as a job-level env key at every pin site, so the shape
-	// moves again — deliberately.
-	// Re-derived again at the 2026-08-31 resync: ci.yml auto-merged both sides,
-	// so the merged execution shape hashes to neither side's prior pin. Taken
-	// from the candidate digest this package printed for the merged workflow,
-	// not from either side. The trigger pins below did not move — triggers
-	// merged to a shape identical to both sides, so they were left alone.
-	// Re-derived once more for the ga-4h8bu scripts split (PR #141 round 2):
-	// the integration changes-filter widens to scripts/** so plain
-	// shell-script PRs trigger the shards that are the -tags integration
-	// tests' only CI home — a deliberate execution-shape change, pinned from
-	// the digest printed for the merged (resync + split) workflow.
-	// Re-derived for the static-checks split (ga-dejjh): the boundary guards
-	// and the native-DoltLite suite moved to preflight-guards so golangci-lint
-	// stops running in series behind them. Both jobs are listed in the needs of
-	// check and ci-preflight (ci-required reaches them through ci-preflight),
-	// so the gate is unchanged — only the shape is.
-	// Re-derived on the merge with #152 (static-checks split): both sides moved
-	// ci.yml, so the merged file hashes to neither side.
-	// Re-derived again for the noncmdgc unit-cover shard matrix (ga-gmhbf): the
-	// job that set the run's wall time became a 3-way matrix. Same jobs, same
-	// needs; only the matrix expansion and the job name changed.
-	// Re-derived again at the 2026-09-05 resync (branch
-	// resync/origin-main-20260905): ci.yml auto-merged both sides, so the
-	// merged execution shape hashes to neither the fork's prior pin nor
-	// upstream's, and the digest is taken from the candidate this package
-	// printed for the merged workflow rather than adopted from a side. The
-	// execution-shape delta the new pin encodes, diffed against the fork's
-	// pre-merge ci.yml: upstream added two Cursor worker-core jobs —
-	// worker-core-cursor (PROFILE cursor/tmux-cli, make test-worker-core) and
-	// worker-core-phase2-cursor (make test-worker-core-phase2-all) — each
-	// gated on the same changes filter as its claude/codex/gemini peers, plus
-	// the cursor artifact download, --expected-profile argument, result/
-	// download variable and fan-in conditional in both worker-core-summary
-	// jobs. Nothing fork-side moved: the scripts/** integration filter, the
-	// preflight-guards/preflight-static split, the 3-way noncmdgc cover
-	// matrix, the BD_REPO/BD_SOURCE_REF repin and the 15-minute shard timeout
-	// all survive into the merged file unchanged. Cursor is a profile this
-	// fork already carries (internal/worker.ProfileCursorTmuxCLI), so the
-	// added jobs are new coverage, not a shape that needs reverting.
-	// Re-derived after adding the "Build-cache ban guard" step to
-	// preflight-guards (make check-go-clean-cache). That is a deliberate
-	// execution-shape change -- a new blocking step -- so this tripwire
-	// firing is the intended behavior and re-pinning is the correct
-	// response. No other job, step, or shell text moved.
-	// Re-derived again for the 0066->0067 repin (#195) merged into the
-	// 2026-09-13 resync: ci.yml carries both the resync's execution shape and
-	// #195's BD_SOURCE_REF move (3e03250ee -> 73a5bdc65) at its pin sites, so
-	// the merged file hashes to NEITHER side's pin. Taken from the candidate
-	// digest this package printed for the merged workflow, not adopted.
-	// Re-derived for the upstream-v1.3.0 repin: BD_SOURCE_REF
-	// (73a5bdc65 -> 99d81dd4d) and BD_VERSION (v1.2.2 -> v1.90.0) moved at
-	// ci.yml's five pin sites and nothing else -- env values inside jobs whose
-	// shape is otherwise byte-identical. Taken from the candidate digest this
-	// package printed for the changed workflow.
-	// Re-derived for the bd v1.91.0 repin: BD_SOURCE_REF
-	// (99d81dd4d -> 2498618eb) and BD_VERSION (v1.90.0 -> v1.91.0) moved at
-	// the same five pin sites and nothing else. Taken from the candidate
-	// digest this package printed for the changed workflow.
-	// Bumped for the beads-topology-acceptance job (origin/main): the
-	// bd/dolt-backed topology shapes had never executed in CI — every job
-	// lacked a bd with --proxied-server, so each test skipped and a suite
-	// that ran nothing reported green. The new job builds bd from
-	// BD_CURRENT_REF and sets GC_REQUIRE_ACCEPTANCE_TOOLING so a runner
-	// without that bd fails instead. Widened twice more (beads_topology's
-	// path filter, first to cmd/gc/**+internal/beads/**+internal/doctor/**+
-	// examples/bd/**+test/acceptance/**, then to internal/** wholesale once
-	// `go list -deps` showed 139 of 166 internal packages actually reachable),
-	// plus the "Proxied-native lifecycle and safety" step (later split into
-	// its own "Beads / proxied-native acceptance" job to fit under its own
-	// 90-minute job timeout) and the beads-proxied-perf nightly job. None of
-	// this changes proxied=false behavior — it is coverage for the
-	// proxied-server escape hatch this resync also takes (ga-m07q9); the
-	// fork's own execution-shape history above (BD_REPO/BD_SOURCE_REF bridge
-	// pins, the scripts/** and bootstrap-scripts integration filters, the
-	// static-checks split, the 3-way noncmdgc cover matrix) survives
-	// unchanged into the merged workflow.
 	//
-	// Re-derived again at the 2026-09-25 resync: this merge also carries
-	// origin's beads-topology-acceptance job, so the merged ci.yml hashes to
-	// neither side's prior pin. Taken from the candidate digest
+	// Triggers bumped for merge-queue readiness (TESTING.md "Merge queue"):
+	// merge_group [checks_requested], so Check and CI / required report on a
+	// queue entry's merge-group commit. Reviewed delta: one trigger, no new
+	// job, step command or permission; scripts/ci_merge_queue_test.go pins
+	// what each event expression yields on it.
+	expectedCITriggersHash = "869922e05434e56d0b7fe8245e29529edc9616efac89ce4ba068edf7faa3f69b"
+	// Bumped for the beads-topology-acceptance job: the bd/dolt-backed topology
+	// shapes had never executed in CI — every job lacked a bd with
+	// --proxied-server, so each test skipped and a suite that ran nothing
+	// reported green. The new job builds bd from BD_CURRENT_REF and sets
+	// GC_REQUIRE_ACCEPTANCE_TOOLING so a runner without that bd fails instead.
+	//
+	// Bumped again to widen that job's beads_topology path filter. The curated
+	// cmd/gc globs matched none of the files the proxied lifecycle actually lives
+	// in — the ownership journal, the provider lifecycle, the bd env plumbing,
+	// the `gc init` transport flags — so a change to the feature skipped its own
+	// acceptance job and ci-required still went green on the allowed skip. The
+	// filter is now cmd/gc/**, internal/beads/**, internal/doctor/**,
+	// examples/bd/**, test/acceptance/** plus the pins and the workflow.
+	//
+	// Bumped again on the merge with main, which carried its own reviewed delta
+	// (Beads v1.3.0-rc.2 -> v1.3.0): the merged workflow holds both changes, so
+	// neither side's digest describes it.
+	//
+	// Bumped again to widen beads_topology's internal/ globs to internal/**.
+	// The curated list repeated the same mistake one directory out: the Dolt
+	// floor (internal/doltversion), the proxied provider's auth scope
+	// (internal/doltauth), the pack state dir handed to the bd script
+	// (internal/citylayout) and the pool/binding/health packages matched
+	// neither beads_topology nor shared, so a change to any of them skipped the
+	// only job that stands up the proxied shapes and ci-required accepted the
+	// skip. `go list -deps ./test/acceptance/... ./cmd/gc` names 139 of 166
+	// internal packages, so the filter is now the graph itself.
+	//
+	// Bumped again for one added step in the same job: "Proxied-native
+	// lifecycle and safety" (council pr2 C-F1). TestProxiedNativeLifecycle and
+	// TestProxiedNativeSafety carry //go:build acceptance_a and were selected
+	// by no -run expression in any job, so the proxied-native lane's whole
+	// evidence base — the per-crash-shape ping/recover budgets, foreign-root's
+	// "0 pings, 0 dolt stop", the no-spawn positive control, both no-migrate
+	// rows and the author-at-commit pin — was a local one-off no regression
+	// could fail. Reviewed delta: one `go test` step, same job, same tooling,
+	// no new trigger and no new permission.
+	//
+	// Bumped again to split that step into its own job (round3 D-F17). The
+	// topology job's four step -timeouts summed to 115 minutes against its own
+	// 90-minute cap, so a slow-but-live run was canceled by the job timeout
+	// and lost its `--- FAIL` line and tee'd log. Reviewed delta: the topology
+	// job's -timeouts become 30/15/30 (75 under 90); the lifecycle and safety
+	// step moves to a new "Beads / proxied-native acceptance" job with the same
+	// needs, the same beads_topology `if`, the same runner, env, bd build and
+	// verify steps, one -timeout 45m test step under timeout-minutes 60, and a
+	// skip summary; ci-required needs the new job and allows its skip exactly
+	// as it does the topology job's. No new trigger and no new permission.
+	// Merged with main's reviewed delta: cmd-gc-productmetrics-testhook
+	// timeout-minutes 5 -> 12 (#6396: canceled at the 5-minute budget with no
+	// failing test).
+	//
+	// Bumped again (#6385): the integration path filter also matches
+	// internal/bootstrap/packs/core/assets/scripts/** so a reaper.sh-only
+	// change runs the real-Dolt reaper tests. Reviewed delta: one filter path,
+	// no new job, trigger or permission.
+	//
+	// Bumped again (F9): beads-topology-acceptance gains one step running
+	// TestBeadsProxiedIgnoresUserLevelSharedServer (-timeout 15m) and its job
+	// cap moves 90 -> 105 minutes to keep the step budget under it. Reviewed
+	// delta: one test step and the cap, no new job, trigger or permission.
+	//
+	// Bumped again for the Beads v1.3.0 -> v1.3.1-rc.2 -> v1.3.1 pins: every job's
+	// BD_VERSION env value moves to the new tag. Reviewed delta: that value
+	// only, no new job, step, trigger or permission.
+	//
+	// Bumped again (ga-nr9epw, restoring ga-1037rg / ga-yoxtux regression
+	// coverage without re-widening test-bd-cli-contract's own -run regex,
+	// which TestAcceptanceTargetsSeparateTierAFromExternalBdContracts pins as
+	// an exact literal substring): one new step, "bd CLI contract HOME
+	// isolation (...)", added immediately after the existing "bd CLI contract
+	// (...)" step in each of contract-acceptance-previous, contract-
+	// acceptance-current and contract-radar-bd-head. Each new step runs `make
+	// test-bd-cli-contract-home-isolation`, a separate Makefile target driving
+	// only TestRunBDIsolatesHOMEFromSharedServerConfig under the same
+	// acceptance_bd_contract tag and bd binary the preceding step already
+	// resolved onto PATH. No new job, trigger or permission.
+	//
+	// Bumped again (rbe-west plan R2 step 1): the runner-policy job's own
+	// runs-on drops its hard-coded login list for blacksmith-2vcpu-ubuntu-2404,
+	// matching runner_policy.py, which now selects Blacksmith for every event
+	// and author. Reviewed delta: that one runs-on value, no new job, step,
+	// trigger or permission.
+	//
+	// Bumped again for the Dolt 2.1.7 -> 2.2.0 pin (the Dolt beads v1.3.1
+	// qualifies): the job DOLT_VERSION env values only.
+	//
+	// Bumped again (keep managed Dolt logs from failed acceptance tests):
+	// beads-topology-acceptance and beads-proxied-native-acceptance each gain
+	// a step exporting GC_TEST_FAILURE_ARTIFACT_DIR to $GITHUB_ENV and an
+	// `if: failure()` pinned upload-artifact step for that directory. No new
+	// job, trigger, permission or secret.
+	//
+	// Bumped again (beads#7037): the topology job's shared-server step -run
+	// also selects TestBlockedRepairOnProxiedCityAndRig, the proxied city+rig
+	// proof of gc start's is_blocked repair (about 4 minutes, inside that
+	// step's 15m -timeout). Reviewed delta: one -run alternative, no new job,
+	// step, trigger or permission.
+	//
+	// Bumped again (Go module fetch resilience): every job that calls
+	// actions/setup-go directly sets its `cache: false` and gains one step
+	// right after it, `uses: ./.github/actions/go-mod-download` (restore the
+	// go.sum-keyed module download cache, run a retried `go mod download`,
+	// save on push/schedule only), so build and test steps never fetch from
+	// proxy.golang.org; and the shared changes filter gains that action's
+	// directory and its retry script. Reviewed delta: one setup-go input and
+	// one local-action step per setup-go job, two filter paths. No new job,
+	// trigger, permission or secret. Then the shared changes filter gains
+	// .github/scripts/go-mod-verify-cache.sh, the action's go.sum
+	// verification step. Reviewed delta: one filter path.
+	//
+	// Bumped again (gc 1.5.1 proxied idle timeout): the proxied-native job's
+	// test step also selects TestProxiedIdleTimeoutReapAndTransparentRestart,
+	// sets GC_ACCEPTANCE_TOPOLOGY_MATRIX=1 for that step (the row is gated off
+	// Tier A by that switch), and the step is renamed to say so. No new job,
+	// trigger or permission.
+	//
+	// Bumped again (gc 1.5.1 suspension quiescence): the same step also
+	// selects TestProxiedSuspensionIsQuiescence (~8 minutes, inside the step's
+	// 45m -timeout) and its name says so. No new job, trigger or permission.
+	//
+	// Bumped again (OpenAPI breaking-change gate): preflight-generated gains
+	// an OPENAPI_BREAKING_BASE job env (PR base SHA, else github.sha) and a
+	// "Fetch OpenAPI breaking-change base" step that shallow-fetches that
+	// commit before `make spec-ci`, which now also runs the oasdiff gate; the
+	// spec-ci step is renamed to say so. Reviewed delta: one env var, one
+	// step, one step name; no new job, trigger or permission.
+	//
+	// Bumped again (ga-96smfk.8, checks moved to Bazel): preflight-static
+	// drops the CI-policy, go.mod replace, native dependency surface,
+	// event-export isolation, open-core boundary, format and docs steps, and
+	// preflight-generated drops its GC_REQUIRE_OAPI_CODEGEN env, the spec-ci
+	// and generated-docs drift steps and the patch upload. Each now runs as a
+	// Bazel test in the required bazel.yml unit lane; the OpenAPI
+	// breaking-change gate (needs the git base commit) stays as its own
+	// `make openapi-breaking-check` step. Reviewed delta: removed steps, one
+	// removed env and one renamed step command; no new job, trigger or
+	// permission.
+	//
+	// Bumped again (ga-96smfk.26, acceptance shard floor): TestBeadsProxiedDefault
+	// was split into independent TestBeadsProxiedDefault* top-level tests, so
+	// the topology job's proxied-default step selects those eight names
+	// instead of the one. Same tests' assertions, same step, -timeout and env.
+	// No new job, trigger or permission.
+	//
+	// Bumped again (ga-96smfk.6, package integration shards moved to Bazel):
+	// the eleven packages-* rows (packages-core-N-of-4,
+	// packages-cmd-gc-integration, packages-runtime-tmux-N-of-6) leave
+	// integration-shards for a new integration-packages-fork job with the
+	// same runner, env and steps, run only for fork and Dependabot pull
+	// requests (bazel.yml's gating integration-packages lane covers pushes
+	// and same-repo PRs); ci-integration needs it and allows its skip.
+	// Reviewed delta: one job split by condition; no new trigger, step
+	// command or permission.
+	//
+	// Bumped again (ga-96smfk.5, lint and vet as nogo): preflight-static
+	// drops the static-scope classifier, the golangci-lint version/cache
+	// steps, `make lint-affected`, `make lint` and `make vet` (nogo now runs
+	// them inside every Bazel Go compile, gated by bazel.yml), and its
+	// checkout no longer needs fetch-depth 2. Reviewed delta: removed steps
+	// and one removed checkout input; no new job, trigger or permission.
+	//
+	// Bumped again (ga-96smfk.50, //test/integration smoke subset moved to
+	// Bazel): the bdstore and rest-smoke rows join the packages-* rows in one
+	// fork/Dependabot-PR-only integration-shards job (bazel.yml's gating
+	// integration-smoke and integration-packages lanes cover pushes and every
+	// other PR), and integration-packages-fork goes; ci-integration drops it.
+	// Reviewed delta: rows moved between two jobs of identical runner, env
+	// and steps, one job removed; no new trigger, step command or permission.
+	// Bumped again (ga-96smfk.7, cmd/gc process suite moved to Bazel): the
+	// 12-shard cmd-gc-process job now runs for fork and Dependabot PRs only
+	// (the integration-packages-fork condition) and its name says so. Pushes
+	// and same-repo PRs run the same suite in bazel.yml's gating
+	// integration-packages lane (//cmd/gc:gc_test, --config=integration,
+	// GC_FAST_UNIT=0). Reviewed delta: one job's if and name; no new job,
+	// trigger or permission.
+	// Bumped again (ga-96smfk.7, worker-core conformance moved to Bazel): the
+	// eight per-profile worker-core and worker-core-phase2 jobs and their two
+	// summary jobs are removed, with the changes job's worker and
+	// worker_phase2 filters and outputs that only they read, and ci-required
+	// no longer needs the two summaries. Bazel runs the same tests with
+	// PROFILE unset (every profile): workertest_test, tmux_test and gc_test
+	// in the unit lane, gc_test's integration-tagged real-transport proof in
+	// the integration-packages lane. Reviewed delta: removed jobs, filters,
+	// outputs and needs; no new job, trigger or permission.
+	//
+	// Bumped again (ga-96smfk.7, tagged suites moved to Bazel): the
+	// cmd-gc-productmetrics-testhook job and preflight-static's "Native
+	// DoltLite beads tests" step are removed, with the job's two ci-required
+	// references. bazel.yml's unit lane runs the same tests as
+	// //cmd/gc:gc_productmetrics_testhook_test (-tags productmetrics_testhook)
+	// and //internal/beads:beads_native_doltlite_test (-tags
+	// gascity_native_beads). Reviewed delta: one removed job and one removed
+	// step; no new job, trigger or permission.
+	//
+	// Bumped again (ga-96smfk.50, fork PRs on Bazel): integration-shards, the
+	// last Go integration shards (packages-*, bdstore, rest-smoke, run only
+	// for fork and Dependabot PRs since #7261), and cmd-gc-process (fork-only
+	// since #7247) are deleted: bazel.yml's gating integration-packages and
+	// integration-smoke lanes run those tests for every PR, fork ones
+	// included (fork-ro run 37569466546, fork-rw run 37572755753).
+	// ci-integration drops integration-shards, ci-required cmd-gc-process.
+	// Reviewed delta: two jobs removed, two needs and two allowed skips
+	// dropped; no new job, trigger or permission.
+	//
+	// Bumped again (ga-96smfk.10, Docker session suite moved to Bazel): the
+	// docker-session job, its `docker` changes filter/output and its
+	// ci-required need and allowed skip are removed. Every scenario of the
+	// real-Docker harness it ran now runs as TestDockerSessionScript
+	// (//test/containerhost, emulated container host) in bazel.yml's gating
+	// integration-packages lane. Reviewed delta: one job and one filter
+	// removed; no new job, trigger, step command or permission.
+	//
+	// Bumped again (ga-96smfk.9, dashboard SPA moved to Bazel): the npm
+	// dashboard job and preflight-generated's `make dashboard-ci` step (and
+	// its setup-node) are removed, and ci-preflight no longer needs the job.
+	// Bazel's unit lane runs the same typecheck, Vitest, build, drift and
+	// Playwright steps (//internal/api/dashboardspa/...). Reviewed delta:
+	// removed job, steps and need; no new job, trigger or permission.
+	// Bumped again (ga-96smfk.7, bd contract cells moved to Bazel): the
+	// contract-acceptance-previous and contract-acceptance-current jobs are
+	// removed, and Check and ci-preflight no longer need them (nor allow the
+	// current cell's skip). bazel.yml's unit lane runs the same tests against
+	// pinned bd release archives: //test/acceptance:bd_cli_contract_prev_test
+	// and :bd_cli_contract_current_test, and
+	// //internal/beads:bd_conditional_release_contract_test. Reviewed delta:
+	// two removed jobs and their fan-in references; no new job, trigger or
+	// permission.
+	//
+	// Bumped again (ga-96smfk.11, beads topology acceptance moved to Bazel):
+	// the beads-topology-acceptance and beads-proxied-native-acceptance jobs
+	// are removed, with the changes job's beads_topology filter and output
+	// that only they read, and ci-required no longer needs them (nor allows
+	// their skip). bazel.yml's required acceptance lane runs the same tests
+	// against the pinned bd and dolt, under GC_REQUIRE_ACCEPTANCE_TOOLING
+	// and GC_ACCEPTANCE_TOPOLOGY_MATRIX: //test/acceptance:acceptance_test
+	// and :acceptance_solo_tests. Reviewed delta: two removed jobs, one
+	// filter and output, and their fan-in references; no new job, trigger or
+	// permission.
+	//
+	// Bumped again (ga-96smfk.10, K8s session suite moved to Bazel): the
+	// k8s-session job, its `k8s` changes filter/output and its ci-required
+	// need and allowed skip are removed. Its one step (TestK8sSessionConformance)
+	// only ran with the GC_K8S_AVAILABLE secret, which was never set, so it
+	// executed nothing; the suite now runs against the emulated pod API in
+	// //test/containerhost in bazel.yml's gating integration-packages lane.
+	// Reviewed delta: one job and one filter removed; no new job, trigger,
+	// step command or permission.
+	//
+	// Bumped again (ga-96smfk.10, openclaw-bridge Node suite moved to
+	// Bazel): the openclaw-bridge job, its openclaw_bridge changes
+	// filter/output and its ci-required need and allowed skip are removed.
+	// The same node --test files run as //contrib/openclaw-bridge's js_tests
+	// under rules_js in bazel.yml's gating unit lane. Reviewed delta: one job
+	// and one filter removed; no new job, trigger, step command or permission.
+	//
+	// Bumped again (ga-96smfk.38, OpenAPI breaking-change gate moved to
+	// Bazel): the preflight-generated job and its need in Check and
+	// ci-preflight are removed. //cmd/openapi-breaking:openapi-breaking_test
+	// (in bazel.yml's gating unit lane) runs the gate with the pinned oasdiff
+	// against the PR base commit's spec, which the lane writes with git show
+	// and hands to @openapi_base_spec. Reviewed delta: one job removed; no
+	// new job, trigger, step command or permission.
+	//
+	// Bumped again (ga-96smfk.12, final cutover: every suite of this tree
+	// under Bazel): preflight-static (no steps left but setup),
+	// preflight-acceptance (Tier A: bazel.yml's acceptance lane plus the
+	// untagged helpers in the unit lane), the push-only unit cover jobs
+	// (bazel-nightly.yml's `bazel coverage //...` -> Codecov flag
+	// bazel-unit), the push-only integration-rest-full shards
+	// (bazel-nightly.yml's //test/integration lane), release-config
+	// (//:goreleaser_check_test) and the ci-preflight / ci-integration
+	// rollups are removed, with the changes job's cmd_gc_process and
+	// integration filters and outputs that only they read. Check and
+	// ci-required fan in the remaining gating jobs; credential-provider-
+	// windows moves to runner_policy.py's Blacksmith Windows runner.
+	// Reviewed delta: jobs, filters and needs removed, one runs-on and one
+	// runner-policy output; no new trigger, step command or permission.
+	//
+	// Bumped again (merge-queue readiness): the changes job's paths-filter
+	// takes base/ref from merge_group.base_sha/head_sha, empty on every other
+	// event (the action's defaults). Reviewed delta: two `with` inputs; no
+	// new job, step command or permission.
+	//
+	// Bumped again (installation rate limit): the changes job's paths-filter
+	// gets `token: ''`, so pull requests diff with git instead of calling the
+	// pulls/files API on the shared github.token budget. Reviewed delta: one
+	// `with` input; no new job, step command or permission.
+	//
+	// Re-derived at the 2026-10-14 resync (fork): the runner-policy job's
+	// runs-on keeps Blacksmith for gastownhall/gascity and selects
+	// ubuntu-latest elsewhere, because a fork has no Blacksmith runners and
+	// the job would sit queued (runner_policy.py makes the same split for
+	// every downstream job). Reviewed delta: one runs-on expression; no new
+	// job, trigger or permission. Taken from the candidate digest
 	// TestCurrentWorkflowsMatchPolicy printed for the merged workflow.
-	// Re-derived again (B2, independent review of PR #215): beads-topology-
-	// acceptance and beads-proxied-native-acceptance's bd-build steps now
-	// resolve BD_REPO/BD_SOURCE_REF/BD_VERSION from deps.env instead of
-	// gastownhall/beads @ BD_CURRENT_REF (ga-m07q9's item 1 -- that upstream
-	// pin schema-skewed against the beads library gc actually links). Taken
-	// from the candidate digest TestCurrentWorkflowsMatchPolicy printed for
-	// the changed workflow, not pasted from the review.
-	// Re-derived for the bd v1.92.0 repin (ga-xwn1k): BD_SOURCE_REF
-	// (2498618eb -> dbf278efb) and BD_VERSION (v1.91.0 -> v1.92.0) moved at
-	// the same five pin sites and nothing else. Taken from the candidate
-	// digest TestCurrentWorkflowsMatchPolicy printed for the changed workflow.
-	// Re-derived again for the bd v1.93.0 repin (ga-xwn1k, same PR, target
-	// changed mid-review): BD_SOURCE_REF (dbf278efb -> 384c2ccca) and
-	// BD_VERSION (v1.92.0 -> v1.93.0) moved at the same five pin sites and
-	// nothing else. Taken from the candidate digest TestCurrentWorkflowsMatchPolicy
-	// printed for the changed workflow.
-	// Re-derived for ga-w7nyj's preflight-static review fix-up: added the
-	// "Verify errorlint --fix regression guard (ga-w7nyj)" step
-	// (`go test -run TestErrorlintStockFixDropsTypeAssertionNegation -v
-	// ./scripts/...`) after the two lint steps, so the one test proving
-	// errorlint's stock --fix drops a negation on this repo's pinned
-	// toolchain runs on every PR (preflight-static), not only on push
-	// (preflight-unit-cover-noncmdgc). Taken from the candidate digest
-	// TestCurrentWorkflowsMatchPolicy printed for the changed workflow.
-	// Re-derived again merging Voxist/main (98b743e41) into the schema-69
-	// repin branch (ga-b2q0c): both this ga-w7nyj step and the repin's
-	// BD_SOURCE_REF/BD_VERSION pin sites land in the merged ci.yml, so
-	// neither side's prior hash is correct on its own. Taken from the
-	// candidate digest TestCurrentWorkflowsMatchPolicy printed for the
-	// merged+repinned workflow (the v1.94.0/1522bdb01 pin, after the
-	// v1.93.0/5cc9948c7 CI-signal pin moved to the tagged release).
-	// Re-derived for the bd v1.94.1 repin: BD_SOURCE_REF
-	// (1522bdb01 -> e4f98340d) and BD_VERSION (v1.94.0 -> v1.94.1) moved at
-	// ci.yml's pin sites and nothing else. Taken from the candidate digest
-	// this package printed for the changed workflow.
-	expectedCIExecutionHash     = "bd6a94b10633325d605775d97526e382e40992a862f73354a2b0e965451c7f3b"
+	expectedCIExecutionHash     = "9d5c8199157cdf98db0c8c3fa242106c6fb8a21be172355fca0d45ed8647a127"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
-	// Re-derived like the CI pin above. Note this one lands on the FORK's prior
-	// value: nightly.yml merged to the fork's execution shape, so wholesale
-	// --theirs on this file would have adopted upstream's pin and failed. Each
-	// pin is an independent tripwire and must be re-derived on its own.
-	// Nightly re-derived with the same fork-first repin (BD_REPO env key at
-	// its two pin sites).
-	// Re-derived again at the 2026-08-31 resync: nightly.yml auto-merged both
-	// sides too, so this pin also lands on neither side's prior value.
-	// Same merge, same rule: nightly carries the repin's BD_SOURCE_REF values at
-	// its two pin sites on top of the resync's shape, so it lands on neither
-	// side's prior value. Setup-action pin below is untouched: the composite
-	// actions were taken from the resync verbatim (go version now derives
-	// from the go.mod directive, which the repin moves to 1.26.8).
-	// Re-derived for the 0066->0067 repin alongside the CI pin above:
-	// BD_SOURCE_REF moved at nightly's two pin sites and nothing else. The
-	// semantic projection was read to confirm that -- env.BD_SOURCE_REF is
-	// the only differing field.
-	// Re-derived for the upstream-v1.3.0 repin: BD_SOURCE_REF and BD_VERSION
-	// moved at nightly's two pin sites and nothing else. Taken from the
-	// candidate digest this package printed for the changed workflow.
-	// Re-derived for the bd v1.91.0 repin: the same two pin sites, same two
-	// keys, nothing else.
-	//
-	// Bumped again (origin/main, merged at this resync): the
-	// beads-proxied-perf job (see above). Taken from the candidate digest
-	// TestCurrentWorkflowsMatchPolicy printed for the merged workflow.
-	// Re-derived for the bd v1.92.0 repin (ga-xwn1k): the same two pin
-	// sites, same two keys, nothing else. Taken from the candidate digest
-	// TestCurrentWorkflowsMatchPolicy printed for the changed workflow.
-	// Re-derived again for the bd v1.93.0 repin (ga-xwn1k, same PR, target
-	// changed mid-review): the same two pin sites, same two keys, nothing
-	// else. Taken from the candidate digest TestCurrentWorkflowsMatchPolicy
-	// printed for the changed workflow.
-	// Re-derived for the bd v1.94.1 repin: the same two pin sites, same two
-	// keys, nothing else. Taken from the candidate digest this package
-	// printed for the changed workflow.
-	expectedNightlyExecutionHash = "f0ddbabeca09d80449664bfe9eef53b1df1a055a9bc6352ca2e0a0eba58d68cd"
-	// Re-derived at the 2026-08-31 resync: the composite setup actions under
-	// .github/actions/setup-gascity-* auto-merged both sides as well, moving
-	// this pin along with the two workflow execution pins above.
-	expectedSetupActionHash = "8f2d6b3a57f11d4f33a41211b1d3d5362d1437ba40c7b6db068abb98e731e5ac"
+	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
+	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
+	// timeout-minutes 60, env GC_REQUIRE_ACCEPTANCE_TOOLING=1 and
+	// GC_ACCEPTANCE_PERF=1, the setup action with dolt and no released bd, the
+	// PR jobs' resolve-pin / build-bd-from-BD_CURRENT_REF / verify steps
+	// verbatim, and one `go test -tags acceptance_a -timeout 45m -run
+	// 'TestBeadsProxiedDefault$'` step. No new trigger, no new permission, no
+	// provider selector. Then (v1.5.0 Tier C first-run drain) the tier-c job's
+	// -run selector gained TestFreshInit_SlingSpawnsDefaultPoolWorker and
+	// TestFreshInit_ClaudeUnrestricted, mirroring RC Gate's acceptance C shards;
+	// same job, env, secrets and runner. Then the Beads v1.3.0 -> v1.3.1-rc.2
+	// -> v1.3.1 pins: the workflow and job BD_VERSION env values only. Then
+	// the Dolt 2.1.7 -> 2.2.0 pin (DOLT_VERSION env values) and one step in
+	// the bundled-pack-pins job, `scripts/check-embedded-pins --skip-bundled`
+	// with GITHUB_TOKEN, which fails when deps.env falls behind the latest
+	// beads release or the Dolt it qualifies. No new job, trigger or
+	// permission. Then beads-proxied-perf gains the same failure-diagnostics
+	// routing step and `if: failure()` pinned upload-artifact step as the PR
+	// acceptance jobs; no new job, trigger, permission or secret. Then the
+	// tier B job fetches tag v1.5.0-rc1 (shallow, one ref) and requires the
+	// split-storage rc1 upgrade scenario to run rather than skip; no new job,
+	// trigger, permission or secret. Then (Go module fetch resilience)
+	// bundled-pack-pins and waiver-clock each set setup-go `cache: false` and
+	// gain one step right after it, `uses: ./.github/actions/go-mod-download`;
+	// no new job, trigger, permission or secret. Then (ga-96smfk.26)
+	// beads-proxied-perf's -run selects TestBeadsProxiedDefaultNativeLane, the
+	// one test split out of TestBeadsProxiedDefault that reads
+	// GC_ACCEPTANCE_PERF; no new job, trigger, permission or secret.
+	// Bumped again (ga-96smfk.59): integration-sqlite-coordstore is removed.
+	// It selected GC_BEADS=sqlite, a provider #3151 removed (gc now
+	// hard-errors on it), so it failed every night; no job may select a
+	// provider now. Reviewed delta: one job removed; no new job, trigger or
+	// permission.
+	// Re-derived at the 2026-10-14 resync (fork): nightly.yml merged to
+	// upstream's shape plus the fork's two standing deltas -- the
+	// BD_REPO/BD_SOURCE_REF/BD_VERSION fork-first bd pin block (ga-zzcjs) in
+	// the workflow env and tier-c's `if: github.repository ==
+	// 'gastownhall/gascity'` guard -- so it hashes to neither side's pin.
+	// Taken from the candidate digest TestCurrentWorkflowsMatchPolicy printed
+	// for the merged workflow. ci.yml and the setup action merged to
+	// upstream's exact shape, so their pins above are upstream's.
+	expectedNightlyExecutionHash = "2d3525b2937155afbd20e59a19171b8bafa31028116c729747f322286ad9f55b"
+	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
+	// `cache: false` and one step right after it,
+	// `uses: ./.github/actions/go-mod-download`.
+	expectedSetupActionHash = "910f005f48c629c9bf76c69a007b60c4132a76859183e59c0fe99d642bf6141f"
 )
 
 var requiredFilterPaths = map[string][]string{
 	"mail": {"internal/mail/**", "contrib/mail-scripts/**"},
-	"docker": {
-		"internal/session/**",
-		"scripts/gc-session-docker",
-		"scripts/test-docker-session",
-		"contrib/session-scripts/**",
-	},
-	"k8s": {
-		"internal/session/**",
-		"contrib/session-scripts/gc-session-k8s*",
-		"test/integration/session_k8s_test.go",
-	},
 	"beads": {
 		"go.mod",
 		"internal/beads/**",
@@ -224,62 +379,12 @@ var requiredFilterPaths = map[string][]string{
 		".github/scripts/install-bd-archive.sh",
 		"cmd/gc/init_provider_readiness.go",
 	},
-	// beads-topology-acceptance is the only job that stands up the proxied
-	// shapes for real, and ci-required allows its skip, so the paths that must
-	// trigger it are policy rather than convention. The internal/** entry is
-	// the dependency graph of the binaries the job builds:
-	// `go list -deps ./test/acceptance/... ./cmd/gc`.
-	"beads_topology": {
-		"go.mod",
-		"go.sum",
-		"deps.env",
-		"cmd/gc/**",
-		"internal/**",
-		"examples/bd/**",
-		"test/acceptance/**",
-		".github/workflows/ci.yml",
-	},
 	"packs": {
 		"examples/gastown/**",
 		"internal/config/pack.go",
 		"internal/config/compose.go",
 		"cmd/gc/embed_builtin_packs.go",
 		"scripts/update-bundled-gastown-pack",
-	},
-	"worker": {
-		"go.mod",
-		"go.sum",
-		".github/workflows/**",
-		"Makefile",
-		"internal/worker/**",
-		"internal/sessionlog/**",
-		"internal/modelwindow/**",
-		"internal/runtime/**",
-		"internal/config/**",
-		"cmd/gc/template_resolve*.go",
-		"cmd/gc/session_*",
-		"test/**worker**",
-	},
-	"worker_phase2": {
-		"go.mod",
-		"go.sum",
-		".github/workflows/**",
-		"Makefile",
-		"internal/worker/**",
-		"internal/sessionlog/**",
-		"internal/modelwindow/**",
-		"internal/runtime/**",
-		"internal/config/**",
-		"cmd/gc/**",
-	},
-	"cmd_gc_process": {
-		"go.mod",
-		"go.sum",
-		".github/workflows/**",
-		"Makefile",
-		"cmd/gc/**",
-		"internal/**",
-		"examples/gastown/**",
 	},
 	"credential_provider": {
 		"go.mod",
@@ -288,26 +393,15 @@ var requiredFilterPaths = map[string][]string{
 		"internal/testenv/**",
 		"internal/testutil/**",
 	},
-	"integration": {
-		"go.mod",
-		"go.sum",
-		".github/workflows/**",
-		"Makefile",
-		"**/*.go",
-		// The whole scripts/ tree (subsumes the formerly named runner
-		// scripts): the scripts package's -tags integration tests have the
-		// integration shards as their only CI home, so a PR touching any
-		// plain shell script there must trigger them (ga-4h8bu split).
-		"scripts/**",
-		"examples/gastown/**",
-	},
-	"openclaw_bridge": {"contrib/openclaw-bridge/**", ".github/workflows/**"},
 	"shared": {
 		"go.mod",
 		"go.sum",
 		"Makefile",
 		".github/workflows/**",
 		".github/actions/setup-gascity-ubuntu/**",
+		".github/actions/go-mod-download/**",
+		".github/scripts/go-mod-download-retry.sh",
+		".github/scripts/go-mod-verify-cache.sh",
 		".github/scripts/install-dolt-archive.sh",
 		".github/scripts/install-bd-archive.sh",
 		".github/scripts/install-claude-native.sh",
@@ -365,13 +459,7 @@ func validate(ci, nightly, action map[string]any) error {
 	if err := validateChangesJob(ci); err != nil {
 		return err
 	}
-	if err := validatePolicyWiring(ci); err != nil {
-		return err
-	}
 	if err := validatePRProviderOwnership(ci); err != nil {
-		return err
-	}
-	if err := validatePlaywrightInstallHardening(ci); err != nil {
 		return err
 	}
 	if err := assertWorkflowExecution("CI", ci, expectedCIExecutionHash); err != nil {
@@ -453,40 +541,6 @@ func validateChangesJob(workflow map[string]any) error {
 	return nil
 }
 
-// policyGuardJob is the job that runs the focused CI policy and the boundary
-// guards it validates. The pair was split out of preflight-static (ga-dejjh)
-// so golangci-lint — 13-15 minutes and the whole critical path — no longer
-// runs in series behind ~2 minutes of guards. What this validator pins is the
-// ORDER, not the job name: the policy check must run unconditionally right
-// after setup-go and before the guards, so a workflow edit that weakens a
-// guard cannot also disable the check that would have caught it.
-const policyGuardJob = "preflight-guards"
-
-func validatePolicyWiring(workflow map[string]any) error {
-	guardJob, err := workflowJob(workflow, policyGuardJob)
-	if err != nil {
-		return err
-	}
-	steps, err := mappingSlice(guardJob["steps"], policyGuardJob+" steps")
-	if err != nil {
-		return err
-	}
-	setupIndex := findStep(steps, "uses", setupGoAction)
-	policyIndex := findStep(steps, "run", "make test-ci-policy")
-	firstGuardIndex := findStep(steps, "run", "make check-gomod-replace")
-	if setupIndex < 0 || policyIndex != setupIndex+1 || firstGuardIndex <= policyIndex {
-		return fmt.Errorf(
-			"%s must run the focused CI policy immediately after setup-go and before other guards",
-			policyGuardJob,
-		)
-	}
-	want := map[string]any{"run": "make test-ci-policy"}
-	if got := projectStep(steps[policyIndex]); !reflect.DeepEqual(got, want) {
-		return fmt.Errorf("%s CI policy step must be unconditional and blocking", policyGuardJob)
-	}
-	return nil
-}
-
 func validatePRProviderOwnership(workflow map[string]any) error {
 	execution, err := projectWorkflowExecution(workflow)
 	if err != nil {
@@ -505,7 +559,7 @@ func validatePRProviderOwnership(workflow map[string]any) error {
 func validateNightlyProviderOwnership(workflow map[string]any) error {
 	if match, ok := findEnvField(workflow, "nightly"); ok {
 		return fmt.Errorf(
-			"nightly provider selection must be owned only by integration-sqlite-coordstore: %s assigns %s",
+			"nightly jobs must not select a beads test provider (the sqlite coordination store it selected was removed in #3151): %s assigns %s",
 			match.path,
 			match.name,
 		)
@@ -526,71 +580,14 @@ func validateNightlyProviderOwnership(workflow map[string]any) error {
 		if !ok {
 			return fmt.Errorf("nightly job %q must be a mapping", name)
 		}
-		if name == "integration-sqlite-coordstore" {
-			continue
-		}
 		path := "nightly.jobs." + name
 		if match, found := findJobProviderSelector(projectJob(job), path); found {
 			return fmt.Errorf(
-				"nightly provider selection must be owned only by integration-sqlite-coordstore: %s assigns %s",
+				"nightly jobs must not select a beads test provider (the sqlite coordination store it selected was removed in #3151): %s assigns %s",
 				match.path,
 				match.name,
 			)
 		}
-	}
-	return nil
-}
-
-// validatePlaywrightInstallHardening ensures the Dashboard SPA's Playwright
-// Chromium install step fails fast on a hung apt mirror instead of consuming
-// its whole retry budget on a single stuck attempt: each retry wraps the
-// install command with a per-attempt timeout, and apt itself gets an
-// explicit HTTP timeout so a dead mirror errors instead of hanging.
-func validatePlaywrightInstallHardening(workflow map[string]any) error {
-	job, err := workflowJob(workflow, "dashboard")
-	if err != nil {
-		return err
-	}
-	steps, err := mappingSlice(job["steps"], "dashboard steps")
-	if err != nil {
-		return err
-	}
-	const stepName = "Install Playwright Chromium"
-	var installStep map[string]any
-	for _, candidate := range steps {
-		if candidate["name"] == stepName {
-			installStep = candidate
-			break
-		}
-	}
-	if installStep == nil {
-		return fmt.Errorf("dashboard job is missing the %q step", stepName)
-	}
-	if installStep["timeout-minutes"] != 12 {
-		return fmt.Errorf("%q step must keep its outer timeout-minutes at 12", stepName)
-	}
-	run, ok := installStep["run"].(string)
-	if !ok {
-		return fmt.Errorf("%q step must have a run script", stepName)
-	}
-	aptTimeoutIndex := strings.Index(run, `Acquire::http::Timeout "15"`)
-	if aptTimeoutIndex < 0 {
-		return fmt.Errorf(
-			"%q step must configure an apt HTTP timeout (Acquire::http::Timeout \"15\") so a dead mirror errors instead of hanging",
-			stepName,
-		)
-	}
-	const perAttemptInstall = "timeout 240 npm run test:e2e:install:ci"
-	installIndex := strings.Index(run, perAttemptInstall)
-	if installIndex < 0 {
-		return fmt.Errorf(
-			"%q step must wrap each retry attempt with a per-attempt timeout (%q) so a hung install cannot consume the whole step budget",
-			stepName,
-			perAttemptInstall,
-		)
-	}
-	if aptTimeoutIndex > installIndex {
-		return fmt.Errorf("%q step must configure the apt HTTP timeout before the retry loop runs", stepName)
 	}
 	return nil
 }
@@ -788,20 +785,6 @@ func copyValue(value any) any {
 	default:
 		return value
 	}
-}
-
-func findStep(steps []map[string]any, field, value string) int {
-	found := -1
-	for index, step := range steps {
-		if step[field] != value {
-			continue
-		}
-		if found >= 0 {
-			return -1
-		}
-		found = index
-	}
-	return found
 }
 
 type providerSelectorMatch struct {
