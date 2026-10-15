@@ -219,17 +219,49 @@ func wholeSplitClasses() []coordclass.Class {
 	return classes
 }
 
-// The generated work_query's federation bit is a PROJECTION of Plan(RoutedWork):
-// a binding leg in the plan means the claimable set spans a store no bd
-// workspace can reach. The three answers that matter are pinned together
-// because they are the ones an operator's city can be in.
+// The generated work_query's federation bit is a PROJECTION of the city's
+// shape: a binding leg in Plan(RoutedWork), or rig spread — claimable rows on a
+// bound rig the work-dir command cannot read. The rows below pin each half on
+// its own before the combined cities, so neither can go vacuous behind the
+// other, and the collision/unbound rows pin the same rules the reader's leg
+// assembly applies (rigLegsExcludingCityName, openStandaloneRigStores).
 func TestQueryTopologyProjectsTheRoutedWorkPlan(t *testing.T) {
-	cfg := residencyTestConfig()
+	cfg := residencyTestConfig() // rigs alpha and bravo, both bound
+	rigLess := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 
-	// A city that relocates nothing: no binding leg, so `bd ready` is enough and
-	// the generated command is byte-identical to the one it always ran.
-	if routedWorkNeedsFederatedReader("", cfg) {
-		t.Error("a single-store city was told to use the federated reader; its generated query is supposed to be unchanged")
+	// A city that relocates nothing and declares no rigs: no binding leg and no
+	// rig legs, so `bd ready` is enough and the generated command is
+	// byte-identical to the one it always ran.
+	if routedWorkNeedsFederatedReader("", rigLess) {
+		t.Error("a single-store city with no rigs was told to use the federated reader; its generated query is supposed to be unchanged")
+	}
+
+	// RIG SPREAD ALONE (vp-bzeg D3): a bound rig is a bd workspace, but it is
+	// not the one the work_query runs from, so its claimable rows are invisible
+	// to `bd ready` whatever their tier. The reader must federate.
+	if !routedWorkNeedsFederatedReader("", cfg) {
+		t.Error("a city with bound rigs was told `bd ready` is enough; the query runs from the city work directory and reads exactly one store, so the rigs' claimable rows are invisible to it")
+	}
+
+	// A rig keyed under the CITY'S OWN NAME is no leg — the same collision
+	// rigLegsExcludingCityName drops from an opened leg map — so it alone is
+	// not spread.
+	collide := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "test-city", Path: "/tmp/self"}},
+	}
+	if routedWorkNeedsFederatedReader("", collide) {
+		t.Error("a city whose only rig is keyed under the city's own name was told to federate; the reader drops that collision, so the predicate naming a leg the reader will not build is a needless federation")
+	}
+
+	// An UNBOUND rig (declared but empty Path) is skipped by the reader's leg
+	// opener, so it alone is not spread either.
+	unbound := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "ghost", Path: ""}},
+	}
+	if routedWorkNeedsFederatedReader("", unbound) {
+		t.Error("a city whose only rig is unbound (no path) was told to federate; the reader skips that rig, so there is no store for the reader to reach that `bd ready` cannot")
 	}
 
 	split := t.TempDir()

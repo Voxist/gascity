@@ -177,6 +177,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`routedWorkNeedsFederatedReader` answered a narrower contract than its own
+  doc states, so a city whose claimable work spreads across rig stores kept
+  the single-store reader.** The predicate's stated question is "does the
+  claimable set span a store the generated query cannot reach" — but its only
+  half was `TouchesBinding()`, planned over a topology built with no rig legs
+  (`assembleResidencyTopology` assembles rigs from the map the caller passes,
+  and the predicate passed nil). A bound rig holds a bd workspace, but not the
+  one a work-dir `bd ready` reads, so its claimable rows were invisible to the
+  generated query at every tier — the binding half's shape, one store kind
+  over. The predicate now also counts the rig legs the reader's own leg
+  assembly would carry (`configuredRigLegCount`: bound rigs only, city-named
+  collisions dropped — the same two rules `openStandaloneRigStores` and
+  `rigLegsExcludingCityName` apply), and the API's `queryTopology` derives the
+  same half from the `BeadStores()` map its federation contract iterates, so
+  both surfaces flip together and agree with the reader they name by
+  construction. Cities with rigs now render `gc ready` in their generated work
+  queries; `gc ready`'s leg set is unchanged (the rigs were always legs of
+  it), and the hook's federated collapse (`scopeFederatedHookStores`) now
+  activates on them, replacing the per-rig fan-out with one read whose answer
+  is a superset of it. (vp-bzeg, ADR-0075 D3, vp-wcna)
+
 - **The federated ready reader rejected the hybrid sort its own generator
   emits, and reported that rejection on stdout — the one stream the generated
   work query captures.** The routed tier's pool-demand read emits `--sort

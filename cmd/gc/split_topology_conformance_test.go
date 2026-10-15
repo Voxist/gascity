@@ -2500,13 +2500,19 @@ func fixtureGraphLeg(e splitEnv) beads.Store {
 //
 // It asserts three things, in the order they have to hold:
 //
-//  1. The seam answers. cityQueryTopology is the production resolver, and it
-//     rides on graphClassBinding — the same question resolveClassStore asks —
-//     so a city that relocates nothing federates nothing.
-//  2. The command changes, and only in the reader. The single-store row is the
-//     byte-identity claim (its exact bytes are pinned by
-//     internal/config's TestWorkQueryGolden); here it is the command WORD that
-//     matters, because a split city emitting `bd ready` is the blindness.
+//  1. The seam answers the city's SHAPE. cityQueryTopology is the production
+//     resolver, and FederatedReady is that shape — a binding leg (the split)
+//     OR rig spread, a bound rig whose claimable rows the work-dir command
+//     cannot read (vp-bzeg D3). The rig fixture exists on BOTH topologies, so
+//     both subtests federate here: the single-store row is the new rig-spread
+//     answer, not the legacy one. The rig-less single-store answer (`bd ready`
+//     unchanged) is pinned by TestQueryTopologyProjectsTheRoutedWorkPlan's
+//     rig-less row, and internal/config's TestWorkQueryGolden still pins those
+//     exact bytes.
+//  2. The command changes, and only in the reader. A federating city emitting
+//     `bd ready` is the blindness — either because the graph class was
+//     migrated off the ledger it reads (the split) or because the rigs hold
+//     rows it will never see (the single-store row).
 //  3. The reader the command names actually answers with the routed graph work,
 //     read through the production leg assembly rather than a restatement of it.
 //
@@ -2552,32 +2558,32 @@ func fixtureGraphLeg(e splitEnv) beads.Store {
 func conformanceWorkQueryFederation(t *testing.T, e splitEnv) {
 	agentCfg := e.cfg.Agents[0]
 	topo := cityQueryTopology(e.cityPath, e.cfg)
-	if topo.FederatedReady != e.split {
-		t.Fatalf("cityQueryTopology reports FederatedReady=%v on a split=%v city; the generated query is built from this answer, so a wrong one is silent blindness or a needless federation", topo.FederatedReady, e.split)
+	// The law, against the fixture's own facts: a binding leg (e.split) or rig
+	// spread (the with-rig fixture) federates; only a city with NEITHER keeps
+	// the single-store command. That city is not this harness — the rig-less
+	// answer is pinned in census_residency_test.go — so both subtests here
+	// federate, and the single-store one is the row vp-bzeg ships.
+	wantFederated := e.split || len(e.rigStores) > 0
+	if topo.FederatedReady != wantFederated {
+		t.Fatalf("cityQueryTopology reports FederatedReady=%v on a split=%v, rig-legged=%v city; the generated query is built from this answer, so a wrong one is silent blindness or a needless federation", topo.FederatedReady, e.split, len(e.rigStores) > 0)
 	}
 	workQuery := agentCfg.EffectiveWorkQueryFor(topo)
 	poolDemand := agentCfg.EffectivePoolDemandQueryFor(topo)
 
 	if !e.split {
-		for name, cmd := range map[string]string{"work_query": workQuery, "scale_check": poolDemand} {
-			if strings.Contains(cmd, "gc ready") {
-				t.Errorf("a single-store city's %s reads through the federated reader: %q — its command must be the one it already runs", name, cmd)
-			}
-			if !strings.Contains(cmd, "bd ready") {
-				t.Errorf("a single-store city's %s no longer shells `bd ready`: %q", name, cmd)
-			}
-		}
-		// Nothing is relocated, so no override can be blind to it.
+		// No binding here, so the blindness is the RIG legs: a verbatim
+		// work_query override runs in one workspace and cannot see the rig
+		// stores' claimable rows. The old answer — "nothing is relocated, so no
+		// override can be blind" — was the binding-only contract.
 		blind := (&config.Agent{Name: "custom", WorkQuery: "bd ready --json"}).FederationBlindOverrides(topo)
-		if len(blind) != 0 {
-			t.Errorf("a single-store city reports work_query overrides as federation-blind (%v); there is no second store for them to miss", blind)
+		if len(blind) == 0 {
+			t.Errorf("a rig-spread single-store city reports no federation-blind work_query overrides (%v); a verbatim `bd ready` cannot see the rig legs' claimable rows, which is exactly what the flag exists to name", blind)
 		}
-		return
 	}
 
 	for name, cmd := range map[string]string{"work_query": workQuery, "scale_check": poolDemand} {
 		if strings.Contains(cmd, "bd ready") {
-			t.Fatalf("a split city's %s still shells `bd ready`, which reads the work ledger the graph class was migrated OFF: %q", name, cmd)
+			t.Fatalf("a federating city's %s still shells `bd ready`, which reads the one ledger the query runs from and misses both the migrated graph class and the rigs' claimable rows: %q", name, cmd)
 		}
 		if !strings.Contains(cmd, "gc ready") {
 			t.Fatalf("a split city's %s does not name the federated reader: %q", name, cmd)
@@ -2588,8 +2594,17 @@ func conformanceWorkQueryFederation(t *testing.T, e splitEnv) {
 		// layer up. internal/config's TestFederatedWorkQueryPropagatesADeadLeg
 		// EXECUTES this; the clause is pinned here so the split-topology row cannot
 		// go green on a command that swallows it.
+		if !strings.Contains(cmd, "gc ready") {
+			t.Fatalf("a federating city's %s does not name the federated reader: %q", name, cmd)
+		}
+		// The consumer half of the fail-loud rule. `gc ready` exits non-zero on a
+		// dead leg (I13); a tier that captured that exit into an empty result and
+		// fell through would print `[]` and exit 0, which is the same fail-open one
+		// layer up. internal/config's TestFederatedWorkQueryPropagatesADeadLeg
+		// EXECUTES this; the clause is pinned here so neither federating row can
+		// go green on a command that swallows it.
 		if !strings.Contains(cmd, `|| exit $?`) {
-			t.Errorf("a split city's %s runs the federated reader without propagating its exit status: %q", name, cmd)
+			t.Errorf("a federating city's %s runs the federated reader without propagating its exit status: %q", name, cmd)
 		}
 	}
 
@@ -2602,7 +2617,7 @@ func conformanceWorkQueryFederation(t *testing.T, e splitEnv) {
 		"--exclude-type=epic",
 	} {
 		if !strings.Contains(workQuery, flag) {
-			t.Fatalf("the split work_query's routed tier lost %q, so the reader flags asserted below are not the ones it runs: %q", flag, workQuery)
+			t.Fatalf("the federating work_query's routed tier lost %q, so the reader flags asserted below are not the ones it runs: %q", flag, workQuery)
 		}
 	}
 
@@ -2616,7 +2631,7 @@ func conformanceWorkQueryFederation(t *testing.T, e splitEnv) {
 		limit:          20,
 	})
 	if err != nil {
-		t.Fatalf("the reader the split work_query names failed over healthy stores: %v", err)
+		t.Fatalf("the reader the federating work_query names failed over healthy stores: %v", err)
 	}
 	found := false
 	for _, row := range rows {
@@ -2629,10 +2644,17 @@ func conformanceWorkQueryFederation(t *testing.T, e splitEnv) {
 		for _, row := range rows {
 			ids = append(ids, row.ID)
 		}
-		t.Fatalf("the reader the split work_query names answered %v and not the routed graph step %s; the command was swapped but the answer is still work-ledger-only, which is the blindness with extra steps", ids, routed.ID)
+		t.Fatalf("the reader the federating work_query names answered %v and not the routed graph step %s; the command was swapped but the answer is still work-ledger-only, which is the blindness with extra steps", ids, routed.ID)
 	}
 
-	conformanceWorkQueryClaimsWhatItSees(t, e)
+	// The see-and-claim chain is a property of a RELOCATED class: its point is
+	// that the work store's not-found opens the escalation to the binding. On
+	// the single-store row the routed step above sits in the very leg the claim
+	// roots at — the reader half asserted it is served, and there is nothing to
+	// escalate — so the chain is pinned by the split row only.
+	if e.split {
+		conformanceWorkQueryClaimsWhatItSees(t, e)
+	}
 }
 
 // conformanceWorkQueryClaimsWhatItSees asserts the closed gap: the bead the

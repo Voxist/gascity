@@ -86,6 +86,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -192,6 +193,26 @@ func rigLegsExcludingCityName(cityName string, rigStores map[string]beads.Store)
 		out[name] = store
 	}
 	return out
+}
+
+// configuredRigLegCount counts the rig legs a federated read would carry, from
+// the city's CONFIG alone: every BOUND rig — openStandaloneRigStores skips an
+// unbound rig (empty Path), so it is no leg — except one keyed under the city's
+// own name, the same collision rigLegsExcludingCityName drops from an opened
+// leg map. It is the shape half of routedWorkNeedsFederatedReader, so the
+// predicate that decides whether to federate and the reader that then does it
+// derive the same leg set rather than two lists kept in step.
+func configuredRigLegCount(cfg *config.City, cityName string) int {
+	if cfg == nil {
+		return 0
+	}
+	n := 0
+	for _, rig := range cfg.Rigs {
+		if rig.Name != cityName && strings.TrimSpace(rig.Path) != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // readyLegLabel is the name a failing leg reports itself by. The three spellings

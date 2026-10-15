@@ -27,16 +27,39 @@ func relocatedGraphStore(state State) beads.Store {
 // queryTopology answers the city facts a generated work_query or MCP catalog has
 // to be built against, from the API's own view of the city.
 //
-// FederatedReady rides on relocatedGraphStore — the SAME identity gate this file
-// already uses — rather than on a second reading of [storage], so the command
-// this surface renders names the same reader the CLI's cityQueryTopology picks
-// for the same city.
+// FederatedReady is the city's SHAPE, on the same two halves the CLI's
+// routedWorkNeedsFederatedReader answers: a relocated graph class
+// (relocatedGraphStore — the SAME identity gate this file already uses), or rig
+// spread — a rig whose store a work-dir `bd ready` cannot read. The rig half
+// counts BeadStores() entries other than the city's own key, which is the map
+// humaHandleBeadReady's federation contract iterates, so the command this
+// surface renders names the same reader over the same legs the CLI's
+// cityQueryTopology picks for the same city — agreement by construction, not by
+// two derivations kept in step.
 func queryTopology(state State) config.QueryTopology {
-	topo := config.QueryTopology{FederatedReady: relocatedGraphStore(state) != nil}
+	topo := config.QueryTopology{
+		FederatedReady: relocatedGraphStore(state) != nil || rigSpreadCount(state) > 0,
+	}
 	if cfg := state.Config(); cfg != nil {
 		topo.Beads = cfg.Beads
 	}
 	return topo
+}
+
+// rigSpreadCount counts the rig legs of state.BeadStores() — every entry except
+// the city's own key. Both State implementations key the city store under
+// CityName(), so the count is exactly the bound-rig legs the federated ready
+// read fans out over.
+func rigSpreadCount(state State) int {
+	stores := state.BeadStores()
+	cityName := state.CityName()
+	n := 0
+	for name := range stores {
+		if name != cityName {
+			n++
+		}
+	}
+	return n
 }
 
 // graphPlaneUnavailable is the authoritative failure a dead graph leg produces.

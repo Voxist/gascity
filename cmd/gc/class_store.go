@@ -473,18 +473,31 @@ func cityQueryTopology(cityPath string, cfg *config.City) config.QueryTopology {
 // routedWorkNeedsFederatedReader reports whether this city's claimable set spans
 // a store no bd workspace can reach.
 //
-// The work legs of Plan(RoutedWork) are bd workspaces — the city work store and
-// the rigs — and the hook already fans out across them. The binding is not one,
-// so its presence in the plan is the whole answer. A REFUSED city answers yes:
-// the refusal is about a relocated class, and only the federated reader carries
-// it to the operator instead of silently reading the wrong ledger.
+// Two shapes answer yes, and either is enough:
+//
+//   - RIG SPREAD. The generated work_query runs from the consumer's own work
+//     directory, where `bd ready` reads exactly one store. A bound rig holds a
+//     bd workspace, but it is not THIS one — its claimable rows are invisible
+//     to the single-store command whatever their tier. configuredRigLegCount
+//     derives the spread from the config with the same two rules the reader's
+//     leg assembly applies (bound rigs only, city-named rigs dropped), so the
+//     predicate and `gc ready` agree about the leg set by construction.
+//
+//   - A BINDING. The work legs of Plan(RoutedWork) are bd workspaces — the city
+//     work store and the rigs — and the binding is not one, so its presence in
+//     the plan is the other whole answer. A REFUSED city answers yes too: the
+//     refusal is about a relocated class, and only the federated reader carries
+//     it to the operator instead of silently reading the wrong ledger.
 //
 // The topology is built with no work legs on purpose. This asks about the SHAPE
 // of the city, not about a caller's opened stores, and every caller here — `gc
 // hook`, `gc prime`, `gc agent list`, the dispatch runtime — holds a different
-// set or none at all. Bindings do not depend on which work stores the caller
-// opened, so the answer is the same for all of them.
+// set or none at all. Bindings and rigs do not depend on which work stores the
+// caller opened, so the answer is the same for all of them.
 func routedWorkNeedsFederatedReader(cityPath string, cfg *config.City) bool {
+	if configuredRigLegCount(cfg, loadedCityName(cfg, cityPath)) > 0 {
+		return true
+	}
 	topo := residencyTopologyForCity(cityPath, cfg, queryTopologyWorkProbe{}, nil)
 	plan, err := storeref.Plan(storeref.RoutedWork{}, topo)
 	if err != nil {
