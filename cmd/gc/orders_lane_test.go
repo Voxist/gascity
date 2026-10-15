@@ -181,6 +181,10 @@ func ordersLaneTestRuntime(t *testing.T, od orderDispatcher, patrol string, stde
 	// A threshold of 100 can never be exceeded, so the lane's pressure gate
 	// always proceeds regardless of the machine running the test.
 	t.Setenv(fsPressureThresholdEnv, "100")
+	// A bare temp dir otherwise reads as a gc-managed bd city: the pass's
+	// managed-Dolt preflight and an order's check env would then start (and
+	// leak) a real sql-server on any host with dolt on PATH.
+	t.Setenv("GC_BEADS", "file")
 	if stderr == nil {
 		stderr = io.Discard
 	}
