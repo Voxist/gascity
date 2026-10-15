@@ -115,9 +115,23 @@ containsAny(finding["secret"], [
     r"""(?:^|/)internal/worker/message_receipt_test\.go$""",
     r"""(?:^|/)internal/api/handler_sessions_test\.go$""",
     r"""(?:^|/)internal/api/session_structured_identity_test\.go$""",
+    r"""(?:^|/)internal/runtime/dialog_test\.go$""",
     // Root-level historical bead export, pre-.beads/backup restructure; no
     // longer tracked at HEAD, but still present in full git history.
     r"""^issues\.jsonl$"""
+  ])
+)
+
+// SHA-256 digests (64 hex chars) pinned as content checksums — a cache-key
+// probe, a workflow-script hash pin and a release-gate's recorded artifact
+// digest, all arriving with the 2026-10-14 upstream resync. A digest
+// identifies content; it authorises nothing. Scoped to exactly these paths.
+|| (
+  matchesAny(finding["secret"], [r"""^[0-9a-f]{64}$"""])
+  && matchesAny(attributes[?"path"].orValue(""), [
+    r"""^release-gates/[^/]+\.md$""",
+    r"""^tools/rbe/cache-rrc-probe\.sh$""",
+    r"""^scripts/bazel_multilane_test\.go$"""
   ])
 )
 '''
