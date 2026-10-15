@@ -22,10 +22,8 @@ import (
 var errNativeStoreIdentityMismatch = errors.New("native store identity mismatch")
 
 // IdentityAlert is the typed payload of a post-open identity assertion failure.
-// It is the gc-side shape of a store.degraded(class=identity-mismatch) signal.
-// The patrol/event branch, when present, maps this onto its typed event; until
-// then the default sink degrades it to a structured log so this check never
-// hard-depends on a sibling branch.
+// The default sink logs it with slog message "store.degraded" and
+// class=identity-mismatch; no event is emitted.
 type IdentityAlert struct {
 	// ScopeRoot is the scope whose native store failed the assertion.
 	ScopeRoot string
@@ -33,13 +31,12 @@ type IdentityAlert struct {
 	Result identity.Result
 }
 
-// IdentityAlertSink consumes a degraded identity assertion. Implementations emit
-// a typed store.degraded / doctor.alert event; the default sink logs.
+// IdentityAlertSink consumes a degraded identity assertion. The default sink
+// (logIdentityAlertSink) logs it.
 type IdentityAlertSink func(IdentityAlert)
 
-// logIdentityAlertSink degrades an identity alert to a structured error log. It
-// is the fallback when no typed event sink is wired, keeping the assertion
-// observable without depending on the patrol branch's event types.
+// logIdentityAlertSink records an identity alert as a structured error log with
+// slog message "store.degraded", keeping the assertion observable.
 func logIdentityAlertSink(logger *slog.Logger) IdentityAlertSink {
 	if logger == nil {
 		logger = slog.Default()

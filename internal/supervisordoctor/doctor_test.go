@@ -62,31 +62,6 @@ func TestCheckSlowTicksFor(t *testing.T) {
 	}
 }
 
-func TestCheckS6ConnectionCeiling(t *testing.T) {
-	tests := []struct {
-		name    string
-		in      S6Input
-		wantRed bool
-	}{
-		// 8 scopes × (pool 2 + 1) = 24 ≤ 0.8×256 = 204.8 → ok.
-		{"within budget", S6Input{Scopes: 8, PoolSize: 2, MaxConnections: 256}, false},
-		// 8 scopes × (pool 30 + 1) = 248 > 204.8 → red.
-		{"over budget", S6Input{Scopes: 8, PoolSize: 30, MaxConnections: 256}, true},
-		// exactly at ceiling: 4 × (pool 39 + 1) = 160 = 0.8×200 → not red.
-		{"exactly at ceiling", S6Input{Scopes: 4, PoolSize: 39, MaxConnections: 200}, false},
-		{"unknown max skips", S6Input{Scopes: 8, PoolSize: 30, MaxConnections: 0}, false},
-		{"zero scopes skips", S6Input{Scopes: 0, PoolSize: 30, MaxConnections: 256}, false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := CheckS6ConnectionCeiling(tc.in)
-			if (got != nil) != tc.wantRed {
-				t.Fatalf("CheckS6ConnectionCeiling red=%v, want %v (alert=%+v)", got != nil, tc.wantRed, got)
-			}
-		})
-	}
-}
-
 func TestCheckAgentConfigIsolation(t *testing.T) {
 	base := t.TempDir()
 

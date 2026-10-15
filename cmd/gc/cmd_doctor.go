@@ -340,7 +340,6 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewOrderOutcomeHealthyCheck(cfg, cityPath))
 		register(doctor.NewOrderRunOnRoleCheck(cfg, cityPath))
 		register(newCodexHooksDriftCheck(cityPath, codexHookWorkDirs(cityPath, cfg)))
-		register(newBeadsProxiedCapabilityCheck(cfg))
 		// bd build pin: `bd --version` must contain [beads] expected_build
 		// (brew-clobber class). No-op when the pin is unset.
 		register(doctor.NewBeadsExpectedBuildCheck(cfg.Beads.ExpectedBuild))

@@ -59,7 +59,7 @@ func TestFreshScopeCanonicalDoltModeKeepsDoltliteOffTheProxiedDefault(t *testing
 // TestFreshScopeCanonicalDoltModeStillDefaultsDoltCitiesToProxied, asserting
 // origin's af7ad8a0f default ("proxied-local bd-owned Dolt by default on
 // beads v1.3.0-rc.2"). This fork does not adopt that default (ga-m07q9):
-// config.Proxied stays defaulting false, and a scope with no persisted
+// new scopes stay non-proxied by default, and a scope with no persisted
 // dolt_mode and no other signal resolves to an ordinary gc-managed Dolt
 // server. Adapted (2026-09-25 resync) rather than dropped -- a direct,
 // function-level assertion on freshScopeCanonicalDoltMode for a plain
@@ -135,7 +135,7 @@ func TestDoltliteScopeIsNotProviderOwnedProxied(t *testing.T) {
 // or function: a freshly initialized scope's persisted dolt_mode is
 // "server", not "proxied-server", unless the scope is explicitly marked
 // proxied. This fork does not adopt beads v1.3.0-rc.2's proxied-by-default
-// topology (af7ad8a0f) -- config.Proxied stays defaulting false, and a scope
+// topology (af7ad8a0f) -- new scopes stay non-proxied by default, and a scope
 // with no persisted dolt_mode and no other signal must resolve to an
 // ordinary gc-managed Dolt server.
 //

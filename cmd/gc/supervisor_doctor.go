@@ -61,7 +61,7 @@ func supervisorDoctorIntervalFor(reg *cityRegistry) time.Duration {
 // the supervisor loop and surfaces findings exclusively through events.
 //
 // The subset here is the part buildable on this branch: tick-age,
-// agent_config_isolation, and the S6 connection ceiling. Provenance and
+// slow ticks, and agent_config_isolation. Provenance and
 // port-file-consistency checks are intentionally omitted — they are owned
 // by sibling scale branches and are not registered here; this driver
 // degrades gracefully without them rather than hard-depending on them.
@@ -119,20 +119,6 @@ func evaluateCityDoctorSubset(state api.State, _ io.Writer) {
 		SampleCount: samples,
 		SlowestMs:   slowestMs,
 		Window:      window,
-	}); a != nil {
-		alerts = append(alerts, *a)
-	}
-
-	// S6 connection ceiling: scopes × (pool+1) ≤ 0.8 × max_connections.
-	// collectStage1ScopeRoots dedups colliding rig paths, so the count never
-	// over-estimates the connection ceiling when two rigs resolve to the same
-	// scope root (the patrol's own enumeration keeps duplicates intentionally).
-	scopes := len(collectStage1ScopeRoots(cityPath, cfg))
-	if a := supervisordoctor.CheckS6ConnectionCeiling(supervisordoctor.S6Input{
-		City:           cityName,
-		Scopes:         scopes,
-		PoolSize:       cfg.Beads.ProxyPoolSizeOrDefault(),
-		MaxConnections: cfg.Dolt.EffectiveMaxConnections(),
 	}); a != nil {
 		alerts = append(alerts, *a)
 	}
