@@ -139,6 +139,11 @@ var cacheOmittedCapabilities = map[string]func(beads.Store) bool{
 	// unwraps the cache and applies the activation predicate.
 	"EventsJournalActive":   nil,
 	"ReadEventsJournalPage": nil,
+	// Engine-only, fork-owned: the post-open scope-identity assertion runs on
+	// the concrete *beads.NativeDoltStore at scope-open
+	// (assertNativeStoreIdentity), before any class store or cache exists.
+	"AssertOpenedIdentity": nil,
+	"OpenedIdentity":       nil,
 }
 
 // TestControllerBindingCacheForwardsEveryEngineCapability holds the cache to

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // beadsStateTestCity creates a minimal city with file beads provider and returns
@@ -158,8 +159,9 @@ func TestBeadsState_IDsFlag(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("cmdBeadsState --state done --ids = %d; stderr=%s", code, stderr.String())
 	}
-	// File-store bead IDs start with "gc-"
-	if !strings.Contains(stdout.String(), "gc-") {
+	// File-store bead IDs carry the city's HQ prefix (#5416), derived from
+	// the fixture's workspace name.
+	if !strings.Contains(stdout.String(), config.DeriveBeadsPrefix("test-city")+"-") {
 		t.Errorf("--ids: expected bead ID in output, got:\n%s", stdout.String())
 	}
 }

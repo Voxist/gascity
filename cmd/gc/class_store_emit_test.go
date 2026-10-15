@@ -1674,7 +1674,9 @@ func TestMainStoreEmissionWrapsOnlyPinnedEngines(t *testing.T) {
 }
 
 // plainCreateEngine is a bead engine with only the required store surface: no
-// storage-class create, which is the native Dolt engine's shape.
+// storage-class create, which is upstream's native Dolt engine's shape. The
+// fork's *beads.NativeDoltStore carries CreateWithStorage, so the emitter's
+// fallback is modeled here rather than over the real engine.
 type plainCreateEngine struct{ beads.Store }
 
 // mc-03yxh regression. On a single-store native Dolt city the session store is
@@ -1686,8 +1688,8 @@ type plainCreateEngine struct{ beads.Store }
 // support it". It must take the plain create, carry the storage class on the
 // bead's flags as the policy does for such a store, and still announce it.
 func TestMainStoreSessionCreateOverAnEngineWithoutStorageCreate(t *testing.T) {
-	if reflect.TypeOf(&beads.NativeDoltStore{}).Implements(reflect.TypeOf((*beads.StorageCreateStore)(nil)).Elem()) {
-		t.Fatal("*beads.NativeDoltStore now has a storage-class create; this test models an engine without one, so point it at the shape that lacks it")
+	if reflect.TypeOf(plainCreateEngine{}).Implements(reflect.TypeOf((*beads.StorageCreateStore)(nil)).Elem()) {
+		t.Fatal("plainCreateEngine now has a storage-class create; this test models an engine without one, so point it at the shape that lacks it")
 	}
 	cityPath := t.TempDir()
 	cfg := &config.City{}
@@ -1740,11 +1742,15 @@ func TestEmittingClassStoreOverClaimsArePinnedPerEngine(t *testing.T) {
 	want := map[reflect.Type][]string{
 		reflect.TypeOf(&beads.NativeDoltStore{}): {
 			"AdvanceSequenceFloor", "AtomicConditionalCloserHandle", "CachedReadExact",
-			"ConditionalWritesModeSource", "CreateWithStorage", "DepAddWithMetadata",
+			"ConditionalWritesModeSource", "DepAddWithMetadata",
 			"HasResidentOutside", "NamespaceCensusHandle", "ReadyContext",
 			"SequenceFloor", "SetSequenceFloor", "StoreHealthPath",
 		},
 		reflect.TypeOf(&beads.SQLiteStore{}): {
+			// The fork's identity forwarders answer as a store with no
+			// identity: an empty OpenedIdentity, and AssertOpenedIdentity
+			// fails closed to ClassOpenedEmpty.
+			"AssertOpenedIdentity", "OpenedIdentity",
 			"ConditionalWritesModeSource", "Count", "DepListBatch",
 			"EventsJournalActive", "NamespaceCensusHandle", "ReadEventsJournalPage",
 			"ReadOnly", "SawRows",
