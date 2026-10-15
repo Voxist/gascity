@@ -1805,6 +1805,11 @@ func (cr *CityRuntime) tickReapStaleSessionBeads(p *tickPass) bool {
 		p.sessionBeads = cr.loadSessionBeadSnapshot()
 		p.recordPhase(TraceSiteSessionSnapshot, "load_session_snapshot.after_reap", phaseStart, traceSessionSnapshotFields(p.sessionBeads))
 	}
+	// The phantom reap (vp-g0z1) closes session beads, so a canceled pass
+	// skips it; the next phase's ctx check stops the tick.
+	if p.ctx.Err() != nil {
+		return false
+	}
 	phaseStart = time.Now()
 	phantomReaped := reapPhantomSessionBeads(cr.sessionsBeadStore().Store, p.seatWork, cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr)
 	p.recordPhase(TraceSiteControllerTickPhase, "reap_phantom_session_beads", phaseStart, map[string]any{"reaped": phantomReaped})
