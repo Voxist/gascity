@@ -64,6 +64,9 @@ jobs:
   # Go-native twins on GitHub-hosted runners, in the shard shapes the fork's
   # pre-Bazel ci.yml already ran on ubuntu-latest.
   static:
+    # Named for the fork ruleset's required check: upstream's ci.yml no
+    # longer has a preflight job, and this static lane is the fork's preflight.
+    name: CI / preflight
     if: ${{ github.repository != 'gastownhall/gascity' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
