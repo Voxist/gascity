@@ -96,6 +96,10 @@ var (
 	}
 )
 
+// implicitRecoveryFreezeReason is the denial reason for a scope under a
+// MIGRATION-FREEZE.
+const implicitRecoveryFreezeReason = "a MIGRATION-FREEZE is active"
+
 // implicitRecoveryDeniedError is returned when an implicit recovery is refused.
 type implicitRecoveryDeniedError struct {
 	cityPath string
@@ -107,12 +111,20 @@ func (e *implicitRecoveryDeniedError) Error() string {
 	return fmt.Sprintf("city %q: %s; managed Dolt was not started: %s", e.cityPath, e.reason, e.next)
 }
 
+// isMigrationFreezeDenial reports whether err carries the gate's refusal of a
+// store under a MIGRATION-FREEZE. No other error, the gate's stopped-city
+// denial included, answers true.
+func isMigrationFreezeDenial(err error) bool {
+	var denied *implicitRecoveryDeniedError
+	return errors.As(err, &denied) && denied.reason == implicitRecoveryFreezeReason
+}
+
 // implicitManagedDoltRecoveryCheck returns nil when an implicit managed-Dolt
 // recovery may proceed, otherwise an *implicitRecoveryDeniedError. A denial is
 // logged once per process per city and reason.
 func implicitManagedDoltRecoveryCheck(cityPath string) error {
 	if implicitRecoveryMigrationFrozen(cityPath) {
-		return denyImplicitRecovery(cityPath, "a MIGRATION-FREEZE is active",
+		return denyImplicitRecovery(cityPath, implicitRecoveryFreezeReason,
 			"clear the freeze marker once the migration window closes")
 	}
 	if lifecycleIntent.Load() || implicitRecoveryControllerLiveness(cityPath) != controllerLivenessStopped {
@@ -135,7 +147,7 @@ func implicitManagedDoltRecoveryCheck(cityPath string) error {
 func recoverManagedBDCommandForScope(cityPath, scopeRoot string) error {
 	if scopeRoot != "" && implicitRecoveryMigrationFrozen(scopeRoot) {
 		return fmt.Errorf("%w: %w", errManagedDoltRecoverDeclined,
-			denyImplicitRecovery(scopeRoot, "a MIGRATION-FREEZE is active", "clear the freeze marker once the migration window closes"))
+			denyImplicitRecovery(scopeRoot, implicitRecoveryFreezeReason, "clear the freeze marker once the migration window closes"))
 	}
 	return recoverManagedBDCommand(cityPath)
 }

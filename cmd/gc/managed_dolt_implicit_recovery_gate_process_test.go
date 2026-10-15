@@ -104,4 +104,29 @@ func TestManagedCityRefusesImplicitDoltRecoveryInChildProcess(t *testing.T) {
 			t.Fatalf("provider script ran against a frozen city:\n%s", data)
 		}
 	})
+
+	// The schema-window stop sequence runs gc stop with the controller down
+	// and a MIGRATION-FREEZE set. gc stop declares lifecycle intent, but the
+	// freeze still refuses the store, and a store that cannot be opened cannot
+	// hold a session mid-create: the stop reports the freeze and succeeds.
+	t.Run("stop frozen", func(t *testing.T) {
+		city := shortSocketTempDir(t, "gc-city-")
+		writeManagedBdCityFixture(t, city)
+		log := providerStubLog(t, city)
+		marker := filepath.Join(city, ".beads", migrationFreezeMarkerName)
+		if err := os.WriteFile(marker, []byte("tester\t2026-10-01T00:00:00Z\tschema window\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		out, code := runChildGC(t, city, "stop", city)
+		if code != 0 {
+			t.Fatalf("gc stop of a stopped, frozen city = exit %d, want 0:\n%s", code, out)
+		}
+		if !strings.Contains(out, "MIGRATION-FREEZE") {
+			t.Fatalf("gc stop did not report the freeze it could not read past:\n%s", out)
+		}
+		if data, err := os.ReadFile(log); err == nil && strings.Contains(string(data), "start") {
+			t.Fatalf("provider script started Dolt under a freeze:\n%s", data)
+		}
+	})
 }

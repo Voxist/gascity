@@ -461,6 +461,13 @@ func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, fo
 		return 0
 	}
 
+	// From here the stop must read the store to confirm it (the sessions left
+	// creating by an interrupted start, the recorded-session sweep), and with
+	// no controller serving the city the implicit-recovery gate would refuse
+	// that read and leave the stop unconfirmed. Stopping is lifecycle work:
+	// the store comes back only for this flow, which retires it again last
+	// (shutdownBeadsProviderForStop). A MIGRATION-FREEZE still denies it.
+	declareLifecycleIntent()
 	store, _ := openCityStoreForStop(cityPath)
 	// Every store consumer in this stop flow is session-class (sleep-reason marks,
 	// session-name lookups, session-runtime stop, orphan cleanup), so route the
@@ -650,6 +657,12 @@ func stopInterruptedStartsForStop(cityPath string, sessFront *session.Store, sp 
 		return nil, false
 	}
 	infos, err := sessFront.ListLabeledSessionInfosUnfiltered()
+	if err != nil && isMigrationFreezeDenial(err) {
+		// A store the freeze keeps closed cannot carry a start mid-create
+		// through it, so there is nothing left creating to stop.
+		fmt.Fprintf(stderr, "gc stop: warning: did not check for sessions left creating by an interrupted start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return nil, false
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "gc stop: could not check for sessions left creating by an interrupted start, so they may still be running: listing the city's sessions: %v\n", err) //nolint:errcheck // best-effort stderr
 		return nil, true
