@@ -58,8 +58,18 @@ func TestDeriveArtifactInBaseLineage(t *testing.T) {
 	if a.BaseRef != "voxist/main" {
 		t.Errorf("BaseRef = %q, want %q", a.BaseRef, "voxist/main")
 	}
+	if a.BaseBranch != "main" {
+		t.Errorf("BaseBranch = %q, want %q", a.BaseBranch, "main")
+	}
 	if !strings.HasPrefix(head, a.BaseSHA) {
 		t.Errorf("BaseSHA = %q, want prefix of %q", a.BaseSHA, head)
+	}
+	// End-to-end for the remote-less stamp: derived from the remote-tracking
+	// ref voxist/main, the rendered stamp must not carry "voxist" — a reader
+	// in a clone whose voxist (or origin) names another fork must get the
+	// same unambiguous string (vp-9ry5w AC2 shape).
+	if got, want := a.BaseStamp(), "main@"+a.BaseSHA+"+0-0"; got != want {
+		t.Errorf("BaseStamp = %q, want %q", got, want)
 	}
 }
 
@@ -197,9 +207,16 @@ func TestArtifactCommitStamp(t *testing.T) {
 }
 
 func TestArtifactBaseStamp(t *testing.T) {
-	a := Artifact{BaseRef: "Voxist/main", BaseSHA: "eb743642c", Ahead: 1, Behind: 340}
-	if got, want := a.BaseStamp(), "Voxist/main@eb743642c+1-340"; got != want {
+	// The remote name must NOT appear in the stamp: it is clone-relative
+	// and resolving it from a clone whose same-named remote points at the
+	// opposite repository is the exact wrong-remote trap the stamp should
+	// close (vp-9ry5w). The commit is the anchor; the branch is a label.
+	a := Artifact{BaseRef: "Voxist/main", BaseBranch: "main", BaseSHA: "eb743642c", Ahead: 1, Behind: 340}
+	if got, want := a.BaseStamp(), "main@eb743642c+1-340"; got != want {
 		t.Errorf("BaseStamp = %q, want %q", got, want)
+	}
+	if strings.Contains(a.BaseStamp(), "Voxist") {
+		t.Errorf("BaseStamp = %q leaks the clone-relative remote name", a.BaseStamp())
 	}
 }
 

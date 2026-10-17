@@ -32,6 +32,11 @@ type Artifact struct {
 	// BaseRef is the remote-tracking ref the lineage claim is made against,
 	// exactly as supplied (e.g. "Voxist/main").
 	BaseRef string
+	// BaseBranch is the branch component of the RESOLVED remote-tracking
+	// ref (e.g. "main" from refs/remotes/Voxist/main), set by
+	// DeriveArtifact. The rendered base stamp carries the branch name but
+	// deliberately not the remote name — see BaseStamp.
+	BaseBranch string
 	// BaseSHA is the abbreviated commit BaseRef resolved to at derivation
 	// time, so the stamp stays falsifiable after the ref moves.
 	BaseSHA string
@@ -124,14 +129,15 @@ func DeriveArtifact(repoPath, baseRef string) (Artifact, error) {
 	}
 
 	return Artifact{
-		HeadSHA:  headSHA,
-		ShortSHA: shortSHA,
-		Token:    token,
-		Dirty:    dirty,
-		BaseRef:  baseRef,
-		BaseSHA:  baseSHA,
-		Ahead:    ahead,
-		Behind:   behind,
+		HeadSHA:    headSHA,
+		ShortSHA:   shortSHA,
+		Token:      token,
+		Dirty:      dirty,
+		BaseRef:    baseRef,
+		BaseBranch: parts[1],
+		BaseSHA:    baseSHA,
+		Ahead:      ahead,
+		Behind:     behind,
 	}, nil
 }
 
@@ -164,11 +170,20 @@ func (a Artifact) CommitStamp() string {
 }
 
 // BaseStamp renders the build's relationship to its base lineage at build
-// time — e.g. "Voxist/main@eb743642c+0-0" — for embedding via ldflags so
-// `gc version` can answer "how far from the fork's main was this build?"
+// time — e.g. "main@eb743642c+0-0" — for embedding via ldflags so `gc
+// version` can answer "how far from the fork's main was this build?"
 // without rev-list archeology.
+//
+// The remote name is deliberately NOT part of the stamp. A remote name is
+// clone-relative: the build directory's `origin` is the fork, but the
+// shared clone's `origin` is the upstream, so a reader who resolves
+// "origin/main@..." from their own checkout lands on the OPPOSITE
+// repository (the same wrong-remote comparison the build-time ancestor
+// check refuses). The commit is the anchor — it identifies the lineage
+// everywhere and any clone can verify or fetch it; the branch name is kept
+// only as a human-readable label (vp-9ry5w).
 func (a Artifact) BaseStamp() string {
-	return fmt.Sprintf("%s@%s+%d-%d", a.BaseRef, a.BaseSHA, a.Ahead, a.Behind)
+	return fmt.Sprintf("%s@%s+%d-%d", a.BaseBranch, a.BaseSHA, a.Ahead, a.Behind)
 }
 
 // ShellSingleQuote wraps s in single quotes for safe eval in POSIX shells,
