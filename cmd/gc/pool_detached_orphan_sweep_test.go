@@ -1072,3 +1072,56 @@ func TestSweepDetachedHandoffOrphans_PartialSessionListStillResolvesByID(t *test
 		t.Fatalf("gc.routed_to=%q, want gascity/gastown.polecat", got.Metadata[beadmeta.RoutedToMetadataKey])
 	}
 }
+
+// The detached-orphan park exemption: a bead parked with gc.awaiting_human (or
+// either sibling signal) whose gc.routed_to the operator deliberately cleared
+// must not have its route re-armed from its session bead — ADR-0066 D3
+// amended / ADR-0023 C5. The session bead is present and its template
+// resolves, so the park signal is the ONLY reason the sweep skips: deleting the
+// exclusion flips this test to restored=1, exactly like the SkipsWorkflowKind
+// control.
+func TestSweepDetachedHandoffOrphans_SkipsParkedCandidate(t *testing.T) {
+	store := beads.NewMemStore()
+
+	_, err := store.Create(beads.Bead{
+		Title:  "polecat session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "gastown__polecat-th-parked",
+			"template":     "gascity/gastown.polecat",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	work, err := store.Create(beads.Bead{
+		Title:  "parked work",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.WorkBranchMetadataKey:    "polecat/ga-parked",
+			beadmeta.SessionNameMetadataKey:   "gastown__polecat-th-parked",
+			beadmeta.AwaitingHumanMetadataKey: "karel@voxist.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+
+	n, err := sweepDetachedHandoffOrphans(store)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("restored=%d, want 0 (a parked bead's discharged route is not data loss)", n)
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("get work bead: %v", err)
+	}
+	if got.Metadata[beadmeta.RoutedToMetadataKey] != "" {
+		t.Fatalf("gc.routed_to=%q, want empty — the sweep re-armed a parked bead", got.Metadata[beadmeta.RoutedToMetadataKey])
+	}
+}

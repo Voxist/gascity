@@ -39,8 +39,18 @@ const Namespace = "gc."
 // cmd/. Keep this block sorted by identifier; the Go compiler rejects duplicate
 // identifiers, giving us a free compile-time uniqueness guarantee.
 const (
-	AttemptLogMetadataKey     = "gc.attempt_log"
-	AttemptMetadataKey        = "gc.attempt"
+	AttemptLogMetadataKey = "gc.attempt_log"
+	AttemptMetadataKey    = "gc.attempt"
+	// AwaitingHumanMetadataKey names the agent park convention: the bead's
+	// required next actor is a human, its gc.routed_to was deliberately
+	// cleared with the park, and every auto-router — pack-side (gclib.is_parked)
+	// and binary-side (IsParkedMetadata) — must leave both exactly as they are
+	// (vp-dbck / ADR-0023 C5; vp-cixi precedent for the value shape).
+	AwaitingHumanMetadataKey = "gc.awaiting_human"
+	// BlockedOnMetadataKey is the second park spelling some writers stamp
+	// instead of gc.awaiting_human (e.g. vc-u9j's human-operator
+	// oauth-credential hold): same semantics, same exemption.
+	BlockedOnMetadataKey      = "gc.blocked_on"
 	BondMetadataKey           = "gc.bond"
 	BondVarsMetadataKey       = "gc.bond_vars"
 	BoundStepIDMetadataKey    = "gc.bound_step_id"
@@ -117,23 +127,27 @@ const (
 	DeferredRoutedToMetadataKey          = "gc.deferred_routed_to"
 	DeferredTypeMetadataKey              = "gc.deferred_type"
 	DetachedMetadataKey                  = "gc.detached"
-	DoNotAutoRouteMetadataKey            = "gc.do_not_auto_route"
-	DrainContextMetadataKey              = "gc.drain_context"
-	DrainContinuationGroupMetadataKey    = "gc.drain_continuation_group"
-	DrainControlIDMetadataKey            = "gc.drain_control_id"
-	DrainCountMetadataKey                = "gc.drain_count"
-	DrainFormulaMetadataKey              = "gc.drain_formula"
-	DrainIndexMetadataKey                = "gc.drain_index"
-	DrainItemSingleLaneMetadataKey       = "gc.drain_item_single_lane"
-	DrainManifestMetadataKey             = "gc.drain_manifest.v1"
-	DrainMaxUnitsMetadataKey             = "gc.drain_max_units"
-	DrainMemberAccessMetadataKey         = "gc.drain_member_access"
-	DrainMemberIDMetadataKey             = "gc.drain_member_id"
-	DrainMemberUnresolvedMetadataKey     = "gc.drain_member_unresolved"
-	DrainOnItemFailureMetadataKey        = "gc.drain_on_item_failure"
-	DrainParentConvoyIDMetadataKey       = "gc.drain_parent_convoy_id"
-	DrainStateMetadataKey                = "gc.drain_state"
-	DrainUnitKeyMetadataKey              = "gc.drain_unit_key"
+	// DoNotAutoRouteMetadataKey is the explicit operator hold: a truthy value
+	// (1/true/yes after StringMap decode — bd type-infers `--set-metadata
+	// key=1` to a JSON integer) parks the bead against every auto-router.
+	// IsOptOutValue normalises the decoded spellings; see IsParkedMetadata.
+	DoNotAutoRouteMetadataKey         = "gc.do_not_auto_route"
+	DrainContextMetadataKey           = "gc.drain_context"
+	DrainContinuationGroupMetadataKey = "gc.drain_continuation_group"
+	DrainControlIDMetadataKey         = "gc.drain_control_id"
+	DrainCountMetadataKey             = "gc.drain_count"
+	DrainFormulaMetadataKey           = "gc.drain_formula"
+	DrainIndexMetadataKey             = "gc.drain_index"
+	DrainItemSingleLaneMetadataKey    = "gc.drain_item_single_lane"
+	DrainManifestMetadataKey          = "gc.drain_manifest.v1"
+	DrainMaxUnitsMetadataKey          = "gc.drain_max_units"
+	DrainMemberAccessMetadataKey      = "gc.drain_member_access"
+	DrainMemberIDMetadataKey          = "gc.drain_member_id"
+	DrainMemberUnresolvedMetadataKey  = "gc.drain_member_unresolved"
+	DrainOnItemFailureMetadataKey     = "gc.drain_on_item_failure"
+	DrainParentConvoyIDMetadataKey    = "gc.drain_parent_convoy_id"
+	DrainStateMetadataKey             = "gc.drain_state"
+	DrainUnitKeyMetadataKey           = "gc.drain_unit_key"
 	// DrainUnprojectedBlockersMetadataKey records, on a drain item root, the
 	// out-of-convoy blockers of its source member that the item workflow could
 	// not depend on because they live in another class store. The item workflow
@@ -438,6 +452,8 @@ const OptionMetadataPrefix = "opt_"
 var KnownMetadataKeys = []string{
 	AttemptLogMetadataKey,
 	AttemptMetadataKey,
+	AwaitingHumanMetadataKey,
+	BlockedOnMetadataKey,
 	BondMetadataKey,
 	BondVarsMetadataKey,
 	BoundStepIDMetadataKey,
