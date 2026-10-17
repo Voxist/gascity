@@ -30,7 +30,36 @@ const (
 	// after a supervisor start, exec orders fail spuriously because dispatch
 	// begins before pack staging completes. 2x margin on the observed window.
 	orderOutcomeStartGrace = 10 * time.Minute
+
+	// eventLogSinceFloor is the floor sinceWindowFor's derived Since window
+	// never shrinks below, regardless of how short the widest monitored
+	// interval is. On a city whose shortest order is a few minutes, 3x that
+	// alone would prune almost everything, leaving too little trailing
+	// history for order-outcome-healthy's failure-streak threshold
+	// (orderOutcomeFailureThreshold) to mean anything.
+	eventLogSinceFloor = 6 * time.Hour
 )
+
+// sinceWindowFor derives a bounded Since timestamp as
+// now - max(3 x maxExpected, eventLogSinceFloor).
+//
+// Provably lossless for order-outcome-healthy's trailing-failure count: every
+// monitored cron/cooldown order emits an outcome at least every expected
+// interval, so a genuine trailing streak of orderOutcomeFailureThreshold
+// failures sits entirely inside 3x the widest expected interval.
+//
+// order-firing-current's own classifyOrderFiring already declares CRITICAL
+// stale at the same age >= expected*3 boundary (vc-89s), so the identical
+// window is lossless there too — no fire older than it can change that
+// check's verdict either. Shared by both checks (via this one function) so
+// their Since windows can never drift apart.
+func sinceWindowFor(maxExpected time.Duration, now time.Time) time.Time {
+	window := 3 * maxExpected
+	if window < eventLogSinceFloor {
+		window = eventLogSinceFloor
+	}
+	return now.Add(-window)
+}
 
 // nearControllerStart reports whether ts falls within grace after any controller
 // start. Every start is checked, not just the newest: two restarts with no
@@ -65,7 +94,11 @@ func nearControllerStart(ts time.Time, starts []time.Time, grace time.Duration) 
 // on every restart, which is the opposite of what this check is for.
 //
 // sawOutcome distinguishes "ran and succeeded" from "never produced an outcome";
-// order-firing-current already owns the never-fired case.
+// order-firing-current already owns the never-fired case. Since the read is
+// Since-bounded (vc-sen0), sawOutcome=false means "no outcome within the
+// derived window", not "no outcome ever" — correct by construction, because a
+// monitored order with zero outcomes in 3x its expected interval is stale,
+// which is order-firing-current's jurisdiction, not this check's.
 //
 // skipped counts trailing failures that were inside the post-start grace
 // window and therefore excluded from streak. Callers need this to avoid
@@ -138,6 +171,9 @@ type OrderOutcomeHealthyCheck struct {
 	cityPath  string
 	threshold int
 	grace     time.Duration
+	// clock is overridden in tests that need to pin "now" against fixture
+	// timestamps; production always uses time.Now.
+	clock func() time.Time
 }
 
 // NewOrderOutcomeHealthyCheck creates the repeated-order-failure check.
@@ -147,6 +183,7 @@ func NewOrderOutcomeHealthyCheck(cfg *config.City, cityPath string) *OrderOutcom
 		cityPath:  cityPath,
 		threshold: orderOutcomeFailureThreshold,
 		grace:     orderOutcomeStartGrace,
+		clock:     time.Now,
 	}
 }
 
@@ -196,14 +233,45 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 		return result
 	}
 
+	now := c.clock()
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	// Resolve the Since window BEFORE reading the event log, from the same
+	// trigger-type gate the monitoring loop below applies, so the window and
+	// the monitored set can never disagree about which orders count. A
+	// suspended-rig order is deliberately still counted here: including its
+	// interval in the window can only widen it (never lossy), and the loop
+	// below is what actually excludes suspended orders from the result.
+	cronCache := map[string]time.Duration{}
+	var maxExpected time.Duration
+	for _, order := range allOrders {
+		if order.Trigger != "cron" && order.Trigger != "cooldown" {
+			continue
+		}
+		expected, intervalErr := expectedIntervalForOrder(order, cronCache)
+		if intervalErr != nil {
+			continue
+		}
+		if expected > maxExpected {
+			maxExpected = expected
+		}
+	}
+	since := sinceWindowFor(maxExpected, now)
+
 	eventPath := filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl")
-	outcomes, err := readOrderOutcomeEvents(eventPath)
+	outcomes, err := readOrderOutcomeEvents(eventPath, since)
 	if err != nil {
 		result.Status = StatusError
 		result.Message = fmt.Sprintf("read order outcome events: %v", err)
 		return result
 	}
-	starts, err := controllerStartTimes(eventPath)
+	// since minus grace, not since: a controller start that itself falls just
+	// before the outcome window's edge can still mark an outcome inside that
+	// window as "near start" (nearControllerStart looks forward from a start
+	// by grace), so a start within [since-grace, since) must still be visible.
+	starts, err := controllerStartTimes(eventPath, since.Add(-c.grace))
 	if err != nil {
 		result.Status = StatusError
 		result.Message = fmt.Sprintf("read controller start events: %v", err)
@@ -263,13 +331,20 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 }
 
 // readOrderOutcomeEvents returns order.completed and order.failed merged in Seq
-// order. events.Filter matches a single Type, hence two reads.
-func readOrderOutcomeEvents(eventPath string) ([]events.Event, error) {
-	completed, err := events.ReadFiltered(eventPath, events.Filter{Type: events.OrderCompleted})
+// order, bounded to events at or after since. events.Filter matches a single
+// Type, hence two reads.
+//
+// Since-bounding an archived chain lets archiveOverlapsFilter skip archives
+// that predate the window by name, without opening them (vc-sen0): an
+// unbounded read here previously streamed and gunzipped the entire archive
+// chain on every doctor run (measured ~7.9GB / ~56 archives), which alone blew
+// the check's time budget regardless of the live log's size.
+func readOrderOutcomeEvents(eventPath string, since time.Time) ([]events.Event, error) {
+	completed, err := events.ReadFiltered(eventPath, events.Filter{Type: events.OrderCompleted, Since: since})
 	if err != nil {
 		return nil, err
 	}
-	failed, err := events.ReadFiltered(eventPath, events.Filter{Type: events.OrderFailed})
+	failed, err := events.ReadFiltered(eventPath, events.Filter{Type: events.OrderFailed, Since: since})
 	if err != nil {
 		return nil, err
 	}
@@ -282,11 +357,13 @@ func readOrderOutcomeEvents(eventPath string) ([]events.Event, error) {
 	return merged, nil
 }
 
-// controllerStartTimes returns every controller.started timestamp. The sibling
-// check's latestControllerStartedAt returns only the newest, which is not enough
-// here — see nearControllerStart.
-func controllerStartTimes(eventPath string) ([]time.Time, error) {
-	startEvents, err := events.ReadFiltered(eventPath, events.Filter{Type: events.ControllerStarted})
+// controllerStartTimes returns every controller.started timestamp at or after
+// since. The sibling check's latestControllerStartedAt returns only the
+// newest, which is not enough here — see nearControllerStart. Callers pass a
+// since bounded further back than the outcome window by the post-start grace
+// margin (see the call site in Run), not the outcome window's own since.
+func controllerStartTimes(eventPath string, since time.Time) ([]time.Time, error) {
+	startEvents, err := events.ReadFiltered(eventPath, events.Filter{Type: events.ControllerStarted, Since: since})
 	if err != nil {
 		return nil, err
 	}

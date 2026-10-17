@@ -28,8 +28,11 @@ const (
 	// orderFiringTimeoutHint names the actual cause of a timeout here. It
 	// deliberately does NOT mention beads/Dolt connectivity: this check times
 	// out on read cost, not on reachability, and the old connectivity wording
-	// sent triage at a healthy data plane for a full cycle (ga-klv).
-	orderFiringTimeoutHint = "the city event log or order history is large; re-run the inspect commands bounded (gc order history <name> --limit 20) and consider gc events compact"
+	// sent triage at a healthy data plane for a full cycle (ga-klv). It also
+	// does not suggest `gc events compact`: that subcommand does not exist in
+	// any build (verified absent at origin/main), so the old wording sent
+	// triage looking for a command that would only fail (vc-sen0).
+	orderFiringTimeoutHint = "the city event log or order history is large; re-run the inspect commands bounded (gc order history <name> --limit 20), or re-run gc order check with a raised --check-timeout"
 	// orderFiringEventTailLimit bounds the newest-first order.fired read. The
 	// check needs only each order's most recent firing, so it reads the tail
 	// of the live log rather than scanning it whole: on a busy city the active
@@ -215,10 +218,10 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 	}
 
 	eventPath := filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl")
-	firedFilter := events.Filter{Type: events.OrderFired}
-	if maxExpected > 0 {
-		firedFilter.Since = now.Add(-3 * maxExpected)
-	}
+	// sinceWindowFor is shared with order-outcome-healthy (vc-sen0) so the two
+	// checks' Since windows can never drift apart; see its doc comment for why
+	// the same window is lossless for both checks' classification thresholds.
+	firedFilter := events.Filter{Type: events.OrderFired, Since: sinceWindowFor(maxExpected, now)}
 	// The tail read is doubly bounded: at most orderFiringEventTailLimit
 	// newest matches, further pruned by the Since window above. It reads only
 	// the live file, so archive corruption cannot touch it; the reads that do
