@@ -29,6 +29,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The pre-push hook's fast-test tier (gate 3) is now advisory: a red
+  `make test-fast-parallel` reports and the push proceeds.** The tier was
+  fail-closed, and on darwin it was red at the base commit (PATH_MAX and
+  NOFILE failures in `internal/productmetrics`, vp-iauu), so git rejected
+  every push from an affected machine citing failures in code the pushed
+  change never touched. For ephemeral agent seats — which cannot attribute
+  the rejection and die with their worktrees unpushed — that converted a
+  host-environmental flake into permanent work loss (the vp-mxq0 signature,
+  8 occurrences on one bead). CI remains the authoritative gate; the local
+  tier stays a convenience. The outcome is still named and greppable on
+  stderr (PASSED / RED — push CONTINUING / SKIPPED via `LOCAL_TESTS_ACK`),
+  so an audit can still tell a green tier from a skipped one and from a red
+  one, and the resync-loss and bead-ownership gates remain fail-closed.
+
 - **The container security guards now assert security FLOORS rather than exact
   versions**, which is what their own comments already claimed they did. The
   mcp-agent-mail lock check pinned a resolved version by exact string, so the

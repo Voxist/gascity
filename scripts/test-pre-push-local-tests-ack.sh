@@ -1,27 +1,36 @@
 #!/usr/bin/env bash
 #
-# test-pre-push-local-tests-ack.sh — self-test for the LOCAL_TESTS_ACK escape
-# on gate 3 of .githooks/pre-push (bead vc-dq0b).
+# test-pre-push-local-tests-ack.sh — self-test for gate 3 of .githooks/pre-push
+# (bead vc-dq0b introduced the LOCAL_TESTS_ACK; bead vp-iauu made the gate
+# ADVISORY).
 #
 # The pre-push hook runs three gates in order:
-#   1. check-resync-loss  (ga-d32bn)     — ack: RESYNC_LOSS_ACK=1
+#   1. check-resync-loss  (ga-d32bn)     — ack: RESYNC_LOSS_ACK=1   — fail-closed
 #   2. bead-ownership     (ga-fip9ps.1)  — fail-closed, no scoped ack
-#   3. make test-fast-parallel           — ack: LOCAL_TESTS_ACK=<pushed sha>  <- under test
+#   3. make test-fast-parallel           — ADVISORY (vp-iauu); LOCAL_TESTS_ACK=<sha>
+#                                          remains the deliberate skip
 #
-# Before vc-dq0b, gate 3's only bypass was `git push --no-verify`, which
-# disarms all three. The property these cases pin is therefore NOT "the ack
-# works" (that is cheap and would be green even if the ack disarmed
-# everything) but "the ack is SCOPED": it skips gate 3 and leaves gates 1
-# and 2 armed. Cases C and D are the load-bearing ones — they must fail if
-# the ack is ever moved earlier in the hook or widened into a --no-verify
-# equivalent. Cases E-H pin that the ack is BOUND to the pushed commit: any
-# other value (0, 1, a stale SHA, a too-short prefix) must still run gate 3,
-# and so must an ack for one of several different commits in one push (I).
+# vp-iauu: a fail-closed local tier converts every host-dependent failure —
+# the darwin PATH_MAX/NOFILE red-at-base is the proven case — into permanent
+# work loss, because the seat that hits the rejection is ephemeral, cannot
+# attribute a failure in code it never touched, and dies with its worktree
+# unpushed. CI is the authoritative gate, so gate 3 now REPORTS (named,
+# greppable line on stderr, red or green) and the push always proceeds.
+# The property this file pins is therefore threefold: (a) a red tier is
+# AUDITABLE — the push proceeds but the output names the failure, so a red
+# tier can never pass silently (that is what today's --no-verify bypass
+# already allowed); (b) LOCAL_TESTS_ACK remains SCOPED — it skips gate 3 and
+# leaves gates 1 and 2 armed, and cases C and D are the load-bearing ones:
+# they must fail if the ack is ever moved earlier in the hook or widened into
+# a --no-verify equivalent; (c) ack values that do not bind to the pushed
+# commit are IGNORED — the tier still runs, with the red visible in the
+# output, and the push still proceeds (there is nothing left for a forged
+# ack to unlock).
 #
 # Hermetic: temp git repos, a stub bd, and a Makefile whose tier target is a
-# simulated failure. Never runs the real Go suite (that is the tier this bead
-# exists because nobody can run on a loaded host) and asserts no wall-clock
-# budget of any kind.
+# simulated failure (or a simulated pass, case L). Never runs the real Go
+# suite (that is the tier this bead exists because nobody can run on a loaded
+# host) and asserts no wall-clock budget of any kind.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -43,12 +52,15 @@ export POG_READ_ATTEMPTS=1
 tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/pplta.XXXXXX")"
 trap 'rm -rf "$tmp_root"' EXIT
 
-# setup_repo: a bare remote plus a work clone carrying the real pre-push hook,
-# the real ownership guard, a passing gate-1 stub, and a Makefile whose
-# test-fast-parallel target FAILS — the state this bead is about. core.hooksPath
-# is enabled only AFTER the base push, so the fixture's own setup is not gated.
-# Echoes "<remote-dir> <work-dir>".
+# setup_repo [passing]: a bare remote plus a work clone carrying the real
+# pre-push hook, the real ownership guard, a passing gate-1 stub, and a
+# Makefile whose test-fast-parallel target FAILS (default — the state
+# vp-iauu is about) or PASSES (arg "passing" — the green advisory path).
+# core.hooksPath is enabled only AFTER the base push, so the fixture's own
+# setup is not gated. Echoes "<remote-dir> <work-dir>".
 setup_repo() {
+	local tier_rc=1
+	[ "${1:-}" = passing ] && tier_rc=0
 	local remote work
 	remote="$(mktemp -d "$tmp_root/remote.XXXXXX")"
 	git init -q --bare "$remote"
@@ -77,7 +89,11 @@ setup_repo() {
 		# $(MERGE) is a Makefile variable, not a shell expansion — single quotes
 		# are deliberate here.
 		# shellcheck disable=SC2016
-		printf 'check-resync-loss:\n\t./scripts/check-resync-loss.sh $(MERGE)\n\ntest-fast-parallel:\n\t@echo "SIMULATED gate-3 tier failure (test fixture)" >&2; exit 1\n' >Makefile
+		if [ "$tier_rc" -eq 0 ]; then
+			printf 'check-resync-loss:\n\t./scripts/check-resync-loss.sh $(MERGE)\n\ntest-fast-parallel:\n\t@echo "SIMULATED gate-3 tier pass (test fixture)"\n' >Makefile
+		else
+			printf 'check-resync-loss:\n\t./scripts/check-resync-loss.sh $(MERGE)\n\ntest-fast-parallel:\n\t@echo "SIMULATED gate-3 tier failure (test fixture)" >&2; exit 1\n' >Makefile
+		fi
 		echo base >f.txt
 		git add -A
 		git commit -qm base
@@ -90,13 +106,16 @@ setup_repo() {
 
 remote_sha() { git -C "$1" rev-parse -q --verify "$2" 2>/dev/null || true; }
 
-echo "== pre-push gate 3 / LOCAL_TESTS_ACK (vc-dq0b) =="
+echo "== pre-push gate 3 / LOCAL_TESTS_ACK (vc-dq0b, advisory since vp-iauu) =="
 
 # ---------------------------------------------------------------------------
-# A — BASELINE / FALSIFIABILITY. Tier fails, no ack: the push must be blocked.
-# Without this case the whole file could pass while gate 3 never ran at all.
+# A — THE ADVISORY CONTRACT. Tier fails, no ack: the push PROCEEDS, but the
+# output must carry BOTH the tier's own failure and the hook's named RED
+# advisory line. Without this case the whole file could pass while gate 3
+# never ran at all; without the greppable line a red tier could pass
+# silently — the audit hole --no-verify already had.
 # ---------------------------------------------------------------------------
-echo "-- gate 3 failure blocks the push when the ack is absent --"
+echo "-- tier failure with no ack: push proceeds, red reported by name --"
 read -r remA workA <<<"$(setup_repo)"
 (
 	set -e
@@ -109,13 +128,13 @@ read -r remA workA <<<"$(setup_repo)"
 outA="$(mktemp "$tmp_root/outA.XXXXXX")"
 (cd "$workA" && GIT_TERMINAL_PROMPT=0 git push origin ours) >"$outA" 2>&1
 rcA=$?
-# The simulated-tier line must be present: a push rejected for any other
-# reason (a hook dying before gate 3) proves nothing about gate 3.
-if [ "$rcA" -ne 0 ] && [ -z "$(remote_sha "$remA" refs/heads/ours)" ] &&
-	grep -q 'SIMULATED gate-3 tier failure' "$outA"; then
-	record_pass "no-ack/tier-failure-blocks-push (rejected by gate 3, remote untouched)"
+if [ "$rcA" -eq 0 ] && [ -n "$(remote_sha "$remA" refs/heads/ours)" ] &&
+	grep -q 'SIMULATED gate-3 tier failure' "$outA" &&
+	grep -q 'gate 3 (make test-fast-parallel) RED' "$outA" &&
+	grep -q 'push CONTINUING' "$outA"; then
+	record_pass "no-ack/tier-failure-reported-push-proceeds (advisory red, remote updated)"
 else
-	record_fail "no-ack/tier-failure-blocks-push" "rc=$rcA remote_sha=$(remote_sha "$remA" refs/heads/ours)"
+	record_fail "no-ack/tier-failure-reported-push-proceeds" "rc=$rcA remote_sha=$(remote_sha "$remA" refs/heads/ours)"
 	sed 's/^/    /' "$outA"
 fi
 
@@ -176,8 +195,9 @@ fi
 # C — LOAD-BEARING. The ack must NOT disarm gate 2. A bead that reads back as
 # claimed by a different session is exactly the ownership violation gate 2
 # exists to catch (the PR #4243 shape). With LOCAL_TESTS_ACK=1 set and the
-# tier still failing, the push must STILL be blocked — by gate 2, not gate 3.
-# This is the case that fails if the ack is ever hoisted above gate 2.
+# tier still failing, the push must STILL be blocked — by gate 2, not gate 3
+# (which is advisory and could not block anything anyway). This is the case
+# that fails if the ack is ever hoisted above gate 2.
 # ---------------------------------------------------------------------------
 echo "-- a valid LOCAL_TESTS_ACK leaves the bead-ownership guard armed --"
 read -r remC workC <<<"$(setup_repo)"
@@ -250,12 +270,16 @@ fi
 
 # ---------------------------------------------------------------------------
 # E-H — THE ACK IS BOUND TO THE PUSH. Any value that is not the pushed commit
-# must leave gate 3 armed: the push is still blocked by the failing tier, and
-# the hook says why it ignored the ack. These fail if the check is widened
-# back to "any non-empty value" or loosened to accept a non-matching SHA.
+# must NOT skip gate 3: the tier runs, the hook says why it ignored the ack,
+# and the tier's red (the fixture always fails without "passing") is visible
+# in the output. Gate 3 cannot block anymore, so the assertion is audit, not
+# rejection: the IGNORED notice and the RED advisory line must both be
+# present. These fail if the check is widened back to "any non-empty value"
+# or loosened to accept a non-matching SHA.
 # ---------------------------------------------------------------------------
 # assert_ack_ignored <case-name> <ack-value|STALE|SHORT>: a Go change pushed
-# with that ack must be rejected by gate 3 with an IGNORED notice.
+# with that ack must run gate 3 (tier failure + IGNORED notice + RED advisory
+# in the output) and still land on the remote.
 assert_ack_ignored() {
 	local name="$1" value="$2" rem work out rc
 	read -r rem work <<<"$(setup_repo)"
@@ -274,10 +298,11 @@ assert_ack_ignored() {
 	out="$(mktemp "$tmp_root/out.XXXXXX")"
 	(cd "$work" && GIT_TERMINAL_PROMPT=0 LOCAL_TESTS_ACK="$value" git push origin ours) >"$out" 2>&1
 	rc=$?
-	if [ "$rc" -ne 0 ] && [ -z "$(remote_sha "$rem" refs/heads/ours)" ] &&
+	if [ "$rc" -eq 0 ] && [ -n "$(remote_sha "$rem" refs/heads/ours)" ] &&
 		grep -q "LOCAL_TESTS_ACK=$value IGNORED" "$out" &&
-		grep -q 'SIMULATED gate-3 tier failure' "$out"; then
-		record_pass "$name (ignored, gate 3 ran and blocked)"
+		grep -q 'SIMULATED gate-3 tier failure' "$out" &&
+		grep -q 'push CONTINUING' "$out"; then
+		record_pass "$name (ignored, tier ran and reported red, push proceeded)"
 	else
 		record_fail "$name" "rc=$rc"
 		sed 's/^/    /' "$out"
@@ -328,11 +353,12 @@ ackI="$(printf '%s\n' "$shaI1" "$shaI2" | sort | head -n 1)"
 outI="$(mktemp "$tmp_root/outI.XXXXXX")"
 (cd "$workI" && GIT_TERMINAL_PROMPT=0 LOCAL_TESTS_ACK="$ackI" git push origin ours other) >"$outI" 2>&1
 rcI=$?
-if [ "$rcI" -ne 0 ] && [ -z "$(remote_sha "$remI" refs/heads/ours)" ] &&
-	[ -z "$(remote_sha "$remI" refs/heads/other)" ] &&
+if [ "$rcI" -eq 0 ] && [ -n "$(remote_sha "$remI" refs/heads/ours)" ] &&
+	[ -n "$(remote_sha "$remI" refs/heads/other)" ] &&
 	grep -q "LOCAL_TESTS_ACK=$ackI IGNORED — this push carries more than one commit" "$outI" &&
-	grep -q 'SIMULATED gate-3 tier failure' "$outI"; then
-	record_pass "ack/two-commits-one-acked-runs-gate-3 (ignored, gate 3 ran and blocked)"
+	grep -q 'SIMULATED gate-3 tier failure' "$outI" &&
+	grep -q 'push CONTINUING' "$outI"; then
+	record_pass "ack/two-commits-one-acked-runs-gate-3 (ignored, tier ran, push proceeded)"
 else
 	record_fail "ack/two-commits-one-acked-runs-gate-3" "rc=$rcI"
 	sed 's/^/    /' "$outI"
@@ -364,6 +390,35 @@ if [ "$rcK" -eq 0 ] && [ "$(remote_sha "$remK" refs/heads/ours)" = "$shaK" ] &&
 else
 	record_fail "ack/uppercase-sha-skips-gate-3" "rc=$rcK"
 	sed 's/^/    /' "$outK"
+fi
+
+# ---------------------------------------------------------------------------
+# L — THE GREEN PATH. Tier passes, no ack: the push proceeds and the hook
+# emits the PASSED advisory line, so an audit can distinguish a green tier
+# from a skipped one (the SKIPPED ack line) and from a red one (the RED
+# line). Without this case, a hook that skipped the tier unconditionally
+# would satisfy every other case in this file.
+# ---------------------------------------------------------------------------
+echo "-- tier passes with no ack: push proceeds, green reported by name --"
+read -r remL workL <<<"$(setup_repo passing)"
+(
+	set -e
+	cd "$workL"
+	git checkout -q -b ours
+	echo "package main" >a.go
+	git add -A
+	git commit -qm "go change"
+) >/dev/null 2>&1
+outL="$(mktemp "$tmp_root/outL.XXXXXX")"
+(cd "$workL" && GIT_TERMINAL_PROMPT=0 git push origin ours) >"$outL" 2>&1
+rcL=$?
+if [ "$rcL" -eq 0 ] && [ -n "$(remote_sha "$remL" refs/heads/ours)" ] &&
+	grep -q 'SIMULATED gate-3 tier pass' "$outL" &&
+	grep -q 'gate 3 (make test-fast-parallel) PASSED' "$outL"; then
+	record_pass "no-ack/tier-pass-reported-push-proceeds (advisory green)"
+else
+	record_fail "no-ack/tier-pass-reported-push-proceeds" "rc=$rcL"
+	sed 's/^/    /' "$outL"
 fi
 
 echo
