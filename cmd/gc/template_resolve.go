@@ -481,11 +481,21 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// Step 10: Merge environment layers. Workspace.Env sits between
 	// passthrough and provider so a per-provider/agent/patch entry can
 	// still override a workspace-wide default.
+	//
+	// The session-bound layers expand against the child session's identity
+	// (agentEnv, Step 8), not the controller process: config-authored values
+	// reference ${GC_SESSION_NAME}/${GC_AGENT}, which exist only in the env
+	// the child will exec with (vp-w7cc — the controller collapse left every
+	// OTEL_RESOURCE_ATTRIBUTES attribution attribute empty fleet-wide).
 	var workspaceEnv map[string]string
 	if p.workspace != nil {
 		workspaceEnv = p.workspace.Env
 	}
-	env := mergeEnv(passthroughEnv(), expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
+	env := mergeEnv(passthroughEnv(),
+		expandEnvMapWithIdentity(workspaceEnv, agentEnv),
+		expandEnvMapWithIdentity(resolved.Env, agentEnv),
+		expandEnvMapWithIdentity(cfgAgent.Env, agentEnv),
+		agentEnv)
 	processenv.PrependGCBinDirToPATH(env, env["GC_BIN"])
 	env = convergence.ScrubTokenEnv(env)
 
@@ -493,6 +503,12 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// resolved provider, agent) — excluding passthrough and the generated
 	// agentEnv plumbing — so a resolved config env change fingerprints as
 	// Launch-tier identity instead of a no-op.
+	//
+	// Deliberately expandEnvMap, NOT the identity-aware twin: the fingerprint
+	// must stay a function of the operator's authored text and the controller
+	// host context only. Session-identity expansion here would make
+	// Launch-tier identity differ per session and fragment warm-relaunch
+	// dedupe (two sessions of the same agent would never share a warm box).
 	operatorEnv := mergeEnv(expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env))
 	operatorEnv = convergence.ScrubTokenEnv(operatorEnv)
 

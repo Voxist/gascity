@@ -415,7 +415,7 @@ func TestCityAnchoredSessionEnvSkipsCityAnchorsWhenCityPathEmpty(t *testing.T) {
 		"PROVIDER_TOKEN": "ok",
 	}
 
-	got := cityAnchoredSessionEnv(" \t\n ", nil, providerEnv)
+	got := cityAnchoredSessionEnv(" \t\n ", nil, providerEnv, nil)
 	if got["GC_CITY"] != "/provider/city" {
 		t.Fatalf("GC_CITY = %q, want provider value", got["GC_CITY"])
 	}
@@ -462,7 +462,7 @@ func TestCityAnchoredSessionEnvSkipsLocalAnchorsWhenRemoteTargeted(t *testing.T)
 			"GC_CITY_URL":    "https://remote.example.test",
 			"PROVIDER_TOKEN": "ok",
 		}
-		got := cityAnchoredSessionEnv(cityPath, nil, providerEnv)
+		got := cityAnchoredSessionEnv(cityPath, nil, providerEnv, nil)
 		for _, key := range []string{"GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT", "GC_CITY_RUNTIME_DIR"} {
 			v, ok := got[key]
 			if !ok {
@@ -483,7 +483,7 @@ func TestCityAnchoredSessionEnvSkipsLocalAnchorsWhenRemoteTargeted(t *testing.T)
 		providerEnv := map[string]string{
 			"GC_CITY_CONTEXT": "remote-context",
 		}
-		got := cityAnchoredSessionEnv(cityPath, nil, providerEnv)
+		got := cityAnchoredSessionEnv(cityPath, nil, providerEnv, nil)
 		for _, key := range []string{"GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT", "GC_CITY_RUNTIME_DIR"} {
 			v, ok := got[key]
 			if !ok {
@@ -495,7 +495,7 @@ func TestCityAnchoredSessionEnvSkipsLocalAnchorsWhenRemoteTargeted(t *testing.T)
 	})
 
 	t.Run("local — no remote keys present", func(t *testing.T) {
-		got := cityAnchoredSessionEnv(cityPath, nil, map[string]string{"PROVIDER_TOKEN": "ok"})
+		got := cityAnchoredSessionEnv(cityPath, nil, map[string]string{"PROVIDER_TOKEN": "ok"}, nil)
 		if got["GC_CITY"] != cityPath {
 			t.Errorf("GC_CITY = %q, want %q (anchors still seeded when no remote target present)", got["GC_CITY"], cityPath)
 		}

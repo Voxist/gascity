@@ -1574,6 +1574,45 @@ func expandEnvMap(m map[string]string) map[string]string {
 	return out
 }
 
+// expandEnvMapWithIdentity is the session-identity-aware twin of expandEnvMap:
+// config-authored env layers for a SESSION reference the child session's
+// identity (${GC_SESSION_NAME}, ${GC_AGENT} — the fleet's
+// OTEL_RESOURCE_ATTRIBUTES does), which the controller process never carries.
+// Expanding those layers against the controller collapsed every attribution
+// attribute fleet-wide (vp-w7cc). identity is the Step-8 agentEnv-style map
+// the child will actually exec with; the controller process remains the
+// fallback for host context. Only session-bound layers belong here — the
+// operator fingerprint (operatorEnv) keeps expandEnvMap so per-session
+// identity cannot fragment Launch-tier relaunch dedupe.
+func expandEnvMapWithIdentity(m, identity map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = processenv.ExpandSessionEnvValueWithIdentity(v, identity)
+	}
+	return out
+}
+
+// sessionIdentityLookup returns the child-session identity entries that
+// config-authored env expansion must prefer over the controller process
+// (vp-w7cc), mirroring internal/api's helper of the same name: the values the
+// session runtime will actually bind for GC_SESSION_NAME and GC_AGENT. Empty
+// entries are omitted rather than pinned empty, so a missing identity falls
+// through to the controller process instead of shadowing a value it might
+// legitimately carry.
+func sessionIdentityLookup(sessionName, agent string) map[string]string {
+	m := make(map[string]string, 2)
+	if v := strings.TrimSpace(sessionName); v != "" {
+		m["GC_SESSION_NAME"] = v
+	}
+	if v := strings.TrimSpace(agent); v != "" {
+		m["GC_AGENT"] = v
+	}
+	return m
+}
+
 // mergeEnv combines multiple env maps into one. Later maps override earlier
 // ones for the same key. Returns nil if all inputs are empty.
 func mergeEnv(maps ...map[string]string) map[string]string {

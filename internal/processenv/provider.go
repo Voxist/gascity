@@ -141,10 +141,31 @@ func IsControllerOnlyEnv(key string) bool {
 // differently-named session variable, which no key-level guard can catch.
 func ExpandSessionEnvValue(value string) string {
 	return os.Expand(value, func(key string) string {
-		for _, controllerOnly := range ControllerOnlyEnvKeys {
-			if key == controllerOnly {
-				return ""
-			}
+		if IsControllerOnlyEnv(key) {
+			return ""
+		}
+		return os.Getenv(key)
+	})
+}
+
+// ExpandSessionEnvValueWithIdentity is the session-identity-aware twin of
+// ExpandSessionEnvValue: config-authored env values reference the CHILD
+// session's identity (${GC_AGENT}, ${GC_SESSION_NAME}, ${GC_BEAD_ID}), which
+// exists only in the env the session runtime will actually exec with — never
+// in the controller process doing the expansion. Expanding those references
+// against the controller silently collapsed them to empty (vp-w7cc: every
+// OTEL_RESOURCE_ATTRIBUTES attribution attribute fleet-wide). The identity map
+// is consulted FIRST; the controller process remains the fallback for host
+// context (${HOME} and friends). ControllerOnlyEnvKeys stay masked to empty
+// regardless of source: the identity map must never become a laundering path
+// for controller-only credentials.
+func ExpandSessionEnvValueWithIdentity(value string, identity map[string]string) string {
+	return os.Expand(value, func(key string) string {
+		if IsControllerOnlyEnv(key) {
+			return ""
+		}
+		if v, ok := identity[key]; ok {
+			return v
 		}
 		return os.Getenv(key)
 	})

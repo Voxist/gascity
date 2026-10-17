@@ -296,7 +296,7 @@ func newWorkerSessionHandleForResolvedRuntimeWithConfig(
 	// project the workspace environment here before handing the runtime to the
 	// worker factory. In particular, workspace.env BD_BIN must follow the same
 	// schema-compatible executable as the controller and resumed sessions.
-	sessionEnv := resolvedWorkerSessionEnvWithConfig(cityPath, cfg, resolved)
+	sessionEnv := resolvedWorkerSessionEnvWithConfig(cityPath, cfg, resolved, sessionIdentityLookup(firstNonEmptyGCString(explicitName, alias), alias))
 	sessionCfg.Runtime.SessionEnv = sessionEnv
 	sessionCfg.Runtime.Hints.Env = sessionEnv
 	// Stage provider-overlay hooks on the CLI create path the same way the
@@ -401,7 +401,11 @@ func resolvedWorkerSessionConfigWithConfig(
 // provider process context and provider-authored values, matching the
 // canonical resolveTemplate layering. Identity and controller-only overlays
 // remain authoritative at the end.
-func resolvedWorkerSessionEnvWithConfig(cityPath string, cfg *config.City, resolved *config.ResolvedProvider) map[string]string {
+//
+// identity carries the child session's identity (GC_SESSION_NAME/GC_AGENT, see
+// sessionIdentityLookup) so config-authored layers expand against the identity
+// the child will exec with, not the controller process (vp-w7cc).
+func resolvedWorkerSessionEnvWithConfig(cityPath string, cfg *config.City, resolved *config.ResolvedProvider, identity map[string]string) map[string]string {
 	if resolved == nil {
 		return nil
 	}
@@ -411,8 +415,8 @@ func resolvedWorkerSessionEnvWithConfig(cityPath string, cfg *config.City, resol
 	}
 	sessionEnv := mergeEnv(
 		providerProcessPassthroughEnv(),
-		expandEnvMap(workspaceEnv),
-		expandEnvMap(resolved.Env),
+		expandEnvMapWithIdentity(workspaceEnv, identity),
+		expandEnvMapWithIdentity(resolved.Env, identity),
 		processenv.ControllerOnlyEnvOverlay(),
 	)
 	if strings.TrimSpace(cityPath) != "" {
@@ -640,7 +644,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	// dispatcher trace path is per-dispatcher-qualified and must not be
 	// overwritten with the city-uniform default here. template_resolve.go
 	// owns the qualified override for the CLI create path.
-	sessionEnv := resolvedWorkerSessionEnvWithConfig(cityPath, cfg, resolved)
+	sessionEnv := resolvedWorkerSessionEnvWithConfig(cityPath, cfg, resolved, sessionIdentityLookup(info.SessionName, session.AssigneeIdentifier(info)))
 	// Resolve session_live so resumed sessions get re-themed (status bar,
 	// keybindings) the same way reconciler-started sessions do. Without this,
 	// `gc session attach` recreates the tmux runtime with an empty
