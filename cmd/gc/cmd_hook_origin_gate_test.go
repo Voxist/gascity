@@ -163,3 +163,88 @@ func TestCmdHookClaimNamedOriginReportsGatedReason(t *testing.T) {
 			stdout.String(), stderr.String())
 	}
 }
+
+// vc-0sub S1: on a stderr-discarding caller the gated answer must survive
+// somewhere, and the only channel left is the exit code. The role templates'
+// own startup idiom is `gc hook 2>/dev/null` (vc-0sub S2 is fixing the idiom,
+// not the fleet of wrappers around it), so until every caller is retrained the
+// discovery door reports the gated state on a distinct exit code while stdout
+// stays the parseable empty array vc-ozanp5 pinned.
+func TestCmdHookNamedOriginGatedEmptyExitsDistinctCode(t *testing.T) {
+	hookOriginGateCity(t)
+	// Same seat shape as the audible-refusal test above: a named origin whose
+	// alias does not match the routed target, so the gate actually refuses and
+	// the pool tier is never probed.
+	t.Setenv("GC_ALIAS", "other-seat")
+	t.Setenv("GC_AGENT", "worker")
+	t.Setenv("GC_SESSION_ID", "worker-session-id")
+	t.Setenv("GC_SESSION_NAME", "worker-session")
+	t.Setenv("GC_TEMPLATE", "worker")
+	t.Setenv("GC_SESSION_ORIGIN", "named")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithFormat(nil, false, "", &stdout, &stderr)
+
+	if code != hookExitPoolTierGated {
+		t.Fatalf("cmdHook() = %d for a gated named origin with routed work available, want %d — "+
+			"a caller that discards stderr cannot tell gated from drained; stdout=%q stderr=%q",
+			code, hookExitPoolTierGated, stdout.String(), stderr.String())
+	}
+	// The stdout contract is unchanged (vc-ozanp5): still the empty JSON array
+	// every consumer parses. The new signal rides the exit code only.
+	if trimmed := strings.TrimSpace(stdout.String()); trimmed != "[]" {
+		t.Fatalf("stdout = %q, want [] — the gated signal must not corrupt the JSON array contract", trimmed)
+	}
+	// The audible reason is unchanged too: exit 3 is an ADDITIONAL channel, not
+	// a replacement for the stderr refusal.
+	if !strings.Contains(stderr.String(), "work_query pool tier not probed") {
+		t.Fatalf("gated exit lost the audible refusal:\nstderr=%q", stderr.String())
+	}
+}
+
+// Control for the exit-code rewrite: a permitted origin that finds the routed
+// work must still exit 0. The rewrite keys on exit 1 + refusal, so this is the
+// case most likely to break by accident if the refusal flag leaks across
+// invocations.
+func TestCmdHookEphemeralOriginGatedCodeUnaffected(t *testing.T) {
+	hookOriginGateCity(t)
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_AGENT", "worker")
+	t.Setenv("GC_SESSION_ID", "worker-session-id")
+	t.Setenv("GC_SESSION_NAME", "worker-session")
+	t.Setenv("GC_TEMPLATE", "worker")
+	t.Setenv("GC_SESSION_ORIGIN", "ephemeral")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithFormat(nil, false, "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHook() = %d for a permitted origin with work available, want 0; stderr=%s", code, stderr.String())
+	}
+}
+
+// hookDiscoveryExitCode is a pure rewrite: exit 1 (empty) becomes the gated
+// exit code ONLY when the origin gate actually refused this invocation; every
+// other exit — work found, store unavailable, a failed read, a timeout —
+// passes through untouched. Pinned as a table so the precedence stays explicit.
+func TestHookDiscoveryExitCodeRewritesOnlyGatedEmpty(t *testing.T) {
+	cases := []struct {
+		name        string
+		code        int
+		gateRefused bool
+		want        int
+	}{
+		{"gated empty becomes gated code", 1, true, hookExitPoolTierGated},
+		{"plain empty stays exit 1", 1, false, 1},
+		{"work found wins over the refusal flag", 0, true, 0},
+		{"store unavailable wins", 2, true, 2},
+		{"failed read stays exit 1 shape", 1, true, hookExitPoolTierGated},
+		{"arbitrary failure passes through", 124, false, 124},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hookDiscoveryExitCode(tc.code, tc.gateRefused); got != tc.want {
+				t.Fatalf("hookDiscoveryExitCode(%d, %v) = %d, want %d", tc.code, tc.gateRefused, got, tc.want)
+			}
+		})
+	}
+}

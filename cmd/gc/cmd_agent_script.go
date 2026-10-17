@@ -17,6 +17,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 const agentScriptActionTimeout = 5 * time.Minute
@@ -806,9 +808,12 @@ func agentScriptHookBeadWithRunner(stderr io.Writer, runHook agentScriptHookRunn
 // the hook in-process, so it has the exit code, and the code is the primary
 // signal; stderr text is only the secondary filter for exit 1. Precedence:
 //
-//  1. exit 2 is the store-unavailable contract (reportWorkQueryFailure): a
-//     failure whatever stderr says. Any exit other than 1 is likewise never
-//     the empty turn.
+//  1. exit 3 with the origin-gate refusal on stderr is the discovery door's
+//     gated-empty answer (vc-0sub S1): the pool tier was refused, not drained.
+//     The refusal line is what makes it benign — an unexplained exit 3 stays a
+//     failure. Any other exit other than 1 is likewise never the empty turn;
+//     exit 2 in particular is the store-unavailable contract
+//     (reportWorkQueryFailure): a failure whatever stderr says.
 //  2. exit 1 is benign only if every remaining stderr line is a stamped
 //     exit-0 diagnostic (hookWorkQueryDiagPrefix, forwarded by
 //     hookWorkQueryRunner — the origin-gate refusal, driver reconnect chatter
@@ -819,6 +824,14 @@ func agentScriptHookBeadWithRunner(stderr io.Writer, runHook agentScriptHookRunn
 // "warning" fall through to the empty turn: the classifier-side
 // idle-agents-with-work-waiting dead-drop.
 func agentScriptHookExitIsNoWork(code int, output, stderr string) bool {
+	if code == hookExitPoolTierGated {
+		// vc-0sub S1: the discovery door's gated-empty answer. It IS the
+		// graceful empty turn — the refusal is a policy disclosure, not a
+		// failure — but ONLY when the refusal actually rode the stderr: an
+		// unexplained exit 3 is an unknown code and keeps the fail-closed
+		// reading below.
+		return strings.Contains(stderr, config.PoolDemandOriginGateRefusalPrefix)
+	}
 	if code != 1 {
 		return false
 	}

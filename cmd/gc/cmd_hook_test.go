@@ -2084,7 +2084,10 @@ esac
 		// Manual session whose probe target (poolDemandTarget() == "worker") is NOT
 		// its own alias: the origin gate keeps it out of another queue's generic
 		// routed demand. Self-target admit does not fire ("worker" != alias).
-		{name: "manual", origin: "manual", alias: "worker-adhoc-manual", session: "worker-adhoc-manual", wantCode: 1},
+		// vc-0sub S1: the gated empty answer carries the DISTINCT gated code —
+		// "never probed" is not "probed and drained", and a caller that
+		// discards stderr must be able to tell those apart by the code alone.
+		{name: "manual", origin: "manual", alias: "worker-adhoc-manual", session: "worker-adhoc-manual", wantCode: hookExitPoolTierGated},
 		// Named session probing its OWN claim identity (GC_ALIAS == poolDemandTarget()
 		// == "worker"): the gate admits self-routed discovery so the session can
 		// claim work routed to itself. This is the C2 fix (ga-6wkhl) and the direct
