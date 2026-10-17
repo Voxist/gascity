@@ -49,7 +49,12 @@ func run() error {
 	}
 
 	eval := prwatchdog.Watch(context.Background(), fetcher, realClock{}, realSleeper{}, prwatchdog.PollOptions{
-		HeadSHA:                  headSHA,
+		HeadSHA: headSHA,
+		// PR_BASE_SHA enables the base-red comparison: a head failure of
+		// CI / required that the base commit also exhibits passes through
+		// non-blocking instead of pinning the PR (vp-2lr9 D2). Optional:
+		// unset leaves the watchdog's behavior unchanged.
+		BaseSHA:                  os.Getenv("PR_BASE_SHA"),
 		NeedsMacLabel:            parseBoolEnv("NEEDS_MAC_LABEL"),
 		NeedsReviewFormulasLabel: parseBoolEnv("NEEDS_REVIEW_FORMULAS_LABEL"),
 		Deadline:                 prwatchdog.ObservationDeadline,
@@ -186,11 +191,7 @@ func (f *githubFetcher) fetchPage(ctx context.Context, headSHA, name string, pag
 // $GITHUB_STEP_SUMMARY.
 func renderSummary(eval prwatchdog.Evaluation) string {
 	var b strings.Builder
-	if eval.Pass {
-		b.WriteString("## PR evidence watchdog: PASS\n\n")
-	} else {
-		b.WriteString("## PR evidence watchdog: FAIL\n\n")
-	}
+	fmt.Fprintf(&b, "## %s\n\n", eval.Banner())
 	fmt.Fprintf(&b, "**Reason:** %s\n\n", eval.Reason)
 	b.WriteString("| Check | State |\n")
 	b.WriteString("| --- | --- |\n")

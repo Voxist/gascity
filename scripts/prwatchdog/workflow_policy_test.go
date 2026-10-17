@@ -182,6 +182,21 @@ func TestWatchdogWorkflow_InvokesTheWatchdogProgram(t *testing.T) {
 	}
 }
 
+func TestWatchdogWorkflow_PassesBaseSHAForBaseRedAttribution(t *testing.T) {
+	doc := loadWatchdogWorkflow(t)
+	body, err := yaml.Marshal(doc)
+	if err != nil {
+		t.Fatalf("re-marshal workflow: %v", err)
+	}
+	text := string(body)
+	if !strings.Contains(text, "PR_BASE_SHA") {
+		t.Fatalf("workflow must pass PR_BASE_SHA so the watchdog can attribute a head failure to a red base (vp-2lr9 D2), got:\n%s", text)
+	}
+	if !strings.Contains(text, "github.event.pull_request.base.sha") {
+		t.Fatalf("PR_BASE_SHA must be wired from github.event.pull_request.base.sha, got:\n%s", text)
+	}
+}
+
 func TestWatchdogWorkflow_UsesExplicitPRHeadSHANotBareGithubSHA(t *testing.T) {
 	doc := loadWatchdogWorkflow(t)
 	body, err := yaml.Marshal(doc)
