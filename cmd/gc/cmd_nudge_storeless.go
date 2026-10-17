@@ -126,6 +126,21 @@ func resolveNudgeTargetViaStoreBounded(cityPath string, cfg *config.City, identi
 // / continuation epoch are enriched best-effort the same way so queue items
 // and generation matching keep working; queue items keep the caller's
 // identifier as their Agent value (alias) so hook-drain matching is unchanged.
+//
+// Deliberately session-nudge-only (vp-rqs8q / T-00B2). Session nudge is the
+// one nudge path whose argv identifier is itself a session name the live
+// runtime can verify directly, so name-candidate resolution is sound. It
+// does NOT generalize to the other callers:
+//
+//   - gc mail's recipient may be an alias or agent key that only the bead
+//     store materializes; guessing a session name for it can misaddress the
+//     nudge, and a mail notification delivered to the wrong seat is worse
+//     than a failed one. Under a hung store mail fails loudly instead of
+//     guessing.
+//   - gc sling's nudge leg runs behind its own store resolution
+//     (resolvePoolSessionRefs / lookupSessionNameOrLegacy), so a storeless
+//     fallback here would not remove sling's store dependency — it would
+//     only add a second, weaker resolver that disagrees with the first.
 func resolveNudgeTargetStoreless(cityPath string, cfg *config.City, sp runtime.Provider, identifier string) (nudgeTarget, error) {
 	if sp == nil {
 		return nudgeTarget{}, fmt.Errorf("%w: %q (storeless resolution requires a runtime provider)", session.ErrSessionNotFound, identifier)
