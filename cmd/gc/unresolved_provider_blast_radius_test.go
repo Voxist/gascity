@@ -116,7 +116,7 @@ func (e *unresolvedProviderEnv) tick(t *testing.T) (*CityRuntime, DesiredStateRe
 	if err != nil {
 		t.Fatalf("reload session snapshot: %v", err)
 	}
-	cr.beadReconcileTick(context.Background(), result, snapshot, nil, false)
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result, snapshot, nil, false)
 	return cr, result, stderr.String()
 }
 
@@ -135,7 +135,7 @@ func TestUnresolvableProviderDoesNotDrainItsSessionsAsOrphaned(t *testing.T) {
 	cr, result, stderr := env.tick(t)
 
 	if _, ok := result.State["s-rig-a-worker"]; !ok {
-		t.Fatalf("healthy rig session missing from desired state %v; stderr:\n%s", keysOf(result.State), stderr)
+		t.Fatalf("healthy rig session missing from desired state %v; stderr:\n%s", templateParamsKeys(result.State), stderr)
 	}
 	if ds := cr.sessionDrains.get(env.broken.ID); ds != nil {
 		t.Fatalf("session of the agent whose provider could not be resolved is draining (reason %q): an unresolvable provider must fail closed for that agent, not orphan its sessions; stderr:\n%s", ds.reason, stderr)
@@ -243,7 +243,7 @@ func TestOneShotStartReconcileCarriesUnresolvedTemplates(t *testing.T) {
 	}
 }
 
-func keysOf(m map[string]TemplateParams) []string {
+func templateParamsKeys(m map[string]TemplateParams) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)

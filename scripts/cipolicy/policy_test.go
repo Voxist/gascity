@@ -1,7 +1,6 @@
 package cipolicy
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -24,13 +23,6 @@ func TestCurrentWorkflowsMatchPolicy(t *testing.T) {
 	}
 }
 
-func TestPlaywrightChromiumInstallHardensAgainstHungAptMirror(t *testing.T) {
-	docs := loadPolicyDocuments(t)
-	if err := validatePlaywrightInstallHardening(docs.ci); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestMakeTestCIPolicyRunsStaticScopeContracts(t *testing.T) {
 	// -tags integration is load-bearing: two of the named contracts live in
 	// the integration-tagged pr_static_scope_contract_test.go (ga-4h8bu
@@ -39,19 +31,18 @@ func TestMakeTestCIPolicyRunsStaticScopeContracts(t *testing.T) {
 	// not compile matches nothing and reports ok. The scripts package's
 	// TestCIPolicyRunPatternNamesExistingTests guards that class generally.
 	assertTestCIPolicyRecipeLine(t, "the focused static-scope contracts",
-		"\t$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -tags integration -run '^(TestPreflightStaticScopesOrdinaryPRsWithoutWeakeningProtectedRuns|TestFullStaticLintExplicitlyOwnsConfiguredGolangCIGovet|TestChangedStaticTargetsScopeLintAndFormattingToTheDiff|TestCIStaticScopeClassifierFailsClosedOutsideValidatedPullRequestMerge)$$' ./scripts")
+		"\t$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -tags integration -run '^(TestLintAndVetRunAsNogoInBazel|TestLintChangedBuildsNogoForChangedBazelPackages|TestChangedFormattingScopesToTheDiff)$$' ./scripts")
 }
 
 // TestMakeTestCIPolicyRunsVersionPinContracts keeps the bd and Dolt pin
-// contracts on the PR-time critical path.
+// contracts in the local `make test-ci-policy` sweep. (CI runs them, with the
+// rest of ./scripts, as //scripts:scripts_test in the required Bazel lane.)
 //
 // They assert that deps.env, go.mod, the workflow env blocks, the Dockerfiles
-// and the integration suite's own literal all name the same versions. The only
-// other CI jobs that sweep ./scripts — preflight-unit-cover-noncmdgc and
-// preflight-unit-cover-cmdgc — are `if: github.event_name == 'push'`, so
-// without this line a pin bump that misses one anchor goes green on the PR and
-// fails after merge. That is exactly how the integration suite sat on
-// v1.3.0-rc.2 while main pinned v1.3.0 (tracker ga-rnwg5u).
+// and the integration suite's own literal all name the same versions; a pin
+// bump that misses one anchor otherwise only fails in the push-only
+// integration shard, after merge. That is exactly how the integration suite
+// sat on v1.3.0-rc.2 while main pinned v1.3.0 (tracker ga-rnwg5u).
 //
 // It is a separate recipe line rather than more alternatives on the
 // static-scope one so that command stays byte-identical to what
@@ -91,9 +82,9 @@ func assertTestCIPolicyRecipeLine(t *testing.T, what, want string) {
 func TestDisplayLabelsDoNotAffectPolicy(t *testing.T) {
 	docs := loadPolicyDocuments(t)
 	docs.ci["name"] = "Renamed workflow"
-	job(t, docs.ci, "preflight-acceptance")["name"] = "Renamed job"
-	step(t, job(t, docs.ci, "preflight-acceptance"), 2)["name"] = "Renamed step"
-	step(t, job(t, docs.ci, "preflight-static"), 2)["name"] = "GC_BEADS and test-integration-bdstore are display text only"
+	job(t, docs.ci, "pack-gate")["name"] = "Renamed job"
+	step(t, job(t, docs.ci, "pack-gate"), 3)["name"] = "Renamed step"
+	step(t, job(t, docs.ci, "credential-provider-windows"), 3)["name"] = "GC_BEADS and test-integration-bdstore are display text only"
 	docs.action["name"] = "Renamed action"
 	docs.action["description"] = "Renamed action description"
 	input(t, docs.action, "dolt-version")["description"] = "Renamed input description"
@@ -111,76 +102,75 @@ func TestExecutionShapeMutationsFailPolicy(t *testing.T) {
 		{
 			name: "needs",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				job(t, docs.ci, "preflight-acceptance")["needs"] = []any{"changes"}
+				job(t, docs.ci, "pack-gate")["needs"] = []any{"changes"}
 			},
 		},
 		{
 			name: "if",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				job(t, docs.ci, "integration-shards")["if"] = "false"
+				job(t, docs.ci, "pack-gate")["if"] = "false"
 			},
 		},
 		{
 			name: "runner",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				job(t, docs.ci, "integration-shards")["runs-on"] = "ubuntu-latest"
+				job(t, docs.ci, "pack-gate")["runs-on"] = "ubuntu-latest"
 			},
 		},
 		{
 			name: "timeout",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				job(t, docs.ci, "integration-shards")["timeout-minutes"] = 60
+				job(t, docs.ci, "pack-gate")["timeout-minutes"] = 60
 			},
 		},
 		{
 			name: "environment",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				job(t, docs.ci, "integration-shards")["env"].(map[string]any)["DOLT_VERSION"] = "latest"
+				step(t, job(t, docs.ci, "pack-gate"), 4)["env"].(map[string]any)["GC_TEST_GASCITY_PACKS_REGISTRY"] = "latest"
 			},
 		},
 		{
 			name: "strategy",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				job(t, docs.ci, "integration-shards")["strategy"].(map[string]any)["fail-fast"] = true
+				job(t, docs.ci, "pack-gate")["strategy"] = map[string]any{"fail-fast": true}
 			},
 		},
 		{
 			name: "nested execution field named name",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				strategy := job(t, docs.ci, "integration-shards")["strategy"].(map[string]any)
-				matrix := strategy["matrix"].(map[string]any)
-				row := matrix["include"].([]any)[0].(map[string]any)
-				row["name"] = "this is matrix data, not a display label"
+				job(t, docs.ci, "pack-gate")["strategy"] = map[string]any{
+					"matrix": map[string]any{"name": []any{"this is matrix data, not a display label"}},
+				}
 			},
 		},
 		{
 			name: "uses",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				step(t, job(t, docs.ci, "preflight-acceptance"), 0)["uses"] = "actions/checkout@main"
+				step(t, job(t, docs.ci, "pack-gate"), 0)["uses"] = "actions/checkout@main"
 			},
 		},
 		{
 			name: "run",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				step(t, job(t, docs.ci, "preflight-acceptance"), 2)["run"] = "make test-acceptance-all"
+				step(t, job(t, docs.ci, "pack-gate"), 3)["run"] = "make test-acceptance-all"
 			},
 		},
 		{
 			name: "with",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				step(t, job(t, docs.ci, "integration-shards"), 1)["with"].(map[string]any)["install-claude-cli"] = "true"
+				step(t, job(t, docs.ci, "pack-gate"), 1)["with"].(map[string]any)["go-version-file"] = "go.work"
 			},
 		},
 		{
 			name: "shell",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				step(t, job(t, docs.ci, "preflight-acceptance"), 2)["shell"] = "bash {0}"
+				step(t, job(t, docs.ci, "pack-gate"), 3)["shell"] = "bash {0}"
 			},
 		},
 		{
 			name: "error behavior",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				step(t, job(t, docs.ci, "preflight-acceptance"), 2)["continue-on-error"] = true
+				step(t, job(t, docs.ci, "pack-gate"), 3)["continue-on-error"] = true
 			},
 		},
 	}
@@ -231,23 +221,23 @@ func TestTopologyAndProviderOwnershipMutationsFailPolicy(t *testing.T) {
 		{
 			name: "PR provider override",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				job(t, docs.ci, "preflight-static")["env"] = map[string]any{"GC_BEADS": "sqlite"}
+				job(t, docs.ci, "credential-provider-windows")["env"] = map[string]any{"GC_BEADS": "sqlite"}
 			},
 		},
 		{
 			name: "wrapped duplicate proof",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				steps := job(t, docs.ci, "preflight-static")["steps"].([]any)
+				steps := job(t, docs.ci, "credential-provider-windows")["steps"].([]any)
 				steps = append(steps, map[string]any{
 					"run": "timeout 15m make test-integration-bdstore",
 				})
-				job(t, docs.ci, "preflight-static")["steps"] = steps
+				job(t, docs.ci, "credential-provider-windows")["steps"] = steps
 			},
 		},
 		{
 			name: "quoted duplicate proof",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				appendJobStep(t, job(t, docs.ci, "preflight-static"), map[string]any{
+				appendJobStep(t, job(t, docs.ci, "credential-provider-windows"), map[string]any{
 					"run": `make test-integration-"bdstore"`,
 				})
 			},
@@ -255,7 +245,7 @@ func TestTopologyAndProviderOwnershipMutationsFailPolicy(t *testing.T) {
 		{
 			name: "backslash-obfuscated duplicate proof",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				appendJobStep(t, job(t, docs.ci, "preflight-static"), map[string]any{
+				appendJobStep(t, job(t, docs.ci, "credential-provider-windows"), map[string]any{
 					"run": `make test-integration-bd\store`,
 				})
 			},
@@ -263,7 +253,7 @@ func TestTopologyAndProviderOwnershipMutationsFailPolicy(t *testing.T) {
 		{
 			name: "line-continuation duplicate proof",
 			mutate: func(t *testing.T, docs policyDocuments) {
-				appendJobStep(t, job(t, docs.ci, "preflight-static"), map[string]any{
+				appendJobStep(t, job(t, docs.ci, "credential-provider-windows"), map[string]any{
 					"run": "make test-integration-\\\nbdstore",
 				})
 			},
@@ -640,186 +630,10 @@ func removeValue(t *testing.T, value any, remove string) []any {
 
 func TestPolicyErrorsIdentifyTheBrokenContract(t *testing.T) {
 	docs := loadPolicyDocuments(t)
-	job(t, docs.ci, "integration-shards")["runs-on"] = "ubuntu-latest"
+	job(t, docs.ci, "pack-gate")["runs-on"] = "ubuntu-latest"
 
 	err := validate(docs.ci, docs.nightly, docs.action)
-	if err == nil || !strings.Contains(err.Error(), "integration-shards") {
-		t.Fatalf("error = %v, want integration-shards context", err)
-	}
-}
-
-// TestLintDoesNotRunBehindTheBoundaryGuards pins the ga-dejjh split. The
-// boundary guards and the native-DoltLite suite are ~2 minutes; golangci-lint
-// is 13-15 on a PR run and is the whole critical path. Running them in one
-// job put the cheap work in series ahead of the expensive work for no reason.
-// A future edit that moves lint back alongside the guards — or drops either
-// job from the gates — silently restores that, so both halves are pinned here:
-// they are separate jobs, and both are listed in the needs of check and
-// ci-preflight. (ci-required does not name them directly; it reaches them
-// through ci-preflight, which is why the loop below asserts the two jobs that
-// do list them.)
-func TestLintDoesNotRunBehindTheBoundaryGuards(t *testing.T) {
-	docs := loadPolicyDocuments(t)
-
-	guards, err := workflowJob(docs.ci, "preflight-guards")
-	if err != nil {
-		t.Fatalf("preflight-guards: %v", err)
-	}
-	guardSteps, err := mappingSlice(guards["steps"], "preflight-guards steps")
-	if err != nil {
-		t.Fatal(err)
-	}
-	static, err := workflowJob(docs.ci, "preflight-static")
-	if err != nil {
-		t.Fatalf("preflight-static: %v", err)
-	}
-	staticSteps, err := mappingSlice(static["steps"], "preflight-static steps")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, violation := range splitViolations(guardSteps, staticSteps) {
-		t.Error(violation)
-	}
-
-	// Splitting a job is only safe if both halves still gate.
-	for _, gate := range []string{"check", "ci-preflight"} {
-		job, err := workflowJob(docs.ci, gate)
-		if err != nil {
-			t.Fatalf("%s: %v", gate, err)
-		}
-		needs, ok := job["needs"].([]any)
-		if !ok {
-			t.Fatalf("%s needs is not a list: %T", gate, job["needs"])
-		}
-		for _, want := range []string{"preflight-static", "preflight-guards"} {
-			found := false
-			for _, n := range needs {
-				if text, ok := n.(string); ok && text == want {
-					found = true
-					break
-				}
-			}
-			if !found {
-				t.Errorf("%s does not require %s; a failure there would not fail the gate", gate, want)
-			}
-		}
-	}
-}
-
-// lintRunSteps and guardRunSteps are the COMPLETE command sets each job owns.
-// A partial list lets a partial re-merge through: an edit that moved only
-// `make fmt-check-changed` back into the guards job would re-serialize that
-// work while a list naming just `make fmt-check` stayed green.
-var (
-	lintRunSteps = []string{
-		"make lint", "make lint-affected",
-		"make fmt-check", "make fmt-check-changed",
-		"make vet", "make check-docs",
-	}
-	guardRunSteps = []string{
-		"make test-ci-policy",
-		"make check-gomod-replace",
-		"make check-native-dependency-surface",
-		"make check-eventexport-isolation",
-		"make check-core-boundary",
-		"make test-native-doltlite-beads",
-	}
-)
-
-// countSteps counts steps whose field equals value. findStep cannot be used
-// for an ABSENCE assertion: it returns -1 both when a step is missing and when
-// it appears more than once (its ambiguity guard), so `findStep(...) >= 0`
-// reads a DUPLICATED step as absent.
-//
-// No run string is duplicated in ci.yml today, and
-// TestPreflightStaticScopesOrdinaryPRsWithoutWeakeningProtectedRuns pins the
-// scope pair to one step each — the pair runs DIFFERENT commands
-// (make lint-affected vs make lint, make fmt-check-changed vs make fmt-check).
-// The duplicate shape is what a bad merge produces, which is exactly when this
-// tripwire has to bite, so it is guarded rather than assumed away.
-// TestCountStepsSeesDuplicates covers it.
-func countSteps(steps []map[string]any, field, value string) int {
-	n := 0
-	for _, step := range steps {
-		if step[field] == value {
-			n++
-		}
-	}
-	return n
-}
-
-// splitViolations reports run strings that landed in the wrong half of the
-// ga-dejjh split: lint commands in the guards job, guard commands in the static
-// job. It takes the step lists rather than reading ci.yml so that
-// TestSplitViolationsSeeDuplicatedSteps can hand it the shape a bad merge
-// makes, which the real workflow never has.
-func splitViolations(guardSteps, staticSteps []map[string]any) []string {
-	var violations []string
-	for _, run := range lintRunSteps {
-		if countSteps(guardSteps, "run", run) > 0 {
-			violations = append(violations, fmt.Sprintf("preflight-guards runs %q; the lint work belongs in preflight-static so it does not queue behind the guards", run))
-		}
-	}
-	for _, run := range guardRunSteps {
-		if countSteps(staticSteps, "run", run) > 0 {
-			violations = append(violations, fmt.Sprintf("preflight-static runs %q; the guards belong in preflight-guards so lint is not serialized behind them", run))
-		}
-	}
-	return violations
-}
-
-// TestSplitViolationsSeeDuplicatedSteps is the regression guard for the swap
-// this PR makes: the split check must catch a forbidden step that a merge left
-// in TWICE, which `findStep(...) >= 0` read as absent.
-//
-// The real ci.yml holds no duplicate, so without a fixture the two call sites
-// could be reverted to findStep and the whole suite would stay green — the
-// regression could silently re-land. Each case below fails if that revert
-// happens.
-func TestSplitViolationsSeeDuplicatedSteps(t *testing.T) {
-	for _, tc := range []struct {
-		name         string
-		guardSteps   []map[string]any
-		staticSteps  []map[string]any
-		wantContains string
-	}{
-		{
-			name: "lint duplicated into the guards job",
-			guardSteps: []map[string]any{
-				{"run": "make test-ci-policy"},
-				{"run": "make lint"},
-				{"run": "make check-gomod-replace"},
-				{"run": "make lint"},
-			},
-			wantContains: "preflight-guards runs \"make lint\"",
-		},
-		{
-			name: "a guard duplicated into the static job",
-			staticSteps: []map[string]any{
-				{"run": "make check-core-boundary"},
-				{"run": "make lint"},
-				{"run": "make check-core-boundary"},
-			},
-			wantContains: "preflight-static runs \"make check-core-boundary\"",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := splitViolations(tc.guardSteps, tc.staticSteps)
-			if len(got) == 0 {
-				t.Fatalf("a duplicated step was reported as absent; findStep's -1 ambiguity is back")
-			}
-			if !strings.Contains(strings.Join(got, "\n"), tc.wantContains) {
-				t.Errorf("violations = %q, want one mentioning %s", got, tc.wantContains)
-			}
-		})
-	}
-
-	// The single-step case must still be caught, and a clean split must stay
-	// silent, or the guard would be trivially satisfied.
-	if got := splitViolations([]map[string]any{{"run": "make vet"}}, nil); len(got) != 1 {
-		t.Errorf("a single misplaced step produced %d violations, want 1", len(got))
-	}
-	if got := splitViolations([]map[string]any{{"run": "make test-ci-policy"}}, []map[string]any{{"run": "make lint"}}); len(got) != 0 {
-		t.Errorf("a correct split reported %q, want no violations", got)
+	if err == nil || !strings.Contains(err.Error(), "pack-gate") {
+		t.Fatalf("error = %v, want pack-gate context", err)
 	}
 }

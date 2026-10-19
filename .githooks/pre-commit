@@ -8,7 +8,7 @@ repo_root="$(git rev-parse --show-toplevel)"
 # only thing keeping beads' own pre-commit alive.
 "$repo_root/.githooks/lib/beads-chain.sh" pre-commit ${1+"$@"}
 
-# `go clean -cache` guard (AGENTS.md "Build Cache Conventions"; bead vp-g96b).
+# `go clean -cache` guard (fork-maintainer-guide.md "Build Cache Conventions"; bead vp-g96b).
 # Runs BEFORE the four-category early exit below, because the files most likely
 # to acquire the command -- a shell script, a Makefile recipe, a CI step, an
 # order -- are in none of those four categories and would otherwise be skipped
@@ -31,7 +31,7 @@ gcc_hook_dir="${BASH_SOURCE[0]%/*}"
 [ "$gcc_hook_dir" = "${BASH_SOURCE[0]}" ] && gcc_hook_dir="."
 gcc_guard="$gcc_hook_dir/../scripts/check-go-clean-cache.sh"
 if [ ! -x "$gcc_guard" ]; then
-  echo "pre-commit: $gcc_guard is missing or not executable — refusing to commit with the build-cache ban guard disabled (AGENTS.md \"Build Cache Conventions\")" >&2
+  echo "pre-commit: $gcc_guard is missing or not executable — refusing to commit with the build-cache ban guard disabled (fork-maintainer-guide.md \"Build Cache Conventions\")" >&2
   exit 1
 fi
 if ! "$gcc_guard" --staged; then
@@ -50,22 +50,77 @@ if [ -n "$staged_go_files" ]; then
   printf '%s\n' "$staged_go_files" | scripts/precommit-format-staged-go
   printf '%s\n' "$staged_go_files" | xargs git add
 
-  # ga-w7nyj: --fix is deliberately NOT passed here. golangci-lint 2.12.0 has
-  # no per-linter fix control (the only toggle is this global flag, which
-  # applies to every linter that supports auto-fix -- govet, errorlint,
-  # gocritic, misspell, and revive are all enabled in .golangci.yml and all
-  # support it), and its stock errorlint --fix silently drops the negation on
-  # `if _, ok := x.(*T); !ok`-shaped code, inverting the branch's meaning
-  # (reproduced twice in this repo's own history: Voxist/gascity#219 and
-  # #231's review fix-up commits both hit it). A lint issue in staged code
-  # now fails the commit instead of being silently rewritten; see
-  # TestPreCommitLintChangedFlagsDoNotAutoFix and
-  # TestErrorlintStockFixDropsTypeAssertionNegation in
-  # scripts/precommit_contract_test.go.
+  # Lint and vet: nogo (//tools/nogo) over the staged files' Bazel packages,
+  # the same analyzers bazel.yml gates on. Findings fail the commit; nogo
+  # prints a `patch -p1` command for the ones with suggested fixes.
   #
-  # No re-stage follows: lint-changed cannot modify staged files anymore
-  # (that was --fix's job), so the git add above is the only one needed.
-  make lint-changed LINT_CHANGED_SCOPE=staged LINT_FLAGS="--new-from-rev=HEAD --whole-files" || exit 1
+  # ga-w7nyj: nothing here may auto-fix staged code. golangci-lint's stock
+  # errorlint --fix silently drops the negation on `if _, ok := x.(*T); !ok`
+  # (Voxist/gascity#219 and #231 both hit it); see
+  # TestPreCommitLintChangedFlagsDoNotAutoFix in scripts/precommit_contract_test.go.
+  #
+  # Fork: GC_PRECOMMIT_LINT=go swaps nogo for `go vet` over the staged
+  # packages, mirroring GC_PREPUSH_SUITE=go. It exists for hosts Bazel does
+  # not serve: on macOS the stock LLVM toolchain cannot compile the cgo deps
+  # (dolthub ICU/zstd), and every worktree path gets its own Bazel output
+  # base, which a shared host with many worktrees cannot afford per commit.
+  case "${GC_PRECOMMIT_LINT:-bazel}" in
+    go)
+      echo "pre-commit: GC_PRECOMMIT_LINT=go: running go vet over the staged packages, NOT nogo; CI's bazel.yml gates on nogo. Unset GC_PRECOMMIT_LINT to run nogo." >&2
+      # Builtins only: the hook runs under a restricted PATH (see above).
+      # Each package is vetted inside the module that owns it: the repo
+      # carries nested modules (tools/nogo) that the root module cannot load.
+      vet_entries=()
+      while IFS= read -r file; do
+        case "$file" in
+          ""|testdata/*|*/testdata/*) continue ;;
+        esac
+        dir="${file%/*}"
+        [ "$dir" = "$file" ] && dir="."
+        mod="$dir"
+        while [ "$mod" != "." ] && [ ! -f "$mod/go.mod" ]; do
+          case "$mod" in
+            */*) mod="${mod%/*}" ;;
+            *) mod="." ;;
+          esac
+        done
+        if [ "$mod" = "." ]; then rel="./$dir"; else rel="./${dir#"$mod"}"; rel="${rel/#.\/\//./}"; fi
+        [ "$rel" = "./" ] && rel="."
+        entry="$mod|$rel"
+        case " ${vet_entries[*]-} " in
+          *" $entry "*) ;;
+          *) vet_entries+=("$entry") ;;
+        esac
+      done <<<"$staged_go_files"
+      vet_mods=()
+      for entry in ${vet_entries[@]+"${vet_entries[@]}"}; do
+        case " ${vet_mods[*]-} " in
+          *" ${entry%%|*} "*) ;;
+          *) vet_mods+=("${entry%%|*}") ;;
+        esac
+      done
+      for mod in ${vet_mods[@]+"${vet_mods[@]}"}; do
+        mod_pkgs=()
+        for entry in "${vet_entries[@]}"; do
+          [ "${entry%%|*}" = "$mod" ] && mod_pkgs+=("${entry#*|}")
+        done
+        # Skip packages whose files build constraints exclude (go vet
+        # refuses them outright); vet the buildable ones by import path.
+        buildable=$(go -C "$mod" list -e -f '{{if or .GoFiles .CgoFiles .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' "${mod_pkgs[@]}") || exit 1
+        if [ -n "$buildable" ]; then
+          # shellcheck disable=SC2086 # one import path per word
+          go -C "$mod" vet $buildable || exit 1
+        fi
+      done
+      ;;
+    bazel)
+      make lint-changed LINT_CHANGED_SCOPE=staged || exit 1
+      ;;
+    *)
+      echo "pre-commit: unknown GC_PRECOMMIT_LINT=${GC_PRECOMMIT_LINT}; expected bazel (default) or go" >&2
+      exit 2
+      ;;
+  esac
 
   # Regenerate the OpenAPI spec from the live Huma API and stage both
   # canonical copies. Keeps the committed spec and the published
@@ -83,16 +138,20 @@ if [ -n "$staged_go_files" ]; then
   go run ./cmd/genschema
   git add docs/reference/schema/city-schema.json docs/reference/schema/city-schema.txt docs/reference/config.md docs/reference/cli.md
 
-  make vet
   # Heavy `go test` fan-out runs in .githooks/pre-push, not here (#3628).
   # Invoking `make test-fast-parallel` on every commit fired an
   # `xargs -P<nproc>` storm of ~2.8 GB test-binary compiles (~17 GB pressure,
-  # load >100 on constrained hosts such as WSL). Format, lint, vet, and codegen
-  # stay in pre-commit; the test suite gates at push time instead.
+  # load >100 on constrained hosts such as WSL). Format, lint/vet (nogo), and
+  # codegen stay in pre-commit; the test suite gates at push time instead.
 fi
 
 if [ -n "$staged_docs" ]; then
-  make check-docs
+  # Fork: GC_PRECOMMIT_LINT=go also takes the docs check off Bazel.
+  if [ "${GC_PRECOMMIT_LINT:-bazel}" = "go" ]; then
+    make check-docs-go
+  else
+    make check-docs
+  fi
 fi
 
 # Re-read the index rather than reusing the pre-hook staged_spec snapshot:

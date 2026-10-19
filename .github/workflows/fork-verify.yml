@@ -11,12 +11,24 @@ name: fork-verify
 # the Go + Dolt + native-dependency setup is not re-solved here.
 
 on:
+  pull_request:
+    branches: [main, "hotfix/**", "release/**"]
   push:
-    branches: ["feat/**", "fix/**"]
+    branches: [main, "feat/**", "fix/**"]
   workflow_dispatch:
+
+concurrency:
+  group: fork-verify-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
+
+env:
+  DOLT_VERSION: "2.2.0"
+  BD_VERSION: "v1.94.1" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
+  BD_REPO: "Voxist/beads"
+  BD_SOURCE_REF: "e4f98340d71ca96744f1f3f5f50e6468066706ca" # fork-tip bd commit (schema 0069) — built from BD_REPO source by install-bd-archive.sh
 
 jobs:
   verify:
@@ -25,11 +37,6 @@ jobs:
     # runners or repository secrets.
     if: ${{ github.repository != 'gastownhall/gascity' }}
     runs-on: ubuntu-latest
-    env:
-      DOLT_VERSION: "2.1.7"
-      BD_VERSION: "v1.94.1" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
-      BD_REPO: "Voxist/beads"
-      BD_SOURCE_REF: "e4f98340d71ca96744f1f3f5f50e6468066706ca" # fork-tip bd commit (schema 0069) — built from BD_REPO source by install-bd-archive.sh
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -51,3 +58,68 @@ jobs:
         run: go test ./internal/orders/ -run 'TestParseScope|TestValidateRejectsUnknownScope|TestValidateAcceptsCityAndRigScope|TestParseEnv' -count=1 -v
       - name: Unit tests — scale from zero (#2819)
         run: go test ./cmd/gc/ -run 'TestBuildDesiredState_ScaleFromZero' -count=1 -v
+
+  # The fork's gating unit lane. Upstream's suites run under Bazel on
+  # rbe-west (bazel.yml), which a fork cannot reach, so these are the
+  # Go-native twins on GitHub-hosted runners, in the shard shapes the fork's
+  # pre-Bazel ci.yml already ran on ubuntu-latest.
+  static:
+    # Named for the fork ruleset's required check: upstream's ci.yml no
+    # longer has a preflight job, and this static lane is the fork's preflight.
+    name: CI / preflight
+    if: ${{ github.repository != 'gastownhall/gascity' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "false"
+      - name: Build-cache ban guard
+        run: make check-go-clean-cache
+      - name: CI policy
+        run: make test-ci-policy
+      - name: Format
+        run: make fmt-check
+      - name: Vet (go vet plus the build-tag scopes)
+        run: make vet-go
+
+  unit-noncmdgc:
+    name: unit (non-cmd/gc ${{ matrix.shard }} of 3)
+    if: ${{ github.repository != 'gastownhall/gascity' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "false"
+      - name: Unit tests (non-cmd/gc shard ${{ matrix.shard }} of 3)
+        run: make test-cover-noncmdgc-shard NONCMDGC_COVER_SHARD=${{ matrix.shard }} NONCMDGC_COVER_TOTAL=3
+
+  unit-cmdgc:
+    name: unit (cmd/gc ${{ matrix.shard }} of 6)
+    if: ${{ github.repository != 'gastownhall/gascity' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-gascity-ubuntu
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "false"
+      - name: Unit tests (cmd/gc shard ${{ matrix.shard }} of 6)
+        run: make test-cover-cmdgc-shard CMD_GC_COVER_SHARD=${{ matrix.shard }} CMD_GC_COVER_TOTAL=6

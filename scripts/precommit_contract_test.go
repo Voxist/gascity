@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"os/exec"
@@ -212,8 +213,18 @@ func TestPrePushUsesCanonicalMachineAwareConcurrency(t *testing.T) {
 	if strings.Contains(content, `LOCAL_TEST_JOBS="${LOCAL_TEST_JOBS:-3}"`) {
 		t.Fatal("pre-push hook must not replace the canonical machine-aware default with a fixed three-job cap")
 	}
-	if !strings.Contains(content, "exec make test-fast-parallel") {
-		t.Fatal("pre-push hook must continue delegating the unchanged fast-suite inventory to make test-fast-parallel")
+	if !strings.Contains(content, `exec "$repo_root/.githooks/lib/push-suite.sh"`) {
+		t.Fatal("pre-push hook must delegate the push-time suite to .githooks/lib/push-suite.sh")
+	}
+	suite, err := os.ReadFile(filepath.Join(repoRoot, ".githooks", "lib", "push-suite.sh"))
+	if err != nil {
+		t.Fatalf("read push-suite.sh: %v", err)
+	}
+	if strings.Contains(string(suite), "LOCAL_TEST_JOBS") {
+		t.Fatal("push-suite.sh must not shadow the canonical machine-aware job count")
+	}
+	if !strings.Contains(string(suite), "exec make test-fast-parallel") {
+		t.Fatal("push-suite.sh's go fallback must continue delegating the unchanged fast-suite inventory to make test-fast-parallel")
 	}
 	for _, path := range []string{"Makefile", filepath.Join("scripts", "test-local-parallel")} {
 		content, err := os.ReadFile(filepath.Join(repoRoot, path))
@@ -463,7 +474,12 @@ func TestPreCommitFailsClosedWhenGoBlockStagesSpecAsSideEffectAndNpmAbsent(t *te
 	if err := os.MkdirAll(filepath.Dir(formatStagedGoPath), 0o755); err != nil {
 		t.Fatalf("create parent for %s: %v", formatStagedGoPath, err)
 	}
-	writeExecutable(t, formatStagedGoPath, "#!/usr/bin/env bash\nexit 0\n")
+	// The hook pipes the staged file list into this script under
+	// `set -o pipefail`. Like the real script, the stub must read its stdin
+	// to EOF: one that exits without reading races the hook's printf, which
+	// dies of SIGPIPE whenever the stub exits first, and bash exits 141
+	// without printing anything (the silent CI flake on loaded runners).
+	writeExecutable(t, formatStagedGoPath, "#!/usr/bin/env bash\ncat >/dev/null\nexit 0\n")
 	runGit("add", "-A")
 	runGit("commit", "-m", "init")
 
@@ -585,7 +601,7 @@ func restrictedPathWithoutNpm(t *testing.T, stubs map[string]string) string {
 	// up `sh` on PATH). timeout is optional; without it the chain still runs.
 	// python3 joins them because .githooks/pre-commit now runs
 	// scripts/check-go-clean-cache.sh (the `go clean -cache` ban guard,
-	// AGENTS.md "Build Cache Conventions"), whose scanner is python3. It is
+	// fork-maintainer-guide.md "Build Cache Conventions"), whose scanner is python3. It is
 	// already a hook-path dependency via check-resync-loss.sh in pre-push.
 	for _, name := range []string{"bash", "sh", "env", "git", "xargs", "python3"} {
 		realPath, err := exec.LookPath(name)
@@ -637,9 +653,18 @@ func TestNativeDoltliteBeadsTargetRunsTaggedSuite(t *testing.T) {
 
 	cmd := exec.Command("make", "-n", "test-native-doltlite-beads")
 	cmd.Dir = repoRoot
-	out, err := cmd.CombinedOutput()
+	// The Makefile's Linux CGO fallback probes the host's cc and ICU headers
+	// at parse time and prints a line when it fires; off, the dry run is the
+	// recipe alone on any host.
+	cmd.Env = append(os.Environ(), "SYS_USR_CGO_FALLBACK=0")
+	// The recipe is on stdout. stderr carries parse-time noise such as the
+	// Makefile's $(shell go env ...) printing "go: downloading go1.x" on a
+	// fresh remote worker, which is not a command.
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("make -n test-native-doltlite-beads failed: %v\n%s", err, out)
+		t.Fatalf("make -n test-native-doltlite-beads failed: %v\n%s%s", err, out, stderr.Bytes())
 	}
 	command := string(out)
 	if err := validateNativeDoltliteDryRun(command); err != nil {
@@ -758,10 +783,12 @@ func preCommitLintChangedFlags(t *testing.T, repoRoot string) string {
 	if err != nil {
 		t.Fatalf("read pre-commit hook: %v", err)
 	}
-	re := regexp.MustCompile(`make lint-changed LINT_CHANGED_SCOPE=staged LINT_FLAGS="([^"]*)"`)
+	// LINT_FLAGS is optional: the nogo lint-changed recipe takes none, and an
+	// absent LINT_FLAGS passes no flags at all.
+	re := regexp.MustCompile(`make lint-changed LINT_CHANGED_SCOPE=staged(?: LINT_FLAGS="([^"]*)")?`)
 	m := re.FindStringSubmatch(string(hook))
 	if m == nil {
-		t.Fatal("pre-commit hook's `make lint-changed LINT_CHANGED_SCOPE=staged LINT_FLAGS=\"...\"` invocation " +
+		t.Fatal("pre-commit hook's `make lint-changed LINT_CHANGED_SCOPE=staged [LINT_FLAGS=\"...\"]` invocation " +
 			"not found in the expected shape -- update this test's regex to match the hook's current form " +
 			"(and re-check TestErrorlintStockFixDropsTypeAssertionNegation's premise still holds)")
 	}

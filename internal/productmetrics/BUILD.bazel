@@ -1,5 +1,10 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
+# //cmd/gc:gc_productmetrics_testhook_test builds this package with -tags
+# productmetrics_testhook; gazelle lists the tagged files in srcs, and
+# rules_go drops them again in every configuration without the tag.
+# gazelle:build_tags integration,productmetrics_testhook
+
 go_library(
     name = "productmetrics",
     srcs = [
@@ -12,6 +17,7 @@ go_library(
         "notice_content.go",
         "pause.go",
         "platform_unsupported.go",
+        "productmetrics_testhook.go",
         "quota.go",
         "release.go",
         "service.go",
@@ -53,6 +59,7 @@ go_test(
         "control_unix_test.go",
         "event_test.go",
         "hangbudget_test.go",
+        "main_test.go",
         "marker_protocol_unix_test.go",
         "notice_state_unix_test.go",
         "pause_allocation_test.go",
@@ -69,6 +76,7 @@ go_test(
         "spawn_unix_test.go",
         "spool_unix_test.go",
         "state_namespace_unix_test.go",
+        "status_reason_schema_test.go",
         "status_test.go",
         "status_unix_test.go",
         "status_writer_unix_test.go",
@@ -85,63 +93,29 @@ go_test(
         exclude = ["BUILD.bazel"],
     ),
     embed = [":productmetrics"],
+    shard_count = 2,
     deps = [
+        "//:gascity",
+        "//internal/gchome",
         "//internal/testenv",
     ] + select({
-        "@rules_go//go/platform:aix": [
-            "//internal/gchome",
-        ],
-        "@rules_go//go/platform:android": [
-            "//internal/gchome",
-        ],
         "@rules_go//go/platform:darwin": [
-            "//internal/gchome",
+            "//internal/bazeltest",
             "//internal/testutil",
             "@org_golang_x_sys//unix",
-        ],
-        "@rules_go//go/platform:dragonfly": [
-            "//internal/gchome",
-        ],
-        "@rules_go//go/platform:freebsd": [
-            "//internal/gchome",
-        ],
-        "@rules_go//go/platform:illumos": [
-            "//internal/gchome",
-        ],
-        "@rules_go//go/platform:ios": [
-            "//internal/gchome",
-        ],
-        "@rules_go//go/platform:js": [
-            "//internal/gchome",
         ],
         "@rules_go//go/platform:linux": [
-            "//internal/gchome",
+            "//internal/bazeltest",
             "//internal/testutil",
             "@org_golang_x_sys//unix",
-        ],
-        "@rules_go//go/platform:netbsd": [
-            "//internal/gchome",
-        ],
-        "@rules_go//go/platform:openbsd": [
-            "//internal/gchome",
-        ],
-        "@rules_go//go/platform:osx": [
-            "//internal/gchome",
-        ],
-        "@rules_go//go/platform:plan9": [
-            "//internal/gchome",
-        ],
-        "@rules_go//go/platform:qnx": [
-            "//internal/gchome",
-        ],
-        "@rules_go//go/platform:solaris": [
-            "//internal/gchome",
-        ],
-        "@rules_go//go/platform:windows": [
-            "//internal/gchome",
         ],
         "//conditions:default": [],
     }),
+)
+
+exports_files(
+    ["command_ids_gen.go"],
+    visibility = ["//visibility:public"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
@@ -152,6 +126,25 @@ filegroup(
         ["**"],
         allow_empty = True,
         exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
     ),
     visibility = ["//visibility:public"],
 )

@@ -13,7 +13,7 @@ import (
 
 // TestCheckResyncLoss runs the shell self-test for
 // scripts/check-resync-loss.sh, the resync merge-loss gate (ga-d32bn and
-// ga-8gpw4; AGENTS.md "Resync conventions" rules 5 and 6). It exercises the
+// ga-8gpw4; fork-maintainer-guide.md "Resync conventions" rules 5 and 6). It exercises the
 // historical 2026-08-31 resync merge, synthetic-repo fixtures for
 // DROPPED-FILE / the identical-change skip / conflict-hunk stripping /
 // (name, file) keying, the matched-pair fixtures that prove each gate goes

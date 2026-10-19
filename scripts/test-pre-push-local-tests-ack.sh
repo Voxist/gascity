@@ -39,6 +39,10 @@ record_fail() {
 # live bead store — the exact host-coupling this bead is about.
 unset GC_AGENT GC_SESSION_NAME GC_SESSION_ID GC_ALIAS GC_TEMPLATE
 export POG_READ_ATTEMPTS=1
+# Gate 3 runs .githooks/lib/push-suite.sh, which prefers bazel when it is
+# installed; the fixture has no Bazel workspace, so pin the plain-go mode and
+# reach the fixture Makefile's failing test-fast-parallel target directly.
+export GC_PREPUSH_SUITE=go
 
 tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/pplta.XXXXXX")"
 trap 'rm -rf "$tmp_root"' EXIT
@@ -70,6 +74,9 @@ setup_repo() {
 		# repo with no beads database, so it is safe to install as-is.
 		cp "$REPO_ROOT/.githooks/lib/beads-chain.sh" .githooks/lib/beads-chain.sh
 		chmod +x .githooks/lib/beads-chain.sh
+		# Gate 3 execs this runner (GC_PREPUSH_SUITE=go above).
+		cp "$REPO_ROOT/.githooks/lib/push-suite.sh" .githooks/lib/push-suite.sh
+		chmod +x .githooks/lib/push-suite.sh
 		cp "$REPO_ROOT/scripts/push-ownership-guard.sh" scripts/push-ownership-guard.sh
 		printf '#!/usr/bin/env bash\nexit 0\n' >scripts/check-resync-loss.sh
 		chmod +x scripts/check-resync-loss.sh

@@ -124,7 +124,7 @@ func TestOrderTrackingSweepWatchdogNeverClosesLiveGenerationMarker(t *testing.T)
 	// No dispatcher wired: the deadline tier is inert, so the live marker
 	// must survive an arbitrarily old timestamp — while the same pass reaps
 	// the foreign-generation marker immediately.
-	cr.runOrderTrackingSweepWatchdog(foreign.CreatedAt.Add(1000 * time.Hour))
+	cr.runOrderTrackingSweepWatchdog(cr.cfg, foreign.CreatedAt.Add(1000*time.Hour))
 
 	got, err := store.Get(marker.ID)
 	if err != nil {
@@ -170,7 +170,7 @@ func TestOrderTrackingSweepWatchdogLiveGenerationSurvivesRepeatedTicks(t *testin
 	ticks := int(10 * time.Minute / (30 * time.Second))
 	for i := range ticks {
 		now := live.CreatedAt.Add(30 * time.Second * time.Duration(i+1))
-		cr.runOrderTrackingSweepWatchdog(now)
+		cr.runOrderTrackingSweepWatchdog(cr.cfg, now)
 
 		got, err := store.Get(live.ID)
 		if err != nil {
@@ -315,7 +315,7 @@ func TestOrderTrackingSweepWatchdogDeadlineTierUsesEffectiveTimeout(t *testing.T
 	if err != nil {
 		t.Fatalf("Create(stale same-gen): %v", err)
 	}
-	cr.runOrderTrackingSweepWatchdog(stale.CreatedAt.Add(time.Second))
+	cr.runOrderTrackingSweepWatchdog(cr.cfg, stale.CreatedAt.Add(time.Second))
 	got, err := store.Get(stale.ID)
 	if err != nil {
 		t.Fatalf("Get(stale): %v", err)
@@ -335,7 +335,7 @@ func TestOrderTrackingSweepWatchdogDeadlineTierUsesEffectiveTimeout(t *testing.T
 		t.Fatalf("Create(fresh same-gen): %v", err)
 	}
 	orderTrackingDeadlineGrace = time.Hour
-	cr.runOrderTrackingSweepWatchdog(fresh.CreatedAt.Add(time.Second))
+	cr.runOrderTrackingSweepWatchdog(cr.cfg, fresh.CreatedAt.Add(time.Second))
 	gotFresh, err := store.Get(fresh.ID)
 	if err != nil {
 		t.Fatalf("Get(fresh): %v", err)

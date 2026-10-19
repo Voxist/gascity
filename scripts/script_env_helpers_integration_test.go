@@ -7,30 +7,9 @@
 package scripts_test
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
-
-func filteredMakefileCGOTestEnv() []string {
-	env := os.Environ()
-	filtered := make([]string, 0, len(env))
-	for _, entry := range env {
-		if strings.HasPrefix(entry, "CGO_") {
-			continue
-		}
-		filtered = append(filtered, entry)
-	}
-	// The Makefile's CGO probes invoke `go env`; with an isolated HOME that
-	// would download a toolchain into t.TempDir(), whose read-only module
-	// cache files then defeat TempDir cleanup. Pin the local toolchain and
-	// keep any module-cache writes out of the temp home.
-	return append(filtered,
-		"GOTOOLCHAIN=local",
-		"GOMODCACHE="+filepath.Join(os.TempDir(), "gc-makefile-cgo-gomodcache"),
-	)
-}
 
 func assertContains(t *testing.T, haystack, needle string) {
 	t.Helper()

@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -263,6 +264,10 @@ func TestLifecycleIntentCallSiteSetIsPinned(t *testing.T) {
 		"controller.go:runController":                                       true,
 		"dolt_recover_managed.go:recoverManagedDoltProcess":                 true,
 		"dolt_start_managed.go:startManagedDoltProcess":                     true,
+		// gc stop is lifecycle work: with no controller serving the city it
+		// revives the store to list interrupted starts (upstream's intent),
+		// and shutdownBeadsProviderForStop takes it back down.
+		"cmd_stop.go:cmdStopBodyWithoutSuccessExtendingCap": true,
 	}
 	fset := token.NewFileSet()
 	files, err := filepath.Glob("*.go")
@@ -307,6 +312,29 @@ func TestLifecycleIntentCallSiteSetIsPinned(t *testing.T) {
 	for k := range want {
 		if !got[k] {
 			t.Errorf("allowlisted caller no longer present: %s", k)
+		}
+	}
+}
+
+// Only the freeze denial, however deeply wrapped, lets gc stop skip its check
+// of rows left creating; the stopped-city denial and any other store error
+// must still leave the stop unconfirmed.
+func TestIsMigrationFreezeDenialMatchesOnlyTheFreeze(t *testing.T) {
+	frozen := &implicitRecoveryDeniedError{cityPath: "/city", reason: implicitRecoveryFreezeReason, next: "clear"}
+	stopped := &implicitRecoveryDeniedError{cityPath: "/city", reason: "city is stopped", next: "run gc start"}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "freeze", err: frozen, want: true},
+		{name: "wrapped freeze", err: fmt.Errorf("listing session beads: %w", fmt.Errorf("bd list: %w", frozen)), want: true},
+		{name: "stopped city", err: fmt.Errorf("bd list: %w", stopped)},
+		{name: "other store error", err: errors.New("bd list: connection refused")},
+		{name: "nil", err: nil},
+	} {
+		if got := isMigrationFreezeDenial(tc.err); got != tc.want {
+			t.Errorf("%s: isMigrationFreezeDenial = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }

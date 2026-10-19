@@ -559,7 +559,7 @@ rm -rf "$typegrp_repo"
 # 8. Gate 1 exemption is driven by the `linguist-generated` .gitattributes
 #    attribute (ga-d32bn review): a file so marked and taken wholesale from
 #    upstream in a real conflict must be exempt, not reported TOOK-THEIRS —
-#    this is what licenses AGENTS.md "Resync conventions" rule 1's "take
+#    this is what licenses fork-maintainer-guide.md "Resync conventions" rule 1's "take
 #    upstream wholesale" instruction for the paths in .gitattributes.
 # ---------------------------------------------------------------------------
 echo "== gate 1: a linguist-generated file taken wholesale is exempt =="
@@ -586,7 +586,7 @@ genattr_repo="$(mktemp -d "${TMPDIR:-/tmp}/crl-test-genattr.XXXXXX")"
 
 	git checkout -q ours
 	# Real conflict (both sides changed the same line); resolve by taking
-	# upstream's regenerated content wholesale, per AGENTS.md rule 1.
+	# upstream's regenerated content wholesale, per fork-maintainer-guide.md rule 1.
 	git merge --no-edit theirs >/dev/null 2>&1 || true
 	git checkout --theirs -- gen.txt
 	git add -A
@@ -600,7 +600,7 @@ else
 	genattr_out=$(mktemp "${TMPDIR:-/tmp}/crl-test-genattr-out.XXXXXX")
 	(cd "$genattr_repo" && bash "$SCRIPT") >"$genattr_out" 2>&1
 	genattr_rc=$?
-	if [ "$genattr_rc" -eq 0 ] && grep -q "EXEMPT (generated, AGENTS.md rule 1) TOOK-THEIRS gen.txt" "$genattr_out"; then
+	if [ "$genattr_rc" -eq 0 ] && grep -q "EXEMPT (generated, fork-maintainer-guide.md rule 1) TOOK-THEIRS gen.txt" "$genattr_out"; then
 		record_pass "exempts a linguist-generated file taken wholesale"
 	else
 		record_fail "exempts a linguist-generated file taken wholesale" "exit=$genattr_rc:"
@@ -693,7 +693,7 @@ rm -rf "$collide_repo"
 
 # ---------------------------------------------------------------------------
 # 10. Gate 2 exemption: a fork-added declaration "lost" from a
-#     linguist-generated file is the licensed AGENTS.md rule 1 outcome
+#     linguist-generated file is the licensed fork-maintainer-guide.md rule 1 outcome
 #     (take upstream wholesale), not a resolution defect — must report
 #     EXEMPT and never fail the gate, the same as Gate 1's file-level
 #     exemption for the same path.
@@ -738,7 +738,7 @@ EOF
 
 	git checkout -q ours
 	# Real conflict; resolve by taking upstream's regenerated content
-	# wholesale, per AGENTS.md rule 1 — this drops ForkFunc.
+	# wholesale, per fork-maintainer-guide.md rule 1 — this drops ForkFunc.
 	git merge --no-edit theirs >/dev/null 2>&1 || true
 	git checkout --theirs -- gen.go
 	git add -A
@@ -1489,6 +1489,10 @@ install_resync_hook() {
 	# real first action.
 	cp "$REPO_ROOT/.githooks/lib/beads-chain.sh" "$repo/.githooks/lib/beads-chain.sh"
 	chmod +x "$repo/.githooks/lib/beads-chain.sh"
+	# Gate 3 execs .githooks/lib/push-suite.sh; GC_PREPUSH_SUITE=go (exported
+	# below) makes it run the stub Makefile's test-fast-parallel, not bazel.
+	cp "$REPO_ROOT/.githooks/lib/push-suite.sh" "$repo/.githooks/lib/push-suite.sh"
+	chmod +x "$repo/.githooks/lib/push-suite.sh"
 	cp "$REPO_ROOT/scripts/push-ownership-guard.sh" "$repo/scripts/push-ownership-guard.sh"
 	cp "$resync_script" "$repo/scripts/check-resync-loss.sh"
 	chmod +x "$repo/scripts/check-resync-loss.sh"
@@ -1503,6 +1507,10 @@ test-fast-parallel:
 EOF
 	git -C "$repo" config core.hooksPath .githooks
 }
+
+# push-suite.sh prefers bazel when it is installed; the hook-wiring fixtures
+# stand in a trivial Makefile, so pin the plain go-suite path.
+export GC_PREPUSH_SUITE=go
 
 # poison_resync_script: fails loudly if ever invoked — proves the hook does
 # NOT call check-resync-loss.sh for an ordinary non-merge push.

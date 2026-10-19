@@ -7,7 +7,7 @@
 #
 # WHAT THIS CATCHES, AND WHAT IT DOES NOT
 #
-# AGENTS.md ("Build Cache Conventions") hard-bans `go clean -cache`: run against
+# fork-maintainer-guide.md ("Build Cache Conventions") hard-bans `go clean -cache`: run against
 # the shared GOCACHE it removes all 256 shard directories, hot entries included,
 # and concurrent builds then fail outright -- cmd/go resolves an entry, hands
 # the path to the compiler or linker, and the tool opens a file that has just
@@ -366,7 +366,7 @@ entries included. Concurrent builds do not merely miss — cmd/go resolves an
 entry, hands the path to the compiler or linker, and the tool then opens a file
 that has just been unlinked. That is a hard build failure, on stdlib imports
 included. It broke the fleet on 2026-06-13 (bead vp-g96b) and again 2026-09-05.
-The rule: AGENTS.md, "Build Cache Conventions".
+The rule: fork-maintainer-guide.md, "Build Cache Conventions".
 
 Instead:
   go clean -testcache                       clears test RESULTS only; explicitly
