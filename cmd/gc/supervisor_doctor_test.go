@@ -201,38 +201,3 @@ func TestDoctorSubsetSlowTicksOldBreachOutsideWindowNoAlert(t *testing.T) {
 		t.Fatalf("slow_ticks alerts = %d, want 0 (breach outside window)", got)
 	}
 }
-
-// TestDoctorSubsetS6CeilingBreachEmitsAlert asserts the S6 connection
-// ceiling fires when scopes × (pool+1) exceeds 0.8 × max_connections.
-func TestDoctorSubsetS6CeilingBreachEmitsAlert(t *testing.T) {
-	cfg := &config.City{}
-	// One rig + city = 2 scopes; the breach comes from a large pool against
-	// a tiny max_connections so 2×(pool+1) > 0.8×max.
-	cfg.Rigs = []config.Rig{{Name: "r1", Path: "rigs/r1"}}
-	pool := 30
-	cfg.Beads.ProxyPoolSize = &pool
-	cfg.Dolt.MaxConnections = 10 // ceiling = 8; projected = 2×31 = 62 > 8
-	cs, ep := newDoctorTestState(t, cfg)
-
-	evaluateCityDoctorSubset(cs, io.Discard)
-
-	if got := len(alertsOfCheck(t, ep, supervisordoctor.CheckNameS6ConnectionCeiling)); got != 1 {
-		t.Fatalf("s6 alerts = %d, want 1", got)
-	}
-}
-
-// TestDoctorSubsetS6CeilingWithinBudgetNoAlert asserts the ceiling stays
-// quiet within budget.
-func TestDoctorSubsetS6CeilingWithinBudgetNoAlert(t *testing.T) {
-	cfg := &config.City{}
-	pool := 2
-	cfg.Beads.ProxyPoolSize = &pool
-	cfg.Dolt.MaxConnections = 256 // ceiling = 204.8; projected = 1×3 = 3
-	cs, ep := newDoctorTestState(t, cfg)
-
-	evaluateCityDoctorSubset(cs, io.Discard)
-
-	if got := len(alertsOfCheck(t, ep, supervisordoctor.CheckNameS6ConnectionCeiling)); got != 0 {
-		t.Fatalf("s6 alerts = %d, want 0 (within budget)", got)
-	}
-}

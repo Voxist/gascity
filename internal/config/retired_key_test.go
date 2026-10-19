@@ -42,12 +42,12 @@ func TestClassifyUndecodedRetiredKey(t *testing.T) {
 	}
 }
 
-// TestUndecodedPathsWithEmptyRetiredRegistry proves the SHIPPED registry (empty
-// until S5-T7) leaves unknown-key fatality intact end-to-end through both paths.
+// TestUndecodedPathsWithEmptyRetiredRegistry proves the SHIPPED registry leaves
+// unknown-key fatality intact end-to-end through both paths.
 func TestUndecodedPathsWithEmptyRetiredRegistry(t *testing.T) {
 	t.Parallel()
-	if len(retiredKeys) != 0 {
-		t.Fatalf("retiredKeys ships empty (S5-T7 adds the first entry); got %v", retiredKeys)
+	if _, ok := retiredKeys["daemon.totally_unknown_key"]; ok {
+		t.Fatalf("the probe key must not be registered as retired; got %v", retiredKeys)
 	}
 	var cfg City
 	md, err := toml.Decode("[daemon]\ntotally_unknown_key = true\n", &cfg)

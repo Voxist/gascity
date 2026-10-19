@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 )
@@ -28,6 +29,21 @@ type portFileConsistencyCheck struct {
 	// livePort resolves the live managed dolt port; seam for tests.
 	// Defaults to newLiveDoltPortResolver().resolve.
 	livePort func(cityPath string) (liveDoltPortResolution, error)
+}
+
+// proxiedServerClientInfo is the subset of bd's
+// .beads/proxied_server_client_info.json this check reads: an external block
+// naming the dolt sql-server the proxy fronts. gc never reads it back for
+// endpoint resolution — gc-side resolution is live-state only
+// (dolt_port_live.go).
+type proxiedServerClientInfo struct {
+	External *proxiedServerExternal `json:"external,omitempty"`
+}
+
+type proxiedServerExternal struct {
+	Host string `json:"host,omitempty"`
+	Port int    `json:"port,omitempty"`
+	User string `json:"user,omitempty"`
 }
 
 func newPortFileConsistencyCheck(cityPath string, cfg *config.City) *portFileConsistencyCheck {
@@ -124,7 +140,7 @@ func (c *portFileConsistencyCheck) WarmupEligible() bool { return false }
 func statusFilesPresent(scopes []portFileScope) []string {
 	var out []string
 	for _, scope := range scopes {
-		for _, name := range []string{"dolt-server.port", proxiedServerClientInfoFile} {
+		for _, name := range []string{"dolt-server.port", proxyendpoint.SidecarFileName} {
 			path := filepath.Join(scope.dir, ".beads", name)
 			if _, err := os.Stat(path); err == nil {
 				out = append(out, fmt.Sprintf("%s: %s", scope.label, path))
@@ -152,7 +168,7 @@ func scopePortFileMismatches(scope portFileScope, livePort int) []string {
 		}
 	}
 
-	infoFile := filepath.Join(scope.dir, ".beads", proxiedServerClientInfoFile)
+	infoFile := filepath.Join(scope.dir, ".beads", proxyendpoint.SidecarFileName)
 	if data, err := os.ReadFile(infoFile); err == nil {
 		var info proxiedServerClientInfo
 		if jsonErr := json.Unmarshal(data, &info); jsonErr != nil {

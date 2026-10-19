@@ -30,16 +30,16 @@ type retiredKey struct {
 // classifier (classifyUndecoded), and IsRetiredKeyWarning keeps it non-fatal +
 // surfaced on the two downstream deciders that re-classify config warnings —
 // strict mode (cmd/gc/strict_warnings.go) and the agent warning-emit path
-// (cmd/gc/cmd_agent.go). It is intentionally empty until the first consumer:
-// S5-T7 retires daemon.graph_workflows (today still a live formula_v2 alias).
+// (cmd/gc/cmd_agent.go). Entries may also be registered from init() in
+// fork-owned files (retired_keys_fork.go). S5-T7 retires daemon.graph_workflows
+// (today still a live formula_v2 alias).
 //
-// S5-T7 INTEGRATION NOTES (deferred to the change that adds the first entry):
+// Registration notes:
 //   - Whole-table retirement needs BOTH the parent-table key and each leaf key
 //     registered, because toml.MetaData.Undecoded() reports both.
 //   - The struct-round-trip rewrite guard (GuardRewriteKeyLoss in
-//     site_binding.go) and `gc migrate` still refuse a file carrying a retired
-//     key (the rewrite would drop it). S5-T7 must decide whether to exempt
-//     retired keys there or reword the "upgrade gc" guidance.
+//     site_binding.go, which `gc migrate` also uses) does not refuse a retired
+//     key: it is ignored on load, so the rewrite dropping it is intended.
 var retiredKeys = map[string]retiredKey{}
 
 // retiredKeyWarning renders the migration warning for a retired key.
