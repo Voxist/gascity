@@ -93,3 +93,31 @@ func TestNativePoolReadTimeoutDefaultLeavesRoomForOneReconnect(t *testing.T) {
 		t.Fatalf("nativePoolReadTimeoutDefault = %s, want below nativeReadRetryBudget %s", nativePoolReadTimeoutDefault, nativeReadRetryBudget)
 	}
 }
+
+// TestOpenNativeDoltStorageRestoresPoolReadTimeoutOnPanic pins that a panic
+// inside the library open cannot leave gc's default in the process env, where
+// every later open would read it as the operator's choice.
+func TestOpenNativeDoltStorageRestoresPoolReadTimeoutOnPanic(t *testing.T) {
+	t.Setenv("BD_EVENTS_JOURNAL", "")
+	t.Setenv(nativePoolReadTimeoutEnvKey, "")
+	if err := os.Unsetenv(nativePoolReadTimeoutEnvKey); err != nil {
+		t.Fatal(err)
+	}
+	oldOpen := nativeDoltOpenBestAvailable
+	t.Cleanup(func() { nativeDoltOpenBestAvailable = oldOpen })
+	nativeDoltOpenBestAvailable = func(context.Context, string) (beadslib.Storage, error) {
+		panic("library open panicked")
+	}
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("openNativeDoltStorage did not propagate the library panic")
+			}
+		}()
+		_, _ = openNativeDoltStorage(context.Background(), t.TempDir())
+	}()
+	if value, present := os.LookupEnv(nativePoolReadTimeoutEnvKey); present {
+		t.Fatalf("%s=%q leaked into the process env after a panicking open", nativePoolReadTimeoutEnvKey, value)
+	}
+}

@@ -584,11 +584,11 @@ func WithNativeReopen(reopen NativeReopenFunc) NativeDoltStoreOption {
 // rather than fail. A killed server fails its open connections at once; a
 // silently dead peer surfaces only when the per-I/O read deadline
 // (nativePoolReadTimeoutDefault, 60s) expires, which leaves room for one
-// reconnect and retry inside the budget. A proxied-native handle is in the opposite situation — bd owns the
-// proxy and its Dolt child, gc never restarts either, and the recovery for an
-// unreachable endpoint is to demote this handle to the bd leaf. Holding a
-// caller for 90s first buys nothing and hides the demotion behind a timeout
-// nobody can attribute.
+// reconnect and retry inside the budget. A proxied-native handle is in the
+// opposite situation — bd owns the proxy and its Dolt child, gc never restarts
+// either, and the recovery for an unreachable endpoint is to demote this handle
+// to the bd leaf. Holding a caller for 90s first buys nothing and hides the
+// demotion behind a timeout nobody can attribute.
 //
 // A non-positive duration is ignored, so a misread knob leaves the default
 // rather than producing a store whose every read fails instantly.

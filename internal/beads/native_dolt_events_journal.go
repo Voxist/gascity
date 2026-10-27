@@ -30,8 +30,8 @@ func openNativeDoltStorage(ctx context.Context, beadsDir string) (beadslib.Stora
 	if err != nil {
 		return nil, err
 	}
+	defer restorePoolTimeout()
 	storage, err := nativeDoltOpenBestAvailable(ctx, beadsDir)
-	restorePoolTimeout()
 	if err != nil || storage == nil || !nativeEventsJournalEnabledFor(beadsDir) {
 		return storage, err
 	}
