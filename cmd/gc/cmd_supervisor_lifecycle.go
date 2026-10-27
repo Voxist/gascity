@@ -1751,12 +1751,15 @@ var supervisorServiceEnvNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // sync by hand.
 var supervisorServiceEnvKeys = map[string]bool{
 	// beads' pooled per-I/O deadline overrides (#1861 rationale, like the
-	// GC_DOLT_* keys). The supervisor's in-process store opens honor ONLY the
-	// env rung — the config.yaml rung reads a viper only cmd/bd initializes,
-	// .beads/.env is bd-main-only — so on a shared/hub-bound Dolt store where
-	// the 10s default is too tight these must survive plist regeneration.
-	// Unset, gc's native opens default the read deadline to the native read
-	// budget (internal/beads withNativePoolReadTimeoutDefault), not beads' 10s.
+	// GC_DOLT_* keys). The supervisor's in-process store opens honor the env
+	// rung first and then the workspace's own .beads/config.yaml
+	// (dolt.pool-read-timeout, via the library's GetStringFromDir fallback);
+	// the global viper rung is initialized only by cmd/bd and .beads/.env is
+	// bd-main-only. The env rung is the one that reaches every workspace, so
+	// on a shared/hub-bound Dolt store these must survive plist regeneration.
+	// With neither rung set to a usable value, gc's native opens default the
+	// read deadline to 60s (internal/beads withNativePoolReadTimeoutDefault),
+	// not beads' 10s.
 	// Scope: two opens withhold the BEADS_ namespace by design and keep gc's
 	// defaults either way — the storebinding workspace open, and the opt-in
 	// proxied-native read lane (GC_BEADS_PROXIED_NATIVE), whose own knob

@@ -581,8 +581,10 @@ func WithNativeReopen(reopen NativeReopenFunc) NativeDoltStoreOption {
 //
 // It is a production option, not a test hook. The default is sized for a
 // managed-Dolt rebind gc performs itself: a read that spans one should recover
-// rather than fail, so it waits out ~40-56s of mysql i/o timeouts plus the
-// restart. A proxied-native handle is in the opposite situation — bd owns the
+// rather than fail. A killed server fails its open connections at once; a
+// silently dead peer surfaces only when the per-I/O read deadline
+// (nativePoolReadTimeoutDefault, 60s) expires, which leaves room for one
+// reconnect and retry inside the budget. A proxied-native handle is in the opposite situation — bd owns the
 // proxy and its Dolt child, gc never restarts either, and the recovery for an
 // unreachable endpoint is to demote this handle to the bd leaf. Holding a
 // caller for 90s first buys nothing and hides the demotion behind a timeout
@@ -842,10 +844,12 @@ func (s *NativeDoltStore) acquireStorageGen() (beadslib.Storage, uint64, func(),
 
 const (
 	// nativeReadRetryBudget bounds the total reconnect-and-retry time for a
-	// single read. It must comfortably exceed the managed-Dolt hard-kill/rebind
-	// window (~40-56s of mysql i/o timeouts before the dead handle surfaces the
-	// error, plus the restart) so a read spanning a rebind recovers rather than
-	// failing, while still failing fast for a genuinely down server.
+	// single read. It must exceed the per-I/O read deadline
+	// (nativePoolReadTimeoutDefault) plus a managed-Dolt restart, so a read whose
+	// connection died silently mid-rebind can time out, reconnect and recover
+	// once, while a genuinely down server still fails within the budget. A slow
+	// read on a live server runs once under the deadline rather than being cut
+	// and re-issued (ga-s69mk.7).
 	nativeReadRetryBudget = 90 * time.Second
 	// nativeReadRetryBackoff spaces reconnect-and-retry passes.
 	nativeReadRetryBackoff = 200 * time.Millisecond
