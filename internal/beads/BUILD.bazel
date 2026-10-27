@@ -179,6 +179,7 @@ go_test(
         "native_dolt_events_journal_read_test.go",
         "native_dolt_events_journal_test.go",
         "native_dolt_migration_freeze_test.go",
+        "native_dolt_pool_timeout_test.go",
         "native_dolt_proxied_open_test.go",
         "native_dolt_readonly_test.go",
         "native_dolt_storage_class_live_test.go",

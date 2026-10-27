@@ -1755,7 +1755,9 @@ var supervisorServiceEnvKeys = map[string]bool{
 	// env rung — the config.yaml rung reads a viper only cmd/bd initializes,
 	// .beads/.env is bd-main-only — so on a shared/hub-bound Dolt store where
 	// the 10s default is too tight these must survive plist regeneration.
-	// Scope: two opens withhold the BEADS_ namespace by design and keep the
+	// Unset, gc's native opens default the read deadline to the native read
+	// budget (internal/beads withNativePoolReadTimeoutDefault), not beads' 10s.
+	// Scope: two opens withhold the BEADS_ namespace by design and keep gc's
 	// defaults either way — the storebinding workspace open, and the opt-in
 	// proxied-native read lane (GC_BEADS_PROXIED_NATIVE), whose own knob
 	// GC_BEADS_PROXIED_READ_BUDGET is a wall-clock cap on a whole read's

@@ -26,7 +26,12 @@ import (
 // on a backend that cannot record it fails the open, closing the store, rather
 // than returning a handle whose writes would silently go unrecorded.
 func openNativeDoltStorage(ctx context.Context, beadsDir string) (beadslib.Storage, error) {
+	restorePoolTimeout, err := withNativePoolReadTimeoutDefault(beadsDir)
+	if err != nil {
+		return nil, err
+	}
 	storage, err := nativeDoltOpenBestAvailable(ctx, beadsDir)
+	restorePoolTimeout()
 	if err != nil || storage == nil || !nativeEventsJournalEnabledFor(beadsDir) {
 		return storage, err
 	}
