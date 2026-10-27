@@ -100,6 +100,49 @@ func TestEnqueueQueuedNudgeIntoWithoutStoreSkipsShadowOpen(t *testing.T) {
 	}
 }
 
+// TestEnqueueQueuedNudgeStorelessLeavesTakenShadowDebtsUnpaid pins the other
+// store open the storeless enqueue must avoid: settling the shadow debts its
+// queue maintenance takes. A storeless nudge that supersedes an earlier one
+// takes that nudge's shadow debt; paying it would open the bead store, so the
+// debt stays taken and unpaid for the controller to pay once its lease ends.
+func TestEnqueueQueuedNudgeStorelessLeavesTakenShadowDebtsUnpaid(t *testing.T) {
+	opens, _ := installCountingNudgeStoreSeam(t)
+	dir := t.TempDir()
+	ref := &nudgeReference{Kind: "bead", ID: "gc-storeless-ref"}
+
+	for _, id := range []string{"n-superseded", "n-superseding"} {
+		item := newQueuedNudgeWithOptions("worker", "storeless "+id, "session", time.Now(), queuedNudgeOptions{ID: id, Reference: ref})
+		if err := enqueueQueuedNudgeStoreless(dir, item); err != nil {
+			t.Fatalf("enqueueQueuedNudgeStoreless(%s): %v", id, err)
+		}
+	}
+	if *opens != 0 {
+		t.Fatalf("storeless enqueue opened the bead store %d times; want 0", *opens)
+	}
+
+	var superseded *nudgequeue.Item
+	if err := nudgequeue.WithState(dir, func(s *nudgequeue.State) error {
+		for i := range s.Dead {
+			if s.Dead[i].ID == "n-superseded" {
+				item := s.Dead[i]
+				superseded = &item
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("reading queue state: %v", err)
+	}
+	if superseded == nil {
+		t.Fatal("n-superseded is not dead-lettered; the supersession took no debt and this test is vacuous")
+	}
+	if superseded.Shadow == nil {
+		t.Fatal("n-superseded carries no shadow debt; want the debt its supersession took")
+	}
+	if superseded.Shadow.Paid {
+		t.Fatal("n-superseded's shadow debt was paid; paying it opens the bead store the storeless path must not open")
+	}
+}
+
 // TestResolveNudgeTargetViaStoreBoundedTripsOnHungOpen pins the bounded store
 // attempt: a store open that hangs (shared Dolt server stalled) must trip the
 // budget instead of blocking the caller for the legacy 30/60s.
@@ -200,7 +243,7 @@ func TestSessionNudgeStorelessFallbackQueuesDespiteHungStore(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	start := time.Now()
-	rc := sessionNudgeWithStorelessFallback(dir, cfg, fake, identity, "wake up, store is down", nudgeDeliveryQueue, true, &stdout, &stderr)
+	rc := sessionNudgeWithStorelessFallback(dir, cfg, fake, identity, "wake up, store is down", nudgeDeliveryQueue, "", true, &stdout, &stderr)
 	elapsed := time.Since(start)
 
 	if rc != 0 {
@@ -261,7 +304,7 @@ func TestSessionNudgeStorelessFallbackDeliversLiveImmediate(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	rc := sessionNudgeWithStorelessFallback(dir, cfg, fake, identity, "wake up now", nudgeDeliveryImmediate, true, &stdout, &stderr)
+	rc := sessionNudgeWithStorelessFallback(dir, cfg, fake, identity, "wake up now", nudgeDeliveryImmediate, "", true, &stdout, &stderr)
 	if rc != 0 {
 		t.Fatalf("rc = %d; stderr:\n%s", rc, stderr.String())
 	}
@@ -304,7 +347,7 @@ func TestSessionNudgeStorelessFallbackOnStoreMiss(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	rc := sessionNudgeWithStorelessFallback(dir, cfg, fake, identity, "store missed you", nudgeDeliveryQueue, true, &stdout, &stderr)
+	rc := sessionNudgeWithStorelessFallback(dir, cfg, fake, identity, "store missed you", nudgeDeliveryQueue, "", true, &stdout, &stderr)
 	if rc != 0 {
 		t.Fatalf("rc = %d; stderr:\n%s", rc, stderr.String())
 	}

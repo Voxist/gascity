@@ -1751,7 +1751,7 @@ func installNoSkillLiveProviderCommandOverride(cityDir, provider, sourceProvider
 func noSkillLiveProviderDefaults(provider string) (promptMode, promptFlag string, readyDelay int, args []string) {
 	switch strings.TrimSpace(provider) {
 	case "codex":
-		return "arg", "", 3000, []string{"--dangerously-bypass-approvals-and-sandbox", "--model", "gpt-5.5", "-c", "model_reasoning_effort=xhigh"}
+		return "arg", "", 3000, []string{"--dangerously-bypass-approvals-and-sandbox"}
 	case "gemini":
 		return "arg", "", 5000, []string{"--approval-mode", "yolo"}
 	case "opencode":
@@ -3595,6 +3595,9 @@ func runFreshNamedSessionTurn(t *testing.T, provider, identity, prompt, outputRe
 	nudgeTimedOut := isRunTimeout(err)
 	outputPath := filepath.Join(c.Dir, outputRel)
 	if err != nil && !nudgeTimedOut {
+		// Named, not returned as literals: gofumpt v0.9.2 (the Bazel format
+		// gate) and Go 1.27's printer (goimports) indent a multi-line
+		// composite literal in a return list differently.
 		run := inferenceSessionRun{
 			CityDir:      c.Dir,
 			Identity:     identity,
@@ -3605,7 +3608,7 @@ func runFreshNamedSessionTurn(t *testing.T, provider, identity, prompt, outputRe
 			OutputPath:   outputPath,
 			LastStatus:   strings.TrimSpace(statusOut),
 		}
-		fields := map[string]string{
+		spawnEvidence := map[string]string{
 			"city_dir":              c.Dir,
 			"provider":              provider,
 			"identity":              identity,
@@ -3620,7 +3623,7 @@ func runFreshNamedSessionTurn(t *testing.T, provider, identity, prompt, outputRe
 			"status":                strings.TrimSpace(statusOut),
 			"output_rel":            outputRel,
 		}
-		details := map[string]string{
+		taskEvidence := map[string]string{
 			"city_dir":              c.Dir,
 			"provider":              provider,
 			"identity":              identity,
@@ -3633,7 +3636,7 @@ func runFreshNamedSessionTurn(t *testing.T, provider, identity, prompt, outputRe
 			"nudge_out":             strings.TrimSpace(nudgeOut),
 			"output_path":           outputPath,
 		}
-		return run, fields, details, "task", fmt.Errorf("gc session nudge failed: %w", err)
+		return run, spawnEvidence, taskEvidence, "task", fmt.Errorf("gc session nudge failed: %w", err)
 	}
 	if nudgeTimedOut {
 		if blocked, blockErr := detectLiveBlockedInteraction(c.Dir, sessionInfo.SessionName); blockErr == nil && blocked != nil {

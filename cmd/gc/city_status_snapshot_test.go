@@ -404,7 +404,7 @@ func TestCityStatusAgentObservationDoesNotResolveRuntimeNamesThroughStore(t *tes
 		},
 	}
 
-	snapshot := collectCityStatusSnapshot(sp, cfg, "/home/user/city", store, io.Discard)
+	snapshot := collectCityStatusSnapshot(sp, cfg, statusTestCityDir(t), store, io.Discard)
 	if len(snapshot.Agents) != 2 {
 		t.Fatalf("agents = %d, want 2", len(snapshot.Agents))
 	}
@@ -461,7 +461,7 @@ func TestCityStatusUsesBeadBackedRuntimeNameForSingletonAgent(t *testing.T) {
 		Agents:    []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}},
 	}
 
-	snapshot := collectCityStatusSnapshot(sp, cfg, "/home/user/city", store, io.Discard)
+	snapshot := collectCityStatusSnapshot(sp, cfg, statusTestCityDir(t), store, io.Discard)
 	if len(snapshot.Agents) != 1 {
 		t.Fatalf("agents = %d, want 1", len(snapshot.Agents))
 	}
@@ -500,7 +500,7 @@ func TestCityStatusUsesSessionBackedObservationForSuspendedCustomRuntimeName(t *
 		Agents:    []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}},
 	}
 
-	snapshot := collectCityStatusSnapshot(sp, cfg, "/home/user/city", store, io.Discard)
+	snapshot := collectCityStatusSnapshot(sp, cfg, statusTestCityDir(t), store, io.Discard)
 	if len(snapshot.Agents) != 1 {
 		t.Fatalf("agents = %d, want 1", len(snapshot.Agents))
 	}
@@ -530,7 +530,8 @@ func TestCityStatusUsesStatusSnapshotToRouteACPDrainMetadata(t *testing.T) {
 		Session:   config.SessionConfig{Provider: "fake"},
 		Agents:    []config.Agent{{Name: "reviewer", Session: "acp", MaxActiveSessions: intPtr(1)}},
 	}
-	sp, err := newStatusSessionProviderForCity(cfg, t.TempDir())
+	cityPath := statusTestCityDir(t)
+	sp, err := newStatusSessionProviderForCity(cfg, cityPath)
 	if err != nil {
 		t.Fatalf("newStatusSessionProviderForCity: %v", err)
 	}
@@ -557,7 +558,7 @@ func TestCityStatusUsesStatusSnapshotToRouteACPDrainMetadata(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	snapshot := collectCityStatusSnapshot(sp, cfg, "/home/user/city", store, io.Discard)
+	snapshot := collectCityStatusSnapshot(sp, cfg, cityPath, store, io.Discard)
 	if len(snapshot.Agents) != 1 {
 		t.Fatalf("agents = %d, want 1", len(snapshot.Agents))
 	}
@@ -599,7 +600,7 @@ func TestCityStatusUsesBeadBackedRuntimeNameForPoolInstance(t *testing.T) {
 		},
 	}
 
-	snapshot := collectCityStatusSnapshot(sp, cfg, "/home/user/city", store, io.Discard)
+	snapshot := collectCityStatusSnapshot(sp, cfg, statusTestCityDir(t), store, io.Discard)
 	if len(snapshot.Agents) != 2 {
 		t.Fatalf("agents = %d, want 2", len(snapshot.Agents))
 	}
@@ -639,13 +640,13 @@ func TestCityStatusUsesBeadBackedRuntimeNameForStampedPoolSlotBead(t *testing.T)
 	}
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "city"},
-		Rigs:      []config.Rig{{Name: "frontend", Path: "/tmp/frontend"}},
+		Rigs:      []config.Rig{{Name: "frontend", Path: t.TempDir()}},
 		Agents: []config.Agent{
 			{Name: "dog", Dir: "frontend", MaxActiveSessions: intPtr(2)},
 		},
 	}
 
-	snapshot := collectCityStatusSnapshot(sp, cfg, "/home/user/city", store, io.Discard)
+	snapshot := collectCityStatusSnapshot(sp, cfg, statusTestCityDir(t), store, io.Discard)
 	if len(snapshot.Agents) != 2 {
 		t.Fatalf("agents = %d, want 2", len(snapshot.Agents))
 	}
@@ -691,8 +692,9 @@ func TestCityStatusNamedSessionsUseLoadedSnapshotWithoutGet(t *testing.T) {
 		}},
 	}
 
+	cityPath := statusTestCityDir(t)
 	var stdout, stderr bytes.Buffer
-	snapshot := collectCityStatusSnapshot(sp, cfg, "/home/user/city", store, &stderr)
+	snapshot := collectCityStatusSnapshot(sp, cfg, cityPath, store, &stderr)
 	if len(snapshot.NamedSessions) != 1 {
 		t.Fatalf("named sessions = %d, want 1", len(snapshot.NamedSessions))
 	}
@@ -700,7 +702,7 @@ func TestCityStatusNamedSessionsUseLoadedSnapshotWithoutGet(t *testing.T) {
 		t.Fatalf("snapshot named session status = %q, want materialized", got)
 	}
 
-	code := doCityStatusWithStoreAndSnapshot(sp, dops, cfg, "/home/user/city", store, loadStatusSessionSnapshot("/home/user/city", cfg, store, &stderr), &stdout, &stderr)
+	code := doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, loadStatusSessionSnapshot(cityPath, cfg, store, &stderr), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}

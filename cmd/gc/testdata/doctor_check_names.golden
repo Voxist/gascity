@@ -24,10 +24,16 @@ dolt-watchdog-liveness
 config-valid
 legacy-suspended-field
 daemon-session-reconciler
+beads-ledger-feed
 rollout:beads.conditional_writes
 rollout:beads.guarded_release
 rollout:daemon.formula_v2
 rollout:beads.allow_schema_behind_migrate
+rollout:ops.content
+rollout:ops.control
+rollout:ops.lifecycle
+ops-recording
+conversation-lanes
 config-refs
 stale-local-pack-dirs
 pre-start-scripts
@@ -52,6 +58,7 @@ pack-runtimes
 prompt-delivery-budget
 mcp-config
 mcp-shared-target
+mcp-adoption
 builtin-pack-imports
 packv2-import-state
 gascity-pack-binding
@@ -95,6 +102,7 @@ gate-sandbox-reads
 dolt-server
 fork-rate
 dolt-noms-size
+dolt-compact-state
 dolt-journal-size
 dolt-log-size
 dolt-config

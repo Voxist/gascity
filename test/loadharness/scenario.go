@@ -235,9 +235,8 @@ func runTick(stores []*ampStore, sc scenario, bus *events.Fake) (time.Duration, 
 		//    failure must surface as unavailable, never an empty store.
 		if err := s.resolveEndpoint(); err != nil {
 			degraded = true
-			bus.Record(events.Event{Type: "store.degraded", Subject: s.scope, Message: "endpoint unresolvable"})
 			// Factory falls back rather than rendering work; not silent-empty
-			// because we emitted a typed degraded signal.
+			// because the tick reports the scope degraded.
 			continue
 		}
 
@@ -252,7 +251,6 @@ func runTick(stores []*ampStore, sc scenario, bus *events.Fake) (time.Duration, 
 		}
 		if readyErr != nil {
 			degraded = true
-			bus.Record(events.Event{Type: "store.degraded", Subject: s.scope, Message: readyErr.Error()})
 			continue
 		}
 
@@ -263,12 +261,10 @@ func runTick(stores []*ampStore, sc scenario, bus *events.Fake) (time.Duration, 
 		created, err := s.create(probe)
 		if err != nil {
 			degraded = true
-			bus.Record(events.Event{Type: "store.degraded", Subject: s.scope, Message: err.Error()})
 			continue
 		}
 		if err := s.closeBead(created.ID); err != nil {
 			degraded = true
-			bus.Record(events.Event{Type: "store.degraded", Subject: s.scope, Message: err.Error()})
 			continue
 		}
 

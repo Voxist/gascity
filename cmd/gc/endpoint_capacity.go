@@ -117,10 +117,9 @@ const capacityEndpointForgetAfter = 10 * time.Minute
 const capacityValveMemory = time.Hour
 
 // breakerStateChangedEventType is the event emitted on every capacity
-// breaker transition. Its payload is breakerStateChangedPayload. Like
-// events.ProviderHealthGateAlert it is not in events.KnownEventTypes yet, so
-// subscribers receive it through the custom-event envelope.
-const breakerStateChangedEventType = "breaker.state_changed"
+// breaker transition. Its payload is breakerStateChangedPayload, the shape of
+// the events.BreakerStateChangedPayload registered for it.
+const breakerStateChangedEventType = events.BreakerStateChanged
 
 // breakerStateChangedPayload is the breaker.state_changed payload. Its shape
 // matches events.BreakerStateChangedPayload from gastownhall/gascity#5953.

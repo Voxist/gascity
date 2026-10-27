@@ -138,7 +138,7 @@ func TestHealthyStoreStillDispatchesWhenNoStoreIsDegraded(t *testing.T) {
 		stdout:              io.Discard,
 		od:                  od,
 		standaloneCityStore: beads.NewMemStore(),
-		standaloneRigStores: map[string]beads.Store{"healthyrig": newPrefixedStore("vcnyok")},
+		standaloneRigStores: map[string]beads.Store{"healthyrig": newBreakerSweepScopeStore("vcnyok")},
 	}
 
 	done := make(chan struct{})

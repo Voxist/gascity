@@ -81,6 +81,8 @@ func (c *CachingStore) reconcileLoop(ctx context.Context, stagger time.Duration)
 		case <-ctx.Done():
 			return
 		case <-timer.C:
+		case <-c.reconcileKick:
+			// Reset below discards a fire the kick raced (Go 1.23 timers).
 		}
 
 		c.reconcileIfDue(c.clockNow())
@@ -289,11 +291,19 @@ func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
 		return 0
 	}
 
+	// After the failure backoff: a request never hurries a failing backing.
+	if c.reconcileRequested.Load() {
+		return 0
+	}
+
 	if c.lastFreshAt.IsZero() {
 		return 0
 	}
 
 	lastFullScanAt := c.stats.LastReconcileAt
+	if lastFullScanAt.IsZero() {
+		lastFullScanAt = c.lastScanAt
+	}
 	if lastFullScanAt.IsZero() {
 		lastFullScanAt = c.lastFreshAt
 	}
@@ -304,6 +314,36 @@ func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
 	return dueAt.Sub(now)
 }
 
+// RequestReconcile asks for a full re-scan as soon as the reconcile gate
+// (WithReconcileGate) and the failure backoff allow, instead of at the next
+// cadence tick. It returns at once, and requests coalesce: any number made
+// before a run starts are honored by that run, unless that run discards its
+// merge to a full Prime that merged first, which re-arms them. A request
+// made while a run is in flight gets a run of its own, whose list read comes
+// after the request, so a caller that asks after a write committed is
+// covered by a scan that sees it. A closed gate keeps the request pending until it opens. The cache
+// must be reconciling (StartReconciler) for the request to be acted on.
+func (c *CachingStore) RequestReconcile() {
+	c.reconcileRequested.Store(true)
+	c.mu.Lock()
+	c.stats.ReconcileRequests++
+	c.mu.Unlock()
+	select {
+	case c.reconcileKick <- struct{}{}:
+	default: // a kick is already pending
+	}
+}
+
+// rearmReconcileRequest restores a request a run took but did not serve,
+// without counting it again.
+func (c *CachingStore) rearmReconcileRequest() {
+	c.reconcileRequested.Store(true)
+	select {
+	case c.reconcileKick <- struct{}{}:
+	default: // a kick is already pending
+	}
+}
+
 func (c *CachingStore) runReconciliation() {
 	// Breaker open: skip the cycle cheaply (one problem entry per episode)
 	// unless a recovery probe is due, in which case the scan below doubles
@@ -311,6 +351,9 @@ func (c *CachingStore) runReconciliation() {
 	if c.reconcileUnavailableSkip() {
 		return
 	}
+	// Cleared before the list read, so a request made from here on gets
+	// another run (RequestReconcile).
+	requested := c.reconcileRequested.Swap(false)
 	start := time.Now()
 
 	c.mu.RLock()
@@ -378,9 +421,14 @@ func (c *CachingStore) runReconciliation() {
 		// rows newer than this scan's (reconciles do not overlap). The Prime
 		// is at least as complete, so the pass merges nothing, including the
 		// shared tail's store-wide flags; only its latency still counts.
+		// The Prime may have listed before a request this run took, so the
+		// request is re-armed: its run must list after it.
 		c.recordReconcileLatencyLocked(bdLatency)
 		c.recomputeCadenceLocked()
 		c.mu.Unlock()
+		if requested {
+			c.rearmReconcileRequest()
+		}
 		return
 	}
 	now := c.clockNow()
@@ -709,6 +757,11 @@ func (c *CachingStore) mergeSnapshotLocked(
 			setBeadStatus(&closed, "closed")
 			if freshClosed, ok := confirmedClosed[id]; ok {
 				closed = cloneBead(freshClosed)
+				// Recorded under the lock, before the notification goes
+				// out, so a refresh that reads this close in between does
+				// not announce it again (RefreshRowReport's
+				// AnnounceUnheldClose).
+				c.recordAnnouncedCloseLocked(id, freshClosed, now)
 			}
 			res.notifications = append(res.notifications, cacheNotification{
 				eventType: "bead.closed",
@@ -746,6 +799,8 @@ func (c *CachingStore) mergeSnapshotLocked(
 		delete(c.deps, id)
 	}
 	c.pruneRetainedFencesLocked(now)
+	c.pruneAnnouncedClosesLocked(now)
+	c.pruneSilentClosesLocked()
 
 	// 4. Shared tail (was duplicated per branch).
 	c.syncFailures = 0

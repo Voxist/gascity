@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // bdAdmissionScope resolves the admission-semaphore scope key for a bd call,
@@ -85,6 +87,12 @@ func bdAdmissionCapsForCity(cityPath string) (perScope, global int, maxWait time
 	if err != nil || cfg == nil {
 		return 4, 16, 30 * time.Second
 	}
+	return bdAdmissionCapsFromConfig(cfg)
+}
+
+// bdAdmissionCapsFromConfig resolves the bd admission caps from a loaded city
+// config.
+func bdAdmissionCapsFromConfig(cfg *config.City) (perScope, global int, maxWait time.Duration) {
 	r := cfg.Beads.Resilience
 	return r.MaxInflightPerScopeOrDefault(), r.MaxInflightGlobalOrDefault(), r.MaxAdmissionWaitOrDefault()
 }

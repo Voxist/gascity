@@ -490,7 +490,7 @@ func TestBestStoreWithWorkD1ProbeRefinesRank(t *testing.T) {
 		t.Fatalf("pre-D1 shape: store.dir = %q err %v, want riga", got.dir, err)
 	}
 	// With the probe: city's hidden P1 must be ranked and win.
-	_, got, err = bestStoreWithWork("q", stores, stores[0], run, hookStoreRankOptions{RankProbeCommand: "probe"})
+	_, got, err = bestStoreWithWorkRanked("q", stores, stores[0], run, hookStoreRankOptions{RankProbeCommand: "probe"})
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -536,7 +536,7 @@ func TestBestStoreWithWorkD1ProbeDoesNotOverwriteAnOlderWindowAge(t *testing.T) 
 		}
 		return rigaAny, nil
 	}
-	_, got, err := bestStoreWithWork("q", stores, stores[0], run, hookStoreRankOptions{RankProbeCommand: "probe"})
+	_, got, err := bestStoreWithWorkRanked("q", stores, stores[0], run, hookStoreRankOptions{RankProbeCommand: "probe"})
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -562,7 +562,7 @@ func TestBestStoreWithWorkProbeFailureKeepsWindowRank(t *testing.T) {
 		}
 		return `[{"id":"va-1","priority":1}]`, nil
 	}
-	_, got, err := bestStoreWithWork("q", stores, stores[0], run, hookStoreRankOptions{RankProbeCommand: "probe"})
+	_, got, err := bestStoreWithWorkRanked("q", stores, stores[0], run, hookStoreRankOptions{RankProbeCommand: "probe"})
 	if err != nil {
 		t.Fatalf("a failed probe must not error the hook: %v", err)
 	}
@@ -622,7 +622,7 @@ func TestBestStoreWithWorkCollectsSelectionStats(t *testing.T) {
 		}
 	}
 	var stats hookSelectionStats
-	_, got, err := bestStoreWithWork("q", stores, stores[0], run, hookStoreRankOptions{Stats: &stats})
+	_, got, err := bestStoreWithWorkRanked("q", stores, stores[0], run, hookStoreRankOptions{Stats: &stats})
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -671,9 +671,13 @@ func TestBestStoreWithWorkSurfacesOwnStoreErrorWhenNoWork(t *testing.T) {
 	}
 }
 
-func TestBestStoreWithWorkIgnoresRigStoreErrorWhenOwnStoreHasNoWork(t *testing.T) {
-	// A flaky federated rig store must not wedge the hook: when the agent's own
-	// store is healthy (no work), a rig-store error is best-effort and dropped.
+func TestBestStoreWithWorkSurfacesRigStoreErrorWhenOwnStoreHasNoWork(t *testing.T) {
+	// The agent's own store is healthy and empty, but a rig store could not be
+	// read, so "no work" is not established. This used to drop the rig error as
+	// best-effort and answer the city store's "[]", which drained seats whose
+	// work sat in the unread rig. The error now surfaces as a secondary-store
+	// failure: a failed query to the caller, but not this session's own store
+	// failing (hookStoreFailureReport emits it under the rig store's name).
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
 	run := func(_, dir string, _ []string) (string, error) {
 		if dir == "city" {
@@ -682,14 +686,76 @@ func TestBestStoreWithWorkIgnoresRigStoreErrorWhenOwnStoreHasNoWork(t *testing.T
 		return "", errTestStoreTimeout
 	}
 	out, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
-	if err != nil {
-		t.Fatalf("rig-store error must not surface when own store is healthy; got %v", err)
+	var secondary *hookSecondaryStoreFailure
+	if !errors.As(err, &secondary) {
+		t.Fatalf("err = %v, want a *hookSecondaryStoreFailure", err)
 	}
-	if out != `[]` {
-		t.Fatalf("out = %q, want city store's no-work output", out)
+	if !errors.Is(err, errTestStoreTimeout) {
+		t.Fatalf("err = %v, want it to wrap the rig store's own error", err)
+	}
+	if out != "" {
+		t.Fatalf("out = %q, want no output alongside the failure", out)
 	}
 	if gotStore.dir != "" || len(gotStore.env) != 0 {
 		t.Fatalf("store = %#v, want zero value when no work is found", gotStore)
+	}
+}
+
+func TestBestStoreWithWorkOwnStoreErrorTakesPrecedenceOverRigStoreError(t *testing.T) {
+	// Both stores fail: the agent's own store's error is the one surfaced, as
+	// itself, so emitCityWorkQueryFailure still classifies it.
+	errRig := errors.New("rig store down")
+	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
+	run := func(_, dir string, _ []string) (string, error) {
+		if dir == "city" {
+			return "", errTestStoreTimeout
+		}
+		return "", errRig
+	}
+	_, _, err := bestStoreWithWork("q", stores, stores[0], run)
+	if !errors.Is(err, errTestStoreTimeout) {
+		t.Fatalf("err = %v, want the own store's error", err)
+	}
+	var secondary *hookSecondaryStoreFailure
+	if errors.As(err, &secondary) {
+		t.Fatalf("err = %v, want the own store's error surfaced as itself, not as a secondary failure", err)
+	}
+}
+
+// TestHookStoreFailureReportEmitsEachFailedStoreOnce pins the event half of a
+// query that failed on secondary stores: each failed store is emitted on its
+// own, as itself, once per invocation however many failed reads name it; a
+// failure the answer did not stop on is a stderr line, once, and no event; and
+// the agent's own store's failure is still emitted as the query's error.
+func TestHookStoreFailureReportEmitsEachFailedStoreOnce(t *testing.T) {
+	var emitted []error
+	emit := func(_ string, err error) { emitted = append(emitted, err) }
+	var stderr strings.Builder
+	report := newHookStoreFailureReport("gc hook --claim", &stderr, emit)
+	riga := &hookStoreReadError{dir: "riga", rig: "riga", err: errTestStoreTimeout}
+	rigb := &hookStoreReadError{dir: "rigb", rig: "rigb", err: errTestStoreTimeout}
+	rigc := &hookStoreReadError{dir: "rigc", rig: "rigc", err: errTestStoreTimeout}
+	secondary := &hookSecondaryStoreFailure{failures: []*hookStoreReadError{riga, rigb}}
+
+	report.failed("q", secondary)
+	report.failed("q", hookClaimRetryWindowClosed(secondary, &hookClaimOps{}))
+	report.failed("q", nil)
+	if len(emitted) != 2 || !errors.Is(emitted[0], riga) || !errors.Is(emitted[1], rigb) {
+		t.Fatalf("emitted %v, want riga's and rigb's failures, once each", emitted)
+	}
+
+	report.note(rigc)
+	report.note(rigc)
+	if len(emitted) != 2 {
+		t.Fatalf("emitted %v; a failure the answer did not stop on is not a failed query", emitted)
+	}
+	if got := strings.Count(stderr.String(), `rig "rigc"`); got != 1 {
+		t.Fatalf("stderr names rigc %d times, want once: %q", got, stderr.String())
+	}
+
+	report.failed("q", errTestStoreTimeout)
+	if len(emitted) != 3 || !errors.Is(emitted[2], errTestStoreTimeout) {
+		t.Fatalf("emitted %v, want the own store's failure emitted as itself", emitted)
 	}
 }
 
