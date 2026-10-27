@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -29,6 +30,7 @@ import (
 //	FAKE_REMOTE_URLS         "hq=git+ssh://host/repo" (default file:///example.invalid/<db>)
 //	FAKE_NO_REMOTE_DBS       databases with no configured remote
 //	FAKE_AHEAD / FAKE_BEHIND commit counts the classify queries report (default 1 / 0)
+//	FAKE_AHEAD_AFTER_PUSH    ahead count once db has been pushed (default: FAKE_AHEAD)
 //	FAKE_PUSH_FAIL_DBS       databases whose DOLT_PUSH fails
 type proxiedSyncFakeGC struct {
 	logPath  string
@@ -96,7 +98,9 @@ case "$q" in
   "CALL DOLT_FETCH("*)
     printf 'status\n0\n' ;;
   *"dolt_log('remotes/"*"..main')"*)
-    printf 'n\n%%s\n' "${FAKE_AHEAD:-1}" ;;
+    ahead=${FAKE_AHEAD:-1}
+    if [ -s "$state/$db.pushes" ] && [ -n "${FAKE_AHEAD_AFTER_PUSH:-}" ]; then ahead=$FAKE_AHEAD_AFTER_PUSH; fi
+    printf 'n\n%%s\n' "$ahead" ;;
   *"dolt_log('main..remotes/"*)
     printf 'n\n%%s\n' "${FAKE_BEHIND:-0}" ;;
   "CALL DOLT_PUSH("*)
@@ -123,7 +127,12 @@ func (f proxiedSyncFakeGC) log(t *testing.T) string {
 	return string(data)
 }
 
-// pushes returns the DOLT_PUSH statements the fake recorded for db.
+// proxiedPushTag matches the reaper tag sync appends to every DOLT_PUSH
+// (dolt_push_tag in runtime.sh). It must survive the trip through gc bd sql.
+var proxiedPushTag = regexp.MustCompile(` /\* gc-dolt-sync:[0-9]+:[A-Za-z0-9_-]+ \*/$`)
+
+// pushes returns the DOLT_PUSH statements the fake recorded for db, each with
+// its reaper tag checked and stripped.
 func (f proxiedSyncFakeGC) pushes(t *testing.T, db string) []string {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(f.stateDir, db+".pushes"))
@@ -133,7 +142,14 @@ func (f proxiedSyncFakeGC) pushes(t *testing.T, db string) []string {
 	if err != nil {
 		t.Fatalf("read pushes for %s: %v", db, err)
 	}
-	return strings.Split(strings.TrimSpace(string(data)), "\n")
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	for i, line := range lines {
+		if !proxiedPushTag.MatchString(line) {
+			t.Fatalf("%s push %q lacks the gc-dolt-sync reaper tag", db, line)
+		}
+		lines[i] = proxiedPushTag.ReplaceAllString(line, "")
+	}
+	return lines
 }
 
 // newProxiedSyncCity lays out a proxied city and installs the fake gc. dolt and
@@ -444,4 +460,40 @@ func TestSyncProxiedRefusesGC(t *testing.T) {
 	if data, readErr := os.ReadFile(fake.logPath); readErr == nil && len(data) > 0 {
 		t.Fatalf("sync reached a scope before refusing --gc:\n%s", data)
 	}
+}
+
+// TestSyncProxiedDrainVerifiesThroughGCBD covers the fork's --drain mode on a
+// proxied city: there is no managed server to refuse on, and the post-push
+// residual re-fetch and re-classification go through gc bd like every other
+// query.
+func TestSyncProxiedDrainVerifiesThroughGCBD(t *testing.T) {
+	t.Run("drained", func(t *testing.T) {
+		cityPath, binDir, fake := newProxiedSyncCity(t)
+		out, err := runProxiedSync(t, binDir, cityPath, []string{"FAKE_AHEAD_AFTER_PUSH=0"}, "--drain")
+		if err != nil {
+			t.Fatalf("proxied sync --drain failed: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "  hq: pushed main -> origin:main (file:///example.invalid/hq) [backlog 0, verified]") {
+			t.Fatalf("output missing the verified-drain line:\n%s", out)
+		}
+		if got := fake.pushes(t, "hq"); len(got) != 1 {
+			t.Fatalf("hq pushes = %q, want one", got)
+		}
+		if n := strings.Count(fake.log(t), "CALL DOLT_FETCH("); n != 2 {
+			t.Fatalf("DOLT_FETCH calls = %d, want 2 (pre-push and residual):\n%s", n, fake.log(t))
+		}
+	})
+	t.Run("not drained", func(t *testing.T) {
+		cityPath, binDir, fake := newProxiedSyncCity(t)
+		out, err := runProxiedSync(t, binDir, cityPath, nil, "--drain")
+		if err == nil {
+			t.Fatalf("proxied sync --drain succeeded with a residual backlog:\n%s", out)
+		}
+		if !strings.Contains(out, "BACKLOG NOT DRAINED:") {
+			t.Fatalf("output missing the undrained summary:\n%s", out)
+		}
+		if got := fake.pushes(t, "hq"); len(got) != 3 {
+			t.Fatalf("hq pushes = %q, want 3 drain rounds", got)
+		}
+	})
 }
