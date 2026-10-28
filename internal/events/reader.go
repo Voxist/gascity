@@ -861,9 +861,9 @@ func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) 
 }
 
 // ReadLatestMatch returns the newest event matching filter, scanning the
-// live file tail-first, then any in-flight rotating-* files (the previous
-// active log, not yet archived), then sibling archives newest-first,
-// stopping at the first source that yields a match. ok is false when no match
+// live file tail-first, then the rotated history (sibling archives and any
+// in-flight rotating-* files) newest seq window first, stopping at the first
+// source that yields a match. ok is false when no match
 // exists anywhere. This is the primitive for "latest occurrence of a
 // rare event" queries (e.g. controller.started, ~2 events across weeks):
 // a Since window is unsafe there — it returns zero matches whenever the
@@ -894,43 +894,8 @@ func ReadLatestMatch(path string, filter Filter) (Event, bool, []string, error) 
 		}
 	}
 
-	rotated, ok, warnings := latestMatchInRotating(filepath.Dir(path), filter)
-	if ok {
-		return rotated, true, warnings, nil
-	}
-
-	archives, err := archiveFilesIn(filepath.Dir(path))
-	if err != nil {
-		// Dir unlistable (usually: doesn't exist) — no archives to consult.
-		return Event{}, false, warnings, nil
-	}
-	for i := len(archives) - 1; i >= 0; i-- {
-		info := archives[i]
-		if !archiveOverlapsFilter(info, filter) {
-			continue
-		}
-		// Within an archive events are oldest-first, so the whole archive
-		// is streamed and the last match kept — O(1 archive) for the
-		// typical rare-event query, independent of total history size.
-		var last Event
-		var found bool
-		archivePath := filepath.Join(filepath.Dir(path), info.Basename)
-		err := streamArchive(archivePath, filter, func(e Event) bool {
-			if matchesFilter(e, filter) {
-				last = e
-				found = true
-			}
-			return true
-		})
-		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("skipped unreadable archive %q: %v", info.Basename, err))
-			continue
-		}
-		if found {
-			return last, true, warnings, nil
-		}
-	}
-	return Event{}, false, warnings, nil
+	ev, ok, warnings := latestMatchInHistory(filepath.Dir(path), filter)
+	return ev, ok, warnings, nil
 }
 
 // ReadLatestSeq returns the highest complete event Seq the log holds: in

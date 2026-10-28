@@ -93,3 +93,32 @@ func TestReadLatestMatchFallsThroughRotatingFileToArchive(t *testing.T) {
 		t.Fatalf("warnings = %v, want none", warnings)
 	}
 }
+
+// TestReadLatestMatchNewerArchiveBeatsStuckRotatingFile: a rotating file whose
+// gzip failed can trail a later archive. The walk is by seq window, so the
+// newer archive's match wins over the stuck file's older one.
+func TestReadLatestMatchNewerArchiveBeatsStuckRotatingFile(t *testing.T) {
+	dir := t.TempDir()
+	live := filepath.Join(dir, "events.jsonl")
+	base := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	writeRotatingEvents(t, dir, base.Add(time.Hour), 1, 2,
+		Event{Seq: 1, Type: ControllerStarted, Ts: base},
+		Event{Seq: 2, Type: OrderFired, Ts: base.Add(time.Minute)},
+	)
+	writeEventsArchive(t, dir, base.Add(2*time.Hour), 3, 4,
+		Event{Seq: 3, Type: ControllerStarted, Ts: base.Add(70 * time.Minute)},
+		Event{Seq: 4, Type: OrderFired, Ts: base.Add(80 * time.Minute)},
+	)
+	writeEventsJSONL(t, live, Event{Seq: 5, Type: OrderFired, Ts: base.Add(3 * time.Hour)})
+
+	ev, ok, warnings, err := ReadLatestMatch(live, Filter{Type: ControllerStarted})
+	if err != nil || !ok {
+		t.Fatalf("ReadLatestMatch: ok=%v err=%v, want match", ok, err)
+	}
+	if ev.Seq != 3 {
+		t.Fatalf("ev.Seq = %d, want 3 (the newer archive, not the stuck rotating file's 1)", ev.Seq)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", warnings)
+	}
+}
