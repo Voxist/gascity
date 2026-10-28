@@ -11,9 +11,8 @@ package events
 // path) apart. Every decision, and the result of an admitted run, is now
 // one event of this type, distinguished by Outcome.
 
-// ManagedDoltRecoverDecision fires for every managed-Dolt recover
-// decision and for the result of every admitted recover.
-const ManagedDoltRecoverDecision = "managed_dolt.recover_decision"
+// ManagedDoltRecoverDecision itself is declared in events.go with every
+// other event type.
 
 // ManagedDoltRecoverOutcome classifies one managed_dolt.recover_decision
 // event.

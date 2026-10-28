@@ -11,7 +11,10 @@
     "delivery": { "type": "string", "enum": ["immediate", "wait-idle", "queue"] },
     "queued": { "type": "boolean" },
     "outcome": { "type": "string", "enum": ["delivered", "queued"] },
-    "path": { "type": "string", "enum": ["storeless-fallback"] }
+    "path": { "type": "string", "enum": ["storeless-fallback"] },
+    "op_id": { "type": "string", "minLength": 1 },
+    "key": { "type": "string", "minLength": 1 },
+    "replayed": { "type": "boolean" }
   },
   "additionalProperties": true
 }

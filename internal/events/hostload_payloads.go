@@ -16,6 +16,10 @@ package events
 // HostLoadSamplePayload so the wire shape stays typed at the source.
 const HostLoadSample = "host.load_sample"
 
+// The sampler runs on the controller's CityRuntime only (DES-BX D13), so a
+// worker site may not record it.
+func init() { RegisterAuthorship(HostLoadSample, AuthorController) }
+
 // HostLoadSamplePayload is the typed payload for host.load_sample events.
 // RunnableProcs and TotalCPUPercent ride alongside the load averages
 // because load alone cannot discriminate CPU oversubscription from I/O

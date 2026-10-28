@@ -77,6 +77,7 @@ setup_repo() {
 		# Gate 3 execs this runner (GC_PREPUSH_SUITE=go above).
 		cp "$REPO_ROOT/.githooks/lib/push-suite.sh" .githooks/lib/push-suite.sh
 		chmod +x .githooks/lib/push-suite.sh
+		cp "$REPO_ROOT/.githooks/lib/local-runtime.sh" .githooks/lib/local-runtime.sh
 		cp "$REPO_ROOT/scripts/push-ownership-guard.sh" scripts/push-ownership-guard.sh
 		printf '#!/usr/bin/env bash\nexit 0\n' >scripts/check-resync-loss.sh
 		chmod +x scripts/check-resync-loss.sh

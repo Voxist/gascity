@@ -90,6 +90,7 @@ go_test(
         "filenames_test.go",
         "filter_test.go",
         "last_run_skip_test.go",
+        "order_requires_backend_test.go",
         "order_test.go",
         "override_test.go",
         "run_on_test.go",

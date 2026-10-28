@@ -18,15 +18,15 @@ import (
 // transport breaker holds open is dropped from the sweep, loudly, and every
 // other scope is swept as before.
 
-// prefixedStore is a MemStore-backed beads.Store standing in for one scope's
+// breakerSweepScopeStore is a MemStore-backed beads.Store standing in for one scope's
 // bead store; prefix only makes failures readable.
-type prefixedStore struct {
+type breakerSweepScopeStore struct {
 	beads.Store
 	prefix string
 }
 
-func newPrefixedStore(prefix string) *prefixedStore {
-	return &prefixedStore{Store: beads.NewMemStore(), prefix: prefix}
+func newBreakerSweepScopeStore(prefix string) *breakerSweepScopeStore {
+	return &breakerSweepScopeStore{Store: beads.NewMemStore(), prefix: prefix}
 }
 
 // degradeScope opens a scope's REAL transport breaker the way the bd runner
@@ -66,8 +66,8 @@ func TestDegradedStoresAreDroppedFromTheTickSweep(t *testing.T) {
 	sickRoot, wellRoot := t.TempDir(), t.TempDir()
 	degradeScope(t, cityPath, sickRoot)
 
-	sick := sweepScoped(newPrefixedStore("vcnysick"), `rig "sick"`, sickRoot)
-	well := sweepScoped(newPrefixedStore("vcnywell"), `rig "well"`, wellRoot)
+	sick := sweepScoped(newBreakerSweepScopeStore("vcnysick"), `rig "sick"`, sickRoot)
+	well := sweepScoped(newBreakerSweepScopeStore("vcnywell"), `rig "well"`, wellRoot)
 
 	var stderr bytes.Buffer
 	kept := filterDegradedSweepStores(cityPath, []beads.Store{sick, well}, &stderr, "test")
@@ -89,8 +89,8 @@ func TestDegradedStoresAreDroppedFromTheTickSweep(t *testing.T) {
 func TestHealthyStoresSurviveTheSweepFilterUntouched(t *testing.T) {
 	cityPath := writeBreakerTestCity(t, "")
 	stores := []beads.Store{
-		sweepScoped(newPrefixedStore("vcnya"), `rig "a"`, t.TempDir()),
-		sweepScoped(newPrefixedStore("vcnyb"), `rig "b"`, t.TempDir()),
+		sweepScoped(newBreakerSweepScopeStore("vcnya"), `rig "a"`, t.TempDir()),
+		sweepScoped(newBreakerSweepScopeStore("vcnyb"), `rig "b"`, t.TempDir()),
 	}
 	var stderr bytes.Buffer
 	kept := filterDegradedSweepStores(cityPath, stores, &stderr, "test")

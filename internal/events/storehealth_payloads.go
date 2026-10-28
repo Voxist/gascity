@@ -6,28 +6,10 @@ package events
 // through the bd runner), the controller reconcile loop, and the
 // supervisor-cadence doctor.
 //
-// Every constant below is added to KnownEventTypes (events.go) so the
-// Principle-7 coverage test (TestEveryKnownEventTypeHasRegisteredPayload)
-// forces a registered payload to exist for each one.
-
-const (
-	// BreakerStateChanged fires on every resilience breaker state
-	// transition (closed/open/half-open), wired from the breaker
-	// registry's state-change callback.
-	BreakerStateChanged = "breaker.state_changed"
-	// ControllerTickCompleted is the controller heartbeat, emitted once
-	// per completed reconcile tick. The unsampled stream is both the
-	// supervisor doctor's tick-age/slow-tick signal and a sound basis for
-	// tick-period arithmetic — the earlier breach-or-every-10th sampling
-	// made it a biased sample that was complete only by coincidence
-	// (vp-qvqk). One event per tick is patrol-cadence volume, not a hot
-	// path.
-	ControllerTickCompleted = "controller.tick_completed"
-	// DoctorAlert fires when the supervisor-cadence doctor evaluates a
-	// cheap check to red. It is the detector that closes the
-	// detection-at-human-cadence hole (incidents 5 and 11).
-	DoctorAlert = "doctor.alert"
-)
+// The constants are declared in events.go, where every event type lives
+// (TestEveryDeclaredEventTypeHasAnAuthorship scans that file), and are in
+// KnownEventTypes so TestEveryKnownEventTypeHasRegisteredPayload forces a
+// registered payload to exist for each one.
 
 // BreakerStateChangedPayload is the typed payload for
 // breaker.state_changed events. Mirrors resilience.Transition without

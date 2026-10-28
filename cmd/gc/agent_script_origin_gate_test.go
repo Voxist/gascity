@@ -109,12 +109,13 @@ func TestAgentScriptStillFailsWhenWorkQueryExitsNonZero(t *testing.T) {
 	if hookStderr.Len() != 0 {
 		t.Fatalf("a failed query's stderr must ride the error, not the diag stream: %q", hookStderr.String())
 	}
-	// doHook renders that error the way gc hook does; the classifier must
-	// still call it a failure.
+	// doHook renders that error the way gc hook does: every work-query
+	// failure exits 2 (reportWorkQueryFailure), never the empty-queue exit 1,
+	// and the classifier must still call it a failure.
 	var stdout, stderr bytes.Buffer
 	code := doHook("q", "", false, func(string, string) (string, error) { return "", err }, &stdout, &stderr, hookVisibility{})
-	if code != 1 {
-		t.Fatalf("doHook = %d, want 1", code)
+	if code != 2 {
+		t.Fatalf("doHook = %d, want 2", code)
 	}
 	if agentScriptHookExitIsNoWork(code, stdout.String(), stderr.String()) {
 		t.Fatalf("a failed work query was classified as no-work:\nstderr=%q", stderr.String())

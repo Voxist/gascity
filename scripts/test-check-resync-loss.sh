@@ -1493,6 +1493,7 @@ install_resync_hook() {
 	# below) makes it run the stub Makefile's test-fast-parallel, not bazel.
 	cp "$REPO_ROOT/.githooks/lib/push-suite.sh" "$repo/.githooks/lib/push-suite.sh"
 	chmod +x "$repo/.githooks/lib/push-suite.sh"
+	cp "$REPO_ROOT/.githooks/lib/local-runtime.sh" "$repo/.githooks/lib/local-runtime.sh"
 	cp "$REPO_ROOT/scripts/push-ownership-guard.sh" "$repo/scripts/push-ownership-guard.sh"
 	cp "$resync_script" "$repo/scripts/check-resync-loss.sh"
 	chmod +x "$repo/scripts/check-resync-loss.sh"

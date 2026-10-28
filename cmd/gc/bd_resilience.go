@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/resilience"
 )
@@ -30,6 +31,12 @@ func bdResilienceSettingsForCity(cityPath string) resilience.Settings {
 	if err != nil || cfg == nil {
 		return resilience.DefaultSettings()
 	}
+	return bdResilienceSettingsFromConfig(cfg)
+}
+
+// bdResilienceSettingsFromConfig resolves [beads.resilience] from a loaded
+// city config.
+func bdResilienceSettingsFromConfig(cfg *config.City) resilience.Settings {
 	r := cfg.Beads.Resilience
 	return resilience.Settings{
 		Enabled:             r.EnabledOrDefault(),
@@ -58,10 +65,39 @@ func bdResilienceRegistryForCity(cityPath string) *resilience.Registry {
 	if reg, ok := bdResilience.registries[key]; ok {
 		return reg
 	}
-	reg := resilience.NewRegistry(settings)
-	reg.SetOnStateChange(breakerStateChangeEmitter(key))
+	reg := newBdResilienceRegistry(key, settings)
 	bdResilience.registries[key] = reg
 	return reg
+}
+
+// newBdResilienceRegistry builds a city's breaker registry, wired to record
+// its transitions into the city's event log.
+func newBdResilienceRegistry(key string, settings resilience.Settings) *resilience.Registry {
+	reg := resilience.NewRegistry(settings)
+	reg.SetOnStateChange(breakerStateChangeEmitter(key))
+	return reg
+}
+
+// seedBdTransportGuardsForCity builds the city's breaker registry and bd
+// admission controller from cfg when this process has neither yet. A one-shot
+// invocation that already loaded cfg then does not load it a second and third
+// time on its first bd call. Either guard already present is left as is.
+func seedBdTransportGuardsForCity(cityPath string, cfg *config.City) {
+	if cfg == nil {
+		return
+	}
+	key := filepath.Clean(cityPath)
+	bdResilience.mu.Lock()
+	if _, ok := bdResilience.registries[key]; !ok {
+		bdResilience.registries[key] = newBdResilienceRegistry(key, bdResilienceSettingsFromConfig(cfg))
+	}
+	bdResilience.mu.Unlock()
+	perScope, global, maxWait := bdAdmissionCapsFromConfig(cfg)
+	bdAdmissionRegistry.mu.Lock()
+	if _, ok := bdAdmissionRegistry.controllers[key]; !ok {
+		bdAdmissionRegistry.controllers[key] = newBdAdmission(key, perScope, global, maxWait)
+	}
+	bdAdmissionRegistry.mu.Unlock()
 }
 
 // breakerStateChangeEmitter returns a resilience state-change callback that

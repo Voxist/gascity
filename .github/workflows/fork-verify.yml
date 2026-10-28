@@ -25,7 +25,7 @@ permissions:
   contents: read
 
 env:
-  DOLT_VERSION: "2.2.0"
+  DOLT_VERSION: "2.6.0"
   BD_VERSION: "v1.94.1" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
   BD_REPO: "Voxist/beads"
   BD_SOURCE_REF: "e4f98340d71ca96744f1f3f5f50e6468066706ca" # fork-tip bd commit (schema 0069) — built from BD_REPO source by install-bd-archive.sh
@@ -106,14 +106,18 @@ jobs:
         run: make test-cover-noncmdgc-shard NONCMDGC_COVER_SHARD=${{ matrix.shard }} NONCMDGC_COVER_TOTAL=3
 
   unit-cmdgc:
-    name: unit (cmd/gc ${{ matrix.shard }} of 6)
+    name: unit (cmd/gc ${{ matrix.shard }} of 8)
     if: ${{ github.repository != 'gastownhall/gascity' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6]
+        # 8, not 6: each shard passes its tests to go test as one -run regex,
+        # and Linux caps a single argv string at 128 KiB (MAX_ARG_STRLEN). At
+        # 6 shards the 2026-10-27 resync pushed a shard to ~132 KB, so exec
+        # failed with E2BIG and go test exited 2 before running anything.
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu
@@ -121,5 +125,5 @@ jobs:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "false"
-      - name: Unit tests (cmd/gc shard ${{ matrix.shard }} of 6)
-        run: make test-cover-cmdgc-shard CMD_GC_COVER_SHARD=${{ matrix.shard }} CMD_GC_COVER_TOTAL=6
+      - name: Unit tests (cmd/gc shard ${{ matrix.shard }} of 8)
+        run: make test-cover-cmdgc-shard CMD_GC_COVER_SHARD=${{ matrix.shard }} CMD_GC_COVER_TOTAL=8

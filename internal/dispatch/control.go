@@ -285,8 +285,10 @@ func evaluateRetryAttempt(store beads.Store, bead, attempt beads.Bead, _ int, op
 // evaluateRalphIteration propagates the iteration's non-gc metadata onto the
 // ralph control, reloads the control so the check sees the updated values, and
 // runs the check script. An iteration that failed hard closes the control as a
-// hard failure without running the check; a GatePass closes the control;
-// anything else spawns the next iteration or exhausts.
+// hard failure without running the check; a GatePass closes the control; a
+// run without a verdict re-runs the check attempt-free while the
+// infrastructure budget lasts (spendCheckInfraRetry); anything else spawns the
+// next iteration or exhausts.
 func evaluateRalphIteration(store beads.Store, bead, iteration beads.Bead, iterationNum int, opts ProcessOptions) (attemptEvaluation, error) {
 	// Propagate non-gc metadata from the iteration to the ralph control BEFORE
 	// running the check. This makes the iteration's output (e.g.,
@@ -314,6 +316,25 @@ func evaluateRalphIteration(store beads.Store, bead, iteration beads.Bead, itera
 	checkResult, err := runRalphCheck(store, reloaded, iteration, iterationNum, opts)
 	if err != nil {
 		return attemptEvaluation{}, fmt.Errorf("%s: running check: %w", bead.ID, err)
+	}
+	// A check that ran past its timeout, or read blind (exit 75 or a typed
+	// stderr marker), produced no verdict: re-run it on a later sweep against
+	// this same iteration, charged to the control's infrastructure budget
+	// instead of an attempt. Returning before the attempt log is written
+	// leaves the control untouched. A GateError is a failed start
+	// (formula-spec-v2 §3.1) and is graded like any failure, as is a blind
+	// read once the budget is spent: the outcome itself is left as the gate
+	// reported it.
+	infra := checkResult.Outcome == convergence.GateTimeout
+	if reason, blind := convergence.ClassifyInfraBlind(checkResult); blind {
+		opts.tracef("ralph check-infra-blind bead=%s attempt=%d reason=%s exit=%s",
+			bead.ID, iterationNum, reason, formatGateExitCode(checkResult.ExitCode))
+		infra = true
+	}
+	if infra {
+		if err := spendCheckInfraRetry(store, reloaded, checkResult.Outcome, iterationNum, opts); err != nil {
+			return attemptEvaluation{}, err
+		}
 	}
 	eval := attemptEvaluation{logOutcome: checkResult.Outcome, logDetail: checkResult.Stderr}
 	if checkResult.Outcome == convergence.GatePass {
@@ -1082,6 +1103,8 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 	}
 	var fanoutSteps []formula.RecipeStep
 	var fanoutDeps []formula.RecipeDep
+	var fanoutControls []formula.RecipeStep
+	fanoutControlByStep := make(map[string]string)
 	var nestedSeedSteps []formula.RecipeStep
 	var nestedSeedDeps []formula.RecipeDep
 
@@ -1200,6 +1223,8 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 			if fanoutStep, fanoutDep, ok := buildAttemptRecipeFanoutControl(childStep, child.OnComplete); ok {
 				fanoutSteps = append(fanoutSteps, fanoutStep)
 				fanoutDeps = append(fanoutDeps, fanoutDep)
+				fanoutControls = append(fanoutControls, fanoutStep)
+				fanoutControlByStep[childStep.ID] = fanoutStep.ID
 			}
 			// No parent-child dep to the iteration scope — it creates a
 			// deadlock (scope waits for children, children wait for scope).
@@ -1218,7 +1243,15 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 		}
 	}
 
-	applyAttemptRecipeScopeChecks(recipe)
+	// Fanout convergence gates downstream work in the re-spawned attempt
+	// recipe exactly as it does at compile time: point every dep on an
+	// on_complete child at its <child>-fanout control before the scope-check
+	// pass, so a sibling that needs the child waits for the fanout children
+	// instead of racing them. The fanout controls themselves are appended
+	// after this rewrite and the scope-check pass, so their own
+	// fanout→source edge is never rewritten into a self-block.
+	formula.RewriteRecipeDepsToControls(recipe.Deps, recipe.Steps, fanoutControls, fanoutControlByStep)
+	applyAttemptRecipeScopeChecks(recipe, fanoutControlByStep)
 	recipe.Steps = append(recipe.Steps, fanoutSteps...)
 	recipe.Deps = append(recipe.Deps, fanoutDeps...)
 	// Nested-control seed steps are appended after the outer scope-check pass so
@@ -1325,7 +1358,12 @@ func buildAttemptRecipeFanoutControl(source formula.RecipeStep, onComplete *form
 // its subject step, and deps that waited on the subject are rewritten to
 // wait on the scope-check instead — except the one edge that would leave a
 // node blocked by the control that closes it (formula.RewriteRecipeDepsToControls).
-func applyAttemptRecipeScopeChecks(recipe *formula.Recipe) {
+//
+// fanoutControlByStep maps an on_complete subject step ID to its minted
+// <subject>-fanout control. When present, the scope-check also blocks on that
+// fanout control so scope finalization waits for the spawned children, exactly
+// as the compile path's scopeCheckNeeds does.
+func applyAttemptRecipeScopeChecks(recipe *formula.Recipe, fanoutControlByStep map[string]string) {
 	if recipe == nil || len(recipe.Steps) == 0 {
 		return
 	}
@@ -1370,6 +1408,13 @@ func applyAttemptRecipeScopeChecks(recipe *formula.Recipe) {
 			DependsOnID: step.ID,
 			Type:        "blocks",
 		})
+		if fanoutID := fanoutControlByStep[step.ID]; fanoutID != "" {
+			controlDeps = append(controlDeps, formula.RecipeDep{
+				StepID:      controlID,
+				DependsOnID: fanoutID,
+				Type:        "blocks",
+			})
+		}
 	}
 
 	if len(controls) == 0 {

@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "events",
     srcs = [
+        "authorship.go",
         "backend_payloads.go",
         "control_payloads.go",
         "events.go",
@@ -12,6 +13,7 @@ go_library(
         "inode_unix.go",
         "inode_windows.go",
         "managed_dolt_recover_payloads.go",
+        "mirror.go",
         "multiplexer.go",
         "order_payloads.go",
         "payload.go",
@@ -33,6 +35,7 @@ go_library(
         "stream_cursor.go",
         "supervisor_payloads.go",
         "watch_backfill.go",
+        "work_payloads.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/events",
     visibility = ["//:__subpackages__"],
@@ -50,11 +53,13 @@ go_library(
 go_test(
     name = "events_test",
     srcs = [
+        "authorship_test.go",
         "backend_payloads_test.go",
         "conformance_test.go",
         "control_payloads_test.go",
         "events_test.go",
         "latest_archived_match_test.go",
+        "mirror_test.go",
         "multiplexer_membership_test.go",
         "multiplexer_test.go",
         "order_payloads_test.go",
@@ -69,6 +74,7 @@ go_test(
         "reader_since_bounded_test.go",
         "reader_tail_active_only_test.go",
         "reader_tail_archive_test.go",
+        "reader_types_test.go",
         "recorder_batch_test.go",
         "recorder_handle_test.go",
         "recorder_readonly_test.go",
@@ -87,6 +93,8 @@ go_test(
         "type_naming_test.go",
         "watch_backfill_test.go",
     ],
+    # The authorship test parses events.go.
+    data = ["events.go"],
     embed = [":events"],
     deps = [
         "//internal/events/eventstest",

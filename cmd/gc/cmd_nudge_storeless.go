@@ -182,7 +182,7 @@ func resolveNudgeTargetStoreless(cityPath string, cfg *config.City, sp runtime.P
 // sessionNudgeStorelessEntry is cmdSessionNudge's flagged entry: resolve city,
 // config, and provider (none of which touch the bead store), then run the
 // bounded-store-attempt + storeless-fallback orchestration.
-func sessionNudgeStorelessEntry(identifier, message string, mode nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
+func sessionNudgeStorelessEntry(identifier, message string, mode nudgeDeliveryMode, key string, jsonOutput bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -198,7 +198,7 @@ func sessionNudgeStorelessEntry(identifier, message string, mode nudgeDeliveryMo
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	return sessionNudgeWithStorelessFallback(cityPath, cfg, sp, identifier, message, mode, jsonOutput, stdout, stderr)
+	return sessionNudgeWithStorelessFallback(cityPath, cfg, sp, identifier, message, mode, key, jsonOutput, stdout, stderr)
 }
 
 // sessionNudgeWithStorelessFallback attempts the normal store-backed
@@ -210,10 +210,10 @@ func sessionNudgeStorelessEntry(identifier, message string, mode nudgeDeliveryMo
 // path) and queue delivery writes the flock'd authority directly, skipping the
 // shadow bead. The degraded path is reported on stderr and in the JSON `path`
 // field.
-func sessionNudgeWithStorelessFallback(cityPath string, cfg *config.City, sp runtime.Provider, identifier, message string, mode nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
+func sessionNudgeWithStorelessFallback(cityPath string, cfg *config.City, sp runtime.Provider, identifier, message string, mode nudgeDeliveryMode, key string, jsonOutput bool, stdout, stderr io.Writer) int {
 	target, err := resolveNudgeTargetViaStoreBounded(cityPath, cfg, identifier)
 	if err == nil {
-		return deliverSessionNudge(target, message, mode, jsonOutput, stdout, stderr)
+		return deliverSessionNudge(target, message, mode, key, jsonOutput, stdout, stderr)
 	}
 	fallbackTarget, fallbackErr := resolveNudgeTargetStoreless(cityPath, cfg, sp, identifier)
 	if fallbackErr != nil {
@@ -221,5 +221,5 @@ func sessionNudgeWithStorelessFallback(cityPath string, cfg *config.City, sp run
 		return 1
 	}
 	fmt.Fprintf(stderr, "gc session nudge: warning: store-backed resolution failed (%v); delivering via storeless fallback for %q\n", err, identifier) //nolint:errcheck // best-effort stderr
-	return deliverSessionNudgeWithWorker(fallbackTarget, nil, sp, message, mode, jsonOutput, stdout, stderr)
+	return deliverSessionNudgeKeyed(fallbackTarget, nil, sp, message, mode, key, jsonOutput, stdout, stderr)
 }

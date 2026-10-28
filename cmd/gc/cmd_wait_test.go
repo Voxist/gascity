@@ -836,9 +836,9 @@ func depsEnvBDPins(t *testing.T) (bdVersion, sourceRef string, bridged bool) {
 
 func TestBuildPinnedBDBinaryForTestsUsesGoModSource(t *testing.T) {
 	// Load-bearing for the census even though waitTestRealBDPath calls it
-	// again: this is the cmd/gc+untagged slow_process_gate call site the
-	// 57 -> 58 bump accounts for across census.go, test-resources.toml, and
-	// TESTING.md. Deleting it as redundant fails the ledger gate.
+	// again: this is a cmd/gc+untagged slow_process_gate call site counted in
+	// test/test-resource-counts.toml. Deleting it as redundant fails the
+	// census gate until the counts file is regenerated.
 	skipSlowCmdGCTest(t, "builds a real bd binary from source; run make test-cmd-gc-process for full coverage")
 
 	// Route through waitTestRealBDPath so this shares waitTestRealBDPathOnce
