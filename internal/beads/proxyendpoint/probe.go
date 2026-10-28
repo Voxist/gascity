@@ -95,13 +95,14 @@ const (
 // number the library acts on. beads' migrationSource.currentVersion applies a
 // "cursor reality floor": before it believes a cursor it asks whether the live
 // schema corroborates it, and when a sentinel is missing it clamps the cursor
-// down (beads v1.3.0 internal/storage/schema/schema.go, currentVersion ->
-// cursorRealityFloor, and ignoredSource's sentinelTables/sentinelColumns at
-// :290-311; beads v1.3.1 adds sentinelFlooredTables). beads documents both
+// down (beads internal/storage/schema/schema.go, currentVersion ->
+// cursorRealityFloor, and ignoredSource's sentinelTables,
+// sentinelFlooredTables and sentinelColumns). beads documents these
 // contradicted shapes as real in the field: a
 // historical ignored-v16 ordinal collision leaves `leases` present without the
-// column 0016 adds, and a database materialized out of band can be missing the
-// wisps tables altogether.
+// column 0016 adds, a database materialized out of band can be missing the
+// wisps tables altogether, and a fresh clone arrives at-latest without the
+// dolt_ignored events and events-journal tables.
 //
 // A reader that compares only the raw MAX therefore compares a number the
 // library does not use. On a database at raw ignored=26 with `leases.
@@ -122,23 +123,40 @@ func IgnoredSentinelTables() []string {
 }
 
 // IgnoredSentinelFlooredTable is one of the ignored lane's FLOORED sentinel
-// tables (beads v1.3.1 migrationSource.sentinelFlooredTables): a dolt_ignored
-// table a fresh clone can lack while its cursor reads at-latest. Unlike a
-// sentinel TABLE, its absence disbelieves the cursor only back to Floor, the
-// highest ignored version the table's absence still leaves believable.
+// tables (beads migrationSource.sentinelFlooredTables): a dolt_ignored table a
+// fresh clone can lack while its cursor reads at-latest. Unlike a sentinel
+// TABLE, its absence disbelieves the cursor only back to Floor, the highest
+// ignored version the table's absence still leaves believable.
 type IgnoredSentinelFlooredTable struct {
 	Table string
 	Floor int
 }
 
-// ignoredSentinelFlooredTables are in the library's probing order. It is empty
-// because the beads this fork pins (go.mod, v1.3.1-0.20261001090346-46e670abbfd4)
-// declares no sentinelFlooredTables: its cursorRealityFloor does not clamp on
-// events/bd_events_journal/bd_events_seq, so probing them here would compute a
-// cursor the library never acts on. beads v1.3.1 floors them at 18, 21 and 21
-// (ignored/0019 and ignored/0022); TestIgnoredSentinelsMatchPinnedBeads fails
-// when a pin bump brings them in.
-var ignoredSentinelFlooredTables []IgnoredSentinelFlooredTable
+// ignoredSentinelFlooredTables are the pinned library's floored sentinel
+// tables, in its probing order (go.mod, v1.3.1-0.20261027095128-43f41374a34d).
+//
+// All three are dolt_ignored, so they live only in a clone's working set and a
+// fresh clone can arrive with ignored_schema_migrations at-latest but without
+// them. Each floor is the version just below the ignored migration that creates
+// the table, so the library's replay re-creates it without re-running anything
+// older:
+//
+//   - events is created by ignored/0019_create_events (the clone-local twin of
+//     main 0062, which moved events off the versioned plane), so floor 18;
+//   - bd_events_journal and bd_events_seq are both created by
+//     ignored/0022_create_events_journal (the clone-local twin of main 0064),
+//     so floor 21.
+//
+// The library floors them rather than sending them to 0, as it does a missing
+// wisps table, because a floor of 0 would replay ignored/0007's unguarded
+// `UPDATE wisps SET is_blocked = 0` over a table absence that says nothing
+// about the migrations below its creator. TestIgnoredSentinelsMatchPinnedBeads
+// fails when a pin bump changes the set, a floor or the order.
+var ignoredSentinelFlooredTables = []IgnoredSentinelFlooredTable{
+	{Table: "events", Floor: 18},
+	{Table: "bd_events_journal", Floor: 21},
+	{Table: "bd_events_seq", Floor: 21},
+}
 
 // IgnoredSentinelFlooredTables returns the ignored lane's floored sentinel
 // tables, copied so a caller cannot edit the library's facts.
@@ -887,12 +905,11 @@ func readIgnoredReality(ctx context.Context, conn *sql.Conn) (CursorReality, err
 // the sentinel tables use, and an absent table is an absent column.
 //
 // The LIKE pattern's '_' is a wildcard, so the Field comparison is the exact
-// one, and case-sensitive, as Dolt's LIKE already is and as the library's own
-// SHOW COLUMNS reads compare (hasContentHashColumn, and the sentinel probe
-// beads#7592 moves onto that shape). A column re-cased by hand, which no
-// migration produces, therefore reads as absent and floors the lane, where the
-// linked v1.3.1 sentinel probe — information_schema.columns, which folds case —
-// would believe it: that disagreement refuses an open, and never admits one.
+// one, and case-sensitive, as Dolt's LIKE already is and as the linked
+// library's own sentinel probe compares (sentinelColumnExists: the carrier
+// table's existence first, then showColumnExists). A column re-cased by hand,
+// which no migration produces, therefore reads as absent and floors the lane
+// here exactly as it does in the library.
 func readSentinelColumnPresent(ctx context.Context, conn *sql.Conn) (bool, error) {
 	tableExists, err := readExistsCount(ctx, conn, cursorExistsQuery, IgnoredSentinelColumnTable)
 	if err != nil || tableExists == 0 {
