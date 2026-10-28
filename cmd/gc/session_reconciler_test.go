@@ -14617,6 +14617,41 @@ func TestReconcileSessionBeads_UsesVisibilitySnapshotForOrphanedSessions(t *test
 	}
 }
 
+// listedNotRunningProvider lists every box its fake runs but reads each one
+// not running, as an exec pack with no is-running does. It counts the probes.
+type listedNotRunningProvider struct {
+	runtime.Provider
+	probes map[string]int
+}
+
+func (p *listedNotRunningProvider) IsRunning(name string) bool {
+	p.probes[name]++
+	return false
+}
+
+// TestReconcileSessionBeads_ProbesListedOrphanedSession: the visibility
+// snapshot short-circuits only absence. A name the runtime lists takes the
+// per-row probe, and the row is decided by what the probe reads (ga-s69mk.15).
+//
+// Kills: restoring providerAlive = visibleSet[name] on the fast path.
+func TestReconcileSessionBeads_ProbesListedOrphanedSession(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	session := env.createSessionBead("listed-0", "worker")
+	if err := env.sp.Start(context.Background(), "listed-0", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	sp := &listedNotRunningProvider{Provider: env.sp, probes: map[string]int{}}
+
+	got := reconcileTeardownTick(t, env, sp, session.ID)
+
+	if sp.probes["listed-0"] == 0 {
+		t.Fatalf("listed session was never probed; presence in the snapshot must not read as alive (stdout=%s stderr=%s)", env.stdout.String(), env.stderr.String())
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed: the probe reads the box not running, so the undesired row is orphaned (stdout=%s stderr=%s)", got.Status, env.stdout.String(), env.stderr.String())
+	}
+}
+
 // PR #209 -- skipped for now. Drained beads don't block capacity (all
 // selection paths skip them). Closing would break gc attach on drained
 // sessions. Tracked as a future cleanup task.
