@@ -51,7 +51,11 @@ state=%s
 printf 'gc %%s\n' "$*" >> "$log"
 if [ "${1:-}" = "rig" ] && [ "${2:-}" = "list" ]; then
   [ -z "${FAKE_RIG_LIST_FAIL:-}" ] || { echo "fake gc: rig list failed" >&2; exit 1; }
-  printf '%%s\n' "${FAKE_RIG_LIST_JSON:-{\"rigs\":[]\}}"
+  # Not "${FAKE_RIG_LIST_JSON:-{...\}}": bash 3.2 (macOS /bin/bash) keeps the
+  # escaping backslash in the default, which jq then rejects.
+  rigs_json=${FAKE_RIG_LIST_JSON:-}
+  [ -n "$rigs_json" ] || rigs_json='{"rigs":[]}'
+  printf '%%s\n' "$rigs_json"
   exit 0
 fi
 if [ "${1:-}" != "bd" ]; then
