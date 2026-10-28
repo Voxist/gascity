@@ -2370,13 +2370,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// uncertain second observation is refused only once the heal is
 			// already durable (ga-9uoe8). The probe cost is bounded by the
 			// configured named specs, not by the phantom backlog.
-			if (listRunErr == nil || listRunPartial) && sp != nil && !preserveConfiguredNamedSessionBeadInfo(info, cfg, cityName) {
+			if (listRunErr == nil || listRunPartial) && sp != nil && !visibleSet[name] && !preserveConfiguredNamedSessionBeadInfo(info, cfg, cityName) {
 				// Fast path: a real runtime provider produced a usable snapshot
-				// this tick, so the visibleSet map is an authoritative liveness
-				// signal — absence means dead. Decide from the O(1) snapshot with
-				// NO per-session probe (phantom-reap perf:
+				// this tick, so absence from the visibleSet map is an
+				// authoritative "dead". Decide from the O(1) snapshot with NO
+				// per-session probe (phantom-reap perf:
 				// TestReconcileSessionBeads_UsesVisibilitySnapshotForOrphanedSessions).
-				providerAlive = visibleSet[name]
+				// Presence is not "alive": a runtime can list a name its own
+				// liveness op reads not running for this row (an exec pack with
+				// no is-running), so a listed name takes the probe below, which
+				// the failed-create teardown depends on
+				// (TestManualRowTeardown_EveryCloseSite).
+				providerAlive = false
 			} else {
 				// No usable snapshot (sp==nil ⇒ nothing observed the runtime this
 				// tick, or the list errored): list-absence is NOT an authoritative
