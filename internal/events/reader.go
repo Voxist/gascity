@@ -861,8 +861,9 @@ func readFilteredTailFromFile(f *os.File, size int64, filter Filter, limit int) 
 }
 
 // ReadLatestMatch returns the newest event matching filter, scanning the
-// live file tail-first and then sibling archives newest-first, stopping
-// at the first archive that yields a match. ok is false when no match
+// live file tail-first, then any in-flight rotating-* files (the previous
+// active log, not yet archived), then sibling archives newest-first,
+// stopping at the first source that yields a match. ok is false when no match
 // exists anywhere. This is the primitive for "latest occurrence of a
 // rare event" queries (e.g. controller.started, ~2 events across weeks):
 // a Since window is unsafe there — it returns zero matches whenever the
@@ -893,12 +894,16 @@ func ReadLatestMatch(path string, filter Filter) (Event, bool, []string, error) 
 		}
 	}
 
+	rotated, ok, warnings := latestMatchInRotating(filepath.Dir(path), filter)
+	if ok {
+		return rotated, true, warnings, nil
+	}
+
 	archives, err := archiveFilesIn(filepath.Dir(path))
 	if err != nil {
 		// Dir unlistable (usually: doesn't exist) — no archives to consult.
-		return Event{}, false, nil, nil
+		return Event{}, false, warnings, nil
 	}
-	var warnings []string
 	for i := len(archives) - 1; i >= 0; i-- {
 		info := archives[i]
 		if !archiveOverlapsFilter(info, filter) {
