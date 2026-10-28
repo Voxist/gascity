@@ -2384,9 +2384,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				providerAlive = false
 			} else {
 				// No usable snapshot (sp==nil ⇒ nothing observed the runtime this
-				// tick, or the list errored): list-absence is NOT an authoritative
-				// "dead" signal, so confirm with the per-session probe, which
-				// surfaces a liveness observation error. That error drives the
+				// tick, or the list errored), or the name is listed: list-absence
+				// is then not an authoritative "dead" signal and presence is not
+				// "alive", so confirm with the per-session probe, which surfaces a
+				// liveness observation error. That error drives the
 				// fail-closed guards on the destructive !providerAlive paths below
 				// (pending-create rollback, failed-create close, drain-ack
 				// finalize, orphan close): an uncertain observation must not close

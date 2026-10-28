@@ -282,7 +282,10 @@ jobs:
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    timeout-minutes: 35
+    # Fork (ga-s69mk.16): off gastownhall/gascity this runs on GitHub-hosted
+    # macOS (runner_policy.py), where make test took 31-35 min after the
+    # 2026-10-27 resync and was cancelled at 35 with no failing test.
+    timeout-minutes: ${{ github.repository == 'gastownhall/gascity' && 35 || 50 }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
