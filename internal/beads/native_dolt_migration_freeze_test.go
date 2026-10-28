@@ -35,11 +35,14 @@ func clearAmbientMigrationFreezeEnv(t *testing.T) {
 // and proxied-only lists (a state that test independently forbids).
 func TestDirectNativeOpenEnvKeysWithholdBDAllowRemoteMigrate(t *testing.T) {
 	clearAmbientMigrationFreezeEnv(t)
-	if !slices.Contains(directNativeOpenWithheldKeys, "BD_ALLOW_REMOTE_MIGRATE") {
-		t.Fatalf("directNativeOpenWithheldKeys = %v, want it to contain BD_ALLOW_REMOTE_MIGRATE", directNativeOpenWithheldKeys)
-	}
-	if slices.Contains(nativeDoltOpenEnvKeys, "BD_ALLOW_REMOTE_MIGRATE") {
-		t.Fatal("BD_ALLOW_REMOTE_MIGRATE belongs only in directNativeOpenWithheldKeys, not in the shared nativeDoltOpenEnvKeys")
+	// Both spellings of migrate consent the linked library honours.
+	for _, consent := range []string{"BD_ALLOW_REMOTE_MIGRATE", "BD_ALLOW_MIGRATE"} {
+		if !slices.Contains(directNativeOpenWithheldKeys, consent) {
+			t.Fatalf("directNativeOpenWithheldKeys = %v, want it to contain %s", directNativeOpenWithheldKeys, consent)
+		}
+		if slices.Contains(nativeDoltOpenEnvKeys, consent) {
+			t.Fatalf("%s belongs only in directNativeOpenWithheldKeys, not in the shared nativeDoltOpenEnvKeys", consent)
+		}
 	}
 	for _, key := range nativeDoltOpenEnvKeys {
 		if !slices.Contains(directNativeOpenEnvKeys, key) {

@@ -63,8 +63,13 @@ var nativeDoltOpenEnvKeys = []string{
 // is also already listed in proxiedOnlyOpenEnvKeys — adding it here too would
 // put the same key in both lists, which that test independently forbids.
 // directNativeOpenEnvKeys below merges the two only at the point of use.
+//
+// BD_ALLOW_MIGRATE is the same consent under the name the linked library
+// (beads 43f41374a, schema/migrate_consent.go) adds for scripted callers; it is
+// withheld for the same reason.
 var directNativeOpenWithheldKeys = []string{
 	"BD_ALLOW_REMOTE_MIGRATE",
+	"BD_ALLOW_MIGRATE",
 }
 
 // directNativeOpenEnvKeys is the open-env key list every direct native open
