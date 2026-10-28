@@ -47,41 +47,6 @@ var nativeDoltOpenEnvKeys = []string{
 	"BEADS_DOLT_SHARED_SERVER",
 }
 
-// directNativeOpenWithheldKeys are keys withheld (never projected with a
-// value, always unset for the open window) from every direct native open, in
-// addition to nativeDoltOpenEnvKeys.
-//
-// ga-vwupk: the direct lane otherwise leaves an ambient BD_ALLOW_REMOTE_MIGRATE
-// (a fork-bd variable that unlocks a numbered schema migration, unrelated to
-// anything gc itself sets) untouched — inherited straight from whatever shell
-// or supervisor launched gc — while the proxied lane already withholds the
-// whole BD_ namespace (native_dolt_proxied_open.go, withWithheldPrefixesLocked
-// with bdEnvPrefix). This is a SEPARATE list rather than an addition to
-// nativeDoltOpenEnvKeys on purpose: that list is pinned to exactly the
-// fourteen BEADS_-namespace keys the direct/proxied split test
-// (TestDirectNativeOpenEnvKeyListUnchanged) asserts, and BD_ALLOW_REMOTE_MIGRATE
-// is also already listed in proxiedOnlyOpenEnvKeys — adding it here too would
-// put the same key in both lists, which that test independently forbids.
-// directNativeOpenEnvKeys below merges the two only at the point of use.
-//
-// BD_ALLOW_MIGRATE is the same consent under the name the linked library
-// (beads 43f41374a, schema/migrate_consent.go) adds for scripted callers; it is
-// withheld for the same reason.
-var directNativeOpenWithheldKeys = []string{
-	"BD_ALLOW_REMOTE_MIGRATE",
-	"BD_ALLOW_MIGRATE",
-}
-
-// directNativeOpenEnvKeys is the open-env key list every direct native open
-// (both the plain window and the WithoutAmbientEnv hermetic window) projects:
-// nativeDoltOpenEnvKeys plus directNativeOpenWithheldKeys. env never sets the
-// latter, so per withProjectedOpenEnvLocked's "absent from env" rule they are
-// always unset for the duration of the open — the shared-store gate the
-// upstream library's migration path checks (store.go) is the one place
-// BD_ALLOW_REMOTE_MIGRATE could otherwise slip a migration in past the
-// ga-vwupk freeze check above it.
-var directNativeOpenEnvKeys = append(append([]string(nil), nativeDoltOpenEnvKeys...), directNativeOpenWithheldKeys...)
-
 func nativeDoltOperationContext(parent context.Context) (context.Context, context.CancelFunc) {
 	if parent == nil {
 		parent = context.Background()
@@ -154,8 +119,9 @@ func withNativeDoltOpenEnvAndCredentialCommand(env map[string]string, credential
 // open environment while nativeDoltOpenEnvMu is already held. The lock-aware
 // form is used by hermetic opens, which must withhold the whole BEADS_ namespace
 // and project the selected keys as one indivisible environment transition.
-// BDAllowRemoteMigrateEnvKey is projected from env as well, so the linked
-// library sees it only when the caller decided it.
+// bdRemoteMigrateOpenEnvKeys are projected from env as well, so the linked
+// library sees its migrate-consent and skew switches only when the caller
+// decided them.
 func withNativeDoltOpenEnvAndCredentialCommandLocked(env map[string]string, credentialCommand string) (func(), error) {
 	restoreScoped, err := withProjectedOpenEnvLocked(nativeDoltOpenEnvKeys, env, credentialCommand)
 	if err != nil {
@@ -184,7 +150,14 @@ const BDAllowRemoteMigrateEnvKey = "BD_ALLOW_REMOTE_MIGRATE"
 // bdRemoteMigrateOpenEnvKeys is the projection list for
 // BDAllowRemoteMigrateEnvKey. It stays out of nativeDoltOpenEnvKeys, which
 // lists the BEADS_ keys a direct open decides.
-var bdRemoteMigrateOpenEnvKeys = []string{BDAllowRemoteMigrateEnvKey}
+//
+// Fork (ga-s69mk.18): it also decides the linked library's other gate
+// switches, so an ambient value never reaches the open: BD_ALLOW_MIGRATE is
+// the migrate consent beads 43f41374a adds (schema/migrate_consent.go), and
+// BD_IGNORE_SCHEMA_SKEW turns the library's skew refusal into a warning. gc
+// never sets either, so both are always unset for the open window, as the
+// proxied lane already has them through its BD_ prefix withholding.
+var bdRemoteMigrateOpenEnvKeys = []string{BDAllowRemoteMigrateEnvKey, "BD_ALLOW_MIGRATE", "BD_IGNORE_SCHEMA_SKEW"}
 
 // withProjectedOpenEnvLocked is the projection itself, parameterised by the key
 // list it decides.

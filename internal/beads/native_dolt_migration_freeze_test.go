@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -25,39 +24,46 @@ func clearAmbientMigrationFreezeEnv(t *testing.T) {
 	t.Setenv(migrationFreezeEnvFile, "")
 }
 
-// TestDirectNativeOpenEnvKeysWithholdBDAllowRemoteMigrate pins the ga-vwupk
-// structure directly, alongside the behavioral tests below: a SEPARATE
-// withheld-keys list (directNativeOpenWithheldKeys), merged only at the
-// point of use into directNativeOpenEnvKeys, rather than an addition to the
-// shared nativeDoltOpenEnvKeys — which TestDirectNativeOpenEnvKeyListUnchanged
-// (native_dolt_proxied_open_test.go) pins to exactly its original fourteen
-// BEADS_ keys, and which would otherwise land the same key in both the direct
-// and proxied-only lists (a state that test independently forbids).
-func TestDirectNativeOpenEnvKeysWithholdBDAllowRemoteMigrate(t *testing.T) {
+// TestDirectNativeOpenWindowWithholdsAmbientLibraryGates checks the
+// environment the linked library actually sees inside a direct native open
+// window (ga-vwupk, ga-s69mk.18). An ambient migrate consent or skew override
+// exported by the operator's shell must not reach the open. Only a value the
+// caller passes in env does, which is how gc carries a city's
+// beads.allow_schema_behind_migrate opt-in.
+func TestDirectNativeOpenWindowWithholdsAmbientLibraryGates(t *testing.T) {
 	clearAmbientMigrationFreezeEnv(t)
-	// Both spellings of migrate consent the linked library honours.
-	for _, consent := range []string{"BD_ALLOW_REMOTE_MIGRATE", "BD_ALLOW_MIGRATE"} {
-		if !slices.Contains(directNativeOpenWithheldKeys, consent) {
-			t.Fatalf("directNativeOpenWithheldKeys = %v, want it to contain %s", directNativeOpenWithheldKeys, consent)
-		}
-		if slices.Contains(nativeDoltOpenEnvKeys, consent) {
-			t.Fatalf("%s belongs only in directNativeOpenWithheldKeys, not in the shared nativeDoltOpenEnvKeys", consent)
-		}
+	gates := []string{"BD_ALLOW_REMOTE_MIGRATE", "BD_ALLOW_MIGRATE", "BD_IGNORE_SCHEMA_SKEW"}
+	for _, key := range gates {
+		t.Setenv(key, "1")
 	}
-	for _, key := range nativeDoltOpenEnvKeys {
-		if !slices.Contains(directNativeOpenEnvKeys, key) {
-			t.Errorf("directNativeOpenEnvKeys drops shared key %q", key)
-		}
+
+	restore, err := withNativeDoltOpenEnvAndCredentialCommand(map[string]string{}, "")
+	if err != nil {
+		t.Fatalf("open window: %v", err)
 	}
-	for _, key := range directNativeOpenWithheldKeys {
-		if !slices.Contains(directNativeOpenEnvKeys, key) {
-			t.Errorf("directNativeOpenEnvKeys drops withheld key %q", key)
+	for _, key := range gates {
+		if v, ok := os.LookupEnv(key); ok {
+			t.Errorf("inside the direct open window %s=%q, want it unset", key, v)
 		}
 	}
-	if len(directNativeOpenEnvKeys) != len(nativeDoltOpenEnvKeys)+len(directNativeOpenWithheldKeys) {
-		t.Errorf("directNativeOpenEnvKeys has %d keys, want %d + %d",
-			len(directNativeOpenEnvKeys), len(nativeDoltOpenEnvKeys), len(directNativeOpenWithheldKeys))
+	restore()
+	for _, key := range gates {
+		if got := os.Getenv(key); got != "1" {
+			t.Errorf("after the window %s=%q, want the ambient value restored", key, got)
+		}
 	}
+
+	restore, err = withNativeDoltOpenEnvAndCredentialCommand(map[string]string{BDAllowRemoteMigrateEnvKey: "1"}, "")
+	if err != nil {
+		t.Fatalf("open window with opt-in: %v", err)
+	}
+	if got := os.Getenv(BDAllowRemoteMigrateEnvKey); got != "1" {
+		t.Errorf("caller-decided %s=%q inside the window, want 1", BDAllowRemoteMigrateEnvKey, got)
+	}
+	if v, ok := os.LookupEnv("BD_ALLOW_MIGRATE"); ok {
+		t.Errorf("BD_ALLOW_MIGRATE=%q leaked alongside the caller's opt-in, want unset", v)
+	}
+	restore()
 }
 
 // writeMigrationFreezeMarker writes a MIGRATION-FREEZE marker at scopeRoot's
