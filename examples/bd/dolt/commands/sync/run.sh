@@ -17,6 +17,12 @@
 # would restart its retired proxy. --gc is refused there (purge each scope
 # with `gc bd purge`).
 #
+# Fork: on a proxied city each push runs inside bd's Dolt child, in that
+# child's environment, and gc strips secret-named variables (TOKEN, SECRET,
+# PASSWORD, ACCESS_KEY, CREDENTIAL) from the bd it starts. Credentials for a
+# network remote must therefore come from files (`dolt creds`,
+# ~/.aws/credentials) or ssh-agent, never from environment variables.
+#
 # Refspec resolution (per database):
 #   1. GC_DOLT_REFSPEC_<DB_UPPER> env var override, in <local>:<remote> form
 #      (e.g. GC_DOLT_REFSPEC_GA=main:gascity-3). DB name is uppercased with
@@ -685,15 +691,20 @@ sync_database_sql() {
       # (every attempt dies at the same wall). Threshold is 90% of the live
       # deadline: comfortably above fast-failure noise (e.g. a corrupt remote,
       # vp-catlj) and below the deadline itself.
-      deadline=$(listener_read_timeout_secs)
-      threshold=$(( deadline * 9 / 10 ))
-      if [ "$fetch_elapsed" -ge "$threshold" ]; then
+      #
+      # A proxied scope's listener is bd's, which gc's dolt-config.yaml does
+      # not describe, and its elapsed time includes the gc/bd start-up, so the
+      # wall cannot be told apart there: report the failure as it is.
+      deadline=""
+      [ "$proxied" = true ] || deadline=$(listener_read_timeout_secs)
+      if [ -n "$deadline" ] && [ "$fetch_elapsed" -ge $(( deadline * 9 / 10 )) ]; then
         rm -f "$fetch_err_tmp"
         echo "  $name: COLD-OPEN WALL — fetch killed at ${fetch_elapsed}s (listener deadline ${deadline}s); NO off-box copy this server lifetime — skipped (NOT pushed)" >&2
         cold_wall_stores="$cold_wall_stores $name"
+        last_fail_reason="cold-open wall: fetch killed at ${fetch_elapsed}s"
         return 1
       fi
-      echo "  $name: fetch failed (exit $fetch_rc) after ${fetch_elapsed}s (listener deadline ${deadline}s) — skipped (NOT pushed)" >&2
+      echo "  $name: fetch failed (exit $fetch_rc) after ${fetch_elapsed}s${deadline:+ (listener deadline ${deadline}s)} — skipped (NOT pushed)" >&2
       if [ -s "$fetch_err_tmp" ]; then
         while IFS= read -r line || [ -n "$line" ]; do
           printf '  %s: %s\n' "$name" "$line" >&2
