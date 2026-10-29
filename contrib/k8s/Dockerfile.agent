@@ -22,18 +22,18 @@ FROM golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d744
 # FORK-FIRST BRIDGE (supersedes the ADR-0026 C5 upstream bridge; ga-zzcjs) —
 # keep in lockstep with deps.env. BD_VERSION is the version string the pinned
 # source declares; BD_SOURCE_REF is the commit built from. No published
-# upstream release carries schema 0069 yet, so this image builds bd from the
-# Voxist/beads fork tip, whose newest upstream ancestor (BD_LIB_REF
-# 46e670abbfd4) is the commit gc's go.mod links — same schema, no skew.
-# BD_SOURCE_REF is the commit the fork's annotated v1.94.1 tag names
-# (e4f98340d); see deps.env.
-# Retire the bridge once a release >= 0069 exists on a module-resolvable repo:
+# upstream release carries schema 0072 yet, so this image builds bd from the
+# Voxist/beads fork, whose newest upstream ancestor (BD_LIB_REF
+# 43f41374a34d) is the commit gc's go.mod links — same schema, no skew.
+# BD_SOURCE_REF is the commit the fork's annotated v1.95.0 tag names
+# (4ff2418f7); see deps.env.
+# Retire the bridge once a release >= 0072 exists on a module-resolvable repo:
 # set BD_VERSION to that tag and drop BD_SOURCE_REF/BD_SOURCE_SHA256.
-ARG BD_VERSION=v1.94.1
+ARG BD_VERSION=v1.95.0
 ARG BD_REPO=Voxist/beads
-ARG BD_SOURCE_REF=e4f98340d71ca96744f1f3f5f50e6468066706ca
-ARG BD_SOURCE_SHA256=ccb79109dec924f1eb1bac21b445eaeb61b3725528acaa9476c2d544620dbe8a
-ARG BD_BUILD=e4f98340d
+ARG BD_SOURCE_REF=4ff2418f74b0d9d5e7cca19dfae40cca786d73bd
+ARG BD_SOURCE_SHA256=92ba2d745ae83d0d4f6a6e5d6cd327d3c5360b3597dd22620ef5288af795c9a7
+ARG BD_BUILD=4ff2418f7
 ARG BD_BRANCH=HEAD
 # 1.83.2, not 1.83.1: CVE-2026-84445 (HIGH) covers <=1.83.1. The pinned
 # source declares 1.83.2, so this is a match, not an override.
@@ -42,17 +42,17 @@ ARG GRPC_VERSION=1.83.2
 # what the module graph then selects is a silent downgrade (ga-0emb8). Every
 # override here must be >= what the pinned source resolves.
 ARG XTEXT_VERSION=0.42.0
-# The pinned beads source declares x/crypto 0.56.0 and x/mod 0.40.0, which
-# already clear CVE-2026-56854 (CRITICAL, fixed 0.55.0) and CVE-2026-56864
-# (HIGH, fixed 0.40.0). The image scan gates HIGH+CRITICAL with --exit-code 1.
+# The pinned beads source declares x/crypto 0.57.0 and x/mod 0.41.0, which
+# clear CVE-2026-56854 (CRITICAL, fixed 0.55.0) and CVE-2026-56864 (HIGH,
+# fixed 0.40.0). The image scan gates HIGH+CRITICAL with --exit-code 1.
 # x/net 0.60.0 requires x/crypto 0.57.0, and x/text 0.42.0 requires x/mod
 # 0.41.0, so both sit at those resolved versions; holding either lower would
 # silently downgrade it (ga-0emb8).
 ARG XCRYPTO_VERSION=0.57.0
 ARG XMOD_VERSION=0.41.0
 # bd embeds dolt as a library, so it reaches github.com/apache/thrift through
-# the parquet writer. The pinned source resolves thrift 0.23.0, which carries
-# CVE-2026-43871 (HIGH, TCompactProtocol varint byte-count DoS, fixed 0.24.0).
+# the parquet writer. thrift <0.24.0 carries CVE-2026-43871 (HIGH,
+# TCompactProtocol varint byte-count DoS); the pinned source resolves 0.24.0.
 ARG THRIFT_VERSION=0.24.0
 ARG XNET_VERSION=0.60.0
 
@@ -60,11 +60,10 @@ ARG XNET_VERSION=0.60.0
 # so gc's own go.mod bumps do not reach this image and the overrides below are
 # required. Each must be >= what the pinned source already declares — pinning
 # BELOW it silently downgrades the shipped binary, which no post-build
-# assertion would catch. At BD_SOURCE_REF e4f98340d the source resolves grpc
-# 1.83.2, x/text 0.41.0, x/crypto 0.56.0 and x/mod 0.40.0 on its own. The real
-# lifts are thrift 0.24.0 and x/net 0.60.0 (CVE-2026-78669); x/net 0.60.0
-# requires x/crypto 0.57.0 and x/text 0.42.0, and x/text 0.42.0 requires x/mod
-# 0.41.0, so the x/text, x/crypto and x/mod ARGs track those resolved versions
+# assertion would catch. At BD_SOURCE_REF 4ff2418f7 (v1.95.0) the source
+# already resolves every one of them on its own: grpc 1.83.2, x/text 0.42.0,
+# x/crypto 0.57.0, x/mod 0.41.0, thrift 0.24.0 and x/net 0.60.0
+# (CVE-2026-78669). No override is a lift at this ref; each is held at parity
 # (ga-0emb8: an ARG below what the graph selects fails its exact
 # `go version -m` assertion). Keep each `go get` and its trailing
 # `go version -m` check: together they fail the build if a later source bump

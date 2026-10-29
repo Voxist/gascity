@@ -99,10 +99,10 @@ import (
 // SchemaVersions().
 const (
 	// SchemaCursorMain is schema.LatestVersion() for the pinned library.
-	SchemaCursorMain = 69
+	SchemaCursorMain = 72
 	// SchemaCursorIgnored is schema.LatestIgnoredVersion() for the pinned
 	// library.
-	SchemaCursorIgnored = 27
+	SchemaCursorIgnored = 28
 )
 
 // PinnedSchemaCursors returns the pair a proxied database must already be at
@@ -158,8 +158,8 @@ func PinnedSchemaCursors() (main, ignored int) {
 // acts on. migrationSource.currentVersion clamps a cursor the live schema
 // contradicts down to a "reality floor" — min(raw, 11) when
 // `leases.granted_node` is missing, min(raw, 18) or min(raw, 21) when the
-// dolt_ignored `events` or `bd_events_journal`/`bd_events_seq` tables are
-// (beads v1.3.1), and 0 when `wisps`/`wisp_dependencies` are — and beads
+// dolt_ignored `events` or `bd_events_journal`/`bd_events_seq` tables are,
+// and 0 when `wisps`/`wisp_dependencies` are — and beads
 // documents these shapes as real in the field. Comparing the RAW
 // cursor therefore proved nothing: a database at raw ignored=26 with the
 // sentinel absent passed this gate, the proxied open is WRITABLE

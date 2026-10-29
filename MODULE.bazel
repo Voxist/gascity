@@ -262,7 +262,7 @@ go_deps.module_override(
     path = "github.com/steveyegge/beads",
 )
 
-# Fork: the beads pin is a pseudo-version past v1.3.1 (schema 0069; see
+# Fork: the beads pin is a pseudo-version past v1.3.1 (schema 0072; see
 # deps.env), and beads at that commit ships its own BUILD files, which load
 # @gazelle and @rules_go -- names not visible from a go_deps repository under
 # Bzlmod. Regenerate them instead of using the shipped ones.

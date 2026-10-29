@@ -4,8 +4,8 @@
 // templates, so the two call sites cannot drift apart from each other.
 //
 // Sourced from bd <sub> --help output (2026-07-13, bd v1.1.0); kept current
-// against the pinned bd by TestBdFlagManifestCurrent (latest: bd v1.94.1 at
-// e4f98340d, 2026-10-06).
+// against the pinned bd by TestBdFlagManifestCurrent (latest: bd v1.95.0 at
+// 4ff2418f7, 2026-10-29).
 package bdflags
 
 import (
@@ -136,6 +136,10 @@ var valueFlagsBySub = map[string]map[string]bool{
 		// Added 2026-08-11 against bd a75c226c9 (0062-era conditional writes);
 		// --force (bool, below) same provenance.
 		"--if-assignee": true, "--if-status": true,
+		// --if-revision added 2026-10-29 against bd 4ff2418f7 (v1.95.0,
+		// schema-0072 repin, ga-s69mk.18): upstream 37acca96d (#7203), the
+		// revision compare-and-swap guard, also on close, reopen and delete.
+		"--if-revision": true,
 		// -l added 2026-10-01 against bd 5cc9948c7 (schema-0069 repin,
 		// Voxist/beads#60, ga-b2q0c): upstream 6530c7532 gave --add-label a
 		// -l shorthand matching `bd create -l`. Not a new flag, a new alias
@@ -152,13 +156,19 @@ var valueFlagsBySub = map[string]map[string]bool{
 		"--title": true, "--spec-id": true, "--unset-metadata": true,
 	},
 	"close": {
-		"-r": true, "--reason": true, "--reason-file": true, "--session": true,
+		// --if-revision: see update.
+		"--if-revision": true,
+		"-r":            true, "--reason": true, "--reason-file": true, "--session": true,
 	},
 	"reopen": {
-		"-r": true, "--reason": true,
+		// --if-revision: see update.
+		"--if-revision": true,
+		"-r":            true, "--reason": true,
 	},
 	"delete": {
-		"--from-file": true,
+		// --if-revision: see update.
+		"--if-revision": true,
+		"--from-file":   true,
 	},
 	"ready": {
 		// --label-pattern/--label-regex/--max-rows added 2026-08-11 against
@@ -190,7 +200,10 @@ var valueFlagsBySub = map[string]map[string]bool{
 		"--wisp-type": true,
 	},
 	"show": {
-		"--as-of": true, "--id": true,
+		// --comments-tail added 2026-10-29 against bd 4ff2418f7 (v1.95.0,
+		// ga-s69mk.18): upstream 5d2c01bd9 (#6618), `--comments-tail int`.
+		"--comments-tail": true,
+		"--as-of":         true, "--id": true,
 	},
 	"mol current": {
 		"--for": true, "--limit": true, "--range": true,
@@ -231,6 +244,10 @@ var boolFlagsBySub = map[string]map[string]bool{
 		"--silent": true, "--stdin": true, "--validate": true,
 	},
 	"update": {
+		// --clear-notes added 2026-10-29 against bd 4ff2418f7 (v1.95.0,
+		// ga-s69mk.18): upstream 45a116d1a (#5946), the explicit way to empty
+		// notes now that `--notes ""` is refused.
+		"--clear-notes":             true,
 		"--allow-empty-description": true, "--claim": true, "--ephemeral": true,
 		"--force": true, "--history": true, "--no-history": true,
 		"--persistent": true, "--stdin": true,

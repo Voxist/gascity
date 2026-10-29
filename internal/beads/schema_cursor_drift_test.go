@@ -92,8 +92,7 @@ func TestSchemaCursorsMatchPinnedBeads(t *testing.T) {
 //   - ignoredSource.sentinelTables equals gc's list, in ORDER (the library
 //     probes tables first and short-circuits on the first absent one);
 //   - ignoredSource.sentinelFlooredTables equals gc's floored list (tables,
-//     replay floors and order; none at this fork's pin, three at beads
-//     v1.3.1);
+//     replay floors and order);
 //   - ignoredSource.sentinelColumns is exactly the one column gc reads, with
 //     the same replay floor;
 //   - cursorRealityFloor's missing-table arm floors at gc's table floor.
@@ -151,13 +150,13 @@ func TestIgnoredSentinelsMatchPinnedBeads(t *testing.T) {
 }
 
 // pinnedCursorRealityFloorDigest is cursorRealityFloorDigest at the pinned
-// beads (this fork pins v1.3.1-0.20261001090346-46e670abbfd4,
+// beads (this fork pins v1.3.1-0.20261027095128-43f41374a34d,
 // internal/storage/schema/schema.go: sentinel tables floor at 0 and
-// short-circuit, then sentinel columns clamp to the lowest replayFloor of any
-// absent one; it has no floored sentinel tables). beads v1.3.1's function,
-// which also clamps on floored tables, digests to
-// 309a20318eea0f78e6e33fd76c9ca0dfe5fd0f3da6b48371cda7102648b4843d.
-const pinnedCursorRealityFloorDigest = "65993bb205e8911af8e696360952bd16c8d8388a5db7c23c427e63e97dc14533"
+// short-circuit, then floored sentinel tables and sentinel columns each clamp
+// to the lowest replayFloor of any absent one). The previous pin,
+// v1.3.1-0.20261001090346-46e670abbfd4, had no floored-table loop and
+// digested to 65993bb205e8911af8e696360952bd16c8d8388a5db7c23c427e63e97dc14533.
+const pinnedCursorRealityFloorDigest = "309a20318eea0f78e6e33fd76c9ca0dfe5fd0f3da6b48371cda7102648b4843d"
 
 // TestSentinelDriftPinSeesEveryDirection proves the pin above is structural by
 // feeding it the library shapes the old substring pin could not see, and one it
@@ -170,8 +169,13 @@ func TestSentinelDriftPinSeesEveryDirection(t *testing.T) {
 	const pinned = `var (
 	mainSource    = migrationSource{cursorTable: "schema_migrations"}
 	ignoredSource = migrationSource{
-		cursorTable:     "ignored_schema_migrations",
-		sentinelTables:  []string{"wisps", "wisp_dependencies"},
+		cursorTable:    "ignored_schema_migrations",
+		sentinelTables: []string{"wisps", "wisp_dependencies"},
+		sentinelFlooredTables: []schemaSentinelTable{
+			{table: "events", replayFloor: 18},
+			{table: "bd_events_journal", replayFloor: 21},
+			{table: "bd_events_seq", replayFloor: 21},
+		},
 		sentinelColumns: []schemaSentinelColumn{{table: "leases", column: "granted_node", replayFloor: 11}},
 	}
 )
@@ -225,12 +229,32 @@ var doltIgnorePatterns = []string{"wisps", "wisp_dependencies"}
 			want: "thirdSource",
 		},
 		{
-			// The pinned beads declares no floored sentinel tables, so beads
-			// v1.3.1's first one arriving through a pin bump is drift.
 			name: "an ADDED floored sentinel table",
 			sources: map[string]string{"schema.go": header + strings.Replace(pinned,
-				`sentinelColumns: []schemaSentinelColumn{`, `sentinelFlooredTables: []schemaSentinelTable{{table: "events", replayFloor: 18}},
-		sentinelColumns: []schemaSentinelColumn{`, 1)},
+				`{table: "bd_events_seq", replayFloor: 21},`, `{table: "bd_events_seq", replayFloor: 21},
+			{table: "wisp_events", replayFloor: 23},`, 1)},
+			want: "sentinelFlooredTables",
+		},
+		{
+			name: "a REMOVED floored sentinel table",
+			sources: map[string]string{"schema.go": header + strings.Replace(pinned,
+				`{table: "events", replayFloor: 18},`, ``, 1)},
+			want: "sentinelFlooredTables",
+		},
+		{
+			name: "a moved floored replay floor",
+			sources: map[string]string{"schema.go": header + strings.Replace(pinned,
+				`replayFloor: 18}`, `replayFloor: 19}`, 1)},
+			want: "sentinelFlooredTables",
+		},
+		{
+			// The library probes them in order and Missing names the first
+			// absent one that reached the lowest floor, so order is drift too.
+			name: "reordered floored sentinel tables",
+			sources: map[string]string{"schema.go": header + strings.Replace(pinned,
+				`{table: "bd_events_journal", replayFloor: 21},
+			{table: "bd_events_seq", replayFloor: 21},`, `{table: "bd_events_seq", replayFloor: 21},
+			{table: "bd_events_journal", replayFloor: 21},`, 1)},
 			want: "sentinelFlooredTables",
 		},
 		{
@@ -243,8 +267,8 @@ var doltIgnorePatterns = []string{"wisps", "wisp_dependencies"}
 		{
 			name: "a new sentinel KIND on ignoredSource",
 			sources: map[string]string{"schema.go": header + strings.Replace(pinned,
-				`cursorTable:     "ignored_schema_migrations",`,
-				`cursorTable:     "ignored_schema_migrations",
+				`cursorTable:    "ignored_schema_migrations",`,
+				`cursorTable:    "ignored_schema_migrations",
 		sentinelIndexes: []string{"idx_wisps_lease"},`, 1)},
 			want: "unknown sentinel field sentinelIndexes",
 		},

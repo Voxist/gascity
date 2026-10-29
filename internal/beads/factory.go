@@ -617,9 +617,10 @@ func libraryExtensionBackend(scopeRoot string) (string, bool) {
 // The open runs in a direct native open's env window, not the proxied lane's
 // hermetic one, and that is deliberate parity with the bd CLI door for the
 // same workspace. The caller's env decides the BEADS_ credential and Dolt
-// keys and BD_ALLOW_REMOTE_MIGRATE (gc sets it only for a city that opted in),
-// while the other BD_ switches (BD_EVENTS_JOURNAL, BD_IGNORE_SCHEMA_SKEW,
-// BD_SMART_GATE) reach the library as they reach bd. A backend that cannot
+// keys and BD_ALLOW_REMOTE_MIGRATE (gc sets it only for a city that opted in);
+// BD_ALLOW_MIGRATE and BD_IGNORE_SCHEMA_SKEW are always unset in the window
+// (bdRemoteMigrateOpenEnvKeys), while the other BD_ switches
+// (BD_EVENTS_JOURNAL, BD_SMART_GATE) reach the library as they reach bd. A backend that cannot
 // record a journal the env or workspace enables fails the open rather than
 // return a handle whose writes would go unrecorded.
 func (opts StoreOpenOptions) openLibraryExtensionStore(ctx context.Context, provider, backend string) (StoreOpenResult, error) {

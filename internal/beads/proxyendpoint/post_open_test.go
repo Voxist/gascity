@@ -18,7 +18,6 @@ import (
 // answer — so the main row is not passing against a pool with nothing stale in
 // it.
 func TestReadPostOpenObservesTheStateAfterTheOpen(t *testing.T) {
-	withBeadsV131FlooredSentinelTables(t)
 	before := proxyendpointtest.State{Head: "before0000"}
 	after := proxyendpointtest.State{Head: "after11111"}
 
