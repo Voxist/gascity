@@ -383,7 +383,11 @@ const (
 	// v1.3.2 bump does not (the fork-first pin block keeps v1.94.1). Taken from
 	// the candidate digest TestCurrentWorkflowsMatchPolicy printed for the
 	// merged workflow.
-	expectedNightlyExecutionHash = "3d20383e611404cc9f998940686a2fd7098c9f1fe13ec90921f196d2a408a2b9"
+	// Re-derived for the bd v1.95.0 repin (ga-s69mk.18): BD_VERSION
+	// (v1.94.1 -> v1.95.0) and BD_SOURCE_REF (e4f98340d -> 4ff2418f7) at
+	// nightly.yml's two pin sites, nothing else. Taken from the candidate
+	// digest TestCurrentWorkflowsMatchPolicy printed for the changed workflow.
+	expectedNightlyExecutionHash = "6854d6595b3dc9f44607187125443a5e1749ce32a487e9af37bfb939c3fca1f9"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`. Then the claude-version
