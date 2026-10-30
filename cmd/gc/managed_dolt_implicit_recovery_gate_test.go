@@ -172,11 +172,11 @@ func TestProbeControllerLivenessWithNoSocketIsStopped(t *testing.T) {
 	}
 }
 
-type timeoutNetError struct{}
+type controllerTimeoutNetError struct{}
 
-func (timeoutNetError) Error() string   { return "i/o timeout" }
-func (timeoutNetError) Timeout() bool   { return true }
-func (timeoutNetError) Temporary() bool { return true }
+func (controllerTimeoutNetError) Error() string   { return "i/o timeout" }
+func (controllerTimeoutNetError) Timeout() bool   { return true }
+func (controllerTimeoutNetError) Temporary() bool { return true }
 
 // Only a refused connection or a missing socket confirms a stop: a slow or
 // otherwise failing controller must read as unknown so a starved host is never
@@ -193,8 +193,8 @@ func TestClassifyControllerPingErrorIsThreeValued(t *testing.T) {
 		{"answered", nil, controllerLivenessRunning},
 		{"connection refused (stale socket)", unavailable(&net.OpError{Op: "dial", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}), controllerLivenessStopped},
 		{"missing socket", unavailable(&net.OpError{Op: "dial", Err: os.NewSyscallError("connect", syscall.ENOENT)}), controllerLivenessStopped},
-		{"dial timeout", unavailable(&net.OpError{Op: "dial", Err: timeoutNetError{}}), controllerLivenessUnknown},
-		{"read timeout", controllerCommandError{op: "reading response", err: timeoutNetError{}, unresponsive: true}, controllerLivenessUnknown},
+		{"dial timeout", unavailable(&net.OpError{Op: "dial", Err: controllerTimeoutNetError{}}), controllerLivenessUnknown},
+		{"read timeout", controllerCommandError{op: "reading response", err: controllerTimeoutNetError{}, unresponsive: true}, controllerLivenessUnknown},
 		{"write failure", errors.New("sending command: broken pipe"), controllerLivenessUnknown},
 	}
 	for _, tc := range tests {

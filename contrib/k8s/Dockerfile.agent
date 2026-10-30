@@ -54,7 +54,8 @@ ARG XMOD_VERSION=0.41.0
 # the parquet writer. thrift <0.24.0 carries CVE-2026-43871 (HIGH,
 # TCompactProtocol varint byte-count DoS); the pinned source resolves 0.24.0.
 ARG THRIFT_VERSION=0.24.0
-ARG XNET_VERSION=0.60.0
+ARG XNET_VERSION=0.62.0
+ARG JOSE_VERSION=4.1.6
 
 # bd resolves grpc and x/text through the beads module graph, not this repo's,
 # so gc's own go.mod bumps do not reach this image and the overrides below are
@@ -89,6 +90,7 @@ RUN bd_version="${BD_VERSION#v}" \
     && go get "golang.org/x/mod@v${XMOD_VERSION}" \
     && go get "github.com/apache/thrift@v${THRIFT_VERSION}" \
     && go get "golang.org/x/net@v${XNET_VERSION}" \
+    && go get "github.com/go-jose/go-jose/v4@v${JOSE_VERSION}" \
     && CGO_ENABLED=1 go build \
        -tags="gms_pure_go" \
        -trimpath \
@@ -101,7 +103,8 @@ RUN bd_version="${BD_VERSION#v}" \
     && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/crypto v${XCRYPTO_VERSION} " \
     && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/mod v${XMOD_VERSION} " \
     && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/apache/thrift v${THRIFT_VERSION} " \
-    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/net v${XNET_VERSION} "
+    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/net v${XNET_VERSION} " \
+    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/go-jose/go-jose/v4 v${JOSE_VERSION} "
 
 FROM ${BASE_IMAGE}
 

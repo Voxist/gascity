@@ -41,7 +41,7 @@ next to that code; read the matching file before changing it.
 | Bazel builds | `engdocs/bazel-quickstart.md` |
 | Where a package lives | `engdocs/contributors/codebase-map.md`, then the package's `go doc` |
 | What is planned | `ROADMAP.md` |
-| A resync, build caches, Git hooks or bd/beads work tracking on this fork, or what the fork is for | `engdocs/contributors/fork-maintainer-guide.md` |
+| Fork resyncs, build caches, Git hooks, bd tracking, the fork's purpose | `engdocs/contributors/fork-maintainer-guide.md` |
 
 ## How work flows here
 
@@ -144,6 +144,9 @@ Violating any fails the build. Details live in the linked files.
 - **Worker boundary (active migration).** Production `cmd/gc` code reaches
   sessions through `worker.Handle`
   (`TestGCNonTestFilesStayOnWorkerBoundary`; `internal/worker/AGENTS.md`).
+- **Typed store boundary (active migration).** Outside the residency
+  layer, code takes typed class handles, not a raw `beads.Store`, and uses
+  `beads.As` for capabilities (`storeclass` lint, shrink-only baseline).
 - **Agent config field sync.** A new `config.Agent` field is wired in every
   copy and merge site (`TestAgentFieldSync` and siblings;
   `internal/config/AGENTS.md`).

@@ -286,7 +286,8 @@ _pog_ownership_violation() {
 #      grandchild id after its first dotted segment, misresolving to the
 #      wrong (and possibly closed) parent/child bead instead of the actual
 #      grandchild bead the branch is for. The literal 6-char-only pattern
-#      would misresolve to the root bead on any sub-bead's own branch.
+#      would misresolve to the root bead on any sub-bead's own branch, and
+#      truncate a seven-character id to a nonexistent six-character one.
 #   2. Falls back to this session's in-progress assignment
 #      (bd list --assignee="$GC_AGENT" --status=in_progress --json) when
 #      the branch name doesn't match. Only resolves when that query returns

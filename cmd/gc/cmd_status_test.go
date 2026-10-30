@@ -389,16 +389,16 @@ func TestRigStatusAPIClientRoutesToSupervisorWhenAPIClientNil(t *testing.T) {
 		t.Fatalf("register city: %v", err)
 	}
 
-	origControllerAlive := apiRouteControllerAliveHook
+	origControllerIdentity := apiRouteControllerIdentityHook
 	oldAlive := supervisorAliveHook
 	oldRunning := supervisorCityRunningHook
 	// Simulate the supervisor's in-process controller responding to ping (the
 	// production condition apiClient sees for a supervisor-managed city).
-	apiRouteControllerAliveHook = func(string) int { return 4242 }
+	apiRouteControllerIdentityHook = func(string) controllerIdentityReply { return controllerIdentityReply{PID: 4242} }
 	supervisorAliveHook = func() int { return 4321 }
 	supervisorCityRunningHook = func(string) (bool, string, bool) { return true, "", true }
 	t.Cleanup(func() {
-		apiRouteControllerAliveHook = origControllerAlive
+		apiRouteControllerIdentityHook = origControllerIdentity
 		supervisorAliveHook = oldAlive
 		supervisorCityRunningHook = oldRunning
 	})

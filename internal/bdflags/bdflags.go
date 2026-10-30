@@ -45,7 +45,9 @@ import (
 // and in v1.1.0 (upstream's own BD_VERSION pin) and is absent from 3e03250ee
 // (renamed --cpu-profile), and --server-url is not a persistent flag in any
 // bd across the supported range. --format, which #5601 omits, is a real
-// hidden persistent String in all three.
+// hidden persistent String in all three. Upstream 1080d0bc5 (#8333) added both
+// again for its fleet's bd 1.3.0 Enterprise build; the fork runs the fork bd,
+// not that build, so the 2026-10-30 resync kept them out.
 var globalValueFlags = map[string]bool{
 	// --format is a HIDDEN persistent StringVar ("Output format (json). Alias
 	// for --json", MarkHidden'd immediately after registration) present in every
@@ -106,7 +108,8 @@ var globalBoolFlags = map[string]bool{
 // compound bd subcommands, "parent child" ("mol pour"). The key set here
 // defines every subcommand this package knows about — see Known/Subcommands.
 //
-// Sourced from `bd <sub> --help` (bd 1.3.2, 2026-10-24).
+// Sourced from `bd <sub> --help` (bd 1.3.2, 2026-10-24, and bd 1.3.0
+// Enterprise, 2026-10-26: TestBdFlagManifestCurrent passes against both).
 var valueFlagsBySub = map[string]map[string]bool{
 	"create": {
 		// --storage-class added 2026-08-11 against bd a75c226c9 (0060-era

@@ -282,6 +282,8 @@ var builtinAuthorship = map[string]Authorship{
 	StorageBindingUnconverged:       AuthorController,
 	StorageBindingUncheckable:       AuthorController,
 	StorageBindingNotConfigured:     AuthorController,
+	StorageRigImport:                AuthorController,
+	StorageRigResidue:               AuthorController,
 
 	// Fork-declared types. managed_dolt.recover_decision comes from bd_env's
 	// transport-failure retry, in every gc process that runs bd, gc hook and
