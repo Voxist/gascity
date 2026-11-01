@@ -33,6 +33,9 @@ var interruptedCloseGates = map[string]closeGate{
 	"stale-session":           closeReleasing,
 	"dead-runtime":            closeReleasing,
 	strandedRepairCloseReason: closeReleasing,
+	// reapPhantomSessionBeads closes only an asleep, never-woken row, so once
+	// its state is "phantom-session" the reap never runs on it again.
+	"phantom-session": closeReleasing,
 }
 
 // interruptedClosePassthroughCodes are the pool-freeable sleep reasons the

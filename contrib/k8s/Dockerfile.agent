@@ -38,17 +38,18 @@ ARG BD_BRANCH=HEAD
 # 1.83.2, not 1.83.1: CVE-2026-84445 (HIGH) covers <=1.83.1. The pinned
 # source declares 1.83.2, so this is a match, not an override.
 ARG GRPC_VERSION=1.83.2
-# x/text 0.42.0: the x/net 0.60.0 floor below requires it, and pinning BELOW
+# x/text 0.43.0: the x/net 0.62.0 floor below requires it, and pinning BELOW
 # what the module graph then selects is a silent downgrade (ga-0emb8). Every
 # override here must be >= what the pinned source resolves.
-ARG XTEXT_VERSION=0.42.0
+ARG XTEXT_VERSION=0.43.0
 # The pinned beads source declares x/crypto 0.57.0 and x/mod 0.41.0, which
 # clear CVE-2026-56854 (CRITICAL, fixed 0.55.0) and CVE-2026-56864 (HIGH,
 # fixed 0.40.0). The image scan gates HIGH+CRITICAL with --exit-code 1.
-# x/net 0.60.0 requires x/crypto 0.57.0, and x/text 0.42.0 requires x/mod
-# 0.41.0, so both sit at those resolved versions; holding either lower would
-# silently downgrade it (ga-0emb8).
-ARG XCRYPTO_VERSION=0.57.0
+# x/net 0.62.0 (GO-2026-6860 / GO-2026-6866) requires x/crypto 0.58.0, and
+# x/text 0.43.0 requires x/mod 0.41.0, so both sit at those resolved
+# versions; holding either lower would silently downgrade it (ga-0emb8), and
+# the exact `go version -m` checks below would fail the build.
+ARG XCRYPTO_VERSION=0.58.0
 ARG XMOD_VERSION=0.41.0
 # bd embeds dolt as a library, so it reaches github.com/apache/thrift through
 # the parquet writer. thrift <0.24.0 carries CVE-2026-43871 (HIGH,

@@ -17,9 +17,9 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 		ghSourceRef   = "b300f2ec7ec9dc9addc39b2ad88c54097ded7ca0"
 		doltSourceRef = "05e6bceb1a210a7a8d770b74b8ef4825c165c0a8"
 		grpcVersion   = "1.83.2"
-		xtextVersion  = "0.42.0"
-		// Floors for the gh and dolt builds; see Dockerfile.base.
-		xcryptoVersion            = "0.57.0"
+		// Floor for the gh and dolt builds; see Dockerfile.base. x/text and
+		// x/crypto are asserted against go.mod below, as upstream's
+		// TestRebuiltToolsForcePatchedXModules does.
 		xmodVersion               = "0.41.0"
 		thriftVersion             = "0.24.0"
 		ghSourceSHA256            = "a0c18c98c73f7333f73e19b3a0bf5bd18673f3dc226193ab6478b3ea1ea18f03"
@@ -33,7 +33,9 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 	root := repoRoot(t)
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.base")
 	requireArgsMatchGoMod(t, "contrib/k8s/Dockerfile.base", dockerfile, readFile(t, root, "go.mod"),
-		goModPinnedArg{"GRPC_VERSION", "google.golang.org/grpc", "v1.83.2"})
+		goModPinnedArg{"GRPC_VERSION", "google.golang.org/grpc", "v1.83.2"},
+		goModPinnedArg{"XTEXT_VERSION", "golang.org/x/text", "v0.42.0"},
+		goModPinnedArg{"XCRYPTO_VERSION", "golang.org/x/crypto", "v0.57.0"})
 	for _, want := range []string{
 		"ARG GH_VERSION=" + ghVersion,
 		"ARG GH_SOURCE_REF=" + ghSourceRef,
@@ -41,8 +43,6 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 		"ARG DOLT_SOURCE_REF=" + doltSourceRef,
 		"ARG DOLT_SOURCE_SHA256=" + doltSourceSHA256,
 		"ARG GRPC_VERSION=" + grpcVersion,
-		"ARG XTEXT_VERSION=" + xtextVersion,
-		"ARG XCRYPTO_VERSION=" + xcryptoVersion,
 		"ARG XMOD_VERSION=" + xmodVersion,
 		"ARG THRIFT_VERSION=" + thriftVersion,
 		"ARG DOLT_TOOLCHAIN_RELEASE=" + doltToolchainRelease,
@@ -116,14 +116,15 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		grpcVersion    = "1.83.2"
 		// Floors, not exact pins: each must be >= what the pinned source
 		// resolves, because pinning BELOW that is a silent downgrade
-		// (ga-0emb8). The x/net 0.60.0 floor (CVE-2026-78669) requires
-		// x/crypto 0.57.0 and x/text 0.42.0, and x/text 0.42.0 requires x/mod
-		// 0.41.0, so all three sit at those resolved versions in bd's, gh's
-		// and dolt's module graphs alike. x/crypto 0.56.0 was already needed
-		// for CVE-2026-78662 and CVE-2026-56855 (SSH channel-deadlock DoS),
-		// and x/mod 0.40.0 for CVE-2026-56864 and CVE-2026-56865 (sumdb).
-		xtextVersion   = "0.42.0"
-		xcryptoVersion = "0.57.0"
+		// (ga-0emb8). The x/net 0.62.0 floor (CVE-2026-78669 at 0.60.0,
+		// GO-2026-6860 / GO-2026-6866 at 0.62.0) requires x/crypto 0.58.0 and
+		// x/text 0.43.0, and x/text 0.43.0 requires x/mod 0.41.0, so all three
+		// sit at those resolved versions in bd's, gh's and dolt's module
+		// graphs alike. x/crypto 0.56.0 was already needed for CVE-2026-78662
+		// and CVE-2026-56855 (SSH channel-deadlock DoS), and x/mod 0.40.0 for
+		// CVE-2026-56864 and CVE-2026-56865 (sumdb).
+		xtextVersion   = "0.43.0"
+		xcryptoVersion = "0.58.0"
 		xmodVersion    = "0.41.0"
 		// CVE-2026-43871 (HIGH, TCompactProtocol varint byte-count DoS, fixed
 		// 0.24.0). bd embeds dolt as a library and reaches thrift through the
