@@ -134,6 +134,17 @@ containsAny(finding["secret"], [
     r"""^scripts/bazel_multilane_test\.go$"""
   ])
 )
+
+// Heavy-gate test keys (`test_key: <40-hex commit SHA>-<10-hex>`) recorded in
+// release-gate evidence, arriving with the 2026-10-30 upstream resync
+// (4280569b4). The key names a test run; it authorises nothing. Scoped to
+// release-gate documents and to exactly that shape.
+|| (
+  matchesAny(finding["secret"], [r"""^[0-9a-f]{40}-[0-9a-f]{10}$"""])
+  && matchesAny(attributes[?"path"].orValue(""), [
+    r"""^release-gates/[^/]+\.md$"""
+  ])
+)
 '''
 
 # Restore the built-in ruleset. `--config` REPLACES the default config
