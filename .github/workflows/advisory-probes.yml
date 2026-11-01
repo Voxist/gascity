@@ -49,7 +49,7 @@ jobs:
   # filter so a cross-cutting change runs both).
   route:
     name: Route advisory probes
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'gastownhall/gascity' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     outputs:
       runner_8vcpu: ${{ steps.policy.outputs.runner_8vcpu }}
       runner_32vcpu: ${{ steps.policy.outputs.runner_32vcpu }}

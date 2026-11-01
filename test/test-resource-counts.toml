@@ -21,7 +21,7 @@ calls = 2
 [[count]]
 path = "Makefile"
 resource = "test_target"
-calls = 38
+calls = 39
 
 [[count]]
 path = "cmd/gc-write-mint/e2e_test.go"
