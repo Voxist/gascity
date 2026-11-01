@@ -875,6 +875,9 @@ _assert_branch_resolves_whole() {
     repo="$(new_repo_with_branch "$branch")"
     fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
     write_fake_bd "$fbd"
+    # A bounding tool on PATH keeps the no-timeout WARNING (ga-6kev4) out of
+    # the no-WARNING assertion below, so only the ownership warning counts.
+    write_fake_timeout "$fbd"
     write_show_json "$fbd" "$id" "in_progress" "agent-x" "tmpl-x" "[]"
     printf '[{"id":"%s"}]' "$id" > "$fbd/fake-bd-state/list-json"
     out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
