@@ -202,6 +202,7 @@ go_test(
         "resume_test.go",
         "resume_user_hold_test.go",
         "runtime_binding_test.go",
+        "runtime_facts_test.go",
         "runtime_lease_crossproc_test.go",
         "runtime_lease_test.go",
         "session_mutation_lock_test.go",
