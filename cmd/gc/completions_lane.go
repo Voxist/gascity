@@ -382,12 +382,19 @@ func (cr *CityRuntime) runCompletionsSweepChunk(backstop *executionevent.Complet
 	// stamps from a past wedge) are healed by the per-boot full traversal.
 	backstop.VisitStamped = reason == backstopReasonStartup
 	result := backstop.Pass(ep, graphStores, "execution-reconcile")
+	// A skipped archive degrades the record without failing the chunk. Name it:
+	// the facts it held may be re-emitted once, and the archive needs repair.
+	for _, warning := range result.WarmWarnings {
+		fmt.Fprintf(cr.stderr, "%s: completions sweep: journal warm: %s\n", cr.logPrefix, warning) //nolint:errcheck // best-effort stderr
+	}
 	if result.WarmFailed {
 		// The chunk read nothing: its idempotency record could not be loaded.
 		// Back the retry off instead of re-issuing the journal read at the
 		// chunk cadence; the sweep debt (forced latch, cadence clock) is kept.
+		// The error is logged: a lane that backs off without saying why fails
+		// silently: a truncated archive once sat behind this line unnamed.
 		lane.noteSweepFailure(time.Now())
-		fmt.Fprintf(cr.stderr, "%s: completions sweep: journal warm failed; retrying in %s\n", cr.logPrefix, completionsWarmFailureBackoff) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(cr.stderr, "%s: completions sweep: journal warm failed: %v; retrying in %s\n", cr.logPrefix, result.WarmErr, completionsWarmFailureBackoff) //nolint:errcheck // best-effort stderr
 		return result
 	}
 	// A store the traversal could not list is skipped so one dark store cannot

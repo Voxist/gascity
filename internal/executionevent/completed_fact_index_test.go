@@ -70,13 +70,19 @@ func TestCompletedFactIndexReadsTheJournalOnceAndThenNever(t *testing.T) {
 	if journal.reads != 1 {
 		t.Fatalf("warming the index cost %d journal read(s), want 1", journal.reads)
 	}
+	// The warm's one read also reads the head once, to record how far the read
+	// reached (the high-water). Only a pass that reads the journal pays that.
+	if journal.latestSeqs > 1 {
+		t.Fatalf("warming the index cost %d head read(s), want at most 1", journal.latestSeqs)
+	}
+	warmHeadReads := journal.latestSeqs
 	for range 5 {
 		if emitted := index.ReconcileRoots(journal, stores, rootIDs, "execution-reconcile"); emitted != 0 {
 			t.Fatalf("a repeat pass emitted %d fact(s); the index is not remembering what it recorded", emitted)
 		}
 	}
-	if journal.reads != 1 || journal.latestSeqs != 0 {
-		t.Fatalf("5 further passes cost %d journal read(s) and %d head read(s), want 1 and 0 in total", journal.reads, journal.latestSeqs)
+	if journal.reads != 1 || journal.latestSeqs != warmHeadReads {
+		t.Fatalf("5 further passes cost %d journal read(s) and %d head read(s), want 1 and %d in total", journal.reads, journal.latestSeqs, warmHeadReads)
 	}
 }
 

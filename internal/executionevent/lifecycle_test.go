@@ -110,8 +110,8 @@ func TestEmitCompletedSkipsAJournaledFactAndKeepsTheIndexCold(t *testing.T) {
 	journaled := events.NewFake()
 	journaled.Record(rec.Events[0])
 	var warm CompletedFactIndex
-	if !warm.warm(journaled) {
-		t.Fatal("warm failed")
+	if _, err := warm.warm(journaled); err != nil {
+		t.Fatalf("warm failed: %v", err)
 	}
 	if warm.EmitCompleted(journaled, graph, step, "close-hook") {
 		t.Fatal("a journaled fact was emitted again")

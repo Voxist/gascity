@@ -815,6 +815,15 @@ type InFlightProvider interface {
 	ListInFlight(filter Filter) ([]Event, error)
 }
 
+// InFlightWarningsProvider is an optional extension of [InFlightProvider]
+// for readers that prefer a partial answer to none: an archive that cannot be
+// read is skipped and named in the returned warnings, rather than failing the
+// whole read. A caller that uses it must tolerate missing the skipped
+// archive's events and should surface the warnings.
+type InFlightWarningsProvider interface {
+	ListInFlightWithWarnings(filter Filter) ([]Event, []string, error)
+}
+
 // InFlightContextProvider is an optional extension for providers whose
 // in-flight-aware read ([InFlightProvider]) can stop when ctx is done, so a
 // read whose caller has gone does not run to the end of a long history.

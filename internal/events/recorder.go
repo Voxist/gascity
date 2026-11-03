@@ -859,6 +859,14 @@ func (r *FileRecorder) ListInFlight(filter Filter) ([]Event, error) {
 	return ReadFilteredWithInFlight(r.path, filter)
 }
 
+// ListInFlightWithWarnings is ListInFlight with unreadable archives skipped
+// and named in the warnings instead of failing the read
+// (ReadFilteredWithInFlightWarnings). It implements
+// [InFlightWarningsProvider].
+func (r *FileRecorder) ListInFlightWithWarnings(filter Filter) ([]Event, []string, error) {
+	return ReadFilteredWithInFlightWarnings(r.path, filter)
+}
+
 // ListInFlightContext is ListInFlight that stops between archives once ctx is
 // done (ReadFilteredWithInFlightContext). It implements
 // [InFlightContextProvider].

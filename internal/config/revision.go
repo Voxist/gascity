@@ -266,7 +266,20 @@ type WatchTarget struct {
 	Path                string
 	Recursive           bool
 	DiscoverConventions bool
+	// Inputs lists the files directly inside a shallow (non-recursive)
+	// directory target that are config inputs: the provenance sources the
+	// directory holds and, for the city root, city.toml, pack.toml and
+	// packs.lock. A change to any other file in that directory cannot change
+	// the config, so the watcher ignores it. Empty means every entry counts,
+	// which keeps hand-built targets on the old behavior. Recursive targets
+	// ignore it: everything under a pack or convention root is config.
+	Inputs []string
 }
+
+// cityRootConfigInputs are the city-root files that are config inputs even
+// when the current provenance does not list them yet: creating pack.toml or
+// packs.lock must still wake the reloader.
+var cityRootConfigInputs = []string{"city.toml", packFile, "packs.lock"}
 
 // WatchTargets returns the set of paths that should be watched for config
 // changes. Config source directories are shallow; city roots discover
@@ -292,10 +305,30 @@ func WatchTargets(prov *Provenance, cfg *City, cityRoot string) []WatchTarget {
 		})
 	}
 
+	addInput := func(dir, file string) {
+		idx, ok := seen[dir]
+		if !ok {
+			return
+		}
+		for _, existing := range targets[idx].Inputs {
+			if existing == file {
+				return
+			}
+		}
+		targets[idx].Inputs = append(targets[idx].Inputs, file)
+	}
+
 	if prov != nil {
 		for _, src := range prov.Sources {
 			dir := filepath.Dir(src)
-			addTarget(dir, false, pathutil.SamePath(dir, cityRoot))
+			isCityRoot := pathutil.SamePath(dir, cityRoot)
+			addTarget(dir, false, isCityRoot)
+			addInput(dir, src)
+			if isCityRoot {
+				for _, name := range cityRootConfigInputs {
+					addInput(dir, filepath.Join(dir, name))
+				}
+			}
 		}
 	}
 

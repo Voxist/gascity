@@ -791,6 +791,7 @@ func watchConfigTargets(targets []config.WatchTarget, debounceDelay time.Duratio
 		return func() {}
 	}
 	registrar := newConfigWatchRegistrar(watcher, stderr)
+	inputs := newConfigWatchInputs(targets)
 
 	markDirty := func() {
 		dirty.Store(true)
@@ -854,6 +855,11 @@ func watchConfigTargets(targets []config.WatchTarget, debounceDelay time.Duratio
 				if shouldIgnoreConfigWatchEvent(event.Name) {
 					continue
 				}
+				if inputs.ignores(event.Name) &&
+					!registrar.isConventionRootCreate(event.Name) &&
+					!registrar.watchesRecursively(event.Name) {
+					continue
+				}
 				if event.Op&(fsnotify.Create|fsnotify.Rename) != 0 {
 					if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
 						// Convention roots may appear after startup, and nested
@@ -893,19 +899,81 @@ func watchConfigTargets(targets []config.WatchTarget, debounceDelay time.Duratio
 	}
 }
 
+// configWatchIgnoredDirs are directory names whose contents are never config:
+// gc's own runtime state (.gc, .beads), version control (.git), agent tool
+// state (.omc) and agent scratch space (.scratch). An event at or below any of
+// them is dropped, and the recursive walk does not descend into them. Each one
+// churns constantly in a live city, so without this every git operation and
+// every scratch write woke the reloader.
+var configWatchIgnoredDirs = []string{".gc", ".beads", ".git", ".omc", ".scratch"}
+
 func shouldIgnoreConfigWatchEvent(path string) bool {
 	clean := filepath.Clean(path)
 	if clean == "" || clean == "." {
 		return false
 	}
-	sepGC := string(filepath.Separator) + ".gc"
-	sepBeads := string(filepath.Separator) + ".beads"
-	return clean == ".gc" ||
-		clean == ".beads" ||
-		strings.HasSuffix(clean, sepGC) ||
-		strings.HasSuffix(clean, sepBeads) ||
-		strings.Contains(clean, sepGC+string(filepath.Separator)) ||
-		strings.Contains(clean, sepBeads+string(filepath.Separator))
+	sep := string(filepath.Separator)
+	for _, name := range configWatchIgnoredDirs {
+		if clean == name ||
+			strings.HasSuffix(clean, sep+name) ||
+			strings.Contains(clean, sep+name+sep) {
+			return true
+		}
+	}
+	return false
+}
+
+// configWatchInputs answers whether an event in a SHALLOW watch directory names
+// a config input. fsnotify reports every entry of a watched directory, and a
+// city root accumulates files that are not config at all (scratch files, editor
+// swap files, review dumps), so without this filter each of their writes woke
+// the reloader. Only directories whose target listed Inputs are filtered; any
+// other event (recursive pack and convention roots, a file target, a directory
+// with no Inputs) still counts.
+type configWatchInputs struct {
+	dirs map[string]map[string]struct{}
+}
+
+func newConfigWatchInputs(targets []config.WatchTarget) configWatchInputs {
+	in := configWatchInputs{dirs: make(map[string]map[string]struct{})}
+	for _, target := range targets {
+		if target.Recursive || len(target.Inputs) == 0 {
+			continue
+		}
+		dir := normalizePathForCompare(target.Path)
+		files := in.dirs[dir]
+		if files == nil {
+			files = make(map[string]struct{}, len(target.Inputs))
+			in.dirs[dir] = files
+		}
+		// Keyed by base name under the normalized directory: an input that is
+		// itself a symlink, or one that was just deleted, still matches.
+		for _, file := range target.Inputs {
+			files[filepath.Base(file)] = struct{}{}
+		}
+	}
+	// A directory that is also a recursive root is watched whole.
+	for _, target := range targets {
+		if target.Recursive {
+			delete(in.dirs, normalizePathForCompare(target.Path))
+		}
+	}
+	return in
+}
+
+// ignores reports whether path is an entry of a filtered shallow directory that
+// is not one of its config inputs. Convention roots (agents/, formulas/, ...)
+// are handled by the caller before this is asked.
+func (in configWatchInputs) ignores(path string) bool {
+	if len(in.dirs) == 0 {
+		return false
+	}
+	files, ok := in.dirs[normalizePathForCompare(filepath.Dir(path))]
+	if !ok {
+		return false
+	}
+	_, isInput := files[filepath.Base(filepath.Clean(path))]
+	return !isInput
 }
 
 // reloadResult holds the result of a config reload attempt.
