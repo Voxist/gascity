@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Daily age-based trim of the shared Go build cache.
+
+  Install:
+    cp scripts/com.voxist.gocache-trim.plist ~/Library/LaunchAgents/
+    # then point ProgramArguments at this checkout if it is not at
+    # /Users/Shared/Github/gascity, and:
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.voxist.gocache-trim.plist
+
+  Verify:
+    launchctl print gui/$(id -u)/com.voxist.gocache-trim
+    launchctl kickstart -p gui/$(id -u)/com.voxist.gocache-trim
+    tail ~/Library/Logs/gocache-trim.log
+
+  Uninstall:
+    launchctl bootout gui/$(id -u)/com.voxist.gocache-trim
+    rm ~/Library/LaunchAgents/com.voxist.gocache-trim.plist
+
+  There are deliberately no StandardOutPath / StandardErrorPath keys. Those
+  redirect files grow without bound; the script keeps its own log capped at
+  TRIM_LOG_MAX_LINES lines and records failures there too.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.voxist.gocache-trim</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>/Users/Shared/Github/gascity/scripts/trim-go-build-cache.sh</string>
+	</array>
+
+	<!-- 04:00 local. launchd runs a missed calendar interval at next wake. -->
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>4</integer>
+		<key>Minute</key>
+		<integer>0</integer>
+	</dict>
+
+	<!-- Never on load: bootstrapping this job must not delete anything by
+	     surprise. The calendar interval is the only trigger. -->
+	<key>RunAtLoad</key>
+	<false/>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<!-- launchd's default PATH is minimal; every tool the script uses
+		     lives in /usr/bin or /bin. GOCACHE and TMPDIR are deliberately
+		     NOT set here. -->
+		<key>PATH</key>
+		<string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>TRIM_DAYS</key>
+		<string>3</string>
+	</dict>
+
+	<!-- Yield CPU to builds, but deliberately no LowPriorityIO and no
+	     ProcessType Background. The job is dominated by one metadata scan of
+	     ~800k cache entries, which on this host takes roughly 10-15 minutes
+	     against a cold APFS metadata cache under fleet load (about 2 minutes
+	     when that cache is already warm). Adding macOS IOPOL throttling on
+	     top of a scan that long risks a run that never finishes before the
+	     next one is due; the job runs once a day at 04:00, so Nice is enough
+	     politeness. If it ever needs to be gentler, shorten the scan rather
+	     than throttling its I/O. -->
+	<key>Nice</key>
+	<integer>5</integer>
+</dict>
+</plist>
