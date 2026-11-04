@@ -86,6 +86,7 @@ go_test(
         "integration_test.go",
         "launchd_isolation_test.go",
         "mail_test.go",
+        "prompt_query_federation_test.go",
         "review_check_scripts_test.go",
         "review_formula_test.go",
         "skill_lifecycle_test.go",
@@ -126,6 +127,7 @@ go_test(
     deps = [
         "//internal/api/apicontract",
         "//internal/bazeltest",
+        "//internal/beadmeta",
         "//internal/beads",
         "//internal/beads/beadstest",
         "//internal/beads/contract",

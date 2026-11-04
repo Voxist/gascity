@@ -17,9 +17,9 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 		ghSourceRef   = "b300f2ec7ec9dc9addc39b2ad88c54097ded7ca0"
 		doltSourceRef = "05e6bceb1a210a7a8d770b74b8ef4825c165c0a8"
 		grpcVersion   = "1.83.2"
-		xtextVersion  = "0.42.0"
-		// Floors for the gh and dolt builds; see Dockerfile.base.
-		xcryptoVersion            = "0.57.0"
+		// Floor for the gh and dolt builds; see Dockerfile.base. x/text and
+		// x/crypto are asserted against go.mod below, as upstream's
+		// TestRebuiltToolsForcePatchedXModules does.
 		xmodVersion               = "0.41.0"
 		thriftVersion             = "0.24.0"
 		ghSourceSHA256            = "a0c18c98c73f7333f73e19b3a0bf5bd18673f3dc226193ab6478b3ea1ea18f03"
@@ -33,7 +33,9 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 	root := repoRoot(t)
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.base")
 	requireArgsMatchGoMod(t, "contrib/k8s/Dockerfile.base", dockerfile, readFile(t, root, "go.mod"),
-		goModPinnedArg{"GRPC_VERSION", "google.golang.org/grpc", "v1.83.2"})
+		goModPinnedArg{"GRPC_VERSION", "google.golang.org/grpc", "v1.83.2"},
+		goModPinnedArg{"XTEXT_VERSION", "golang.org/x/text", "v0.42.0"},
+		goModPinnedArg{"XCRYPTO_VERSION", "golang.org/x/crypto", "v0.57.0"})
 	for _, want := range []string{
 		"ARG GH_VERSION=" + ghVersion,
 		"ARG GH_SOURCE_REF=" + ghSourceRef,
@@ -41,8 +43,6 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 		"ARG DOLT_SOURCE_REF=" + doltSourceRef,
 		"ARG DOLT_SOURCE_SHA256=" + doltSourceSHA256,
 		"ARG GRPC_VERSION=" + grpcVersion,
-		"ARG XTEXT_VERSION=" + xtextVersion,
-		"ARG XCRYPTO_VERSION=" + xcryptoVersion,
 		"ARG XMOD_VERSION=" + xmodVersion,
 		"ARG THRIFT_VERSION=" + thriftVersion,
 		"ARG DOLT_TOOLCHAIN_RELEASE=" + doltToolchainRelease,
@@ -116,14 +116,15 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		grpcVersion    = "1.83.2"
 		// Floors, not exact pins: each must be >= what the pinned source
 		// resolves, because pinning BELOW that is a silent downgrade
-		// (ga-0emb8). The x/net 0.60.0 floor (CVE-2026-78669) requires
-		// x/crypto 0.57.0 and x/text 0.42.0, and x/text 0.42.0 requires x/mod
-		// 0.41.0, so all three sit at those resolved versions in bd's, gh's
-		// and dolt's module graphs alike. x/crypto 0.56.0 was already needed
-		// for CVE-2026-78662 and CVE-2026-56855 (SSH channel-deadlock DoS),
-		// and x/mod 0.40.0 for CVE-2026-56864 and CVE-2026-56865 (sumdb).
-		xtextVersion   = "0.42.0"
-		xcryptoVersion = "0.57.0"
+		// (ga-0emb8). The x/net 0.62.0 floor (CVE-2026-78669 at 0.60.0,
+		// GO-2026-6860 / GO-2026-6866 at 0.62.0) requires x/crypto 0.58.0 and
+		// x/text 0.43.0, and x/text 0.43.0 requires x/mod 0.41.0, so all three
+		// sit at those resolved versions in bd's, gh's and dolt's module
+		// graphs alike. x/crypto 0.56.0 was already needed for CVE-2026-78662
+		// and CVE-2026-56855 (SSH channel-deadlock DoS), and x/mod 0.40.0 for
+		// CVE-2026-56864 and CVE-2026-56865 (sumdb).
+		xtextVersion   = "0.43.0"
+		xcryptoVersion = "0.58.0"
 		xmodVersion    = "0.41.0"
 		// CVE-2026-43871 (HIGH, TCompactProtocol varint byte-count DoS, fixed
 		// 0.24.0). bd embeds dolt as a library and reaches thrift through the
@@ -174,6 +175,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		goModPinnedArg{"GRPC_VERSION", "google.golang.org/grpc", "v1.83.2"},
 		goModPinnedArg{"THRIFT_VERSION", "github.com/apache/thrift", "v0.24.0"},
 		goModPinnedArg{"XNET_VERSION", "golang.org/x/net", "v0.60.0"},
+		goModPinnedArg{"JOSE_VERSION", "github.com/go-jose/go-jose/v4", "v4.1.6"},
 	)
 	for _, want := range []string{
 		"ARG BD_VERSION=" + bdVersion,
@@ -200,6 +202,8 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/apache/thrift v${THRIFT_VERSION} "`,
 		`go get "golang.org/x/net@v${XNET_VERSION}"`,
 		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/net v${XNET_VERSION} "`,
+		`go get "github.com/go-jose/go-jose/v4@v${JOSE_VERSION}"`,
+		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/go-jose/go-jose/v4 v${JOSE_VERSION} "`,
 		`CGO_ENABLED=1 go build`,
 		`-tags="gms_pure_go"`,
 		`-X main.Version=${bd_version}`,
@@ -306,9 +310,10 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"mcp>=1.30.0",
 		"urllib3>=2.8.0",
 		"fsspec>=2026.6.0",
-		"litellm>=1.89.7",
+		"litellm>=1.106.3",
 		"filelock>=3.29.0,<4",
 		"opentelemetry-api>=1.45.1",
+		"dnspython>=2.9.0",
 	} {
 		if !strings.Contains(input, want) {
 			t.Errorf("mcp-agent-mail input requirements missing security floor %q", want)
@@ -321,6 +326,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"cryptography>=50.0.0",
 		"pyjwt>=2.15.0",
 		"fastmcp>=3.4.10",
+		"authlib>=1.9.1",
 	} {
 		if !strings.Contains(overrides, want) {
 			t.Errorf("mcp-agent-mail overrides missing security floor %q", want)
@@ -351,11 +357,13 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		{"pyjwt", "2.15.1"},
 		{"urllib3", "2.8.0"},
 		{"fsspec", "2026.6.0"},
-		{"litellm", "1.89.7"},
+		{"litellm", "1.106.3"},
 		{"fastmcp", "3.4.10"},
 		{"fastmcp-slim", "3.4.10"},
 		{"filelock", "3.29.0"},
 		{"opentelemetry-api", "1.45.1"},
+		{"authlib", "1.9.1"},
+		{"dnspython", "2.9.0"},
 		// Lock-only CVE bumps: no input floor, so this pin is their only guard.
 		{"bleach", "6.4.0"},
 		{"h2", "4.4.1"},
@@ -865,6 +873,7 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 		goModPinnedArg{"XMOD_VERSION", "golang.org/x/mod", "v0.41.0"},
 		goModPinnedArg{"THRIFT_VERSION", "github.com/apache/thrift", "v0.24.0"},
 		goModPinnedArg{"COMPRESS_VERSION", "github.com/klauspost/compress", "v1.18.7"},
+		goModPinnedArg{"JOSE_VERSION", "github.com/go-jose/go-jose/v4", "v4.1.6"},
 	)
 
 	// gh needs x/text, x/net and x/mod. Its pinned source selects x/crypto v0.53.0, below
@@ -885,6 +894,8 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 		"golang.org/x/text":             "XTEXT_VERSION",
 		"github.com/apache/thrift":      "THRIFT_VERSION",
 		"github.com/klauspost/compress": "COMPRESS_VERSION",
+		// Dolt's pinned source selects go-jose/v4 4.1.4 (CVE-2026-116587).
+		"github.com/go-jose/go-jose/v4": "JOSE_VERSION",
 	}
 	// Each `go get` is looked for inside its own stanza. gh and Dolt share the x/text
 	// override verbatim, so a file-wide search lets one stand in for the other and a

@@ -222,6 +222,7 @@
               "storage-repair-sequence",
               "runtime-workdir-export",
               "agent-is-foreign",
+              "storage-vouch-bd",
               "beads-state",
               "config-lint",
               "provider-quota",

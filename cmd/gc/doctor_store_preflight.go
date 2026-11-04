@@ -15,12 +15,12 @@ const doctorBeadStorePreflightTimeout = 5 * time.Second
 
 // City + per-rig store checks skipped on outage-shaped preflight; keep in sync with buildDoctorChecks.
 const (
-	// 20, not upstream's 19: the fork's prDeliveryDoctorCheck is a city store
+	// 23, not upstream's 22: the fork's prDeliveryDoctorCheck is a city store
 	// check and lives inside buildDoctorChecks' storeOK block alongside
 	// upstream's. This constant is the drift lock the preflight test asserts
 	// against. Per-rig is 4, not upstream's 3: rig beads, rig data-presence
 	// (fork), custom-types and hold-label conventions.
-	doctorCityStoreCheckCount   = 20
+	doctorCityStoreCheckCount   = 23
 	doctorPerRigStoreCheckCount = 4
 )
 
