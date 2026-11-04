@@ -232,7 +232,7 @@ var bootstrapPolicy = Ledger{
 			PackageName:     "main",
 			Owner:           "TestManagedCityRefusesImplicitDoltRecoveryInChildProcess",
 			Resources:       []Resource{ResourceSubprocess},
-			OwnerBead:       "ga-lc97s",
+			OwnerBead:       "ga-cv29l",
 			Invariant:       "the implicit-recovery gate child-process proof is a checked Medium subprocess owner",
 			ResourceOwner:   "the one child gc process is confined to TestManagedCityRefusesImplicitDoltRecoveryInChildProcess, which exists to re-exec the test binary as a real gc: the gate lives in the production command path, so only a real child with lifecycle intent withheld can prove a stopped or frozen city is refused before the provider script runs",
 			MigrationTarget: "P0.4b",
