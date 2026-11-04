@@ -215,7 +215,7 @@ func Catalog() []Entry {
 			"t3bridge", "exact:t3bridge", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				time.Date(2026, time.November, 5, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.December, 15, 0, 0, 0, 0, time.UTC),
 				"the production T3 bridge composition has focused tests but no full shared runtime contract; needs a fake-double T3 server reachable from RunProviderTests",
 			),
 		),
@@ -223,7 +223,7 @@ func Catalog() []Entry {
 			"k8s", "exact:k8s", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/k8s", "NewSeamBacked"),
-				time.Date(2026, time.November, 12, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.December, 8, 0, 0, 0, 0, time.UTC),
 				"no runnable harness proves NewSeamBacked() against a live Kubernetes API plus pod exec lifecycle; every k8s package test drives newProviderWithOps(fake) instead of the real constructor, and no kind/integration-tagged harness exists in internal/runtime/k8s",
 			),
 		),
@@ -231,7 +231,7 @@ func Catalog() []Entry {
 			"herdr", "exact:herdr", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/herdr", "New"),
-				time.Date(2026, time.October, 31, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.December, 31, 0, 0, 0, 0, time.UTC),
 				"the full conformance run is an opt-in live journey (make test-herdr-live, or GC_FAST_UNIT=0) and skips in the unit lane, in short mode, and when the herdr executable is absent",
 			),
 		),
@@ -256,8 +256,8 @@ func Catalog() []Entry {
 			),
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				time.Date(2026, time.November, 5, 0, 0, 0, 0, time.UTC),
-				"the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract; same underlying gap as runtime.builtin.t3bridge, staggered so the two claims don't lapse together",
+				time.Date(2026, time.December, 15, 0, 0, 0, 0, time.UTC),
+				"the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract; same underlying gap as runtime.builtin.t3bridge, so it shares that claim's date (one contract closes both)",
 			),
 		),
 		builtin(
