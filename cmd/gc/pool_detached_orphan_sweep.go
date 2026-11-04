@@ -204,6 +204,13 @@ func isDetachedHandoffOrphanCandidate(b beads.Bead) bool {
 	if strings.TrimSpace(b.Metadata[beadmeta.WorkBranchMetadataKey]) == "" {
 		return false // no work branch → not a completed-work handoff bead
 	}
+	// A parked bead's route was discharged deliberately (amended ADR-0066 D3:
+	// gc.routed_to cleared with the park), so re-arming it from the session
+	// bead would undo the operator's park — the same exemption every
+	// pack-layer router honors via gclib.is_parked (vp-dbck, vp-o2hx2).
+	if beadmeta.IsParkedMetadata(b.Metadata) {
+		return false // parked — no more auto-agent work; the route stays cleared
+	}
 	// Accept either session back-reference. The claim path stamps gc.session_id
 	// whenever GC_SESSION_ID is set and adds gc.session_name only when
 	// GC_SESSION_NAME is also present (hookClaimIdentityPatch), so a valid
