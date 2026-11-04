@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -2885,8 +2886,12 @@ func managedDoltRuntimeProcessOwned(state doltRuntimeState, layout managedDoltRu
 	// Membership, not equality: another process may legitimately hold the same
 	// port number on a different local address, and picking one holder at random
 	// to compare against would disown a live managed Dolt. See portHolderPIDs.
-	heldByState, known := portHeldByPID(strconv.Itoa(state.Port), state.PID)
-	if known && !heldByState {
+	// Only a port held by others disowns state: a checked empty listing is the
+	// city's own server before it binds (a restart), and falls through to the
+	// process ownership check.
+	holders, known := portHolderPIDsKnown(strconv.Itoa(state.Port))
+	heldByState := known && slices.Contains(holders, state.PID)
+	if known && len(holders) > 0 && !heldByState {
 		return false
 	}
 	owned, deleted := inspectManagedDoltOwnership(state.PID, layout)
