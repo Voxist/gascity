@@ -29,6 +29,12 @@ esac
 . "$__SCRIPT_DIR/_bd_trace.sh" "orphan-sweep"
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/order_outcome.sh"
+# shellcheck disable=SC1091
+. "$__SCRIPT_DIR/_tick_budget.sh"
+# Tick budget: 120s default = 0.5 x the order's explicit 4m timeout
+# (vc-djwg ratio). VOXIST_TICK_BUDGET_S_ORPHAN_SWEEP overrides; see
+# _tick_budget.sh for the contract.
+tb_init "orphan-sweep" 120
 
 # Where the recovery summary goes. Cities that staff a coordinator role (e.g.
 # the gastown pack's mayor) can point this at it; "human" is the reserved
@@ -57,7 +63,7 @@ SESSION_TMP=$(mktemp) || {
 trap 'rm -f "$TMP" "$SESSION_TMP"' EXIT
 
 RIG_NAMES=""
-RIG_LIST=$(gc rig list --json 2>/dev/null) || RIG_LIST=""
+RIG_LIST=$(tb_timeout "$(tb_call_timeout 30)" gc rig list --json 2>/dev/null) || RIG_LIST=""
 if [ -n "$RIG_LIST" ]; then
     RIG_NAMES=$(echo "$RIG_LIST" | jq -r '.rigs[] | select(.hq == false and (.suspended // false) == false) | .name' 2>/dev/null) || RIG_NAMES=""
 fi
@@ -66,7 +72,7 @@ append_session_list() {
     local session_fetch_tmp
     local row_count
     session_fetch_tmp=$(mktemp) || return 1
-    if "$@" >"$session_fetch_tmp" 2>/dev/null; then
+    if tb_timeout "$(tb_call_timeout 30)" "$@" >"$session_fetch_tmp" 2>/dev/null; then
         # An exit-0 response that parses to zero session rows carries no
         # liveness evidence at all. A city always has at least the calling
         # session live, so zero rows is never a legitimate steady state --
@@ -107,7 +113,7 @@ read_federated_claims() {
         FEDERATED_READ_ERROR="gc ready --status in_progress was not run: mktemp failed"
         return 1
     }
-    gc ready --status in_progress --json >"$out" 2>"$err_tmp" || rc=$?
+    tb_timeout "$(tb_call_timeout 120)" gc ready --status in_progress --json >"$out" 2>"$err_tmp" || rc=$?
     if [ "$rc" -eq 0 ] && jq -e 'type == "array"' "$out" >/dev/null 2>&1; then
         rm -f "$err_tmp"
         return 0
@@ -133,7 +139,12 @@ append_hq_scope() {
         rm -f "$bead_fetch_tmp" "$federated_tmp"
         return 1
     }
-    gc bd list --status=in_progress --json --limit=0 2>/dev/null >"$bead_fetch_tmp" || true
+    # Timeout-gated so a storm-stuck read cannot eat the scope's whole
+    # budget; gated on SUCCESS so a mid-write kill never appends truncated
+    # JSON that would fail the dedupe pass for the whole sweep.
+    if tb_timeout "$(tb_call_timeout 90)" gc bd list --status=in_progress --json --limit=0 2>/dev/null >"$bead_fetch_tmp"; then
+        cat "$bead_fetch_tmp" >>"$TMP"
+    fi
     # The city's scope also stages the claims only the federated reader
     # returns, between the same two liveness reads. Its rows overlap the scope
     # reads' rows; the first row staged for an id wins (Step 1c).
@@ -154,12 +165,15 @@ append_rig_scope() {
         rm -f "$bead_fetch_tmp"
         return 1
     }
-    gc bd list --rig "$rig" --status=in_progress --json --limit=0 2>/dev/null >"$bead_fetch_tmp" || true
+    # Timeout-gated, appended only on success: a mid-write kill never appends
+    # truncated JSON that would fail the dedupe pass for the whole sweep.
+    if tb_timeout "$(tb_call_timeout 90)" gc bd list --rig "$rig" --status=in_progress --json --limit=0 2>/dev/null >"$bead_fetch_tmp"; then
+        cat "$bead_fetch_tmp" >>"$TMP"
+    fi
     append_session_list gc --rig "$rig" session list --json || {
         rm -f "$bead_fetch_tmp"
         return 1
     }
-    cat "$bead_fetch_tmp" >>"$TMP"
     rm -f "$bead_fetch_tmp"
 }
 
@@ -170,12 +184,44 @@ append_rig_scope() {
 # rows so one stale or unreachable rig does not disable cleanup elsewhere.
 append_hq_scope || exit 0
 
+# Scope cursor (vc-q7hn, load-bearing): the sweep's fixed cost is this
+# staging fan-out — every scope costs two session-list calls and one bd
+# list BEFORE any bead is judged — so under the I/O storm the budget can be
+# spent in staging alone. The cursor is over SCOPES (rigs), not beads: a
+# bead-level cursor would leave the fan-out untouched. A deferred tick
+# resumes after the last completed scope; the HQ scope re-runs every tick
+# (one scope of cost) so the federated read is never skipped entirely.
+SCOPE_CURSOR="$(tb_read_cursor "orphan-sweep")"
+LAST_SCOPE_DONE=""
+RESUMED=1
+[ -n "$SCOPE_CURSOR" ] && RESUMED=0
+SCOPES_TOTAL=0
+SCOPES_DONE=0
 while IFS= read -r rig; do
     [ -z "$rig" ] && continue
+    SCOPES_TOTAL=$((SCOPES_TOTAL + 1))
+    if [ "$RESUMED" -eq 0 ]; then
+        # Skip everything up to and including the cursor scope: the prior
+        # tick staged it. Resume strictly after it. An unknown cursor (the
+        # rig vanished between ticks) never matches and so restarts at the
+        # top — losing the position costs one repeated batch, never a stuck
+        # sweep.
+        if [ "$rig" = "$SCOPE_CURSOR" ]; then
+            RESUMED=1
+        fi
+        continue
+    fi
+    tb_expired && break
     if ! append_rig_scope "$rig"; then
         echo "orphan-sweep: skipping rig $rig after session-list failure" >&2
     fi
+    LAST_SCOPE_DONE="$rig"
+    SCOPES_DONE=$((SCOPES_DONE + 1))
 done <<<"$RIG_NAMES"
+# Persist the resume point: the last scope this tick staged, or clear it when
+# the walk wrapped (every scope reached) or none ran.
+tb_write_cursor "orphan-sweep" "${LAST_SCOPE_DONE:--}"
+SCOPES_DEFERRED=$(( SCOPES_TOTAL > SCOPES_DONE ? SCOPES_TOTAL - SCOPES_DONE : 0 ))
 
 # Step 1c: a federated read that did not complete is declared: this pass
 # judged only the claims the gc bd scope reads returned, and on a split city
@@ -196,9 +242,9 @@ fi
 # Step 2: Get all known agent identities from resolved config.
 # `gc config explain` prints Agent.QualifiedName(), including import binding
 # and rig scope. Fall back to the older config-show parser for older binaries.
-AGENTS=$(gc config explain 2>/dev/null | awk '/^Agent: /{print $2}') || AGENTS=""
+AGENTS=$(tb_timeout "$(tb_call_timeout 30)" gc config explain 2>/dev/null | awk '/^Agent: /{print $2}') || AGENTS=""
 if [ -z "$AGENTS" ]; then
-    AGENTS=$(gc config show 2>/dev/null | awk '/^\[\[agent\]\]/{a=1} a && /^[[:space:]]*name[[:space:]]*=/{print; a=0}' | sed 's/.*=[[:space:]]*"\(.*\)"/\1/') || {
+    AGENTS=$(tb_timeout "$(tb_call_timeout 30)" gc config show 2>/dev/null | awk '/^\[\[agent\]\]/{a=1} a && /^[[:space:]]*name[[:space:]]*=/{print; a=0}' | sed 's/.*=[[:space:]]*"\(.*\)"/\1/') || {
         order_outcome_write
         exit 0
     }
@@ -280,7 +326,7 @@ work_bead_still_resettable() {
     local current_status
     local current_assignee
 
-    CURRENT_BEAD_JSON=$(gc bd show "$bead_id" --json 2>/dev/null) || return 1
+    CURRENT_BEAD_JSON=$(tb_timeout "$(tb_call_timeout 30)" gc bd show "$bead_id" --json 2>/dev/null) || return 1
     current_status=$(printf '%s\n' "$CURRENT_BEAD_JSON" | jq -r "$first_bead_jq | .status // empty" 2>/dev/null) || return 1
     current_assignee=$(printf '%s\n' "$CURRENT_BEAD_JSON" | jq -r "$first_bead_jq | .assignee // empty" 2>/dev/null) || return 1
 
@@ -368,7 +414,7 @@ session_bead_shows_live_assignment() {
 
     while IFS= read -r session_id; do
         [ -n "$session_id" ] || continue
-        if ! session_json=$(gc bd show "$session_id" --json 2>/dev/null); then
+        if ! session_json=$(tb_timeout "$(tb_call_timeout 30)" gc bd show "$session_id" --json 2>/dev/null); then
             if session_probe_failure_is_unverifiable "$session_id" "$assignee"; then
                 probe_failed=1
             fi
@@ -412,7 +458,7 @@ reset_orphan_if_current() {
     local reset_output
     local reset_state
 
-    reset_output=$(gc bd release-if-current "$bead_id" "$expected_assignee" 2>/dev/null) || return 1
+    reset_output=$(tb_timeout "$(tb_call_timeout 30)" gc bd release-if-current "$bead_id" "$expected_assignee" 2>/dev/null) || return 1
     reset_state=$(printf '%s\n' "$reset_output" | awk 'NF { print $1; exit }')
     case "$reset_state" in
         released)
@@ -422,7 +468,7 @@ reset_orphan_if_current() {
             # --append-notes whole (notes have no representation in the class
             # store contract), while every store serves --set-metadata. The
             # value is text, so bd and the class store both keep a string.
-            if ! gc bd update "$bead_id" --set-metadata "gc.orphan_sweep_reason=orphan-sweep: reset from assignee $expected_assignee -- no live session matched" >/dev/null 2>&1; then
+            if ! tb_timeout "$(tb_call_timeout 30)" gc bd update "$bead_id" --set-metadata "gc.orphan_sweep_reason=orphan-sweep: reset from assignee $expected_assignee -- no live session matched" >/dev/null 2>&1; then
                 echo "orphan-sweep: failed to record the reset cause on $bead_id" >&2
             fi
             return 0
@@ -685,8 +731,15 @@ UNVERIFIABLE=0
 # Count of undeliverable summaries. Load-bearing for the exit code below.
 FAILED=0
 # Process substitution (not a pipe) keeps the loop body in the parent
-# shell so $ORPHANED survives for the summary message below.
+# shell so $ORPHANED survives for the summary message below. The budget
+# guard is at the top of the loop body: a claim whose judgment would start
+# with no room left is deferred to the next tick — never abandoned
+# mid-reset (a reset is a bd write; killing one mid-write is the
+# indeterminate-commit vector vc-q7hn exists to remove).
+JUDGED=0
 while IFS=$'\t' read -r bead_id assignee; do
+    tb_expired && break
+    JUDGED=$((JUDGED + 1))
     claim_gate_verdict "$assignee"
     if [ "$GATE_VERDICT" != "local" ]; then
         record_protected_claim "$assignee" "$bead_id"
@@ -719,6 +772,7 @@ while IFS=$'\t' read -r bead_id assignee; do
         fi
     fi
 done < <([ -z "$UNRECOGNIZED_ROWS" ] || printf '%s\n' "$UNRECOGNIZED_ROWS")
+tb_log "$JUDGED" "$SCOPES_DEFERRED" "scopes deferred: $SCOPES_DEFERRED"
 
 PROTECTED_DETAIL=""
 if [ "$PROTECTED" -gt 0 ]; then
@@ -763,6 +817,9 @@ if [ "$ORPHANED" -gt 0 ] || [ "$UNVERIFIABLE" -gt 0 ] || [ "$PROTECTED" -gt 0 ];
         echo "$PROTECTED_DETAIL"
     fi
     if [ "$ORPHANED" -gt 0 ]; then
+        # Plain (unwrapped) on purpose: the escalation summary send is a
+        # one-shot outside every loop, and the Go contract test pins the
+        # literal `if ! gc mail send` loud-fail guard shape here.
         if ! gc mail send "$ESCALATION_TARGET" \
             -s "orphan-sweep: reset $ORPHANED orphaned beads" \
             -m "$SUMMARY${PROTECTED_DETAIL:+

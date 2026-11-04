@@ -8,6 +8,8 @@ description = "Reap stale wisps and purge closed molecules"
 exec = "$PACK_DIR/assets/scripts/reaper.sh"
 trigger = "cooldown"
 interval = "30m"
+# Explicit; the script self-bounds via its internal RUN_BUDGET_SECS=780
+# (plus census/purge budgets) below this timeout (vc-q7hn).
 timeout = "900s"
 skip_aliases = ["mol-dog-reaper"]
 # Interim: the script reads through `gc bd sql`, which an http-served store

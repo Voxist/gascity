@@ -21,6 +21,12 @@ __SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$__SCRIPT_DIR/_bd_trace.sh" "cross-rig-deps"
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/order_outcome.sh"
+# shellcheck disable=SC1091
+. "$__SCRIPT_DIR/_tick_budget.sh"
+# Tick budget: 150s default = 0.5 x the order's explicit 300s timeout
+# (vc-djwg ratio). VOXIST_TICK_BUDGET_S_CROSS_RIG_DEPS overrides for on-host
+# tuning; see _tick_budget.sh for the contract.
+tb_init "cross-rig-deps" 150
 
 CITY="${GC_CITY:-.}"
 LOOKBACK="${CROSS_RIG_LOOKBACK:-15m}"
@@ -46,13 +52,14 @@ SINCE=$(date -u -d "-${LOOKBACK%m} minutes" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || \
 # result exits 0 otherwise.
 QUERY_ERR_FILE=$(mktemp)
 QUERY_RC=0
-CLOSED=$(gc bd query "status=closed AND closed>\"$SINCE\"" --json --limit 0 2>"$QUERY_ERR_FILE") || QUERY_RC=$?
+CLOSED=$(tb_timeout "$(tb_call_timeout 120)" gc bd query "status=closed AND closed>\"$SINCE\"" --json --limit 0 2>"$QUERY_ERR_FILE") || QUERY_RC=$?
 QUERY_ERR=$(cat "$QUERY_ERR_FILE")
 rm -f "$QUERY_ERR_FILE"
 if [ "$QUERY_RC" -ne 0 ]; then
     case "$QUERY_ERR" in
         *"only supported for bd-backed beads providers"*)
             echo "cross-rig-deps: city is not a bd bead store; nothing to resolve there"
+            tb_log 0 0 "skipped: not a bd bead store"
             order_outcome_scope_skipped city "not a bd bead store"
             order_outcome_set skipped "not a bd bead store"
             order_outcome_write
@@ -63,6 +70,7 @@ fi
 [ -z "$QUERY_ERR" ] || printf '%s\n' "$QUERY_ERR" >&2
 [ "$QUERY_RC" -eq 0 ] || exit "$QUERY_RC"
 if [ -z "$CLOSED" ] || [ "$CLOSED" = "[]" ]; then
+    tb_log 0 0 "nothing closed recently"
     exit 0
 fi
 
@@ -73,17 +81,27 @@ fi
 # survives to the summary echo below. CLOSED is pre-validated as a
 # non-empty array above, so CLOSED_IDS is non-empty here.
 RESOLVED=0
+PROCESSED=0
+LAST_DONE=""
 CLOSED_IDS=$(echo "$CLOSED" | jq -r '.[].id' 2>/dev/null)
 # Bead-id prefixes of suspended rigs. A suspended rig is left cold: any bd
 # read restarts its retired proxy, so its beads wait for it to resume.
-SUSPENDED_PREFIXES=$(gc rig list --json 2>/dev/null \
+SUSPENDED_PREFIXES=$(tb_timeout "$(tb_call_timeout 30)" gc rig list --json 2>/dev/null \
     | jq -r '(.rigs // [])[] | select(.hq != true and .suspended == true) | .prefix' 2>/dev/null) || SUSPENDED_PREFIXES=""
+# Batch over the closed ids with a carry-over cursor (vc-q7hn): the tail is
+# latency-driven, so a wall-clock guard alone still ends the tick mid-list;
+# the cursor makes a deferred tick resume instead of re-walking the prefix.
+TB_CURSOR="$(tb_read_cursor "cross-rig-deps")"
+tb_batch_after 50 <<< "$CLOSED_IDS"
+BATCH_IDS="$TB_BATCH_ITEMS"
 while IFS= read -r closed_id; do
+    [ -z "$closed_id" ] && continue
+    tb_expired && break
     if [ -n "$SUSPENDED_PREFIXES" ] && printf '%s\n' "$SUSPENDED_PREFIXES" | grep -qxF "${closed_id%%-*}"; then
         continue
     fi
     # Find beads that have a blocks dep on this closed issue.
-    DEPS=$(gc bd dep list "$closed_id" --direction=up --type=blocks --json 2>/dev/null) || continue
+    DEPS=$(tb_timeout "$(tb_call_timeout 30)" gc bd dep list "$closed_id" --direction=up --type=blocks --json 2>/dev/null) || continue
     if [ -z "$DEPS" ] || [ "$DEPS" = "[]" ]; then
         continue
     fi
@@ -97,15 +115,26 @@ while IFS= read -r closed_id; do
         continue
     fi
     while IFS= read -r dep_id; do
+        [ -z "$dep_id" ] && continue
         if [ -n "$SUSPENDED_PREFIXES" ] && printf '%s\n' "$SUSPENDED_PREFIXES" | grep -qxF "${dep_id%%-*}"; then
             continue
         fi
         # Convert blocks → related: remove blocking semantics, keep audit trail.
-        gc bd dep remove "$dep_id" "external:$closed_id" 2>/dev/null || true
-        gc bd dep add "$dep_id" "external:$closed_id" --type=related 2>/dev/null || true
+        tb_timeout "$(tb_call_timeout 30)" gc bd dep remove "$dep_id" "external:$closed_id" 2>/dev/null || true
+        tb_timeout "$(tb_call_timeout 30)" gc bd dep add "$dep_id" "external:$closed_id" --type=related 2>/dev/null || true
         RESOLVED=$((RESOLVED + 1))
     done <<< "$EXTERNAL_DEPS"
-done <<< "$CLOSED_IDS"
+    PROCESSED=$((PROCESSED + 1))
+    LAST_DONE="$closed_id"
+done <<< "$BATCH_IDS"
+
+# Persist the carry-over point. On a budget break the cursor is the LAST
+# item actually processed (not the batch's nominal end), so the next tick
+# resumes exactly where work stopped. Empty when the sweep wrapped or
+# nothing was processed — tb_write_cursor treats "-" as a clear.
+tb_write_cursor "cross-rig-deps" "${LAST_DONE:-$TB_NEXT_CURSOR}"
+DEFERRED=$(( $(printf '%s\n' "$CLOSED_IDS" | grep -c . 2>/dev/null || true) - PROCESSED ))
+tb_log "$PROCESSED" "$DEFERRED"
 
 if [ "$RESOLVED" -gt 0 ]; then
     echo "cross-rig-deps: resolved $RESOLVED cross-rig dependencies"

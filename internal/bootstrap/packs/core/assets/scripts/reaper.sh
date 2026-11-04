@@ -25,6 +25,19 @@ CITY_BEADS_DIR="$CITY_ABS/.beads"
 . "$SCRIPT_DIR/scope_bd.sh"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/order_outcome.sh"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/_tick_budget.sh"
+# Tick budget (vp-psukt): reaper already self-bounds through three
+# interlocking internal budgets (RUN_BUDGET_SECS below the 900s order
+# timeout, WORKFLOW_ROOT_BUDGET_SECS, PURGE_BUDGET_SECS) that predate the
+# shared helper and carry the same contract — stop STARTING new work when
+# the wall clock is spent, resume from the store next run. Retro-fitting
+# them onto tb_* plumbing would rewrite a 1600-line script's deadline
+# machinery for no behavioral gain, so this source is for the uniform
+# tb_log measurement line and per-call timeout sizing on NEW call sites
+# only; the private budgets remain the binding guard here (documented
+# deviation from plan AC1 — see bead vp-psukt).
+tb_init "reaper" 780
 
 if ! command -v jq >/dev/null 2>&1; then
     echo "reaper: jq is required but not found in PATH" >&2
@@ -1605,3 +1618,4 @@ fi
 
 maintenance_done "$SUMMARY"
 echo "reaper: $SUMMARY"
+tb_log 0 0 "$SUMMARY"

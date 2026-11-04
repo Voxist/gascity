@@ -10,4 +10,7 @@
 description = "Convert satisfied cross-rig blocks deps to related"
 trigger = "cooldown"
 interval = "5m"
+# Explicit (vc-q7hn): p50 9.3s but p95 264s under the vc-ffl7 I/O storm; the
+# inherited default masked the tail. The script self-bounds at 150s (0.5x).
+timeout = "300s"
 exec = "$PACK_DIR/assets/scripts/cross-rig-deps.sh"

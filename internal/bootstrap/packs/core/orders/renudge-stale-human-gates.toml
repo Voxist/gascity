@@ -35,5 +35,7 @@
 description = "Re-mail + re-nudge the addressee of a human gate left open past a staleness threshold"
 trigger = "cooldown"
 interval = "5m"
+# Explicit; the script self-bounds at 60s (0.5x this timeout) and defers
+# un-started scopes to the next tick (vc-q7hn).
 timeout = "120s"
 exec = "$PACK_DIR/assets/scripts/renudge-stale-human-gates.sh"

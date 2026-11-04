@@ -72,6 +72,12 @@ __SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$__SCRIPT_DIR/_bd_trace.sh" "renudge-stale-human-gates"
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/order_outcome.sh"
+# shellcheck disable=SC1091
+. "$__SCRIPT_DIR/_tick_budget.sh"
+# Tick budget: 60s default = 0.5 x the order's explicit 120s timeout
+# (vc-djwg ratio). VOXIST_TICK_BUDGET_S_RENUDGE_STALE_HUMAN_GATES overrides;
+# see _tick_budget.sh for the contract.
+tb_init "renudge-stale-human-gates" 60
 
 # jq is a hard dependency: it decodes the gate list and the re-fetched gate
 # record. Without it every re-nudge would be silently skipped. Fail loud.
@@ -142,7 +148,7 @@ trap 'rm -f "$SCOPES_FILE"' EXIT
 READY_ERR_FILE="$(mktemp "$PACK_STATE_DIR/.renudge-ready-err.XXXXXX")"
 trap 'rm -f "$SCOPES_FILE" "$READY_ERR_FILE"' EXIT
 printf '\n' > "$SCOPES_FILE" # HQ scope: an empty line
-RIGS_JSON="$(gc rig list --json 2>/dev/null || true)"
+RIGS_JSON="$(tb_timeout "$(tb_call_timeout 30)" gc rig list --json 2>/dev/null || true)"
 if [ -n "$RIGS_JSON" ]; then
     printf '%s' "$RIGS_JSON" \
         | jq -r '(.rigs // [])[] | select(.hq != true and .suspended != true) | .name' 2>/dev/null \
@@ -198,7 +204,7 @@ renudge_gate() {
     # Re-fetch: the list projection omits assignee/metadata, and re-reading
     # closes the tiny window where the gate resolved since the list. Confirm
     # it is still an open human gate before sending.
-    GATE_JSON="$(gc bd show "$gate_id" "$@" --json 2>/dev/null \
+    GATE_JSON="$(tb_timeout "$(tb_call_timeout 30)" gc bd show "$gate_id" "$@" --json 2>/dev/null \
         | jq -c 'if type == "array" then .[0] else . end' 2>/dev/null)" || return 0
     [ -n "$GATE_JSON" ] && [ "$GATE_JSON" != "null" ] || return 0
     GATE_TYPE="$(printf '%s' "$GATE_JSON" | jq -r \
@@ -241,8 +247,16 @@ Resolve with: gc bd close $gate_id"
     fi
 }
 
-# 1. bd's own human gates (await_type == "human"), listed per scope.
+# 1. bd's own human gates (await_type == "human"), listed per scope. The
+# scope walk is the fixed staging cost this budget exists to bound
+# (vc-q7hn): each scope is a full gate-list round trip under the I/O storm,
+# so the sweep stops starting new scopes once the budget is spent and the
+# remainder defers to the next tick.
+TOTAL_SCOPES="$(grep -c '' "$SCOPES_FILE" 2>/dev/null || true)"
+SCOPES_DONE=0
+SCOPES_DEFERRED=0
 while IFS= read -r scope; do
+    tb_expired && break
     RIG_ARG1=""
     RIG_ARG2=""
     if [ -n "$scope" ]; then
@@ -254,7 +268,7 @@ while IFS= read -r scope; do
     # unlimited so a busy rig past the default 50 is not silently truncated.
     # Best-effort: a read failure (API down, unreachable rig) must not crash
     # the controller's order loop — skip this scope and continue.
-    GATES_JSON="$(gc bd gate list ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} --limit 0 --json 2>/dev/null)" || continue
+    GATES_JSON="$(tb_timeout "$(tb_call_timeout 30)" gc bd gate list ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} --limit 0 --json 2>/dev/null)" || continue
     [ -n "$GATES_JSON" ] && [ "$GATES_JSON" != "null" ] || continue
 
     HUMAN_GATES="$(printf '%s' "$GATES_JSON" \
@@ -269,7 +283,9 @@ while IFS= read -r scope; do
     done <<INNER
 $HUMAN_GATES
 INNER
+    SCOPES_DONE=$((SCOPES_DONE + 1))
 done < "$SCOPES_FILE"
+SCOPES_DEFERRED=$(( TOTAL_SCOPES > SCOPES_DONE ? TOTAL_SCOPES - SCOPES_DONE : 0 ))
 
 # 2. Human gates a formula [steps.gate] synthesized (gc.gate_type == "human").
 # gc ready --status open lists them across the city store, the serving rigs
@@ -287,7 +303,7 @@ FORMULA_GATES_ERROR=""
 read_formula_gates() {
     local listing why
     local rc=0
-    listing="$(gc ready --status open --metadata-field "gc.gate_type=human" --json 2>"$READY_ERR_FILE")" || rc=$?
+    listing="$(tb_timeout "$(tb_call_timeout 60)" gc ready --status open --metadata-field "gc.gate_type=human" --json 2>"$READY_ERR_FILE")" || rc=$?
     if [ "$rc" -ne 0 ]; then
         why="$(cat "$READY_ERR_FILE")" || why=""
         FORMULA_GATES_ERROR="gc ready --status open failed (exit $rc): $(printf '%s' "$why" | tr '\t\n' '  ')"
@@ -307,12 +323,16 @@ if ! read_formula_gates; then
     echo "renudge-stale-human-gates: $FORMULA_GATES_ERROR; formula gates were not swept (will retry next sweep)" >&2
     order_outcome_scope_skipped "formula gates (gc ready)" "$FORMULA_GATES_ERROR"
 fi
+tb_expired || {
 while IFS="$(printf '\t')" read -r gate_id created_at; do
     [ -n "$gate_id" ] || continue
     renudge_gate "$gate_id" "$created_at"
 done <<FORMULA
 $FORMULA_GATES
 FORMULA
+}
+
+tb_log "$((RENUDGED + FAILED))" "$SCOPES_DEFERRED"
 
 # Prune entries older than RETENTION so the state file stays bounded.
 RETENTION_S="$(duration_to_seconds "$RETENTION")"

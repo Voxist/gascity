@@ -27,5 +27,8 @@
 description = "Reset beads assigned to dead agents back to the work pool"
 trigger = "cooldown"
 interval = "5m"
+# Explicit (vc-q7hn): p50 102s under the vc-ffl7 I/O storm, p95 at the
+# deadline. The script self-bounds at 120s (0.5x this timeout), with a
+# SCOPE-level cursor over rigs so a deferred tick resumes its fan-out.
 timeout = "4m"
 exec = "$PACK_DIR/assets/scripts/orphan-sweep.sh"

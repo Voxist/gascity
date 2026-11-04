@@ -19,4 +19,8 @@
 description = "Nudge dependents' assignees or routed targets when a blocker bead closes"
 trigger = "event"
 on = "bead.closed"
+# Explicit (vc-q7hn): p50 57.6s but p95 255.6s under the vc-ffl7 I/O storm;
+# the inherited 300s default let ticks die at the deadline mid-write. The
+# script self-bounds at 150s (0.5x this timeout).
+timeout = "300s"
 exec = "$PACK_DIR/assets/scripts/cascade-nudge-on-blocker-close.sh"

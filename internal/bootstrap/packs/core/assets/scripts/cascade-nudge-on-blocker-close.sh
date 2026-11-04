@@ -35,6 +35,12 @@ set -euo pipefail
 __SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/_bd_trace.sh" "cascade-nudge-on-blocker-close"
+# shellcheck disable=SC1091
+. "$__SCRIPT_DIR/_tick_budget.sh"
+# Tick budget: 150s default = 0.5 x the order's explicit 300s timeout
+# (vc-djwg ratio). VOXIST_TICK_BUDGET_S_CASCADE_NUDGE_ON_BLOCKER_CLOSE
+# overrides; see _tick_budget.sh for the contract.
+tb_init "cascade-nudge-on-blocker-close" 150
 
 # jq is a hard dependency: it decodes the event stream and the dependency
 # records. Without it every cascade would be silently skipped. Fail loud.
@@ -69,7 +75,7 @@ duration_to_seconds() {
 # prefix_rig below (no associative arrays, for bash 3.2 portability).
 # Best-effort: a single-rig city resolves nothing here and simply runs the
 # bd/gc calls in their default scope.
-RIGS_JSON="$(gc rig list --json 2>/dev/null || true)"
+RIGS_JSON="$(tb_timeout "$(tb_call_timeout 30)" gc rig list --json 2>/dev/null || true)"
 
 # Resolve a bead id's rig into RIG_ARG1/RIG_ARG2 ("--rig" "<name>"), or
 # leave them empty when the prefix is unknown. Callers expand them with
@@ -114,13 +120,13 @@ nudge_routed_target() {
     local target="$1"
     local message="$2"
     local members any member
-    members="$(gc session list --json --state active --template "$target" 2>/dev/null \
+    members="$(tb_timeout "$(tb_call_timeout 30)" gc session list --json --state active --template "$target" 2>/dev/null \
         | jq -r '(.sessions // [])[] | .name // .id' 2>/dev/null)" || members=""
     if [ -n "$members" ]; then
         any=1
         while IFS= read -r member; do
             [ -n "$member" ] || continue
-            if gc session nudge "$member" "$message" >/dev/null 2>&1; then
+            if tb_timeout "$(tb_call_timeout 30)" gc session nudge "$member" "$message" >/dev/null 2>&1; then
                 any=0
             fi
         done <<MEMBERS
@@ -128,7 +134,7 @@ $members
 MEMBERS
         return "$any"
     fi
-    gc session nudge "$target" "$message" >/dev/null 2>&1
+    tb_timeout "$(tb_call_timeout 30)" gc session nudge "$target" "$message" >/dev/null 2>&1
 }
 
 # still_held reports what still holds dependent $1 once $2, the blocker whose
@@ -154,7 +160,7 @@ MEMBERS
 # fails, or that cannot be parsed, proves nothing either: the nudge goes out,
 # as it always has. Uses the dependent's rig args.
 still_held() {
-    _down="$(gc bd dep list "$1" ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} \
+    _down="$(tb_timeout "$(tb_call_timeout 30)" gc bd dep list "$1" ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} \
             --direction=down --type=blocks --json 2>/dev/null)" || return 0
     printf '%s' "$_down" | jq -r --arg b "$2" '
         def closed_blocked:
@@ -172,12 +178,12 @@ still_held() {
 
 # Pull recent bead.closed events. Best-effort: a read failure must not
 # crash the controller's order loop.
-EVENTS="$(gc events --type bead.closed --since "$LOOKBACK" 2>/dev/null)" || exit 0
-[ -n "$EVENTS" ] || exit 0
+EVENTS="$(tb_timeout "$(tb_call_timeout 60)" gc events --type bead.closed --since "$LOOKBACK" 2>/dev/null)" || exit 0
+[ -n "$EVENTS" ] || { tb_log 0 0 "no close events in lookback"; exit 0; }
 
 BLOCKERS="$(printf '%s\n' "$EVENTS" \
     | jq -r '.payload.bead.id // empty' 2>/dev/null | sort -u)" || BLOCKERS=""
-[ -n "$BLOCKERS" ] || exit 0
+[ -n "$BLOCKERS" ] || { tb_log 0 0 "no blockers in lookback"; exit 0; }
 
 # Load dedup state (object mapping "<blocker>|<dependent>" -> ISO timestamp).
 STATE="$(cat "$STATE_FILE" 2>/dev/null || true)"
@@ -185,12 +191,24 @@ echo "$STATE" | jq -e 'type == "object"' >/dev/null 2>&1 || STATE='{}'
 
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 NUDGED=0
+PROCESSED=0
+LAST_DONE=""
+# Batch over the blockers with a carry-over cursor (vc-q7hn): under the I/O
+# storm the tail is latency-driven, so the wall-clock guard alone would end
+# the tick mid-list; the cursor makes a deferred tick resume instead of
+# re-walking the prefix. (The blocker list is bounded by the lookback
+# window, but each blocker costs a dep list plus per-dependent reads, which
+# is exactly the unbounded-in-latency shape the budget exists to cap.)
+TB_CURSOR="$(tb_read_cursor "cascade-nudge-on-blocker-close")"
+tb_batch_after 50 <<< "$BLOCKERS"
+BATCH_BLOCKERS="$TB_BATCH_ITEMS"
 while IFS= read -r blocker; do
     [ -n "$blocker" ] || continue
+    tb_expired && break
 
     set_rig_args "$blocker"
     [ -z "$RIG_SUSPENDED" ] || continue
-    DEPS="$(gc bd dep list "$blocker" ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} \
+    DEPS="$(tb_timeout "$(tb_call_timeout 30)" gc bd dep list "$blocker" ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} \
             --direction=up --type=blocks --json 2>/dev/null)" || continue
     if [ -z "$DEPS" ] || [ "$DEPS" = "[]" ]; then continue; fi
 
@@ -240,7 +258,7 @@ while IFS= read -r blocker; do
         esac
         if [ "$dep_kind" = "assignee" ]; then
             msg="blocker $blocker closed — your dependent $dep_id may be unblocked"
-            if gc session nudge ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} "$target" "$msg" >/dev/null 2>&1; then
+            if tb_timeout "$(tb_call_timeout 30)" gc session nudge ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} "$target" "$msg" >/dev/null 2>&1; then
                 STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
                 NUDGED=$((NUDGED + 1))
             fi
@@ -254,9 +272,17 @@ while IFS= read -r blocker; do
     done <<EOF
 $ROWS
 EOF
+    PROCESSED=$((PROCESSED + 1))
+    LAST_DONE="$blocker"
 done <<EOF
-$BLOCKERS
+$BATCH_BLOCKERS
 EOF
+
+# Persist the carry-over point. On a budget break the cursor is the LAST
+# blocker actually processed, so the next tick resumes where work stopped.
+# "-" clears it when the sweep wrapped or nothing was processed.
+tb_write_cursor "cascade-nudge-on-blocker-close" "${LAST_DONE:-$TB_NEXT_CURSOR}"
+tb_log "$PROCESSED" "$(( $(printf '%s\n' "$BLOCKERS" | grep -c '' ) - PROCESSED ))"
 
 # Prune entries older than RETENTION so the state file stays bounded.
 RETENTION_S="$(duration_to_seconds "$RETENTION")"
