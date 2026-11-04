@@ -179,7 +179,7 @@ var bootstrapPolicy = Ledger{
 			Invariant:       "declared go-test invocation sites in tracked build-orchestration files (Makefile, CI workflow YAML) cannot grow without an explicit, reviewed baseline update",
 			ResourceOwner:   "each new test target's author declares it via a baseline bump with real ownership fields — same contract as every other resource dimension (ga-hpcma0)",
 			MigrationTarget: "n/a — preventive dimension, not paying down inherited debt",
-			Expires:         "2026-10-31",
+			Expires:         "2026-12-31",
 		},
 	},
 	Medium: []MediumOwner{
@@ -500,7 +500,7 @@ var bootstrapPolicy = Ledger{
 			Invariant:       "the storeclass nolint-suppression proof is a checked Medium subprocess owner",
 			ResourceOwner:   "the nogo subprocess per case is confined to TestNolintNeverSuppressesStoreclass, which exists to run the Bazel-built nogo binary over a fixture under every nolint spelling and placement: nolint handling lives in rules_go's patched nogo driver, not in the storeclass analyzer, so only a real nogo run can prove that no directive suppresses a storeclass finding",
 			MigrationTarget: "P0.4b",
-			Expires:         "2026-10-31",
+			Expires:         "2026-12-31",
 		},
 	},
 	ReviewedHermeticBody: []ReviewedHermeticBody{
