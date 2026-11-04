@@ -85,7 +85,9 @@ litellm>=1.106.3
 # empty/nil HMAC key — cross-language sibling of CVE-2026-45363) in joserfc
 # < 1.6.8. joserfc arrives transitively via authlib; pin the floor until
 # authlib's transitive constraint carries the patched version itself.
-joserfc>=1.6.8
+# Raised to 1.7.5 for CVE-2026-119283 (DoS via unbounded recipient processing
+# during JWE decryption) in joserfc < 1.7.5.
+joserfc>=1.7.5
 
 # Security floor: CVE-2026-52869 + CVE-2026-52870 (HIGH, fixed 1.27.2 — HTTP
 # transports serve session requests without verifying the authenticated
