@@ -411,6 +411,25 @@ func readFilteredCore(path string, filter Filter, failFast bool) ([]Event, []str
 // catch-up path; a positive Filter.Limit bounds only ReadFiltered's own scan,
 // not newly discovered rotation sources merged by the recovery pass.
 func ReadFilteredWithInFlight(path string, filter Filter) ([]Event, error) {
+	evts, _, err := readFilteredWithInFlightCore(path, filter, true)
+	return evts, err
+}
+
+// ReadFilteredWithInFlightWarnings is ReadFilteredWithInFlight with
+// archive-level errors degraded to skips, the in-flight counterpart of
+// ReadFilteredWithWarnings: a canonical .gz archive that cannot be read
+// (truncated gzip, torn write) is skipped and named in the returned warnings
+// instead of failing the whole read. Live-file and rotation-source errors
+// still fail it.
+//
+// It exists for readers that would otherwise retry forever: a fail-fast read
+// over a permanently truncated archive never succeeds, so its caller re-reads
+// the full archive history on every retry and still learns nothing.
+func ReadFilteredWithInFlightWarnings(path string, filter Filter) ([]Event, []string, error) {
+	return readFilteredWithInFlightCore(path, filter, false)
+}
+
+func readFilteredWithInFlightCore(path string, filter Filter, failFast bool) ([]Event, []string, error) {
 	// A closed window proves the records appended before it hold no
 	// match, and an in-flight rotating file holds the previous active
 	// log, appended earlier still. Right after rotation installs a fresh
@@ -418,21 +437,23 @@ func ReadFilteredWithInFlight(path string, filter Filter) ([]Event, error) {
 	// the window or the walk reaches byte 0 still open, and the full read
 	// below consults the rotating sources.
 	if result, bounded, err := readFilteredSince(context.Background(), path, filter); bounded || err != nil {
-		return result, err
+		return result, nil, err
 	}
-	base, listedArchives, baseErr := readFilteredTracked(path, filter)
+	// listedArchives holds every canonical archive in the snapshot, including
+	// one a lenient read skipped, so readRotationSources does not retry it.
+	base, warnings, listedArchives, baseErr := readFilteredCore(path, filter, failFast)
 	rotated, rotationErr := readRotationSources(path, filter, listedArchives)
 	if len(rotated) == 0 {
 		if baseErr == nil {
-			return base, rotationErr
+			return base, warnings, rotationErr
 		}
-		return base, baseErr
+		return base, warnings, baseErr
 	}
 	merged := mergeEventsBySeq(base, rotated)
 	if baseErr != nil {
-		return merged, baseErr
+		return merged, warnings, baseErr
 	}
-	return merged, rotationErr
+	return merged, warnings, rotationErr
 }
 
 // readRotationSources performs the post-active directory scan across BOTH

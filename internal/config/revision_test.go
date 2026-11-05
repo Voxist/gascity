@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"testing"
 
@@ -868,5 +869,36 @@ func TestRevision_EditDuringLoadIsNotStampedWithNewRevision(t *testing.T) {
 		if !loadedSuspended && loadedRev == diskRev {
 			t.Fatalf("edit after read %d of %d: load returned pre-edit agent content stamped with the post-edit revision; a reload would never be triggered", k, counter.reads)
 		}
+	}
+}
+
+// TestWatchTargetsListsConfigInputsForShallowDirs: the watcher drops events
+// for entries of a shallow directory that are not config inputs, so
+// WatchTargets has to name them. The city root lists its provenance sources
+// plus city.toml, pack.toml and packs.lock even before they exist; any other
+// source directory lists only the sources it holds.
+func TestWatchTargetsListsConfigInputsForShallowDirs(t *testing.T) {
+	root := t.TempDir()
+	fragDir := filepath.Join(t.TempDir(), "fragments")
+	prov := &Provenance{Sources: []string{
+		filepath.Join(root, "city.toml"),
+		filepath.Join(fragDir, "agents.toml"),
+	}}
+	targets := WatchTargets(prov, &City{}, root)
+
+	inputs := map[string][]string{}
+	for _, target := range targets {
+		inputs[target.Path] = target.Inputs
+	}
+	wantRoot := []string{
+		filepath.Join(root, "city.toml"),
+		filepath.Join(root, "pack.toml"),
+		filepath.Join(root, "packs.lock"),
+	}
+	if got := inputs[root]; !reflect.DeepEqual(got, wantRoot) {
+		t.Fatalf("city root Inputs = %q, want %q", got, wantRoot)
+	}
+	if got, want := inputs[fragDir], []string{filepath.Join(fragDir, "agents.toml")}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("fragment dir Inputs = %q, want %q", got, want)
 	}
 }

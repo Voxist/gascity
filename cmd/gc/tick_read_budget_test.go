@@ -236,6 +236,12 @@ func TestCompletionsDeltaJournalReadBudgetWithNamedRoots(t *testing.T) {
 	if journal.fullReads != 1 {
 		t.Fatalf("warming the fact index cost %d full journal read(s), want exactly 1", journal.fullReads)
 	}
+	// The warm's one read also reads the head once, to record how far it
+	// reached (the high-water). Only a pass that reads the journal pays that.
+	if journal.latestSeqs > 1 {
+		t.Fatalf("warming the fact index cost %d head read(s), want at most 1", journal.latestSeqs)
+	}
+	warmHeadReads := journal.latestSeqs
 
 	// Steady ticks: roots named every time, as on maintainer-city.
 	for range 8 {
@@ -248,8 +254,8 @@ func TestCompletionsDeltaJournalReadBudgetWithNamedRoots(t *testing.T) {
 	// And not a cheaper journal read either: a warm index reads NOTHING. The
 	// facts it does not emit itself arrive through the journal feed the lane
 	// already tails, which costs the tick nothing at all.
-	if journal.tailReads != 0 || journal.latestSeqs != 0 {
-		t.Fatalf("a warm index issued %d incremental read(s) and %d head read(s), want 0 and 0", journal.tailReads, journal.latestSeqs)
+	if journal.tailReads != 0 || journal.latestSeqs != warmHeadReads {
+		t.Fatalf("a warm index issued %d incremental read(s) and %d head read(s) beyond its warm-up, want 0 and 0", journal.tailReads, journal.latestSeqs-warmHeadReads)
 	}
 
 	// Control: the index is warm, not broken. A root whose step closes AFTER the

@@ -634,13 +634,21 @@ type CompletedFactIndex struct {
 	// growth accumulates toward the cap instead of re-flooring every pass. See
 	// that const for why the bound is relative and not absolute.
 	baseline int
-	// maxSeq is the journal high-water of the last successful load. Journal
-	// seqs are monotonic and a fact once read cannot change, so every re-read
-	// resumes at this floor instead of byte 0 — the full-history form of the
-	// re-read (every archive gunzipped plus the whole active journal, per
-	// retry, per city) was the primary supervisor I/O burn (ga-ftgyl). It
-	// survives Invalidate and warm errors by design: only what was READ is
-	// behind it, so resuming from it can never skip an unseen fact.
+	// maxSeq is the journal high-water of the last successful load: the
+	// journal's LatestSeq when that read STARTED, or the newest fact it
+	// returned if that is higher. Journal seqs are monotonic and a fact once
+	// read cannot change, so every re-read resumes at this floor instead of
+	// byte 0 — the full-history form of the re-read (every archive gunzipped
+	// plus the whole active journal, per retry, per city) was the primary
+	// supervisor I/O burn (ga-ftgyl). It survives Invalidate and warm errors by
+	// design: only what was READ is behind it, so resuming from it can never
+	// skip an unseen fact. The one exception is an archive the lenient read
+	// skipped as unreadable: its facts were never seen and are not retried,
+	// and the skip is surfaced as a warm warning.
+	//
+	// It is NOT the seq of the newest matching fact. Completion facts are a
+	// small share of the journal, so that seq can sit far behind the read's
+	// actual reach, and every tail re-read would reopen every archive above it.
 	maxSeq uint64
 }
 
@@ -692,7 +700,7 @@ func (idx *CompletedFactIndex) ReconcileRoots(recorder events.Provider, graphSto
 	if recorder == nil || len(rootIDs) == 0 {
 		return 0
 	}
-	if !idx.warm(recorder) {
+	if _, err := idx.warm(recorder); err != nil {
 		return 0
 	}
 	emitted := 0
@@ -716,10 +724,18 @@ func (idx *CompletedFactIndex) ReconcileRoots(recorder events.Provider, graphSto
 	return emitted
 }
 
-// warm loads the set from the journal when it is cold and reports whether the
-// index can be used. A journal that cannot be read reports false: emitting
+// warm loads the set from the journal when it is cold. A nil error means the
+// index can be used. A journal that cannot be read returns the error: emitting
 // without the record would duplicate recovery facts, and a later pass retries.
-func (idx *CompletedFactIndex) warm(recorder events.Provider) bool {
+//
+// The returned warnings name archives the read skipped as unreadable (a
+// truncated .gz). A skipped archive degrades the record rather than failing
+// it: a fail-fast read over a permanently truncated archive can never succeed,
+// so failing would stop the lane for good and re-read the whole history on
+// every retry. The cost of the skip is that a fact only that archive held may
+// be re-emitted once as a duplicate recovery fact, which is a correct
+// restatement of a real close.
+func (idx *CompletedFactIndex) warm(recorder events.Provider) ([]string, error) {
 	idx.mu.Lock()
 	// Growth past the load baseline forces a REBUILD, not another tail merge: the
 	// set has accumulated more keys than the journal still backs, so re-read it
@@ -736,7 +752,7 @@ func (idx *CompletedFactIndex) warm(recorder events.Provider) bool {
 	rebuild := len(idx.facts) > idx.baseline+completedFactIndexGrowthCap
 	if idx.loaded && !rebuild {
 		idx.mu.Unlock()
-		return true
+		return nil, nil
 	}
 	afterSeq := idx.maxSeq
 	if rebuild {
@@ -763,19 +779,30 @@ func (idx *CompletedFactIndex) warm(recorder events.Provider) bool {
 	// keeps the earlier reads' facts. AfterSeq also lets the reader skip whole
 	// archives by their seq window instead of gunzipping them. A rebuild resets
 	// the high-water to 0 to re-read the retained journal in full.
-	existing, err := completedFacts(recorder, events.Filter{Type: events.ExecutionStepCompleted, AfterSeq: afterSeq})
-	if err != nil {
-		return false
+	//
+	// readHigh is the journal's reach when the read starts. Every event at or
+	// below it was already appended, so the read covers all of them and the
+	// next re-read can resume there. A LatestSeq error only costs that
+	// optimization: the high-water then falls back to the newest fact read.
+	readHigh, latestErr := recorder.LatestSeq()
+	if latestErr != nil {
+		readHigh = 0
 	}
-	idx.mergeFromJournal(existing, rebuild, fullLoad)
-	return true
+	existing, warnings, err := completedFacts(recorder, events.Filter{Type: events.ExecutionStepCompleted, AfterSeq: afterSeq})
+	if err != nil {
+		return warnings, err
+	}
+	idx.mergeFromJournal(existing, rebuild, fullLoad, readHigh)
+	return warnings, nil
 }
 
 // mergeFromJournal folds a journal read into the fact set under the index lock.
 // A rebuild re-floors the set to exactly what the read returned; otherwise the
 // read is a tail merge that extends the set from the high-water. fullLoad (a
-// cold first read or a rebuild) redefines the growth-cap baseline.
-func (idx *CompletedFactIndex) mergeFromJournal(existing []events.Event, rebuild, fullLoad bool) {
+// cold first read or a rebuild) redefines the growth-cap baseline. readHigh is
+// the journal's LatestSeq when the read started; the high-water advances to it
+// even when no fact sits that high.
+func (idx *CompletedFactIndex) mergeFromJournal(existing []events.Event, rebuild, fullLoad bool, readHigh uint64) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 	switch {
@@ -807,6 +834,9 @@ func (idx *CompletedFactIndex) mergeFromJournal(existing []events.Event, rebuild
 		if event.Seq > maxSeq {
 			maxSeq = event.Seq
 		}
+	}
+	if readHigh > maxSeq {
+		maxSeq = readHigh
 	}
 	idx.maxSeq = maxSeq
 	if fullLoad {
@@ -930,6 +960,12 @@ type CompletionBackstopResult struct {
 	// chunk is re-polled immediately, a warm failure must be backed off or the
 	// caller re-issues the journal read every poll interval forever (ga-ftgyl).
 	WarmFailed bool
+	// WarmErr is why the warm failed, set exactly when WarmFailed is. A caller
+	// that backs off without logging it leaves the lane failing silently.
+	WarmErr error
+	// WarmWarnings names archives the warm skipped as unreadable. The chunk
+	// still ran; the record is only missing what those archives held.
+	WarmWarnings []string
 }
 
 // Pass visits at most ChunkSize roots, resuming from the last Pass's cursor.
@@ -940,8 +976,11 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 		return result
 	}
 	b.prepareSweep(storeFanSignature(graphStores))
-	if !b.index.warm(recorder) {
+	warnings, err := b.index.warm(recorder)
+	result.WarmWarnings = warnings
+	if err != nil {
 		result.WarmFailed = true
+		result.WarmErr = err
 		return result
 	}
 	for b.storeIndex < len(graphStores) {
@@ -1218,11 +1257,19 @@ func applyConvergenceStamp(graphStore beads.GraphStore, root beads.Bead, rowCoun
 // FileRecorder segment that is temporarily awaiting archive compression. A
 // reconciliation pass must see that segment before deciding a close needs a
 // recovery fact; otherwise an event rotation can create a duplicate fact.
-func completedFacts(recorder events.Provider, filter events.Filter) ([]events.Event, error) {
-	if inFlight, ok := recorder.(events.InFlightProvider); ok {
-		return inFlight.ListInFlight(filter)
+//
+// A provider that can skip unreadable archives is read that way, and the skips
+// come back as warnings (see warm for why a skip beats a failure here).
+func completedFacts(recorder events.Provider, filter events.Filter) ([]events.Event, []string, error) {
+	if lenient, ok := recorder.(events.InFlightWarningsProvider); ok {
+		return lenient.ListInFlightWithWarnings(filter)
 	}
-	return recorder.List(filter)
+	if inFlight, ok := recorder.(events.InFlightProvider); ok {
+		evts, err := inFlight.ListInFlight(filter)
+		return evts, nil, err
+	}
+	evts, err := recorder.List(filter)
+	return evts, nil, err
 }
 
 type completedFactKey struct {
