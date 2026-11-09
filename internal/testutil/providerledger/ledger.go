@@ -239,9 +239,9 @@ func Catalog() []Entry {
 			"hybrid", "exact:hybrid", nil,
 			waivedRuntime(
 				repoSymbol("cmd/gc", "newHybridProvider"),
-				time.Date(2026, time.November, 22, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.December, 26, 0, 0, 0, 0, time.UTC),
 				"cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract."+
-					" Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation; the underlying test gap must be fixed separately.",
+					" Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation, and again on 2026-11-07; the underlying test gap must be fixed separately.",
 			),
 		),
 		builtin(
