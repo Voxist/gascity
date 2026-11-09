@@ -79,6 +79,22 @@ func (p *eventCheckSpy) List(filter events.Filter) ([]events.Event, error) {
 	return p.Fake.List(filter)
 }
 
+// ListTail is the fork's bounded zero-cursor read (vp-8jig): an order with no
+// persisted cursor reads the recent tail instead of the whole history. It is
+// the same check reading past 0, so it is recorded and fails the same way.
+func (p *eventCheckSpy) ListTail(filter events.Filter, limit int) ([]events.Event, error) {
+	if filter.Type == p.typ {
+		p.mu.Lock()
+		p.after = append(p.after, filter.AfterSeq)
+		fail := p.failRead
+		p.mu.Unlock()
+		if fail {
+			return nil, errors.New("simulated event log read failure")
+		}
+	}
+	return p.Fake.ListTail(filter, limit)
+}
+
 func (p *eventCheckSpy) setFailRead(fail bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

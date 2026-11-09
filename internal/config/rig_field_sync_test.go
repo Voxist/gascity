@@ -33,6 +33,8 @@ func TestRigFieldSync(t *testing.T) {
 		// [[patches.agent]], which applyAgentPatch handles.
 		"Overrides":  "rig-scoped agent overrides, consumed by pack expansion before ApplyPatches; use [[patches.agent]]",
 		"RigPatches": "V2 spelling of Overrides, same composition ordering",
+		"Federation": "deliberately not patchable (see Rig.Federation): it decides which identities may act on a store another city also attaches",
+		"Namespace":  "cross-city declaration paired with Federation, not patchable for the same reason",
 	}
 
 	rigFields := structFields(reflect.TypeOf(Rig{}))

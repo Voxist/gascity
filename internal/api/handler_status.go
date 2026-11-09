@@ -183,10 +183,9 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		// succeed, and no poll pays the rebuild inline. There is deliberately
 		// no upper age bound: a rebuild that keeps failing (recovered panic,
 		// perpetual wedge past statusWarmBuildTimeout) leaves this body served
-		// with CacheAgeS growing, and that header — rendered by the CLI as a
-		// stalled-build banner past cacheAgeStaleBuildThresholdSeconds — is the
-		// signal; blocking the request instead would only hide it behind a
-		// timeout. Pinned by TestHandleStatusReseedsWarmEntryAfterLongIdle.
+		// with CacheAgeS growing and CacheRefresh "rebuilding", and those
+		// headers — rendered by the CLI's cache-age footer — are the signal;
+		// blocking the request instead would only hide it behind a timeout. Pinned by TestHandleStatusReseedsWarmEntryAfterLongIdle.
 		if age > statusWarmRefreshAfter {
 			s.refreshWarmStatusInBackground(cacheKey, input.Lite)
 		}
@@ -201,12 +200,20 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		// CacheAgeS reports the GREATER of the two staleness signals, the
 		// same rule savedStatusOutput applies: how long ago this warm entry
 		// was built, and the age of the CachingStore snapshot it was built
-		// from. Reporting only the store age hides the warm delay —
-		// statusWarmRefreshAfter is seconds while the CLI's staleness banner
-		// fires at 30s (cacheAgeBannerThresholdSeconds), so a minutes-old warm body
-		// on a freshly reconciled store would report ~0 and silently suppress
-		// the banner on exactly the stale view the operator needs told about.
-		f := statusServedFreshness(entry.body, age, cacheAgeSeconds(work))
+		// from. Reporting only the store age hides the warm delay: a
+		// minutes-old warm body on a freshly reconciled store would report ~0
+		// and silently suppress the CLI's cache-age footer on exactly the stale
+		// view the operator needs told about.
+		//
+		// Within statusResponseTTLFloor the warm body is as good as the TTL
+		// floor's and reports what that serve would (the store's freshness
+		// alone); past it, it is a stale-while-revalidate serve and reports as
+		// one, so the warm path answers each age the way the path it stands in
+		// front of would.
+		f := statusCacheFreshness(entry.body, cacheAgeSeconds(work))
+		if age > statusResponseTTLFloor {
+			f = statusServedFreshness(entry.body, age, cacheAgeSeconds(work))
+		}
 		return &IndexOutput[StatusBody]{
 			Index:        statusBuildIndex(*entry, index),
 			CacheAgeS:    f.ageS,

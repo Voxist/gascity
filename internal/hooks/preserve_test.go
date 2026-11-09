@@ -46,11 +46,19 @@ func TestPreserveManagedFileKeepsCurrentPlugin(t *testing.T) {
 				t.Errorf("freshly installed %s plugin was not preserved", provider)
 			}
 			stale := version.ReplaceAll(installed, []byte("${1}0"))
+			staleForm := "with its version zeroed"
 			if bytes.Equal(stale, installed) {
-				t.Fatalf("%s has no hook version to zero", rel)
+				// The fork's kiro overlay carries no numeric version: its
+				// staleness marker is the pre-GC_BIN bare-gc spelling of its
+				// managed commands (managedShellHookFileNeedsGCBinUpgrade).
+				stale = bytes.ReplaceAll(installed, []byte(`\"${GC_BIN:-gc}\"`), []byte("gc"))
+				staleForm = "in the pre-GC_BIN spelling"
+			}
+			if bytes.Equal(stale, installed) {
+				t.Fatalf("%s has no hook version to zero and no GC_BIN invocation to revert", rel)
 			}
 			if PreserveManagedFile(rel, stale) {
-				t.Errorf("%s plugin with its version zeroed was preserved; the bundled file is not recognized as managed", provider)
+				t.Errorf("%s plugin %s was preserved; the bundled file is not recognized as managed", provider, staleForm)
 			}
 		})
 	}

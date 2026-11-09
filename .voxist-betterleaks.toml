@@ -109,6 +109,7 @@ containsAny(finding["secret"], [
     r"""(?:^|/)cmd/gc/testdata/wd15_campaign_corpus\.jsonl$""",
     r"""(?:^|/)internal/session/transcript_lookup_test\.go$""",
     r"""(?:^|/)internal/session/manager_test\.go$""",
+    r"""(?:^|/)internal/session/held_transcript_test\.go$""",
     r"""(?:^|/)internal/worker/history_identity_test\.go$""",
     r"""(?:^|/)internal/worker/transcript/claude_slug_test\.go$""",
     r"""(?:^|/)internal/worker/invocation_telemetry_usagefact_test\.go$""",
@@ -141,6 +142,17 @@ containsAny(finding["secret"], [
 // release-gate documents and to exactly that shape.
 || (
   matchesAny(finding["secret"], [r"""^[0-9a-f]{40}-[0-9a-f]{10}$"""])
+  && matchesAny(attributes[?"path"].orValue(""), [
+    r"""^release-gates/[^/]+\.md$"""
+  ])
+)
+
+// Commit SHAs (40 hex) recorded as OPENAPI_BREAKING_BASE=<sha> in release-gate
+// evidence, arriving with the 2026-11-09 upstream resync. A commit id names a
+// revision; it authorises nothing. Scoped to release-gate documents and to
+// exactly that shape.
+|| (
+  matchesAny(finding["secret"], [r"""^[0-9a-f]{40}$"""])
   && matchesAny(attributes[?"path"].orValue(""), [
     r"""^release-gates/[^/]+\.md$"""
   ])

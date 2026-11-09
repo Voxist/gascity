@@ -643,7 +643,9 @@ interval = "1h"
 }
 
 // TestOrderScanContractLoadAllOrdersReportsEveryUnmatchedOverride pins the CLI
-// path: the refusal stays loud and names every unmatched override at once.
+// path: it names every unmatched override at once. On this fork the CLI
+// degrades instead of refusing (vp-ia7c, orderScanOptions' OnOverrideError):
+// it warns, exits 0 and still applies the overrides that match.
 func TestOrderScanContractLoadAllOrdersReportsEveryUnmatchedOverride(t *testing.T) {
 	cityPath, cityFormulasDir := contractCitySetup(t)
 	writeContractOrder(t, filepath.Join(cityPath, "orders"), "nightly", `[order]
@@ -667,8 +669,12 @@ interval = "1h"
 	}
 
 	var stderr bytes.Buffer
-	if _, code := loadAllOrders(cityPath, cfg, &stderr, "gc order list"); code != 1 {
-		t.Fatalf("loadAllOrders code = %d, want 1; stderr: %s", code, stderr.String())
+	all, code := loadAllOrders(cityPath, cfg, &stderr, "gc order list")
+	if code != 0 {
+		t.Fatalf("loadAllOrders code = %d, want 0 (degrade-not-fatal, vp-ia7c); stderr: %s", code, stderr.String())
+	}
+	if len(all) != 1 || all[0].IsEnabled() {
+		t.Fatalf("orders = %+v, want nightly disabled by the override after the unmatched one", all)
 	}
 	for _, want := range []string{
 		`orders.overrides[0]: order "retired-order" not found`,

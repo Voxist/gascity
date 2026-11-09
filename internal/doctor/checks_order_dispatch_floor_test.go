@@ -13,16 +13,23 @@ import (
 )
 
 // Floor arithmetic used throughout: floor = ceil(ring/budget) * patrol_interval.
-// With the default budget (4) and a 30s patrol, a ring of 9 gives ceil(9/4)=3
-// passes = 1m30s.
+// With a budget of 4 and a 30s patrol, a ring of 9 gives ceil(9/4)=3 passes =
+// 1m30s.
+
+// orderDispatchFloorTestBudget is the budget a budget argument of 0 stands for.
+// It is set explicitly rather than left to config.DefaultMaxOrderDispatchesPerTick
+// so the arithmetic above holds whatever default the build carries (the fork's
+// is 5, vp-cixi.6).
+const orderDispatchFloorTestBudget = 4
 
 func orderDispatchFloorCity(t *testing.T, patrol string, budget int) (string, *config.City) {
 	t.Helper()
 	cityPath, cfg := orderFiringTestCity(t)
 	cfg.Daemon.PatrolInterval = patrol
-	if budget > 0 {
-		cfg.Orders.MaxDispatchesPerTick = &budget
+	if budget <= 0 {
+		budget = orderDispatchFloorTestBudget
 	}
+	cfg.Orders.MaxDispatchesPerTick = &budget
 	return cityPath, cfg
 }
 

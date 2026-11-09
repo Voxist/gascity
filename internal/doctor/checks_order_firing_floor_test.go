@@ -10,9 +10,11 @@ import (
 )
 
 // orderFiringRingPeers is how many hourly cooldown orders writeOrderFiringRing
-// adds beside the order under test: a ring of nine takes three passes of the
-// default budget of 4, one default 30s patrol each, a 1m30s dispatch floor.
-const orderFiringRingPeers = 8
+// adds beside the order under test: a ring of eleven takes three passes of the
+// default budget, one default 30s patrol each, a 1m30s dispatch floor. Eleven
+// takes three passes at a budget of 4 or 5, so the arithmetic holds whichever
+// default the build carries (the fork's is 5, vp-cixi.6).
+const orderFiringRingPeers = 10
 
 func writeOrderFiringRing(t *testing.T, cityPath string) {
 	t.Helper()
@@ -22,8 +24,8 @@ func writeOrderFiringRing(t *testing.T, cityPath string) {
 }
 
 func TestOrderFiringCurrent_NeverFired_WithinTheDispatchFloor(t *testing.T) {
-	// A 30s cooldown beside eight other counted orders cannot fire before the
-	// ring comes round: three passes of four at 30s, a 1m30s floor. Controller
+	// A 30s cooldown beside ten other counted orders cannot fire before the
+	// ring comes round: three passes at 30s, a 1m30s floor. Controller
 	// up 60s is within that first cycle, not a never-fired execution gap.
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	cityPath, cfg := orderFiringTestCity(t)

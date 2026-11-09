@@ -327,6 +327,16 @@ func backdateSavedStatus(t *testing.T, srv *Server, d time.Duration) {
 	}
 	entry.storedAt = entry.storedAt.Add(-d)
 	srv.responseCacheEntries["status"] = entry
+	// Every build also records the body as the fork's warm StatusView
+	// (vp-e0hv), which answers before the TTL floor and stale-while-revalidate;
+	// it holds the same body, so it ages with the saved one.
+	srv.statusWarmMu.Lock()
+	defer srv.statusWarmMu.Unlock()
+	if srv.statusWarmFull != nil {
+		warm := *srv.statusWarmFull
+		warm.builtAt = warm.builtAt.Add(-d)
+		srv.statusWarmFull = &warm
+	}
 }
 
 // setCitySuspendedForTest writes the city's runtime suspension state as gc
