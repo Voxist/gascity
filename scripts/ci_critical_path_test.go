@@ -486,7 +486,7 @@ func TestMacRegressionTierJobsGateOnCentralizedOutputs(t *testing.T) {
 	}{
 		{"mac-quality", "needs.gate.outputs.run_smoke == 'true'"},
 		{"mac-unit", "needs.gate.outputs.run_smoke == 'true'"},
-		{"mac-cmd-gc-process", "needs.gate.outputs.run_smoke == 'true'"},
+		{"mac-cmd-gc-process", "needs.gate.outputs.run_cmd_gc_process == 'true'"},
 		{"mac-acceptance", "needs.gate.outputs.run_smoke == 'true'"},
 		{"mac-cover", "needs.gate.outputs.run_full == 'true'"},
 		{"mac-integration-packages", "needs.gate.outputs.run_full == 'true'"},
