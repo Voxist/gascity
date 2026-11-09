@@ -81,6 +81,9 @@ func WithOrderFiringCurrentInapplicableFunc(fn OrderFiringCurrentInapplicableFun
 }
 
 // OrderFiringCurrentCheck reports scheduled orders whose last firing is stale.
+// An order's cadence is its interval, or the dispatch floor when that is
+// longer: the dispatcher starts a bounded number of orders per pass, so a short
+// interval in a large ring cannot be met (see OrderDispatchFloorCheck).
 type OrderFiringCurrentCheck struct {
 	cfg            *config.City
 	cityPath       string
@@ -213,14 +216,22 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 	fleetRole := config.EffectiveFleetRoleFromEnv(c.cfg)
 	roleDeclared := config.FleetRoleDeclaredFromEnv(c.cfg)
 
-	// Resolve expected intervals before touching the event log so the read
-	// below can be bounded by the check's own staleness horizon:
-	// classifyOrderFiring declares stale at age >= expected*3, so no fire
-	// older than 3x the widest interval can change any verdict. The window is
-	// semantically lossless for this check while pruning the read to
-	// O(recent) instead of all recorded history (vc-89s).
+	// The dispatcher starts a bounded number of orders per pass, so an order
+	// can fire no more often than the dispatch floor however short its
+	// interval (order-dispatch-floor reports that configuration). Judging it
+	// against its bare interval instead would call a healthy order stale, or
+	// never fired, merely for waiting its turn in the ring. Each monitored
+	// order's cadence is therefore max(expected, floor).
+	floor, _, _ := orderDispatchFloor(c.cfg, len(orderDispatchRing(allOrders, suspendedRigs)))
+
+	// Resolve cadences before touching the event log so the read below can be
+	// bounded by the check's own staleness horizon: classifyOrderFiring
+	// declares stale at age >= cadence*3, so no fire older than 3x the widest
+	// cadence can change any verdict. The window is semantically lossless for
+	// this check while pruning the read to O(recent) instead of all recorded
+	// history (vc-89s).
 	var monitored []monitoredOrder
-	var maxExpected time.Duration
+	var maxCadence time.Duration
 	for _, order := range allOrders {
 		if order.Trigger != "cron" && order.Trigger != "cooldown" {
 			continue
@@ -233,8 +244,11 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 		}
 		mo := monitoredOrder{order: order}
 		mo.expected, mo.err = expectedIntervalForOrder(order, cronIntervals)
-		if mo.err == nil && mo.expected > maxExpected {
-			maxExpected = mo.expected
+		if mo.err == nil {
+			mo.cadence = max(mo.expected, floor)
+			if mo.cadence > maxCadence {
+				maxCadence = mo.cadence
+			}
 		}
 		monitored = append(monitored, mo)
 	}
@@ -246,8 +260,8 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 
 	eventPath := filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl")
 	firedFilter := events.Filter{Type: events.OrderFired}
-	if maxExpected > 0 {
-		firedFilter.Since = now.Add(-3 * maxExpected)
+	if maxCadence > 0 {
+		firedFilter.Since = now.Add(-3 * maxCadence)
 	}
 	// The tail read is doubly bounded: at most orderFiringEventTailLimit
 	// newest matches, further pruned by the Since window above. It reads only
@@ -292,7 +306,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 			blockingErrors++
 			continue
 		}
-		lastFired, err := c.latestOrderFiredAtUsing(lastRunFor, firedEvents, order, mo.expected, now)
+		lastFired, err := c.latestOrderFiredAtUsing(lastRunFor, firedEvents, order, mo.cadence, now)
 		if err != nil {
 			worst = worseStatus(worst, StatusError)
 			result.Details = append(result.Details, fmt.Sprintf("%s: cannot read order history: %v", orderDisplayName(order), err))
@@ -327,7 +341,11 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 				lastFired = ev.Ts
 			}
 		}
-		status, severity, detail := classifyOrderFiring(order, now, mo.expected, lastFired, startedAt)
+		status, severity, detail := classifyOrderFiring(order, now, mo.cadence, lastFired, startedAt)
+		if mo.cadence > mo.expected {
+			detail += fmt.Sprintf(" (interval %s; the %s dispatch floor sets its cadence)",
+				formatDispatchFloorDuration(mo.expected), formatDispatchFloorDuration(floor))
+		}
 		worst = worseStatus(worst, status)
 		result.Details = append(result.Details, detail)
 		if status != StatusOK {
@@ -676,10 +694,12 @@ func (c *OrderFiringCurrentCheck) latestOrderFiredAtUsing(lastRun OrderFiringCur
 
 // monitoredOrder is one enabled cron/cooldown order the check watches,
 // carrying its resolved expected interval (or the resolution error the
-// classification loop reports).
+// classification loop reports) and its cadence: the interval, or the dispatch
+// floor when that is longer.
 type monitoredOrder struct {
 	order    orders.Order
 	expected time.Duration
+	cadence  time.Duration
 	err      error
 }
 
@@ -748,7 +768,7 @@ func (c *OrderFiringCurrentCheck) pendingLastRunOrders(monitored []monitoredOrde
 		if mo.err != nil {
 			continue
 		}
-		if eventEvidenceSuffices(latestOrderFiredAt(firedEvents, mo.order.ScopedName()), mo.expected, now) {
+		if eventEvidenceSuffices(latestOrderFiredAt(firedEvents, mo.order.ScopedName()), mo.cadence, now) {
 			continue
 		}
 		pending = append(pending, mo.order)

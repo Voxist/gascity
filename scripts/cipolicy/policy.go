@@ -340,11 +340,28 @@ const (
 	// filters and two outputs removed; no new job, trigger, step command or
 	// permission.
 	//
+	// Bumped again (#8977, Windows lane): two new jobs. windows-lane
+	// (runner_16vcpu, needs runner-policy, timeout 30m): GOOS=windows build
+	// of .github/windows-lane/build.txt, GOOS=windows test compile
+	// (-vet=off -run '^$' -exec /bin/true) of test-build.txt, the same for
+	// tools/nogo ./analyzers/..., and GOOS=darwin build plus test compile of
+	// ./.... windows-lane-test (runner_windows, needs runner-policy,
+	// timeout 30m): go test -count=1 over test.txt. Neither is path-gated;
+	// both join the needs of Check and CI / required, whose allow_skipped is
+	// unchanged. Reviewed delta: two jobs and four needs entries; no new
+	// trigger or permission.
+	//
 	// Re-derived at the 2026-10-27 and 2026-10-30 resyncs (fork): upstream's
 	// ci.yml plus the same fork runner-policy runs-on delta as above, so it
 	// hashes to neither side's pin. Taken from the candidate digest
 	// TestCurrentWorkflowsMatchPolicy printed for the merged workflow.
-	expectedCIExecutionHash     = "efa9995edae42ef49899e1fe29161b79791c0c1f9cfc7ca8d41631fc5254c661"
+	//
+	// Re-derived at the 2026-11-09 resync (fork): upstream's ci.yml (with the
+	// #8977 Windows-lane jobs above) plus the same fork runner-policy runs-on
+	// delta as above, so it hashes to neither side's pin. Taken from the
+	// candidate digest TestCurrentWorkflowsMatchPolicy prints for the merged
+	// workflow.
+	expectedCIExecutionHash     = "8aa921636491f3b6cbe0ba2cc2607bc72229373f75e45188ee6248e698398f93"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -390,7 +407,13 @@ const (
 	// Then Beads v1.3.1 -> v1.3.2 (the v1.5.1 pin, merged back
 	// from hotfix/1.5.1): BD_VERSION env value only. Then Dolt 2.2.0 -> 2.6.0
 	// (the first patched Dolt release for the eMudhra CA distrust):
-	// the workflow DOLT_VERSION env value only.
+	// the workflow DOLT_VERSION env value only. Then Beads v1.3.2 -> v1.3.3:
+	// the workflow BD_VERSION env value only. Then Beads v1.3.3 -> v1.3.4:
+	// the workflow BD_VERSION env value only. Then (ga-hd99jq D5) one new
+	// job, nightly-summary: ubuntu-latest, timeout-minutes 5, `if: always()`,
+	// needs every other Nightly job, one python3 step fed by a dedicated
+	// needs.<job>.result env var per dependency that fails closed on anything
+	// but "success"; no new trigger, permission or secret.
 	// Re-derived at the 2026-10-27 resync (fork): the same two fork deltas over
 	// upstream's nightly.yml; the Dolt 2.6.0 bump applies, the BD_VERSION
 	// v1.3.2 bump does not (the fork-first pin block keeps v1.94.1). Taken from
@@ -400,7 +423,13 @@ const (
 	// (v1.94.1 -> v1.95.0) and BD_SOURCE_REF (e4f98340d -> 4ff2418f7) at
 	// nightly.yml's two pin sites, nothing else. Taken from the candidate
 	// digest TestCurrentWorkflowsMatchPolicy printed for the changed workflow.
-	expectedNightlyExecutionHash = "6854d6595b3dc9f44607187125443a5e1749ce32a487e9af37bfb939c3fca1f9"
+	// Re-derived at the 2026-11-09 resync (fork): upstream's nightly.yml (with
+	// the ga-hd99jq D5 nightly-summary job above) plus the same two fork deltas
+	// (the fork-first BD_VERSION/BD_REPO/BD_SOURCE_REF pin block, v1.95.0 at
+	// 4ff2418f7, in place of upstream's v1.3.4; tier-c skipped off
+	// gastownhall/gascity). Taken from the candidate digest
+	// TestCurrentWorkflowsMatchPolicy prints for the merged workflow.
+	expectedNightlyExecutionHash = "ea5adf1cf452d6002dc8204b127ce6dd6cc26b4bdc9ec6bc56594da2815fdce7"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`. Then the claude-version

@@ -571,6 +571,9 @@ type CacheStats struct {
 	DepsWholeCacheWipes int64
 	// ReconcileRequests counts RequestReconcile calls.
 	ReconcileRequests int64
+	// ReconcilePaused reports that the cache's reconcile gate (WithReconcileGate)
+	// was closed when Stats ran, so its periodic re-scans are skipped until it opens.
+	ReconcilePaused bool
 }
 
 const (
@@ -720,7 +723,8 @@ func WithEventIDPrefixes(prefixes ...string) CachingStoreOption {
 // the cache resumes reconciling as soon as allowed answers true again. A
 // caller whose backing store must not be touched for a while (its scope is
 // quiescent) uses this to stop the loop's full scans without rebuilding the
-// cache.
+// cache. Stats also calls allowed, so it must be safe for concurrent use, must
+// not block, and must not call back into the cache.
 func WithReconcileGate(allowed func() bool) CachingStoreOption {
 	return func(c *CachingStore) {
 		c.reconcileGate = allowed
@@ -1282,6 +1286,34 @@ func (c *CachingStore) readyPredicateCanAnswerLocked(deps []Dep) bool {
 	return true
 }
 
+// readyEdgesJudgeableLocked is readyPredicateCanAnswerLocked for a reader
+// that trusts the cache row by row (ReadyJudgmentContext). The
+// dependency-derived predicate reads a row's direct ready-blocking edges, as
+// the Ready of a store that strands absent targets does (SQLite, the
+// in-memory stores), so for such a store it reproduces a lost verdict exactly
+// when every ready-blocking edge lands on a resident row: a non-blocking edge
+// (tracks, relates-to, parent-child) is read by none of them, and the
+// controller judges rows this way only on such a store's cache. bd's verdict
+// reads more than the predicate models: it propagates blocked-ness down
+// parent-child edges, judges a waits-for edge by the target's children rather
+// than the target, and counts a pinned target as satisfied. A parent-child
+// edge keeps the row unjudged; over a bd backing the rest is the same
+// approximation readyPredicateCanAnswerLocked makes. Caller must hold c.mu.
+func (c *CachingStore) readyEdgesJudgeableLocked(deps []Dep) bool {
+	for _, dep := range deps {
+		if dep.Type == "parent-child" {
+			return false
+		}
+		if !isReadyBlockingDependencyType(dep.Type) {
+			continue
+		}
+		if _, resident := c.beads[dep.DependsOnID]; !resident {
+			return false
+		}
+	}
+	return true
+}
+
 // markReadyProjectionLostLocked records that this row's projected verdict is
 // gone. Whether that costs the row its readiness answer is decided at read time
 // by readyProjectionUnknownLocked, so the mark itself stays a pure function of
@@ -1816,12 +1848,12 @@ func (c *CachingStore) prime(ctx context.Context) error {
 
 	now := c.clockNow()
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.fullScanGen > startScan {
 		// A reconcile merged after this listing started (full Primes do not
 		// overlap). It is as complete and may be newer, and it promoted the
 		// cache live, so this merges nothing, including the store-wide flags,
 		// as a reconcile skips after a newer full Prime.
+		c.mu.Unlock()
 		return nil
 	}
 	// The replace runs only when no mutation or merge followed the listing:
@@ -1829,6 +1861,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	replace := c.mutationSeq == startSeq && c.scanGen == startScan
 	c.scanGen++
 	c.fullScanGen = c.scanGen
+	reverify := false
 	if replace {
 		nextBeads := beadMap
 		nextDeps := depsFromBeads(beadMap, depMap, depsComplete && depErr == nil)
@@ -1848,30 +1881,17 @@ func (c *CachingStore) prime(ctx context.Context) error {
 		// scan. See the disowned-value record in the carry-over loop below.
 		nextReadyInvalid := make(map[string]bool)
 		for id, current := range c.beads {
-			if fresh, exists := beadMap[id]; exists {
-				if _, keep := c.recentLocalBeadConflictLocked(id, fresh, now, true); keep {
-					nextBeads[id] = cloneBead(current)
-					if deps, ok := c.deps[id]; ok {
-						nextDeps[id] = cloneDeps(deps)
-					}
-					if _, lost := c.readyProjectionLost[id]; lost {
-						nextReadyLost[id] = struct{}{}
-					}
-					if v, ok := c.readyProjectionInvalid[id]; ok {
-						nextReadyInvalid[id] = v
-					}
-					c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
-					continue
-				}
-				// The fresh row replaces the cached one. When it carries no
-				// verdict but the cached row held one, this prime is a NIL-ING
-				// SITE like any other — the projection was degraded for the
-				// scan — so it owes the differ the disowned value. Dropping it
-				// here is what let a full prime taken during a projection
-				// outage re-open the ADR-0094 flood on the next tick that the
-				// projection answered: the substitution had nothing to
-				// substitute (vc-u2n6; the tick-7 residue after the decline-site
-				// repair in #165's flood reproduction).
+			carry, unverified := c.primeCarriesLocked(id, current, beadMap, now)
+			if !carry {
+				// A listed row's fresh row replaces the cached one. When it
+				// carries no verdict but the cached row held one, this prime is a
+				// NIL-ING SITE like any other — the projection was degraded for
+				// the scan — so it owes the differ the disowned value. Dropping it
+				// here is what let a full prime taken during a projection outage
+				// re-open the ADR-0094 flood on the next tick that the projection
+				// answered: the substitution had nothing to substitute (vc-u2n6;
+				// the tick-7 residue after the decline-site repair in #165's flood
+				// reproduction).
 				//
 				// A cached row that is ALREADY verdict-less may still owe an
 				// entry: clearReadyProjectionLocked nils the row and records the
@@ -1885,7 +1905,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 				// change, not this repair. invalid-without-lost is already a
 				// reachable, valid state (clearReadyProjectionLocked marks lost
 				// conditionally and invalid unconditionally).
-				if fresh.IsBlocked == nil {
+				if fresh, listed := beadMap[id]; listed && fresh.IsBlocked == nil {
 					if current.IsBlocked != nil {
 						nextReadyInvalid[id] = *current.IsBlocked
 					} else if v, ok := c.readyProjectionInvalid[id]; ok {
@@ -1894,18 +1914,22 @@ func (c *CachingStore) prime(ctx context.Context) error {
 				}
 				continue
 			}
-			if current.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
-				nextBeads[id] = cloneBead(current)
-				if deps, ok := c.deps[id]; ok {
-					nextDeps[id] = cloneDeps(deps)
-				}
-				if _, lost := c.readyProjectionLost[id]; lost {
-					nextReadyLost[id] = struct{}{}
-				}
-				if v, ok := c.readyProjectionInvalid[id]; ok {
-					nextReadyInvalid[id] = v
-				}
-				c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
+			nextBeads[id] = cloneBead(current)
+			if deps, ok := c.deps[id]; ok {
+				nextDeps[id] = cloneDeps(deps)
+			}
+			if _, lost := c.readyProjectionLost[id]; lost {
+				nextReadyLost[id] = struct{}{}
+			}
+			if v, ok := c.readyProjectionInvalid[id]; ok {
+				nextReadyInvalid[id] = v
+			}
+			c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
+			if unverified {
+				// Dirty, so reads take the backing for the row until a
+				// refresh or the re-verify settles it.
+				nextDirty[id] = struct{}{}
+				reverify = true
 			}
 		}
 		if depErr != nil {
@@ -1920,18 +1944,19 @@ func (c *CachingStore) prime(ctx context.Context) error {
 		}
 		c.beads = nextBeads
 		c.deps = nextDeps
-		c.setDepsCompleteLocked(depsComplete && depErr == nil, "prime-dep-snapshot-incomplete")
+		c.setDepsCompleteLocked(depsComplete && depErr == nil, "prime: dependency read incomplete")
 		c.dirty = nextDirty
 		c.beadSeq = nextBeadSeq
 		c.localBeadAt = nextLocalBeadAt
 		c.readyProjectionLost = nextReadyLost
 		c.readyProjectionInvalid = nextReadyInvalid
 		c.deletedSeq = make(map[string]uint64)
-		// The replace dropped every beadSeq fence and the deletion fences;
-		// like an eviction, it keeps the write fences of the rows it drops
-		// for the next reconcile to retain. It runs only when no mutation
-		// followed startSeq, so every start below the current seq saw one
-		// and is refused wholesale (writeFencedLocked).
+		// The replace dropped the beadSeq fences of the rows it replaced or
+		// dropped, and the deletion fences; like an eviction, it keeps the
+		// write fences of the rows it drops (the ones it holds closed) for
+		// the next reconcile to retain. It runs only when no mutation
+		// followed startSeq, so every start below the current seq saw one and
+		// is refused wholesale (writeFencedLocked).
 		c.fenceFloor = c.mutationSeq
 	} else {
 		for id, b := range beadMap {
@@ -1952,7 +1977,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 			}
 			c.absorbFreshLocked(id, b, now, opts)
 		}
-		c.setDepsCompleteLocked(false, "prime-partial-no-dep-snapshot")
+		c.markDepsIncompleteLocked("prime raced a write: rows kept from the cache")
 	}
 	c.state = cacheLive
 	c.fullScopeSnapshot = true
@@ -1964,7 +1989,37 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	c.markFreshLocked(now)
 	c.lastScanAt = now
 	c.updateStatsLocked()
+	c.mu.Unlock()
+	if reverify {
+		// Ask for the re-verify now rather than a cadence after this scan:
+		// it announces the carried rows' closes, and a reconcile this Prime
+		// made discard its merge re-arms only a request it took itself.
+		c.RequestReconcile()
+	}
 	return nil
+}
+
+// primeCarriesLocked reports whether a full Prime's replace keeps current, the
+// row the cache holds for id, over what the scan (beadMap) returned, and
+// whether the kept row is unverified. A listed row is kept only when a recent
+// local write changed it, which the scan may predate. A row absent from the
+// scan is not known to be closed: the listing is active-only, so a row closed,
+// deleted, or merely omitted behind the cache looks the same here. Every
+// non-closed one is kept for the next cacheFullScanQuery reconcile, whose
+// per-id re-verify (recoverMissingFromList) merges an alive row back,
+// announces a verified close exactly once, or defers on error; only a row the
+// cache already holds closed is dropped. A kept absent row is unverified
+// unless a recent local write vouches for the cached row, as it does for a
+// listed one. Caller must hold c.mu.
+func (c *CachingStore) primeCarriesLocked(id string, current Bead, beadMap map[string]Bead, now time.Time) (carry, unverified bool) {
+	if fresh, listed := beadMap[id]; listed {
+		_, keep := c.recentLocalBeadConflictLocked(id, fresh, now, true)
+		return keep, false
+	}
+	if current.Status == "closed" {
+		return false, false
+	}
+	return true, !recentLocalMutation(c.localBeadAt[id], now)
 }
 
 func (c *CachingStore) beginFullPrime() (*fullPrimeCycle, bool) {
@@ -2175,6 +2230,10 @@ func (c *CachingStore) Stopped() <-chan struct{} {
 
 // Stats returns current cache statistics.
 func (c *CachingStore) Stats() CacheStats {
+	// The gate is immutable after construction; ask it outside c.mu so it can
+	// never deadlock against the cache.
+	paused := c.reconcileGate != nil && !c.reconcileGate()
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -2189,6 +2248,7 @@ func (c *CachingStore) Stats() CacheStats {
 	if !c.depsComplete && !c.depsIncompleteSince.IsZero() {
 		s.DepsIncompleteFor = depsClock().Sub(c.depsIncompleteSince)
 	}
+	s.ReconcilePaused = paused
 	switch c.state {
 	case cachePartial:
 		s.State = "partial"
@@ -2226,28 +2286,34 @@ func (c *CachingStore) recordProblem(op string, err error) {
 	c.recordProblemLocked(op, err)
 }
 
-// setDepsCompleteLocked is the only writer of c.depsComplete outside tests. It
-// exists so the flag's dwell time is observable (ADR-0094 D6): routing every
 // depsClock is the clock the ADR-0094 D6 dwell is measured against. FOUR sites
 // consult it — the construction stamp, the latch stamp, the Stats() elapsed
 // read, and the deps_for= field in the reconcile heartbeat log
 // (caching_store_reconcile.go) — because a test that controls one still races
 // the others, and a log that reports a different dwell than the gauge it
-// mirrors is worse than no log. Overridable so
-// the dwell can be asserted EXACTLY rather than as "> 0" -- on a
-// microsecond-granularity clock (macOS) a latch and an immediately following
-// read land in the same tick and elapse exactly zero, which is a property of
-// the clock and not of the gauge (ga-eyz5l).
+// mirrors is worse than no log. Overridable so the dwell can be asserted
+// EXACTLY rather than as "> 0" -- on a microsecond-granularity clock (macOS) a
+// latch and an immediately following read land in the same tick and elapse
+// exactly zero, which is a property of the clock and not of the gauge
+// (ga-eyz5l).
 var depsClock = time.Now
 
+// setDepsCompleteLocked is the only writer of c.depsComplete outside tests. It
+// exists so the flag's dwell time is observable (ADR-0094 D6): routing every
 // write through one place keeps depsIncompleteSince, the latching driver and
 // the transition counters exact by construction rather than by convention.
+// markDepsIncompleteLocked is the clearing entry point for a caller that needs
+// to know whether the flag was set.
 //
 // driver is recorded only on a true->false transition, so the reported driver
 // always names the site that latched the CURRENT degradation. Re-asserting
 // false from a different path does not overwrite it and does not restart the
 // dwell -- the flag has been false since the first fall, and that is the fact
-// ADR-0094's ">1h" trigger asks about.
+// ADR-0094's ">1h" trigger asks about. The same transition is logged as
+// "dependency coverage lost: <driver>", rate-limited per driver: while the flag
+// is clear, readiness reads go live and a status change may invalidate cached
+// verdicts well beyond the changed row. A flip is not itself a problem (most
+// are races the next scan heals), so it is not counted as one.
 //
 // TestDepsCompleteHasASingleWriter fails if any non-test file assigns the field
 // directly, which is what stops the gauge from drifting away from the flag.
@@ -2266,6 +2332,11 @@ func (c *CachingStore) setDepsCompleteLocked(complete bool, driver string) {
 	c.depsDegradations++
 	c.depsIncompleteSince = depsClock()
 	c.depsIncompleteDriver = driver
+	if c.problemf != nil {
+		if msg, ok := c.problemLogMessageLocked("dependency coverage lost: "+driver, c.clockNow()); ok {
+			c.problemf(msg)
+		}
+	}
 }
 
 func (c *CachingStore) recordProblemLocked(op string, err error) {

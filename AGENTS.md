@@ -24,6 +24,7 @@ next to that code; read the matching file before changing it.
 
 | When you touch | Read first |
 |---|---|
+| Asked to run or try Gas City, not change it | README "Get it running" (no build) |
 | `internal/api/`, `internal/events/`, `internal/extmsg/`, CLI code that constructs events or calls the API client, the OpenAPI spec, or the dashboard | `internal/api/AGENTS.md` |
 | `internal/config/` (agent or rig config fields) | `internal/config/AGENTS.md` |
 | `internal/session/` | `internal/session/AGENTS.md` |
@@ -41,7 +42,7 @@ next to that code; read the matching file before changing it.
 | Bazel builds | `engdocs/bazel-quickstart.md` |
 | Where a package lives | `engdocs/contributors/codebase-map.md`, then the package's `go doc` |
 | What is planned | `ROADMAP.md` |
-| Fork resyncs, build caches, Git hooks, bd tracking, the fork's purpose | `engdocs/contributors/fork-maintainer-guide.md` |
+| This fork | `engdocs/contributors/fork-maintainer-guide.md` |
 
 ## How work flows here
 
@@ -80,7 +81,7 @@ has `*_test.go` files next to the code. Integration tests that need real
 infrastructure (tmux, filesystem) go in `test/` with build tags.
 
 **The architecture docs are a reference, not a blueprint.** When the DX
-conflicts with the docs, DX wins. We update the docs to match.
+conflicts with the docs, DX wins.
 
 **Search history before rebuilding.** If a feature looks missing or
 regressed, check `git log -S <symbol>` / `git log --all --grep <keyword>`

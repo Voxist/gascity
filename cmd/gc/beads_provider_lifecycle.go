@@ -3441,6 +3441,20 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 		}
 		cityHasCompleteStorageBinding = completeBinding
 	}
+	// A city bd bound to a server it was pointed at keeps bd's config.yaml and
+	// bd's own port file, as a provider-owned city does: gc's endpoint keys
+	// there are the claim scopeIsBdOwnedDirectExternal reads. A complete
+	// storage binding decides first, as it does for a rig below: one that
+	// still carries bd's legacy host and port must keep the skip that leaves
+	// the city's inheriting rigs alone.
+	cityBdOwnedDirect := false
+	if !cityProviderOwned && !cityHasCompleteStorageBinding {
+		cityBdOwnedDirect, err = scopeIsBdOwnedDirectExternal(cityPath, cityPath)
+		if err != nil {
+			return fmt.Errorf("classifying city store binding: %w", err)
+		}
+	}
+	cityUsesBd = cityUsesBd && !cityBdOwnedDirect
 	anyRigUsesBd := false
 	for _, rig := range rigs {
 		if strings.TrimSpace(rig.Path) == "" {
@@ -3473,7 +3487,7 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 	// resolve a managed port, so it must not be asked about a city whose store
 	// gc does not serve: there is no managed port to find and the mirror is not
 	// gc's to delete.
-	if !cityProviderOwned && cityState.EndpointOrigin == contract.EndpointOriginManagedCity && !cityHasCompleteStorageBinding && !strings.EqualFold(strings.TrimSpace(cityState.DoltMode), "proxied-server") {
+	if !cityProviderOwned && !cityBdOwnedDirect && cityState.EndpointOrigin == contract.EndpointOriginManagedCity && !cityHasCompleteStorageBinding && !strings.EqualFold(strings.TrimSpace(cityState.DoltMode), "proxied-server") {
 		managedPort = currentDoltPort(cityPath)
 	}
 	// Past this point the city mirror may already have moved, so failures are
@@ -3488,7 +3502,7 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 		} else {
 			removeDoltPortFile(cityPath)
 		}
-	} else if !cityUsesBd && !cityProviderOwned {
+	} else if !cityUsesBd && !cityProviderOwned && !cityBdOwnedDirect {
 		removeDoltPortFile(cityPath)
 	}
 
@@ -3514,6 +3528,11 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 			continue
 		}
 		if rigHasCompleteStorageBinding {
+			continue
+		}
+		if bdOwnedDirect, err := scopeIsBdOwnedDirectExternal(cityPath, rig.Path); err != nil {
+			return fmt.Errorf("classifying rig %q store binding: %w", rig.Name, err)
+		} else if bdOwnedDirect {
 			continue
 		}
 		embedded, err := scopeMetadataRecordsEmbeddedDolt(fsys.OSFS{}, rig.Path)

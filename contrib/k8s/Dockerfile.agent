@@ -57,19 +57,27 @@ ARG XMOD_VERSION=0.41.0
 ARG THRIFT_VERSION=0.24.0
 ARG XNET_VERSION=0.62.0
 ARG JOSE_VERSION=4.1.6
+# BD_SOURCE_REF's go.mod pins klauspost/compress 1.18.7, which GO-2026-6865
+# (panic on two-block frames) affects; 1.20.2 is fixed and requires no other
+# module, so its `go get` cannot move any of the pins above.
+ARG COMPRESS_VERSION=1.20.2
 
-# bd resolves grpc and x/text through the beads module graph, not this repo's,
-# so gc's own go.mod bumps do not reach this image and the overrides below are
-# required. Each must be >= what the pinned source already declares — pinning
-# BELOW it silently downgrades the shipped binary, which no post-build
-# assertion would catch. At BD_SOURCE_REF 4ff2418f7 (v1.95.0) the source
-# already resolves every one of them on its own: grpc 1.83.2, x/text 0.42.0,
-# x/crypto 0.57.0, x/mod 0.41.0, thrift 0.24.0 and x/net 0.60.0
-# (CVE-2026-78669). No override is a lift at this ref; each is held at parity
-# (ga-0emb8: an ARG below what the graph selects fails its exact
-# `go version -m` assertion). Keep each `go get` and its trailing
+# bd resolves grpc, x/text and the other overrides through the beads module
+# graph, not this repo's, so gc's own go.mod bumps do not reach this image and
+# the overrides below are required. GRPC_VERSION, XTEXT_VERSION,
+# XCRYPTO_VERSION, XMOD_VERSION, THRIFT_VERSION, XNET_VERSION, JOSE_VERSION and
+# COMPRESS_VERSION override the source's own requirements with the current
+# security floor. Each must be >= what the pinned source already declares —
+# pinning BELOW it silently downgrades the shipped binary (ga-0emb8: an ARG
+# below what the graph selects fails its exact `go version -m` assertion). At
+# BD_SOURCE_REF 4ff2418f7 (v1.95.0) the source resolves grpc 1.83.2, x/mod
+# 0.41.0 and thrift 0.24.0 on its own (held at parity), and x/net 0.60.0,
+# x/text 0.42.0, x/crypto 0.57.0, go-jose/v4 4.1.4 and klauspost/compress
+# 1.18.7, which the overrides lift. Keep each `go get` and its trailing
 # `go version -m` check: together they fail the build if a later source bump
-# regresses one of them instead of silently shipping it.
+# regresses one of them instead of silently shipping it. Raise them with the
+# upstream requirement -- never leave one behind, or the `go get` downgrades
+# the source while the check still passes.
 #
 # Rebuild the pinned fork source with its production CGO/pure-Go-regex
 # configuration and release identity, changing only the patched dependency
@@ -92,6 +100,7 @@ RUN bd_version="${BD_VERSION#v}" \
     && go get "github.com/apache/thrift@v${THRIFT_VERSION}" \
     && go get "golang.org/x/net@v${XNET_VERSION}" \
     && go get "github.com/go-jose/go-jose/v4@v${JOSE_VERSION}" \
+    && go get "github.com/klauspost/compress@v${COMPRESS_VERSION}" \
     && CGO_ENABLED=1 go build \
        -tags="gms_pure_go" \
        -trimpath \
@@ -105,7 +114,8 @@ RUN bd_version="${BD_VERSION#v}" \
     && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/mod v${XMOD_VERSION} " \
     && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/apache/thrift v${THRIFT_VERSION} " \
     && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/net v${XNET_VERSION} " \
-    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/go-jose/go-jose/v4 v${JOSE_VERSION} "
+    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/go-jose/go-jose/v4 v${JOSE_VERSION} " \
+    && go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/klauspost/compress v${COMPRESS_VERSION} "
 
 FROM ${BASE_IMAGE}
 

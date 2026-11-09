@@ -82,10 +82,11 @@ func resolveNudgeTargetViaStoreBounded(cityPath string, cfg *config.City, identi
 	if budget <= 0 {
 		return resolveNudgeTargetViaStore(cityPath, cfg, identifier)
 	}
-	// Read the seam here, not inside the goroutine below: that goroutine can
+	// Read the seams here, not inside the goroutine below: that goroutine can
 	// outlive this call (it is abandoned when the budget fires), and a read
-	// from it would race any later write to the package var.
+	// from it would race any later write to the package vars.
 	open := openNudgeBeadStore
+	stderr := nudgeWarningWriter
 	ch := make(chan nudgeStoreResolveResult, 1)
 	go func() {
 		defer func() {
@@ -93,7 +94,7 @@ func resolveNudgeTargetViaStoreBounded(cityPath string, cfg *config.City, identi
 				ch <- nudgeStoreResolveResult{err: fmt.Errorf("nudge store resolution panicked: %v", recovered)}
 			}
 		}()
-		target, err := resolveNudgeTargetViaStoreOpening(open, cityPath, cfg, identifier)
+		target, err := resolveNudgeTargetViaStoreOpening(open, stderr, cityPath, cfg, identifier)
 		ch <- nudgeStoreResolveResult{target: target, err: err}
 	}()
 	timer := time.NewTimer(budget)

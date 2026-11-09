@@ -591,6 +591,39 @@ listener_read_timeout_secs() {
   esac
 }
 
+# report_remote_skip DB REMOTE_PAIR — DB has no remote sync may push to by
+# default (none configured, or only non-file:// ones and no
+# GC_DOLT_REMOTE_<DB> override). Prints the skip and leaves its reason in
+# last_skip_reason for the order outcome declaration.
+report_remote_skip() {
+  if [ "$2" = "AMBIGUOUS" ]; then
+    last_skip_reason="no local remote; set GC_DOLT_REMOTE_$(db_env_key "$1" 2>/dev/null) to push to a non-local remote"
+  else
+    last_skip_reason="no remote"
+  fi
+  echo "  $1: skipped ($last_skip_reason)"
+}
+
+# write_order_outcome declares the databases skipped for lack of a usable
+# remote to the order runner (GC_ORDER_OUTCOME_FILE): skipped when every
+# counted database was skipped, partial when others synced. Database names
+# pass valid_database_name and reasons are fixed text, so neither needs JSON
+# escaping.
+write_order_outcome() {
+  if [ -z "${GC_ORDER_OUTCOME_FILE:-}" ] || [ -z "$skipped_scopes" ]; then return 0; fi
+  outcome_kind=partial
+  outcome_reason="some databases were not synced to a remote"
+  if [ "$skip_count" -eq "$total_count" ]; then
+    outcome_kind=skipped
+    outcome_reason="no database was synced to a remote"
+  fi
+  if ! printf '{"outcome":"%s","reason":"%s","scopes":[%s]}\n' \
+    "$outcome_kind" "$outcome_reason" "$skipped_scopes" > "$GC_ORDER_OUTCOME_FILE"; then
+    printf 'sync: unable to write order outcome declaration to %s\n' "$GC_ORDER_OUTCOME_FILE" >&2
+    return 1
+  fi
+}
+
 sync_database_sql() {
   name="$1"
   if ! valid_database_name "$name"; then
@@ -631,7 +664,7 @@ sync_database_sql() {
       undrained_stores="$undrained_stores $name"
       return 1
     fi
-    echo "  $name: skipped ($no_remote_detail)"
+    report_remote_skip "$name" "$remote_pair"
     return 0
   fi
   remote_name=${remote_pair%%|*}
@@ -915,11 +948,7 @@ sync_database_cli() {
     return 1
   }
   if [ -z "$remote_pair" ] || [ "$remote_pair" = "AMBIGUOUS" ]; then
-    if [ "$remote_pair" = "AMBIGUOUS" ]; then
-      echo "  $name: skipped (no local remote; set GC_DOLT_REMOTE_$(db_env_key "$name" 2>/dev/null) to push to a non-local remote)"
-    else
-      echo "  $name: skipped (no remote)"
-    fi
+    report_remote_skip "$name" "$remote_pair"
     return 0
   fi
   remote_name=${remote_pair%%|*}
@@ -973,6 +1002,15 @@ record_failure() {
   exit_code=1
   fail_count=$((fail_count + 1))
   failed_summary="$failed_summary$1 ($2); "
+}
+
+# record_skip <name> <reason> — count one database skipped for lack of a usable
+# remote (report_remote_skip's last_skip_reason) toward the order outcome
+# declaration (write_order_outcome) and the all-skipped summary.
+record_skip() {
+  skip_count=$((skip_count + 1))
+  skipped_summary="$skipped_summary$1 ($2); "
+  skipped_scopes="${skipped_scopes:+$skipped_scopes,}$(printf '{"scope":"%s","reason":"%s"}' "$1" "$2")"
 }
 
 # replay_prefixed <label> <file> — copy a captured stderr file to stderr, each
@@ -1059,7 +1097,12 @@ sync_proxied_scopes() {
 
     total_count=$((total_count + 1))
     last_fail_reason=""
-    sync_database_sql "$name" || record_failure "$name" "${last_fail_reason:-unknown error}"
+    last_skip_reason=""
+    if sync_database_sql "$name"; then
+      [ -z "$last_skip_reason" ] || record_skip "$name" "$last_skip_reason"
+    else
+      record_failure "$name" "${last_fail_reason:-unknown error}"
+    fi
   done <<PROXIED_SCOPES
 $ps_specs
 PROXIED_SCOPES
@@ -1098,6 +1141,9 @@ exit_code=0
 fail_count=0
 total_count=0
 failed_summary=""
+skip_count=0
+skipped_summary=""
+skipped_scopes=""
 server_running=false
 # A bd-owned proxied city has no managed server: bd owns each scope's Dolt
 # child, and sync reaches it through gc bd (sync_proxied_scopes).
@@ -1167,6 +1213,7 @@ elif [ -d "$data_dir" ]; then
 
     total_count=$((total_count + 1))
     last_fail_reason=""
+    last_skip_reason=""
     call_rc=0
     if [ "$server_running" = true ]; then
       sync_database_sql "$name" || call_rc=$?
@@ -1175,6 +1222,8 @@ elif [ -d "$data_dir" ]; then
     fi
     if [ "$call_rc" -ne 0 ]; then
       record_failure "$name" "${last_fail_reason:-unknown error}"
+    elif [ -n "$last_skip_reason" ]; then
+      record_skip "$name" "$last_skip_reason"
     fi
   done
 fi
@@ -1203,6 +1252,16 @@ if [ "$drain" = true ] && [ -n "$undrained_stores" ]; then
   done
   echo "These stores have NO complete off-box copy for this server lifetime."
   exit_code=1
+fi
+
+if [ "$skip_count" -gt 0 ] && [ "$skip_count" -eq "$total_count" ]; then
+  echo "sync: $skip_count/$total_count database(s) skipped, nothing synced: $skipped_summary" >&2
+fi
+# The order runner reads the declaration only from a run that exits 0; a
+# failed run records order.failed from the failure summary below instead. An
+# unwritable declaration fails the run rather than recording a skip as success.
+if [ "$exit_code" -eq 0 ]; then
+  write_order_outcome || exit 1
 fi
 
 # Positioned as the last line of output: an OrderFailed event built from this

@@ -7,10 +7,12 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// R-INV (plan item 1.3): a scope whose store is unavailable must FREEZE
-// its prior desired state — partial-marked templates retain their open
-// session counts — and must never silently flatten to zero demand. Other
-// scopes proceed unaffected (scope quarantine).
+// R-INV (plan item 1.3): a scope whose store is unavailable must FREEZE its
+// prior desired state — partial-marked templates retain their open session
+// counts — and must never silently flatten to zero demand. Other scopes
+// proceed unaffected (scope quarantine). Any Ready error marks the scope
+// partial; ErrStoreUnavailable is the error these tests use to express the
+// outage.
 
 // unavailableReadyStore wraps a Store and fails Ready with the typed
 // ErrStoreUnavailable, simulating a breaker-open scope.
@@ -81,14 +83,33 @@ func TestRetainScaleCheckPartialPoolDesiredFreezesUnavailableScope(t *testing.T)
 		},
 	})
 
-	got := retainScaleCheckPartialPoolDesired(nil, nil, sessionBeads, map[string]bool{"vr/worker": true})
+	// The partial set comes from counting, not from a hand-built map, so the
+	// mark is carried from the store failure through to retention.
+	counts, partials, _ := defaultScaleCheckCounts([]defaultScaleCheckTarget{
+		{template: "vr/worker", storeKey: "vr", store: &unavailableReadyStore{Store: beads.NewMemStore()}},
+	})
+	if got := counts["vr/worker"]; got != 0 {
+		t.Fatalf("counts[vr/worker] = %d, want 0 from the unavailable store", got)
+	}
+	got := retainScaleCheckPartialPoolDesired(nil, counts, sessionBeads, partials)
 	if got["vr/worker"] != 2 {
 		t.Fatalf("retained pool desired = %v, want vr/worker frozen at 2 running sessions", got)
 	}
 
-	// Without partial marking the same zero-count input would drain — the
-	// typed unavailable signal is what arms the freeze.
-	if drained := retainScaleCheckPartialPoolDesired(nil, nil, sessionBeads, nil); len(drained) != 0 {
-		t.Fatalf("retention without partial templates = %v, want empty", drained)
+	// Without partial marking the same zero-count input drains: the partial
+	// marking is what arms the freeze.
+	cases := []struct {
+		name     string
+		partials map[string]bool
+	}{
+		{name: "no partial templates", partials: nil},
+		{name: "another template partial", partials: map[string]bool{"hq/worker": true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if drained := retainScaleCheckPartialPoolDesired(nil, nil, sessionBeads, tc.partials); len(drained) != 0 {
+				t.Fatalf("retention with partials %v = %v, want empty (vr/worker not retained)", tc.partials, drained)
+			}
+		})
 	}
 }

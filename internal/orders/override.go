@@ -49,12 +49,14 @@ type Override struct {
 // Degrade-not-fatal contract: a single unmatched (or empty-name) override
 // must NOT abort the whole override pass. Every valid override is applied
 // regardless of where the bad one sits in the slice, and the unmatched ones
-// are collected into a single joined error so the caller can warn-and-skip
-// them. This is the blast-radius fix for the outage where one stale
-// [[orders.overrides]] entry naming a removed order made the ENTIRE order
-// config fail to load → the dispatcher enumerated 0 orders → no agents
-// (vp-ia7c). Callers route the returned error to a warning sink (e.g.
-// ScanOptions.OnOverrideError) instead of failing config load.
+// are collected into a single joined error, in config order, so the caller
+// can warn-and-skip them. This is the blast-radius fix for the outage where
+// one stale [[orders.overrides]] entry naming a removed order made the
+// ENTIRE order config fail to load → the dispatcher enumerated 0 orders → no
+// agents (vp-ia7c). Callers route the returned error to a warning sink (e.g.
+// ScanOptions.OnOverrideError) instead of failing config load. An override
+// can name an absent order because the order was retired or renamed, its own
+// file disables it, or the city's orders skip list removed it.
 //
 // The returned error (when non-nil) wraps one error per skipped override via
 // errors.Join, preserving the per-index "...not found" / "name is required"

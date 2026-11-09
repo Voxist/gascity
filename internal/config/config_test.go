@@ -2003,7 +2003,7 @@ func TestEffectiveWorkQueryBD105CompatibilityOptIn(t *testing.T) {
 	if !strings.Contains(got, `bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "human" --json --sort hybrid --limit=20`) {
 		t.Errorf("EffectiveWorkQueryForBeads(bd-1.0.5) missing include-ephemeral routed probe: %q", got)
 	}
-	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
+	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --exclude-label "hold:mayor" --exclude-label "hold:external" --json --limit=1`) {
 		t.Errorf("EffectiveWorkQueryForBeads(bd-1.0.5) missing include-ephemeral assigned probe: %q", got)
 	}
 }
@@ -2133,7 +2133,7 @@ func TestEffectiveAssignedReadyQueryDefault(t *testing.T) {
 	if strings.Contains(got, `--include-ephemeral`) {
 		t.Fatalf("EffectiveAssignedReadyQuery() default must be bd 1.0.4-compatible without --include-ephemeral: %q", got)
 	}
-	if !strings.Contains(got, `bd ready --assignee="$id" --json --limit=1`) {
+	if !strings.Contains(got, `bd ready --assignee="$id" --exclude-label "hold:mayor" --exclude-label "hold:external" --json --limit=1`) {
 		t.Fatalf("EffectiveAssignedReadyQuery() missing assigned-ready tier: %q", got)
 	}
 	if strings.Contains(got, "gc.routed_to") {
@@ -2145,7 +2145,7 @@ func TestEffectiveAssignedReadyQueryDefault(t *testing.T) {
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --assignee=worker-session --json --limit=1") printf '[{"id":"assigned-ready"}]' ;;
+  "ready --assignee=worker-session --exclude-label hold:mayor --exclude-label hold:external --json --limit=1") printf '[{"id":"assigned-ready"}]' ;;
   *) printf '[]' ;;
 esac
 `)
@@ -2157,7 +2157,7 @@ esac
 func TestEffectiveAssignedReadyQueryForBeadsBD105Compatibility(t *testing.T) {
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	got := a.EffectiveAssignedReadyQueryFor(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}})
-	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
+	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --exclude-label "hold:mayor" --exclude-label "hold:external" --json --limit=1`) {
 		t.Fatalf("EffectiveAssignedReadyQueryForBeads(bd-1.0.5) missing include-ephemeral assigned-ready tier: %q", got)
 	}
 }
@@ -2270,12 +2270,12 @@ func TestEffectiveAssignedReadyQueryControlDispatcherClaimsLegacyAssignedWork(t 
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --assignee=gascity--control-dispatcher --json --limit=1"|\
-  "ready --assignee=gascity/control-dispatcher --json --limit=1")
+  "ready --assignee=gascity--control-dispatcher --exclude-label hold:mayor --exclude-label hold:external --json --limit=1"|\
+  "ready --assignee=gascity/control-dispatcher --exclude-label hold:mayor --exclude-label hold:external --json --limit=1")
     printf '[]'
     ;;
-  "ready --assignee=gascity--workflow-control --json --limit=1"|\
-  "ready --assignee=gascity/workflow-control --json --limit=1")
+  "ready --assignee=gascity--workflow-control --exclude-label hold:mayor --exclude-label hold:external --json --limit=1"|\
+  "ready --assignee=gascity/workflow-control --exclude-label hold:mayor --exclude-label hold:external --json --limit=1")
     printf '[{"id":"ga-legacy-ready"}]'
     ;;
   *)
@@ -2405,8 +2405,8 @@ case "$*" in
   "list --status in_progress --assignee=gascity/workflow-control --json --limit=1")
     printf '[]'
     ;;
-  "ready --assignee=gascity--workflow-control --json --limit=1"|\
-  "ready --assignee=gascity/workflow-control --json --limit=1")
+  "ready --assignee=gascity--workflow-control --exclude-label hold:mayor --exclude-label hold:external --json --limit=1"|\
+  "ready --assignee=gascity/workflow-control --exclude-label hold:mayor --exclude-label hold:external --json --limit=1")
     printf '[{"id":"ga-legacy-ready"}]'
     ;;
   *)
@@ -2597,7 +2597,7 @@ func TestEffectiveWorkQueryExcludesEpics(t *testing.T) {
 		`bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "human" --json`,
 		// assigned tiers carry NO epic exclusion
 		`bd list --status in_progress --assignee="$id" --json`,
-		`bd ready --assignee="$id" --json`,
+		`bd ready --assignee="$id" --exclude-label "hold:mayor" --exclude-label "hold:external" --json`,
 		`-- hello-world/worker`,
 	}
 	for _, want := range wantPresent {
@@ -2622,7 +2622,7 @@ func TestEffectiveWorkQueryExcludesEpicsControlDispatcher(t *testing.T) {
 	wantPresent := []string{
 		`bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "human" --json`,
 		`bd list --status in_progress --assignee="$cand" --json`,
-		`bd ready --assignee="$cand" --json`,
+		`bd ready --assignee="$cand" --exclude-label "hold:mayor" --exclude-label "hold:external" --json`,
 		`-- gascity/control-dispatcher gascity/workflow-control`,
 	}
 	for _, want := range wantPresent {
@@ -4519,6 +4519,48 @@ name = "mayor"
 	got := cfg.Daemon.DriftDrainTimeoutDuration()
 	if got != 3*time.Minute {
 		t.Errorf("DriftDrainTimeoutDuration() = %v, want 3m", got)
+	}
+}
+
+// --- DriftDeferralEscalateAfter tests ---
+
+func TestDaemonDriftDeferralEscalateAfter(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want time.Duration
+	}{
+		{"unset uses one hour", "", time.Hour},
+		{"positive is honored", "90m", 90 * time.Minute},
+		{"unparseable uses one hour", "an hour", time.Hour},
+		{"zero uses one hour", "0s", time.Hour},
+		{"negative uses one hour", "-5m", time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := DaemonConfig{DriftDeferralEscalateAfter: tc.raw}
+			if got := d.DriftDeferralEscalateAfterDuration(); got != tc.want {
+				t.Errorf("DriftDeferralEscalateAfterDuration() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if DefaultDriftDeferralEscalateAfter != time.Hour {
+		t.Errorf("DefaultDriftDeferralEscalateAfter = %v, want 1h", DefaultDriftDeferralEscalateAfter)
+	}
+}
+
+func TestParseDriftDeferralEscalateAfter(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "test"
+
+[daemon]
+drift_deferral_escalate_after = "45m"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.Daemon.DriftDeferralEscalateAfterDuration(); got != 45*time.Minute {
+		t.Errorf("DriftDeferralEscalateAfterDuration() = %v, want 45m", got)
 	}
 }
 
@@ -8817,5 +8859,29 @@ func TestEffectiveWorkQueryRoutedQueueUsesHybridSortHonoringPriority(t *testing.
 		if !strings.Contains(tc.got, `gc.run_target=$target" --metadata-field "gc.kind=workflow" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "human" --json --sort oldest --limit=20`) {
 			t.Errorf("%s: migration probe must remain --sort oldest (unchanged): %q", tc.name, tc.got)
 		}
+	}
+}
+
+func TestOrdersConfig_EffectiveMaxDispatchesPerTick(t *testing.T) {
+	intPtr := func(n int) *int { return &n }
+	for _, tc := range []struct {
+		name string
+		in   *int
+		want int
+	}{
+		{"unset uses the default", nil, DefaultMaxOrderDispatchesPerTick},
+		{"zero uses the default", intPtr(0), DefaultMaxOrderDispatchesPerTick},
+		{"negative uses the default", intPtr(-3), DefaultMaxOrderDispatchesPerTick},
+		{"positive is honored", intPtr(9), 9},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := OrdersConfig{MaxDispatchesPerTick: tc.in}.EffectiveMaxDispatchesPerTick()
+			if got != tc.want {
+				t.Fatalf("EffectiveMaxDispatchesPerTick() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+	if DefaultMaxOrderDispatchesPerTick != 5 {
+		t.Fatalf("DefaultMaxOrderDispatchesPerTick = %d, want 5 (the fork default, vp-cixi.6)", DefaultMaxOrderDispatchesPerTick)
 	}
 }
