@@ -620,15 +620,12 @@ func (c *CachingStore) mergeSnapshotLocked(
 	c.preserveCachedReadyProjectionLocked(freshByID, depMap, useFreshDeps)
 
 	res := mergeSectionResult{notifications: make([]cacheNotification, 0, len(freshByID))}
-	nextDepsComplete := useFreshDeps
-	// Which cause folded nextDepsComplete false, for the D6 gauge's driver
-	// field. Resolved up front: the dep fetch is the store-wide cause, so a
-	// per-row degradation is only the attributable one when the fetch itself
-	// came back whole. Unused when nextDepsComplete stays true.
-	depsDegradeDriver := "reconcile-dep-fetch-incomplete"
-	if useFreshDeps {
-		depsDegradeDriver = "reconcile-row-degraded"
-	}
+	// Which cause folded nextDepsComplete false is coverageLost, the D6
+	// gauge's driver and the flip log's reason. The dep fetch is the
+	// store-wide cause, so a per-row degradation is only the attributable one
+	// when the fetch itself came back whole. Unused when nextDepsComplete
+	// stays true.
+	nextDepsComplete, coverageLost := useFreshDeps, "reconcile: dependency read incomplete"
 
 	// 1. Absorb loop — over freshByID. Classification reads pre-absorb state.
 	for id, freshBead := range freshByID {
@@ -689,8 +686,8 @@ func (c *CachingStore) mergeSnapshotLocked(
 			now:           now,
 			skipLabels:    true,
 		})
-		if d.degradeDepsComplete {
-			nextDepsComplete = false
+		if d.degradeDepsComplete && nextDepsComplete {
+			nextDepsComplete, coverageLost = false, "reconcile: skipped a row whose cached edges it could not verify"
 		}
 		if d.action != mergeAbsorb {
 			continue
@@ -803,7 +800,7 @@ func (c *CachingStore) mergeSnapshotLocked(
 
 	// 4. Shared tail (was duplicated per branch).
 	c.syncFailures = 0
-	c.setDepsCompleteLocked(nextDepsComplete, depsDegradeDriver)
+	c.setDepsCompleteLocked(nextDepsComplete, coverageLost)
 	c.primePartialErr = nil
 	c.advanceObservationLocked()
 	c.promoteLiveLocked()
@@ -922,7 +919,9 @@ func (c *CachingStore) reconcileSuccessLogLocked(now time.Time, elapsed time.Dur
 			depsField += fmt.Sprintf(" deps_for=%s", depsClock().Sub(c.depsIncompleteSince).Round(time.Second))
 		}
 		if c.depsIncompleteDriver != "" {
-			depsField += " deps_driver=" + c.depsIncompleteDriver
+			// Quoted: a driver is a prose reason ("reconcile: dependency read
+			// incomplete"), and the line is key=value.
+			depsField += fmt.Sprintf(" deps_driver=%q", c.depsIncompleteDriver)
 		}
 	}
 	return fmt.Sprintf(

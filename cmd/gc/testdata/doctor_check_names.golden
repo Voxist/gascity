@@ -35,6 +35,7 @@ rollout:ops.control
 rollout:ops.lifecycle
 ops-recording
 conversation-lanes
+legacy-delivery
 config-refs
 stale-local-pack-dirs
 pre-start-scripts
@@ -51,6 +52,7 @@ skill-dangling-sink
 order-firing-current
 order-outcome-healthy
 order-run-on-role
+order-dispatch-floor
 codex-hooks-drift
 beads-expected-build
 native-store-canary-identity
@@ -90,11 +92,13 @@ run-target-routed-to-backfill
 route-recovery-quarantine
 cross-store-gates
 storage-rigs
+storage-split
 dangling-blocking-edges
 hold-label-routed-to
 pool-idle-routed-work
 v2-demand-migrations
 v2-session-migration
+exec-runtime-identity
 work-option-metadata-migration
 backlog-depth
 order-tracking-retention
@@ -102,10 +106,13 @@ session-model
 pr-delivery
 startup-health-episodes
 ownerless-runtimes
+program-status-capture
 gate-sandbox-reads
 dolt-server
 fork-rate
 dolt-noms-size
+dolt-unbound-databases
+dolt-corrupt-aside
 dolt-compact-state
 dolt-journal-size
 dolt-log-size

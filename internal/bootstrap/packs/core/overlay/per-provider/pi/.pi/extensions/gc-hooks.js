@@ -16,13 +16,12 @@ const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const GC_PI_HOOK_VERSION = 9;
-const GC_BIN = process.env.GC_BIN || "gc";
+const GC_PI_HOOK_VERSION = 10;
 // GC_BIN is the explicit override (the deployed binary gc exports into every
-// agent process). The PATH prefix stays for gc's own downstream tool
-// resolution; it no longer selects which gc build runs.
-const PATH_PREFIX =
-  `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`;
+// agent process). Managed sessions supply the authoritative binary and PATH.
+// Do not prepend ambient host locations here: gc's descendants must inherit
+// the same runtime.
+const GC_BIN = process.env.GC_BIN || "gc";
 let mirrorTempCounter = 0;
 // `gc prime --hook` writes the session's startup context to stdout. pi has no
 // session_start hook surface that can inject into the model's context, so the
@@ -41,7 +40,6 @@ function run(args, cwd, extraEnv = {}) {
       env: {
         ...process.env,
         ...extraEnv,
-        PATH: PATH_PREFIX + (process.env.PATH || ""),
       },
     }).trim();
   } catch (err) {

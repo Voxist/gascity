@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // The fixtures in this file materialize the graph shape every graph.v2 formula
@@ -112,7 +113,7 @@ func TestProcessScopeCheckRepairsLegacySelfClosingBodyEdge(t *testing.T) {
 	control, body := legacyScopeCheckFixture(t, store)
 	setupCloses := len(store.closeOrder)
 
-	result, err := ProcessControl(store, control, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), control, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(scope-check on legacy graph): %v (tier %v)", err, ClassifyControllerError(err))
 	}
@@ -146,7 +147,7 @@ func TestProcessWorkflowFinalizeRepairsLegacySelfClosingRootEdge(t *testing.T) {
 	finalizer, root := legacyWorkflowFinalizeFixture(t, store)
 	setupCloses := len(store.closeOrder)
 
-	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize on legacy graph): %v (tier %v)", err, ClassifyControllerError(err))
 	}
@@ -189,7 +190,7 @@ func TestProcessScopeCheckAbortRepairsLegacySelfClosingBodyEdge(t *testing.T) {
 		}
 	}
 
-	result, err := ProcessControl(store, control, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), control, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(scope-check fail on legacy graph): %v (tier %v)", err, ClassifyControllerError(err))
 	}
@@ -221,7 +222,7 @@ func TestLegacyCycleRepairLeavesForeignBlockersToTheSemanticTier(t *testing.T) {
 		foreign := mustCreateWorkflowBead(t, store, beads.Bead{Title: "unrelated open work", Type: "task"})
 		mustDepAdd(t, store, body.ID, foreign.ID, "blocks")
 
-		_, err := ProcessControl(store, control, ProcessOptions{})
+		_, err := ProcessControl(beadstest.Graph(store), control, ProcessOptions{Work: beadstest.Work(store)})
 		if err == nil {
 			t.Fatal("ProcessControl succeeded; the foreign blocker should have refused the body close")
 		}
@@ -248,7 +249,7 @@ func TestLegacyCycleRepairLeavesForeignBlockersToTheSemanticTier(t *testing.T) {
 		foreign := mustCreateWorkflowBead(t, store, beads.Bead{Title: "unrelated open work", Type: "task"})
 		mustDepAdd(t, store, root.ID, foreign.ID, "blocks")
 
-		_, err := ProcessControl(store, finalizer, ProcessOptions{})
+		_, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 		if err == nil {
 			t.Fatal("ProcessControl succeeded; the foreign blocker should have refused the root close")
 		}
@@ -285,7 +286,7 @@ func TestLegacyCycleRepairIgnoresControlsOfOtherWorkflows(t *testing.T) {
 	})
 	mustDepAdd(t, store, body.ID, otherControl.ID, "blocks")
 
-	_, err := ProcessControl(store, control, ProcessOptions{})
+	_, err := ProcessControl(beadstest.Graph(store), control, ProcessOptions{Work: beadstest.Work(store)})
 	if err == nil {
 		t.Fatal("ProcessControl succeeded; a control of another workflow must not be repaired away")
 	}
@@ -311,7 +312,7 @@ func TestLegacyCycleRepairIsANoOpOnPostFixGraphs(t *testing.T) {
 	}
 	mustDepAdd(t, store, root.ID, finalizer.ID, "tracks")
 
-	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 	}
@@ -344,7 +345,7 @@ func TestReconcileTerminalScopedMemberRepairsLegacyEdgeOntoPreservedControl(t *t
 		t.Fatalf("mark subject failed: %v", err)
 	}
 
-	result, err := reconcileTerminalScopedMember(store, mustGetBead(t, store, subjectID))
+	result, err := reconcileTerminalScopedMember(beadstest.Graph(store), mustGetBead(t, store, subjectID))
 	if err != nil {
 		t.Fatalf("reconcileTerminalScopedMember(fail on legacy graph): %v (tier %v)", err, ClassifyControllerError(err))
 	}
@@ -400,7 +401,7 @@ func TestLegacyCycleRepairSkipsDanglingBlockers(t *testing.T) {
 		control, body := legacyScopeCheckFixture(t, store)
 		ghost := addDanglingBlocker(t, store, body.ID)
 
-		result, err := ProcessControl(store, control, ProcessOptions{})
+		result, err := ProcessControl(beadstest.Graph(store), control, ProcessOptions{Work: beadstest.Work(store)})
 		if err != nil {
 			t.Fatalf("ProcessControl(scope-check with dangling dep): %v (tier %v)", err, ClassifyControllerError(err))
 		}
@@ -429,7 +430,7 @@ func TestLegacyCycleRepairSkipsDanglingBlockers(t *testing.T) {
 		finalizer, root := legacyWorkflowFinalizeFixture(t, store)
 		addDanglingBlocker(t, store, root.ID)
 
-		result, err := ProcessControl(store, finalizer, ProcessOptions{})
+		result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 		if err != nil {
 			t.Fatalf("ProcessControl(workflow-finalize with dangling dep): %v (tier %v)", err, ClassifyControllerError(err))
 		}
@@ -462,7 +463,7 @@ func TestLegacyCycleRepairDanglingBlockerDoesNotMaskForeignBlocker(t *testing.T)
 	foreign := mustCreateWorkflowBead(t, store, beads.Bead{Title: "unrelated open work", Type: "task"})
 	mustDepAdd(t, store, body.ID, foreign.ID, "blocks")
 
-	_, err := ProcessControl(store, control, ProcessOptions{})
+	_, err := ProcessControl(beadstest.Graph(store), control, ProcessOptions{Work: beadstest.Work(store)})
 	if err == nil {
 		t.Fatal("ProcessControl succeeded; the foreign blocker should have refused the body close")
 	}
@@ -514,7 +515,7 @@ func TestProcessWorkflowFinalizeMissingRootIsDecidedByTheRootNotTheErrorChain(t 
 	}
 	store := &foreignNotFoundCloseStore{strictCloseStore: strict, failID: root.ID}
 
-	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 	if err == nil {
 		t.Fatalf("ProcessControl returned %+v with no error; the root close failure must surface", result)
 	}
@@ -552,7 +553,7 @@ func TestProcessWorkflowFinalizeGenuinelyMissingRootStillClosesAsMissingRoot(t *
 		t.Fatalf("delete root: %v", err)
 	}
 
-	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(finalize with deleted root): %v", err)
 	}
@@ -632,7 +633,7 @@ func TestLegacyCycleRepairMatchesBodyByScopeRefAlone(t *testing.T) {
 		t.Fatalf("mark subject failed: %v", err)
 	}
 
-	result, err := reconcileTerminalScopedMember(store, mustGetBead(t, store, subjectID))
+	result, err := reconcileTerminalScopedMember(beadstest.Graph(store), mustGetBead(t, store, subjectID))
 	if err != nil {
 		t.Fatalf("reconcileTerminalScopedMember(body identified by gc.scope_ref only): %v (tier %v)", err, ClassifyControllerError(err))
 	}

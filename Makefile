@@ -11,6 +11,9 @@ GOLANGCI_LINT := $(BIN_DIR)/golangci-lint
 OASDIFF := $(BIN_DIR)/oasdiff
 
 BINARY     := gc
+# COMPANION is gc's OSC 7501 capture companion. It is pure Go and is built,
+# installed and removed alongside gc, which looks it up next to itself.
+COMPANION  := gc-osc7501
 BUILD_DIR  := bin
 INSTALL_DIR := $(BIN_DIR)
 
@@ -149,11 +152,13 @@ BAZEL_TEST = $(BAZEL) test $(BAZEL_FLAGS) --keep_going
 bazel-tmpdir:
 	@mkdir -p /tmp/bt
 
-## build: compile gc binary with version metadata
+## build: compile gc and its gc-osc7501 companion with version metadata
 build:
 	go build -buildvcs=false -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/gc
+	CGO_ENABLED=0 go build -buildvcs=false -ldflags "-X main.version=$(VERSION)" -o $(BUILD_DIR)/$(COMPANION) ./cmd/gc-osc7501
 ifeq ($(shell uname),Darwin)
 	@scripts/sign-darwin-local.sh $(BUILD_DIR)/$(BINARY)
+	@GC_SIGN_IDENTIFIER=com.gascity.gc-osc7501 scripts/sign-darwin-local.sh $(BUILD_DIR)/$(COMPANION)
 endif
 
 ## artifact: build a provenance-named gc artifact (requires BASE_REF=<remote>/<branch>, e.g. Voxist/main)
@@ -251,10 +256,11 @@ GC_DEPLOY_DIR ?= $(HOME)/.gc/bin
 GC_DEPLOY_BINARY ?= $(INSTALL_DIR)/$(BINARY)
 GC_DEPLOY_CHANNELS ?= $(HOME)/.local/bin/$(BINARY) $(BIN_DIR)/$(BINARY) $(GC_DEPLOY_DIR)/$(BINARY)
 
-## install: build and install gc to GOPATH/bin (same location as go install)
+## install: build and install gc and gc-osc7501 to GOPATH/bin (same location as go install)
 #
-# Writes exactly one path: $(INSTALL_DIR)/$(BINARY). It deliberately does NOT
-# relink any deploy channel -- two writers at one path, last one wins in
+# Writes exactly two paths: $(INSTALL_DIR)/$(BINARY) and its companion
+# $(INSTALL_DIR)/$(COMPANION), which gc looks up next to itself (else on
+# PATH). It deliberately does NOT relink any deploy channel -- two writers at one path, last one wins in
 # silence, is how this machine ran a stale supervisor image for an unknown
 # period (vc-lwif). To move a running deployment onto this build, run the
 # explicit second step: `make deploy-fleet`.
@@ -287,6 +293,17 @@ install: check-self-contained
 		chmod 0755 "$$tmp"; \
 		mv -f "$$tmp" "$(INSTALL_DIR)/$(BINARY)"; \
 		trap - EXIT INT TERM HUP
+	@# The companion is installed beside gc, because gc looks for it next to
+	@# the path it was started by (else on PATH). Same temp-then-rename write.
+	@# deploy-fleet does not link it beside the other channels; gc started
+	@# through one of those finds it on PATH.
+	@set -e; \
+		tmp="$(INSTALL_DIR)/.$(COMPANION).tmp.$$$$"; \
+		trap 'rm -f "$$tmp"' EXIT INT TERM HUP; \
+		cp -f "$(BUILD_DIR)/$(COMPANION)" "$$tmp"; \
+		chmod 0755 "$$tmp"; \
+		mv -f "$$tmp" "$(INSTALL_DIR)/$(COMPANION)"; \
+		trap - EXIT INT TERM HUP
 	@# Deploy provenance: machine-derived build manifest next to the binary
 	@go run ./cmd/writebuildmanifest -binary "$(INSTALL_DIR)/$(BINARY)" -repo "$(CURDIR)"
 	@# A DIFFERENT channel that resolves to the install path also moved with
@@ -305,7 +322,7 @@ install: check-self-contained
 			echo "WARNING: $$channel resolves to $(INSTALL_DIR)/$(BINARY) -- this install moved it."; \
 			echo "         Anything running that binary is now on this build."; \
 		done
-	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY)"
+	@echo "Installed $(BINARY) and $(COMPANION) to $(INSTALL_DIR)"
 	@# $(INSTALL_DIR)/$(BINARY) is itself a deploy channel, so claiming the
 	@# channels were untouched would be false by this Makefile's own
 	@# definitions. Name what was written instead (ga-lwif MEDIUM).
@@ -434,7 +451,7 @@ check-schema: generate
 
 ## clean: remove build artifacts
 clean:
-	rm -f $(BUILD_DIR)/$(BINARY)
+	rm -f $(BUILD_DIR)/$(BINARY) $(BUILD_DIR)/$(COMPANION)
 
 ## complexity: print an advisory cyclomatic complexity report for shipped Go
 complexity:
@@ -1038,7 +1055,7 @@ test-bd-cli-contract-home-isolation:
 ## is the only contract that needs a real CAS-capable bd. Every pinned bd
 ## (BD_PREV_VERSION, BD_VERSION and BD_CURRENT_REF) carries
 ## `--if-assignee`/`--if-status`, so the row's capability skip fires on none
-## of them. CI runs the row only against the BD_CURRENT_REF bd (v1.3.2):
+## of them. CI runs the row only against the BD_CURRENT_REF bd (v1.3.4):
 ## strictly in //internal/beads:bd_conditional_release_contract_test, and in
 ## the integration-packages lane. A BD_PREV_VERSION cell is ga-7ryjc6.
 ## GC_REQUIRE_BD_CONDITIONAL_RELEASE=1 turns the row's capability skip into a
@@ -1293,10 +1310,15 @@ NONCMDGC_COVER_TOTAL ?= 3
 ## status, so a bad shard index would run `go test` with no packages, which
 ## succeeds having tested nothing; `set -e` does propagate the failure of an
 ## assignment.
+##
+## -timeout is per test binary. 20m, not 10m: upstream's internal/workladder
+## property sims (50-100s each on one worker, which Bazel spreads over 6
+## shards) run in one binary here, under coverage, and exceeded 10m on CI
+## (2026-11-09 resync).
 test-cover-noncmdgc-shard: test-fsys-darwin-compile
 	set -e; \
 	pkgs="$$(printf '%s\n' $(UNIT_COVER_PKGS_NONCMDGC) | ./scripts/noncmdgc-shard-packages $(NONCMDGC_COVER_SHARD) $(NONCMDGC_COVER_TOTAL))"; \
-	$(TEST_ENV) GC_FAST_UNIT=1 go test -timeout 10m \
+	$(TEST_ENV) GC_FAST_UNIT=1 go test -timeout 20m \
 		-coverprofile=coverage.noncmdgc.$(NONCMDGC_COVER_SHARD).txt \
 		$$pkgs
 
@@ -1331,12 +1353,28 @@ $(GOLANGCI_LINT):
 
 ## install-oapi-codegen: install pinned oapi-codegen so the spec→client drift
 ## test (TestGeneratedClientInSync) can regenerate client_gen.go without skipping.
+# Retries like $(GOLANGCI_LINT): spec-ci installs this on every CI run, and the
+# tool's own module graph (not gascity's go.sum) comes from the module proxy,
+# so one transient proxy stream error would otherwise fail the required Check.
 .PHONY: install-oapi-codegen
 install-oapi-codegen:
-	@if ! command -v oapi-codegen >/dev/null; then \
-		echo "Installing oapi-codegen..." >&2; \
-		go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.6.0; \
-	fi
+	@if command -v oapi-codegen >/dev/null; then exit 0; fi; \
+	echo "Installing oapi-codegen..." >&2; \
+	attempt=1; max_attempts=5; delay=2; \
+	while [ $$attempt -le $$max_attempts ]; do \
+		echo "oapi-codegen install attempt $$attempt/$$max_attempts" >&2; \
+		if go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.6.0; then \
+			exit 0; \
+		fi; \
+		if [ $$attempt -lt $$max_attempts ]; then \
+			echo "oapi-codegen install failed; retrying in $${delay}s..." >&2; \
+			sleep $$delay; \
+		fi; \
+		attempt=$$((attempt + 1)); \
+		delay=$$((delay * 2)); \
+	done; \
+	echo "ERROR: failed to install oapi-codegen after $$max_attempts attempts" >&2; \
+	exit 1
 
 ## install-oasdiff: install the pinned oasdiff used by openapi-breaking-check.
 ## Reinstalls when the binary on disk is a different version.

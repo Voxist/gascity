@@ -167,6 +167,7 @@ func statusBeadsDiagnosticFromGen(g *genclient.BeadsDiagnostic) *beads.BeadsDiag
 	if g.GcBdInflight != nil {
 		out.BdInflight = int(*g.GcBdInflight)
 	}
+	out.Proxied = statusProxiedDiagnosticFromGen(g.Proxied)
 	return out
 }
 
@@ -180,6 +181,9 @@ func statusAgentViewFromGen(g genclient.StatusAgentDetail) StatusAgentView {
 	}
 	if g.SessionName != nil {
 		out.SessionName = *g.SessionName
+	}
+	if g.SessionId != nil {
+		out.SessionID = *g.SessionId
 	}
 	if g.GroupName != nil {
 		out.GroupName = *g.GroupName
@@ -199,4 +203,41 @@ func statusRigViewFromGen(g genclient.StatusRigDetail) StatusRigView {
 		Path:      g.Path,
 		Suspended: g.Suspended,
 	}
+}
+
+// statusProxiedDiagnosticFromGen carries the controller's proxied-native
+// account through to the CLI view, so `gc status --json` prints beads.proxied
+// on the API route as the local route does.
+func statusProxiedDiagnosticFromGen(g *genclient.ProxiedDiagnostic) *beads.ProxiedDiagnostic {
+	if g == nil {
+		return nil
+	}
+	out := &beads.ProxiedDiagnostic{}
+	if g.Endpoint.Port != nil {
+		out.Endpoint.Port = int(*g.Endpoint.Port)
+	}
+	if g.Endpoint.Pid != nil {
+		out.Endpoint.PID = int(*g.Endpoint.Pid)
+	}
+	if g.Endpoint.Generation != nil {
+		out.Endpoint.Generation = *g.Endpoint.Generation
+	}
+	out.Cursors.Main = int(g.Cursors.Main)
+	out.Cursors.Ignored = int(g.Cursors.Ignored)
+	if g.Evidence != nil {
+		out.Evidence = *g.Evidence
+	}
+	if g.IdlePolicy != nil {
+		out.IdlePolicy = *g.IdlePolicy
+	}
+	if g.Verdict != nil {
+		out.Verdict = beads.ProxiedVerdict(*g.Verdict)
+	}
+	if g.Detail != nil {
+		out.Detail = *g.Detail
+	}
+	if g.Demoted != nil {
+		out.Demoted = *g.Demoted
+	}
+	return out
 }

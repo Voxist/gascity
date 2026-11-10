@@ -31,6 +31,7 @@ import (
 // against the suite and, where this test's tree carries the package's
 // BUILD.bazel, against its shard_count.
 var integrationPackagesShards = map[string]int{
+	"//cmd/gc-osc7501:gc-osc7501_test":                           1,
 	"//cmd/gc-write-mint:gc-write-mint_test":                     1,
 	"//cmd/gc:gc_test":                                           24,
 	"//examples/bd/dolt:dolt_test":                               6,
@@ -242,11 +243,15 @@ func TestIntegrationPackagesFitsTheJobsBudget(t *testing.T) {
 // 2026-10-24 for //test/conversationlane's split: its one 395-450 s action,
 // the lane's last from #8147 on, became six that run side by side (the
 // longest about 200 s), so its five new actions shorten the lane's tail.
-// Fork (Voxist): 91, not upstream's 85 — the fork adds integration-tagged
+// Raised to 86 on 2026-10-31 for //cmd/gc-osc7501:gc-osc7501_test (the
+// OSC 7501 companion against a scratch tmux, about 4 s), which runs inside
+// the second wave without lengthening its tail.
+//
+// Fork (Voxist): 92, not upstream's 86 — the fork adds integration-tagged
 // targets (e.g. //scripts:scripts_test via ci_critical_path_slow_test.go) and
 // does not run this Bazel lane (bazel.yml is upstream-only; fork CI is
 // fork-verify.yml).
-const integrationPackagesTwoWaveExceptionPinned = 91
+const integrationPackagesTwoWaveExceptionPinned = 92
 
 // checkIntegrationPackagesJobsBudget reports whether total (the lane's test
 // action count) is acceptable against effective (its --jobs). total may
