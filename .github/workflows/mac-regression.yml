@@ -357,9 +357,12 @@ jobs:
             *) echo "go_test_count must be 1 to 10, got '$GO_TEST_COUNT_INPUT'" >&2; exit 1 ;;
           esac
           timeout=20m
-          # Off upstream the job gets 50 minutes: keep go test's own timeout,
-          # with its goroutine dump, inside that budget.
-          if [ "$GITHUB_REPOSITORY" != "gastownhall/gascity" ]; then timeout=40m; fi
+          # Off upstream the job gets 50 minutes, and go test starts only after
+          # ~6 minutes of setup plus a cold compile. Its timeout must fire, with
+          # the goroutine dump that names a hung test, before the job is
+          # cancelled: at 40m the fork nightly lost 11 of 12 shards to the job
+          # cap with no dump, so it is 30m there (ga-05vt3.12).
+          if [ "$GITHUB_REPOSITORY" != "gastownhall/gascity" ]; then timeout=30m; fi
           if [ "$GO_TEST_COUNT_INPUT" != 1 ]; then timeout=80m; fi
           make test-cmd-gc-process-shard CMD_GC_PROCESS_SHARD=${{ matrix.shard }} CMD_GC_PROCESS_TOTAL=12 \
             CMD_GC_PROCESS_COUNT="$GO_TEST_COUNT_INPUT" CMD_GC_PROCESS_TIMEOUT="$timeout"

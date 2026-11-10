@@ -467,3 +467,63 @@ func TestMacAcceptanceBudgetsByRepository(t *testing.T) {
 		})
 	}
 }
+
+// processShardGoTimeout runs the cmd-gc process shard step's timeout choice
+// (everything before its make call) as repo with go_test_count count, and
+// returns the go test timeout it picks.
+func processShardGoTimeout(t *testing.T, repo, count string) time.Duration {
+	t.Helper()
+	step := macRegressionStep(t, "mac-cmd-gc-process", "Run cmd/gc process shard")
+	var prefix []string
+	for _, line := range strings.Split(step.Run, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "make ") {
+			break
+		}
+		prefix = append(prefix, line)
+	}
+	script := strings.Join(prefix, "\n") + "\nprintf '%s' \"$timeout\"\n"
+	if strings.Contains(script, "${{") {
+		t.Fatalf("process shard timeout choice has an expression this test does not substitute:\n%s", script)
+	}
+	out, err := runWorkflowStepScript(t, t.TempDir(), script, map[string]string{
+		"GITHUB_REPOSITORY":   repo,
+		"GO_TEST_COUNT_INPUT": count,
+	})
+	if err != nil {
+		t.Fatalf("process shard timeout choice: %v\n%s", err, out)
+	}
+	return parseMinutes(t, strings.TrimSpace(out))
+}
+
+// The cmd-gc process shards' go test timeout must fire, with its goroutine
+// dump, before the job is cancelled, or a hung test goes unnamed. Off
+// upstream the job gets 50 minutes and a shard spends ~6 minutes on setup and
+// a cold compile before go test starts, so its go timeout is 30m: at 40m the
+// fork's nightly lost 11 of 12 shards to the job cap with no dump
+// (ga-05vt3.12). Upstream keeps 20m, and a soak (go_test_count above 1) 80m
+// under its 90-minute job.
+func TestMacProcessShardGoTimeoutFiresBeforeTheJobCap(t *testing.T) {
+	jobCap := regexp.MustCompile(`github\.repository == 'gastownhall/gascity' && ([0-9]+) \|\| ([0-9]+)`).
+		FindStringSubmatch(macJobTimeoutMinutes(t, "mac-cmd-gc-process"))
+	if jobCap == nil {
+		t.Fatalf("mac-cmd-gc-process timeout-minutes %q has no upstream-or-fork budget", macJobTimeoutMinutes(t, "mac-cmd-gc-process"))
+	}
+	for _, tc := range []struct {
+		name, repo, count string
+		want, job         time.Duration
+	}{
+		{name: "upstream", repo: "gastownhall/gascity", count: "1", want: 20 * time.Minute, job: parseMinutes(t, jobCap[1])},
+		{name: "fork", repo: "Voxist/gascity", count: "1", want: 30 * time.Minute, job: parseMinutes(t, jobCap[2])},
+		{name: "fork soak", repo: "Voxist/gascity", count: "3", want: 80 * time.Minute, job: 90 * time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := processShardGoTimeout(t, tc.repo, tc.count)
+			if got != tc.want {
+				t.Errorf("go test timeout = %s, want %s", got, tc.want)
+			}
+			if tc.job-got < 10*time.Minute {
+				t.Errorf("go test timeout %s leaves under 10 min of the %s job for setup and compile, so the job is cancelled before go's goroutine dump", got, tc.job)
+			}
+		})
+	}
+}
