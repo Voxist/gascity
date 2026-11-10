@@ -1310,10 +1310,15 @@ NONCMDGC_COVER_TOTAL ?= 3
 ## status, so a bad shard index would run `go test` with no packages, which
 ## succeeds having tested nothing; `set -e` does propagate the failure of an
 ## assignment.
+##
+## -timeout is per test binary. 20m, not 10m: upstream's internal/workladder
+## property sims (50-100s each on one worker, which Bazel spreads over 6
+## shards) run in one binary here, under coverage, and exceeded 10m on CI
+## (2026-11-09 resync).
 test-cover-noncmdgc-shard: test-fsys-darwin-compile
 	set -e; \
 	pkgs="$$(printf '%s\n' $(UNIT_COVER_PKGS_NONCMDGC) | ./scripts/noncmdgc-shard-packages $(NONCMDGC_COVER_SHARD) $(NONCMDGC_COVER_TOTAL))"; \
-	$(TEST_ENV) GC_FAST_UNIT=1 go test -timeout 10m \
+	$(TEST_ENV) GC_FAST_UNIT=1 go test -timeout 20m \
 		-coverprofile=coverage.noncmdgc.$(NONCMDGC_COVER_SHARD).txt \
 		$$pkgs
 
