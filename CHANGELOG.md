@@ -29,6 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **On this fork, `gc status` and `gc rig status` keep reading the warm
+  status (vp-e0hv)** rather than upstream's `?fresh=true` build-for-the-read
+  described below: they answer at once with the supervisor's warm StatusView,
+  which the supervisor rebuilds in the background once it is older than 5 s,
+  so a run right after a change can still show the previous state. The age
+  and refresh state the supervisor reports come with it. API clients that
+  send `?fresh=true` themselves keep upstream's behavior.
+
 - **The container security guards now assert security FLOORS rather than exact
   versions**, which is what their own comments already claimed they did. The
   mcp-agent-mail lock check pinned a resolved version by exact string, so the

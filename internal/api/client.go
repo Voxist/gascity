@@ -1359,20 +1359,18 @@ func (c *Client) GetBead(id string) (CachedRead[beads.Bead], error) {
 // so callers can surface _cache_age_s on --json output and a cache-age
 // footer on human output.
 //
-// The CLI's reads are one-shot, so GetStatus asks the server to build the
-// body for the read (?fresh=true) rather than answer with the one a previous
-// read left saved (ga-v1vyh8.17). The server waits about 10s for that build
-// and then answers with its saved body, if it has one; a server older than
-// the parameter ignores it and serves its saved body at once. Either way the
-// saved body comes with its age (and rebuilding where the server sends the
-// refresh header). CachedRead.AgeSeconds and Refresh stay exactly what the
-// server reports; the CLI never claims freshness itself.
+// GetStatus does not ask for ?fresh=true: the server answers with its warm
+// StatusView at once and refreshes it in the background (vp-e0hv), where a
+// fresh read would wait up to about 10s for a build on every gc status. The
+// body comes with its age, and rebuilding where the server is building a
+// newer one; CachedRead.AgeSeconds and Refresh stay exactly what the server
+// reports, so the CLI never claims freshness itself. API clients that need a
+// body built for the read send ?fresh=true themselves.
 func (c *Client) GetStatus() (CachedRead[StatusView], error) {
 	if err := c.requireCityScope(); err != nil {
 		return CachedRead[StatusView]{}, err
 	}
-	fresh := true
-	resp, err := c.cw.GetV0CityByCityNameStatusWithResponse(context.Background(), c.cityName, &genclient.GetV0CityByCityNameStatusParams{Fresh: &fresh})
+	resp, err := c.cw.GetV0CityByCityNameStatusWithResponse(context.Background(), c.cityName, &genclient.GetV0CityByCityNameStatusParams{})
 	if err != nil {
 		return CachedRead[StatusView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
 	}

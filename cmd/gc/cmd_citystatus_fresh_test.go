@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/api"
@@ -45,22 +46,48 @@ func alphaSuspendedIn(t *testing.T, raw []byte) bool {
 	return false
 }
 
-// gc status run right after a change shows the change: the server builds the
-// body for each read rather than answering with the one the previous read
-// left saved, and that read names no rebuild (ga-v1vyh8.17).
+// warmStatusConvergeWithin bounds how long a change takes to reach gc status
+// on this fork. The CLI reads the server's warm StatusView (vp-e0hv), which
+// the server rebuilds in the background once it is older than its 5 s
+// refresh age, so a read right after a change may still show the previous
+// body; a later read shows the change. Upstream's ?fresh=true read, which
+// builds the body for every read, is not what gc status sends here.
+const warmStatusConvergeWithin = 30 * time.Second
+
+// warmStatusEventually re-runs read until it reports true or
+// warmStatusConvergeWithin passes, and reports whether it did.
+func warmStatusEventually(read func() bool) bool {
+	deadline := time.Now().Add(warmStatusConvergeWithin)
+	for {
+		if read() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// gc status shows a change made since the previous read once the server's
+// warm StatusView has been rebuilt, and that read names no rebuild.
 func TestCityStatusShowsAChangeMadeSinceThePreviousRead(t *testing.T) {
 	h := newCityStatusRouteHarness(t)
 	for _, lane := range apiLanes(t, h) {
 		setAlphaSuspended(t, h, false)
-		first, _ := cityStatusVia(t, h, lane, true)
-		if alphaSuspendedIn(t, first) {
-			t.Fatalf("%s: first read shows alpha suspended, want not", lane.name)
+		if !warmStatusEventually(func() bool {
+			first, _ := cityStatusVia(t, h, lane, true)
+			return !alphaSuspendedIn(t, first)
+		}) {
+			t.Fatalf("%s: gc status never showed alpha resumed", lane.name)
 		}
 
 		setAlphaSuspended(t, h, true)
-		second, _ := cityStatusVia(t, h, lane, true)
-		if !alphaSuspendedIn(t, second) {
-			t.Errorf("%s: read right after suspending alpha shows it not suspended: the CLI got the previous read's saved body", lane.name)
+		if !warmStatusEventually(func() bool {
+			second, _ := cityStatusVia(t, h, lane, true)
+			return alphaSuspendedIn(t, second)
+		}) {
+			t.Errorf("%s: gc status still shows alpha not suspended %s after suspending it: the warm view was never rebuilt", lane.name, warmStatusConvergeWithin)
 		}
 		if _, stderr := cityStatusVia(t, h, lane, false); strings.Contains(string(stderr), cacheAgeFooterMark) {
 			t.Errorf("%s: text-mode stderr has a cache-age footer on a body built for the read:\n%s", lane.name, stderr)
@@ -68,7 +95,8 @@ func TestCityStatusShowsAChangeMadeSinceThePreviousRead(t *testing.T) {
 	}
 }
 
-// gc rig status run right after an agent starts shows it running.
+// gc rig status shows an agent started since the previous read once the
+// server's warm StatusView has been rebuilt.
 func TestRigStatusShowsAnAgentStartedSinceThePreviousRead(t *testing.T) {
 	h := newCityStatusRouteHarness(t)
 	sp, ok := h.cs.SessionProvider().(*runtime.Fake)
@@ -86,23 +114,22 @@ func TestRigStatusShowsAnAgentStartedSinceThePreviousRead(t *testing.T) {
 	}
 	for _, lane := range apiLanes(t, h) {
 		_ = sp.Stop(sessionName)
-		code, out, errOut := runRigStatusRoute(t, h.cityPath, sp, newFakeDrainOps(), "alpha", lane.client, "", true)
-		if code != 0 {
-			t.Fatalf("%s: first gc rig status exit %d: %s", lane.name, code, errOut)
+		readRunning := func() bool {
+			code, out, errOut := runRigStatusRoute(t, h.cityPath, sp, newFakeDrainOps(), "alpha", lane.client, "", true)
+			if code != 0 {
+				t.Fatalf("%s: gc rig status exit %d: %s", lane.name, code, errOut)
+			}
+			return rigbotRunning(t, out)
 		}
-		if rigbotRunning(t, out) {
-			t.Fatalf("%s: first read shows rigbot running, want not", lane.name)
+		if !warmStatusEventually(func() bool { return !readRunning() }) {
+			t.Fatalf("%s: gc rig status never showed rigbot stopped", lane.name)
 		}
 
 		if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
 			t.Fatalf("start rigbot: %v", err)
 		}
-		code, out, errOut = runRigStatusRoute(t, h.cityPath, sp, newFakeDrainOps(), "alpha", lane.client, "", true)
-		if code != 0 {
-			t.Fatalf("%s: second gc rig status exit %d: %s", lane.name, code, errOut)
-		}
-		if !rigbotRunning(t, out) {
-			t.Errorf("%s: read right after starting rigbot shows it not running: the CLI got the previous read's saved body", lane.name)
+		if !warmStatusEventually(readRunning) {
+			t.Errorf("%s: gc rig status still shows rigbot not running %s after starting it: the warm view was never rebuilt", lane.name, warmStatusConvergeWithin)
 		}
 		if _, _, errOut := runRigStatusRoute(t, h.cityPath, sp, newFakeDrainOps(), "alpha", lane.client, "", false); bytes.Contains(errOut, []byte(cacheAgeFooterMark)) {
 			t.Errorf("%s: text-mode stderr has a cache-age footer on a body built for the read:\n%s", lane.name, errOut)
@@ -138,8 +165,10 @@ func (s *freshIgnoringSupervisor) handler(rebuilding bool, body map[string]any) 
 	})
 }
 
-// requireFreshAsked fails unless every recorded read asked for ?fresh=true.
-func (s *freshIgnoringSupervisor) requireFreshAsked(t *testing.T) {
+// requireWarmRead fails unless every recorded read left ?fresh unset: the
+// fork's CLI reads the warm StatusView (vp-e0hv) and reports the age the
+// server sends with it.
+func (s *freshIgnoringSupervisor) requireWarmRead(t *testing.T) {
 	t.Helper()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -147,8 +176,8 @@ func (s *freshIgnoringSupervisor) requireFreshAsked(t *testing.T) {
 		t.Fatal("the CLI made no /status read")
 	}
 	for _, q := range s.queries {
-		if q.Get("fresh") != "true" {
-			t.Errorf("/status query = %v, want fresh=true", q)
+		if q.Has("fresh") {
+			t.Errorf("/status query = %v, want no fresh parameter", q)
 		}
 	}
 }
@@ -209,7 +238,7 @@ func TestRouteCityStatus_ServerIgnoringFreshKeepsItsReport(t *testing.T) {
 					t.Errorf("gc status --json _cache_age_s = %v, want 300, the age the supervisor reported", out.CacheAgeS)
 				}
 			}
-			sup.requireFreshAsked(t)
+			sup.requireWarmRead(t)
 		})
 	}
 }
@@ -246,7 +275,7 @@ func TestRouteRigStatus_ServerIgnoringFreshKeepsItsReport(t *testing.T) {
 			if want := olderSupervisorFooters[rebuilding]; !strings.Contains(stderr.String(), want) {
 				t.Errorf("gc rig status stderr = %q, want it to contain %q", stderr.String(), want)
 			}
-			sup.requireFreshAsked(t)
+			sup.requireWarmRead(t)
 		})
 	}
 }

@@ -270,8 +270,8 @@ func cmdCityStatusLocalFallback(cfg *config.City, cityPath string, jsonOutput bo
 // `gc status`'s local fallback re-opens the full local bead/dolt store and
 // rescans event archives to rebuild store health, which measured ~9.5s of
 // CPU on a 26-agent/1.2GB city versus ~3.65s for the supervisor to build the
-// status from its warm caches (#5028), the build `gc status` waits for
-// (ga-v1vyh8.17). Status has a local fallback (unlike maintenance), so this
+// status from its warm caches (#5028); `gc status` is served the
+// supervisor's warm StatusView without waiting for a build (vp-e0hv). Status has a local fallback (unlike maintenance), so this
 // change only affects the ROUTE picked, not the correctness of either path.
 var cityStatusAPIClient = supervisorFallthroughAPIClient
 

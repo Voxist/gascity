@@ -7,10 +7,13 @@ import (
 	"testing"
 )
 
-// The CLI's one-shot status reads ask the server to build the body for the
-// read (?fresh=true) and send none of the poller or long-poll parameters
-// (ga-v1vyh8.17).
-func TestGetStatusAsksForABodyBuiltForTheRead(t *testing.T) {
+// The CLI's status reads are served the server's warm StatusView at once
+// (vp-e0hv): GetStatus sends no ?fresh=true, and none of the poller or
+// long-poll parameters. A fresh read waits up to statusFreshBuildWait for a
+// build, which is the wait the warm view exists to take off gc status; the
+// age and refresh state the server reports with the warm body say how old it
+// is. Explicit ?fresh=true API requests keep upstream's build slots.
+func TestGetStatusReadsTheWarmBody(t *testing.T) {
 	var got url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got = r.URL.Query()
@@ -24,8 +27,7 @@ func TestGetStatusAsksForABodyBuiltForTheRead(t *testing.T) {
 	if _, err := NewCityScopedClient(srv.URL, "c").GetStatus(); err != nil {
 		t.Fatalf("GetStatus: %v", err)
 	}
-	want := url.Values{"fresh": {"true"}}
-	if len(got) != len(want) || got.Get("fresh") != "true" {
-		t.Fatalf("GetStatus query = %v, want %v", got, want)
+	if len(got) != 0 {
+		t.Fatalf("GetStatus query = %v, want none (no fresh=true: the CLI reads the warm body)", got)
 	}
 }
