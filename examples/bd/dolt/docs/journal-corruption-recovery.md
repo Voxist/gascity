@@ -133,6 +133,8 @@ whose database has no usable backup.
 ls -l <archive>/<sql_name>/issues.jsonl   # stop and escalate if it is missing
 mv <data_dir>/<dbname> <somewhere-safe>
 cd /path/to/city
+gc dolt start   # the corrupt store is moved aside, so the server starts without replaying it
+# If gc dolt start fails, stop and escalate, as for a failed check below.
 # for a rig scope, add --rig <rig> to each gc bd command below
 # --recreate-missing creates an EMPTY database when the scope's database is
 # missing OR UNREACHABLE. Run it only after both checks pass:
@@ -342,9 +344,11 @@ one re-create flag it admits, `--recreate-missing`, even though the pinned bd ha
 
 **MANDATORY PRE-CHECK before every `--recreate-missing` step, in this block and in 4b.
 `--recreate-missing` creates a fresh, EMPTY database when the scope's server-mode database
-is missing OR UNREACHABLE. Run it only after both checks in the block pass: the managed Dolt
-server answers `select 1`, and `<dbname>` is absent from its `show databases`. If the server
-does not answer, STOP and escalate: an unreachable server is not a missing database.**
+is missing OR UNREACHABLE. Step 3 stopped the managed server, so start it again with
+`gc dolt start` once the corrupt store is moved aside; if that fails, STOP and escalate. Run
+`--recreate-missing` only after both checks in the block pass: the managed Dolt server
+answers `select 1`, and `<dbname>` is absent from its `show databases`. If the server does
+not answer, STOP and escalate: an unreachable server is not a missing database.**
 
 **Confirm `<port>` from the listening socket**, `lsof -a -p <dolt-pid> -iTCP -sTCP:LISTEN`
 with the managed Dolt server's PID, not only from the port file: a proxied city's proxy can
@@ -358,8 +362,12 @@ ls -l <archive>/<sql_name>/issues.jsonl
 # Keep the corrupt store; never delete it
 mv <data_dir>/<dbname> <somewhere-safe>
 
-# Re-create only this scope's database, empty, under the scope's own identity
+# Start the managed server again (Step 3 stopped it)
 cd /path/to/city
+gc dolt start   # the corrupt store is moved aside, so the server starts without replaying it
+# If gc dolt start fails, stop and escalate, as for a failed check below.
+
+# Re-create only this scope's database, empty, under the scope's own identity
 # --recreate-missing creates an EMPTY database when the scope's database is
 # missing OR UNREACHABLE. Run it only after both checks pass:
 # 1. the managed Dolt server is up and answers (no error):
@@ -422,7 +430,9 @@ gc bd list --status in_progress --json | jq '.[] | {id, title, status}'
 
 ## Step 5: Verify
 
-Confirm the database starts cleanly and the city is healthy before resuming work:
+Confirm the database starts cleanly and the city is healthy before resuming work. After
+Step 4 (fallback) or 4b, the managed server started with `gc dolt start` is still running;
+`gc start` adopts it rather than starting a second one.
 
 ```bash
 # Start the city; gc start brings up the managed Dolt server first
