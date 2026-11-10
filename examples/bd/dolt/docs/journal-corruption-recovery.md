@@ -134,11 +134,13 @@ ls -l <archive>/<sql_name>/issues.jsonl   # stop and escalate if it is missing
 mv <data_dir>/<dbname> <somewhere-safe>
 cd /path/to/city
 # for a rig scope, add --rig <rig> to each gc bd command below
-# MANDATORY PRE-CHECK before --recreate-missing (see Step 4 (fallback)):
-#          the managed server must answer, and <dbname> must be absent from
-#          what it lists; if either check fails, STOP and escalate
-gc dolt status   # must report the server running; note its port
-dolt --host 127.0.0.1 --port <port> --user root --password "" --no-tls sql -q "show databases"
+# --recreate-missing creates an EMPTY database when the scope's database is
+# missing OR UNREACHABLE. Run it only after both checks pass:
+# 1. the managed Dolt server is up and answers (no error):
+dolt --host 127.0.0.1 --port <port> --user root --password "" --no-tls sql -q "select 1"
+# 2. <dbname> is absent from the server you just moved it out of:
+dolt --host 127.0.0.1 --port <port> --user root --password "" --no-tls sql -q "show databases" | grep -x '<dbname>' && echo "STOP: still present"
+# If check 1 fails, stop and escalate: an unreachable server is not a missing database.
 gc bd init --recreate-missing -p <prefix> --skip-hooks --skip-agents
 gc bd import <archive>/<sql_name>/issues.jsonl
 # if the import fails, stop before the backup lines and Step 5: move the
@@ -340,14 +342,13 @@ one re-create flag it admits, `--recreate-missing`, even though the pinned bd ha
 
 **MANDATORY PRE-CHECK before every `--recreate-missing` step, in this block and in 4b.
 `--recreate-missing` creates a fresh, EMPTY database when the scope's server-mode database
-is missing OR UNREACHABLE, so run against a server that is merely down or not answering it
-replaces a database that still exists with an empty one. Before running it:**
+is missing OR UNREACHABLE. Run it only after both checks in the block pass: the managed Dolt
+server answers `select 1`, and `<dbname>` is absent from its `show databases`. If the server
+does not answer, STOP and escalate: an unreachable server is not a missing database.**
 
-1. **The managed Dolt server must answer:** `gc dolt status` reports it running and names its
-   port, and `dolt --host 127.0.0.1 --port <port> --user root --password "" --no-tls sql -q
-   "show databases"` returns the server's database list.
-2. **`<dbname>` must be absent from that list.**
-3. **If either check fails, STOP and escalate. Do not run the `--recreate-missing` step.**
+**Confirm `<port>` from the listening socket**, `lsof -a -p <dolt-pid> -iTCP -sTCP:LISTEN`
+with the managed Dolt server's PID, not only from the port file: a proxied city's proxy can
+overwrite the port file with its own port, and the checks would then ask the wrong server.
 
 ```bash
 # SPLIT-STORE CITY: stop here, before the move (see above)
@@ -357,13 +358,15 @@ ls -l <archive>/<sql_name>/issues.jsonl
 # Keep the corrupt store; never delete it
 mv <data_dir>/<dbname> <somewhere-safe>
 
-# MANDATORY PRE-CHECK (see above): STOP unless the server answers and
-# <dbname> is absent from its list
-cd /path/to/city
-gc dolt status   # must report the server running; note its port
-dolt --host 127.0.0.1 --port <port> --user root --password "" --no-tls sql -q "show databases"
-
 # Re-create only this scope's database, empty, under the scope's own identity
+cd /path/to/city
+# --recreate-missing creates an EMPTY database when the scope's database is
+# missing OR UNREACHABLE. Run it only after both checks pass:
+# 1. the managed Dolt server is up and answers (no error):
+dolt --host 127.0.0.1 --port <port> --user root --password "" --no-tls sql -q "select 1"
+# 2. <dbname> is absent from the server you just moved it out of:
+dolt --host 127.0.0.1 --port <port> --user root --password "" --no-tls sql -q "show databases" | grep -x '<dbname>' && echo "STOP: still present"
+# If check 1 fails, stop and escalate: an unreachable server is not a missing database.
 gc bd init --recreate-missing -p <prefix> --skip-hooks --skip-agents
 
 # Import the scope's last JSONL export (bd export format)
@@ -382,8 +385,9 @@ gc bd list --status in_progress --json | jq '.[] | {id, title, status}'
 - `--recreate-missing` is how the pinned bd release (v1.95.0) re-creates the missing
   database of a scope that is already initialized; a plain `gc bd init` refuses, and so
   does `--reinit-local`, which on this release does not authorize re-creating a missing
-  server-mode database. bd treats an UNREACHABLE server-mode database the same as a missing
-  one, which is why the pre-check above must pass first. It acts on this scope's database only (`dolt_database` in
+  server-mode database. It also fires when the server is unreachable, so never run it while
+  the server is down, on a port conflict, or during journal replay; the pre-check above is
+  mandatory. It acts on this scope's database only (`dolt_database` in
   `.beads/metadata.json`) and keeps the project id that file records, which `gc start`
   checks against `.beads/identity.toml`. Run it only after the move above. A bd whose
   `bd init --help` does not list `--recreate-missing` (upstream releases through v1.3.4)
