@@ -571,6 +571,44 @@ func writeDirectExternalCityOnLoopback(t *testing.T, city, rigPath string) {
 	journalCityScopeOwnership(t, city, city, providerScopeIntent{Transport: "direct", Target: "external"})
 }
 
+// A bd command into a bd-owned rig dials the rig's own binding, not the
+// city's (ga-05vt3.36). bd's config.yaml for such a store names no gc endpoint
+// (a bd init writes an issue prefix, or nothing but comments), so the rig reads
+// as legacy-minimal, and the rig projection used to fall through to the city's
+// Dolt target. That set BEADS_DOLT_SERVER_PORT to the city's server, which
+// holds no database of the rig's: here a city bound to one loopback server and
+// a rig bd bound to another, the shape a gc-managed city adopting an
+// operator's loopback store also has.
+func TestBdOwnedLoopbackRigEnvDialsItsOwnBinding(t *testing.T) {
+	city := normalizePathForCompare(t.TempDir())
+	rig := filepath.Join(city, "rigs", "hv")
+	writeDirectExternalCityOnLoopback(t, city, rig)
+	rigPort := bdOwnedLoopbackPort + 1
+	writeBdOwnedDirectExternalRig(t, rig, "hv", "127.0.0.1", rigPort)
+	t.Setenv("GC_BEADS", "bd")
+	if owned, err := scopeIsBdOwnedDirectExternal(city, rig); err != nil || !owned {
+		t.Fatalf("scopeIsBdOwnedDirectExternal = %v, %v; want true", owned, err)
+	}
+	cfg, err := loadCityConfig(city, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	env, err := bdRuntimeEnvForRigWithErrorNoRecovery(city, cfg, rig)
+	if err != nil {
+		t.Fatalf("bdRuntimeEnvForRigWithErrorNoRecovery: %v", err)
+	}
+	for key, want := range map[string]string{
+		"BEADS_DOLT_SERVER_PORT": fmt.Sprint(rigPort),
+		"GC_DOLT_PORT":           fmt.Sprint(rigPort),
+		"BEADS_DOLT_SERVER_HOST": "127.0.0.1",
+	} {
+		if got := env[key]; got != want {
+			t.Errorf("%s = %q, want %q, the rig's own binding (the city's server is on %d)", key, got, want, bdOwnedLoopbackPort)
+		}
+	}
+}
+
 // A store bd initialized with `--server --external` against a dolt sql-server
 // the operator runs on this machine records a loopback binding. In a proxied
 // city gc runs no Dolt of its own, so that binding cannot be a stale record of

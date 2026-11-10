@@ -154,6 +154,31 @@ func TestResolvedRuntimeCityDoltTargetDeniedForStoppedCity(t *testing.T) {
 	}
 }
 
+// The gate is on managed-Dolt recovery. A city bound directly to an
+// operator's server, whose Dolt lifecycle gc does not own, has none to revive, so a stopped controller must not turn its target resolution into
+// a refusal: upstream reads such a city's binding from bd's own metadata, and
+// the fork bd writes it a config.yaml with no endpoint, so the resolution
+// reaches the recovery step (ga-05vt3.36).
+func TestResolvedRuntimeCityDoltTargetNotGatedForADoltGCDoesNotRun(t *testing.T) {
+	s := &gateSeams{liveness: controllerLivenessStopped}
+	installGateSeams(t, s)
+	configureIsolatedRuntimeEnv(t)
+	city := normalizePathForCompare(t.TempDir())
+	writeDirectExternalCityOnLoopback(t, city, filepath.Join(city, "rigs", "hv"))
+	if err := os.WriteFile(filepath.Join(city, ".beads", "config.yaml"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if managed, err := managedDoltLifecycleOwned(city); err != nil || managed {
+		t.Fatalf("managedDoltLifecycleOwned = %v, %v; want false for a city bound to an operator's server", managed, err)
+	}
+
+	_, _, err := resolvedRuntimeCityDoltTarget(city, true)
+	var denied *implicitRecoveryDeniedError
+	if errors.As(err, &denied) {
+		t.Fatalf("resolvedRuntimeCityDoltTarget() err = %v; a city whose Dolt gc does not run has no managed Dolt to refuse", err)
+	}
+}
+
 func TestExplicitLifecycleEntryPointsDeclareIntent(t *testing.T) {
 	city := t.TempDir()
 	resetLifecycleIntentForTest(t)
