@@ -3,9 +3,11 @@ package scripts_test
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -370,5 +372,98 @@ func TestMakeTestMacRefusesAnEmptyPackageList(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "\ntest-mac: test-mac-pkgs-guard ") {
 		t.Error("test-mac does not depend on test-mac-pkgs-guard")
+	}
+}
+
+// macJobTimeoutMinutes returns the raw timeout-minutes of a mac-regression.yml
+// job: a number, or a GitHub expression.
+func macJobTimeoutMinutes(t *testing.T, job string) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(repoRoot(t), ".github", "workflows", "mac-regression.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wf struct {
+		Jobs map[string]struct {
+			TimeoutMinutes string `yaml:"timeout-minutes"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(body, &wf); err != nil {
+		t.Fatal(err)
+	}
+	j, ok := wf.Jobs[job]
+	if !ok || j.TimeoutMinutes == "" {
+		t.Fatalf("mac-regression.yml job %s has no timeout-minutes", job)
+	}
+	return j.TimeoutMinutes
+}
+
+// macRepoTernary matches the one expression shape these budgets use:
+// upstream's value, else the fork's.
+var macRepoTernary = regexp.MustCompile(`^\$\{\{\s*github\.repository == 'gastownhall/gascity' && '?([0-9a-z]+)'? \|\| '?([0-9a-z]+)'?\s*\}\}$`)
+
+// resolveMacRepoValue resolves value as GitHub would in repo: a literal is
+// itself; the upstream-or-fork expression picks its side.
+func resolveMacRepoValue(t *testing.T, value, repo string) string {
+	t.Helper()
+	if !strings.Contains(value, "${{") {
+		return value
+	}
+	m := macRepoTernary.FindStringSubmatch(strings.TrimSpace(value))
+	if m == nil {
+		t.Fatalf("value %q is not the upstream-or-fork repository expression this test resolves", value)
+	}
+	if repo == "gastownhall/gascity" {
+		return m[1]
+	}
+	return m[2]
+}
+
+func parseMinutes(t *testing.T, raw string) time.Duration {
+	t.Helper()
+	if d, err := time.ParseDuration(raw); err == nil {
+		return d
+	}
+	d, err := time.ParseDuration(raw + "m")
+	if err != nil {
+		t.Fatalf("parse %q as minutes: %v", raw, err)
+	}
+	return d
+}
+
+// Mac Tier A acceptance keeps upstream's budget upstream (25 min job, 20m
+// go test) and gets a larger one off upstream, where hosted macOS runners
+// run it in one process: the 2026-11-09 resync's added acceptance tests ran
+// past 18 minutes of go test there and the 25 min job was cancelled twice.
+// On both, go test's own timeout fires inside the job budget, with room for
+// the ~7 min setup and compile, so a hung test is named, not cut off.
+func TestMacAcceptanceBudgetsByRepository(t *testing.T) {
+	var tierA ciCriticalPathStep
+	for _, step := range readCriticalPathWorkflow(t, "mac-regression.yml").Jobs["mac-acceptance"].Steps {
+		if strings.TrimSpace(step.Run) == "make test-acceptance-go" {
+			tierA = step
+		}
+	}
+	if tierA.Run == "" {
+		t.Fatal("mac-acceptance has no make test-acceptance-go step")
+	}
+	jobBudget := macJobTimeoutMinutes(t, "mac-acceptance")
+	for _, tc := range []struct {
+		repo           string
+		job, goTimeout time.Duration
+	}{
+		{repo: "gastownhall/gascity", job: 25 * time.Minute, goTimeout: 20 * time.Minute},
+		{repo: "Voxist/gascity", job: 45 * time.Minute, goTimeout: 35 * time.Minute},
+	} {
+		t.Run(tc.repo, func(t *testing.T) {
+			job := parseMinutes(t, resolveMacRepoValue(t, jobBudget, tc.repo))
+			goTimeout := parseMinutes(t, resolveMacRepoValue(t, tierA.Env["ACCEPTANCE_TIMEOUT"], tc.repo))
+			if job != tc.job || goTimeout != tc.goTimeout {
+				t.Errorf("job %s, ACCEPTANCE_TIMEOUT %s; want %s and %s", job, goTimeout, tc.job, tc.goTimeout)
+			}
+			if job-goTimeout < 5*time.Minute {
+				t.Errorf("job %s leaves under 5 min for setup and compile before ACCEPTANCE_TIMEOUT %s", job, goTimeout)
+			}
+		})
 	}
 }

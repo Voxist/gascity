@@ -375,7 +375,10 @@ jobs:
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
-    timeout-minutes: 25
+    # Off upstream (no Blacksmith macOS pool) the hosted runners run Tier A in
+    # one process and passed 18 minutes of go test after the 2026-11-09
+    # resync, so the job gets 45 there; upstream keeps 25.
+    timeout-minutes: ${{ github.repository == 'gastownhall/gascity' && 25 || 45 }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -391,8 +394,10 @@ jobs:
         env:
           # Mac runs acceptance ~3-4x slower than Linux because launchd
           # mediates the supervisor lifecycle; bump the go-test timeout
-          # so the whole binary doesn't panic mid-test.
-          ACCEPTANCE_TIMEOUT: 20m
+          # so the whole binary doesn't panic mid-test. Off upstream it is
+          # 35m, inside that job's 45 minutes, so go test's timeout and its
+          # goroutine dump fire before the job is cancelled.
+          ACCEPTANCE_TIMEOUT: ${{ github.repository == 'gastownhall/gascity' && '20m' || '35m' }}
         run: make test-acceptance-go
       # The bd contract steps run after a Tier A failure too, so one red step
       # does not hide the others.
