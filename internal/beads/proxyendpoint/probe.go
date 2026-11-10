@@ -95,8 +95,8 @@ const (
 // number the library acts on. beads' migrationSource.currentVersion applies a
 // "cursor reality floor": before it believes a cursor it asks whether the live
 // schema corroborates it, and when a sentinel is missing it clamps the cursor
-// down (beads internal/storage/schema/schema.go, currentVersion ->
-// cursorRealityFloor, and ignoredSource's sentinelTables,
+// down (beads internal/storage/schema/schema.go, currentVersion -> readCursor
+// -> cursorReality, and ignoredSource's sentinelTables,
 // sentinelFlooredTables and sentinelColumns). beads documents these
 // contradicted shapes as real in the field: a
 // historical ignored-v16 ordinal collision leaves `leases` present without the
@@ -133,9 +133,9 @@ type IgnoredSentinelFlooredTable struct {
 }
 
 // ignoredSentinelFlooredTables are the pinned library's floored sentinel
-// tables, in its probing order (go.mod, v1.3.1-0.20261027095128-43f41374a34d).
+// tables, in its probing order (go.mod, v1.3.1-0.20261104055431-3c205e0a41e4).
 //
-// All three are dolt_ignored, so they live only in a clone's working set and a
+// All four are dolt_ignored, so they live only in a clone's working set and a
 // fresh clone can arrive with ignored_schema_migrations at-latest but without
 // them. Each floor is the version just below the ignored migration that creates
 // the table, so the library's replay re-creates it without re-running anything
@@ -145,7 +145,13 @@ type IgnoredSentinelFlooredTable struct {
 //     main 0062, which moved events off the versioned plane), so floor 18;
 //   - bd_events_journal and bd_events_seq are both created by
 //     ignored/0022_create_events_journal (the clone-local twin of main 0064),
-//     so floor 21.
+//     so floor 21;
+//   - wisp_id_tombstones is created by ignored/0030_create_wisp_id_tombstones
+//     (the clone-local twin of the table main 0074 creates), so floor 29.
+//
+// The library also gives wisp_id_tombstones a lossNotice: a warning it prints
+// when the replay re-creates the table empty on a clone whose cursor says it
+// existed. The notice changes no cursor, so the mirror has nothing to carry.
 //
 // The library floors them rather than sending them to 0, as it does a missing
 // wisps table, because a floor of 0 would replay ignored/0007's unguarded
@@ -156,6 +162,7 @@ var ignoredSentinelFlooredTables = []IgnoredSentinelFlooredTable{
 	{Table: "events", Floor: 18},
 	{Table: "bd_events_journal", Floor: 21},
 	{Table: "bd_events_seq", Floor: 21},
+	{Table: "wisp_id_tombstones", Floor: 29},
 }
 
 // IgnoredSentinelFlooredTables returns the ignored lane's floored sentinel
