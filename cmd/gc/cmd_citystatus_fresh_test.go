@@ -46,26 +46,36 @@ func alphaSuspendedIn(t *testing.T, raw []byte) bool {
 	return false
 }
 
-// warmStatusConvergeWithin bounds how long a change takes to reach gc status
-// on this fork. The CLI reads the server's warm StatusView (vp-e0hv), which
-// the server rebuilds in the background once it is older than its 5 s
+// warmStatusConvergeWithin is the safety deadline for a change to reach gc
+// status on this fork. The CLI reads the server's warm StatusView (vp-e0hv),
+// which the server rebuilds in the background once it is older than its 5 s
 // refresh age, so a read right after a change may still show the previous
-// body; a later read shows the change. Upstream's ?fresh=true read, which
+// body and a later read shows the change. Upstream's ?fresh=true read, which
 // builds the body for every read, is not what gc status sends here.
 const warmStatusConvergeWithin = 30 * time.Second
 
-// warmStatusEventually re-runs read until it reports true or
-// warmStatusConvergeWithin passes, and reports whether it did.
-func warmStatusEventually(read func() bool) bool {
-	deadline := time.Now().Add(warmStatusConvergeWithin)
+// awaitWarmStatus is the one polling boundary for these tests (TESTING.md,
+// "Asynchronous tests wait for facts"): the CLI's view of the supervisor is a
+// black box that signals no rebuild, and adding a signal would change the
+// status contract. It re-reads on a context-bounded ticker until read reports
+// ok, and fails with the last observed state when the deadline passes first.
+func awaitWarmStatus(t *testing.T, what string, read func() (ok bool, observed string)) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), warmStatusConvergeWithin)
+	defer cancel()
+	tick := time.NewTicker(500 * time.Millisecond)
+	defer tick.Stop()
 	for {
-		if read() {
-			return true
+		ok, observed := read()
+		if ok {
+			return
 		}
-		if time.Now().After(deadline) {
-			return false
+		select {
+		case <-ctx.Done():
+			t.Fatalf("%s: not observed within %s; last read: %s", what, warmStatusConvergeWithin, observed)
+			return
+		case <-tick.C:
 		}
-		time.Sleep(500 * time.Millisecond)
 	}
 }
 
@@ -75,22 +85,18 @@ func TestCityStatusShowsAChangeMadeSinceThePreviousRead(t *testing.T) {
 	h := newCityStatusRouteHarness(t)
 	for _, lane := range apiLanes(t, h) {
 		setAlphaSuspended(t, h, false)
-		if !warmStatusEventually(func() bool {
-			first, _ := cityStatusVia(t, h, lane, true)
-			return !alphaSuspendedIn(t, first)
-		}) {
-			t.Fatalf("%s: gc status never showed alpha resumed", lane.name)
-		}
+		awaitWarmStatus(t, lane.name+": gc status shows alpha resumed", func() (bool, string) {
+			out, _ := cityStatusVia(t, h, lane, true)
+			return !alphaSuspendedIn(t, out), string(out)
+		})
 
 		setAlphaSuspended(t, h, true)
-		if !warmStatusEventually(func() bool {
-			second, _ := cityStatusVia(t, h, lane, true)
-			return alphaSuspendedIn(t, second)
-		}) {
-			t.Errorf("%s: gc status still shows alpha not suspended %s after suspending it: the warm view was never rebuilt", lane.name, warmStatusConvergeWithin)
-		}
+		awaitWarmStatus(t, lane.name+": gc status shows alpha suspended once the warm view is rebuilt", func() (bool, string) {
+			out, _ := cityStatusVia(t, h, lane, true)
+			return alphaSuspendedIn(t, out), string(out)
+		})
 		if _, stderr := cityStatusVia(t, h, lane, false); strings.Contains(string(stderr), cacheAgeFooterMark) {
-			t.Errorf("%s: text-mode stderr has a cache-age footer on a body built for the read:\n%s", lane.name, stderr)
+			t.Errorf("%s: text-mode stderr has a cache-age footer on a recently rebuilt warm body:\n%s", lane.name, stderr)
 		}
 	}
 }
@@ -114,25 +120,23 @@ func TestRigStatusShowsAnAgentStartedSinceThePreviousRead(t *testing.T) {
 	}
 	for _, lane := range apiLanes(t, h) {
 		_ = sp.Stop(sessionName)
-		readRunning := func() bool {
-			code, out, errOut := runRigStatusRoute(t, h.cityPath, sp, newFakeDrainOps(), "alpha", lane.client, "", true)
-			if code != 0 {
-				t.Fatalf("%s: gc rig status exit %d: %s", lane.name, code, errOut)
+		readRunning := func(want bool) func() (bool, string) {
+			return func() (bool, string) {
+				code, out, errOut := runRigStatusRoute(t, h.cityPath, sp, newFakeDrainOps(), "alpha", lane.client, "", true)
+				if code != 0 {
+					t.Fatalf("%s: gc rig status exit %d: %s", lane.name, code, errOut)
+				}
+				return rigbotRunning(t, out) == want, string(out)
 			}
-			return rigbotRunning(t, out)
 		}
-		if !warmStatusEventually(func() bool { return !readRunning() }) {
-			t.Fatalf("%s: gc rig status never showed rigbot stopped", lane.name)
-		}
+		awaitWarmStatus(t, lane.name+": gc rig status shows rigbot stopped", readRunning(false))
 
 		if err := sp.Start(context.Background(), sessionName, runtime.Config{}); err != nil {
 			t.Fatalf("start rigbot: %v", err)
 		}
-		if !warmStatusEventually(readRunning) {
-			t.Errorf("%s: gc rig status still shows rigbot not running %s after starting it: the warm view was never rebuilt", lane.name, warmStatusConvergeWithin)
-		}
+		awaitWarmStatus(t, lane.name+": gc rig status shows rigbot running once the warm view is rebuilt", readRunning(true))
 		if _, _, errOut := runRigStatusRoute(t, h.cityPath, sp, newFakeDrainOps(), "alpha", lane.client, "", false); bytes.Contains(errOut, []byte(cacheAgeFooterMark)) {
-			t.Errorf("%s: text-mode stderr has a cache-age footer on a body built for the read:\n%s", lane.name, errOut)
+			t.Errorf("%s: text-mode stderr has a cache-age footer on a recently rebuilt warm body:\n%s", lane.name, errOut)
 		}
 	}
 }
