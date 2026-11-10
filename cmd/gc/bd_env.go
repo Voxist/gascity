@@ -1613,7 +1613,15 @@ func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, 
 		} else if !cityDoltRunsOutsideGC(cityPath) {
 			if deniedErr := implicitManagedDoltRecoveryCheck(cityPath); deniedErr != nil {
 				recoveryDeniedErr = deniedErr
-			} else if err := healthBeadsProviderForCityTarget(ctx, cityPath, false); err == nil {
+			} else if err := func() error {
+				// The call stays on healthBeadsProviderContext by name: the
+				// recover funnel pins this route to the guarded health path
+				// (TestEnvResolutionRouteReachesRecoverOnlyThroughTheGuardedHealthPath).
+				if cityTargetHealthOverride != nil {
+					return cityTargetHealthOverride(ctx, cityPath, false)
+				}
+				return healthBeadsProviderContext(ctx, cityPath, false)
+			}(); err == nil {
 				resetRecoveryCache()
 				if port := recoveredManagedDoltPort(); port != "" {
 					return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
@@ -1649,19 +1657,10 @@ func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, 
 }
 
 // cityTargetHealthOverride, when set, replaces the health and recovery call
-// the city's target resolution makes (healthBeadsProviderForCityTarget). Tests
-// set it to count calls; a plain func var would form an initialization cycle
-// through healthBeadsProviderContext.
+// the city's target resolution makes (healthBeadsProviderContext). Tests set it
+// to count calls; a func var holding healthBeadsProviderContext would form an
+// initialization cycle through it.
 var cityTargetHealthOverride func(ctx context.Context, cityPath string, waitForScopes bool) error
-
-// healthBeadsProviderForCityTarget is the health and recovery call the city's
-// target resolution makes.
-func healthBeadsProviderForCityTarget(ctx context.Context, cityPath string, waitForScopes bool) error {
-	if cityTargetHealthOverride != nil {
-		return cityTargetHealthOverride(ctx, cityPath, waitForScopes)
-	}
-	return healthBeadsProviderContext(ctx, cityPath, waitForScopes)
-}
 
 // cityDoltRunsOutsideGC reports whether cityPath is bound directly to a Dolt
 // server gc does not run: its binding resolves to an external server-mode
@@ -2116,6 +2115,12 @@ func applyResolvedRigDoltEnvContext(ctx context.Context, env map[string]string, 
 // proxied scope's metadata may carry a host and port (bd's sidecar upstream),
 // and a doltlite scope is never given Dolt env.
 func scopeRecordsBdOwnedDirectServer(cityPath, scopeRoot string) (bool, error) {
+	// Classify first: it reads only a persisted server binding, so a scope on
+	// a storage binding gc does not model (a hosted "postgres" backend) is
+	// answered false before the strict metadata load below would reject it.
+	if bdOwned, err := scopeIsBdOwnedDirectExternal(cityPath, scopeRoot); err != nil || !bdOwned {
+		return false, err
+	}
 	meta, ok, err := contract.LoadMetadataState(fsys.OSFS{}, scopeMetadataJSONPath(scopeRoot))
 	if err != nil || !ok {
 		return false, err
@@ -2123,10 +2128,8 @@ func scopeRecordsBdOwnedDirectServer(cityPath, scopeRoot string) (bool, error) {
 	if !strings.EqualFold(strings.TrimSpace(meta.DoltMode), "server") {
 		return false, nil
 	}
-	if backend := strings.TrimSpace(meta.Backend); backend != "" && backend != "dolt" {
-		return false, nil
-	}
-	return scopeIsBdOwnedDirectExternal(cityPath, scopeRoot)
+	backend := strings.TrimSpace(meta.Backend)
+	return backend == "" || backend == "dolt", nil
 }
 
 // applyScopeRecordedDoltTargetEnv projects the Dolt target recorded for
