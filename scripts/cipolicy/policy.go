@@ -400,7 +400,11 @@ const (
 	// (v1.94.1 -> v1.95.0) and BD_SOURCE_REF (e4f98340d -> 4ff2418f7) at
 	// nightly.yml's two pin sites, nothing else. Taken from the candidate
 	// digest TestCurrentWorkflowsMatchPolicy printed for the changed workflow.
-	expectedNightlyExecutionHash = "6854d6595b3dc9f44607187125443a5e1749ce32a487e9af37bfb939c3fca1f9"
+	// Re-derived for the bd v1.96.0 repin (vp-pb00j): BD_VERSION
+	// (v1.95.0 -> v1.96.0) and BD_SOURCE_REF (4ff2418f7 -> 9dbe41b77) at
+	// nightly.yml's two pin sites, nothing else. Taken from the candidate
+	// digest TestCurrentWorkflowsMatchPolicy printed for the changed workflow.
+	expectedNightlyExecutionHash = "9fa9dcdbe663848303c668292dc0413cb6e0854bb10d7e90dde2896e0558f530"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`. Then the claude-version
