@@ -41,8 +41,14 @@ func macRegressionStep(t *testing.T, job, id string) ciCriticalPathStep {
 // GITHUB_OUTPUT as a map.
 func runMacGateStep(t *testing.T, env map[string]string) map[string]string {
 	t.Helper()
+	return runMacGateStepAs(t, "gastownhall/gascity", env)
+}
+
+// runMacGateStepAs runs the gate script as it would run in repo.
+func runMacGateStepAs(t *testing.T, repo string, env map[string]string) map[string]string {
+	t.Helper()
 	step := macRegressionStep(t, "gate", "gate")
-	script := strings.ReplaceAll(step.Run, "${{ github.repository }}", "gastownhall/gascity")
+	script := strings.ReplaceAll(step.Run, "${{ github.repository }}", repo)
 	if strings.Contains(script, "${{") {
 		t.Fatalf("gate script has an expression this test does not substitute:\n%s", script)
 	}
@@ -118,6 +124,44 @@ func TestMacRegressionGateRunsSmokeOnEveryNonDocsPullRequest(t *testing.T) {
 
 // The gate classifies a pull request's diff as docs-only or not; anything
 // outside the docs trees (and the root's markdown files) runs the smoke tier.
+// The cmd-gc process shards follow the smoke tier upstream. Off upstream the
+// runner policy has no Blacksmith macOS pool, so the hosted runners take
+// 20-30+ minutes a shard: there they run nightly, on dispatch, and on an
+// explicit needs-mac request only (ga-05vt3.12).
+func TestMacRegressionGateRoutesCmdGCProcessShards(t *testing.T) {
+	pr := func(repo string, label string) map[string]string {
+		return map[string]string{
+			"EVENT_NAME":     "pull_request",
+			"PR_HEAD_REPO":   repo,
+			"PR_DRAFT":       "false",
+			"NEEDS_LABEL":    label,
+			"FILTER_OUTCOME": "success",
+			"CODE_CHANGED":   "true",
+		}
+	}
+	cases := []struct {
+		name, repo string
+		env        map[string]string
+		want       string
+	}{
+		{name: "upstream pull request", repo: "gastownhall/gascity", env: pr("gastownhall/gascity", "false"), want: "true"},
+		{name: "upstream docs-only", repo: "gastownhall/gascity", env: map[string]string{"EVENT_NAME": "pull_request", "PR_HEAD_REPO": "gastownhall/gascity", "PR_DRAFT": "false", "NEEDS_LABEL": "false", "FILTER_OUTCOME": "success", "CODE_CHANGED": "false"}, want: "false"},
+		{name: "fork pull request", repo: "Voxist/gascity", env: pr("Voxist/gascity", "false"), want: "false"},
+		{name: "fork pull request with needs-mac", repo: "Voxist/gascity", env: pr("Voxist/gascity", "true"), want: "true"},
+		{name: "fork nightly", repo: "Voxist/gascity", env: map[string]string{"EVENT_NAME": "schedule"}, want: "true"},
+		{name: "fork dispatch", repo: "Voxist/gascity", env: map[string]string{"EVENT_NAME": "workflow_dispatch", "SUITE_INPUT": "smoke"}, want: "true"},
+		{name: "fork merge group", repo: "Voxist/gascity", env: map[string]string{"EVENT_NAME": "merge_group"}, want: "false"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := runMacGateStepAs(t, tc.repo, tc.env)
+			if got["run_cmd_gc_process"] != tc.want {
+				t.Errorf("run_cmd_gc_process = %q (smoke %q, %s), want %q", got["run_cmd_gc_process"], got["run_smoke"], got["reason"], tc.want)
+			}
+		})
+	}
+}
+
 func TestMacRegressionGateClassifiesDocsOnlyDiffs(t *testing.T) {
 	filter := macRegressionStep(t, "gate", "filter")
 	if got := filter.With["predicate-quantifier"]; got != "every" {
