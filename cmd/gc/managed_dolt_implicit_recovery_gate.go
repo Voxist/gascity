@@ -119,13 +119,24 @@ func isMigrationFreezeDenial(err error) bool {
 	return errors.As(err, &denied) && denied.reason == implicitRecoveryFreezeReason
 }
 
+// implicitRecoveryFreezeCheck is the gate's first rule on its own: a
+// MIGRATION-FREEZE denies, whatever else holds. A resolution that skips
+// recovery for another reason still answers it first (gc stop relies on the
+// freeze denial, isMigrationFreezeDenial).
+func implicitRecoveryFreezeCheck(cityPath string) error {
+	if implicitRecoveryMigrationFrozen(cityPath) {
+		return denyImplicitRecovery(cityPath, implicitRecoveryFreezeReason,
+			"clear the freeze marker once the migration window closes")
+	}
+	return nil
+}
+
 // implicitManagedDoltRecoveryCheck returns nil when an implicit managed-Dolt
 // recovery may proceed, otherwise an *implicitRecoveryDeniedError. A denial is
 // logged once per process per city and reason.
 func implicitManagedDoltRecoveryCheck(cityPath string) error {
-	if implicitRecoveryMigrationFrozen(cityPath) {
-		return denyImplicitRecovery(cityPath, implicitRecoveryFreezeReason,
-			"clear the freeze marker once the migration window closes")
+	if err := implicitRecoveryFreezeCheck(cityPath); err != nil {
+		return err
 	}
 	if lifecycleIntent.Load() || implicitRecoveryControllerLiveness(cityPath) != controllerLivenessStopped {
 		return nil

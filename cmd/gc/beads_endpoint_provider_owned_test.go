@@ -609,6 +609,62 @@ func TestBdOwnedLoopbackRigEnvDialsItsOwnBinding(t *testing.T) {
 	}
 }
 
+// The bd-owned rig projection is scoped to a rig bd recorded in direct server
+// mode. A proxied rig whose config.yaml names no gc endpoint and whose
+// metadata carries a host and port (bd's sidecar upstream) must not be pointed
+// at that upstream: its proxy is what bd dials.
+func TestProxiedRigWithMetadataEndpointIsNotProjectedAsBdOwned(t *testing.T) {
+	city := normalizePathForCompare(t.TempDir())
+	rig := filepath.Join(city, "rigs", "hv")
+	writeDirectExternalCityOnLoopback(t, city, rig)
+	writeBdOwnedDirectExternalRig(t, rig, "hv", "127.0.0.1", bdOwnedLoopbackPort+1)
+	meta := fmt.Sprintf(`{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server",`+
+		`"dolt_server_host":"127.0.0.1","dolt_server_port":%d,"dolt_database":"hv"}`+"\n", bdOwnedLoopbackPort+1)
+	if err := os.WriteFile(filepath.Join(rig, ".beads", "metadata.json"), []byte(meta), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "bd")
+	cfg, err := loadCityConfig(city, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	env, _ := bdRuntimeEnvForRigWithErrorNoRecovery(city, cfg, rig)
+	for _, key := range []string{"BEADS_DOLT_SERVER_PORT", "GC_DOLT_PORT"} {
+		if got := env[key]; got == fmt.Sprint(bdOwnedLoopbackPort+1) {
+			t.Errorf("%s = %q: a proxied rig was projected onto its sidecar upstream", key, got)
+		}
+	}
+}
+
+// A gc-managed city's minimal-config rig whose database lives in the city's
+// data dir is gc's, whatever loopback port its metadata kept: it keeps
+// dialing the city's managed server, never the recorded port.
+func TestManagedCityRigWithItsDatabaseInTheDataDirKeepsTheCityPort(t *testing.T) {
+	city, rigs := newLegacyManagedCityFixture(t, "fe")
+	rig := rigs["fe"]
+	seedCityDatabaseDir(t, city, "hq")
+	seedCityDatabaseDir(t, city, "fe")
+	writeDoltRuntimePublicationFixture(t, city, managedDoltStatePath(city)) // port 3307
+	writeBdOwnedDirectExternalRig(t, rig, "fe", "127.0.0.1", bdOwnedLoopbackPort)
+	cfg, err := loadCityConfig(city, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	env, err := bdRuntimeEnvForRigWithErrorNoRecovery(city, cfg, rig)
+	if err != nil {
+		t.Fatalf("bdRuntimeEnvForRigWithErrorNoRecovery: %v", err)
+	}
+	cityEnv, err := bdRuntimeEnvWithErrorNoRecovery(city)
+	if err != nil {
+		t.Fatalf("bdRuntimeEnvWithErrorNoRecovery: %v", err)
+	}
+	if got, want := env["GC_DOLT_PORT"], cityEnv["GC_DOLT_PORT"]; got != want || got == fmt.Sprint(bdOwnedLoopbackPort) {
+		t.Fatalf("rig GC_DOLT_PORT = %q, want the city's %q, never the recorded %d", got, want, bdOwnedLoopbackPort)
+	}
+}
+
 // A store bd initialized with `--server --external` against a dolt sql-server
 // the operator runs on this machine records a loopback binding. In a proxied
 // city gc runs no Dolt of its own, so that binding cannot be a stale record of

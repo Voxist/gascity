@@ -1057,15 +1057,7 @@ func applyCanonicalScopeBackendEnvFor(env map[string]string, cityPath, scopeRoot
 	}
 	switch meta.Backend {
 	case "", "dolt":
-		clearProjectedBeadsBackendEnv(env)
-		target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, cityPath, scopeRoot)
-		if err != nil {
-			return true, err
-		}
-		applyCanonicalDoltTargetEnv(env, target)
-		applyCanonicalDoltAuthEnv(env, cityPath, scopeRoot, target)
-		mirrorBeadsDoltScopeEnv(env, target)
-		return true, nil
+		return true, applyScopeRecordedDoltTargetEnv(env, cityPath, scopeRoot)
 	case "doltlite":
 		clearProjectedDoltEnv(env)
 		env["GC_BEADS_BACKEND"] = "doltlite"
@@ -1610,15 +1602,25 @@ func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, 
 	}
 	var recoveryDeniedErr error
 	if allowRecovery {
-		if deniedErr := implicitManagedDoltRecoveryCheckForCity(cityPath); deniedErr != nil {
-			recoveryDeniedErr = deniedErr
-		} else if err := healthBeadsProviderContext(ctx, cityPath, false); err == nil {
-			resetRecoveryCache()
-			if port := recoveredManagedDoltPort(); port != "" {
-				return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
+		// MIGRATION-FREEZE denies whatever the city is, before any skip. A
+		// city no Dolt gc runs stands behind (cityDoltRunsOutsideGC) then
+		// skips health and recovery entirely: there is no managed port to
+		// find, and the health call would recover the city's provider-owned
+		// rigs, starting their servers for a city that may be deliberately
+		// stopped (ga-lc97s, ga-05vt3.36).
+		if frozenErr := implicitRecoveryFreezeCheck(cityPath); frozenErr != nil {
+			recoveryDeniedErr = frozenErr
+		} else if !cityDoltRunsOutsideGC(cityPath) {
+			if deniedErr := implicitManagedDoltRecoveryCheck(cityPath); deniedErr != nil {
+				recoveryDeniedErr = deniedErr
+			} else if err := healthBeadsProviderForCityTarget(ctx, cityPath, false); err == nil {
+				resetRecoveryCache()
+				if port := recoveredManagedDoltPort(); port != "" {
+					return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
+				}
+			} else if ctxErr := ctx.Err(); ctxErr != nil {
+				return contract.DoltConnectionTarget{}, false, ctxErr
 			}
-		} else if ctxErr := ctx.Err(); ctxErr != nil {
-			return contract.DoltConnectionTarget{}, false, ctxErr
 		}
 	}
 	// Last-resort: when all other recovery paths have been exhausted but the
@@ -1646,23 +1648,33 @@ func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, 
 	return contract.DoltConnectionTarget{}, false, nil
 }
 
-// implicitManagedDoltRecoveryCheckForCity applies the implicit managed-Dolt
-// recovery gate to cityPath's target resolution, except for a city bound
-// directly to a server gc does not run: its binding resolves to an external
-// server-mode target and gc does not own a Dolt lifecycle for it
-// (managedDoltLifecycleOwned). No process that gc runs stands behind such a
-// city, so there is no managed Dolt for the gate to keep stopped, and a
-// stopped controller must not turn the city's resolution, or a rig's built on
-// it, into a refusal (ga-05vt3.36). Anything not classified that way, a
-// classification that fails included, stays gated.
-func implicitManagedDoltRecoveryCheckForCity(cityPath string) error {
-	if target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, cityPath, cityPath); err == nil &&
-		target.External && strings.EqualFold(strings.TrimSpace(target.DoltMode), "server") {
-		if managed, ownErr := managedDoltLifecycleOwned(cityPath); ownErr == nil && !managed {
-			return nil
-		}
+// cityTargetHealthOverride, when set, replaces the health and recovery call
+// the city's target resolution makes (healthBeadsProviderForCityTarget). Tests
+// set it to count calls; a plain func var would form an initialization cycle
+// through healthBeadsProviderContext.
+var cityTargetHealthOverride func(ctx context.Context, cityPath string, waitForScopes bool) error
+
+// healthBeadsProviderForCityTarget is the health and recovery call the city's
+// target resolution makes.
+func healthBeadsProviderForCityTarget(ctx context.Context, cityPath string, waitForScopes bool) error {
+	if cityTargetHealthOverride != nil {
+		return cityTargetHealthOverride(ctx, cityPath, waitForScopes)
 	}
-	return implicitManagedDoltRecoveryCheck(cityPath)
+	return healthBeadsProviderContext(ctx, cityPath, waitForScopes)
+}
+
+// cityDoltRunsOutsideGC reports whether cityPath is bound directly to a Dolt
+// server gc does not run: its binding resolves to an external server-mode
+// target and gc owns no Dolt lifecycle for it (managedDoltLifecycleOwned).
+// Its target resolution then has no managed Dolt to find or recover. A
+// classification that fails answers false, so the caller stays gated.
+func cityDoltRunsOutsideGC(cityPath string) bool {
+	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, cityPath, cityPath)
+	if err != nil || !target.External || !strings.EqualFold(strings.TrimSpace(target.DoltMode), "server") {
+		return false
+	}
+	managed, err := managedDoltLifecycleOwned(cityPath)
+	return err == nil && !managed
 }
 
 func managedLocalDoltEnv(env map[string]string) bool {
@@ -2081,25 +2093,47 @@ func applyResolvedRigDoltEnvContext(ctx context.Context, env map[string]string, 
 		mirrorBeadsDoltScopeEnv(env, target)
 		return nil
 	}
-	// A rig bd owns (scopeIsBdOwnedDirectExternal) dials the binding bd
-	// recorded for it, not the city's: bd's own config.yaml names no gc
-	// endpoint, so the rig reads as legacy-minimal, and inheriting the city
-	// target would point bd at a server that holds none of the rig's databases
-	// (ga-05vt3.36).
-	if bdOwned, err := scopeIsBdOwnedDirectExternal(cityPath, rigPath); err != nil {
+	// A rig bd owns, recorded in direct server mode with a Dolt backend
+	// (scopeRecordsBdOwnedDirectServer), dials the binding bd recorded for it,
+	// not the city's: bd's own config.yaml names no gc endpoint, so the rig
+	// reads as legacy-minimal, and inheriting the city target would point bd
+	// at a server that holds none of the rig's databases (ga-05vt3.36). Such a
+	// rig whose recorded binding cannot be resolved is an error, where the
+	// city fallback below used to hide it.
+	if bdOwned, err := scopeRecordsBdOwnedDirectServer(cityPath, rigPath); err != nil {
 		return err
 	} else if bdOwned {
-		return applyBdOwnedScopeDoltTargetEnv(env, cityPath, rigPath)
+		return applyScopeRecordedDoltTargetEnv(env, cityPath, rigPath)
 	}
 	// Rigs without local endpoint authority inherit the resolved city target.
 	// A minimal local .beads/config.yaml must not suppress valid city compat fallback.
 	return applyResolvedCityDoltEnvContext(ctx, env, cityPath, allowRecovery)
 }
 
-// applyBdOwnedScopeDoltTargetEnv projects the Dolt target bd recorded for a
-// bd-owned scope, as the canonical projection does for an authoritative one:
-// the resolver reads bd's metadata.json binding (contract.ResolveDoltConnectionTarget).
-func applyBdOwnedScopeDoltTargetEnv(env map[string]string, cityPath, scopeRoot string) error {
+// scopeRecordsBdOwnedDirectServer reports whether scopeRoot is bd's
+// (scopeIsBdOwnedDirectExternal) AND its metadata.json records a Dolt-backed
+// store in direct server mode. The second half scopes the projection: a
+// proxied scope's metadata may carry a host and port (bd's sidecar upstream),
+// and a doltlite scope is never given Dolt env.
+func scopeRecordsBdOwnedDirectServer(cityPath, scopeRoot string) (bool, error) {
+	meta, ok, err := contract.LoadMetadataState(fsys.OSFS{}, scopeMetadataJSONPath(scopeRoot))
+	if err != nil || !ok {
+		return false, err
+	}
+	if !strings.EqualFold(strings.TrimSpace(meta.DoltMode), "server") {
+		return false, nil
+	}
+	if backend := strings.TrimSpace(meta.Backend); backend != "" && backend != "dolt" {
+		return false, nil
+	}
+	return scopeIsBdOwnedDirectExternal(cityPath, scopeRoot)
+}
+
+// applyScopeRecordedDoltTargetEnv projects the Dolt target recorded for
+// scopeRoot (contract.ResolveDoltConnectionTarget, which reads its canonical
+// config or bd's metadata.json binding) with its auth. The canonical
+// projection's Dolt arm and a bd-owned direct-server rig share it.
+func applyScopeRecordedDoltTargetEnv(env map[string]string, cityPath, scopeRoot string) error {
 	clearProjectedBeadsBackendEnv(env)
 	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, cityPath, scopeRoot)
 	if err != nil {
