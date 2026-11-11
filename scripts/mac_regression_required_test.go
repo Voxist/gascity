@@ -473,6 +473,14 @@ func TestMacAcceptanceBudgetsByRepository(t *testing.T) {
 // returns the go test timeout it picks.
 func processShardGoTimeout(t *testing.T, repo, count string) time.Duration {
 	t.Helper()
+	return parseMinutes(t, processShardStepValue(t, repo, count, "timeout"))
+}
+
+// processShardStepValue runs everything before the cmd-gc process shard
+// step's make call as repo with go_test_count count, and returns the shell
+// variable name as that leaves it.
+func processShardStepValue(t *testing.T, repo, count, name string) string {
+	t.Helper()
 	step := macRegressionStep(t, "mac-cmd-gc-process", "Run cmd/gc process shard")
 	var prefix []string
 	for _, line := range strings.Split(step.Run, "\n") {
@@ -481,18 +489,18 @@ func processShardGoTimeout(t *testing.T, repo, count string) time.Duration {
 		}
 		prefix = append(prefix, line)
 	}
-	script := strings.Join(prefix, "\n") + "\nprintf '%s' \"$timeout\"\n"
+	script := strings.Join(prefix, "\n") + "\nprintf '%s' \"$" + name + "\"\n"
 	if strings.Contains(script, "${{") {
-		t.Fatalf("process shard timeout choice has an expression this test does not substitute:\n%s", script)
+		t.Fatalf("process shard step prelude has an expression this test does not substitute:\n%s", script)
 	}
 	out, err := runWorkflowStepScript(t, t.TempDir(), script, map[string]string{
 		"GITHUB_REPOSITORY":   repo,
 		"GO_TEST_COUNT_INPUT": count,
 	})
 	if err != nil {
-		t.Fatalf("process shard timeout choice: %v\n%s", err, out)
+		t.Fatalf("process shard step prelude: %v\n%s", err, out)
 	}
-	return parseMinutes(t, strings.TrimSpace(out))
+	return strings.TrimSpace(out)
 }
 
 // The cmd-gc process shards' go test timeout must fire, with its goroutine
@@ -523,6 +531,65 @@ func TestMacProcessShardGoTimeoutFiresBeforeTheJobCap(t *testing.T) {
 			}
 			if tc.job-got < 10*time.Minute {
 				t.Errorf("go test timeout %s leaves under 10 min of the %s job for setup and compile, so the job is cancelled before go's goroutine dump", got, tc.job)
+			}
+		})
+	}
+}
+
+// Off upstream a cmd-gc process shard streams its progress (ga-05vt3.12):
+// every shard of the 2026-11-11 fork nightly reached the job cap still in
+// discovery, before go's own timeout starts, and logged nothing. The step
+// hands scripts/test-go-test-shard its progress settings through make's
+// EXTRA_TEST_ENV, the one way past the Makefile's env -i. Its SIGQUIT to a
+// live test binary must come, a heartbeat late at worst, at least 8 minutes
+// before the job cap (about 6 of setup precede the shard, then the dump is
+// written), and never during a soak, which has its own 80m budget. Upstream
+// runs the shard as before.
+func TestMacProcessShardStreamsProgressOffUpstream(t *testing.T) {
+	step := macRegressionStep(t, "mac-cmd-gc-process", "Run cmd/gc process shard")
+	if !strings.Contains(step.Run, `EXTRA_TEST_ENV="$progress_env"`) {
+		t.Fatalf("the process shard's make call does not pass EXTRA_TEST_ENV=\"$progress_env\":\n%s", step.Run)
+	}
+	jobCap := regexp.MustCompile(`github\.repository == 'gastownhall/gascity' && ([0-9]+) \|\| ([0-9]+)`).
+		FindStringSubmatch(macJobTimeoutMinutes(t, "mac-cmd-gc-process"))
+	if jobCap == nil {
+		t.Fatalf("mac-cmd-gc-process timeout-minutes %q has no upstream-or-fork budget", macJobTimeoutMinutes(t, "mac-cmd-gc-process"))
+	}
+	forkJob := parseMinutes(t, jobCap[2])
+	for _, tc := range []struct {
+		name, repo, count string
+		want              []string
+	}{
+		{name: "upstream", repo: "gastownhall/gascity", count: "1", want: nil},
+		{name: "upstream soak", repo: "gastownhall/gascity", count: "3", want: nil},
+		{name: "fork", repo: "Voxist/gascity", count: "1", want: []string{
+			"GO_TEST_SHARD_PROGRESS=1", "GO_TEST_SHARD_PROGRESS_INTERVAL=120", "GO_TEST_SHARD_PROGRESS_QUIT_AFTER=38m",
+		}},
+		{name: "fork soak", repo: "Voxist/gascity", count: "3", want: []string{
+			"GO_TEST_SHARD_PROGRESS=1", "GO_TEST_SHARD_PROGRESS_INTERVAL=120",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := strings.Fields(processShardStepValue(t, tc.repo, tc.count, "progress_env"))
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("progress_env = %q, want %q", got, tc.want)
+			}
+			var interval, quitAfter time.Duration
+			for _, assignment := range got {
+				name, value, _ := strings.Cut(assignment, "=")
+				switch name {
+				case "GO_TEST_SHARD_PROGRESS_INTERVAL":
+					seconds, err := time.ParseDuration(value + "s")
+					if err != nil {
+						t.Fatalf("GO_TEST_SHARD_PROGRESS_INTERVAL=%q: %v", value, err)
+					}
+					interval = seconds
+				case "GO_TEST_SHARD_PROGRESS_QUIT_AFTER":
+					quitAfter = parseMinutes(t, value)
+				}
+			}
+			if quitAfter > 0 && forkJob-(quitAfter+interval) < 8*time.Minute {
+				t.Errorf("SIGQUIT at %s plus a %s heartbeat leaves under 8 min of the %s job for setup and the dump", quitAfter, interval, forkJob)
 			}
 		})
 	}
