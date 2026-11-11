@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -13,6 +14,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads/contract"
 )
 
 type gateSeams struct {
@@ -151,6 +154,128 @@ func TestResolvedRuntimeCityDoltTargetDeniedForStoppedCity(t *testing.T) {
 	_, _, err = resolvedRuntimeCityDoltTarget(cityPath, true)
 	if errors.As(err, &denied) {
 		t.Fatalf("with lifecycle intent the denial must not apply, got %v", err)
+	}
+}
+
+// writeUnmanagedExternalCity builds a city bound directly to an operator's
+// loopback Dolt server (provider-owned direct/external) whose bd config.yaml
+// names no endpoint, as the fork bd writes it, so its target resolution falls
+// through to the recovery step. rigPath is the city's one configured rig.
+func writeUnmanagedExternalCity(t *testing.T, rigPath func(city string) string) string {
+	t.Helper()
+	city := normalizePathForCompare(t.TempDir())
+	writeDirectExternalCityOnLoopback(t, city, rigPath(city))
+	if err := os.WriteFile(filepath.Join(city, ".beads", "config.yaml"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return city
+}
+
+func defaultFixtureRig(city string) string { return filepath.Join(city, "rigs", "hv") }
+
+// countCityTargetHealth replaces the city-target resolution's health and
+// recovery call and counts its calls.
+func countCityTargetHealth(t *testing.T) *int {
+	t.Helper()
+	calls := 0
+	prev := cityTargetHealthOverride
+	cityTargetHealthOverride = func(context.Context, string, bool) error {
+		calls++
+		return nil
+	}
+	t.Cleanup(func() { cityTargetHealthOverride = prev })
+	return &calls
+}
+
+// The gate is on managed-Dolt recovery. A city bound directly to an operator's
+// server, whose Dolt lifecycle gc does not own, has none to revive: its target
+// resolution answers "no gc target" (bd dials its own recorded binding) and
+// runs no health or recovery at all, rather than refusing on a stopped
+// controller (ga-05vt3.36).
+func TestResolvedRuntimeCityDoltTargetNotGatedForADoltGCDoesNotRun(t *testing.T) {
+	s := &gateSeams{liveness: controllerLivenessStopped}
+	installGateSeams(t, s)
+	configureIsolatedRuntimeEnv(t)
+	health := countCityTargetHealth(t)
+	city := writeUnmanagedExternalCity(t, defaultFixtureRig)
+	if managed, err := managedDoltLifecycleOwned(city); err != nil || managed {
+		t.Fatalf("managedDoltLifecycleOwned = %v, %v; want false for a city bound to an operator's server", managed, err)
+	}
+
+	target, ok, err := resolvedRuntimeCityDoltTarget(city, true)
+	if err != nil || ok || target != (contract.DoltConnectionTarget{}) {
+		t.Fatalf("resolvedRuntimeCityDoltTarget() = %+v, %v, %v; want no gc target and no error", target, ok, err)
+	}
+	if *health != 0 {
+		t.Fatalf("health/recovery ran %d time(s) for a city whose Dolt gc does not run", *health)
+	}
+}
+
+// MIGRATION-FREEZE denies whatever the city is (the gate's contract, which gc
+// stop relies on): skipping recovery for a city gc does not run Dolt for
+// comes after the freeze check, not before it.
+func TestResolvedRuntimeCityDoltTargetFreezeDeniesAnUnmanagedExternalCity(t *testing.T) {
+	s := &gateSeams{liveness: controllerLivenessRunning, frozen: true}
+	installGateSeams(t, s)
+	configureIsolatedRuntimeEnv(t)
+	countCityTargetHealth(t)
+	city := writeUnmanagedExternalCity(t, defaultFixtureRig)
+
+	_, _, err := resolvedRuntimeCityDoltTarget(city, true)
+	if !isMigrationFreezeDenial(err) {
+		t.Fatalf("resolvedRuntimeCityDoltTarget() err = %v, want the MIGRATION-FREEZE denial", err)
+	}
+}
+
+// A stopped city gc runs no Dolt for may still carry a provider-owned rig, and
+// the health call would recover that rig (recoverUnhealthyProviderOwnedScopes),
+// starting bd's proxied server and its Dolt: exactly what the gate forbids for
+// a stopped city (ga-lc97s). Resolving the city's target must not run it.
+func TestResolvedRuntimeCityDoltTargetDoesNotRecoverAProviderOwnedRigOfAStoppedExternalCity(t *testing.T) {
+	s := &gateSeams{liveness: controllerLivenessStopped}
+	installGateSeams(t, s)
+	configureIsolatedRuntimeEnv(t)
+	health := countCityTargetHealth(t)
+	city := writeUnmanagedExternalCity(t, defaultFixtureRig)
+	rig := defaultFixtureRig(city)
+	writeBdOwnedProxiedScope(t, rig, "hv")
+	journalCityScopeOwnership(t, city, rig, providerScopeIntent{Transport: "proxied", Target: "local"})
+	if owned, err := hasProviderOwnedRigScope(city, "health"); err != nil || !owned {
+		t.Fatalf("hasProviderOwnedRigScope = %v, %v; want a provider-owned rig", owned, err)
+	}
+
+	if _, _, err := resolvedRuntimeCityDoltTarget(city, true); err != nil {
+		t.Fatalf("resolvedRuntimeCityDoltTarget(): %v", err)
+	}
+	if *health != 0 {
+		t.Fatalf("health/recovery ran %d time(s) for a stopped city: it would recover the provider-owned rig", *health)
+	}
+}
+
+// An ownership that cannot be classified is not evidence that gc runs no Dolt
+// for the city, so the resolution stays gated and a stopped city refuses.
+func TestResolvedRuntimeCityDoltTargetStaysGatedWhenOwnershipCannotBeRead(t *testing.T) {
+	s := &gateSeams{liveness: controllerLivenessStopped}
+	installGateSeams(t, s)
+	configureIsolatedRuntimeEnv(t)
+	health := countCityTargetHealth(t)
+	city := writeUnmanagedExternalCity(t, defaultFixtureRig)
+	journal := filepath.Join(city, ".gc", "scope-ownership.json")
+	if err := os.Chmod(journal, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(journal, 0o600) })
+	if _, err := managedDoltLifecycleOwned(city); err == nil {
+		t.Fatal("managedDoltLifecycleOwned read an unreadable ownership journal")
+	}
+
+	_, _, err := resolvedRuntimeCityDoltTarget(city, true)
+	var denied *implicitRecoveryDeniedError
+	if !errors.As(err, &denied) {
+		t.Fatalf("resolvedRuntimeCityDoltTarget() err = %v, want the stopped-city denial", err)
+	}
+	if *health != 0 {
+		t.Fatalf("health/recovery ran %d time(s) past a denial", *health)
 	}
 }
 

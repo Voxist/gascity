@@ -3,9 +3,11 @@ package scripts_test
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -370,5 +372,158 @@ func TestMakeTestMacRefusesAnEmptyPackageList(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "\ntest-mac: test-mac-pkgs-guard ") {
 		t.Error("test-mac does not depend on test-mac-pkgs-guard")
+	}
+}
+
+// macJobTimeoutMinutes returns the raw timeout-minutes of a mac-regression.yml
+// job: a number, or a GitHub expression.
+func macJobTimeoutMinutes(t *testing.T, job string) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(repoRoot(t), ".github", "workflows", "mac-regression.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wf struct {
+		Jobs map[string]struct {
+			TimeoutMinutes string `yaml:"timeout-minutes"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(body, &wf); err != nil {
+		t.Fatal(err)
+	}
+	j, ok := wf.Jobs[job]
+	if !ok || j.TimeoutMinutes == "" {
+		t.Fatalf("mac-regression.yml job %s has no timeout-minutes", job)
+	}
+	return j.TimeoutMinutes
+}
+
+// macRepoTernary matches the one expression shape these budgets use:
+// upstream's value, else the fork's.
+var macRepoTernary = regexp.MustCompile(`^\$\{\{\s*github\.repository == 'gastownhall/gascity' && '?([0-9a-z]+)'? \|\| '?([0-9a-z]+)'?\s*\}\}$`)
+
+// resolveMacRepoValue resolves value as GitHub would in repo: a literal is
+// itself; the upstream-or-fork expression picks its side.
+func resolveMacRepoValue(t *testing.T, value, repo string) string {
+	t.Helper()
+	if !strings.Contains(value, "${{") {
+		return value
+	}
+	m := macRepoTernary.FindStringSubmatch(strings.TrimSpace(value))
+	if m == nil {
+		t.Fatalf("value %q is not the upstream-or-fork repository expression this test resolves", value)
+	}
+	if repo == "gastownhall/gascity" {
+		return m[1]
+	}
+	return m[2]
+}
+
+func parseMinutes(t *testing.T, raw string) time.Duration {
+	t.Helper()
+	if d, err := time.ParseDuration(raw); err == nil {
+		return d
+	}
+	d, err := time.ParseDuration(raw + "m")
+	if err != nil {
+		t.Fatalf("parse %q as minutes: %v", raw, err)
+	}
+	return d
+}
+
+// Mac Tier A acceptance keeps upstream's budget upstream (25 min job, 20m
+// go test) and gets a larger one off upstream, where hosted macOS runners
+// run it in one process: the 2026-11-09 resync's added acceptance tests ran
+// past 18 minutes of go test there and the 25 min job was cancelled twice.
+// On both, go test's own timeout fires inside the job budget, with room for
+// the ~7 min setup and compile, so a hung test is named, not cut off.
+func TestMacAcceptanceBudgetsByRepository(t *testing.T) {
+	var tierA ciCriticalPathStep
+	for _, step := range readCriticalPathWorkflow(t, "mac-regression.yml").Jobs["mac-acceptance"].Steps {
+		if strings.TrimSpace(step.Run) == "make test-acceptance-go" {
+			tierA = step
+		}
+	}
+	if tierA.Run == "" {
+		t.Fatal("mac-acceptance has no make test-acceptance-go step")
+	}
+	jobBudget := macJobTimeoutMinutes(t, "mac-acceptance")
+	for _, tc := range []struct {
+		repo           string
+		job, goTimeout time.Duration
+	}{
+		{repo: "gastownhall/gascity", job: 25 * time.Minute, goTimeout: 20 * time.Minute},
+		{repo: "Voxist/gascity", job: 45 * time.Minute, goTimeout: 35 * time.Minute},
+	} {
+		t.Run(tc.repo, func(t *testing.T) {
+			job := parseMinutes(t, resolveMacRepoValue(t, jobBudget, tc.repo))
+			goTimeout := parseMinutes(t, resolveMacRepoValue(t, tierA.Env["ACCEPTANCE_TIMEOUT"], tc.repo))
+			if job != tc.job || goTimeout != tc.goTimeout {
+				t.Errorf("job %s, ACCEPTANCE_TIMEOUT %s; want %s and %s", job, goTimeout, tc.job, tc.goTimeout)
+			}
+			if job-goTimeout < 5*time.Minute {
+				t.Errorf("job %s leaves under 5 min for setup and compile before ACCEPTANCE_TIMEOUT %s", job, goTimeout)
+			}
+		})
+	}
+}
+
+// processShardGoTimeout runs the cmd-gc process shard step's timeout choice
+// (everything before its make call) as repo with go_test_count count, and
+// returns the go test timeout it picks.
+func processShardGoTimeout(t *testing.T, repo, count string) time.Duration {
+	t.Helper()
+	step := macRegressionStep(t, "mac-cmd-gc-process", "Run cmd/gc process shard")
+	var prefix []string
+	for _, line := range strings.Split(step.Run, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "make ") {
+			break
+		}
+		prefix = append(prefix, line)
+	}
+	script := strings.Join(prefix, "\n") + "\nprintf '%s' \"$timeout\"\n"
+	if strings.Contains(script, "${{") {
+		t.Fatalf("process shard timeout choice has an expression this test does not substitute:\n%s", script)
+	}
+	out, err := runWorkflowStepScript(t, t.TempDir(), script, map[string]string{
+		"GITHUB_REPOSITORY":   repo,
+		"GO_TEST_COUNT_INPUT": count,
+	})
+	if err != nil {
+		t.Fatalf("process shard timeout choice: %v\n%s", err, out)
+	}
+	return parseMinutes(t, strings.TrimSpace(out))
+}
+
+// The cmd-gc process shards' go test timeout must fire, with its goroutine
+// dump, before the job is cancelled, or a hung test goes unnamed. Off
+// upstream the job gets 50 minutes and a shard spends ~6 minutes on setup and
+// a cold compile before go test starts, so its go timeout is 30m: at 40m the
+// fork's nightly lost 11 of 12 shards to the job cap with no dump
+// (ga-05vt3.12). Upstream keeps 20m, and a soak (go_test_count above 1) 80m
+// under its 90-minute job.
+func TestMacProcessShardGoTimeoutFiresBeforeTheJobCap(t *testing.T) {
+	jobCap := regexp.MustCompile(`github\.repository == 'gastownhall/gascity' && ([0-9]+) \|\| ([0-9]+)`).
+		FindStringSubmatch(macJobTimeoutMinutes(t, "mac-cmd-gc-process"))
+	if jobCap == nil {
+		t.Fatalf("mac-cmd-gc-process timeout-minutes %q has no upstream-or-fork budget", macJobTimeoutMinutes(t, "mac-cmd-gc-process"))
+	}
+	for _, tc := range []struct {
+		name, repo, count string
+		want, job         time.Duration
+	}{
+		{name: "upstream", repo: "gastownhall/gascity", count: "1", want: 20 * time.Minute, job: parseMinutes(t, jobCap[1])},
+		{name: "fork", repo: "Voxist/gascity", count: "1", want: 30 * time.Minute, job: parseMinutes(t, jobCap[2])},
+		{name: "fork soak", repo: "Voxist/gascity", count: "3", want: 80 * time.Minute, job: 90 * time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := processShardGoTimeout(t, tc.repo, tc.count)
+			if got != tc.want {
+				t.Errorf("go test timeout = %s, want %s", got, tc.want)
+			}
+			if tc.job-got < 10*time.Minute {
+				t.Errorf("go test timeout %s leaves under 10 min of the %s job for setup and compile, so the job is cancelled before go's goroutine dump", got, tc.job)
+			}
+		})
 	}
 }
