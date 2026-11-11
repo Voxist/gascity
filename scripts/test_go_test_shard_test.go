@@ -584,7 +584,7 @@ func TestGoTestShardProgressDumpsAWedgedTestBinaryPastQuitAfter(t *testing.T) {
 		t.Fatalf("wedged discovery shard exit = %d, want 1\n%s", status, text)
 	}
 	for _, want := range []string{
-		"heartbeat; live processes (pid ppid elapsed command):",
+		"heartbeat; live processes (pid ppid rss-KiB elapsed command):",
 		"example.test -test.timeout=1m -test.list ^Test",
 		"past GO_TEST_SHARD_PROGRESS_QUIT_AFTER: SIGQUIT to example.test (pid ",
 		"go test -list failed for ./example",

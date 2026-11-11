@@ -46,8 +46,9 @@ source "$repo_root/scripts/lib/harness-reap.sh"
 #   - runs the product with -v, so each test's start and end reach the log as
 #     they happen (the log stamps every line);
 #   - prints a heartbeat every GO_TEST_SHARD_PROGRESS_INTERVAL seconds
-#     (default 180) with the shard's live process tree, naming what it is
-#     compiling or which test binary is running;
+#     (default 180) with the shard's live process tree and each process's
+#     resident memory, naming what it is compiling or which test binary is
+#     running, and the host's swap use;
 #   - once GO_TEST_SHARD_PROGRESS_QUIT_AFTER (an <n>[s|m|h] duration from the
 #     shard's start) has passed, sends SIGQUIT once to every live test binary
 #     in that tree, so a shard about to be cancelled dumps its goroutine stacks
@@ -64,10 +65,10 @@ gc_shard_progress() {
 }
 
 # gc_shard_progress_tree prints every live descendant of this shell, one per
-# line as "pid ppid elapsed command", the command cut to 240 characters (a
-# chunk's -run regex alone can run to 120 KiB).
+# line as "pid ppid rss-KiB elapsed command", the command cut to 240
+# characters (a chunk's -run regex alone can run to 120 KiB).
 gc_shard_progress_tree() {
-  ps -A -o pid=,ppid=,etime=,command= 2>/dev/null | awk -v root="$$" '
+  ps -A -o pid=,ppid=,rss=,etime=,command= 2>/dev/null | awk -v root="$$" '
     { n++; pid[n] = $1; ppid[n] = $2; line[n] = $0 }
     END {
       want[root] = 1
@@ -86,7 +87,7 @@ gc_shard_progress_tree() {
 }
 
 gc_shard_progress_heartbeat() {
-  local interval="$1" quit_after="$2" signaled=" " tree pid command arg
+  local interval="$1" quit_after="$2" signaled=" " tree swap pid command arg
   trap 'exit 0' TERM
   while :; do
     # sleep holds neither output stream, so one left running when this loop
@@ -97,13 +98,19 @@ gc_shard_progress_heartbeat() {
     # progress_pid was recorded) must not leave it beating forever.
     kill -0 "$$" 2>/dev/null || exit 0
     tree="$(gc_shard_progress_tree)"
-    gc_shard_progress "heartbeat; live processes (pid ppid elapsed command):"
+    gc_shard_progress "heartbeat; live processes (pid ppid rss-KiB elapsed command):"
     printf '%s\n' "$tree" | sed 's/^/    /'
+    # Swap in use is the sign of a compile or test outgrowing the runner's
+    # memory (macOS; elsewhere the line is left out).
+    swap="$(sysctl -n vm.swapusage 2>/dev/null || true)"
+    if [[ -n "$swap" ]]; then
+      gc_shard_progress "swap: ${swap}"
+    fi
     if [[ -n "$quit_after" ]] && (( $(date +%s) - progress_start >= quit_after )); then
       # A test binary is a command named *.test, or a script of that name run
       # by its interpreter. Each is signalled once; one still compiling when
       # the time passes is caught on a later beat.
-      while read -r pid _ _ command arg _; do
+      while read -r pid _ _ _ command arg _; do
         case "$command" in
           *.test) ;;
           *) case "$arg" in *.test) command="$arg" ;; *) continue ;; esac ;;
