@@ -100,17 +100,17 @@ func TestMolDoWorkDrainClaimsCurrentContinuation(t *testing.T) {
 		t.Fatal("drain must gate the current-claim branch on gc.step_ref; an unguarded claim restores the stale-identity bug")
 	}
 	// The startup-bead id is only needed by the ready-query fallback. Requiring
-	// it up front aborts drain on any seat that is not demand-spawned:
-	// GC_BEAD_ID exists only in the dispatch condition environment, never in a
-	// session shell, and GC_TRIGGER_BEAD_ID is pool-seat-only (see
-	// cmd/gc/cmd_hook_current.go). Same shape as ga-2q2r0.
+	// it up front aborts drain on every session seat: GC_BEAD_ID exists only in
+	// the dispatch condition environment, never in a session shell, and no
+	// session shell carries a trigger id (cmd/gc/cmd_hook_current.go). Same
+	// shape as ga-2q2r0.
 	startupAt := strings.Index(step, `STARTUP_BEAD_ID="${GC_BEAD_ID`)
 	if startupAt < 0 || startupAt < currentAt {
 		t.Fatal("drain must not require a startup bead id before consulting the current claim")
 	}
-	// The current claim carries gc.root_bead_id, and on a warm seat it is the
-	// ONLY source of it: GC_BEAD_ID never reaches a session shell and
-	// GC_TRIGGER_BEAD_ID is demand-spawn-only (cmd/gc/cmd_hook_current.go).
+	// The current claim carries gc.root_bead_id, and in a session shell it is
+	// the ONLY source of it: GC_BEAD_ID never reaches a session shell and no
+	// session shell carries a trigger id (cmd/gc/cmd_hook_current.go).
 	// Reading the root off the startup bead first strands every warm seat on
 	// the deferred path — the ga-2q2r0 failure, one layer in.
 	rootFromCurrent := strings.Index(step, `ROOT_BEAD_ID=$(printf '%s' "$CURRENT"`)
@@ -421,6 +421,69 @@ func TestMolDoWorkWorkBeadCloseFailsClosed(t *testing.T) {
 	}
 }
 
+// TestCorePackClaimTextTreatsFailedClaimAsHeld pins the agent-facing claim
+// wording. `bd update <id> --claim` is idempotent only for the holder: it wins
+// an open bead that is unassigned or already the actor's and refuses a bead
+// another actor holds. Pack text must not promise a takeover, must tell the
+// agent a failed claim means "held by someone else; do not work it", and the
+// routed-pickup texts must name `gc hook --claim` as the one-step pickup.
+func TestCorePackClaimTextTreatsFailedClaimAsHeld(t *testing.T) {
+	const doWorkName = "formulas/mol-do-work.toml do-work step"
+	doWork := formulaStep(t, readFormula(t, "mol-do-work.toml"), "do-work")
+	texts := map[string]string{doWorkName: doWork}
+	for _, path := range []string{
+		"skills/gc-work/SKILL.md",
+		"overlay/per-provider/copilot/.github/copilot-instructions.md",
+		"overlay/per-provider/kiro/AGENTS.md",
+	} {
+		data, err := fs.ReadFile(PackFS, path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		texts[path] = string(data)
+	}
+	// flatten joins wrapped lines and folds case, so a phrase is found
+	// wherever the prose breaks it or a sentence starts with it.
+	flatten := func(text string) string { return strings.ToLower(strings.Join(strings.Fields(text), " ")) }
+	for name, text := range texts {
+		flat := flatten(text)
+		for _, banned := range []string{"self-assigns", "regardless of current state", "already claimed some other way"} {
+			if strings.Contains(flat, banned) {
+				t.Errorf("%s still says --claim %q; a claim never takes over another holder's bead", name, banned)
+			}
+		}
+		if !strings.Contains(flat, "gc bd update") || !strings.Contains(flat, "--claim") {
+			t.Errorf("%s no longer teaches gc bd update --claim; update this test if the verb moved", name)
+		}
+		if !strings.Contains(flat, "another agent holds") && !strings.Contains(flat, "another agent already holds") {
+			t.Errorf("%s must say a claim fails when another agent holds the bead", name)
+		}
+		if !strings.Contains(flat, "do not work") {
+			t.Errorf("%s must tell the agent not to work a bead whose claim failed", name)
+		}
+		// mol-do-work claims the specific convoy child it derived, so only
+		// the routed-pickup texts must point at the one-step claim.
+		if name != doWorkName && !strings.Contains(flat, "gc hook --claim") {
+			t.Errorf("%s must name gc hook --claim (find and claim one routed item in a single step)", name)
+		}
+		// Plain gc hook only lists routed work. Saying it claims sends the
+		// agent to work a bead it never claimed, with no assignee or lease.
+		for _, banned := range []string{"run `gc hook` to check for and claim", "`gc hook` — check for and claim"} {
+			if strings.Contains(flat, banned) {
+				t.Errorf("%s says plain gc hook claims work (%q); only gc hook --claim claims", name, banned)
+			}
+		}
+	}
+	// Step 3 of mol-do-work records gc.work_outcome on the work bead and closes
+	// it, including for blocked or abandoned work. A failed claim leaves the
+	// bead with its holder, so the failure path must rule both writes out
+	// instead of sending the agent down the blocked close onto someone else's
+	// bead.
+	if !strings.Contains(flatten(doWork), "do not record an outcome on it or close it") {
+		t.Errorf("%s must tell the agent not to record an outcome on, or close, a bead whose claim failed", doWorkName)
+	}
+}
+
 // molDoWorkCloseStepBlock returns the bash block under the do-work step's
 // "Close this formula step" heading, with the convoy variable rendered as cv-1.
 func molDoWorkCloseStepBlock(t *testing.T) string {
@@ -498,6 +561,93 @@ func (c closeStepCase) fakeGC() string {
 *) echo "unexpected gc command: $*" >&2; exit 64 ;;
 esac
 `, c.hookOut, c.hookRC, convoy, show, c.updateRC)
+}
+
+// molDoWorkDrainBlock is the drain step's bash block, as a session shell
+// runs it.
+func molDoWorkDrainBlock(t *testing.T) string {
+	t.Helper()
+	step := formulaStep(t, readFormula(t, "mol-do-work.toml"), "drain")
+	open := strings.Index(step, "```bash\n")
+	if open < 0 {
+		t.Fatal("drain step has no bash block")
+	}
+	body := step[open+len("```bash\n"):]
+	end := strings.Index(body, "```")
+	if end < 0 {
+		t.Fatal("drain bash block is unterminated")
+	}
+	return body[:end]
+}
+
+// Kills a drain that falls back on GC_TRIGGER_BEAD_ID: a shell that still
+// carries a foreign id there (an older gc exported the frozen demand stamp)
+// must never resolve, close or drain-ack through it. With no current claim
+// the drain fails loudly; with one, it closes the claim's own drain step
+// (gastownhall/gascity#5738).
+func TestMolDoWorkDrainNeverFallsBackToTriggerBeadID(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not installed")
+	}
+	scriptPath := filepath.Join(t.TempDir(), "drain.sh")
+	if err := os.WriteFile(scriptPath, []byte(molDoWorkDrainBlock(t)), 0o644); err != nil {
+		t.Fatalf("write drain block: %v", err)
+	}
+	// Every read answers, so only the chain decides which bead is named.
+	const fakeGC = `case "$*" in
+"hook current --id-only") printf '%s\n' "$FAKE_HOOK_CURRENT" ;;
+"bd show ga-foreign --json") printf '%s\n' '[{"id":"ga-foreign","status":"in_progress","metadata":{"gc.root_bead_id":"ga-foreign-root"}}]' ;;
+"bd show ga-dowork --json") printf '%s\n' '[{"id":"ga-dowork","status":"closed","metadata":{"gc.step_ref":"mol-do-work.do-work","gc.root_bead_id":"ga-root"}}]' ;;
+"ready --json --limit=2 --include-ephemeral --metadata-field gc.root_bead_id=ga-root "*) printf '%s\n' '[{"id":"ga-drain"}]' ;;
+"ready --json --limit=2 --include-ephemeral --metadata-field gc.root_bead_id=ga-foreign-root "*) printf '%s\n' '[{"id":"ga-foreign-drain"}]' ;;
+"bd update "*|"runtime drain-ack") ;;
+*) echo "unexpected gc command: $*" >&2; exit 64 ;;
+esac
+`
+	skip := map[string]struct{}{"GC_BEAD_ID": {}, "GC_TRIGGER_BEAD_ID": {}, "FAKE_HOOK_CURRENT": {}}
+	for _, c := range []struct {
+		name, hookCurrent string
+		wantDrained       bool
+	}{
+		{"no current claim", "", false},
+		{"current claim names the do-work step", "ga-dowork", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			binDir, logPath := fakeGCBin(t, fakeGC)
+			if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+				t.Fatalf("create gc log: %v", err)
+			}
+			out, runErr := runPackScript(t, scriptPath, binDir, skip, []string{"GC_TRIGGER_BEAD_ID=ga-foreign", "FAKE_HOOK_CURRENT=" + c.hookCurrent})
+			data, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatalf("read gc log: %v", err)
+			}
+			logged := string(data)
+			if strings.Contains(logged, "ga-foreign") {
+				t.Fatalf("drain consulted the foreign trigger id:\n%s\noutput:\n%s", logged, out)
+			}
+			if !c.wantDrained {
+				if runErr == nil {
+					t.Fatalf("drain exited 0 with no current claim\noutput:\n%s\ngc calls:\n%s", out, logged)
+				}
+				if !strings.Contains(out, "no startup bead id to fall back on") {
+					t.Fatalf("diagnostic = %q, want the no-startup-bead failure", out)
+				}
+				if strings.Contains(logged, "gc bd update") || strings.Contains(logged, "gc runtime drain-ack") {
+					t.Fatalf("drain closed or acked with no current claim:\n%s", logged)
+				}
+				return
+			}
+			if runErr != nil {
+				t.Fatalf("drain failed: %v\noutput:\n%s\ngc calls:\n%s", runErr, out, logged)
+			}
+			for _, want := range []string{"gc bd update ga-drain --set-metadata gc.outcome=pass --status=closed", "gc runtime drain-ack"} {
+				if !strings.Contains(logged, want) {
+					t.Fatalf("gc calls missing %q:\n%s", want, logged)
+				}
+			}
+		})
+	}
 }
 
 // TestMolDoWorkClosesOnlyItsVerifiedClaimedStep runs the do-work step's close

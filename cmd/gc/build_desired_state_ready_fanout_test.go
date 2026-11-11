@@ -44,15 +44,6 @@ func makeReadyWork(t *testing.T, store beads.Store, title, assignee string) bead
 	return b
 }
 
-func sortedIDs(in []beads.Bead) []string {
-	ids := make([]string, 0, len(in))
-	for _, b := range in {
-		ids = append(ids, b.ID)
-	}
-	sort.Strings(ids)
-	return ids
-}
-
 // TestCollectAssignedWorkBeads_ReadyFanOutCollapsesToOneReadPerScope is the
 // core P2.5 (#3218) guarantee: for a scope with K ready-assignees the
 // desired-state builder must issue exactly ONE live Ready read against the

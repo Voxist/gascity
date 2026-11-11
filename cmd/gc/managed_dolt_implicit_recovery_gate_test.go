@@ -267,6 +267,11 @@ func TestLifecycleIntentCallSiteSetIsPinned(t *testing.T) {
 		// revives the store to list interrupted starts (upstream's intent),
 		// and shutdownBeadsProviderForStop takes it back down.
 		"cmd_stop.go:cmdStopBodyWithoutSuccessExtendingCap": true,
+		// The storage maintenance window (upstream S5-B) starts the provider
+		// it needs for an explicit operator verb (gc storage migrate,
+		// snapshot, restore, repair-sequence, rig import), under the
+		// controller lock, and stops it again when the window closes.
+		"storage_maintenance.go:var migrationWindowStartProvider": true,
 	}
 	fset := token.NewFileSet()
 	files, err := filepath.Glob("*.go")

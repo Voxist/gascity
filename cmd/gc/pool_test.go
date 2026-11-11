@@ -509,31 +509,6 @@ func TestDiscoverPoolInstancesUnlimitedFailsClosedOnPartialResults(t *testing.T)
 	}
 }
 
-func TestCountRunningPoolInstancesUnlimited(t *testing.T) {
-	sp := runtime.NewFake()
-	_ = sp.Start(context.Background(), "worker-1", runtime.Config{})
-	_ = sp.Start(context.Background(), "worker-3", runtime.Config{})
-
-	count := countRunningPoolInstances("worker", "", scaleParams{Min: 0, Max: -1}, nil, "city", "", sp)
-	if count != 2 {
-		t.Errorf("count = %d, want 2", count)
-	}
-}
-
-func TestCountRunningPoolInstancesUsesPartialListResults(t *testing.T) {
-	sp := &partialListPoolProvider{
-		Fake:    runtime.NewFake(),
-		listErr: &runtime.PartialListError{Err: errors.New("remote backend down")},
-	}
-	_ = sp.Start(context.Background(), "worker-1", runtime.Config{})
-	_ = sp.Start(context.Background(), "worker-3", runtime.Config{})
-
-	count := countRunningPoolInstances("worker", "", scaleParams{Min: 0, Max: 3}, nil, "city", "", sp)
-	if count != 2 {
-		t.Errorf("count = %d, want 2 from per-session fallback", count)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // poolInstanceName tests
 // ---------------------------------------------------------------------------
@@ -755,39 +730,6 @@ func TestResolveSetupScript_Empty(t *testing.T) {
 	got := config.ResolveSessionSetupScriptPath("/home/user/city", "/home/user/city/packs/gastown", "")
 	if got != "" {
 		t.Errorf("got %q, want empty", got)
-	}
-}
-
-func TestCountRunningPoolInstancesUsesListRunning(t *testing.T) {
-	sp := runtime.NewFake()
-	// Start 3 out of 5 pool instances.
-	_ = sp.Start(context.Background(), "worker-1", runtime.Config{})
-	_ = sp.Start(context.Background(), "worker-3", runtime.Config{})
-	_ = sp.Start(context.Background(), "worker-5", runtime.Config{})
-
-	count := countRunningPoolInstances("worker", "", scaleParams{Min: 0, Max: 5}, nil, "city", "", sp)
-	if count != 3 {
-		t.Errorf("count = %d, want 3", count)
-	}
-}
-
-func TestCountRunningPoolInstancesWithDir(t *testing.T) {
-	sp := runtime.NewFake()
-	// Rig-scoped pool: dir/name pattern.
-	_ = sp.Start(context.Background(), "myrig--worker-1", runtime.Config{})
-	_ = sp.Start(context.Background(), "myrig--worker-2", runtime.Config{})
-
-	count := countRunningPoolInstances("worker", "myrig", scaleParams{Min: 0, Max: 3}, nil, "city", "", sp)
-	if count != 2 {
-		t.Errorf("count = %d, want 2", count)
-	}
-}
-
-func TestCountRunningPoolInstancesNoneRunning(t *testing.T) {
-	sp := runtime.NewFake()
-	count := countRunningPoolInstances("worker", "", scaleParams{Min: 0, Max: 10}, nil, "city", "", sp)
-	if count != 0 {
-		t.Errorf("count = %d, want 0", count)
 	}
 }
 

@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "pidutil",
     srcs = [
+        "environ_darwin.go",
         "listener.go",
         "pidutil.go",
         "procargs2.go",
@@ -28,6 +29,7 @@ go_test(
     srcs = [
         "alive_zombie_test.go",
         "cmdline_portable_test.go",
+        "environ_darwin_test.go",
         "listener_test.go",
         "pidutil_test.go",
         "procargs2_test.go",

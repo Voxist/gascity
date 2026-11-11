@@ -510,7 +510,7 @@ func IsRunOnSkipBead(b beads.Bead) bool {
 // cosmetic, unlike the Cursor read (store_reads.go), whose max-seq reduction is
 // over a different column and therefore must NOT opt in.
 func (s *Store) RecentRuns(scoped string, limit int) ([]OrderRun, error) {
-	if s.store.Store == nil {
+	if s.store == (beads.OrdersStore{}) {
 		return nil, nil
 	}
 	beadsList, err := s.store.List(beads.ListQuery{
@@ -542,7 +542,7 @@ func (s *Store) RecentRuns(scoped string, limit int) ([]OrderRun, error) {
 // LatestOpenRun's deliberate open-only narrowing, the feed lists completed
 // runs alongside in-flight ones. A non-positive limit means unlimited.
 func (s *Store) ListTracking(limit int) ([]OrderRun, error) {
-	if s.store.Store == nil {
+	if s.store == (beads.OrdersStore{}) {
 		return nil, nil
 	}
 	list, err := s.store.List(beads.ListQuery{
@@ -570,7 +570,7 @@ func (s *Store) ListTracking(limit int) ([]OrderRun, error) {
 // row, a found flag, and any list error are returned together; found can be true
 // alongside a partial-tier error, mirroring the feed's prior handling.
 func (s *Store) LatestOpenRun(scoped string) (OrderRun, bool, error) {
-	if s.store.Store == nil {
+	if s.store == (beads.OrdersStore{}) {
 		return OrderRun{}, false, nil
 	}
 	list, err := s.store.List(beads.ListQuery{

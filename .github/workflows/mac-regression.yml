@@ -144,6 +144,7 @@ jobs:
       run_smoke: ${{ steps.gate.outputs.run_smoke }}
       run_full: ${{ steps.gate.outputs.run_full }}
       run_review_formulas: ${{ steps.gate.outputs.run_review_formulas }}
+      run_cmd_gc_process: ${{ steps.gate.outputs.run_cmd_gc_process }}
       reason: ${{ steps.gate.outputs.reason }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -224,10 +225,24 @@ jobs:
             reason="merge_group: Mac verified at PR head"
           fi
 
+          # The cmd-gc process shards follow the smoke tier. Off upstream the
+          # runner policy has no Blacksmith macOS pool, and on 3-core hosted
+          # runners each shard needs 20-30+ minutes (4-6 on Blacksmith), so
+          # there they run nightly, on dispatch, and on an explicit needs-mac
+          # request only (ga-05vt3.12).
+          run_cmd_gc_process=$run_smoke
+          if [[ "$run_smoke" == "true" && "${{ github.repository }}" != "gastownhall/gascity" ]]; then
+            case "$EVENT_NAME" in
+              schedule | workflow_dispatch) ;;
+              *) [[ "$NEEDS_LABEL" == "true" ]] || run_cmd_gc_process=false ;;
+            esac
+          fi
+
           {
             echo "run_smoke=$run_smoke"
             echo "run_full=$run_full"
             echo "run_review_formulas=$run_review_formulas"
+            echo "run_cmd_gc_process=$run_cmd_gc_process"
             echo "reason=$reason"
           } >>"$GITHUB_OUTPUT"
 
@@ -309,13 +324,15 @@ jobs:
     needs:
       - runner-policy
       - gate
-    if: needs.gate.outputs.run_smoke == 'true'
+    if: needs.gate.outputs.run_cmd_gc_process == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     # A shard's tests run in about a minute; the rest is setup plus a cold
     # compile of the cmd/gc test binary on a 3-core hosted runner, which
     # passed 20 minutes once the 2026-10-14 resync grew cmd/gc (ga-s69mk.2).
+    # Off upstream (no Blacksmith macOS pool) a shard needs 20-30+ minutes,
+    # so it gets 50 there (ga-05vt3.12).
     # A soak (go_test_count above 1) runs each shard's tests that many times.
-    timeout-minutes: ${{ (inputs.go_test_count || '1') == '1' && 30 || 90 }}
+    timeout-minutes: ${{ (inputs.go_test_count || '1') != '1' && 90 || (github.repository == 'gastownhall/gascity' && 30 || 50) }}
     strategy:
       fail-fast: false
       matrix:
@@ -340,6 +357,9 @@ jobs:
             *) echo "go_test_count must be 1 to 10, got '$GO_TEST_COUNT_INPUT'" >&2; exit 1 ;;
           esac
           timeout=20m
+          # Off upstream the job gets 50 minutes: keep go test's own timeout,
+          # with its goroutine dump, inside that budget.
+          if [ "$GITHUB_REPOSITORY" != "gastownhall/gascity" ]; then timeout=40m; fi
           if [ "$GO_TEST_COUNT_INPUT" != 1 ]; then timeout=80m; fi
           make test-cmd-gc-process-shard CMD_GC_PROCESS_SHARD=${{ matrix.shard }} CMD_GC_PROCESS_TOTAL=12 \
             CMD_GC_PROCESS_COUNT="$GO_TEST_COUNT_INPUT" CMD_GC_PROCESS_TIMEOUT="$timeout"
@@ -650,6 +670,7 @@ jobs:
           QUALITY: ${{ needs.mac-quality.result }}
           UNIT: ${{ needs.mac-unit.result }}
           CMD_GC: ${{ needs.mac-cmd-gc-process.result }}
+          RUN_CMD_GC_PROCESS: ${{ needs.gate.outputs.run_cmd_gc_process }}
           ACCEPTANCE: ${{ needs.mac-acceptance.result }}
           COVER: ${{ needs.mac-cover.result }}
           INT_PACKAGES: ${{ needs.mac-integration-packages.result }}
@@ -686,7 +707,12 @@ jobs:
           # skipped, cancelled, failure, or no result at all fails the run.
           required=()
           if [[ "${RUN_SMOKE}" == "true" ]]; then
-            required+=("Mac / quality=${QUALITY}" "Mac / make test-mac=${UNIT}" "Mac / cmd-gc process=${CMD_GC}" "Mac / acceptance (Tier A)=${ACCEPTANCE}")
+            required+=("Mac / quality=${QUALITY}" "Mac / make test-mac=${UNIT}" "Mac / acceptance (Tier A)=${ACCEPTANCE}")
+            # Required unless the gate explicitly routed the shards off this
+            # run (off upstream, outside nightly/dispatch/needs-mac).
+            if [[ "${RUN_CMD_GC_PROCESS}" != "false" ]]; then
+              required+=("Mac / cmd-gc process=${CMD_GC}")
+            fi
           fi
           if [[ "${RUN_FULL}" == "true" ]]; then
             required+=("Mac / test-cover-mac=${COVER}" "Mac / integration packages=${INT_PACKAGES}" "Mac / integration bdstore=${INT_BDSTORE}" "Mac / integration rest=${INT_REST}")

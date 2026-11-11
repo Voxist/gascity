@@ -85,6 +85,7 @@ func TestManagedDoltStopCallSiteTripwire(t *testing.T) {
 		"dolt_scope_watchdog.go":                 4,  // the scope watchdog reaping the server it supervises
 		"dolt_start_managed.go":                  13, // start-path cleanup, the test watchdog and the stop helpers
 		"dolt_stop_managed.go":                   1,  // stopManagedDoltProcess itself
+		"storage_maintenance.go":                 1,  // migrationProviderDown's "health" provider op, run by the explicit `gc storage migrate` maintenance window (upstream S5-B); the window's stop goes through the migrationWindowStopProvider seam, not a call here
 	}
 	files, err := filepath.Glob("*.go")
 	if err != nil {

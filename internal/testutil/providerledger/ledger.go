@@ -215,16 +215,18 @@ func Catalog() []Entry {
 			"t3bridge", "exact:t3bridge", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				time.Date(2026, time.December, 15, 0, 0, 0, 0, time.UTC),
-				"the production T3 bridge composition has focused tests but no full shared runtime contract; needs a fake-double T3 server reachable from RunProviderTests",
+				time.Date(2026, time.December, 11, 0, 0, 0, 0, time.UTC),
+				"the production T3 bridge composition has focused tests but no full shared runtime contract; needs a fake-double T3 server reachable from RunProviderTests."+
+					" Renewed by owner decision 2026-11-07; the underlying test gap must be fixed separately.",
 			),
 		),
 		builtin(
 			"k8s", "exact:k8s", nil,
 			waivedRuntime(
 				repoSymbol("internal/runtime/k8s", "NewSeamBacked"),
-				time.Date(2026, time.December, 8, 0, 0, 0, 0, time.UTC),
-				"no runnable harness proves NewSeamBacked() against a live Kubernetes API plus pod exec lifecycle; every k8s package test drives newProviderWithOps(fake) instead of the real constructor, and no kind/integration-tagged harness exists in internal/runtime/k8s",
+				time.Date(2026, time.December, 16, 0, 0, 0, 0, time.UTC),
+				"no runnable harness proves NewSeamBacked() against a live Kubernetes API plus pod exec lifecycle; every k8s package test drives newProviderWithOps(fake) instead of the real constructor, and no kind/integration-tagged harness exists in internal/runtime/k8s."+
+					" Renewed by owner decision 2026-11-07; the underlying test gap must be fixed separately.",
 			),
 		),
 		builtin(
@@ -239,15 +241,15 @@ func Catalog() []Entry {
 			"hybrid", "exact:hybrid", nil,
 			waivedRuntime(
 				repoSymbol("cmd/gc", "newHybridProvider"),
-				time.Date(2026, time.November, 22, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, time.December, 26, 0, 0, 0, 0, time.UTC),
 				"cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract."+
-					" Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation; the underlying test gap must be fixed separately.",
+					" Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation, and again on 2026-11-07; the underlying test gap must be fixed separately.",
 			),
 		),
 		builtin(
 			"exec", "prefix:exec:", nil,
 			provedRuntime(
-				repoSymbol("internal/runtime/exec", "NewSeamBacked"),
+				repoSymbol("internal/runtime/exec", "NewSeamBackedForCity"),
 				"internal/runtime/exec/exec_test.go",
 				"TestExecConformance",
 				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
@@ -256,8 +258,9 @@ func Catalog() []Entry {
 			),
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
-				time.Date(2026, time.December, 15, 0, 0, 0, 0, time.UTC),
-				"the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract; same underlying gap as runtime.builtin.t3bridge, so it shares that claim's date (one contract closes both)",
+				time.Date(2026, time.December, 11, 0, 0, 0, 0, time.UTC),
+				"the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract; same underlying gap as runtime.builtin.t3bridge, so it shares that claim's date (one contract closes both)."+
+					" Renewed by owner decision 2026-11-07; the underlying test gap must be fixed separately.",
 			),
 		),
 		builtin(
