@@ -539,19 +539,28 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 	// Step 10: Merge environment layers. Workspace.Env sits between
 	// passthrough and provider so a per-provider/agent/patch entry can
-	// still override a workspace-wide default.
+	// still override a workspace-wide default. The config layers expand
+	// against agentEnv (Step 8) before the controller process, so a
+	// ${GC_SESSION_NAME} or ${GC_AGENT} names this session (vp-w7cc).
 	var workspaceEnv map[string]string
 	if p.workspace != nil {
 		workspaceEnv = p.workspace.Env
 	}
-	env := mergeEnv(passthroughEnv(), expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
+	env := mergeEnv(passthroughEnv(),
+		expandEnvMapWithIdentity(workspaceEnv, agentEnv),
+		expandEnvMapWithIdentity(resolved.Env, agentEnv),
+		expandEnvMapWithIdentity(cfgAgent.Env, agentEnv),
+		agentEnv)
 	processenv.PrependGCBinDirToPATH(env, env["GC_BIN"])
 	env = convergence.ScrubTokenEnv(env)
 
 	// OperatorEnv carries only the operator-authored layers (workspace,
 	// resolved provider, agent) — excluding passthrough and the generated
 	// agentEnv plumbing — so a resolved config env change fingerprints as
-	// Launch-tier identity instead of a no-op.
+	// Launch-tier identity instead of a no-op. These layers expand against
+	// the controller process, not the session identity, so the fingerprint
+	// stays a function of the authored config and two sessions of one
+	// template keep the same Launch-tier identity.
 	operatorEnv := mergeEnv(expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env))
 	operatorEnv = convergence.ScrubTokenEnv(operatorEnv)
 

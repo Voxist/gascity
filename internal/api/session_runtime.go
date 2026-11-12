@@ -27,7 +27,11 @@ import (
 // create-time precedence in cmd/gc/template_resolve.go: workspace env is the
 // lowest config layer, provider/agent env can override it, and runtime-owned
 // city anchors plus GC_BIN are authoritative. TOML-sourced workspace and
-// provider values support the same $VAR expansion as the CLI launch path.
+// provider values support the same $VAR expansion as the CLI launch path,
+// against identity first: the child session's GC_SESSION_NAME and GC_AGENT
+// (session.ConfigEnvExpansionIdentity), so a ${GC_SESSION_NAME} in city.toml
+// names the session being started or resumed rather than the controller
+// process (vp-w7cc). A nil identity expands against the controller alone.
 //
 // As the final step — mirroring the CLI env finalization in template_resolve.go
 // — the gc binary's directory is prepended to PATH so a bare `gc` in the
@@ -64,7 +68,7 @@ import (
 // drops the inherited entry. GC_CITY_ROOT is pinned too even though
 // citylayout.CityIdentityEnvMap never seeds it, because the guard trips on it
 // and nothing else clears an inherited value.
-func cityAnchoredSessionEnv(cityPath string, workspaceEnv, providerEnv map[string]string) map[string]string {
+func cityAnchoredSessionEnv(cityPath string, workspaceEnv, providerEnv, identity map[string]string) map[string]string {
 	baseline := processenv.ProviderProcessPassthroughEnv()
 	gcBin, _ := os.Executable()
 
@@ -73,10 +77,10 @@ func cityAnchoredSessionEnv(cityPath string, workspaceEnv, providerEnv map[strin
 		out[k] = v
 	}
 	for k, v := range workspaceEnv {
-		out[k] = processenv.ExpandSessionEnvValue(v)
+		out[k] = processenv.ExpandSessionEnvValueWithIdentity(v, identity)
 	}
 	for k, v := range providerEnv {
-		out[k] = processenv.ExpandSessionEnvValue(v)
+		out[k] = processenv.ExpandSessionEnvValueWithIdentity(v, identity)
 	}
 
 	remoteTargeted := strings.TrimSpace(out["GC_CITY_URL"]) != "" || strings.TrimSpace(out["GC_CITY_CONTEXT"]) != ""
@@ -438,7 +442,7 @@ func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config, 
 	resolvedInfo.ResumeStyle = resolved.ResumeStyle
 	resolvedInfo.ResumeCommand = resumeCommand
 	programStatusArm, providerEnv := sessionProgramStatus(configuredProgramStatusMode(s.state.Config()), resolved, transport)
-	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), providerEnv)
+	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), providerEnv, session.ConfigEnvExpansionIdentity(info))
 	return session.BuildResumeCommand(resolvedInfo), sessionResumeHints(resolved, workDir, sessionEnv, mcpServers, sessionResumeInteractive(metadata), programStatusArm), nil
 }
 
@@ -557,7 +561,7 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 		}
 	}
 	programStatusArm, providerEnv := sessionProgramStatus(configuredProgramStatusMode(s.state.Config()), resolved, transport)
-	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), providerEnv)
+	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), configuredWorkspaceSessionEnv(s.state.Config()), providerEnv, session.ConfigEnvExpansionIdentity(info))
 	// This resolver builds the launch hints for every API resume, so the startup
 	// prompt must be delivered through them: without a payload and the delivered
 	// marker, the SessionStart hook is the only carrier and the provider

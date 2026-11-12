@@ -110,3 +110,66 @@ func TestResolveTemplateDisablesProductMetricsForManagedAgent(t *testing.T) {
 		t.Fatalf("BD_DISABLE_METRICS = %q, want unchanged", got)
 	}
 }
+
+// vp-w7cc: TOML-sourced env layers reference the CHILD session's identity
+// (${GC_SESSION_NAME}, ${GC_AGENT}), the identity agentEnv composes at Step 8.
+// Expanding those layers against the controller process collapsed them: the
+// supervisor carries neither var, so the OTEL_RESOURCE_ATTRIBUTES string a
+// city configures materialized with every attribution attribute empty, and a
+// CLI run from inside another session leaked THAT session's identity.
+// Workspace, provider, and agent env must expand against the session identity.
+func TestResolveTemplateExpandsConfigEnvAgainstSessionIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+
+	params := &agentBuildParams{
+		cityName: "city",
+		cityPath: cityPath,
+		workspace: &config.Workspace{
+			Provider: "test",
+			Env: map[string]string{
+				"WS_SESSION_PROBE": "session=${GC_SESSION_NAME},agent=${GC_AGENT}",
+			},
+		},
+		providers: map[string]config.ProviderSpec{
+			"test": {
+				Command:    "echo",
+				PromptMode: "none",
+				Env: map[string]string{
+					"OTEL_RESOURCE_ATTRIBUTES": "gc.session=${GC_SESSION_NAME},gc.agent=${GC_AGENT},gc.provider=claude",
+				},
+			},
+		},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+	agent := &config.Agent{
+		Name: "mayor",
+		Env:  map[string]string{"AGENT_SESSION_PROBE": "${GC_SESSION_NAME}"},
+	}
+
+	// The controller process carries a DIFFERENT session's identity; the
+	// child's Step-8 identity must win, and the controller's must never leak.
+	t.Setenv("GC_SESSION_NAME", "controller-session-must-not-leak")
+	t.Setenv("GC_AGENT", "controller/agent-must-not-leak")
+
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if tp.SessionName == "" {
+		t.Fatal("tp.SessionName empty: fixture no longer composes the Step-8 identity")
+	}
+	for key, want := range map[string]string{
+		"OTEL_RESOURCE_ATTRIBUTES": "gc.session=" + tp.SessionName + ",gc.agent=" + tp.SessionName + ",gc.provider=claude",
+		"WS_SESSION_PROBE":         "session=" + tp.SessionName + ",agent=" + tp.SessionName,
+		"AGENT_SESSION_PROBE":      tp.SessionName,
+	} {
+		if got := tp.Env[key]; got != want {
+			t.Errorf("Env[%s] = %q, want %q (child-session identity, not the controller's)", key, got, want)
+		}
+	}
+}

@@ -163,11 +163,25 @@ func IsControllerOnlyEnv(key string) bool {
 // `FOO = "$GC_CONTROLLER_TOKEN"` copies the controller's value into a
 // differently-named session variable, which no key-level guard can catch.
 func ExpandSessionEnvValue(value string) string {
+	return ExpandSessionEnvValueWithIdentity(value, nil)
+}
+
+// ExpandSessionEnvValueWithIdentity expands a config-authored env value for a
+// specific child session. Workspace, provider, and agent env may reference the
+// child's own identity (${GC_SESSION_NAME}, ${GC_AGENT}), which the controller
+// process doing the expansion does not carry: it has either none or another
+// session's. identity is consulted first, so a key it holds expands to the
+// child's value even when that value is empty (identity not known yet); every
+// other key expands against the controller process as ExpandSessionEnvValue
+// does. ControllerOnlyEnvKeys read as empty whatever identity holds, so the
+// map is never a path for a controller credential into a session.
+func ExpandSessionEnvValueWithIdentity(value string, identity map[string]string) string {
 	return os.Expand(value, func(key string) string {
-		for _, controllerOnly := range ControllerOnlyEnvKeys {
-			if key == controllerOnly {
-				return ""
-			}
+		if IsControllerOnlyEnv(key) {
+			return ""
+		}
+		if v, ok := identity[key]; ok {
+			return v
 		}
 		return os.Getenv(key)
 	})
