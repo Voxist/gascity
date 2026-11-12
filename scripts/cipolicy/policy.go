@@ -429,7 +429,16 @@ const (
 	// 4ff2418f7, in place of upstream's v1.3.4; tier-c skipped off
 	// gastownhall/gascity). Taken from the candidate digest
 	// TestCurrentWorkflowsMatchPolicy prints for the merged workflow.
-	expectedNightlyExecutionHash = "ea5adf1cf452d6002dc8204b127ce6dd6cc26b4bdc9ec6bc56594da2815fdce7"
+	// Bumped (ga-05vt3.9, ga-05vt3.10): two fork-red nightly setup steps.
+	// tier-b fetches tag v1.5.0-rc1 from https://github.com/gastownhall/gascity
+	// by URL instead of `origin` (a fork's origin lacks upstream's tags, so the
+	// fetch exited 128 before any test). beads-proxied-perf's resolve-pin step
+	// builds bd from deps.env BD_REPO@BD_SOURCE_REF when BD_SOURCE_REF is set
+	// (the bd install-bd-archive.sh gives every other job; BD_CURRENT_REF's bd
+	// sat schemas behind the linked library) and from gastownhall/beads at
+	// BD_CURRENT_REF otherwise, as before; the build step clones the resolved
+	// repo. No new job, trigger, permission or secret.
+	expectedNightlyExecutionHash = "b193b572e6222aac66ec006d9a12312630fc6f3bc19035850e8c134d9c121574"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`. Then the claude-version
