@@ -60,9 +60,32 @@
             "type": "string",
             "enum": [
               "remote",
-              "path"
+              "path",
+              "builtin"
             ],
-            "description": "\"remote\" for git-backed sources and \"path\" for local directory sources."
+            "description": "\"remote\" for git-backed sources, \"path\" for local directory sources, and \"builtin\" for sources served from the running gc binary's embedded pack set (vp-fkrl)."
+          },
+          "builtin": {
+            "type": "object",
+            "description": "Set for kind \"builtin\": the import is served from this binary's embedded content, not fetched from the source URL (vp-fkrl).",
+            "properties": {
+              "pack": {
+                "type": "string",
+                "description": "The bundled pack name serving the import."
+              },
+              "built_by": {
+                "type": "string",
+                "description": "Build revision of the running binary serving the bytes; omitted when the binary shipped without a stamp."
+              },
+              "content_hash": {
+                "type": "string",
+                "description": "sha256 digest of the embedded content actually served, as distinct from the pinned commit."
+              }
+            },
+            "required": [
+              "pack",
+              "content_hash"
+            ]
           },
           "path": {
             "type": "string",

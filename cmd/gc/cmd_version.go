@@ -7,6 +7,7 @@ import (
 	"runtime/debug"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/spf13/cobra"
 )
 
@@ -48,6 +49,11 @@ func init() {
 	info, ok := debug.ReadBuildInfo()
 	version, commit, date = resolveBuildMetadata(version, commit, date, ok, info)
 	beadsVersion = resolveBeadsVersion(ok, info)
+	// vp-fkrl: bundled-pack cache markers record the build that materialized
+	// them. Package main is the only place the resolved revision exists, and
+	// internal/builtinpacks cannot import cmd/gc, so it is injected here —
+	// before any command RunE can materialize a cache.
+	builtinpacks.BuiltBy = commit
 }
 
 // resolveBeadsVersion reports the effective linked beads library version
