@@ -9149,7 +9149,11 @@ func TestLaunchTranscriptRoots(t *testing.T) {
 		{"the default root's own dir", observed, dir(filepath.Join(home, ".claude")), nil, city},
 		{"no city", nil, dir("/cfg/claude-a"), nil, append(sessionTranscriptSearchPaths(nil), "/cfg/claude-a/projects")},
 		{"no passed-through dir", observed, map[string]string{}, nil, city},
-		{"the operator's absolute dir over a passed-through one", observed, dir("/cfg/claude-a"), dir("/cfg/claude-b"), []string{"/cfg/claude-b/projects"}},
+		{"the operator's absolute dir over a passed-through one", observed, dir("/cfg/claude-b"), dir("/cfg/claude-b"), []string{"/cfg/claude-b/projects"}},
+		// OperatorEnv is controller-expanded; the launch carries the dir the
+		// session's own identity expanded (vp-w7cc), and the probe follows it.
+		{"the operator's dir as the session expanded it", observed, dir("/cfg/claude-worker-9"), dir("/cfg/claude-"), []string{"/cfg/claude-worker-9/projects"}},
+		{"an upstream's ~ dir replacing the operator's absolute one", observed, dir("~/.claude-up"), dir("/cfg/claude-b"), city},
 		{"a blank passed-through dir", observed, dir(""), nil, city},
 		{"a spaces-only passed-through dir", observed, dir("  "), nil, city},
 		{"a ~ passed-through dir", observed, dir("~/.claude-a"), nil, city}, // the provider resolves it, not the probe

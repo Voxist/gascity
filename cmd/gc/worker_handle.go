@@ -335,7 +335,8 @@ func applyWorkerCreateRuntimeInputs(sessionCfg *worker.ResolvedSessionConfig, cf
 	// Project the workspace environment here before handing the runtime to the
 	// worker factory. In particular, workspace.env BD_BIN must follow the same
 	// schema-compatible executable as the controller and resumed sessions.
-	sessionEnv := resolvedWorkerSessionEnvWithConfig(cityPath, cfg, resolved, transport)
+	identity := session.ConfigEnvExpansionIdentityForCreate(sessionCfg.Alias, sessionCfg.ExplicitName)
+	sessionEnv := resolvedWorkerSessionEnvWithConfig(cityPath, cfg, resolved, transport, identity)
 	sessionCfg.Runtime.SessionEnv = sessionEnv
 	sessionCfg.Runtime.Hints.Env = sessionEnv
 	sessionCfg.Runtime.Hints.ProgramStatus, _ = config.ProgramStatusLaunchFor(cfg, resolved, transport)
@@ -441,8 +442,11 @@ func resolvedWorkerSessionConfigWithConfig(
 // canonical resolveTemplate layering. The program-status env (empty unless
 // armed for transport) follows the provider env, as on the template launch
 // path (applyTemplateProgramStatus). Identity and controller-only overlays
-// remain authoritative at the end.
-func resolvedWorkerSessionEnvWithConfig(cityPath string, cfg *config.City, resolved *config.ResolvedProvider, transport string) map[string]string {
+// remain authoritative at the end. Workspace and provider env expand against
+// identity, the child session's GC_SESSION_NAME and GC_AGENT
+// (session.ConfigEnvExpansionIdentity), before the controller process
+// (vp-w7cc).
+func resolvedWorkerSessionEnvWithConfig(cityPath string, cfg *config.City, resolved *config.ResolvedProvider, transport string, identity map[string]string) map[string]string {
 	if resolved == nil {
 		return nil
 	}
@@ -453,8 +457,8 @@ func resolvedWorkerSessionEnvWithConfig(cityPath string, cfg *config.City, resol
 	_, programStatusEnv := config.ProgramStatusLaunchFor(cfg, resolved, transport)
 	sessionEnv := mergeEnv(
 		providerProcessPassthroughEnv(),
-		expandEnvMap(workspaceEnv),
-		expandEnvMap(resolved.Env),
+		expandEnvMapWithIdentity(workspaceEnv, identity),
+		expandEnvMapWithIdentity(resolved.Env, identity),
 		expandEnvMap(programStatusEnv),
 		processenv.ControllerOnlyEnvOverlay(),
 	)
@@ -754,7 +758,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	// dispatcher trace path is per-dispatcher-qualified and must not be
 	// overwritten with the city-uniform default here. template_resolve.go
 	// owns the qualified override for the CLI create path.
-	sessionEnv := resolvedWorkerSessionEnvWithConfig(cityPath, cfg, resolved, transport)
+	sessionEnv := resolvedWorkerSessionEnvWithConfig(cityPath, cfg, resolved, transport, session.ConfigEnvExpansionIdentity(info))
 	programStatusArm, _ := config.ProgramStatusLaunchFor(cfg, resolved, transport)
 	// Resolve session_live so resumed sessions get re-themed (status bar,
 	// keybindings) the same way reconciler-started sessions do. Without this,

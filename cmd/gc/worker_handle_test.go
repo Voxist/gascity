@@ -2913,3 +2913,121 @@ func TestResolvedWorkerRuntimeDropsStaleResumeCommandAfterProviderSwitch(t *test
 		t.Fatalf("unexpected stderr: %s", stderr.String())
 	}
 }
+
+// vp-w7cc (worker boundary, resume): resumed sessions build SessionEnv via
+// resolvedWorkerSessionEnvWithConfig. Workspace/provider env referencing
+// ${GC_SESSION_NAME}/${GC_AGENT} must expand against the RESUMED session's own
+// identity (the values session.RuntimeEnvWithSessionContext binds), not the
+// controller process resuming it.
+func TestResolvedWorkerRuntimeWithConfigExpandsConfigEnvAgainstSessionIdentity(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Env: map[string]string{
+			"WS_SESSION_PROBE": "session=${GC_SESSION_NAME}",
+		}},
+		Agents: []config.Agent{{Name: "worker", Provider: "stub"}},
+		Providers: map[string]config.ProviderSpec{
+			"stub": {
+				Command: "/bin/echo",
+				Env: map[string]string{
+					"OTEL_RESOURCE_ATTRIBUTES": "gc.session=${GC_SESSION_NAME},gc.agent=${GC_AGENT}",
+				},
+			},
+		},
+	}
+
+	t.Setenv("GC_SESSION_NAME", "controller-session-must-not-leak")
+	t.Setenv("GC_AGENT", "controller/agent-must-not-leak")
+
+	resolved, err := resolvedWorkerRuntimeWithConfigAndMetadata(cityDir, cfg, session.Info{
+		Template:    "worker",
+		WorkDir:     cityDir,
+		SessionName: "resumed-session-42",
+		Alias:       "resumed-agent",
+	}, "", nil)
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfigAndMetadata: %v", err)
+	}
+	if resolved == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfigAndMetadata() = nil")
+	}
+	for key, want := range map[string]string{
+		"OTEL_RESOURCE_ATTRIBUTES": "gc.session=resumed-session-42,gc.agent=resumed-agent",
+		"WS_SESSION_PROBE":         "session=resumed-session-42",
+	} {
+		if got := resolved.SessionEnv[key]; got != want {
+			t.Errorf("SessionEnv[%s] = %q, want %q (resumed session's identity, not the controller's)", key, got, want)
+		}
+		if got := resolved.Hints.Env[key]; got != want {
+			t.Errorf("Hints.Env[%s] = %q, want %q", key, got, want)
+		}
+	}
+}
+
+// vp-w7cc (worker boundary, create): a direct CLI create knows the new
+// session's alias and, when one was given, its explicit name. Config env must
+// expand against those. A session name that is not yet known (generated from
+// the bead ID at create time) expands EMPTY, never to the controller's value.
+func TestApplyWorkerCreateRuntimeInputsExpandsConfigEnvAgainstSessionIdentity(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Env: map[string]string{
+			"WS_SESSION_PROBE": "session=${GC_SESSION_NAME}",
+		}},
+		Agents: []config.Agent{{Name: "worker", Provider: "stub"}},
+		Providers: map[string]config.ProviderSpec{
+			"stub": {
+				Command: "/bin/echo",
+				Env: map[string]string{
+					"OTEL_RESOURCE_ATTRIBUTES": "gc.session=${GC_SESSION_NAME},gc.agent=${GC_AGENT}",
+				},
+			},
+		},
+	}
+	resolved, err := config.ResolveProvider(&cfg.Agents[0], &cfg.Workspace, cfg.Providers, func(string) (string, error) { return "/bin/echo", nil })
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+
+	t.Setenv("GC_SESSION_NAME", "controller-session-must-not-leak")
+	t.Setenv("GC_AGENT", "controller/agent-must-not-leak")
+
+	for _, tc := range []struct {
+		name, alias, explicitName string
+		want                      map[string]string
+	}{
+		{
+			name:         "explicit name and alias",
+			alias:        "new-agent",
+			explicitName: "new-session-7",
+			want: map[string]string{
+				"OTEL_RESOURCE_ATTRIBUTES": "gc.session=new-session-7,gc.agent=new-agent",
+				"WS_SESSION_PROBE":         "session=new-session-7",
+			},
+		},
+		{
+			name:  "generated name",
+			alias: "new-agent",
+			want: map[string]string{
+				"OTEL_RESOURCE_ATTRIBUTES": "gc.session=,gc.agent=new-agent",
+				"WS_SESSION_PROBE":         "session=",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sessionCfg := worker.ResolvedSessionConfig{
+				Alias:        tc.alias,
+				ExplicitName: tc.explicitName,
+				Runtime:      worker.ResolvedRuntime{Hints: workerSessionCreateHints(resolved)},
+			}
+			applyWorkerCreateRuntimeInputs(&sessionCfg, cfg, t.TempDir(), "worker", "", resolved)
+			for key, want := range tc.want {
+				if got := sessionCfg.Runtime.SessionEnv[key]; got != want {
+					t.Errorf("SessionEnv[%s] = %q, want %q", key, got, want)
+				}
+				if got := sessionCfg.Runtime.Hints.Env[key]; got != want {
+					t.Errorf("Hints.Env[%s] = %q, want %q", key, got, want)
+				}
+			}
+		})
+	}
+}

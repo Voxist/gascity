@@ -1804,6 +1804,22 @@ func expandEnvMap(m map[string]string) map[string]string {
 	return out
 }
 
+// expandEnvMapWithIdentity is expandEnvMap for a session-bound env layer:
+// $VAR references expand against the child session's identity first
+// (processenv.ExpandSessionEnvValueWithIdentity), so a ${GC_SESSION_NAME} or
+// ${GC_AGENT} in city.toml names the session being started rather than the
+// controller process starting it (vp-w7cc).
+func expandEnvMapWithIdentity(m, identity map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = processenv.ExpandSessionEnvValueWithIdentity(v, identity)
+	}
+	return out
+}
+
 // mergeEnv combines multiple env maps into one. Later maps override earlier
 // ones for the same key. Returns nil if all inputs are empty.
 func mergeEnv(maps ...map[string]string) map[string]string {
