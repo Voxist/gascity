@@ -98,20 +98,20 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	const (
 		// FORK DIVERGENCE — FORK-FIRST BRIDGE (ga-zzcjs; supersedes the
 		// ADR-0026 C5 upstream bridge). The image builds bd from the
-		// Voxist/beads fork (schema 0072 plus fork-only fixes; the
-		// 0069->0072 store migration is a deliberate `bd migrate schema`
-		// in a window, ga-s69mk.18). go.mod links BD_LIB_REF — the fork's newest
+		// Voxist/beads fork (schema 0074 plus fork-only fixes; the
+		// 0072->0074 store migration is a deliberate `bd migrate schema`
+		// in a window, vp-pb00j). go.mod links BD_LIB_REF — the fork's newest
 		// upstream ancestor — because fork commits do not resolve on the
 		// module path. These values move together with deps.env and go.mod;
-		// a published release >= 0072 on a module-resolvable repo retires
+		// a published release >= 0074 on a module-resolvable repo retires
 		// the bridge (one change: BD_VERSION=tag, drop the refs). Upstream
 		// v1.3.x is not such a release: it tops out at schema 0066.
-		// BD_VERSION is the string the pinned commit declares (1.95.0). bdSourceRef
-		// is the commit the fork's annotated v1.95.0 tag names (4ff2418f7)
+		// BD_VERSION is the string the pinned commit declares (1.96.0). bdSourceRef
+		// is the commit the fork's annotated v1.96.0 tag names (9dbe41b77)
 		// -- see deps.env.
-		bdSourceRef    = "4ff2418f74b0d9d5e7cca19dfae40cca786d73bd"
-		bdSourceSHA256 = "92ba2d745ae83d0d4f6a6e5d6cd327d3c5360b3597dd22620ef5288af795c9a7"
-		bdBuild        = "4ff2418f7"
+		bdSourceRef    = "9dbe41b77dbfbce1bcde5d5326f0e9f69f27336f"
+		bdSourceSHA256 = "50597482f556c2fccb9b969a84b04192b97d8fd481731e50327ed055e5f509fd"
+		bdBuild        = "9dbe41b77"
 		bdBranch       = "HEAD"
 		grpcVersion    = "1.83.2"
 		// Floors, not exact pins: each must be >= what the pinned source
@@ -128,7 +128,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		xmodVersion    = "0.41.0"
 		// CVE-2026-43871 (HIGH, TCompactProtocol varint byte-count DoS, fixed
 		// 0.24.0). bd embeds dolt as a library and reaches thrift through the
-		// parquet writer; the pinned source (v1.95.0) resolves 0.24.0 on its
+		// parquet writer; the pinned source (v1.96.0) resolves 0.24.0 on its
 		// own, so this floor is now parity, kept to catch a regression.
 		thriftVersion = "0.24.0"
 	)
@@ -164,8 +164,8 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		}
 	}
 	bdVersion := env["BD_VERSION"]
-	if bdVersion != "v1.95.0" {
-		t.Fatalf("deps.env BD_VERSION = %q, want v1.95.0 for the pinned source build", bdVersion)
+	if bdVersion != "v1.96.0" {
+		t.Fatalf("deps.env BD_VERSION = %q, want v1.96.0 for the pinned source build", bdVersion)
 	}
 
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")

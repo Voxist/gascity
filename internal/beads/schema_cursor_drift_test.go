@@ -150,13 +150,16 @@ func TestIgnoredSentinelsMatchPinnedBeads(t *testing.T) {
 }
 
 // pinnedCursorRealityFloorDigest is cursorRealityFloorDigest at the pinned
-// beads (this fork pins v1.3.1-0.20261027095128-43f41374a34d,
-// internal/storage/schema/schema.go: sentinel tables floor at 0 and
-// short-circuit, then floored sentinel tables and sentinel columns each clamp
-// to the lowest replayFloor of any absent one). The previous pin,
-// v1.3.1-0.20261001090346-46e670abbfd4, had no floored-table loop and
-// digested to 65993bb205e8911af8e696360952bd16c8d8388a5db7c23c427e63e97dc14533.
-const pinnedCursorRealityFloorDigest = "309a20318eea0f78e6e33fd76c9ca0dfe5fd0f3da6b48371cda7102648b4843d"
+// beads (this fork pins v1.3.1-0.20261104055431-3c205e0a41e4,
+// internal/storage/schema/schema.go: cursorRealityFloor delegates to
+// cursorReality, where sentinel tables floor at 0 and short-circuit, then
+// floored sentinel tables and sentinel columns each clamp to the lowest
+// replayFloor of any absent one; cursorReality also returns the absent
+// floored tables, which readCursor uses only to print their lossNotice).
+// The previous pin, v1.3.1-0.20261027095128-43f41374a34d, kept that logic in
+// cursorRealityFloor itself and digested to
+// 309a20318eea0f78e6e33fd76c9ca0dfe5fd0f3da6b48371cda7102648b4843d.
+const pinnedCursorRealityFloorDigest = "310bb4a0fd94ae454371009e0fdc8df605876ec042c4079253e2bae9a41eda01"
 
 // TestSentinelDriftPinSeesEveryDirection proves the pin above is structural by
 // feeding it the library shapes the old substring pin could not see, and one it
@@ -164,7 +167,7 @@ const pinnedCursorRealityFloorDigest = "309a20318eea0f78e6e33fd76c9ca0dfe5fd0f3d
 // same function the real pin runs.
 func TestSentinelDriftPinSeesEveryDirection(t *testing.T) {
 	const header = "package schema\n\ntype schemaSentinelColumn struct{ table, column string; replayFloor int }\n" +
-		"type schemaSentinelTable struct{ table string; replayFloor int }\n" +
+		"type schemaSentinelTable struct{ table string; replayFloor int; lossNotice string }\n" +
 		"type migrationSource struct{ cursorTable string; sentinelTables []string; sentinelFlooredTables []schemaSentinelTable; sentinelColumns []schemaSentinelColumn }\n"
 	const pinned = `var (
 	mainSource    = migrationSource{cursorTable: "schema_migrations"}
@@ -175,6 +178,7 @@ func TestSentinelDriftPinSeesEveryDirection(t *testing.T) {
 			{table: "events", replayFloor: 18},
 			{table: "bd_events_journal", replayFloor: 21},
 			{table: "bd_events_seq", replayFloor: 21},
+			{table: "wisp_id_tombstones", replayFloor: 29, lossNotice: wispIDTombstonesLossNotice},
 		},
 		sentinelColumns: []schemaSentinelColumn{{table: "leases", column: "granted_node", replayFloor: 11}},
 	}
@@ -437,6 +441,12 @@ var knownMigrationSourceFields = map[string]bool{
 // knownSentinelFields are the three sentinel kinds gc's probe reads.
 var knownSentinelFields = map[string]bool{"sentinelTables": true, "sentinelFlooredTables": true, "sentinelColumns": true}
 
+// cursorRealityFuncs are the pinned library's functions that read the sentinel
+// fields: cursorRealityFloor, and cursorReality, which it delegates to and
+// which also reports the absent floored tables. The mutation check, the
+// table-floor read and the digest cover both.
+var cursorRealityFuncs = map[string]bool{"cursorRealityFloor": true, "cursorReality": true}
+
 // parsedSources is the pinned package, parsed once, in a stable file order.
 type parsedSources struct {
 	fileSet *token.FileSet
@@ -629,7 +639,7 @@ func sentinelMutationProblems(parsed parsedSources) []string {
 		file := parsed.files[fileName]
 		var allowed []*ast.BlockStmt
 		for _, decl := range file.Decls {
-			if function, ok := decl.(*ast.FuncDecl); ok && function.Name.Name == "cursorRealityFloor" && function.Body != nil {
+			if function, ok := decl.(*ast.FuncDecl); ok && cursorRealityFuncs[function.Name.Name] && function.Body != nil {
 				allowed = append(allowed, function.Body)
 			}
 		}
@@ -658,17 +668,21 @@ func sentinelMutationProblems(parsed parsedSources) []string {
 // (`return 20, true, nil` on some new condition) or a read of a field it does
 // not know, and both change which cursor the library acts on; the digest
 // changes with any of them, and with nothing a gofmt or a comment edit does.
+// It digests every cursorRealityFuncs function, in file and declaration order,
+// so the logic counts wherever cursorRealityFloor delegates it.
 func cursorRealityFloorDigest(parsed parsedSources) (string, error) {
+	var tokens strings.Builder
+	found := false
 	for _, fileName := range parsed.names {
 		for _, decl := range parsed.files[fileName].Decls {
 			function, ok := decl.(*ast.FuncDecl)
-			if !ok || function.Name.Name != "cursorRealityFloor" || function.Body == nil {
+			if !ok || !cursorRealityFuncs[function.Name.Name] || function.Body == nil {
 				continue
 			}
+			found = true
 			start := parsed.fileSet.Position(function.Pos()).Offset
 			end := parsed.fileSet.Position(function.End()).Offset
 			source := parsed.bodies[fileName][start:end]
-			var tokens strings.Builder
 			var scan scanner.Scanner
 			scanFiles := token.NewFileSet()
 			scan.Init(scanFiles.AddFile(fileName, -1, len(source)), source, nil, 0)
@@ -688,11 +702,13 @@ func cursorRealityFloorDigest(parsed parsedSources) (string, error) {
 				tokens.WriteString(literal)
 				tokens.WriteByte('\n')
 			}
-			sum := sha256.Sum256([]byte(tokens.String()))
-			return hex.EncodeToString(sum[:]), nil
 		}
 	}
-	return "", errors.New("no cursorRealityFloor function")
+	if !found {
+		return "", errors.New("no cursorRealityFloor function")
+	}
+	sum := sha256.Sum256([]byte(tokens.String()))
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // sentinelsOf reads the sentinel fields of one migrationSource literal. A
@@ -741,6 +757,10 @@ func sentinelsOf(literal *ast.CompositeLit) (sentinelDecl, error) {
 						f.table, err = stringLit(kv.Value)
 					case "replayFloor":
 						f.floor, err = intLit(kv.Value)
+					case "lossNotice":
+						// The warning migrate prints when the replay
+						// re-creates the table empty. It changes no cursor,
+						// so the probe has nothing to mirror.
 					default:
 						err = fmt.Errorf("unknown schemaSentinelTable field %s", keyName(kv.Key))
 					}
@@ -834,11 +854,14 @@ func sentinelDrift(declared map[string]sentinelDecl) []string {
 	return problems
 }
 
-// sentinelTableFloor reads the value cursorRealityFloor returns for a missing
-// sentinel TABLE: the first result of the `return <n>, true, nil` inside its
-// range over m.sentinelTables.
+// sentinelTableFloor reads the value the library returns for a missing
+// sentinel TABLE: the first result of the `return <n>, true, nil[, nil]`
+// inside the range over m.sentinelTables in whichever cursorRealityFuncs
+// function holds it (cursorReality since the 3c205e0a4 pin, which returns the
+// absent floored tables as a fourth result).
 func sentinelTableFloor(sources map[string][]byte) (int, error) {
 	fileSet := token.NewFileSet()
+	sawFunc := false
 	for name, body := range sources {
 		parsed, err := parser.ParseFile(fileSet, name, body, 0)
 		if err != nil {
@@ -846,9 +869,10 @@ func sentinelTableFloor(sources map[string][]byte) (int, error) {
 		}
 		for _, decl := range parsed.Decls {
 			function, ok := decl.(*ast.FuncDecl)
-			if !ok || function.Name.Name != "cursorRealityFloor" || function.Body == nil {
+			if !ok || !cursorRealityFuncs[function.Name.Name] || function.Body == nil {
 				continue
 			}
+			sawFunc = true
 			floor, found := 0, false
 			var walkErr error
 			ast.Inspect(function.Body, func(node ast.Node) bool {
@@ -861,7 +885,7 @@ func sentinelTableFloor(sources map[string][]byte) (int, error) {
 				}
 				ast.Inspect(loop.Body, func(inner ast.Node) bool {
 					ret, ok := inner.(*ast.ReturnStmt)
-					if !ok || found || len(ret.Results) != 3 || !isIdent(ret.Results[1], "true") {
+					if !ok || found || len(ret.Results) < 3 || !isIdent(ret.Results[1], "true") {
 						return !found
 					}
 					floor, walkErr = intLit(ret.Results[0])
@@ -873,13 +897,15 @@ func sentinelTableFloor(sources map[string][]byte) (int, error) {
 			if walkErr != nil {
 				return 0, walkErr
 			}
-			if !found {
-				return 0, errors.New("cursorRealityFloor has no `return <floor>, true, nil` inside its range over sentinelTables")
+			if found {
+				return floor, nil
 			}
-			return floor, nil
 		}
 	}
-	return 0, errors.New("no cursorRealityFloor function")
+	if !sawFunc {
+		return 0, errors.New("no cursorRealityFloor function")
+	}
+	return 0, errors.New("neither cursorRealityFloor nor cursorReality has a `return <floor>, true, ...` inside a range over sentinelTables")
 }
 
 func isIdent(expr ast.Expr, name string) bool {
@@ -950,8 +976,17 @@ func TestForwardDriftSeesOnlyTheMainLane(t *testing.T) {
 	if !strings.Contains(skew, "CurrentVersion(ctx, db)") || strings.Contains(skew, "Ignored") {
 		t.Errorf("checkSchemaSkew now reads something other than the main cursor; the residual says it does not:\n%s", skew)
 	}
-	if !strings.Contains(skew, "currentVersion <= LatestVersion()") {
-		t.Errorf("checkSchemaSkew no longer passes a database at or behind the binary; the residual says it refuses AHEAD only:\n%s", skew)
+	// Since the 3c205e0a4 pin checkSchemaSkew reads the version and hands the
+	// verdict to forwardDriftError, which CheckReadableDrift shares.
+	verdict := skew
+	if strings.Contains(skew, "return forwardDriftError(currentVersion)") {
+		verdict = bodyOf("forwardDriftError")
+		if strings.Contains(verdict, "Ignored") {
+			t.Errorf("forwardDriftError now reads something other than the main cursor; the residual says it does not:\n%s", verdict)
+		}
+	}
+	if !strings.Contains(verdict, "currentVersion <= LatestVersion()") {
+		t.Errorf("checkSchemaSkew no longer passes a database at or behind the binary; the residual says it refuses AHEAD only:\n%s", verdict)
 	}
 	if got := bodyOf("CurrentVersion"); !strings.Contains(got, "return mainSource.currentVersion(ctx, db)") {
 		t.Errorf("CurrentVersion is no longer the MAIN source's cursor:\n%s", got)

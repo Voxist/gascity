@@ -111,6 +111,17 @@ func TestProbeSessionReadsTheIgnoredLanesCursorReality(t *testing.T) {
 			wantEffective: 21,
 		},
 		{
+			// wisp_id_tombstones is created by ignored/0030, so a lane at 31
+			// without it is believed only back to 29.
+			name:          "a missing wisp_id_tombstones floors a lane at 31 back to 29",
+			absentTables:  map[string]bool{"wisp_id_tombstones": true},
+			ignored:       31,
+			wantLimited:   true,
+			wantFloor:     29,
+			wantMissing:   "wisp_id_tombstones",
+			wantEffective: 29,
+		},
+		{
 			// Floored tables do not short-circuit: the column is still read,
 			// and its lower floor wins.
 			name:          "a missing sentinel column lowers a floored table's floor",

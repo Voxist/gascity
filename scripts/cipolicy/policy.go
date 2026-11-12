@@ -429,7 +429,12 @@ const (
 	// 4ff2418f7, in place of upstream's v1.3.4; tier-c skipped off
 	// gastownhall/gascity). Taken from the candidate digest
 	// TestCurrentWorkflowsMatchPolicy prints for the merged workflow.
-	expectedNightlyExecutionHash = "ea5adf1cf452d6002dc8204b127ce6dd6cc26b4bdc9ec6bc56594da2815fdce7"
+	// Re-derived for the bd v1.96.0 repin (vp-pb00j), on top of that resync:
+	// BD_VERSION (v1.95.0 -> v1.96.0) and BD_SOURCE_REF (4ff2418f7 ->
+	// 9dbe41b77) at nightly.yml's two pin sites, nothing else. Taken from the
+	// candidate digest TestCurrentWorkflowsMatchPolicy printed for the merged
+	// workflow.
+	expectedNightlyExecutionHash = "f727f2a6ce8aa27c4ba6d86e9dd9462ae03795eb5b7988eb595c687b4b83ce82"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`. Then the claude-version

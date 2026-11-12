@@ -390,7 +390,7 @@ gc bd backup init <backup_url>
 gc bd list --status in_progress --json | jq '.[] | {id, title, status}'
 ```
 
-- `--recreate-missing` is how the pinned bd release (v1.95.0) re-creates the missing
+- `--recreate-missing` is how the pinned bd release (v1.96.0) re-creates the missing
   database of a scope that is already initialized; a plain `gc bd init` refuses, and so
   does `--reinit-local`, which on this release does not authorize re-creating a missing
   server-mode database. It also fires when the server is unreachable, so never run it while
