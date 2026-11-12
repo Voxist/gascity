@@ -80,3 +80,46 @@ func TestCmdGCProcessTimingEnvCrossesMakeIsolation(t *testing.T) {
 		t.Fatalf("timing runner after Make isolation = %+v, want %+v", artifact.Runner, wantRunner)
 	}
 }
+
+// The fork's macOS process shard step hands its progress settings to
+// scripts/test-go-test-shard through make's EXTRA_TEST_ENV (ga-05vt3.12).
+// Run through the real make target with the value the step computes, the
+// shard must come out in progress mode, past the Makefile's env -i.
+func TestMacProcessShardProgressCrossesMakeIsolation(t *testing.T) {
+	fixture := newGoTestShardFixture(t)
+	progressEnv := processShardStepValue(t, "Voxist/gascity", "1", "progress_env")
+	if progressEnv == "" {
+		t.Fatal("the fork's process shard step sets no progress_env")
+	}
+
+	cmd := makeCommand(
+		"test-cmd-gc-process-shard",
+		"CMD_GC_PROCESS_SHARD=1",
+		"CMD_GC_PROCESS_TOTAL=2",
+		"EXTRA_TEST_ENV="+progressEnv,
+	)
+	cmd.Dir = fixture.repoRoot
+	cmd.Env = []string{
+		"PATH=" + fixture.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"HOME=" + fixture.homeDir,
+		"SHELL=/bin/sh",
+		"LANG=C.UTF-8",
+		"TMPDIR=" + fixture.tmpDir,
+		"GC_TEST_NO_SLICE=1",
+		"SYS_USR_CGO_FALLBACK=0",
+	}
+	status, output := runShardCommand(t, cmd)
+	if status == 0 || !strings.Contains(string(output), "Error 23") {
+		t.Fatalf("make status = %d, want product failure 23 to remain authoritative\n%s", status, output)
+	}
+	for _, want := range []string{
+		"progress on for ./cmd/gc shard 1 of 2: heartbeat every 120s, SIGQUIT to test binaries after 38m",
+		"compile: go test -c ./cmd/gc",
+		"discovery: gc.test -test.list (runs TestMain)",
+		"product run: go test -v",
+	} {
+		if !strings.Contains(string(output), want) {
+			t.Fatalf("make-run shard output lacks %q:\n%s", want, output)
+		}
+	}
+}
