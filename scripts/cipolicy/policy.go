@@ -438,7 +438,13 @@ const (
 	// sat schemas behind the linked library) and from gastownhall/beads at
 	// BD_CURRENT_REF otherwise, as before; the build step clones the resolved
 	// repo. No new job, trigger, permission or secret.
-	expectedNightlyExecutionHash = "b193b572e6222aac66ec006d9a12312630fc6f3bc19035850e8c134d9c121574"
+	// Then (fork, ga-05vt3) nightly-summary's aggregate step gains one env
+	// value, TIER_C_SKIP_EXPECTED: ${{ github.repository !=
+	// 'gastownhall/gascity' }}, the negation of tier-c's own `if`, and its
+	// script accepts tier-c = "skipped" only when that value is "true"; every
+	// other result still fails closed. No new job, trigger, permission or
+	// secret.
+	expectedNightlyExecutionHash = "22b73bf1fe9f34ca5bbf714559a202084906d383bd44c8798d8bb8bca8774590"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`. Then the claude-version

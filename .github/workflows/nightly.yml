@@ -247,7 +247,9 @@ jobs:
   # workflow-level conclusion. A skipped or cancelled job does not reliably
   # turn the run red, so this always-run aggregate -- which fails on any
   # result other than success -- is the one signal the red-streak monitor
-  # can trust.
+  # can trust. One exception: tier-c's own `if` skips it off
+  # gastownhall/gascity (its secrets never reach a fork), so there, and only
+  # there, TIER_C_SKIP_EXPECTED lets tier-c's "skipped" count as expected.
   nightly-summary:
     name: Nightly summary
     needs:
@@ -267,6 +269,7 @@ jobs:
           BEADS_PROXIED_PERF_RESULT: ${{ needs.beads-proxied-perf.result }}
           BUNDLED_PACK_PINS_RESULT: ${{ needs.bundled-pack-pins.result }}
           WAIVER_CLOCK_RESULT: ${{ needs.waiver-clock.result }}
+          TIER_C_SKIP_EXPECTED: ${{ github.repository != 'gastownhall/gascity' }}
         run: |
           python3 - <<'PY'
           import os
@@ -287,7 +290,10 @@ jobs:
               for job, result in results.items():
                   handle.write(f"| {job} | {result} |\n")
 
-          failed = {job: result for job, result in results.items() if result != "success"}
+          expected = {job: {"success"} for job in results}
+          if os.environ.get("TIER_C_SKIP_EXPECTED") == "true":
+              expected["tier-c"] = {"skipped"}
+          failed = {job: result for job, result in results.items() if result not in expected[job]}
           if failed:
               for job, result in failed.items():
                   print(f"{job}: {result}", file=sys.stderr)
