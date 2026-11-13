@@ -3908,10 +3908,16 @@ The flags mirror the "bd ready" contract the default work_query builds:
            --exclude-label "hold:external" --exclude-label "human" \
            --json --limit=20
 
-Rows are emitted in canonical ready order (priority, created_at, id) unless
---sort selects a created_at order, and --limit is applied last, so a bounded
-read is the true top-N of the merged set rather than the top-N of whichever
-store answered first.
+Rows are emitted in canonical ready order (priority, created_at, id), which
+--sort priority also selects. --sort takes the rest of bd ready's policies with
+bd's semantics, hybrid (rows created in the last 48 hours by priority, then
+older rows oldest first) and oldest, plus newest. --limit is applied last, so a
+bounded read is the true top-N of the merged set rather than the top-N of
+whichever store answered first.
+
+A failed read writes nothing to stdout and exits non-zero, as bd ready does:
+stdout carries a JSON array and nothing else, and the diagnostic, with the
+--json failure envelope, goes to stderr.
 
 The rows of --status in_progress carry their blockers (blocked_by), and a row
 whose blockers cannot be resolved fails the read. --until-unblocked ends that
@@ -3954,7 +3960,7 @@ gc ready [flags]
 | `--json` | bool | `true` | accept --json for bd-ready parity (output is always a JSON array) |
 | `--limit` | int |  | max beads to return (0 = unlimited) |
 | `--metadata-field` | stringArray |  | require metadata "key=value", or bare "key" for any non-empty value (repeatable) |
-| `--sort` | string |  | sort order: oldest\|newest (default: canonical ready order) |
+| `--sort` | string |  | sort order: priority\|hybrid\|oldest\|newest (default: priority, the canonical ready order) |
 | `--status` | string |  | list beads in this status instead of ready work: open\|in_progress\|blocked\|closed |
 | `--unassigned` | bool |  | only unassigned work |
 | `--until-unblocked` | bool |  | with --status in_progress, end the answer at its first unblocked row, resolving no row past it |

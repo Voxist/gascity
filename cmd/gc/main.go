@@ -254,16 +254,17 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 	lifecycle.attemptFinalOutcome(resolveProductMetricsFinalOutcome(executedCommand, classification))
 	if executeErr != nil {
 		code := commandExitCode(executeErr)
+		failureOut := jsonFailureOutput(executedCommand, stdout, stderr)
 		if bufferJSONExecution {
 			if len(bytes.TrimSpace(jsonStdout.Bytes())) > 0 {
 				if copyErr := flushBufferedJSON(stdout, stderr, &jsonStdout); copyErr != nil {
 					return 1
 				}
 			} else {
-				_ = writeJSONFailure(stdout, "command_failed", commandFailureMessage(executeErr), code)
+				_ = writeJSONFailure(failureOut, "command_failed", commandFailureMessage(executeErr), code)
 			}
 		} else if reportJSONFailure && observedStdout.BytesWritten() == 0 {
-			_ = writeJSONFailure(stdout, "command_failed", commandFailureMessage(executeErr), code)
+			_ = writeJSONFailure(failureOut, "command_failed", commandFailureMessage(executeErr), code)
 		}
 		return code
 	}

@@ -857,11 +857,13 @@ func TestReadyFiltersAreAppliedOverTheMergedSet(t *testing.T) {
 
 // TestReadyUnknownSortIsRejected keeps a mistyped order from silently falling
 // back to a different one, which is how a bounded read serves the wrong prefix.
+// The refused value is one neither bd nor the generator spells: bd's own
+// policies (priority, hybrid) are accepted (vp-bzeg).
 func TestReadyUnknownSortIsRejected(t *testing.T) {
 	store := splittest.NewWorkStore(t, "gc")
 	mustCreateReadyBead(t, store, beads.Bead{Title: "work", Type: "task"})
 
-	_, err := readywork.Read([]readywork.Leg{readyTestLeg("city", store)}, readywork.Query{Sort: "priority"})
+	_, err := readywork.Read([]readywork.Leg{readyTestLeg("city", store)}, readywork.Query{Sort: "newest-first"})
 	if err == nil || !strings.Contains(err.Error(), "unknown --sort") {
 		t.Fatalf("readyBeadsForOpts error = %v, want a rejection naming the unknown order", err)
 	}
@@ -1163,14 +1165,18 @@ func TestGcReadySteerDescribesTheFlagsItActuallyAccepts(t *testing.T) {
 		t.Errorf("the steer does not name the shorthand gap: %q", rejected)
 	}
 
-	// --sort is shared by NAME and incompatible by VALUE: bd defaults to
-	// "priority", which `gc ready` rejects. A steer that named --sort without
-	// that caveat would still send an operator to a dead end.
-	if err := (readywork.Query{Sort: "priority"}).Validate(); err == nil {
-		t.Error("`gc ready --sort priority` is accepted; the steer says the orders are oldest|newest")
-	}
-	if !strings.Contains(msg, "oldest|newest") {
-		t.Errorf("the steer names --sort without its accepted values: %q", msg)
+	// --sort is shared by NAME and by VALUE: the generated routed tier reads
+	// `--sort priority` and `--sort hybrid` through this reader on a federated
+	// city (vp-bzeg), so bd's policies parse here with bd's semantics, and the
+	// steer names every order the reader accepts. A steer that named a narrower
+	// set would send an operator with a valid query away.
+	for _, order := range []string{readywork.SortPriority, readywork.SortHybrid, readywork.SortOldest, readywork.SortNewest} {
+		if err := (readywork.Query{Sort: order}).Validate(); err != nil {
+			t.Errorf("`gc ready --sort %s` is rejected (%v); the steer names it as accepted", order, err)
+		}
+		if !strings.Contains(msg, order) {
+			t.Errorf("the steer does not name the accepted order %s: %q", order, msg)
+		}
 	}
 }
 
@@ -1528,4 +1534,34 @@ func sessionCloseConfigLoads(t *testing.T, rigNames []string) int64 {
 		t.Fatalf("cmdSessionClose with %d rigs = %d, want 0; stdout=%s stderr=%s", len(rigNames), code, stdout.String(), stderr.String())
 	}
 	return loadCityConfigCalls.Load() - before
+}
+
+// TestReadyFailureKeepsStdoutEmpty pins `gc ready`'s stdout contract: a JSON
+// array and nothing else. A failed read leaves stdout empty and exits
+// non-zero, as `bd ready` does, with the diagnostic on stderr (vp-bzeg).
+//
+// The generated work queries capture the reader's stdout as the answer. Their
+// `|| exit` clause discards a failed capture today, but scripts that read
+// `gc ready` directly (the core pack's spawn-storm and human-gate sweeps) and
+// the stand-in readers the generator tests run all assume an empty stdout on
+// failure. The shared --json failure envelope on stdout is an object where
+// every reader expects an array, so for this command it goes to stderr.
+func TestReadyFailureKeepsStdoutEmpty(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"ready", "--json", "--sort", "newest-first"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("gc ready --sort newest-first exited 0; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("a failed gc ready wrote %q to stdout, want nothing: a reader that captures stdout as the answer would serve it", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), `unknown --sort "newest-first"`) {
+		t.Fatalf("stderr = %q, want the refusal naming the unknown order", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `"ok":false`) {
+		t.Fatalf("stderr = %q, want the failure envelope there instead of on stdout", stderr.String())
+	}
 }
