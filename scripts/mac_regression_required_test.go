@@ -661,6 +661,24 @@ func TestMacCmdGCProcessBuildsOnceOffUpstream(t *testing.T) {
 			t.Errorf("build compile step lacks %q:\n%s", want, compile.Run)
 		}
 	}
+	// The tagged product metrics profile is a second cmd/gc test compile of
+	// the same size, so off upstream it runs here too, measured the same way
+	// (TestProductMetricsTesthookProfileIsFocusedAndRequired pins that it
+	// runs nowhere else there).
+	var testhook *ciCriticalPathStep
+	for i := range build.Steps {
+		if strings.Contains(build.Steps[i].Run, "make test-productmetrics-testhook") {
+			testhook = &build.Steps[i]
+		}
+	}
+	if testhook == nil {
+		t.Fatal("build job does not run make test-productmetrics-testhook")
+	}
+	for _, want := range []string{"/usr/bin/time -l", "maximum resident set size"} {
+		if !strings.Contains(testhook.Run, want) {
+			t.Errorf("build testhook step lacks %q:\n%s", want, testhook.Run)
+		}
+	}
 	if upload.With["name"] != "cmd-gc-test-binary" || upload.With["path"] != "${{ runner.temp }}/cmd-gc-test/gc.test" ||
 		upload.With["if-no-files-found"] != "error" || upload.With["retention-days"] != "1" {
 		t.Errorf("build upload with = %v, want cmd-gc-test-binary from ${{ runner.temp }}/cmd-gc-test/gc.test, failing on no file, kept 1 day", upload.With)

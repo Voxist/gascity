@@ -190,15 +190,28 @@ func TestProductMetricsTesthookProfileIsFocusedAndRequired(t *testing.T) {
 		t.Errorf("gc_productmetrics_testhook_test must run in //...:\n%s", rule)
 	}
 
-	macJob := readCriticalPathWorkflow(t, "mac-regression.yml").Jobs["mac-cmd-gc-process"]
+	// On Mac the profile runs once per run: upstream on historical shard 6,
+	// off upstream in mac-cmd-gc-process-build on the larger runner, because
+	// its tagged cmd/gc compile is as big as the shards' own and, on a 7 GB
+	// shard runner, outlasted the 50-minute job cap (ga-05vt3.12).
+	macWF := readCriticalPathWorkflow(t, "mac-regression.yml")
 	var macTaggedSteps []ciCriticalPathStep
-	for _, step := range macJob.Steps {
+	for _, step := range macWF.Jobs["mac-cmd-gc-process"].Steps {
 		if strings.TrimSpace(step.Run) == "make test-productmetrics-testhook" {
 			macTaggedSteps = append(macTaggedSteps, step)
 		}
 	}
-	if len(macTaggedSteps) != 1 || macTaggedSteps[0].If != "${{ matrix.shard == 6 }}" {
-		t.Errorf("Mac tagged profile steps = %v, want one execution on historical shard 6", macTaggedSteps)
+	if want := "${{ matrix.shard == 6 && github.repository == 'gastownhall/gascity' }}"; len(macTaggedSteps) != 1 || macTaggedSteps[0].If != want {
+		t.Errorf("Mac shard tagged profile steps = %v, want one execution on historical shard 6, upstream only (if %s)", macTaggedSteps, want)
+	}
+	var buildTaggedSteps []ciCriticalPathStep
+	for _, step := range macWF.Jobs["mac-cmd-gc-process-build"].Steps {
+		if strings.Contains(step.Run, "make test-productmetrics-testhook") {
+			buildTaggedSteps = append(buildTaggedSteps, step)
+		}
+	}
+	if len(buildTaggedSteps) != 1 || strings.TrimSpace(buildTaggedSteps[0].If) != "" {
+		t.Errorf("Mac build-job tagged profile steps = %v, want one unconditional execution in the fork-only build job", buildTaggedSteps)
 	}
 }
 

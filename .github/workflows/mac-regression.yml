@@ -323,8 +323,9 @@ jobs:
   # macos-15-xlarge (a larger GitHub-hosted arm64 runner, about 14 GB)
   # compiles it here through the shards' own make target and script, so the
   # environment, tags and flags are theirs, and each shard downloads the
-  # binary instead of compiling. Upstream compiles on Blacksmith in minutes
-  # and never runs this job.
+  # binary instead of compiling. It also runs the product metrics testhook
+  # profile, whose tagged cmd/gc compile is as large, in place of shard 6.
+  # Upstream compiles on Blacksmith in minutes and never runs this job.
   mac-cmd-gc-process-build:
     name: Mac / cmd-gc process / build
     needs:
@@ -370,6 +371,25 @@ jobs:
           if-no-files-found: error
           retention-days: 1
           overwrite: true
+      # Upstream runs this on shard 6. Its -tags productmetrics_testhook
+      # build is a second cmd/gc test compile as large as the shards' own, so
+      # on a fork shard runner it outlasted the 50-minute job cap; here it
+      # runs on the larger runner, once, after the shards' binary is uploaded.
+      - name: Run product metrics testhook profile
+        run: |
+          set -euo pipefail
+          /usr/bin/time -l -o "$RUNNER_TEMP/productmetrics-testhook.rusage" \
+            make test-productmetrics-testhook || status=$?
+          cat "$RUNNER_TEMP/productmetrics-testhook.rusage"
+          wall="$(awk '/ real / {print $1}' "$RUNNER_TEMP/productmetrics-testhook.rusage")"
+          peak="$(awk '/maximum resident set size/ {printf "%.2f", $1 / 1073741824}' "$RUNNER_TEMP/productmetrics-testhook.rusage")"
+          echo "product metrics testhook profile: wall ${wall}s, peak RSS ${peak} GiB"
+          {
+            echo "## product metrics testhook profile"
+            echo
+            echo "Wall ${wall}s, peak RSS ${peak} GiB, status ${status:-0}"
+          } >>"$GITHUB_STEP_SUMMARY"
+          exit "${status:-0}"
 
   # cmd/gc unit/process tests — sharded 12-way so each shard comfortably fits
   # the per-shard timeout even on slower Mac ARM runners. Mirrors the Linux
@@ -453,8 +473,9 @@ jobs:
           make test-cmd-gc-process-shard CMD_GC_PROCESS_SHARD=${{ matrix.shard }} CMD_GC_PROCESS_TOTAL=12 \
             CMD_GC_PROCESS_COUNT="$GO_TEST_COUNT_INPUT" CMD_GC_PROCESS_TIMEOUT="$timeout" \
             EXTRA_TEST_ENV="$shard_env"
+      # Off upstream mac-cmd-gc-process-build runs this profile instead.
       - name: Run product metrics testhook profile
-        if: ${{ matrix.shard == 6 }}
+        if: ${{ matrix.shard == 6 && github.repository == 'gastownhall/gascity' }}
         run: make test-productmetrics-testhook
 
   # Tier A acceptance — smoke-level gate on every PR.
