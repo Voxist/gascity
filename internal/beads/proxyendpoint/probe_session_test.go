@@ -391,6 +391,16 @@ func TestProbeSessionDialsThroughTheBDProxy1Handshake(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), ProbeSessionTimeout)
 		defer cancel()
 		_, err := DefaultProbeIO(proxy.root, proxy.port, "beads").Session(ctx)
+		// A post-accept failure alone cannot tell the reset this listener
+		// sends after the handshake from bd's hang-up on a hello that did not
+		// verify: both wrap io.EOF. The handshake count and the absence of
+		// ErrProxyDataAuth are what say the session got past BDPROXY1.
+		if errors.Is(err, beadslib.ErrProxyDataAuth) {
+			t.Fatalf("the session failed bd's handshake (%v); it must complete it and reach the MySQL greeting", err)
+		}
+		if got := proxy.handshakes.Load(); got != 1 {
+			t.Fatalf("the listener completed %d BDPROXY1 handshake(s), want exactly 1 (session error %v)", got, err)
+		}
 		if !IsPostAcceptFailure(err) {
 			t.Fatalf("the session failed with %v, want the listener's post-handshake reset: the session never reached the MySQL greeting", err)
 		}
@@ -605,6 +615,10 @@ type probeListener struct {
 	// with, which is what a probe of this listener names.
 	root     string
 	accepted *atomic.Int64
+	// handshakes counts the connections that completed bd's BDPROXY1
+	// exchange with this listener: the proof was written to a hello that
+	// verified.
+	handshakes *atomic.Int64
 	// gone receives once for every accepted connection the listener has seen go
 	// away, which is the only place the client's socket close can be observed.
 	gone <-chan struct{}
@@ -626,7 +640,7 @@ func startProbeListener(t *testing.T, behavior probeListenerBehavior) probeListe
 		t.Fatalf("listen: %v", err)
 	}
 	port := listener.Addr().(*net.TCPAddr).Port
-	var accepted atomic.Int64
+	var accepted, handshakes atomic.Int64
 	var peersMu sync.Mutex
 	var peers []string
 	var wg sync.WaitGroup
@@ -656,6 +670,7 @@ func startProbeListener(t *testing.T, behavior probeListenerBehavior) probeListe
 					// bare connect that sends none: hang up, say nothing.
 					return
 				}
+				handshakes.Add(1)
 				switch behavior {
 				case listenerClosesAtOnce:
 					// The deferred close IS the behavior: no greeting, and the
@@ -687,11 +702,12 @@ func startProbeListener(t *testing.T, behavior probeListenerBehavior) probeListe
 	}
 	t.Cleanup(func() { stop(t) })
 	return probeListener{
-		port:     port,
-		root:     writeProbeProxyRoot(t, probeFixtureSecret),
-		accepted: &accepted,
-		gone:     gone,
-		stop:     stop,
+		port:       port,
+		root:       writeProbeProxyRoot(t, probeFixtureSecret),
+		accepted:   &accepted,
+		handshakes: &handshakes,
+		gone:       gone,
+		stop:       stop,
 		peers: func() []string {
 			peersMu.Lock()
 			defer peersMu.Unlock()
