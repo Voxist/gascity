@@ -1288,6 +1288,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc ready` accepts every `--sort` the generated work queries emit, and a
+  failed read leaves stdout empty (vp-bzeg).** The routed tier asks for
+  `--sort priority` (its best-by-priority leg and rank probe) and
+  `--sort hybrid` (its claim window). `bd ready` accepts both, but `gc ready`,
+  the federated reader that replaces it on a city with relocated storage,
+  accepted only `oldest|newest`, so every one of those reads failed there.
+  `gc ready` now takes bd's `priority|hybrid|oldest` with bd's meaning, plus
+  `newest`: `priority` is the canonical ready order (also the default), and
+  `hybrid` serves rows created in the last 48 hours by priority, then older
+  rows oldest first. With `--json`, a failed `gc ready` now writes its failure
+  envelope to stderr: its stdout is a JSON array and nothing else, as the
+  generated queries and the core pack's sweep scripts read it.
+  `TestGeneratedReadyReaderArgvIsAcceptedByGcReady` runs every ready read the
+  generator emits through the real `gc ready` flag surface and reader.
+  `GET /v0/city/{cityName}/work/ready` still takes only `oldest|newest`; for
+  `priority` and `hybrid`, `gc ready` answers with its in-process read.
+
 - **Adopting or restarting with a bd store bound to a loopback Dolt server
   gc does not run works.** A store `bd init --server --external` bound to a
   dolt sql-server on `127.0.0.1`/`localhost`/`::1` was classified as gc's own

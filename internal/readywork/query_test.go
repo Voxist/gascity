@@ -72,3 +72,90 @@ func TestReadRefusesANegativeLimitBeforeReadingAnyStore(t *testing.T) {
 		t.Fatalf("--limit 0 = %v, want every row (0 is unlimited)", got)
 	}
 }
+
+// TestReadAcceptsEverySortBDReadyTakes pins --sort to bd ready's vocabulary.
+// The generated routed tier reads `--sort priority` (its best-by-priority leg)
+// and `--sort hybrid` (its claim window), and on a federated city that read is
+// this reader: an order bd takes and this reader refuses fails every federated
+// probe that asks for it (vp-bzeg). newest is this reader's own addition.
+func TestReadAcceptsEverySortBDReadyTakes(t *testing.T) {
+	for _, order := range []string{SortPriority, SortHybrid, SortOldest, SortNewest} {
+		if err := (Query{Sort: order}).Validate(); err != nil {
+			t.Errorf("--sort %s: %v, want it accepted", order, err)
+		}
+	}
+	err := (Query{Sort: "newest-first"}).Validate()
+	if err == nil {
+		t.Fatal("--sort newest-first was accepted; a mistyped order must be refused, not served in some other order")
+	}
+	for _, order := range []string{SortPriority, SortHybrid, SortOldest, SortNewest} {
+		if !strings.Contains(err.Error(), order) {
+			t.Errorf("refusal %q does not name the accepted order %s", err, order)
+		}
+	}
+}
+
+// TestReadSortPriorityIsTheCanonicalOrder pins that bd's flag default and this
+// reader's default are one law spelled two ways: --sort priority serves the
+// canonical ready order (priority, created_at, id), bounded or not, and a
+// bounded read is still cut by the leg in that order.
+func TestReadSortPriorityIsTheCanonicalOrder(t *testing.T) {
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	rows := []beads.Bead{
+		readyRow("p3-old", 3, base),
+		readyRow("p1-new", 1, base.Add(2*time.Minute)),
+		readyRow("p1-old", 1, base.Add(time.Minute)),
+		readyRow("nil-priority", 0, base.Add(3*time.Minute), func(b *beads.Bead) { b.Priority = nil }),
+	}
+	plain := []Leg{testLeg("city", beads.NewMemStoreFrom(0, rows, nil))}
+	for _, limit := range []int{0, 2} {
+		want := readIDs(t, plain, Query{Limit: limit})
+		if got := readIDs(t, plain, Query{Sort: SortPriority, Limit: limit}); !slices.Equal(got, want) {
+			t.Errorf("--sort priority --limit %d = %v, want the default order %v", limit, got, want)
+		}
+	}
+	store := newNarrowingStore(rows...)
+	if _, err := Read([]Leg{testLeg("city", store)}, Query{Sort: SortPriority, Limit: 2}); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if calls := store.orderedCalls(); len(calls) != 1 || calls[0].order != beads.ReadyOrderCanonical {
+		t.Fatalf("--sort priority --limit 2 asked %+v, want one bounded read cut in the canonical order", calls)
+	}
+}
+
+// TestReadSortHybridServesBDsRecencySeam pins --sort hybrid to bd's SQL
+// rendering (sqlbuild.BuildReadyWorkOrder): rows created within the last 48h
+// first, by (priority, created_at, id); rows past the seam after them, strictly
+// (created_at, id). The routed claim window reads under it, so the merged
+// answer of a federated city must come out in the order the single-store bd
+// read serves. The rows are split across two legs, so the order is imposed on
+// the merged set, not inherited from one store. Margins stay a minute clear of
+// the seam so the case cannot flake on execution time.
+func TestReadSortHybridServesBDsRecencySeam(t *testing.T) {
+	now := time.Now().UTC()
+	nilPriority := func(b *beads.Bead) { b.Priority = nil }
+	city := beads.NewMemStoreFrom(0, []beads.Bead{
+		readyRow("aged-p1", 1, now.Add(-72*time.Hour)),
+		readyRow("fresh-p3", 3, now.Add(-30*time.Minute)),
+		readyRow("seam-aged", 0, now.Add(-48*time.Hour-time.Minute), nilPriority),
+	}, nil)
+	rig := beads.NewMemStoreFrom(0, []beads.Bead{
+		readyRow("aged-p2", 2, now.Add(-50*time.Hour)),
+		readyRow("fresh-p1", 1, now.Add(-time.Hour)),
+		readyRow("fresh-nil", 0, now.Add(-2*time.Hour), nilPriority),
+		readyRow("seam-fresh", 3, now.Add(-48*time.Hour+time.Minute)),
+	}, nil)
+	legs := []Leg{testLeg("city", city), testLeg("rig r", rig)}
+
+	// Fresh tier: priority first (a nil priority sorts as 2), then created_at
+	// ascending, so the p3 row a minute inside the seam precedes the half-hour
+	// old one. Aged tier: created_at ascending whatever the priority, so the p1
+	// row 72h old precedes the p2 row 50h old.
+	want := []string{"fresh-p1", "fresh-nil", "seam-fresh", "fresh-p3", "aged-p1", "aged-p2", "seam-aged"}
+	if got := readIDs(t, legs, Query{Sort: SortHybrid}); !slices.Equal(got, want) {
+		t.Fatalf("--sort hybrid = %v, want %v", got, want)
+	}
+	if got := readIDs(t, legs, Query{Sort: SortHybrid, Limit: 3}); !slices.Equal(got, want[:3]) {
+		t.Fatalf("--sort hybrid --limit 3 = %v, want the hybrid top 3 %v", got, want[:3])
+	}
+}
