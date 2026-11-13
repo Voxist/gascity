@@ -83,8 +83,9 @@ jobs:
         run: make test-ci-policy
       # deps.env LIBRARY BRIDGE POLICY: the network half of the bridge guard
       # (TestBDLibBridgePins holds the offline half). A wrong parent or a
-      # change the upstream PR does not carry fails; a PR that has merged or
-      # closed is a warning annotation telling the bridge owner to drop it.
+      # change the pinned upstream PR range does not carry fails; a PR that
+      # merged or closed, a PR head that moved past the pinned one, and a
+      # lookup that could not reach GitHub are warning annotations.
       - name: Beads library bridge
         env:
           GITHUB_TOKEN: ${{ github.token }}

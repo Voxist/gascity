@@ -365,6 +365,8 @@ func TestBDLibBridgePinsRefusesDrift(t *testing.T) {
 	bridged := map[string]string{
 		"BD_REPO": "Voxist/beads", "BD_LIB_REF": libRef,
 		"BD_LIB_BRIDGE_REF": bridgeRef, "BD_LIB_BRIDGE_UPSTREAM_PR": "gastownhall/beads#8412",
+		"BD_LIB_BRIDGE_UPSTREAM_BASE": "125c62063406d064d8392f3245920b47e9c81f85",
+		"BD_LIB_BRIDGE_UPSTREAM_HEAD": "4af8ad95e8e35907994c4bee62e27ee4b2371703",
 	}
 	with := func(key, value string) map[string]string {
 		out := map[string]string{}
@@ -379,7 +381,9 @@ func TestBDLibBridgePinsRefusesDrift(t *testing.T) {
 		return out
 	}
 	unbridged := with("BD_LIB_BRIDGE_REF", "")
-	delete(unbridged, "BD_LIB_BRIDGE_UPSTREAM_PR")
+	for _, key := range []string{"BD_LIB_BRIDGE_UPSTREAM_PR", "BD_LIB_BRIDGE_UPSTREAM_BASE", "BD_LIB_BRIDGE_UPSTREAM_HEAD"} {
+		delete(unbridged, key)
+	}
 
 	for _, tc := range []struct {
 		name  string
@@ -395,6 +399,8 @@ func TestBDLibBridgePinsRefusesDrift(t *testing.T) {
 		{name: "a bridge with no upstream PR", env: with("BD_LIB_BRIDGE_UPSTREAM_PR", ""), goMod: require + replace, goSum: sum, want: "BD_LIB_BRIDGE_UPSTREAM_PR"},
 		{name: "an upstream PR that is not gastownhall/beads", env: with("BD_LIB_BRIDGE_UPSTREAM_PR", "Voxist/beads#80"), goMod: require + replace, goSum: sum, want: "BD_LIB_BRIDGE_UPSTREAM_PR"},
 		{name: "a short bridge ref", env: with("BD_LIB_BRIDGE_REF", "872c78ec2"), goMod: require + replace, goSum: sum, want: "40-char"},
+		{name: "a bridge with no pinned PR head", env: with("BD_LIB_BRIDGE_UPSTREAM_HEAD", ""), goMod: require + replace, goSum: sum, want: "BD_LIB_BRIDGE_UPSTREAM_HEAD"},
+		{name: "a bridge with no pinned PR base", env: with("BD_LIB_BRIDGE_UPSTREAM_BASE", "125c62063"), goMod: require + replace, goSum: sum, want: "BD_LIB_BRIDGE_UPSTREAM_BASE"},
 		{name: "a bridge with no lib ref under it", env: with("BD_LIB_REF", ""), goMod: require + replace, goSum: sum, want: "BD_LIB_REF"},
 		{
 			name: "a replace at another commit", env: bridged, goSum: sum, want: "BD_LIB_BRIDGE_REF",
@@ -467,7 +473,7 @@ func checkBDLibBridgePins(t bridgeReporter, env map[string]string, goMod, goSum 
 		}
 	}
 
-	if bridgeRef == "" && bridgePR == "" {
+	if bridgeRef == "" && bridgePR == "" && env["BD_LIB_BRIDGE_UPSTREAM_BASE"] == "" && env["BD_LIB_BRIDGE_UPSTREAM_HEAD"] == "" {
 		for _, line := range replaces {
 			t.Errorf("go.mod replaces the beads library (%q) but no bridge is declared: set BD_LIB_BRIDGE_REF and BD_LIB_BRIDGE_UPSTREAM_PR in deps.env (LIBRARY BRIDGE POLICY), or drop the replace", line)
 		}
@@ -475,6 +481,11 @@ func checkBDLibBridgePins(t bridgeReporter, env map[string]string, goMod, goSum 
 	}
 	if !commitRE.MatchString(bridgeRef) {
 		t.Errorf("deps.env BD_LIB_BRIDGE_REF = %q, want the full 40-char %s commit SHA the bridge builds from", bridgeRef, env["BD_REPO"])
+	}
+	for _, key := range []string{"BD_LIB_BRIDGE_UPSTREAM_BASE", "BD_LIB_BRIDGE_UPSTREAM_HEAD"} {
+		if !commitRE.MatchString(env[key]) {
+			t.Errorf("deps.env %s = %q, want the full 40-char gastownhall/beads SHA: the bridge is checked against the pinned PR range BASE..HEAD, never the live PR", key, env[key])
+		}
 	}
 	if !regexp.MustCompile(`^gastownhall/beads#[1-9][0-9]*$`).MatchString(bridgePR) {
 		t.Errorf("deps.env BD_LIB_BRIDGE_UPSTREAM_PR = %q, want the open gastownhall/beads#<n> PR the bridge carries: a bridge exists only while that PR is open", bridgePR)
