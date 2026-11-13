@@ -315,22 +315,82 @@ jobs:
       - name: Run make test-mac
         run: make test-mac
 
+  # Off upstream only: compile the cmd/gc test binary once for all 12 process
+  # shards (ga-05vt3.12). The hosted macos-15 runners the fork's shards get
+  # have 3 cores and 7 GB, and compiling cmd/gc's test package peaks at
+  # 10-12 GB, so every shard swapped through its own 38-42 minute compile and
+  # the nightly lost all 12 to the 50-minute job cap before a test ran.
+  # macos-15-xlarge (a larger GitHub-hosted arm64 runner, about 14 GB)
+  # compiles it here through the shards' own make target and script, so the
+  # environment, tags and flags are theirs, and each shard downloads the
+  # binary instead of compiling. Upstream compiles on Blacksmith in minutes
+  # and never runs this job.
+  mac-cmd-gc-process-build:
+    name: Mac / cmd-gc process / build
+    needs:
+      - runner-policy
+      - gate
+    if: needs.gate.outputs.run_cmd_gc_process == 'true' && github.repository != 'gastownhall/gascity'
+    runs-on: macos-15-xlarge
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ inputs.head_repo || github.repository }}
+          ref: ${{ inputs.head_sha || github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-gascity-macos
+        with:
+          dolt-version: ${{ env.DOLT_VERSION }}
+          bd-version: ${{ env.BD_VERSION }}
+          install-claude-cli: "false"
+      - name: Compile the cmd/gc test binary
+        run: |
+          set -euo pipefail
+          sysctl -n hw.ncpu hw.memsize | paste -sd' ' - | awk '{printf "runner: %d cores, %.1f GiB\n", $1, $2 / 1073741824}'
+          # time -l reports the peak resident set of the largest single
+          # process in the tree it waits on: here cmd/gc's compile.
+          /usr/bin/time -l -o "$RUNNER_TEMP/cmd-gc-build.rusage" \
+            make test-cmd-gc-process-build CMD_GC_PROCESS_BINARY="$RUNNER_TEMP/cmd-gc-test/gc.test" \
+            EXTRA_TEST_ENV="GO_TEST_SHARD_PROGRESS=1 GO_TEST_SHARD_PROGRESS_INTERVAL=60" || status=$?
+          cat "$RUNNER_TEMP/cmd-gc-build.rusage"
+          wall="$(awk '/ real / {print $1}' "$RUNNER_TEMP/cmd-gc-build.rusage")"
+          peak="$(awk '/maximum resident set size/ {printf "%.2f", $1 / 1073741824}' "$RUNNER_TEMP/cmd-gc-build.rusage")"
+          echo "cmd/gc test binary build: wall ${wall}s, peak RSS ${peak} GiB"
+          {
+            echo "## cmd/gc test binary build"
+            echo
+            echo "Wall ${wall}s, peak RSS ${peak} GiB, binary $(du -h "$RUNNER_TEMP/cmd-gc-test/gc.test" 2>/dev/null | cut -f1)"
+          } >>"$GITHUB_STEP_SUMMARY"
+          exit "${status:-0}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cmd-gc-test-binary
+          path: ${{ runner.temp }}/cmd-gc-test/gc.test
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
   # cmd/gc unit/process tests — sharded 12-way so each shard comfortably fits
   # the per-shard timeout even on slower Mac ARM runners. Mirrors the Linux
   # cmd-gc-process matrix in ci.yml. cmd/gc is excluded from mac-unit's
   # make test-mac sweep; coverage is preserved here across all 12 shards.
+  # Off upstream a shard runs the binary mac-cmd-gc-process-build compiled,
+  # so it waits for that job; upstream that job is skipped, and !cancelled()
+  # keeps the skip from skipping the shards with it.
   mac-cmd-gc-process:
     name: Mac / cmd-gc process / shard ${{ matrix.shard }} of 12
     needs:
       - runner-policy
       - gate
-    if: needs.gate.outputs.run_cmd_gc_process == 'true'
+      - mac-cmd-gc-process-build
+    if: ${{ !cancelled() && needs.gate.outputs.run_cmd_gc_process == 'true' && (github.repository == 'gastownhall/gascity' || needs.mac-cmd-gc-process-build.result == 'success') }}
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     # A shard's tests run in about a minute; the rest is setup plus a cold
     # compile of the cmd/gc test binary on a 3-core hosted runner, which
     # passed 20 minutes once the 2026-10-14 resync grew cmd/gc (ga-s69mk.2).
-    # Off upstream (no Blacksmith macOS pool) a shard needs 20-30+ minutes,
-    # so it gets 50 there (ga-05vt3.12).
+    # Off upstream (no Blacksmith macOS pool) a shard runs the prebuilt
+    # binary and keeps the 50 it got while it still compiled (ga-05vt3.12).
     # A soak (go_test_count above 1) runs each shard's tests that many times.
     timeout-minutes: ${{ (inputs.go_test_count || '1') != '1' && 90 || (github.repository == 'gastownhall/gascity' && 30 || 50) }}
     strategy:
@@ -348,6 +408,16 @@ jobs:
           dolt-version: ${{ env.DOLT_VERSION }}
           bd-version: ${{ env.BD_VERSION }}
           install-claude-cli: "false"
+      - name: Download the cmd/gc test binary
+        if: github.repository != 'gastownhall/gascity'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: cmd-gc-test-binary
+          path: ${{ runner.temp }}/cmd-gc-test
+      # Artifacts do not keep mode bits.
+      - name: Mark the cmd/gc test binary executable
+        if: github.repository != 'gastownhall/gascity'
+        run: chmod +x "$RUNNER_TEMP/cmd-gc-test/gc.test"
       - name: Run cmd/gc process shard
         env:
           GO_TEST_COUNT_INPUT: ${{ inputs.go_test_count || '1' }}
@@ -366,21 +436,23 @@ jobs:
           if [ "$GO_TEST_COUNT_INPUT" != 1 ]; then timeout=80m; fi
           # Off upstream every shard of the 2026-11-11 nightly hit the job cap
           # still in `go test -list`, before go's timeout starts, so its log
-          # held only the make line (ga-05vt3.12). There the shard times its
-          # compile, discovery and run apart, streams each test with -v,
-          # prints its live process tree every 2 minutes, and at 38m sends
-          # SIGQUIT to any live test binary, so the goroutine dump lands
-          # before the job is cancelled. A soak keeps its full budget.
-          progress_env=""
+          # held only the make line (ga-05vt3.12). There the shard runs the
+          # binary mac-cmd-gc-process-build compiled instead of compiling its
+          # own, times its discovery and run apart, streams each test with
+          # -v, prints its live process tree every 2 minutes, and at 38m
+          # sends SIGQUIT to any live test binary, so the goroutine dump
+          # lands before the job is cancelled. A soak keeps its full budget.
+          shard_env=""
           if [ "$GITHUB_REPOSITORY" != "gastownhall/gascity" ]; then
-            progress_env="GO_TEST_SHARD_PROGRESS=1 GO_TEST_SHARD_PROGRESS_INTERVAL=120"
+            shard_env="GO_TEST_SHARD_PREBUILT=$RUNNER_TEMP/cmd-gc-test/gc.test"
+            shard_env="$shard_env GO_TEST_SHARD_PROGRESS=1 GO_TEST_SHARD_PROGRESS_INTERVAL=120"
             if [ "$GO_TEST_COUNT_INPUT" = 1 ]; then
-              progress_env="$progress_env GO_TEST_SHARD_PROGRESS_QUIT_AFTER=38m"
+              shard_env="$shard_env GO_TEST_SHARD_PROGRESS_QUIT_AFTER=38m"
             fi
           fi
           make test-cmd-gc-process-shard CMD_GC_PROCESS_SHARD=${{ matrix.shard }} CMD_GC_PROCESS_TOTAL=12 \
             CMD_GC_PROCESS_COUNT="$GO_TEST_COUNT_INPUT" CMD_GC_PROCESS_TIMEOUT="$timeout" \
-            EXTRA_TEST_ENV="$progress_env"
+            EXTRA_TEST_ENV="$shard_env"
       - name: Run product metrics testhook profile
         if: ${{ matrix.shard == 6 }}
         run: make test-productmetrics-testhook

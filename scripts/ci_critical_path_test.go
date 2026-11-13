@@ -486,7 +486,8 @@ func TestMacRegressionTierJobsGateOnCentralizedOutputs(t *testing.T) {
 	}{
 		{"mac-quality", "needs.gate.outputs.run_smoke == 'true'"},
 		{"mac-unit", "needs.gate.outputs.run_smoke == 'true'"},
-		{"mac-cmd-gc-process", "needs.gate.outputs.run_cmd_gc_process == 'true'"},
+		// Also waits on the fork-only build job; TestMacCmdGCProcessShardsRunWhenTheirBinaryIsReady.
+		{"mac-cmd-gc-process", "${{ !cancelled() && needs.gate.outputs.run_cmd_gc_process == 'true' && (github.repository == 'gastownhall/gascity' || needs.mac-cmd-gc-process-build.result == 'success') }}"},
 		{"mac-acceptance", "needs.gate.outputs.run_smoke == 'true'"},
 		{"mac-cover", "needs.gate.outputs.run_full == 'true'"},
 		{"mac-integration-packages", "needs.gate.outputs.run_full == 'true'"},
