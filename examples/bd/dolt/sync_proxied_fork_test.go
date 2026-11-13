@@ -61,6 +61,8 @@ func TestSyncProxiedFetchFailureIsNotAColdWall(t *testing.T) {
 	out, err := runProxiedSync(t, binDir, cityPath, []string{
 		"FAKE_FETCH_FAIL_DBS=hq",
 		"GC_DOLT_CONFIG_FILE=" + cfg,
+		// The fetch retries (vp-q3kp); do not wait out the production backoff.
+		"GC_DOLT_SYNC_FETCH_RETRY_DELAY_SECS=0",
 	})
 	if err == nil {
 		t.Fatalf("proxied sync succeeded despite a failed fetch:\n%s", out)

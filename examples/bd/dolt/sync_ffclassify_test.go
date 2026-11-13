@@ -62,6 +62,9 @@ func runFFSyncRaw(t *testing.T, binDir string, extraEnv []string, args ...string
 		fmt.Sprintf("GC_DOLT_PORT=%d", port),
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
+		// The production fetch-retry backoff is seconds (vp-q3kp); retries
+		// here must not wait it out. extraEnv can still override it.
+		"GC_DOLT_SYNC_FETCH_RETRY_DELAY_SECS=0",
 	)
 	env = append(env, extraEnv...)
 
@@ -319,7 +322,10 @@ func TestSyncFetchTimeoutSkipsNeverPushes(t *testing.T) {
 // env var entirely, exercising the documented-default fallback.
 func runFFSyncWithConfig(t *testing.T, binDir string, readTimeoutMillis int, args ...string) string {
 	t.Helper()
-	var extraEnv []string
+	// One fetch attempt: these tests pin how a single failed attempt is
+	// classified. TestSyncColdOpenWallReportedAfterBudget covers the wall
+	// under a multi-attempt budget (vp-q3kp).
+	extraEnv := []string{"GC_DOLT_SYNC_FETCH_ATTEMPTS=1"}
 	if readTimeoutMillis > 0 {
 		cfgPath := filepath.Join(t.TempDir(), "dolt-config.yaml")
 		cfg := fmt.Sprintf("listener:\n  read_timeout_millis: %d\n", readTimeoutMillis)

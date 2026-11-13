@@ -69,6 +69,14 @@
 #     (default: 3)    — --drain only. How many push+verify rounds a single store
 #                     gets before it is declared undrainable and reported under
 #                     'BACKLOG NOT DRAINED:'. See ADR-0064 D1.
+#   GC_DOLT_SYNC_FETCH_ATTEMPTS
+#     (default: 5)    — tries for the read-only pre-push fetch. The fetch, not
+#                     the push, is what loses to a short server read timeout on
+#                     a store that is cold for the current server lifetime; it
+#                     is idempotent and its remote cache warms across attempts,
+#                     so retrying converges (vp-q3kp).
+#   GC_DOLT_SYNC_FETCH_RETRY_DELAY_SECS
+#     (default: 2)    — backoff between fetch attempts. 0 means retry at once.
 set -e
 
 dry_run=false
@@ -121,11 +129,13 @@ while [ $# -gt 0 ]; do
       echo "  exclude it from sync (reported as 'skipped (.no-sync)')."
       echo ""
       echo "Environment:"
-      echo "  GC_DOLT_REMOTE_<DB>              Select which remote to push to when a database has several"
-      echo "                                   (also the only way to push to a non-file:// remote)"
-      echo "  GC_DOLT_SYNC_FETCH_TIMEOUT_SECS  pre-push fetch bound (default 60)"
-      echo "  GC_DOLT_SYNC_PUSH_TIMEOUT_SECS   push bound (default 1800)"
-      echo "  GC_DOLT_SYNC_DRAIN_ATTEMPTS      --drain push+verify rounds (default 3)"
+      echo "  GC_DOLT_REMOTE_<DB>                  Select which remote to push to when a database has several"
+      echo "                                       (also the only way to push to a non-file:// remote)"
+      echo "  GC_DOLT_SYNC_FETCH_TIMEOUT_SECS      pre-push fetch bound (default 60)"
+      echo "  GC_DOLT_SYNC_FETCH_ATTEMPTS          pre-push fetch tries (default 5)"
+      echo "  GC_DOLT_SYNC_FETCH_RETRY_DELAY_SECS  backoff between tries (default 2)"
+      echo "  GC_DOLT_SYNC_PUSH_TIMEOUT_SECS       push bound (default 1800)"
+      echo "  GC_DOLT_SYNC_DRAIN_ATTEMPTS          --drain push+verify rounds (default 3)"
       exit 0
       ;;
     *) echo "gc dolt sync: unknown flag: $1" >&2; exit 1 ;;
@@ -215,6 +225,58 @@ if [ "$drain_attempts_valid" != true ]; then
     "$drain_attempts" >&2
   exit 2
 fi
+
+# Attempt budget for the pre-push fetch (vp-q3kp). Defaults to 5.
+#
+# The cost is cold-vs-warm, not delta size. A store's first remote operation in
+# a sql-server lifetime must spool the remote's blobs (the git blobstore has no
+# server-side range read); every later operation on that store in the same
+# lifetime is sub-second. On a short server read timeout the cold operation is
+# what dies, and because the FETCH runs first, the push is never attempted. A
+# single-attempt fetch turns "this store is cold" into "skipped (NOT pushed)"
+# for the whole server lifetime.
+#
+# A retry is correct here and would not be for a push: the fetch is read-only
+# and idempotent, so a torn fetch loses nothing, and partial spool progress is
+# retained across attempts, so retrying pays the cold cost in installments that
+# each fit inside the deadline.
+#
+# Measured from cold on a 9-store fleet 2026-08-04, read_timeout_millis=15000
+# (dolt 2.2.3, git+ssh remotes), attempts to converge vs git-remote-cache size:
+#
+#   vg 1 (5.7M) · vl 1 (12M) · vw 1 (57M) · vm 2 (342M) · vr 2 (465M)
+#   va 3 (871M) · vp 4 (799M) · hq NEVER (2.1G)
+#
+# 5 covers every store that converges, with one attempt of margin over the
+# worst. It deliberately does not chase hq, which advanced 4 KB per attempt
+# against a 2.24 GB cache over 12 attempts: no budget converges it, and such a
+# store is reported as the cold-open wall once the budget is spent (vp-9v6f9).
+#
+# Same validation as the bounds above: a zero or non-numeric budget fails loud
+# rather than silently meaning "once" or "never".
+fetch_attempts="${GC_DOLT_SYNC_FETCH_ATTEMPTS-5}"
+case "$fetch_attempts" in
+  ''|*[!0-9]*) fetch_attempts_valid=false ;;
+  *[1-9]*)     fetch_attempts_valid=true ;;
+  *)           fetch_attempts_valid=false ;;
+esac
+if [ "$fetch_attempts_valid" != true ]; then
+  printf 'gc dolt sync: invalid GC_DOLT_SYNC_FETCH_ATTEMPTS=%s (must be a positive integer)\n' \
+    "$fetch_attempts" >&2
+  exit 2
+fi
+
+# Backoff between fetch attempts (seconds). Defaults to 2. Unlike the bounds
+# above, 0 is valid and means "retry at once": it is a delay, not a ceiling, so
+# zero carries no unbounded-run hazard.
+fetch_retry_delay="${GC_DOLT_SYNC_FETCH_RETRY_DELAY_SECS-2}"
+case "$fetch_retry_delay" in
+  ''|*[!0-9]*)
+    printf 'gc dolt sync: invalid GC_DOLT_SYNC_FETCH_RETRY_DELAY_SECS=%s (must be a non-negative integer)\n' \
+      "$fetch_retry_delay" >&2
+    exit 2
+    ;;
+esac
 
 if [ "$proxied" = true ] && [ "$do_gc" = true ]; then
   echo "gc dolt sync: --gc is not supported on bd-owned proxied scopes; purge each scope with 'gc bd purge' instead" >&2
@@ -695,11 +757,37 @@ sync_database_sql() {
       last_fail_reason="cannot create temp file for fetch diagnostics"
       return 1
     }
-    fetch_rc=0
-    fetch_start=$(date +%s)
-    db_sql "$name" "CALL DOLT_FETCH('$remote_name', '$remote_branch')" "$fetch_timeout" \
-      >/dev/null 2>"$fetch_err_tmp" || fetch_rc=$?
-    fetch_elapsed=$(( $(date +%s) - fetch_start ))
+    # Retry the fetch while the failure is transport-shaped (vp-q3kp). Two
+    # outcomes end the loop early:
+    #   * a first-push signal is not a failure, just a branch the remote does
+    #     not have yet; a retry would spend round trips to learn the same thing
+    #   * exit 124 means the client bound already burned fetch_timeout seconds;
+    #     another attempt costs the same again and would starve the stores
+    #     queued behind this one inside the order's own deadline
+    # Everything else retries, including "Blob not found": it recurs across the
+    # fleet's dolt.log on days when nothing is damaged (456 occurrences, 17
+    # distinct hashes over 10+ days) and those attempts fail in seconds, so a
+    # terminal branch would turn a transient into a guaranteed per-cycle skip.
+    # A wall-shaped attempt retries too; the cold-open-wall classification
+    # below runs on the last attempt, once the budget is spent.
+    fetch_try=0
+    while :; do
+      fetch_try=$((fetch_try + 1))
+      fetch_rc=0
+      : > "$fetch_err_tmp"
+      # Elapsed is per attempt: the wall classification reads the last one.
+      fetch_start=$(date +%s)
+      db_sql "$name" "CALL DOLT_FETCH('$remote_name', '$remote_branch')" "$fetch_timeout" \
+        >/dev/null 2>"$fetch_err_tmp" || fetch_rc=$?
+      fetch_elapsed=$(( $(date +%s) - fetch_start ))
+      [ "$fetch_rc" -eq 0 ] && break
+      grep -q "no branches found in remote" "$fetch_err_tmp" 2>/dev/null && break
+      grep -q "invalid ref spec" "$fetch_err_tmp" 2>/dev/null && break
+      [ "$fetch_rc" -eq 124 ] && break
+      [ "$fetch_try" -ge "$fetch_attempts" ] && break
+      echo "  $name: fetch attempt $fetch_try/$fetch_attempts failed (exit $fetch_rc) after ${fetch_elapsed}s — retrying" >&2
+      [ "$fetch_retry_delay" -gt 0 ] && sleep "$fetch_retry_delay"
+    done
     if [ "$fetch_rc" -ne 0 ] && { grep -q "no branches found in remote" "$fetch_err_tmp" 2>/dev/null || grep -q "invalid ref spec" "$fetch_err_tmp" 2>/dev/null; }; then
       # The remote has no such branch: an empty remote ("no branches found in
       # remote") or a brand-new branch on a populated remote ("invalid ref
@@ -719,11 +807,17 @@ sync_database_sql() {
       # elapsed-time signature is the measured physics regardless of which
       # layer reports the kill. A store whose first-in-lifetime fetch must
       # spool its whole remote blobset (no server-side range read) is killed
-      # by the listener's hard per-query read_timeout_millis before the spool
-      # can persist — not a transient blip, and no retry budget converges it
-      # (every attempt dies at the same wall). Threshold is 90% of the live
-      # deadline: comfortably above fast-failure noise (e.g. a corrupt remote,
-      # vp-catlj) and below the deadline itself.
+      # by the listener's hard per-query read_timeout_millis. Threshold is 90%
+      # of the live deadline: comfortably above fast-failure noise (e.g. a
+      # corrupt remote, vp-catlj) and below the deadline itself.
+      #
+      # This runs post-budget (vp-q3kp): a wall-shaped attempt was retried like
+      # any transport failure, because partial spool progress is kept across
+      # attempts and most cold stores converge within the budget. A
+      # wall-shaped LAST attempt means the budget is spent and the store is
+      # not warming — the hq signature (dead flat at the wall, ~4 KB of
+      # progress per attempt) — so it is reported terminally rather than
+      # implying a bigger budget would help.
       #
       # A proxied scope's listener is bd's, which gc's dolt-config.yaml does
       # not describe, and its elapsed time includes the gc/bd start-up, so the
@@ -732,12 +826,14 @@ sync_database_sql() {
       [ "$proxied" = true ] || deadline=$(listener_read_timeout_secs)
       if [ -n "$deadline" ] && [ "$fetch_elapsed" -ge $(( deadline * 9 / 10 )) ]; then
         rm -f "$fetch_err_tmp"
-        echo "  $name: COLD-OPEN WALL — fetch killed at ${fetch_elapsed}s (listener deadline ${deadline}s); NO off-box copy this server lifetime — skipped (NOT pushed)" >&2
+        echo "  $name: COLD-OPEN WALL — fetch killed at ${fetch_elapsed}s (listener deadline ${deadline}s, $fetch_try attempt(s)); NO off-box copy this server lifetime — skipped (NOT pushed)" >&2
         cold_wall_stores="$cold_wall_stores $name"
         last_fail_reason="cold-open wall: fetch killed at ${fetch_elapsed}s"
         return 1
       fi
-      echo "  $name: fetch failed (exit $fetch_rc) after ${fetch_elapsed}s${deadline:+ (listener deadline ${deadline}s)} — skipped (NOT pushed)" >&2
+      # Report the attempts spent: "failed once" and "failed every time the
+      # budget allowed" are different operator signals.
+      echo "  $name: fetch failed (exit $fetch_rc) after $fetch_try attempts, last after ${fetch_elapsed}s${deadline:+ (listener deadline ${deadline}s)} — skipped (NOT pushed)" >&2
       if [ -s "$fetch_err_tmp" ]; then
         while IFS= read -r line || [ -n "$line" ]; do
           printf '  %s: %s\n' "$name" "$line" >&2

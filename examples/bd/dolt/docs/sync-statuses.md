@@ -11,13 +11,14 @@ This is the status vocabulary an operator or patrol sees on stderr.
 | `diverged (<a> ahead / <b> behind)` | Local and remote have both moved — manual reconcile needed. | No — needs a human/agent decision. |
 | `first-push` | Remote branch does not exist yet (empty remote, or a brand-new branch); the push creates it. | — |
 | `fetch timed out after <n>s` | The wall-clock fetch bound (`GC_DOLT_SYNC_FETCH_TIMEOUT_SECS`) fired. | Usually — raise the bound or retry. |
-| `fetch failed (exit <n>) after <elapsed>s (listener deadline <n>s)` | The fetch failed for a reason unrelated to the listener deadline (e.g. a corrupt remote archive). | Depends on the cause — read the replayed dolt stderr. |
+| `fetch attempt <i>/<n> failed (exit <n>) after <elapsed>s — retrying` | One fetch attempt failed and the budget (`GC_DOLT_SYNC_FETCH_ATTEMPTS`, default 5) allows another; the next try starts after `GC_DOLT_SYNC_FETCH_RETRY_DELAY_SECS` (default 2). A first-push signal and a timeout are not retried. | Yes — a cold store warms across attempts (vp-q3kp). |
+| `fetch failed (exit <n>) after <i> attempts, last after <elapsed>s (listener deadline <n>s)` | Every attempt the budget allowed failed, the last for a reason unrelated to the listener deadline (e.g. a corrupt remote archive). | Depends on the cause — read the replayed dolt stderr of the last attempt. |
 | `COLD-OPEN WALL` | See below. | **No.** |
 
 ## `COLD-OPEN WALL`
 
 ```
-<db>: COLD-OPEN WALL — fetch killed at <elapsed>s (listener deadline <n>s);
+<db>: COLD-OPEN WALL — fetch killed at <elapsed>s (listener deadline <n>s, <i> attempt(s));
 NO off-box copy this server lifetime — skipped (NOT pushed)
 ```
 
@@ -35,9 +36,12 @@ not by matching an error string: the exact text at the wall is not reliably
 recorded, but the elapsed-time signature is the measured physics regardless
 of which layer reports the kill (vp-9v6f9).
 
-**It is not transient.** Every attempt in the affected server lifetime dies
-at the same wall — no retry budget converges it. Retrying wastes a fetch
-attempt and reports the same status.
+**It is reported after the retry budget.** A fetch that dies at the wall is
+retried like any other failure, because partial spool progress is kept
+across attempts and most cold stores converge within a few tries (vp-q3kp).
+The status appears only when the last attempt of a spent budget still dies
+at the wall: the store is not warming, and in this server lifetime no budget
+converges it.
 
 **The fix is not in this script.** A durable fix (an automatic warming pass
 that runs its first fetch in a context that tolerates the cold-open cost)
