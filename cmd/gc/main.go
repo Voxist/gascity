@@ -254,7 +254,7 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 	lifecycle.attemptFinalOutcome(resolveProductMetricsFinalOutcome(executedCommand, classification))
 	if executeErr != nil {
 		code := commandExitCode(executeErr)
-		failureOut := jsonFailureOutput(executedCommand, stdout, stderr)
+		failureOut := jsonFailureOutput(executedCommand, stdout)
 		if bufferJSONExecution {
 			if len(bytes.TrimSpace(jsonStdout.Bytes())) > 0 {
 				if copyErr := flushBufferedJSON(stdout, stderr, &jsonStdout); copyErr != nil {

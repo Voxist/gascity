@@ -1536,32 +1536,52 @@ func sessionCloseConfigLoads(t *testing.T, rigNames []string) int64 {
 	return loadCityConfigCalls.Load() - before
 }
 
-// TestReadyFailureKeepsStdoutEmpty pins `gc ready`'s stdout contract: a JSON
-// array and nothing else. A failed read leaves stdout empty and exits
-// non-zero, as `bd ready` does, with the diagnostic on stderr (vp-bzeg).
+// TestReadyFailureMatchesBDReadysFailureShape pins `gc ready`'s failure to
+// `bd ready`'s: stdout empty, exit non-zero, and one diagnostic line on stderr
+// naming the cause, with --json too (vp-bzeg).
 //
-// The generated work queries capture the reader's stdout as the answer. Their
-// `|| exit` clause discards a failed capture today, but scripts that read
-// `gc ready` directly (the core pack's spawn-storm and human-gate sweeps) and
-// the stand-in readers the generator tests run all assume an empty stdout on
-// failure. The shared --json failure envelope on stdout is an object where
-// every reader expects an array, so for this command it goes to stderr.
-func TestReadyFailureKeepsStdoutEmpty(t *testing.T) {
-	t.Setenv("GC_HOME", t.TempDir())
-	t.Chdir(t.TempDir())
+// The generated work queries capture the reader's stdout as the answer, and
+// scripts that read `gc ready` directly (the core pack's spawn-storm,
+// human-gate and orphan sweeps) and the stand-in readers the generator tests
+// run all assume an empty stdout on failure. Those scripts also capture
+// stderr whole as the reason they report, so the shared --json failure
+// envelope is not written at all: on stdout it is an object where every reader
+// expects an array, and on stderr it repeats the diagnostic as JSON.
+//
+// A usage error cobra raises before the command runs (an extra argument) is
+// already named on stderr by gc's usage printer, so it too carries no envelope.
+func TestReadyFailureMatchesBDReadysFailureShape(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		// want is the start of stderr; oneLine requires nothing after it.
+		want    string
+		oneLine bool
+	}{
+		{name: "refused query", args: []string{"ready", "--json", "--sort", "newest-first"}, want: `gc ready: unknown --sort "newest-first"`, oneLine: true},
+		{name: "extra argument", args: []string{"ready", "extra", "--json"}, want: `gc: unknown command "extra" for "gc ready"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_HOME", t.TempDir())
+			t.Chdir(t.TempDir())
 
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"ready", "--json", "--sort", "newest-first"}, &stdout, &stderr)
-	if code == 0 {
-		t.Fatalf("gc ready --sort newest-first exited 0; stdout=%q stderr=%q", stdout.String(), stderr.String())
-	}
-	if stdout.Len() != 0 {
-		t.Fatalf("a failed gc ready wrote %q to stdout, want nothing: a reader that captures stdout as the answer would serve it", stdout.String())
-	}
-	if !strings.Contains(stderr.String(), `unknown --sort "newest-first"`) {
-		t.Fatalf("stderr = %q, want the refusal naming the unknown order", stderr.String())
-	}
-	if !strings.Contains(stderr.String(), `"ok":false`) {
-		t.Fatalf("stderr = %q, want the failure envelope there instead of on stdout", stderr.String())
+			var stdout, stderr bytes.Buffer
+			code := run(tc.args, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("gc %v exited 0; stdout=%q stderr=%q", tc.args, stdout.String(), stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("a failed gc ready wrote %q to stdout, want nothing: a reader that captures stdout as the answer would serve it", stdout.String())
+			}
+			if !strings.HasPrefix(stderr.String(), tc.want) {
+				t.Fatalf("stderr = %q, want it to start %q", stderr.String(), tc.want)
+			}
+			if strings.Contains(stderr.String(), `"ok":false`) {
+				t.Fatalf("stderr = %q carries the --json failure envelope; a script reporting stderr as its reason would repeat the diagnostic", stderr.String())
+			}
+			if lines := strings.Split(strings.TrimSpace(stderr.String()), "\n"); tc.oneLine && len(lines) != 1 {
+				t.Fatalf("stderr = %q, want exactly one diagnostic line", stderr.String())
+			}
+		})
 	}
 }
