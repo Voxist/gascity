@@ -6,3 +6,14 @@ exec = "gc dolt sync"
 # Dolt-server work: never dispatched for a scope on another backend (http,
 # postgres, doltlite); gc reports it there as inapplicable, not failed.
 requires_backend = ["dolt"]
+# 600s, not the 300s exec default (vp-q3kp). The pre-push fetch retries
+# (GC_DOLT_SYNC_FETCH_ATTEMPTS, default 5) because on a store that is cold for
+# the current sql-server lifetime the fetch, not the push, is what loses to a
+# short server read timeout. Every store is cold after a server restart, so a
+# cycle that lands just after one pays that cost for all of them, and the run
+# is sequential across databases: at 300s a few slow stores would exhaust the
+# deadline and the databases later in the scan would be killed before they
+# were attempted, which the emitted event cannot tell apart from a clean run.
+# Measured 2026-08-04: a 9-store cycle took 96-201s with no retries; warm
+# fetches take ~2s, so the retry budget costs little once stores are warm.
+timeout = "600s"
