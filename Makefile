@@ -892,6 +892,11 @@ test-pack-registry-live:
 	$(TEST_ENV) CGO_ENABLED=0 GC_TEST_GASCITY_PACKS_REGISTRY="$${GC_TEST_GASCITY_PACKS_REGISTRY}" go test ./cmd/gc -run '^TestPackRegistryLiveGascityPacksCatalog$$' -count=1
 	$(TEST_ENV) CGO_ENABLED=0 GC_TEST_GASCITY_PACKS_REGISTRY="$${GC_TEST_GASCITY_PACKS_REGISTRY}" go test -tags acceptance_a -timeout 10m ./test/acceptance -run '^TestPackRegistryLiveImportsEveryCatalogPack$$' -count=1
 
+## check-bd-lib-bridge: verify deps.env's beads library bridge against GitHub (parent, diff, upstream PR still open)
+.PHONY: check-bd-lib-bridge
+check-bd-lib-bridge:
+	scripts/check-bd-lib-bridge
+
 ## check-embedded-pins: verify the bundled pack pin and bd/dolt pins are the latest releases
 .PHONY: check-embedded-pins
 check-embedded-pins:

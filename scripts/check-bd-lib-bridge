@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""Check deps.env's temporary beads library bridge against GitHub.
+
+deps.env's LIBRARY BRIDGE POLICY lets gc link beads code upstream has not
+merged only through a bridge: a BD_REPO commit (BD_LIB_BRIDGE_REF) that sits
+directly on BD_LIB_REF and carries exactly the open gastownhall/beads PR
+BD_LIB_BRIDGE_UPSTREAM_PR. scripts/bd_version_pin_test.go
+(TestBDLibBridgePins) checks the go.mod/go.sum half offline. This script
+checks the half that needs the network:
+
+  parent  The bridge commit has exactly one parent, and it is BD_LIB_REF.
+  diff    Every line the bridge adds or removes is a line the PR adds or
+          removes in the same file, and every non-test file the PR changes the
+          bridge changes identically. A test hunk the PR carries may be absent
+          (it can touch a test the older base does not have), but nothing may
+          be present that the PR does not carry: that would be a fork delta.
+  open    The PR is still open. Once it merges the bridge must be dropped:
+          repin BD_LIB_REF onto an upstream commit carrying it.
+
+With no bridge declared it checks nothing and exits 0; the offline test owns
+"no undeclared replace".
+
+--bridge-parents, --bridge-diff, --pr-diff and --pr-state replace the network
+lookups (offline tests).
+"""
+
+from __future__ import annotations
+
+import argparse
+from collections import Counter
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import urllib.request
+
+UPSTREAM_PR_RE = re.compile(r"^(gastownhall/beads)#([1-9][0-9]*)$")
+COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--repo-root", default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--bridge-parents", help="space-separated parent SHAs of the bridge commit (skips the fetch)")
+    parser.add_argument("--bridge-diff", help="file holding `git diff BD_LIB_REF BD_LIB_BRIDGE_REF` (skips the fetch)")
+    parser.add_argument("--pr-diff", help="file holding the upstream PR's diff (skips the download)")
+    parser.add_argument("--pr-state", help="the PR's state: open, closed or merged (skips the API lookup)")
+    return parser.parse_args()
+
+
+def read_deps_env(root: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in (root / "deps.env").read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+
+def http_get(url: str, accept: str) -> bytes:
+    headers = {"Accept": accept, "User-Agent": "gascity-check-bd-lib-bridge"}
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token and url.startswith("https://api.github.com/"):
+        headers["Authorization"] = f"Bearer {token}"
+    last: Exception | None = None
+    for _ in range(3):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=60) as resp:
+                return resp.read()
+        except Exception as err:  # noqa: BLE001 - retried, then reported
+            last = err
+    raise RuntimeError(f"GET {url}: {last}")
+
+
+def fetch_bridge(repo: str, lib_ref: str, bridge_ref: str) -> tuple[list[str], str]:
+    """Return the bridge commit's parents and its diff against lib_ref."""
+    with tempfile.TemporaryDirectory(prefix="bd-lib-bridge-") as tmp:
+        def git(*args: str) -> str:
+            return subprocess.run(
+                ["git", "-C", tmp, *args], check=True, capture_output=True, text=True
+            ).stdout
+
+        git("init", "--quiet")
+        git("fetch", "--quiet", "--depth=2", f"https://github.com/{repo}", bridge_ref)
+        parents = git("rev-list", "--parents", "-n", "1", bridge_ref).split()[1:]
+        diff = ""
+        if parents == [lib_ref]:
+            diff = git("diff", lib_ref, bridge_ref)
+        return parents, diff
+
+
+def changed_lines(diff: str) -> dict[str, Counter]:
+    """Map each file a unified diff touches to the multiset of its +/- lines."""
+    files: dict[str, Counter] = {}
+    current = None
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            match = re.match(r"^diff --git a/(.+?) b/(.+)$", line)
+            current = match.group(2) if match else line
+            files.setdefault(current, Counter())
+            continue
+        if current is None or line.startswith(("+++ ", "--- ")):
+            continue
+        if line.startswith(("+", "-")):
+            files[current][line] += 1
+    return files
+
+
+def is_test_file(path: str) -> bool:
+    return path.endswith("_test.go") or "/testdata/" in f"/{path}"
+
+
+def compare_diffs(bridge: dict[str, Counter], pr: dict[str, Counter]) -> list[str]:
+    errors: list[str] = []
+    for path, lines in sorted(bridge.items()):
+        theirs = pr.get(path)
+        if theirs is None:
+            errors.append(f"the bridge changes {path}, which the upstream PR does not: a fork-only delta")
+            continue
+        extra = lines - theirs
+        if extra:
+            sample = "; ".join(sorted(extra)[:3])
+            errors.append(f"the bridge's change to {path} has {sum(extra.values())} line(s) the PR does not carry ({sample})")
+    for path, lines in sorted(pr.items()):
+        if is_test_file(path):
+            continue
+        mine = bridge.get(path)
+        if mine is None:
+            errors.append(f"the upstream PR changes {path} and the bridge does not: the bridge is not the PR")
+        elif mine != lines:
+            missing = lines - mine
+            sample = "; ".join(sorted(missing)[:3])
+            errors.append(f"the bridge's change to {path} drops {sum(missing.values())} line(s) of the PR ({sample})")
+    return errors
+
+
+def pr_state(owner_repo: str, number: str) -> str:
+    data = json.loads(http_get(f"https://api.github.com/repos/{owner_repo}/pulls/{number}", "application/vnd.github+json"))
+    if data.get("merged"):
+        return "merged"
+    return str(data.get("state", ""))
+
+
+def main() -> int:
+    args = parse_args()
+    root = Path(args.repo_root).resolve()
+    env = read_deps_env(root)
+    bridge_ref = env.get("BD_LIB_BRIDGE_REF", "")
+    upstream_pr = env.get("BD_LIB_BRIDGE_UPSTREAM_PR", "")
+    if not bridge_ref and not upstream_pr:
+        print("check-bd-lib-bridge: no library bridge declared in deps.env")
+        return 0
+
+    lib_ref = env.get("BD_LIB_REF", "")
+    repo = env.get("BD_REPO", "")
+    pr_match = UPSTREAM_PR_RE.match(upstream_pr)
+    errors: list[str] = []
+    if not COMMIT_RE.match(bridge_ref):
+        errors.append(f"BD_LIB_BRIDGE_REF = {bridge_ref!r}, want a full 40-char commit SHA")
+    if not COMMIT_RE.match(lib_ref):
+        errors.append(f"BD_LIB_REF = {lib_ref!r}, want the full upstream SHA the bridge sits on")
+    if not repo:
+        errors.append("BD_REPO is empty; the bridge commit lives on it")
+    if not pr_match:
+        errors.append(f"BD_LIB_BRIDGE_UPSTREAM_PR = {upstream_pr!r}, want gastownhall/beads#<n>")
+    if errors:
+        return report(errors)
+
+    if args.bridge_parents is not None:
+        parents = args.bridge_parents.split()
+        bridge_diff = Path(args.bridge_diff).read_text() if args.bridge_diff else ""
+    else:
+        parents, bridge_diff = fetch_bridge(repo, lib_ref, bridge_ref)
+    if parents != [lib_ref]:
+        errors.append(
+            f"bridge {bridge_ref} on {repo} has parent(s) {parents}, want exactly BD_LIB_REF {lib_ref}: "
+            "a bridge is one commit on top of the upstream commit go.mod requires"
+        )
+        return report(errors)
+
+    owner_repo, number = pr_match.group(1), pr_match.group(2)
+    if args.pr_diff:
+        pr_diff = Path(args.pr_diff).read_text()
+    else:
+        pr_diff = http_get(f"https://github.com/{owner_repo}/pull/{number}.diff", "text/plain").decode()
+    errors += compare_diffs(changed_lines(bridge_diff), changed_lines(pr_diff))
+
+    state = args.pr_state if args.pr_state is not None else pr_state(owner_repo, number)
+    if state == "merged":
+        errors.append(
+            f"{upstream_pr} has merged: drop the bridge — repin BD_LIB_REF to an upstream commit carrying it, "
+            "delete BD_LIB_BRIDGE_REF/BD_LIB_BRIDGE_UPSTREAM_PR and the go.mod replace, in one change"
+        )
+    elif state != "open":
+        errors.append(f"{upstream_pr} is {state or 'in an unknown state'}, not open: a bridge may carry only an open upstream PR")
+    if errors:
+        return report(errors)
+    print(f"check-bd-lib-bridge: {repo}@{bridge_ref[:12]} is {lib_ref[:12]} plus exactly {upstream_pr} (open)")
+    return 0
+
+
+def report(errors: list[str]) -> int:
+    for err in errors:
+        print(f"check-bd-lib-bridge: {err}", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1302,6 +1302,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `data_auth_failed`, never as the no-greeting signature whose recover is
   `bd dolt stop` (vp-ut6qf.2).
 
+  `DialProxyData` is not yet on upstream beads (gastownhall/beads#8412 is
+  open), so gc links it through a temporary library bridge: go.mod still
+  requires `BD_LIB_REF` (3c205e0a4, schema 0074/0031) and replaces it with
+  Voxist/beads 872c78ec2, that commit plus #8412 alone. deps.env records the
+  bridge (`BD_LIB_BRIDGE_REF`, `BD_LIB_BRIDGE_UPSTREAM_PR`) under a written
+  policy, `TestBDLibBridgePins` checks go.mod and go.sum against it, and
+  `make check-bd-lib-bridge` (the fork's CI / preflight) checks its parent,
+  that its change is the PR's, and that the PR is still open. The bridge is
+  dropped when #8412 merges. The bd binary is unchanged: only gc's in-process
+  library reads `BEADS_DOLT_SERVER_PROXY_ROOT`, so bd v1.96.0 stays the fleet
+  pin.
+
 - **Adopting or restarting with a bd store bound to a loopback Dolt server
   gc does not run works.** A store `bd init --server --external` bound to a
   dolt sql-server on `127.0.0.1`/`localhost`/`::1` was classified as gc's own

@@ -274,6 +274,13 @@ go_deps.module_override(
 # deps.env), and beads at that commit ships its own BUILD files, which load
 # @gazelle and @rules_go -- names not visible from a go_deps repository under
 # Bzlmod. Regenerate them instead of using the shipped ones.
+#
+# Under a library bridge (deps.env LIBRARY BRIDGE POLICY) go.mod replaces
+# github.com/steveyegge/beads with a github.com/Voxist/beads version. go_deps
+# applies the root module's replace after version resolution and fetches the
+# replacement by its go.sum hash into the same @com_github_steveyegge_beads
+# repo, so this override and beads_migrations.patch above, both keyed on the
+# original path, apply to the bridged source unchanged.
 go_deps.gazelle_override(
     build_file_generation = "clean",
     path = "github.com/steveyegge/beads",

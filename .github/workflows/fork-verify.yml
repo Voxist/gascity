@@ -81,6 +81,13 @@ jobs:
         run: make check-go-clean-cache
       - name: CI policy
         run: make test-ci-policy
+      # deps.env LIBRARY BRIDGE POLICY: the network half of the bridge guard
+      # (TestBDLibBridgePins holds the offline half). Fails once the upstream
+      # PR the bridge carries merges, so the bridge cannot outlive it.
+      - name: Beads library bridge
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: make check-bd-lib-bridge
       - name: Format
         run: make fmt-check
       - name: Vet (go vet plus the build-tag scopes)
