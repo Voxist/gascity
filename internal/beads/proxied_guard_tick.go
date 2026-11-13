@@ -696,7 +696,7 @@ func (g *proxiedGuard) checkOwner(ctx context.Context, pin Pin) proxiedGuardStep
 // Admission proved effective == raw == pinned at open, so comparing an effective
 // re-read against the pin's raw pair is comparing like with like.
 func proxiedGuardReadCursors(ctx context.Context, pin Pin) (proxyendpoint.Cursors, error) {
-	result := proxyendpoint.Probe(ctx, proxyendpoint.DefaultProbeIO(pin.Port(), pin.Database()))
+	result := proxyendpoint.Probe(ctx, proxyendpoint.DefaultProbeIO(pin.Root(), pin.Port(), pin.Database()))
 	if result.Outcome != proxyendpoint.ProbeServed {
 		if result.Err != nil {
 			return proxyendpoint.Cursors{}, fmt.Errorf("guard cursor read (%s): %w", result.Outcome, result.Err)

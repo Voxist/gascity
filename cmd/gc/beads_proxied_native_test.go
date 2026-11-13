@@ -184,18 +184,25 @@ func TestProxiedOpenEnvForPinGolden(t *testing.T) {
 			env := nativeDoltProxiedOpenEnvForPin("demo", pin, tc.longLived)
 
 			want := map[string]string{
-				"BEADS_DOLT_SERVER_MODE":     "1",
-				"BEADS_DOLT_SERVER_HOST":     "127.0.0.1",
-				"BEADS_DOLT_SERVER_PORT":     "44561",
-				"BEADS_DOLT_SERVER_USER":     "root",
-				"BEADS_DOLT_SERVER_DATABASE": "beads",
-				"BEADS_DOLT_AUTO_START":      "0",
-				"BEADS_DOLT_MAX_CONNS":       tc.maxConns,
-				"GIT_AUTHOR_NAME":            "gc",
-				"GIT_AUTHOR_EMAIL":           "gc@demo",
+				"BEADS_DOLT_SERVER_MODE":       "1",
+				"BEADS_DOLT_SERVER_HOST":       "127.0.0.1",
+				"BEADS_DOLT_SERVER_PORT":       "44561",
+				"BEADS_DOLT_SERVER_PROXY_ROOT": pin.Root(),
+				"BEADS_DOLT_SERVER_USER":       "root",
+				"BEADS_DOLT_SERVER_DATABASE":   "beads",
+				"BEADS_DOLT_AUTO_START":        "0",
+				"BEADS_DOLT_MAX_CONNS":         tc.maxConns,
+				"GIT_AUTHOR_NAME":              "gc",
+				"GIT_AUTHOR_EMAIL":             "gc@demo",
 			}
 			if !reflect.DeepEqual(env, want) {
 				t.Fatalf("proxied open env =\n%s\nwant\n%s", renderEnv(env), renderEnv(want))
+			}
+			// The data port requires bd's BDPROXY1 handshake, so a library open
+			// without the root dials plain MySQL and stalls; the root must be
+			// the one admission read the pinned record from.
+			if root := env["BEADS_DOLT_SERVER_PROXY_ROOT"]; root == "" || root != f.root {
+				t.Errorf("BEADS_DOLT_SERVER_PROXY_ROOT = %q, want the admitted proxy root %q", root, f.root)
 			}
 			for _, forbidden := range []string{"BEADS_DOLT_PROXIED_SERVER", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_DATA_DIR"} {
 				if _, present := env[forbidden]; present {

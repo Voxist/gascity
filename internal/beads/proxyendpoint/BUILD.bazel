@@ -22,6 +22,7 @@ go_library(
         "//internal/pathutil",
         "//internal/pidutil",
         "@com_github_go_sql_driver_mysql//:mysql",
+        "@com_github_steveyegge_beads//:beads",
     ],
 )
 
@@ -53,6 +54,7 @@ go_test(
         "//internal/fsys",
         "//internal/testenv",
         "@com_github_go_sql_driver_mysql//:mysql",
+        "@com_github_steveyegge_beads//:beads",
     ],
 )
 

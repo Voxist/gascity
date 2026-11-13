@@ -298,6 +298,14 @@ func classifyNativeDoltReadError(err error, lane nativeReadLane) nativeReadClass
 		}
 	}
 
+	// 3b. The listener did not prove it is the proxy the root names. PROXIED
+	// LANE ONLY: only a proxied handle dials through bd's handshake. It is
+	// checked ahead of rung 6 because a listener that hangs up on the hello
+	// also wraps io.EOF, which rung 6 would retry for the whole budget.
+	if lane == proxiedNativeLane && errors.Is(err, beadslib.ErrProxyDataAuth) {
+		return nativeReadClass{disposition: nativeReadTerminal, verdict: ProxiedVerdictDataAuthFailed}
+	}
+
 	// 4/5. The endpoint answered about the database or the credentials.
 	msg := strings.ToLower(err.Error())
 	switch {

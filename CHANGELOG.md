@@ -1288,6 +1288,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The proxied-native lane reaches a bd proxy's data port again.** Since
+  beads#7885 the port requires bd's `BDPROXY1` hello before any MySQL byte, so
+  gc's endpoint probe, the guard tick's cursor re-read and the doctor probe
+  stalled for their whole budget (`budget_exhausted`, cursors 0/0) and every
+  proxied scope fell back to the bd CLI. They now dial through bd's own
+  `DialProxyData` under the proxy root gc already resolves, and the native
+  leaf's library open gets `BEADS_DOLT_SERVER_PROXY_ROOT` beside host and port,
+  so its pool makes the same handshake. gc still never reads `proxy.secret`:
+  bd's library does, on every dial. A listener that fails the handshake — a
+  wrong root, a proxy that rotated its secret, or another process on the port —
+  is reported as probe `data_auth_failed` and the terminal verdict
+  `data_auth_failed`, never as the no-greeting signature whose recover is
+  `bd dolt stop` (vp-ut6qf.2).
+
 - **Adopting or restarting with a bd store bound to a loopback Dolt server
   gc does not run works.** A store `bd init --server --external` bound to a
   dolt sql-server on `127.0.0.1`/`localhost`/`::1` was classified as gc's own

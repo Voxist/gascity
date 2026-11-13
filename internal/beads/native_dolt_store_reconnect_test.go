@@ -572,6 +572,17 @@ func TestClassifyNativeDoltReadErrorOrder(t *testing.T) {
 			why:     "main's text table matched \"dial tcp\" and reconnected; a fresh pool gets the same 1049",
 		},
 		{
+			name: "a failed BDPROXY1 handshake is terminal on the proxied lane, not a reconnect",
+			// bd's dialer wraps a hang-up on the hello as ErrProxyDataAuth AND
+			// io.EOF. Rung 6 would read the EOF and reconnect for the whole
+			// budget against a listener that will hang up on every new dial.
+			err:        fmt.Errorf("begin read tx: %w: the listener closed without answering the hello: %w", beadslib.ErrProxyDataAuth, io.EOF),
+			want:       nativeReadTerminal,
+			wantDirect: disposition(nativeReadUnclassified),
+			verdict:    ProxiedVerdictDataAuthFailed,
+			why:        "a dial re-reads the secret, so a fresh pool meets the same listener",
+		},
+		{
 			name:    "MySQL 1049 is terminal and names database_gone",
 			err:     errors.New("begin read tx: Error 1049 (42000): Unknown database 'beads'"),
 			want:    nativeReadTerminal,

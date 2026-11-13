@@ -29,7 +29,9 @@ package acceptance_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -38,8 +40,10 @@ import (
 	"time"
 
 	"github.com/go-sql-driver/mysql"
+	beadslib "github.com/steveyegge/beads"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
@@ -71,9 +75,11 @@ func proxiedSentinelEnv(t *testing.T, bdPath, doltPath string) (*helpers.Env, *h
 // the data dir directly is impossible while the server holds its lock. The
 // session is deliberately a single non-idle connection so it leaves nothing behind
 // for bd's idle watcher to count.
-func proxiedScopeSQL(t *testing.T, scopeRoot string) *sql.DB {
+// proxiedScopeDataPort is the proxy root, data port and database of a proxied
+// scope, read from the files bd publishes.
+func proxiedScopeDataPort(t *testing.T, scopeRoot string) (root string, port int, database string) {
 	t.Helper()
-	root := proxiedScopeProxyRoot(t, scopeRoot)
+	root = proxiedScopeProxyRoot(t, scopeRoot)
 	var record struct {
 		Port int `json:"port"`
 	}
@@ -83,20 +89,38 @@ func proxiedScopeSQL(t *testing.T, scopeRoot string) *sql.DB {
 	}
 	var metadata proxiedBeadsMetadata
 	readJSONFile(t, filepath.Join(scopeRoot, ".beads", "metadata.json"), &metadata)
-	database := strings.TrimSpace(metadata.DoltDatabase)
+	database = strings.TrimSpace(metadata.DoltDatabase)
 	if database == "" {
 		t.Fatalf("%s names no dolt_database", scopeRoot)
 	}
+	return root, record.Port, database
+}
 
+// proxiedDataPortConfig is a MySQL config for a proxy data port. With a root
+// it dials through bd's BDPROXY1 handshake, as every client of the port must;
+// with none it is the plain MySQL dial the port refuses to serve.
+func proxiedDataPortConfig(root string, port int, database string) *mysql.Config {
 	cfg := mysql.NewConfig()
 	cfg.User = "root"
 	cfg.Net = "tcp"
-	cfg.Addr = "127.0.0.1:" + strconv.Itoa(record.Port)
+	cfg.Addr = "127.0.0.1:" + strconv.Itoa(port)
 	cfg.DBName = database
 	cfg.Timeout = 15 * time.Second
 	cfg.ReadTimeout = 30 * time.Second
 	cfg.WriteTimeout = 30 * time.Second
 	cfg.AllowNativePasswords = true
+	if root != "" {
+		cfg.DialFunc = func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return beadslib.DialProxyData(ctx, root, "127.0.0.1", port)
+		}
+	}
+	return cfg
+}
+
+func proxiedScopeSQL(t *testing.T, scopeRoot string) *sql.DB {
+	t.Helper()
+	root, port, database := proxiedScopeDataPort(t, scopeRoot)
+	cfg := proxiedDataPortConfig(root, port, database)
 	connector, err := mysql.NewConnector(cfg)
 	if err != nil {
 		t.Fatalf("build a proxy connector: %v", err)
@@ -197,6 +221,52 @@ func TestProxiedNativeSafety(t *testing.T) {
 		t.Fatalf("the safety city is not serving natively, so none of these rows would be about the lane: store=%q %s\n  %s",
 			payload.Store, describeProxiedAccount(payload), result.Message)
 	}
+
+	t.Run("bdproxy1-data-port", func(t *testing.T) {
+		// The data port requires bd's BDPROXY1 handshake before any MySQL byte
+		// (beads#7885). This row proves both halves against the real proxy:
+		// gc's probe, which dials through beadslib.DialProxyData, is served and
+		// reads the cursors; a plain MySQL dial to the same port is not served
+		// at all; and a root holding another proxy's secret is named
+		// data_auth_failed — never the no-greeting signature whose ladder ends
+		// in `bd dolt stop`.
+		root, port, database := proxiedScopeDataPort(t, cityRoot)
+		ctx := context.Background()
+
+		served := proxyendpoint.Probe(ctx, proxyendpoint.DefaultProbeIO(root, port, database))
+		if served.Outcome != proxyendpoint.ProbeServed {
+			t.Fatalf("gc's probe of bd's live proxy on port %d = %s (%v), want served", port, served.Outcome, served.Err)
+		}
+		if main, ignored := beads.PinnedSchemaCursors(); served.Cursors.Main != main || served.Cursors.Ignored != ignored {
+			t.Errorf("the probe read cursors %s, want the pinned main=%d ignored=%d", served.Cursors, main, ignored)
+		}
+
+		plain, err := mysql.NewConnector(proxiedDataPortConfig("", port, database))
+		if err != nil {
+			t.Fatalf("plain connector: %v", err)
+		}
+		plainDB := sql.OpenDB(plain)
+		plainDB.SetMaxOpenConns(1)
+		plainDB.SetMaxIdleConns(0)
+		defer plainDB.Close() //nolint:errcheck // test session
+		pingCtx, cancel := context.WithTimeout(ctx, proxyendpoint.ProbeSessionTimeout)
+		defer cancel()
+		if err := plainDB.PingContext(pingCtx); err == nil {
+			t.Fatalf("a plain MySQL dial to bd's data port %d was served; the port is supposed to require the BDPROXY1 hello", port)
+		} else {
+			t.Logf("plain MySQL dial to the data port failed, as it must: %v", err)
+		}
+
+		alien := t.TempDir()
+		if err := os.WriteFile(filepath.Join(alien, "proxy.secret"),
+			[]byte(strings.Repeat("ab", 32)+"\n"), 0o600); err != nil {
+			t.Fatalf("write an alien proxy secret: %v", err)
+		}
+		foreign := proxyendpoint.Probe(ctx, proxyendpoint.DefaultProbeIO(alien, port, database))
+		if foreign.Outcome != proxyendpoint.ProbeDataAuthFailed || !errors.Is(foreign.Err, beadslib.ErrProxyDataAuth) {
+			t.Fatalf("a probe under another root's secret = %s (%v), want data_auth_failed wrapping ErrProxyDataAuth", foreign.Outcome, foreign.Err)
+		}
+	})
 
 	t.Run("no-spawn-control", func(t *testing.T) {
 		// The instrument, before the claim. Two properties, both required for the
@@ -351,6 +421,10 @@ func TestProxiedNativeSafety(t *testing.T) {
 		delete(controlEnv, "BEADS_DOLT_AUTO_START")
 		delete(controlEnv, "BEADS_DOLT_SERVER_PORT")
 		delete(controlEnv, "BEADS_DOLT_PORT")
+		// A proxy root is a third gate: a store opened through one never
+		// auto-starts (beads serverOpenCanAutoStart), so the control drops it
+		// with the other two.
+		delete(controlEnv, "BEADS_DOLT_SERVER_PROXY_ROOT")
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
@@ -647,15 +721,18 @@ func proxiedAuthorWindowEnv(t *testing.T, scopeRoot string, city *helpers.City) 
 	var metadata proxiedBeadsMetadata
 	readJSONFile(t, filepath.Join(scopeRoot, ".beads", "metadata.json"), &metadata)
 	return map[string]string{
-		"BEADS_DOLT_SERVER_MODE":     "1",
-		"BEADS_DOLT_SERVER_HOST":     "127.0.0.1",
-		"BEADS_DOLT_SERVER_PORT":     strconv.Itoa(record.Port),
-		"BEADS_DOLT_SERVER_USER":     "root",
-		"BEADS_DOLT_SERVER_DATABASE": strings.TrimSpace(metadata.DoltDatabase),
-		"BEADS_DOLT_AUTO_START":      "0",
-		"BEADS_DOLT_MAX_CONNS":       "1",
-		"GIT_AUTHOR_NAME":            "gc",
-		"GIT_AUTHOR_EMAIL":           "gc@" + proxiedCityName(t, city),
+		"BEADS_DOLT_SERVER_MODE": "1",
+		"BEADS_DOLT_SERVER_HOST": "127.0.0.1",
+		"BEADS_DOLT_SERVER_PORT": strconv.Itoa(record.Port),
+		// The data port requires bd's BDPROXY1 hello: without the root the
+		// library's pool dials plain MySQL and the proxy drops it.
+		"BEADS_DOLT_SERVER_PROXY_ROOT": root,
+		"BEADS_DOLT_SERVER_USER":       "root",
+		"BEADS_DOLT_SERVER_DATABASE":   strings.TrimSpace(metadata.DoltDatabase),
+		"BEADS_DOLT_AUTO_START":        "0",
+		"BEADS_DOLT_MAX_CONNS":         "1",
+		"GIT_AUTHOR_NAME":              "gc",
+		"GIT_AUTHOR_EMAIL":             "gc@" + proxiedCityName(t, city),
 	}
 }
 

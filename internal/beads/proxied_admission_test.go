@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	beadslib "github.com/steveyegge/beads"
 
 	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 )
@@ -450,6 +453,50 @@ func TestAdmitTable(t *testing.T) {
 		}
 		if verdict.Verdict != ProxiedVerdictDraining || verdict.Terminal() {
 			t.Fatalf("verdict = %+v, want a NON-terminal draining", verdict)
+		}
+	})
+
+	t.Run("a failed BDPROXY1 handshake refuses without the zombie ladder", func(t *testing.T) {
+		f := newAdmissionFixture(t, "-1")
+		ops := &admissionOps{}
+		probes, opened := 0, 0
+		in := baseAdmissionInput(f, ops)
+		in.LongLived = true
+		in.Sleep = func(context.Context, time.Duration) error {
+			t.Error("a failed handshake was waited on; it is not a drain and not a silent proxy")
+			return nil
+		}
+		authErr := fmt.Errorf("%w: closed without answering the hello: %w", beadslib.ErrProxyDataAuth, io.EOF)
+		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			probes++
+			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeDataAuthFailed, Err: authErr}
+		}
+
+		pin, err := Admit(context.Background(), in)
+		openIfAdmitted(pin, &opened)
+		if opened != 0 {
+			t.Fatal("a listener that failed bd's handshake yielded an openable pin")
+		}
+		verdict, ok := ProxiedVerdictOf(err)
+		if !ok {
+			t.Fatalf("Admit error = %v, want a typed verdict", err)
+		}
+		if verdict.Verdict != ProxiedVerdictDataAuthFailed || !verdict.Terminal() {
+			t.Fatalf("verdict = %+v, want a terminal data_auth_failed", verdict)
+		}
+		if !errors.Is(err, beadslib.ErrProxyDataAuth) {
+			t.Errorf("the refusal lost its cause: %v", err)
+		}
+		for _, cause := range []string{"proxy root", "rotated its secret", "another process holds the port"} {
+			if !strings.Contains(err.Error(), cause) {
+				t.Errorf("the refusal %q does not name %q", err, cause)
+			}
+		}
+		if probes != 1 {
+			t.Errorf("probe sessions = %d, want exactly 1", probes)
+		}
+		if pings, recovers := ops.counts(); pings != 0 || recovers != 0 {
+			t.Errorf("a failed handshake spent %d ping / %d recover, want 0/0: the recover is `bd dolt stop`, on a listener that may be a healthy proxy for another root", pings, recovers)
 		}
 	})
 

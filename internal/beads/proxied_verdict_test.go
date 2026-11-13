@@ -104,6 +104,9 @@ func TestProxiedVerdictTerminalTable(t *testing.T) {
 		ProxiedVerdictProxyZombie,
 		ProxiedVerdictDatabaseGone,
 		ProxiedVerdictNotOurs,
+		// data_auth_failed: a dial re-reads the secret every time, so the same
+		// root and port meet the same listener until somebody changes one.
+		ProxiedVerdictDataAuthFailed,
 		ProxiedVerdictNoOwnershipRecord,
 		ProxiedVerdictLegacySchema,
 		ProxiedVerdictIdlePolicyFinite,

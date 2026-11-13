@@ -44,6 +44,11 @@ const (
 //
 //   - it names the endpoint the admission pin resolved, so the library dials the
 //     generation that was gated rather than whatever a port file says now;
+//   - it names the pin's proxy root in BEADS_DOLT_SERVER_PROXY_ROOT, so every
+//     connection of the library's pool completes bd's BDPROXY1 handshake under
+//     the secret in that root before any MySQL byte (the data port refuses
+//     anything else), and the library refuses to auto-start or take a socket;
+//     bd's library reads the secret, gc never does;
 //   - it says SERVER MODE with AUTO_START off, so the library treats the server
 //     as external (IsDoltServerMode -> ServerModeExternal -> no auto-start) and
 //     gc cannot spawn a Dolt process for a scope bd owns;
@@ -71,6 +76,7 @@ func nativeDoltProxiedOpenEnvForPin(cityName string, pin beads.Pin, longLived bo
 		"BEADS_DOLT_SERVER_MODE":     "1",
 		"BEADS_DOLT_SERVER_HOST":     proxyendpoint.Host,
 		"BEADS_DOLT_SERVER_PORT":     strconv.Itoa(pin.Port()),
+		proxiedNativeProxyRootEnv:    pin.Root(),
 		"BEADS_DOLT_SERVER_USER":     proxiedNativeDoltUser,
 		"BEADS_DOLT_SERVER_DATABASE": pin.Database(),
 		"BEADS_DOLT_AUTO_START":      "0",
@@ -79,6 +85,11 @@ func nativeDoltProxiedOpenEnvForPin(cityName string, pin beads.Pin, longLived bo
 		"GIT_AUTHOR_EMAIL":           proxiedNativeAuthorEmail(cityName),
 	}
 }
+
+// proxiedNativeProxyRootEnv names the bd proxy root a server-mode library open
+// dials its data port through. The proxied open window projects it
+// (internal/beads proxiedOnlyOpenEnvKeys); .beads/.env cannot set it.
+const proxiedNativeProxyRootEnv = "BEADS_DOLT_SERVER_PROXY_ROOT"
 
 // proxiedNativeDoltUser is the user bd's proxy authenticates its own sessions
 // as, and the one proxyendpoint's probe already uses. A proxied database is not

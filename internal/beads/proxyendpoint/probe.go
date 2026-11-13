@@ -16,6 +16,7 @@ import (
 	"time"
 
 	mysql "github.com/go-sql-driver/mysql"
+	beadslib "github.com/steveyegge/beads"
 )
 
 // Probe budgets. A probe is a diagnostic, not a retry loop: it either answers
@@ -198,11 +199,19 @@ const (
 // ProbeUnknown: it says something about the caller, not about the proxy.
 var ErrNoDatabase = errors.New("proxyendpoint: probe requires a database name")
 
+// ErrNoProxyRoot reports a probe asked to open a session without naming the
+// proxy root. The data port requires bd's BDPROXY1 handshake, and its secret
+// lives in the root, so a session without one could only be a plain MySQL dial
+// that stalls until the proxy drops it. Like ErrNoDatabase it says something
+// about the caller, so it classifies as ProbeUnknown.
+var ErrNoProxyRoot = errors.New("proxyendpoint: probe requires the proxy root")
+
 // ProbeOutcome is what one probe of a proxy's data port concluded. The three
 // real outcomes are the three observable states of bd's byte-pump proxy, and
 // they are not orderable: `refused` on a live record is a proxy draining its
 // backend, `accepted_no_greeting` is a proxy whose Dolt child has exited, and
-// `served` is the only one a reader may act on.
+// `served` is the only one a reader may act on. `data_auth_failed` is a
+// listener that is not, by bd's own handshake, the proxy the root names.
 type ProbeOutcome int
 
 // Probe outcomes.
@@ -243,6 +252,21 @@ const (
 	// ProbeServed means the handshake completed and both schema cursors were
 	// read.
 	ProbeServed
+	// ProbeDataAuthFailed means something accepted the connection and then did
+	// not complete bd's BDPROXY1 data-port handshake under the proxy root's
+	// secret: it hung up on the hello, as a bd proxy does on a token minted
+	// from another secret, or it answered with a proof that does not verify
+	// (beadslib.ErrProxyDataAuth). The listener has not shown it is the proxy
+	// that root names: the root may be another workspace's, the proxy may have
+	// restarted and rotated its secret, or another process may hold the port.
+	//
+	// It is a positive claim and a distinct one. It is not accepted_no_greeting
+	// — a bd proxy authenticates before it dials its Dolt child, so a proxy
+	// with a dead backend completes the handshake and then withholds the
+	// greeting — and it must never feed the no-greeting ladder, whose recover
+	// is `bd dolt stop` on a proxy that may be perfectly healthy for the root
+	// that owns it.
+	ProbeDataAuthFailed
 )
 
 // String renders the outcome as the token the diagnostics report.
@@ -254,6 +278,8 @@ func (o ProbeOutcome) String() string {
 		return "accepted_no_greeting"
 	case ProbeServed:
 		return "served"
+	case ProbeDataAuthFailed:
+		return "data_auth_failed"
 	default:
 		return "unknown"
 	}
@@ -394,8 +420,9 @@ type ProbeResult struct {
 // listener or a database anywhere in the test binary: the classification is the
 // part with the bugs, and it is pure.
 type ProbeIO struct {
-	// Session performs the MySQL handshake and reads both cursors — and the
-	// ignored lane's cursor reality — over one pinned connection.
+	// Session completes bd's BDPROXY1 data-port handshake, then performs the
+	// MySQL handshake and reads both cursors — and the ignored lane's cursor
+	// reality — over one pinned connection.
 	Session func(ctx context.Context) (CursorReport, error)
 	// Dial is a bare TCP connect-and-close, used only to disambiguate a failed
 	// session: something that accepts is a live proxy, and something that
@@ -449,7 +476,10 @@ func probeWithBudget(ctx context.Context, probeIO ProbeIO, budget time.Duration)
 		return ProbeResult{Outcome: ProbeUnknown, Err: sessionErr}
 	}
 	var dialErr error
-	if IsConnectionLevel(sessionErr) && probeIO.Dial != nil {
+	// A failed BDPROXY1 handshake is decided without the confirming dial: the
+	// listener answered (or hung up on the hello), and ClassifyProbe names that
+	// before it would read a dial.
+	if IsConnectionLevel(sessionErr) && !errors.Is(sessionErr, beadslib.ErrProxyDataAuth) && probeIO.Dial != nil {
 		dialCtx, dialCancel := context.WithTimeout(ctx, ProbeDialTimeout)
 		defer dialCancel()
 		dialErr = probeIO.Dial(dialCtx)
@@ -491,6 +521,11 @@ func ClassifyProbe(sessionErr, dialErr error) ProbeOutcome {
 		return ProbeServed
 	case IsIndeterminate(sessionErr):
 		return ProbeUnknown
+	case errors.Is(sessionErr, beadslib.ErrProxyDataAuth):
+		// Ahead of the connection-level arms: a listener that hangs up on the
+		// hello wraps io.EOF as well, and read as connection-level that is the
+		// zombie signature on a proxy that merely belongs to another secret.
+		return ProbeDataAuthFailed
 	case !IsConnectionLevel(sessionErr):
 		return ProbeUnknown
 	case dialErr == nil:
@@ -616,6 +651,16 @@ func IsConnectionLevel(err error) bool {
 // against the proxy's loopback port as `root` with no password — the same
 // credentials bd's own CLI uses over the same proxy — and a bare TCP dial.
 //
+// root is the proxy root the endpoint was read from. The session's connection
+// is dialed by beadslib.DialProxyData, which completes the BDPROXY1 handshake
+// the data port requires before any MySQL byte, under the secret bd keeps in
+// that root. gc never reads the secret itself: bd's library does, on every
+// dial, so a proxy that restarted and rotated it is dialed with the new one. A
+// plain MySQL dial to the same port stalls until the proxy drops it, which is
+// why the root is not optional. The confirming dial stays a bare TCP connect:
+// it asks only whether anything accepts, and a bd proxy neither counts an
+// unauthenticated connection for its idle watcher nor dials its backend for one.
+//
 // "Private" is the load-bearing word, and it is why this does not reach for
 // internal/doltpool. That registry is a process-lifetime cache: its handles must
 // never be closed, it retains up to maxIdleConns connections per endpoint, and a
@@ -627,8 +672,8 @@ func IsConnectionLevel(err error) bool {
 // already given up on. The probe therefore opens its own unregistered handle
 // with no idle slot at all and closes it before it returns: no connection to bd
 // survives the check that made it.
-func DefaultProbeIO(port int, database string) ProbeIO {
-	return probeIOWithDriverTimeout(port, database, probeDriverTimeout(ProbeSessionTimeout))
+func DefaultProbeIO(root string, port int, database string) ProbeIO {
+	return probeIOWithDriverTimeout(root, port, database, probeDriverTimeout(ProbeSessionTimeout))
 }
 
 // probeIOWithDriverTimeout is DefaultProbeIO with the driver's socket deadlines
@@ -636,11 +681,11 @@ func DefaultProbeIO(port int, database string) ProbeIO {
 // deadlines it wants — including the equal-budget configuration this package
 // used to ship, which must classify as ProbeUnknown through the context guard in
 // probeWithBudget rather than through this margin.
-func probeIOWithDriverTimeout(port int, database string, driverTimeout time.Duration) ProbeIO {
+func probeIOWithDriverTimeout(root string, port int, database string, driverTimeout time.Duration) ProbeIO {
 	addr := net.JoinHostPort(Host, strconv.Itoa(port))
 	return ProbeIO{
 		Session: func(ctx context.Context) (CursorReport, error) {
-			return readCursors(ctx, port, database, driverTimeout)
+			return readCursors(ctx, root, port, database, driverTimeout)
 		},
 		Dial: func(ctx context.Context) error {
 			var dialer net.Dialer
@@ -661,7 +706,7 @@ func probeIOWithDriverTimeout(port int, database string, driverTimeout time.Dura
 // connection target defaults the name to "beads" — which is precisely why the
 // refusal lives here rather than in a comment.
 func ProbeEndpoint(ctx context.Context, ep Endpoint, database string) ProbeResult {
-	return Probe(ctx, DefaultProbeIO(ep.Record.Port, database))
+	return Probe(ctx, DefaultProbeIO(ep.Root, ep.Record.Port, database))
 }
 
 // readCursors reads both schema cursors over one pinned private connection.
@@ -673,12 +718,12 @@ func ProbeEndpoint(ctx context.Context, ep Endpoint, database string) ProbeResul
 // (internal/storage/schema/schema.go) and exists for the harsher version of the
 // same hazard: a bare SELECT against a not-yet-created cursor table poisons the
 // pooled connection for the rest of its life.
-func readCursors(ctx context.Context, port int, database string, driverTimeout time.Duration) (CursorReport, error) {
+func readCursors(ctx context.Context, root string, port int, database string, driverTimeout time.Duration) (CursorReport, error) {
 	if strings.TrimSpace(database) == "" {
 		// Cursors read against no database are zeros, not evidence.
 		return CursorReport{}, ErrNoDatabase
 	}
-	connector, err := probeConnector(port, database, driverTimeout)
+	connector, err := probeConnector(root, port, database, driverTimeout)
 	if err != nil {
 		return CursorReport{}, err
 	}
@@ -701,11 +746,22 @@ func probeDriverTimeout(budget time.Duration) time.Duration {
 // bound at all. They are also strictly ABOVE the session budget the context
 // carries, which is the F1 fix — see ProbeDriverTimeoutSlack for why an equal
 // deadline made a slow proxy read as a dead one.
-func probeConnector(port int, database string, driverTimeout time.Duration) (driver.Connector, error) {
+//
+// The connection itself comes from beadslib.DialProxyData under root (see
+// DefaultProbeIO). The dial function is set on this connector's own config
+// rather than registered as a named driver network, so nothing outlives the
+// probe and no process-wide registry maps an address to a root.
+func probeConnector(root string, port int, database string, driverTimeout time.Duration) (driver.Connector, error) {
+	if strings.TrimSpace(root) == "" {
+		return nil, ErrNoProxyRoot
+	}
 	cfg := mysql.NewConfig()
 	cfg.User = probeUser
 	cfg.Net = "tcp"
 	cfg.Addr = net.JoinHostPort(Host, strconv.Itoa(port))
+	cfg.DialFunc = func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return beadslib.DialProxyData(ctx, root, Host, port)
+	}
 	cfg.DBName = database
 	cfg.Timeout = driverTimeout
 	cfg.ReadTimeout = driverTimeout

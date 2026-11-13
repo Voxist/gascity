@@ -899,6 +899,15 @@ func admitOnce(ctx context.Context, in AdmissionInput, root, beadsDir string) (P
 	case proxyendpoint.ProbeAcceptedNoGreeting:
 		return in.escalateZombie(ctx, root, ep, key)
 
+	case proxyendpoint.ProbeDataAuthFailed:
+		// Never the no-greeting ladder: its recover is `bd dolt stop`, and the
+		// listener that failed the handshake may be a healthy proxy for another
+		// root, or not bd's at all.
+		return Pin{}, false, NewProxiedVerdictError(ProxiedVerdictDataAuthFailed,
+			fmt.Sprintf("the listener on data port %d did not complete bd's proxy handshake under the secret in proxy root %s: "+
+				"the root is not the one serving this port, the proxy restarted and rotated its secret, or another process holds the port",
+				key.Port, root), probe.Err)
+
 	default:
 		// ProbeUnknown. IsIndeterminate is consulted before anything else,
 		// because the probe's own deadline and the caller's cancellation are

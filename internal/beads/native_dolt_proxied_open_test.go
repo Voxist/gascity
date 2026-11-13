@@ -172,7 +172,7 @@ func TestDirectNativeOpenEnvKeyListUnchanged(t *testing.T) {
 		}
 	}
 
-	// The proxied list is a superset and adds exactly the seven documented keys.
+	// The proxied list is a superset and adds exactly the eight documented keys.
 	for _, key := range nativeDoltOpenEnvKeys {
 		if !slices.Contains(proxiedNativeOpenEnvKeys, key) {
 			t.Errorf("proxiedNativeOpenEnvKeys drops direct key %q", key)
