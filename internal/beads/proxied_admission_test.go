@@ -500,6 +500,63 @@ func TestAdmitTable(t *testing.T) {
 		}
 	})
 
+	t.Run("a failed handshake across a restart re-admits the new generation", func(t *testing.T) {
+		// bd binds a restarted proxy's listener before it writes the new secret,
+		// so the first probe minted its token from the old one. By the time
+		// admission looks again the replacement proxy has published its record:
+		// re-run, non-terminally, and admit the generation that is there now.
+		f := newAdmissionFixture(t, "-1")
+		ops := &admissionOps{}
+		probes := 0
+		in := baseAdmissionInput(f, ops)
+		in.LongLived = true
+		in.ProcessTable = f.processTable()
+		authErr := fmt.Errorf("%w: closed without answering the hello: %w", beadslib.ErrProxyDataAuth, io.EOF)
+		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			probes++
+			if probes == 1 {
+				// The restart lands between the probe and the re-read.
+				f.writeRecord(6002, "88990011")
+				return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeDataAuthFailed, Err: authErr}
+			}
+			return proxyendpoint.ServedProbeForTest(pinnedCursors(), proxyendpoint.CursorReality{})
+		}
+
+		pin, err := Admit(context.Background(), in)
+		if err != nil {
+			t.Fatalf("Admit across a restart that raced the handshake: %v", err)
+		}
+		if pin.PoolKey().PID != 6002 {
+			t.Errorf("pinned generation = %s, want the replacement proxy", pin.Generation())
+		}
+		if probes != 2 {
+			t.Errorf("probe sessions = %d, want 2: the failed one and the re-admission's", probes)
+		}
+		if pings, recovers := ops.counts(); pings != 0 || recovers != 0 {
+			t.Errorf("a raced handshake spent %d ping / %d recover, want 0/0", pings, recovers)
+		}
+	})
+
+	t.Run("a background tick's raced handshake is non-terminal", func(t *testing.T) {
+		f := newAdmissionFixture(t, "-1")
+		in := baseAdmissionInput(f, &admissionOps{})
+		in.LongLived = true
+		in.ProbeOnce = true
+		in.ProcessTable = f.processTable()
+		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			f.removeRecord()
+			return proxyendpoint.ProbeResult{
+				Outcome: proxyendpoint.ProbeDataAuthFailed,
+				Err:     fmt.Errorf("%w: proof does not verify", beadslib.ErrProxyDataAuth),
+			}
+		}
+		_, err := Admit(context.Background(), in)
+		verdict, ok := ProxiedVerdictOf(err)
+		if !ok || verdict.Verdict != ProxiedVerdictDataAuthFailed || verdict.Terminal() {
+			t.Fatalf("Admit = %v, want a NON-terminal data_auth_failed once the record moved", err)
+		}
+	})
+
 	t.Run("budget expiry mid drain is draining and non terminal", func(t *testing.T) {
 		f := newAdmissionFixture(t, "-1")
 		in := baseAdmissionInput(f, &admissionOps{})

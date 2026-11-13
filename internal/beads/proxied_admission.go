@@ -903,6 +903,18 @@ func admitOnce(ctx context.Context, in AdmissionInput, root, beadsDir string) (P
 		// Never the no-greeting ladder: its recover is `bd dolt stop`, and the
 		// listener that failed the handshake may be a healthy proxy for another
 		// root, or not bd's at all.
+		//
+		// The record is re-read first. bd binds a restarted proxy's listener
+		// before it writes the new secret (and the record after both), so a
+		// probe that raced a restart reusing the port minted its token from the
+		// old secret. A record that moved, or is gone, is that race: re-run
+		// from the top, non-terminally. Only a failed handshake against the
+		// generation still on disk is the terminal fact.
+		if current, readErr := proxyendpoint.Read(root); readErr != nil || !proxyendpoint.NewPoolKey(current, in.Database).SameGeneration(key) {
+			return Pin{}, true, NewNonTerminalProxiedVerdictError(ProxiedVerdictDataAuthFailed,
+				fmt.Sprintf("the listener on data port %d did not complete bd's proxy handshake, and the proxy record under %s "+
+					"has moved since it was read; re-admitting against the new generation", key.Port, root), probe.Err)
+		}
 		return Pin{}, false, NewProxiedVerdictError(ProxiedVerdictDataAuthFailed,
 			fmt.Sprintf("the listener on data port %d did not complete bd's proxy handshake under the secret in proxy root %s: "+
 				"the root is not the one serving this port, the proxy restarted and rotated its secret, or another process holds the port",

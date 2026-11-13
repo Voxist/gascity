@@ -72,9 +72,15 @@ const (
 	// root admission resolved (beadslib.ErrProxyDataAuth): the root is not the
 	// one serving this port, the proxy restarted and rotated its secret, or
 	// another process now holds the port. Unlike not_ours it is decided on the
-	// wire, by bd's own handshake, after the record validated. It is terminal
-	// for the handle: a dial re-reads the secret every time, so a retry against
-	// the same root and port meets the same listener.
+	// wire, by bd's own handshake, after the record validated.
+	//
+	// It is terminal by default, but only once it has been seen twice. bd binds
+	// a restarted proxy's listener before it writes the new secret, so a dial
+	// racing a restart that reused the port can fail once on a healthy proxy.
+	// The read path therefore reconnects once before naming it, admission
+	// re-reads the record and goes non-terminal when the generation moved, and
+	// the guard tick stands down non-terminally so its recovery re-admits. A
+	// repeat against an unchanged generation is the terminal fact.
 	ProxiedVerdictDataAuthFailed ProxiedVerdict = "data_auth_failed"
 
 	// ProxiedVerdictNoOwnershipRecord reports that the scope has no readable

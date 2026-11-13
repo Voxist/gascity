@@ -892,6 +892,9 @@ func (s *NativeDoltStore) withReadRetryContext(parent context.Context, fn func(c
 	// when it expires, so the total cannot stack per-call timeouts past budget.
 	ctx, cancel := context.WithTimeout(parent, budget)
 	defer cancel()
+	// dataAuthReconnected records that this read has spent its one reconnect
+	// on a failed BDPROXY1 handshake (nativeReadDataAuth).
+	dataAuthReconnected := false
 	for {
 		storage, gen, release, err := s.acquireStorageGen()
 		if err != nil {
@@ -959,6 +962,14 @@ func (s *NativeDoltStore) withReadRetryContext(parent context.Context, fn func(c
 				return opErr
 			}
 			backoff = class.cooldown
+		case nativeReadDataAuth:
+			// A repeat after the one reconnect, or a handle that cannot
+			// reconnect at all, is the terminal fact the class names.
+			if reopen == nil || dataAuthReconnected {
+				return s.proxiedReadVerdict(class.verdict, opErr)
+			}
+			dataAuthReconnected = true
+			fallthrough
 		case nativeReadTransient:
 			if reopen == nil {
 				return opErr
@@ -979,7 +990,13 @@ func (s *NativeDoltStore) withReadRetryContext(parent context.Context, fn func(c
 				if ctxErr := ctx.Err(); ctxErr != nil {
 					return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetError(ctxErr, reconnectErr))
 				}
-				if classifyNativeDoltReadError(rcErr, s.readLane()).disposition != nativeReadTransient {
+				switch classifyNativeDoltReadError(rcErr, s.readLane()).disposition {
+				case nativeReadTransient:
+				case nativeReadDataAuth:
+					// The reconnect's own dial met a listener that failed the
+					// handshake: the repeat that makes it terminal.
+					return s.proxiedReadVerdict(ProxiedVerdictDataAuthFailed, reconnectErr)
+				default:
 					return reconnectErr
 				}
 			}

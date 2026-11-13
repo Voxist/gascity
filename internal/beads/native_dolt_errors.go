@@ -182,6 +182,13 @@ const (
 	// nativeReadTerminal means stop: the endpoint answered with a fact about
 	// the database or the credentials that a retry cannot change.
 	nativeReadTerminal
+	// nativeReadDataAuth means the listener did not complete bd's BDPROXY1
+	// handshake. The first one in a read reconnects ONCE: bd binds a
+	// restarted proxy's listener before it writes the new secret, so a dial
+	// in that window mints its token from the old one, and the reconnect
+	// re-admits against a fresh record and secret. A repeat within the same
+	// read is terminal, with the verdict it carries.
+	nativeReadDataAuth
 )
 
 // nativeReadCircuitCooldown is how long a read waits for the linked library's
@@ -301,9 +308,10 @@ func classifyNativeDoltReadError(err error, lane nativeReadLane) nativeReadClass
 	// 3b. The listener did not prove it is the proxy the root names. PROXIED
 	// LANE ONLY: only a proxied handle dials through bd's handshake. It is
 	// checked ahead of rung 6 because a listener that hangs up on the hello
-	// also wraps io.EOF, which rung 6 would retry for the whole budget.
+	// also wraps io.EOF, which rung 6 would retry for the whole budget. One
+	// reconnect, then terminal: see nativeReadDataAuth.
 	if lane == proxiedNativeLane && errors.Is(err, beadslib.ErrProxyDataAuth) {
-		return nativeReadClass{disposition: nativeReadTerminal, verdict: ProxiedVerdictDataAuthFailed}
+		return nativeReadClass{disposition: nativeReadDataAuth, verdict: ProxiedVerdictDataAuthFailed}
 	}
 
 	// 4/5. The endpoint answered about the database or the credentials.

@@ -572,15 +572,16 @@ func TestClassifyNativeDoltReadErrorOrder(t *testing.T) {
 			why:     "main's text table matched \"dial tcp\" and reconnected; a fresh pool gets the same 1049",
 		},
 		{
-			name: "a failed BDPROXY1 handshake is terminal on the proxied lane, not a reconnect",
+			name: "a failed BDPROXY1 handshake is its own class on the proxied lane, not rung 6's reconnect loop",
 			// bd's dialer wraps a hang-up on the hello as ErrProxyDataAuth AND
 			// io.EOF. Rung 6 would read the EOF and reconnect for the whole
-			// budget against a listener that will hang up on every new dial.
+			// budget against a listener that will hang up on every new dial;
+			// this class reconnects once and then stops.
 			err:        fmt.Errorf("begin read tx: %w: the listener closed without answering the hello: %w", beadslib.ErrProxyDataAuth, io.EOF),
-			want:       nativeReadTerminal,
+			want:       nativeReadDataAuth,
 			wantDirect: disposition(nativeReadUnclassified),
 			verdict:    ProxiedVerdictDataAuthFailed,
-			why:        "a dial re-reads the secret, so a fresh pool meets the same listener",
+			why:        "one reconnect re-admits against a fresh record and secret; a repeat is terminal",
 		},
 		{
 			name:    "MySQL 1049 is terminal and names database_gone",
@@ -737,6 +738,77 @@ func TestNativeDoltReadTerminalEndpointFactStopsImmediately(t *testing.T) {
 		}
 		if !errors.Is(err, unknownDB) {
 			t.Error("the driver error must survive as the cause")
+		}
+	})
+}
+
+// TestNativeDoltReadReconnectsOnceOnAFailedHandshake pins the read path's
+// answer to a failed BDPROXY1 handshake: ONE reconnect, then terminal. bd binds
+// a restarted proxy's listener before it writes the new secret, so a dial in
+// that window mints its token from the old one; the reconnect re-admits against
+// a fresh record and secret and should then serve. A listener that fails again
+// is the terminal data_auth_failed, without spending the budget.
+func TestNativeDoltReadReconnectsOnceOnAFailedHandshake(t *testing.T) {
+	authErr := fmt.Errorf("begin read tx: %w: the listener closed without answering the hello: %w",
+		beadslib.ErrProxyDataAuth, io.EOF)
+
+	t.Run("the reconnect serves", func(t *testing.T) {
+		var reopens int32
+		store := storeWithReopen(deadSearchStorage(authErr), healthySearchStorage(&beadslib.Issue{
+			ID: "gc-1", Title: "served", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2,
+		}), &reopens)
+		store.proxiedReadVerdicts = true
+		store.readRetryBudgetOverride = 3 * time.Second
+		got, err := store.Get("gc-1")
+		if err != nil {
+			t.Fatalf("Get after one reconnect: %v", err)
+		}
+		if got.ID != "gc-1" {
+			t.Fatalf("Get = %+v, want gc-1", got)
+		}
+		if n := atomic.LoadInt32(&reopens); n != 1 {
+			t.Fatalf("reopens = %d, want exactly 1", n)
+		}
+	})
+
+	t.Run("a repeat is terminal", func(t *testing.T) {
+		var reopens int32
+		store := storeWithReopen(deadSearchStorage(authErr), deadSearchStorage(authErr), &reopens)
+		store.proxiedReadVerdicts = true
+		store.readRetryBudgetOverride = 5 * time.Second
+		start := time.Now()
+		_, err := store.Get("gc-1")
+		if elapsed := time.Since(start); elapsed > 3*time.Second {
+			t.Fatalf("Get took %s; a repeated failed handshake must not spend the budget", elapsed)
+		}
+		if n := atomic.LoadInt32(&reopens); n != 1 {
+			t.Fatalf("reopens = %d, want exactly 1: one reconnect, then the verdict", n)
+		}
+		verdict, ok := ProxiedVerdictOf(err)
+		if !ok || verdict.Verdict != ProxiedVerdictDataAuthFailed || !verdict.Terminal() {
+			t.Fatalf("Get err = %v, want a terminal data_auth_failed", err)
+		}
+		if !errors.Is(err, beadslib.ErrProxyDataAuth) {
+			t.Errorf("the verdict lost its cause: %v", err)
+		}
+	})
+
+	t.Run("a reconnect that itself fails the handshake is terminal", func(t *testing.T) {
+		var reopens int32
+		store := newNativeDoltStoreForTest(deadSearchStorage(authErr))
+		store.proxiedReadVerdicts = true
+		store.readRetryBudgetOverride = 5 * time.Second
+		store.reopen = func(context.Context) (beadslib.Storage, error) {
+			atomic.AddInt32(&reopens, 1)
+			return nil, fmt.Errorf("open the library over bd's proxy: %w", authErr)
+		}
+		_, err := store.Get("gc-1")
+		if n := atomic.LoadInt32(&reopens); n != 1 {
+			t.Fatalf("reopens = %d, want exactly 1", n)
+		}
+		verdict, ok := ProxiedVerdictOf(err)
+		if !ok || verdict.Verdict != ProxiedVerdictDataAuthFailed || !verdict.Terminal() {
+			t.Fatalf("Get err = %v, want a terminal data_auth_failed", err)
 		}
 	})
 }
