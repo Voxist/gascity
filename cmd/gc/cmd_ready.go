@@ -43,10 +43,16 @@ The flags mirror the "bd ready" contract the default work_query builds:
            --exclude-label "hold:external" --exclude-label "human" \
            --json --limit=20
 
-Rows are emitted in canonical ready order (priority, created_at, id) unless
---sort selects a created_at order, and --limit is applied last, so a bounded
-read is the true top-N of the merged set rather than the top-N of whichever
-store answered first.
+Rows are emitted in canonical ready order (priority, created_at, id), which
+--sort priority also selects. --sort takes the rest of bd ready's policies with
+bd's semantics, hybrid (rows created in the last 48 hours by priority, then
+older rows oldest first) and oldest, plus newest. --limit is applied last, so a
+bounded read is the true top-N of the merged set rather than the top-N of
+whichever store answered first.
+
+A failed read fails as bd ready does: it writes nothing to stdout, names the
+cause on stderr, and exits non-zero. stdout carries a JSON array and nothing
+else, and --json adds no failure envelope.
 
 The rows of --status in_progress carry their blockers (blocked_by), and a row
 whose blockers cannot be resolved fails the read. --until-unblocked ends that
@@ -129,7 +135,7 @@ func registerReadyFlags(cmd *cobra.Command, flags *readyFlags, includeEphemeral,
 	cmd.Flags().StringArrayVar(&opts.MetadataFields, "metadata-field", nil, "require metadata \"key=value\", or bare \"key\" for any non-empty value (repeatable)")
 	cmd.Flags().StringArrayVar(&opts.ExcludeTypes, "exclude-type", nil, "drop beads of this issue type (repeatable)")
 	cmd.Flags().StringArrayVar(&opts.ExcludeLabels, "exclude-label", nil, "drop beads carrying this label (repeatable)")
-	cmd.Flags().StringVar(&opts.Sort, "sort", "", "sort order: oldest|newest (default: canonical ready order)")
+	cmd.Flags().StringVar(&opts.Sort, "sort", "", "sort order: priority|hybrid|oldest|newest (default: priority, the canonical ready order)")
 	cmd.Flags().IntVar(&opts.Limit, "limit", 0, "max beads to return (0 = unlimited)")
 	// --include-ephemeral is accepted for parity with `bd ready`, which the
 	// generated work_query carries verbatim on a bd-1.0.5 city. It selects

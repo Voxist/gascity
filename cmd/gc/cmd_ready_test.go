@@ -857,11 +857,13 @@ func TestReadyFiltersAreAppliedOverTheMergedSet(t *testing.T) {
 
 // TestReadyUnknownSortIsRejected keeps a mistyped order from silently falling
 // back to a different one, which is how a bounded read serves the wrong prefix.
+// The refused value is one neither bd nor the generator spells: bd's own
+// policies (priority, hybrid) are accepted (vp-bzeg).
 func TestReadyUnknownSortIsRejected(t *testing.T) {
 	store := splittest.NewWorkStore(t, "gc")
 	mustCreateReadyBead(t, store, beads.Bead{Title: "work", Type: "task"})
 
-	_, err := readywork.Read([]readywork.Leg{readyTestLeg("city", store)}, readywork.Query{Sort: "priority"})
+	_, err := readywork.Read([]readywork.Leg{readyTestLeg("city", store)}, readywork.Query{Sort: "newest-first"})
 	if err == nil || !strings.Contains(err.Error(), "unknown --sort") {
 		t.Fatalf("readyBeadsForOpts error = %v, want a rejection naming the unknown order", err)
 	}
@@ -1163,14 +1165,18 @@ func TestGcReadySteerDescribesTheFlagsItActuallyAccepts(t *testing.T) {
 		t.Errorf("the steer does not name the shorthand gap: %q", rejected)
 	}
 
-	// --sort is shared by NAME and incompatible by VALUE: bd defaults to
-	// "priority", which `gc ready` rejects. A steer that named --sort without
-	// that caveat would still send an operator to a dead end.
-	if err := (readywork.Query{Sort: "priority"}).Validate(); err == nil {
-		t.Error("`gc ready --sort priority` is accepted; the steer says the orders are oldest|newest")
-	}
-	if !strings.Contains(msg, "oldest|newest") {
-		t.Errorf("the steer names --sort without its accepted values: %q", msg)
+	// --sort is shared by NAME and by VALUE: the generated routed tier reads
+	// `--sort priority` and `--sort hybrid` through this reader on a federated
+	// city (vp-bzeg), so bd's policies parse here with bd's semantics, and the
+	// steer names every order the reader accepts. A steer that named a narrower
+	// set would send an operator with a valid query away.
+	for _, order := range []string{readywork.SortPriority, readywork.SortHybrid, readywork.SortOldest, readywork.SortNewest} {
+		if err := (readywork.Query{Sort: order}).Validate(); err != nil {
+			t.Errorf("`gc ready --sort %s` is rejected (%v); the steer names it as accepted", order, err)
+		}
+		if !strings.Contains(msg, order) {
+			t.Errorf("the steer does not name the accepted order %s: %q", order, msg)
+		}
 	}
 }
 
@@ -1528,4 +1534,54 @@ func sessionCloseConfigLoads(t *testing.T, rigNames []string) int64 {
 		t.Fatalf("cmdSessionClose with %d rigs = %d, want 0; stdout=%s stderr=%s", len(rigNames), code, stdout.String(), stderr.String())
 	}
 	return loadCityConfigCalls.Load() - before
+}
+
+// TestReadyFailureMatchesBDReadysFailureShape pins `gc ready`'s failure to
+// `bd ready`'s: stdout empty, exit non-zero, and one diagnostic line on stderr
+// naming the cause, with --json too (vp-bzeg).
+//
+// The generated work queries capture the reader's stdout as the answer, and
+// scripts that read `gc ready` directly (the core pack's spawn-storm,
+// human-gate and orphan sweeps) and the stand-in readers the generator tests
+// run all assume an empty stdout on failure. Those scripts also capture
+// stderr whole as the reason they report, so the shared --json failure
+// envelope is not written at all: on stdout it is an object where every reader
+// expects an array, and on stderr it repeats the diagnostic as JSON.
+//
+// A usage error cobra raises before the command runs (an extra argument) is
+// already named on stderr by gc's usage printer, so it too carries no envelope.
+func TestReadyFailureMatchesBDReadysFailureShape(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		// want is the start of stderr; oneLine requires nothing after it.
+		want    string
+		oneLine bool
+	}{
+		{name: "refused query", args: []string{"ready", "--json", "--sort", "newest-first"}, want: `gc ready: unknown --sort "newest-first"`, oneLine: true},
+		{name: "extra argument", args: []string{"ready", "extra", "--json"}, want: `gc: unknown command "extra" for "gc ready"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_HOME", t.TempDir())
+			t.Chdir(t.TempDir())
+
+			var stdout, stderr bytes.Buffer
+			code := run(tc.args, &stdout, &stderr)
+			if code == 0 {
+				t.Fatalf("gc %v exited 0; stdout=%q stderr=%q", tc.args, stdout.String(), stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("a failed gc ready wrote %q to stdout, want nothing: a reader that captures stdout as the answer would serve it", stdout.String())
+			}
+			if !strings.HasPrefix(stderr.String(), tc.want) {
+				t.Fatalf("stderr = %q, want it to start %q", stderr.String(), tc.want)
+			}
+			if strings.Contains(stderr.String(), `"ok":false`) {
+				t.Fatalf("stderr = %q carries the --json failure envelope; a script reporting stderr as its reason would repeat the diagnostic", stderr.String())
+			}
+			if lines := strings.Split(strings.TrimSpace(stderr.String()), "\n"); tc.oneLine && len(lines) != 1 {
+				t.Fatalf("stderr = %q, want exactly one diagnostic line", stderr.String())
+			}
+		})
+	}
 }

@@ -45,7 +45,9 @@ func (c *Client) ReadyWork(ctx context.Context, q readywork.Query) ([]readywork.
 		labels := slices.Clone(q.ExcludeLabels)
 		params.ExcludeLabel = &labels
 	}
-	if q.Sort != "" {
+	// --sort priority IS the default order (the canonical ready order), so it
+	// is sent as no sort at all: the endpoint's sort enum does not name it.
+	if q.Sort != "" && q.Sort != readywork.SortPriority {
 		order := genclient.GetV0CityByCityNameWorkReadyParamsSort(q.Sort)
 		params.Sort = &order
 	}

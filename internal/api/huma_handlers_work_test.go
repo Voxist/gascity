@@ -128,6 +128,29 @@ func TestReadyWorkSendsEveryQueryFieldToTheController(t *testing.T) {
 	}
 }
 
+// TestReadyWorkSendsSortPriorityAsTheDefaultOrder pins that --sort priority
+// reaches the controller as the default order rather than as a sort parameter.
+// The two are one order, the canonical ready order, and the endpoint's sort
+// enum does not name priority: sent as such, the generated best-by-priority leg
+// and rank probe would be refused at the door and every such `gc ready` would
+// pay a failed round trip before reading in-process (vp-bzeg).
+func TestReadyWorkSendsSortPriorityAsTheDefaultOrder(t *testing.T) {
+	state := &readyWorkFakeState{fakeState: newFakeState(t), rows: []readywork.ReadyBead{fullReadyBead()}}
+	q := readywork.Query{Unassigned: true, Sort: readywork.SortPriority, Limit: 1}
+	rows, err := workReadyServer(t, state).ReadyWork(context.Background(), q)
+	if err != nil {
+		t.Fatalf("ReadyWork(--sort priority) = %v, want the controller's answer", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("ReadyWork(--sort priority) = %d rows, want 1", len(rows))
+	}
+	want := q
+	want.Sort = ""
+	if len(state.asked) != 1 || !reflect.DeepEqual(state.asked[0], want) {
+		t.Fatalf("controller was asked %+v, want %+v (the default order, no sort)", state.asked, want)
+	}
+}
+
 // TestWorkReadyAnswersAnEmptyArrayNotNull: no ready work is an empty items
 // array, never null, as `gc ready` prints [].
 func TestWorkReadyAnswersAnEmptyArrayNotNull(t *testing.T) {
