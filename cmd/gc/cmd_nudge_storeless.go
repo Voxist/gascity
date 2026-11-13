@@ -127,6 +127,14 @@ func resolveNudgeTargetViaStoreBounded(cityPath string, cfg *config.City, identi
 // / continuation epoch are enriched best-effort the same way so queue items
 // and generation matching keep working; queue items keep the caller's
 // identifier as their Agent value (alias) so hook-drain matching is unchanged.
+//
+// Only gc session nudge falls back to this resolver: its argv identifier is a
+// session name the live runtime can check. A gc mail recipient may be an
+// alias or agent key only the bead store materializes, so a guessed session
+// name could notify the wrong session, and mail fails instead. gc sling's
+// nudge runs behind sling's own store resolution (resolvePoolSessionRefs,
+// lookupSessionNameOrLegacy), so a fallback there would add a second, weaker
+// resolver without removing that store dependency.
 func resolveNudgeTargetStoreless(cityPath string, cfg *config.City, sp runtime.Provider, identifier string) (nudgeTarget, error) {
 	if sp == nil {
 		return nudgeTarget{}, fmt.Errorf("%w: %q (storeless resolution requires a runtime provider)", session.ErrSessionNotFound, identifier)
