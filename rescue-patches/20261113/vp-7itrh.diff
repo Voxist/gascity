@@ -1,0 +1,122 @@
+diff --git a/cmd/gc/cmd_session_nudge_queue_contract_test.go b/cmd/gc/cmd_session_nudge_queue_contract_test.go
+new file mode 100644
+index 000000000..5ef931a53
+--- /dev/null
++++ b/cmd/gc/cmd_session_nudge_queue_contract_test.go
+@@ -0,0 +1,116 @@
++package main
++
++import (
++	"bytes"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/gastownhall/gascity/internal/nudgequeue"
++)
++
++// The vp-7itrh DEFECT-2 contract: "gc session nudge <target> --delivery queue"
++// must never report success while dropping the message. Two shapes:
++//
++//  1. An UNRESOLVABLE target (the bead's hatch/voxist.platform-engineer — no
++//     such rig or agent scope) must fail loudly: non-zero exit, the target
++//     named on stderr, and NOTHING persisted to the queue. A silent rc=0 with
++//     neither delivery nor queue is the silent half-delivery that stranded the
++//     orchestration recipe.
++//
++//  2. A CONFIGURED seat with no live session (the suspended-rig pool shape)
++//     must queue durably and report the queue path at rc=0 — that is the
++//     delivery an orchestrator's metadata+nudge recipe depends on when the
++//     rig is suspended (the nudge fires when the seat resumes).
++//
++// Together they pin the invariant: rc=0 implies the message is durably queued
++// or delivered; an unresolved target is a loud failure, never a quiet drop.
++
++func sessionNudgeContractCity(t *testing.T) string {
++	t.Helper()
++	t.Setenv("GC_BEADS", "file")
++	t.Setenv("GC_SESSION", "fake")
++	cityDir := t.TempDir()
++	cityToml := `[workspace]
++name = "test-city"
++
++[[agent]]
++name = "witness"
++dir = "myrig"
++provider = "codex"
++start_command = "echo"
++
++[[named_session]]
++template = "witness"
++dir = "myrig"
++`
++	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
++		t.Fatalf("WriteFile(city.toml): %v", err)
++	}
++	t.Setenv("GC_CITY", cityDir)
++	return cityDir
++}
++
++func TestCmdSessionNudgeUnresolvableTargetFailsLoudly(t *testing.T) {
++	cityDir := sessionNudgeContractCity(t)
++
++	var stdout, stderr bytes.Buffer
++	rc := cmdSessionNudge(
++		[]string{"hatch/voxist.platform-engineer", "ping"},
++		nudgeDeliveryQueue, false, &stdout, &stderr,
++	)
++
++	if rc == 0 {
++		t.Fatalf("unresolvable target must not exit 0 (silent half-delivery); stdout=%q stderr=%q",
++			stdout.String(), stderr.String())
++	}
++	if !strings.Contains(stderr.String(), "session not found") {
++		t.Fatalf("stderr must name the failure; got %q", stderr.String())
++	}
++
++	// The load-bearing half: nothing may be persisted for a target that does
++	// not resolve. The queue's authority is the flock'd state.json.
++	state, err := os.ReadFile(nudgequeue.StatePath(cityDir))
++	if err != nil && !os.IsNotExist(err) {
++		t.Fatalf("ReadFile(queue state): %v", err)
++	}
++	if strings.Contains(string(state), "hatch/voxist.platform-engineer") {
++		t.Fatalf("queue persisted a nudge for an unresolvable target: %s", state)
++	}
++}
++
++func TestCmdSessionNudgeQueuesForConfiguredSeatWithoutLiveSession(t *testing.T) {
++	cityDir := sessionNudgeContractCity(t)
++
++	// No CreateSession anywhere: the seat is configured but not live — the
++	// suspended-rig pool shape from the bead.
++	target, err := resolveNudgeTarget("myrig/witness")
++	if err != nil {
++		t.Fatalf("resolveNudgeTarget(configured seat): %v", err)
++	}
++
++	var stdout, stderr bytes.Buffer
++	rc := cmdSessionNudge(
++		[]string{"myrig/witness", "ping"},
++		nudgeDeliveryQueue, false, &stdout, &stderr,
++	)
++
++	if rc != 0 {
++		t.Fatalf("configured seat with --delivery queue must queue and exit 0; rc=%d stderr=%q",
++			rc, stderr.String())
++	}
++	if !strings.Contains(stdout.String(), "Queued nudge") {
++		t.Fatalf("stdout must report the queue; got %q", stdout.String())
++	}
++
++	pending, inFlight, dead, err := listQueuedNudgesForTarget(cityDir, target, time.Now())
++	if err != nil {
++		t.Fatalf("listQueuedNudgesForTarget: %v", err)
++	}
++	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
++		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 1/0/0 (durable queue owns the suspended-seat nudge)",
++			len(pending), len(inFlight), len(dead))
++	}
++}

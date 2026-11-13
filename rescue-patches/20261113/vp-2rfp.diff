@@ -1,0 +1,246 @@
+diff --git a/cmd/gc/dolt_cleanup_discovery.go b/cmd/gc/dolt_cleanup_discovery.go
+index 9a7bf2b81..c3b9eaffc 100644
+--- a/cmd/gc/dolt_cleanup_discovery.go
++++ b/cmd/gc/dolt_cleanup_discovery.go
+@@ -44,7 +44,12 @@ func loadRigDoltPorts(rigs []resolverRig, fs fsys.FS) map[int]string {
+ 
+ // procEnumerationTimeout caps the per-PID I/O during /proc walks so a stuck
+ // kernel thread or hung process can't make the reaper hang.
+-const procEnumerationTimeout = 2 * time.Second
++const procEnumerationTimeout = 5 * time.Second
++
++// psEnumerationTimeout caps the wall-clock budget for the full-system ps -ax
++// scan on Darwin. ps -ax walks every process on the machine and typically
++// needs a much larger budget than the per-PID procEnumerationTimeout.
++const psEnumerationTimeout = 30 * time.Second
+ 
+ // discoverDoltProcesses finds live `dolt sql-server` processes and reports
+ // their argv and listening ports. Linux uses /proc for argv, ports, RSS, and
+@@ -277,7 +282,7 @@ func readDoltSQLServerArgv(pid int) ([]string, bool) {
+ }
+ 
+ func psLStartCommandLines() ([]string, error) {
+-	ctx, cancel := context.WithTimeout(context.Background(), procEnumerationTimeout)
++	ctx, cancel := context.WithTimeout(context.Background(), psEnumerationTimeout)
+ 	defer cancel()
+ 	cmd := exec.CommandContext(ctx, "ps", "-ax", "-o", "pid=,rss=,lstart=,command=")
+ 	out, err := cmd.Output()
+diff --git a/engdocs/plans/vp-2rfp-reconcile-backoff-circuit-breaker.md b/engdocs/plans/vp-2rfp-reconcile-backoff-circuit-breaker.md
+new file mode 100644
+index 000000000..c8963e9f7
+--- /dev/null
++++ b/engdocs/plans/vp-2rfp-reconcile-backoff-circuit-breaker.md
+@@ -0,0 +1,126 @@
++# Controller: reconcile backoff + circuit-breaker hardening — Plan v0.1
++
++**Status:** Ready · **Date:** 2026-06-10 · **Author:** voxist.planner-2 · **Rig:** gascity (voxist-platform)
++
++## Context
++
++On 2026-06-10 the HQ dolt-proxy wedged ("CREATE DATABASE hq → invalid
++connection / 10 s i/o timeout"). The `CachingStore.reconcileLoop` in
++`internal/beads/caching_store_reconcile.go` has no sleep before the
++single-retry in `cmd/gc/bd_env.go:bdCommandRunnerWithManagedRetryErr`,
++and a dead `cacheDegraded → return 0` branch in `nextReconcileDelay`
++that bypasses backoff when the store degrades via a partial-result
++error path before accumulating `maxCacheSyncFailures` failures.
++Together these allow a degraded store to hammer the dead proxy with
++rapid retries and pin a CPU core.
++
++The exponential backoff (`syncFailures > 0`, 2 s base, 10-min cap) was
++added on this branch in the first commit. This plan finishes the three
++remaining hardening items:
++
++1. Remove the dead `cacheDegraded → return 0` branch (replaced by the
++   already-present backoff path).
++2. Add a circuit-breaker log line on the first `live→degraded`
++   transition so operators see an alert.
++3. Add a `bdCommandRetrySleep` (500 ms) before the single retry in
++   `bdCommandRunnerWithManagedRetryErr` so the proxy isn't hammered
++   at line-rate when the first attempt fails.
++
++**Branch:** `gc/vp-2rfp` · **Worktree:** `gascity/worktrees/vp-2rfp`
++
++## Constraints
++
++- Go tests only (`go test ./internal/beads/...` and
++  `go test ./cmd/gc/...`); no integration harness needed.
++- No new exported symbols — all changes are internal.
++- The sleep constant `bdCommandRetrySleep` must be in `bd_env.go`, not
++  a shared package (it guards managed-Dolt commands only).
++- Existing `TestNextReconcileDelay` tests must continue to pass.
++
++## Proposed approach
++
++Three red-green pairs:
++
++**Pair 1 — dead branch removal:**
++Write a test that constructs `state=cacheDegraded, syncFailures=0,
++LastProblemAt.IsZero()=true` and asserts `nextReconcileDelay > 0`.
++Current code returns 0 from the dead branch. Fix: replace
++`if c.state == cacheDegraded { return 0 }` with
++`return cacheReconcileMaxBackoff` (conservative worst-case guard for
++the otherwise-unreachable state).
++
++**Pair 2 — degraded transition log:**
++Write a test that drives `runReconciliation` through
++`maxCacheSyncFailures` consecutive errors, captures the default
++logger, and asserts the log contains `"degraded"`. Current code emits
++no log on the `live→cacheDegraded` transition. Fix: add a
++`log.Printf(...)` in the `c.state = cacheDegraded` block.
++
++**Pair 3 — 500 ms retry sleep:**
++Write a test that patches the internal runner with a fake that records
++call timestamps, returns a retryable transport error on the first
++call, and verifies the second call happens no sooner than 400 ms
++later. Current code has no sleep. Fix: add `const bdCommandRetrySleep
++= 500 * time.Millisecond` and `time.Sleep(bdCommandRetrySleep)` before
++`retryRunner(dir, name, args...)`.
++
++## Micro-tasks
++
++| id | description | acceptance | est_minutes | slings |
++|---|---|---|---|---|
++| T-001 | Write failing test `TestNextReconcileDelayDegradedNoSpin` in `internal/beads/caching_store_reconcile_internal_test.go` that constructs `state=cacheDegraded, syncFailures=0, LastProblemAt.IsZero()` and asserts `nextReconcileDelay(now) > 0` | Test exists and fails (`got 0, want > 0`) | 3 | — |
++| T-002 | Replace `if c.state == cacheDegraded { return 0 }` in `nextReconcileDelay` with `return cacheReconcileMaxBackoff`; remove unused `cacheReconcileFailureBackoff` constant | T-001 passes; `go test ./internal/beads/...` green | 3 | — |
++| T-003 | Write failing test `TestRunReconciliationLogsDegradedTransition` in `internal/beads/caching_store_reconcile_internal_test.go` that drives a failing-`List` backing store through `maxCacheSyncFailures` calls, captures the default logger via `captureLog(t)`, and asserts `strings.Contains(log, "degraded")` | Test exists and fails (no log line emitted) | 3 | — |
++| T-004 | Add `log.Printf("beads cache: store degraded rig=%s syncFailures=%d: %v", c.idPrefix, c.syncFailures, err)` inside the `c.state = cacheDegraded` block of `runReconciliation` in `caching_store_reconcile.go` | T-003 passes; `go test ./internal/beads/...` green | 3 | — |
++| T-005 | Write failing test `TestBdCommandRunnerWithManagedRetryErrSleepsBeforeRetry` in `cmd/gc/bd_env_test.go` that injects a fake runner recording `time.Now()` per call, returns a retryable error (e.g. `"connection refused"`) on the first call and nil on the second, and asserts the elapsed time between calls is `>= 400ms` | Test exists and fails (elapsed < 1 ms) | 4 | — |
++| T-006 | Add `const bdCommandRetrySleep = 500 * time.Millisecond` to `bd_env.go` and call `time.Sleep(bdCommandRetrySleep)` immediately before `retryRunner(dir, name, args...)` | T-005 passes; `go test ./cmd/gc/...` green | 3 | — |
++
++## GDPR data-flow impact
++
++### Data added / removed / relocated
++
++No data flow changed. These changes affect only the retry timing and
++logging of internal controller-to-store commands. No bead content,
++user data, or PII is touched.
++
++### New cross-border transfers (or "none")
++
++None.
++
++### Audit-log changes (or "none")
++
++None.
++
++## MDR Class I traceability
++
++Not applicable — not a clinical path.
++
++## Acceptance criteria
++
++1. `go test ./internal/beads/...` passes with all new tests green.
++2. `go test ./cmd/gc/...` passes with the new retry-sleep test green.
++3. Manual: after a simulated HQ proxy wedge (`BD_DOLT_HOST` pointed at
++   a closed port), `gc logs` shows a "beads cache: store degraded"
++   line on the first degradation; subsequent retries happen at
++   exponential backoff intervals, not line-rate; and `top` shows < 5 %
++   CPU for the gc controller goroutine.
++
++## Rollback plan
++
++1. **Git-level:** revert the single PR that introduces these changes.
++   All three pairs are in the same PR; reverting the PR fully restores
++   the previous behavior.
++2. **Data-level:** no database migrations; no persistent state
++   changed. Rollback is instantaneous.
++3. **Trigger:** roll back if the 500 ms retry sleep measurably increases
++   the observed p99 latency of rig-sync operations in production (check
++   the Grafana "bd command duration" panel), or if a test flake is
++   introduced by the timing assertion.
++
++## Open questions
++
++- Should `cacheReconcileMaxBackoff` (10 min) be the right fallback for
++  the dead `cacheDegraded` path, or would a shorter sentinel (e.g.
++  1 min) be safer for a degraded store that somehow lost its failure
++  context? The 10-min cap already applies at `syncFailures=20`; using
++  it here is the most conservative choice.
+diff --git a/internal/beads/caching_store_reconcile.go b/internal/beads/caching_store_reconcile.go
+index 3927ec97e..4322abf93 100644
+--- a/internal/beads/caching_store_reconcile.go
++++ b/internal/beads/caching_store_reconcile.go
+@@ -525,6 +525,7 @@ func (c *CachingStore) runReconciliation() {
+ // hold c.mu (write lock).
+ func (c *CachingStore) promoteLiveLocked() {
+ 	c.state = cacheLive
++	c.circuitTripped = false
+ }
+ 
+ // reconcileSuccessLogLocked composes the per-reconcile success log line
+diff --git a/internal/beads/caching_store_reconcile_internal_test.go b/internal/beads/caching_store_reconcile_internal_test.go
+index 17b93b843..0a5db555f 100644
+--- a/internal/beads/caching_store_reconcile_internal_test.go
++++ b/internal/beads/caching_store_reconcile_internal_test.go
+@@ -742,3 +742,70 @@ func TestPrimeFailureThenReconcileConverges(t *testing.T) {
+ 		t.Fatalf("cachedReadyOnly = %#v, want to include %s", got, missed.ID)
+ 	}
+ }
++
++// TestRunReconciliation_CircuitTripResets_OnRecovery guards that
++// promoteLiveLocked resets circuitTripped so a second live→degraded
++// transition after recovery emits the circuit-breaker trip log again.
++func TestRunReconciliation_CircuitTripResets_OnRecovery(t *testing.T) {
++	backing := &failingScanStore{Store: NewMemStore()}
++	backing.setFailScan(true)
++	cs := NewCachingStoreForTest(backing, nil)
++	cs.state = cacheLive
++
++	var logMu sync.Mutex
++	var logLines []string
++	cs.problemf = func(msg string) {
++		logMu.Lock()
++		logLines = append(logLines, msg)
++		logMu.Unlock()
++	}
++
++	// Phase 1: drive live→degraded; circuit must trip.
++	for i := 0; i < maxCacheSyncFailures; i++ {
++		cs.runReconciliation()
++	}
++	if cs.state != cacheDegraded {
++		t.Fatalf("phase 1: state = %v, want cacheDegraded after %d failures", cs.state, maxCacheSyncFailures)
++	}
++	logMu.Lock()
++	firstTrips := 0
++	for _, l := range logLines {
++		if strings.Contains(l, "circuit-breaker tripped") {
++			firstTrips++
++		}
++	}
++	logLines = logLines[:0]
++	logMu.Unlock()
++	if firstTrips == 0 {
++		t.Fatal("phase 1: expected 'circuit-breaker tripped' log on first live→degraded transition, got none")
++	}
++
++	// Phase 2: recover — backing succeeds, reconcile promotes back to live.
++	backing.setFailScan(false)
++	cs.runReconciliation()
++	if cs.state != cacheLive {
++		t.Fatalf("phase 2: state = %v, want cacheLive after successful recovery reconcile", cs.state)
++	}
++
++	// Phase 3: degrade again — circuit must trip a second time.
++	backing.setFailScan(true)
++	for i := 0; i < maxCacheSyncFailures; i++ {
++		cs.runReconciliation()
++	}
++	if cs.state != cacheDegraded {
++		t.Fatalf("phase 3: state = %v, want cacheDegraded on second failure run", cs.state)
++	}
++
++	logMu.Lock()
++	secondTrips := 0
++	for _, l := range logLines {
++		if strings.Contains(l, "circuit-breaker tripped") {
++			secondTrips++
++		}
++	}
++	logMu.Unlock()
++
++	if secondTrips == 0 {
++		t.Fatal("phase 3: expected 'circuit-breaker tripped' log on second live→degraded transition after recovery, got none — circuitTripped not reset by promoteLiveLocked")
++	}
++}

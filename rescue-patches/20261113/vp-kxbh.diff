@@ -1,0 +1,13 @@
+diff --git a/cmd/gc/dolt_project_id_test.go b/cmd/gc/dolt_project_id_test.go
+index 2d1d2a3d1..93d635c03 100644
+--- a/cmd/gc/dolt_project_id_test.go
++++ b/cmd/gc/dolt_project_id_test.go
+@@ -817,7 +817,7 @@ func TestEnsureManagedDoltProjectIDGeneratesLocalIdentityWithPasswordedServer(t
+ 	_, port, _, cleanup := startPasswordedDoltServer(t, repoDir, "CREATE DATABASE IF NOT EXISTS `hq`; USE `hq`; CREATE TABLE IF NOT EXISTS metadata (`key` VARCHAR(255) PRIMARY KEY, value LONGTEXT);")
+ 	defer cleanup()
+ 
+-	db, err := doltpool.Open(doltpool.Config{User: "root", Host: "127.0.0.1", Port: port, Database: "hq"})
++	db, err := doltpool.Open(doltpool.Config{User: "root", Password: managedDoltPassword(), Host: "127.0.0.1", Port: port, Database: "hq"})
+ 	if err != nil {
+ 		t.Fatalf("doltpool.Open: %v", err)
+ 	}

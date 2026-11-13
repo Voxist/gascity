@@ -1,0 +1,756 @@
+diff --git a/internal/delivery/close_guard.go b/internal/delivery/close_guard.go
+new file mode 100644
+index 000000000..ad0e33760
+--- /dev/null
++++ b/internal/delivery/close_guard.go
+@@ -0,0 +1,25 @@
++package delivery
++
++import (
++	"errors"
++
++	"github.com/gastownhall/gascity/internal/beads"
++)
++
++// ErrNotInTerminalPhase is returned by ValidateClosePrerequisites when a
++// delivery bead (one with gc.phase set) is not yet in a terminal phase.
++var ErrNotInTerminalPhase = errors.New("delivery bead not in terminal phase")
++
++// ValidateClosePrerequisites returns ErrNotInTerminalPhase if b is a delivery
++// bead (gc.phase is non-empty) and the phase is not terminal. Returns nil for
++// non-delivery beads (unset gc.phase) or beads already in a terminal phase.
++func ValidateClosePrerequisites(b beads.Bead) error {
++	phase := b.Metadata[MetaKeyPhase]
++	if phase == "" {
++		return nil
++	}
++	if !IsTerminalPhase(phase) {
++		return ErrNotInTerminalPhase
++	}
++	return nil
++}
+diff --git a/internal/delivery/close_guard_test.go b/internal/delivery/close_guard_test.go
+new file mode 100644
+index 000000000..c5f8f2e23
+--- /dev/null
++++ b/internal/delivery/close_guard_test.go
+@@ -0,0 +1,70 @@
++package delivery_test
++
++import (
++	"errors"
++	"testing"
++
++	"github.com/gastownhall/gascity/internal/beads"
++	"github.com/gastownhall/gascity/internal/delivery"
++)
++
++func beadWithPhase(phase string) beads.Bead {
++	meta := map[string]string{}
++	if phase != "" {
++		meta[delivery.MetaKeyPhase] = phase
++	}
++	return beads.Bead{
++		ID:       "test-bead",
++		Title:    "test",
++		Status:   "open",
++		Metadata: meta,
++	}
++}
++
++func TestValidateClosePrerequisites_NonTerminalReturnsError(t *testing.T) {
++	nonTerminal := []string{
++		delivery.PhaseBuilding,
++		delivery.PhaseCIPending,
++		delivery.PhaseReviewPending,
++		delivery.PhaseRework,
++		delivery.PhaseDecisionPending,
++		delivery.PhaseMergePending,
++		delivery.PhaseConflicted,
++	}
++
++	for _, p := range nonTerminal {
++		b := beadWithPhase(p)
++		if err := delivery.ValidateClosePrerequisites(b); err == nil {
++			t.Errorf("phase %q: expected ErrNotInTerminalPhase, got nil", p)
++		} else if !errors.Is(err, delivery.ErrNotInTerminalPhase) {
++			t.Errorf("phase %q: expected ErrNotInTerminalPhase, got %v", p, err)
++		}
++	}
++}
++
++func TestValidateClosePrerequisites_TerminalReturnsNil(t *testing.T) {
++	terminal := []string{delivery.PhaseMerged, delivery.PhaseAbandoned}
++
++	for _, p := range terminal {
++		b := beadWithPhase(p)
++		if err := delivery.ValidateClosePrerequisites(b); err != nil {
++			t.Errorf("phase %q: expected nil, got %v", p, err)
++		}
++	}
++}
++
++func TestValidateClosePrerequisites_UnsetPhaseReturnsNil(t *testing.T) {
++	// A bead with no gc.phase is not a delivery bead — close is allowed.
++	b := beadWithPhase("")
++	if err := delivery.ValidateClosePrerequisites(b); err != nil {
++		t.Errorf("unset phase: expected nil, got %v", err)
++	}
++}
++
++func TestValidateClosePrerequisites_NilMetadataReturnsNil(t *testing.T) {
++	// A bead with no Metadata map is not a delivery bead.
++	b := beads.Bead{ID: "test", Title: "test", Status: "open"}
++	if err := delivery.ValidateClosePrerequisites(b); err != nil {
++		t.Errorf("nil metadata: expected nil, got %v", err)
++	}
++}
+diff --git a/internal/delivery/integration_test.go b/internal/delivery/integration_test.go
+new file mode 100644
+index 000000000..84583e7ca
+--- /dev/null
++++ b/internal/delivery/integration_test.go
+@@ -0,0 +1,104 @@
++package delivery_test
++
++import (
++	"errors"
++	"testing"
++
++	"github.com/gastownhall/gascity/internal/beads"
++	"github.com/gastownhall/gascity/internal/delivery"
++)
++
++// TestReviewApprove_BorrowsDecisionPendingNotClosed verifies AC4:
++// Given a bead at review-pending, a reviewer APPROVE transitions to
++// decision-pending, the bead stays open, and ValidateClosePrerequisites
++// returns ErrNotInTerminalPhase.
++func TestReviewApprove_BorrowsDecisionPendingNotClosed(t *testing.T) {
++	store := beads.NewMemStore()
++
++	// Set up a bead at review-pending.
++	b, err := store.Create(beads.Bead{Title: "AC4 test bead", Status: "open"})
++	if err != nil {
++		t.Fatalf("create: %v", err)
++	}
++	if err := store.SetMetadata(b.ID, delivery.MetaKeyPhase, delivery.PhaseReviewPending); err != nil {
++		t.Fatalf("set phase: %v", err)
++	}
++
++	// Reviewer APPROVE: transition to decision-pending.
++	if err := delivery.SetPhase(store, b.ID, delivery.PhaseDecisionPending); err != nil {
++		t.Fatalf("SetPhase review-pending→decision-pending: %v", err)
++	}
++
++	// Verify the bead is now in decision-pending.
++	got, err := store.Get(b.ID)
++	if err != nil {
++		t.Fatalf("get: %v", err)
++	}
++	if got.Metadata[delivery.MetaKeyPhase] != delivery.PhaseDecisionPending {
++		t.Errorf("phase: got %q, want %q", got.Metadata[delivery.MetaKeyPhase], delivery.PhaseDecisionPending)
++	}
++	// AC4: bead Status must still be "open".
++	if got.Status != "open" {
++		t.Errorf("status: got %q, want %q", got.Status, "open")
++	}
++	// AC4: close guard must reject the bead.
++	if err := delivery.ValidateClosePrerequisites(got); !errors.Is(err, delivery.ErrNotInTerminalPhase) {
++		t.Errorf("ValidateClosePrerequisites: got %v, want ErrNotInTerminalPhase", err)
++	}
++}
++
++// TestFindDeliveryBeadByPRURL_ReturnsOneBead verifies AC1 — the query
++// primitive returns at most one open bead with gc.phase set for a given PR URL.
++func TestFindDeliveryBeadByPRURL_ReturnsOneBead(t *testing.T) {
++	store := beads.NewMemStore()
++	prURL := "https://github.com/gastownhall/gascity/pull/42"
++
++	// Create a delivery bead with gc.pr_url and gc.phase.
++	b, err := store.Create(beads.Bead{Title: "delivery bead"})
++	if err != nil {
++		t.Fatalf("create: %v", err)
++	}
++	if err := store.SetMetadataBatch(b.ID, map[string]string{
++		delivery.MetaKeyPRURL: prURL,
++		delivery.MetaKeyPhase: delivery.PhaseReviewPending,
++	}); err != nil {
++		t.Fatalf("set metadata: %v", err)
++	}
++
++	// Create a non-delivery bead with the same pr_url but no gc.phase.
++	nonDelivery, err := store.Create(beads.Bead{Title: "non-delivery bead"})
++	if err != nil {
++		t.Fatalf("create non-delivery: %v", err)
++	}
++	if err := store.SetMetadata(nonDelivery.ID, delivery.MetaKeyPRURL, prURL); err != nil {
++		t.Fatalf("set pr_url on non-delivery: %v", err)
++	}
++
++	// FindDeliveryBeadByPRURL must return the delivery bead (has gc.phase).
++	found, ok, err := delivery.FindDeliveryBeadByPRURL(store, prURL)
++	if err != nil {
++		t.Fatalf("FindDeliveryBeadByPRURL: %v", err)
++	}
++	if !ok {
++		t.Fatal("FindDeliveryBeadByPRURL: not found, want found")
++	}
++	if found.ID != b.ID {
++		t.Errorf("found bead ID: got %q, want %q", found.ID, b.ID)
++	}
++	if found.Metadata[delivery.MetaKeyPhase] != delivery.PhaseReviewPending {
++		t.Errorf("found bead phase: got %q, want %q", found.Metadata[delivery.MetaKeyPhase], delivery.PhaseReviewPending)
++	}
++}
++
++// TestFindDeliveryBeadByPRURL_NotFound verifies that a missing bead returns (zero, false, nil).
++func TestFindDeliveryBeadByPRURL_NotFound(t *testing.T) {
++	store := beads.NewMemStore()
++
++	found, ok, err := delivery.FindDeliveryBeadByPRURL(store, "https://github.com/not/real/pull/1")
++	if err != nil {
++		t.Fatalf("FindDeliveryBeadByPRURL: %v", err)
++	}
++	if ok {
++		t.Errorf("expected not found, got bead ID %q", found.ID)
++	}
++}
+diff --git a/internal/delivery/phase.go b/internal/delivery/phase.go
+new file mode 100644
+index 000000000..820f8caf4
+--- /dev/null
++++ b/internal/delivery/phase.go
+@@ -0,0 +1,97 @@
++// Package delivery implements the PR phase state machine for the autonomous
++// delivery pipeline. Phase transitions are the sole mutation path for gc.phase
++// metadata — callers must never write gc.phase directly via SetMetadata.
++package delivery
++
++// Phase state constants for the PR delivery state machine.
++const (
++	PhaseBuilding        = "building"
++	PhaseCIPending       = "ci-pending"
++	PhaseReviewPending   = "review-pending"
++	PhaseRework          = "rework"
++	PhaseDecisionPending = "decision-pending"
++	PhaseMergePending    = "merge-pending"
++	PhaseConflicted      = "conflicted"
++	PhaseMerged          = "merged"    // terminal
++	PhaseAbandoned       = "abandoned" // terminal
++)
++
++// Metadata key constants written to bead records by the delivery package.
++const (
++	MetaKeyPhase          = "gc.phase"
++	MetaKeyPhaseHistory   = "gc.phase_history"
++	MetaKeyPRURL          = "gc.pr_url"
++	MetaKeyPhaseEnteredAt = "gc.phase_entered_at" // RFC3339 timestamp; re-stamped on every SetPhase transition
++	MetaKeyWardenRetries  = "gc.warden_retries"   // cleared to "" on every SetPhase transition
++)
++
++// IsTerminalPhase reports whether p is a terminal phase (merged or abandoned).
++func IsTerminalPhase(p string) bool {
++	return p == PhaseMerged || p == PhaseAbandoned
++}
++
++// validTransitions encodes the legal phase adjacency table.
++// An empty from-phase ("") is the bootstrap edge — a bead with no gc.phase yet
++// may only transition to building.
++var validTransitions = map[string]map[string]bool{
++	"": {
++		PhaseBuilding: true,
++	},
++	PhaseBuilding: {
++		PhaseCIPending: true,
++		PhaseAbandoned: true,
++	},
++	PhaseCIPending: {
++		PhaseReviewPending: true,
++		PhaseRework:        true,
++		PhaseConflicted:    true,
++		PhaseAbandoned:     true,
++	},
++	PhaseReviewPending: {
++		PhaseRework:          true,
++		PhaseDecisionPending: true,
++		PhaseAbandoned:       true,
++	},
++	PhaseRework: {
++		PhaseBuilding:  true,
++		PhaseCIPending: true,
++		PhaseAbandoned: true,
++	},
++	PhaseDecisionPending: {
++		PhaseMergePending: true,
++		PhaseRework:       true,
++		PhaseAbandoned:    true,
++	},
++	PhaseMergePending: {
++		PhaseMerged:     true,
++		PhaseRework:     true,
++		PhaseConflicted: true,
++	},
++	PhaseConflicted: {
++		PhaseRework:    true,
++		PhaseAbandoned: true,
++	},
++	PhaseMerged:    {},
++	PhaseAbandoned: {},
++}
++
++// ValidatePhaseTransition returns an error if transitioning from → to is not
++// a legal edge in the state machine. A nil error means the transition is allowed.
++func ValidatePhaseTransition(from, to string) error {
++	allowed, fromKnown := validTransitions[from]
++	if !fromKnown {
++		return &phaseTransitionError{from: from, to: to, reason: "unknown source phase"}
++	}
++	if !allowed[to] {
++		return &phaseTransitionError{from: from, to: to, reason: "transition not allowed"}
++	}
++	return nil
++}
++
++type phaseTransitionError struct {
++	from, to, reason string
++}
++
++func (e *phaseTransitionError) Error() string {
++	return "delivery: invalid phase transition " + e.from + " → " + e.to + ": " + e.reason
++}
+diff --git a/internal/delivery/phase_test.go b/internal/delivery/phase_test.go
+new file mode 100644
+index 000000000..93906f9fe
+--- /dev/null
++++ b/internal/delivery/phase_test.go
+@@ -0,0 +1,82 @@
++package delivery_test
++
++import (
++	"testing"
++
++	"github.com/gastownhall/gascity/internal/delivery"
++)
++
++func TestPhaseConstants(t *testing.T) {
++	cases := []struct {
++		name  string
++		value string
++	}{
++		{"PhaseBuilding", delivery.PhaseBuilding},
++		{"PhaseCIPending", delivery.PhaseCIPending},
++		{"PhaseReviewPending", delivery.PhaseReviewPending},
++		{"PhaseRework", delivery.PhaseRework},
++		{"PhaseDecisionPending", delivery.PhaseDecisionPending},
++		{"PhaseMergePending", delivery.PhaseMergePending},
++		{"PhaseConflicted", delivery.PhaseConflicted},
++		{"PhaseMerged", delivery.PhaseMerged},
++		{"PhaseAbandoned", delivery.PhaseAbandoned},
++	}
++
++	expected := map[string]string{
++		"PhaseBuilding":        "building",
++		"PhaseCIPending":       "ci-pending",
++		"PhaseReviewPending":   "review-pending",
++		"PhaseRework":          "rework",
++		"PhaseDecisionPending": "decision-pending",
++		"PhaseMergePending":    "merge-pending",
++		"PhaseConflicted":      "conflicted",
++		"PhaseMerged":          "merged",
++		"PhaseAbandoned":       "abandoned",
++	}
++
++	for _, c := range cases {
++		if c.value != expected[c.name] {
++			t.Errorf("constant %s: got %q, want %q", c.name, c.value, expected[c.name])
++		}
++	}
++}
++
++func TestMetaKeyConstants(t *testing.T) {
++	if delivery.MetaKeyPhase != "gc.phase" {
++		t.Errorf("MetaKeyPhase: got %q, want %q", delivery.MetaKeyPhase, "gc.phase")
++	}
++	if delivery.MetaKeyPhaseHistory != "gc.phase_history" {
++		t.Errorf("MetaKeyPhaseHistory: got %q, want %q", delivery.MetaKeyPhaseHistory, "gc.phase_history")
++	}
++	if delivery.MetaKeyPRURL != "gc.pr_url" {
++		t.Errorf("MetaKeyPRURL: got %q, want %q", delivery.MetaKeyPRURL, "gc.pr_url")
++	}
++}
++
++func TestIsTerminalPhase(t *testing.T) {
++	terminal := []string{delivery.PhaseMerged, delivery.PhaseAbandoned}
++	nonTerminal := []string{
++		delivery.PhaseBuilding,
++		delivery.PhaseCIPending,
++		delivery.PhaseReviewPending,
++		delivery.PhaseRework,
++		delivery.PhaseDecisionPending,
++		delivery.PhaseMergePending,
++		delivery.PhaseConflicted,
++	}
++
++	for _, p := range terminal {
++		if !delivery.IsTerminalPhase(p) {
++			t.Errorf("IsTerminalPhase(%q): got false, want true", p)
++		}
++	}
++	for _, p := range nonTerminal {
++		if delivery.IsTerminalPhase(p) {
++			t.Errorf("IsTerminalPhase(%q): got true, want false", p)
++		}
++	}
++	// empty string is not terminal
++	if delivery.IsTerminalPhase("") {
++		t.Error("IsTerminalPhase empty string: got true, want false")
++	}
++}
+diff --git a/internal/delivery/store.go b/internal/delivery/store.go
+new file mode 100644
+index 000000000..f5ae59f84
+--- /dev/null
++++ b/internal/delivery/store.go
+@@ -0,0 +1,74 @@
++package delivery
++
++import (
++	"fmt"
++	"strings"
++	"time"
++
++	"github.com/gastownhall/gascity/internal/beads"
++)
++
++// SetPhase transitions a bead to the given phase, writing gc.phase and
++// appending to gc.phase_history atomically via SetMetadataBatch.
++// It also stamps gc.phase_entered_at with the current time and clears
++// gc.warden_retries so the delivery-warden measures dwell from this transition.
++// If the bead is already in the target phase the call is a no-op (idempotent).
++// Returns an error for illegal transitions or if the bead does not exist.
++func SetPhase(store beads.Store, id, to string) error {
++	return SetPhaseAt(store, id, to, time.Now())
++}
++
++// SetPhaseAt is like SetPhase but accepts an explicit timestamp for
++// gc.phase_entered_at. Use it in tests or callers that control their own clock.
++func SetPhaseAt(store beads.Store, id, to string, at time.Time) error {
++	b, err := store.Get(id)
++	if err != nil {
++		return fmt.Errorf("delivery.SetPhase: get bead %s: %w", id, err)
++	}
++
++	current := b.Metadata[MetaKeyPhase]
++
++	// Idempotent no-op.
++	if current == to {
++		return nil
++	}
++
++	if err := ValidatePhaseTransition(current, to); err != nil {
++		return err
++	}
++
++	history := appendHistory(b.Metadata[MetaKeyPhaseHistory], current, to)
++
++	return store.SetMetadataBatch(id, map[string]string{
++		MetaKeyPhase:          to,
++		MetaKeyPhaseHistory:   history,
++		MetaKeyPhaseEnteredAt: at.UTC().Format(time.RFC3339),
++		MetaKeyWardenRetries:  "",
++	})
++}
++
++// FindDeliveryBeadByPRURL returns the first open bead that has gc.pr_url
++// matching prURL and has gc.phase set (i.e. is a delivery bead).
++// Returns (bead, true, nil) when found; (zero, false, nil) when not found.
++func FindDeliveryBeadByPRURL(store beads.Store, prURL string) (beads.Bead, bool, error) {
++	candidates, err := store.ListByMetadata(map[string]string{MetaKeyPRURL: prURL}, 0)
++	if err != nil {
++		return beads.Bead{}, false, fmt.Errorf("delivery.FindDeliveryBeadByPRURL: %w", err)
++	}
++
++	for _, b := range candidates {
++		if b.Metadata[MetaKeyPhase] != "" {
++			return b, true, nil
++		}
++	}
++	return beads.Bead{}, false, nil
++}
++
++// appendHistory returns the new gc.phase_history value after a from→to transition.
++func appendHistory(existing, from, to string) string {
++	entry := from + "→" + to
++	if existing == "" {
++		return entry
++	}
++	return strings.Join([]string{existing, entry}, ",")
++}
+diff --git a/internal/delivery/store_test.go b/internal/delivery/store_test.go
+new file mode 100644
+index 000000000..5062ebba2
+--- /dev/null
++++ b/internal/delivery/store_test.go
+@@ -0,0 +1,150 @@
++package delivery_test
++
++import (
++	"testing"
++	"time"
++
++	"github.com/gastownhall/gascity/internal/beads"
++	"github.com/gastownhall/gascity/internal/delivery"
++)
++
++func newBeadWithPhase(store beads.Store, phase string) beads.Bead {
++	b, err := store.Create(beads.Bead{Title: "test bead"})
++	if err != nil {
++		panic(err)
++	}
++	if phase != "" {
++		if err := store.SetMetadata(b.ID, delivery.MetaKeyPhase, phase); err != nil {
++			panic(err)
++		}
++		b, err = store.Get(b.ID)
++		if err != nil {
++			panic(err)
++		}
++	}
++	return b
++}
++
++func TestSetPhase_IdempotentSamePhase(t *testing.T) {
++	store := beads.NewMemStore()
++	b := newBeadWithPhase(store, delivery.PhaseBuilding)
++
++	// First call: building → ci-pending.
++	if err := delivery.SetPhase(store, b.ID, delivery.PhaseCIPending); err != nil {
++		t.Fatalf("first SetPhase: %v", err)
++	}
++	b1, _ := store.Get(b.ID)
++	hist1 := b1.Metadata[delivery.MetaKeyPhaseHistory]
++
++	// Second call with the same phase: should be a no-op.
++	if err := delivery.SetPhase(store, b.ID, delivery.PhaseCIPending); err != nil {
++		t.Fatalf("second SetPhase (idempotent): %v", err)
++	}
++	b2, _ := store.Get(b.ID)
++	hist2 := b2.Metadata[delivery.MetaKeyPhaseHistory]
++
++	if b2.Metadata[delivery.MetaKeyPhase] != delivery.PhaseCIPending {
++		t.Errorf("phase: got %q, want %q", b2.Metadata[delivery.MetaKeyPhase], delivery.PhaseCIPending)
++	}
++	// History must not have grown — idempotent call must not append.
++	if hist2 != hist1 {
++		t.Errorf("history changed on idempotent call: before=%q after=%q", hist1, hist2)
++	}
++}
++
++func TestSetPhase_LogsHistory(t *testing.T) {
++	store := beads.NewMemStore()
++	b := newBeadWithPhase(store, "")
++
++	transitions := []struct {
++		to          string
++		wantPhase   string
++		wantHistory string
++	}{
++		{delivery.PhaseBuilding, delivery.PhaseBuilding, "→building"},
++		{delivery.PhaseCIPending, delivery.PhaseCIPending, "→building,building→ci-pending"},
++		{delivery.PhaseReviewPending, delivery.PhaseReviewPending, "→building,building→ci-pending,ci-pending→review-pending"},
++	}
++
++	for _, tt := range transitions {
++		if err := delivery.SetPhase(store, b.ID, tt.to); err != nil {
++			t.Fatalf("SetPhase(%q): %v", tt.to, err)
++		}
++		got, _ := store.Get(b.ID)
++		if got.Metadata[delivery.MetaKeyPhase] != tt.wantPhase {
++			t.Errorf("after →%s: phase got %q want %q", tt.to, got.Metadata[delivery.MetaKeyPhase], tt.wantPhase)
++		}
++		if got.Metadata[delivery.MetaKeyPhaseHistory] != tt.wantHistory {
++			t.Errorf("after →%s: history got %q want %q", tt.to, got.Metadata[delivery.MetaKeyPhaseHistory], tt.wantHistory)
++		}
++	}
++}
++
++func TestSetPhase_IllegalTransition(t *testing.T) {
++	store := beads.NewMemStore()
++	b := newBeadWithPhase(store, delivery.PhaseMerged)
++
++	err := delivery.SetPhase(store, b.ID, delivery.PhaseBuilding)
++	if err == nil {
++		t.Fatal("SetPhase(merged→building): expected error, got nil")
++	}
++}
++
++func TestSetPhase_BeadNotFound(t *testing.T) {
++	store := beads.NewMemStore()
++	err := delivery.SetPhase(store, "nonexistent-id", delivery.PhaseBuilding)
++	if err == nil {
++		t.Fatal("SetPhase with nonexistent ID: expected error, got nil")
++	}
++}
++
++func TestSetPhaseAt_StampsEnteredAtAndClearsRetries(t *testing.T) {
++	store := beads.NewMemStore()
++	b := newBeadWithPhase(store, delivery.PhaseBuilding)
++
++	// Pre-populate stale metadata to confirm SetPhaseAt overwrites them.
++	if err := store.SetMetadataBatch(b.ID, map[string]string{
++		delivery.MetaKeyPhaseEnteredAt: "2020-01-01T00:00:00Z",
++		delivery.MetaKeyWardenRetries:  "3",
++	}); err != nil {
++		t.Fatalf("pre-populate metadata: %v", err)
++	}
++
++	fixedTime := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
++	if err := delivery.SetPhaseAt(store, b.ID, delivery.PhaseCIPending, fixedTime); err != nil {
++		t.Fatalf("SetPhaseAt: %v", err)
++	}
++
++	got, err := store.Get(b.ID)
++	if err != nil {
++		t.Fatalf("store.Get: %v", err)
++	}
++	if got.Metadata[delivery.MetaKeyPhaseEnteredAt] != "2026-06-11T10:00:00Z" {
++		t.Errorf("phase_entered_at: got %q, want %q", got.Metadata[delivery.MetaKeyPhaseEnteredAt], "2026-06-11T10:00:00Z")
++	}
++	if got.Metadata[delivery.MetaKeyWardenRetries] != "" {
++		t.Errorf("warden_retries: got %q, want empty (reset)", got.Metadata[delivery.MetaKeyWardenRetries])
++	}
++}
++
++func TestSetPhaseAt_IdempotentDoesNotUpdateTimestamp(t *testing.T) {
++	store := beads.NewMemStore()
++	b := newBeadWithPhase(store, delivery.PhaseBuilding)
++
++	firstTime := time.Date(2026, 6, 11, 9, 0, 0, 0, time.UTC)
++	if err := delivery.SetPhaseAt(store, b.ID, delivery.PhaseCIPending, firstTime); err != nil {
++		t.Fatalf("first SetPhaseAt: %v", err)
++	}
++
++	// Idempotent call with a different time — must not update the timestamp.
++	laterTime := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
++	if err := delivery.SetPhaseAt(store, b.ID, delivery.PhaseCIPending, laterTime); err != nil {
++		t.Fatalf("idempotent SetPhaseAt: %v", err)
++	}
++
++	got, _ := store.Get(b.ID)
++	if got.Metadata[delivery.MetaKeyPhaseEnteredAt] != "2026-06-11T09:00:00Z" {
++		t.Errorf("idempotent call updated phase_entered_at: got %q, want %q",
++			got.Metadata[delivery.MetaKeyPhaseEnteredAt], "2026-06-11T09:00:00Z")
++	}
++}
+diff --git a/internal/delivery/testenv_import_test.go b/internal/delivery/testenv_import_test.go
+new file mode 100644
+index 000000000..d247a544f
+--- /dev/null
++++ b/internal/delivery/testenv_import_test.go
+@@ -0,0 +1,5 @@
++// Code generated by go run scripts/add-testenv-import.go; DO NOT EDIT.
++
++package delivery_test
++
++import _ "github.com/gastownhall/gascity/internal/testenv"
+diff --git a/internal/delivery/validate_transition_test.go b/internal/delivery/validate_transition_test.go
+new file mode 100644
+index 000000000..77d373dfb
+--- /dev/null
++++ b/internal/delivery/validate_transition_test.go
+@@ -0,0 +1,95 @@
++package delivery_test
++
++import (
++	"errors"
++	"testing"
++
++	"github.com/gastownhall/gascity/internal/delivery"
++)
++
++func TestValidatePhaseTransition(t *testing.T) {
++	legalCases := []struct {
++		from, to string
++	}{
++		// bootstrap
++		{"", PhaseBuilding},
++		// building edges
++		{PhaseBuilding, PhaseCIPending},
++		{PhaseBuilding, PhaseAbandoned},
++		// ci-pending edges
++		{PhaseCIPending, PhaseReviewPending},
++		{PhaseCIPending, PhaseRework},
++		{PhaseCIPending, PhaseConflicted},
++		{PhaseCIPending, PhaseAbandoned},
++		// review-pending edges
++		{PhaseReviewPending, PhaseRework},
++		{PhaseReviewPending, PhaseDecisionPending},
++		{PhaseReviewPending, PhaseAbandoned},
++		// rework edges
++		{PhaseRework, PhaseBuilding},
++		{PhaseRework, PhaseCIPending},
++		{PhaseRework, PhaseAbandoned},
++		// decision-pending edges
++		{PhaseDecisionPending, PhaseMergePending},
++		{PhaseDecisionPending, PhaseRework},
++		{PhaseDecisionPending, PhaseAbandoned},
++		// merge-pending edges
++		{PhaseMergePending, PhaseMerged},
++		{PhaseMergePending, PhaseRework},
++		{PhaseMergePending, PhaseConflicted},
++		// conflicted edges
++		{PhaseConflicted, PhaseRework},
++		{PhaseConflicted, PhaseAbandoned},
++	}
++
++	for _, c := range legalCases {
++		if err := delivery.ValidatePhaseTransition(c.from, c.to); err != nil {
++			t.Errorf("ValidatePhaseTransition(%q, %q): unexpected error: %v", c.from, c.to, err)
++		}
++	}
++
++	illegalCases := []struct {
++		from, to string
++	}{
++		// ci-pending cannot go back to building
++		{PhaseCIPending, PhaseBuilding},
++		// terminal phases have no outgoing edges
++		{PhaseMerged, PhaseBuilding},
++		{PhaseAbandoned, PhaseRework},
++		// unknown from-phase
++		{"unknown-phase", PhaseBuilding},
++		// review-pending cannot skip to merge-pending
++		{PhaseReviewPending, PhaseMergePending},
++	}
++
++	for _, c := range illegalCases {
++		if err := delivery.ValidatePhaseTransition(c.from, c.to); err == nil {
++			t.Errorf("ValidatePhaseTransition(%q, %q): expected error, got nil", c.from, c.to)
++		}
++	}
++}
++
++// Verify the error from an illegal transition is not a plain nil-sentinel but an actual error value.
++func TestValidatePhaseTransition_ErrorIsNonNil(t *testing.T) {
++	err := delivery.ValidatePhaseTransition(PhaseMerged, PhaseBuilding)
++	if err == nil {
++		t.Fatal("expected error for merged→building, got nil")
++	}
++	// The error must not satisfy errors.Is(err, nil).
++	if errors.Is(err, nil) {
++		t.Fatal("error should not satisfy errors.Is(nil)")
++	}
++}
++
++// Constant aliases for use within this test file.
++const (
++	PhaseBuilding        = delivery.PhaseBuilding
++	PhaseCIPending       = delivery.PhaseCIPending
++	PhaseReviewPending   = delivery.PhaseReviewPending
++	PhaseRework          = delivery.PhaseRework
++	PhaseDecisionPending = delivery.PhaseDecisionPending
++	PhaseMergePending    = delivery.PhaseMergePending
++	PhaseConflicted      = delivery.PhaseConflicted
++	PhaseMerged          = delivery.PhaseMerged
++	PhaseAbandoned       = delivery.PhaseAbandoned
++)

@@ -1,0 +1,67 @@
+diff --git a/scripts/check-resync-loss-upstream.py b/scripts/check-resync-loss-upstream.py
+new file mode 100644
+index 000000000..8d5f5635b
+--- /dev/null
++++ b/scripts/check-resync-loss-upstream.py
+@@ -0,0 +1,61 @@
++#!/usr/bin/env python3
++"""Symmetric counterpart to check-resync-loss.sh Gate 2.
++
++Gate 2 finds fork-added decls missing from the merge. This finds
++UPSTREAM-added decls missing from the merge (a "took-ours" loss), which the
++shipped gate does not check at all.
++"""
++import re
++import subprocess
++import sys
++
++BASE = "1154ad128cdf83ecf749a043565cace85be8c497"
++OURS = "fork/main"
++THEIRS = "origin/main"
++MERGE = "HEAD"
++REPO = "/Users/Shared/Github/gascity/.claude/worktrees/agent-a0e6c810962b78b48"
++
++DECL = re.compile(r"^(?:func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)|(?:type|const|var)\s+([A-Za-z_]\w*))")
++
++
++def git(*args):
++    return subprocess.run(["git", "-C", REPO, *args], capture_output=True, text=True)
++
++
++def decls(ref, path):
++    r = git("show", f"{ref}:{path}")
++    if r.returncode != 0:
++        return None
++    names = set()
++    for line in r.stdout.split("\n"):
++        m = DECL.match(line)
++        if m:
++            names.add(m.group(1) or m.group(2))
++    return names
++
++
++changed = git("diff", "--name-only", f"{BASE}", THEIRS).stdout.split("\n")
++paths = [p for p in changed if p.endswith(".go")]
++
++hits = 0
++for p in paths:
++    t = decls(THEIRS, p)
++    if t is None:
++        continue
++    b = decls(BASE, p) or set()
++    o = decls(OURS, p)
++    if o is None:
++        o = set()
++    m = decls(MERGE, p)
++    if m is None:
++        print(f"DROPPED-FILE  {p} (upstream has it, merge does not)")
++        hits += 1
++        continue
++    upstream_added = t - b - o
++    missing = sorted(upstream_added - m)
++    for name in missing:
++        print(f"UPSTREAM-LOSS  {name}  ({p})")
++        hits += 1
++
++print(f"\nchecked {len(paths)} upstream-changed .go file(s); {hits} upstream-added decl(s) missing from merge")
++sys.exit(1 if hits else 0)

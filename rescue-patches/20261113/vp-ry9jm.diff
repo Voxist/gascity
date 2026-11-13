@@ -1,0 +1,671 @@
+diff --git a/cmd/gc/cmd_doctor_supervisor_launchd.go b/cmd/gc/cmd_doctor_supervisor_launchd.go
+new file mode 100644
+index 000000000..845576abb
+--- /dev/null
++++ b/cmd/gc/cmd_doctor_supervisor_launchd.go
+@@ -0,0 +1,311 @@
++package main
++
++import (
++	"fmt"
++	"os"
++	"os/exec"
++	"path/filepath"
++	goruntime "runtime"
++	"strconv"
++	"strings"
++
++	"github.com/gastownhall/gascity/internal/doctor"
++)
++
++// Supervisor launchd job labels are prefixed with this constant (see
++// defaultSupervisorLaunchdLabel in cmd_supervisor_lifecycle.go); isolated
++// supervisors add a "." suffix (com.gascity.supervisor.gc-home-21b018de).
++const supervisorLaunchdLabelPrefix = "com.gascity.supervisor"
++
++// supervisorLaunchdCheck inspects the launchd registration of Gas City
++// supervisor jobs (vp-ry9jm, mirror of city vc-1al9):
++//
++//   - the `launchctl list` Status column is the last-exit discriminator that
++//     already exists and was never read: NEGATIVE means the job was killed by
++//     signal N (SIGKILL/OOM class), POSITIVE is its exit code (a Go panic or
++//     fatal exits 2). It is a single sample overwritten on each restart — an
++//     observation-time discriminator, not a history.
++//   - a configured StandardErrorPath that does not exist means early startup
++//     output and Go-runtime panic text land on a dead path and are lost (the
++//     supervisor's own tee only covers output it emits while alive).
++//   - any job path resolving under a temp root (/var/folders, $TMPDIR) is
++//     integration-test provisioning contamination: a TMPDIR-rooted GC_HOME
++//     runs a supervisor against an empty ephemeral city home, and its log
++//     path dies with the test harness.
++//
++// All inspection is read-only; CanFix is false because unloading or
++// rewriting launchd jobs is an operator decision (unloading a loaded job
++// stops a live supervisor).
++type supervisorLaunchdCheck struct {
++	// listLaunchctl reports `launchctl list` output; injectable for tests.
++	listLaunchctl func() (string, error)
++	// readPlist returns the raw XML of a job's plist; injectable for tests.
++	readPlist func(path string) ([]byte, error)
++	// statPath reports whether a path exists; injectable for tests.
++	statPath func(path string) (bool, error)
++	// homeDir is the user's home; plist/log/GC_HOME paths must resolve
++	// under it. Injectable so tests need no process-HOME mutation.
++	homeDir string
++	// launchAgentsDir overrides the LaunchAgents directory resolution
++	// (defaults to supervisorLaunchAgentsDir, the GC_SUPERVISOR_LAUNCH_AGENTS_DIR
++	// env seam).
++	launchAgentsDir func() string
++	// tempRootHint, when non-empty, additionally flags paths under it
++	// (tests pin this; production leaves it empty — the /var/folders and
++	// os.TempDir() checks cover the real host).
++	tempRootHint string
++}
++
++func newSupervisorLaunchdCheck() *supervisorLaunchdCheck {
++	return &supervisorLaunchdCheck{
++		listLaunchctl:   defaultSupervisorLaunchctlList,
++		readPlist:       defaultReadPlist,
++		statPath:        defaultPathExists,
++		launchAgentsDir: supervisorLaunchAgentsDir,
++	}
++}
++
++func defaultSupervisorLaunchctlList() (string, error) {
++	// supervisorLaunchctlRun discards stdout; the discriminator IS the
++	// output here, so run launchctl directly.
++	out, err := exec.Command("launchctl", "list").Output()
++	if err != nil {
++		return "", err
++	}
++	return string(out), nil
++}
++
++func defaultReadPlist(path string) ([]byte, error) {
++	return os.ReadFile(path)
++}
++
++func defaultPathExists(path string) (bool, error) {
++	_, err := os.Stat(path)
++	if err == nil {
++		return true, nil
++	}
++	if os.IsNotExist(err) {
++		return false, nil
++	}
++	return false, err
++}
++
++// Name implements doctor.Check.
++func (c *supervisorLaunchdCheck) Name() string { return "supervisor-launchd" }
++
++// Run implements doctor.Check.
++func (c *supervisorLaunchdCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
++	r := &doctor.CheckResult{Name: c.Name()}
++	if goruntime.GOOS != "darwin" {
++		r.Status = doctor.StatusOK
++		r.Message = "skipped (not darwin)"
++		return r
++	}
++	listFn := c.listLaunchctl
++	if listFn == nil {
++		listFn = defaultSupervisorLaunchctlList
++	}
++	out, err := listFn()
++	if err != nil {
++		r.Status = doctor.StatusWarning
++		r.Message = fmt.Sprintf("could not read launchctl list: %v", err)
++		r.FixHint = "check that launchd services are queryable for this user session"
++		return r
++	}
++
++	dirFn := c.launchAgentsDir
++	if dirFn == nil {
++		dirFn = supervisorLaunchAgentsDir
++	}
++	readPlist := c.readPlist
++	if readPlist == nil {
++		readPlist = defaultReadPlist
++	}
++	statPath := c.statPath
++	if statPath == nil {
++		statPath = defaultPathExists
++	}
++	homeDir := c.homeDir
++	if homeDir == "" {
++		homeDir, _ = os.UserHomeDir()
++	}
++
++	type jobFinding struct {
++		label    string
++		problems []string
++	}
++	var findings []jobFinding
++	jobs := 0
++	for _, line := range strings.Split(out, "\n") {
++		fields := strings.Fields(line)
++		if len(fields) < 3 || fields[0] == "PID" {
++			continue
++		}
++		label := fields[2]
++		if !strings.HasPrefix(label, supervisorLaunchdLabelPrefix) {
++			continue
++		}
++		jobs++
++		var problems []string
++
++		// Discriminator (Finding 1): negative status = killed by signal.
++		if status, err := strconv.Atoi(fields[1]); err == nil {
++			switch {
++			case status < 0:
++				problems = append(problems, fmt.Sprintf(
++					"last exit was signal %d (SIGKILL/OOM class) — single last-exit sample, not a history",
++					-status))
++			case status > 0:
++				problems = append(problems, fmt.Sprintf(
++					"last exit code %d (a Go panic/fatal exits 2)", status))
++			}
++		}
++
++		plistPath := filepath.Join(dirFn(), label+".plist")
++		raw, err := readPlist(plistPath)
++		if err != nil {
++			problems = append(problems, fmt.Sprintf("plist unreadable: %v", err))
++			findings = append(findings, jobFinding{label: label, problems: problems})
++			continue
++		}
++		stdoutPath := supervisorPlistString(raw, "StandardOutPath")
++		stderrPath := supervisorPlistString(raw, "StandardErrorPath")
++		gcHome := supervisorPlistEnvString(raw, "GC_HOME")
++
++		// Dead log path (Finding 2): crash output lands nowhere.
++		for _, p := range []struct{ name, val string }{
++			{"StandardOutPath", stdoutPath},
++			{"StandardErrorPath", stderrPath},
++		} {
++			if p.val == "" {
++				continue
++			}
++			exists, err := statPath(p.val)
++			if err != nil {
++				problems = append(problems, fmt.Sprintf("%s: stat: %v", p.name, err))
++				continue
++			}
++			if !exists {
++				problems = append(problems, fmt.Sprintf(
++					"%s points at %s which does not exist — early startup output and panic text land on a dead path",
++					p.name, p.val))
++			}
++		}
++
++		// TMPDIR contamination (Finding 3).
++		for _, p := range []struct{ name, val string }{
++			{"StandardOutPath", stdoutPath},
++			{"StandardErrorPath", stderrPath},
++			{"GC_HOME", gcHome},
++		} {
++			if p.val == "" {
++				continue
++			}
++			if supervisorPathUnderTempRoot(p.val, homeDir, c.tempRootHint) {
++				problems = append(problems, fmt.Sprintf(
++					"%s resolves under a temp root (%s) — integration-test provisioning contamination; a TMPDIR-rooted GC_HOME runs against an empty ephemeral city home",
++					p.name, p.val))
++			}
++		}
++
++		findings = append(findings, jobFinding{label: label, problems: problems})
++	}
++
++	if jobs == 0 {
++		r.Status = doctor.StatusOK
++		r.Message = "no supervisor launchd jobs registered"
++		return r
++	}
++
++	var details []string
++	bad := 0
++	for _, f := range findings {
++		if len(f.problems) == 0 {
++			details = append(details, fmt.Sprintf("%s: ok", f.label))
++			continue
++		}
++		bad++
++		details = append(details, fmt.Sprintf("%s:", f.label))
++		for _, p := range f.problems {
++			details = append(details, "  "+p)
++		}
++	}
++	r.Details = details
++	if bad > 0 {
++		r.Status = doctor.StatusError
++		r.Message = fmt.Sprintf("%d of %d supervisor launchd job(s) carry dead or temp-rooted paths or a crash exit status — see details; uninstall stale jobs with launchctl unload + bootout before removing the plist", bad, jobs)
++		return r
++	}
++	r.Status = doctor.StatusOK
++	r.Message = fmt.Sprintf("%d supervisor launchd job(s): log and GC_HOME paths home-rooted, no dead log paths", jobs)
++	return r
++}
++
++// CanFix implements doctor.Check. Unloading a loaded launchd job stops a
++// live supervisor — operator decision.
++func (c *supervisorLaunchdCheck) CanFix() bool { return false }
++
++// Fix implements doctor.Check.
++func (c *supervisorLaunchdCheck) Fix(_ *doctor.CheckContext) error { return nil }
++
++// supervisorPathUnderTempRoot reports whether p resolves under a temp root:
++// the macOS per-user temp areas (/var/folders/...) or os.TempDir(), plus any
++// extra hint root pinned by tests. Home-rooted paths never match.
++func supervisorPathUnderTempRoot(p, homeDir, hint string) bool {
++	clean := filepath.Clean(p)
++	for _, root := range []string{"/var/folders", os.TempDir(), hint} {
++		root = strings.TrimSpace(root)
++		if root == "" {
++			continue
++		}
++		if supervisorPathUnder(clean, root) {
++			return true
++		}
++	}
++	return false
++}
++
++// supervisorPathUnder reports whether p equals or lives under root.
++func supervisorPathUnder(p, root string) bool {
++	root = filepath.Clean(root)
++	if p == root {
++		return true
++	}
++	return strings.HasPrefix(p, root+string(os.PathSeparator))
++}
++
++// supervisorPlistString extracts the <string> value that immediately follows
++// <key>name</key> in a launchd plist. Plist XML represents dicts as sibling
++// key/string elements, which encoding/xml cannot map structurally; the
++// string-scan matches supervisorLaunchdPlistGCPath's existing precedent.
++func supervisorPlistString(raw []byte, name string) string {
++	return supervisorPlistNextString(string(raw), "<key>"+name+"</key>")
++}
++
++// supervisorPlistEnvString extracts a value from the plist's
++// EnvironmentVariables dict.
++func supervisorPlistEnvString(raw []byte, name string) string {
++	start := strings.Index(string(raw), "<key>EnvironmentVariables</key>")
++	if start < 0 {
++		return ""
++	}
++	return supervisorPlistNextString(string(raw[start:]), "<key>"+name+"</key>")
++}
++
++func supervisorPlistNextString(s, keyTag string) string {
++	i := strings.Index(s, keyTag)
++	if i < 0 {
++		return ""
++	}
++	rest := s[i+len(keyTag):]
++	j := strings.Index(rest, "<string>")
++	if j < 0 {
++		return ""
++	}
++	rest = rest[j+len("<string>"):]
++	k := strings.Index(rest, "</string>")
++	if k < 0 {
++		return ""
++	}
++	return strings.TrimSpace(rest[:k])
++}
+diff --git a/cmd/gc/cmd_doctor_supervisor_launchd_test.go b/cmd/gc/cmd_doctor_supervisor_launchd_test.go
+new file mode 100644
+index 000000000..ceef0306a
+--- /dev/null
++++ b/cmd/gc/cmd_doctor_supervisor_launchd_test.go
+@@ -0,0 +1,263 @@
++package main
++
++import (
++	"errors"
++	"path/filepath"
++	goruntime "runtime"
++	"strings"
++	"testing"
++
++	"github.com/gastownhall/gascity/internal/doctor"
++)
++
++// supervisorPlistFixture renders a launchd plist with the given paths, in
++// the same key/string sibling shape the template emits.
++func supervisorPlistFixture(stdout, stderr, gcHome string) string {
++	return `<?xml version="1.0" encoding="UTF-8"?>
++<plist version="1.0">
++<dict>
++    <key>Label</key>
++    <string>com.gascity.supervisor</string>
++    <key>StandardOutPath</key>
++    <string>` + stdout + `</string>
++    <key>StandardErrorPath</key>
++    <string>` + stderr + `</string>
++    <key>EnvironmentVariables</key>
++    <dict>
++        <key>GC_HOME</key>
++        <string>` + gcHome + `</string>
++    </dict>
++</dict>
++</plist>
++`
++}
++
++type launchdFixture struct {
++	listOut string
++	listErr error
++	plists  map[string][]byte // label -> raw plist XML
++	exists  map[string]bool   // path -> exists
++}
++
++func (f *launchdFixture) check(t *testing.T) *doctor.CheckResult {
++	t.Helper()
++	c := newSupervisorLaunchdCheck()
++	c.listLaunchctl = func() (string, error) { return f.listOut, f.listErr }
++	c.readPlist = func(path string) ([]byte, error) {
++		label := strings.TrimSuffix(filepath.Base(path), ".plist")
++		raw, ok := f.plists[label]
++		if !ok {
++			return nil, errors.New("no such plist fixture: " + path)
++		}
++		return raw, nil
++	}
++	c.statPath = func(path string) (bool, error) { return f.exists[path], nil }
++	c.homeDir = "/Users/operator"
++	c.launchAgentsDir = func() string { return "/Users/operator/Library/LaunchAgents" }
++	return c.Run(nil)
++}
++
++func TestSupervisorLaunchdCheckSkippedOffDarwin(t *testing.T) {
++	if goruntime.GOOS == "darwin" {
++		t.Skip("asserts the non-darwin skip")
++	}
++	r := (&supervisorLaunchdCheck{}).Run(nil)
++	if r.Status != doctor.StatusOK || !strings.Contains(r.Message, "not darwin") {
++		t.Fatalf("status=%s msg=%q, want darwin skip", r.Status, r.Message)
++	}
++}
++
++func TestSupervisorLaunchdCheckNoJobs(t *testing.T) {
++	r := (&launchdFixture{listOut: "PID\tStatus\tLabel\n"}).check(t)
++	if r.Status != doctor.StatusOK || !strings.Contains(r.Message, "no supervisor launchd jobs") {
++		t.Fatalf("status=%s msg=%q", r.Status, r.Message)
++	}
++}
++
++func TestSupervisorLaunchdCheckSignalExitFlagged(t *testing.T) {
++	// Bead positive control shape: PID 59551, Status -9 = SIGKILLed.
++	f := &launchdFixture{
++		listOut: "PID\tStatus\tLabel\n59551\t-9\tcom.gascity.supervisor\n",
++		plists: map[string][]byte{
++			"com.gascity.supervisor": []byte(supervisorPlistFixture(
++				"/Users/operator/.gc/supervisor.log",
++				"/Users/operator/.gc/supervisor.log.err",
++				"/Users/operator/.gc")),
++		},
++		exists: map[string]bool{
++			"/Users/operator/.gc/supervisor.log":     true,
++			"/Users/operator/.gc/supervisor.log.err": true,
++		},
++	}
++	r := f.check(t)
++	if r.Status != doctor.StatusError {
++		t.Fatalf("status=%s msg=%q, want error (signal exit)", r.Status, r.Message)
++	}
++	joined := strings.Join(r.Details, "\n")
++	if !strings.Contains(joined, "signal 9 (SIGKILL/OOM class)") {
++		t.Fatalf("details missing signal discriminator: %v", r.Details)
++	}
++}
++
++func TestSupervisorLaunchdCheckPositiveExitFlagged(t *testing.T) {
++	f := &launchdFixture{
++		listOut: "PID\tStatus\tLabel\n-\t78\tcom.gascity.supervisor.gc-home-21b018de\n",
++		plists: map[string][]byte{
++			"com.gascity.supervisor.gc-home-21b018de": []byte(supervisorPlistFixture(
++				"/Users/operator/.gc/supervisor.log",
++				"/Users/operator/.gc/supervisor.log.err",
++				"/Users/operator/.gc")),
++		},
++		exists: map[string]bool{
++			"/Users/operator/.gc/supervisor.log":     true,
++			"/Users/operator/.gc/supervisor.log.err": true,
++		},
++	}
++	r := f.check(t)
++	if r.Status != doctor.StatusError {
++		t.Fatalf("status=%s msg=%q", r.Status, r.Message)
++	}
++	if joined := strings.Join(r.Details, "\n"); !strings.Contains(joined, "last exit code 78") {
++		t.Fatalf("details missing exit-code classification: %v", r.Details)
++	}
++}
++
++func TestSupervisorLaunchdCheckDeadStderrPathFlagged(t *testing.T) {
++	// Finding 2: the configured StandardErrorPath does not exist.
++	dead := "/var/folders/xc/T/gc-int-env-4178157/gc-home/supervisor.log"
++	f := &launchdFixture{
++		listOut: "PID\tStatus\tLabel\n-\t0\tcom.gascity.supervisor.gc-home-21b018de\n",
++		plists: map[string][]byte{
++			"com.gascity.supervisor.gc-home-21b018de": []byte(supervisorPlistFixture(dead, dead, "/var/folders/xc/T/gc-int-env-4178157/gc-home")),
++		},
++		exists: map[string]bool{},
++	}
++	r := f.check(t)
++	joined := strings.Join(r.Details, "\n")
++	if !strings.Contains(joined, "does not exist") {
++		t.Fatalf("details missing dead-path finding: %v", r.Details)
++	}
++	// And the temp-root finding must co-fire (Finding 3).
++	if !strings.Contains(joined, "temp root") {
++		t.Fatalf("details missing TMPDIR contamination finding: %v", r.Details)
++	}
++	if r.Status != doctor.StatusError {
++		t.Fatalf("status=%s msg=%q", r.Status, r.Message)
++	}
++}
++
++func TestSupervisorLaunchdCheckTempRootGCHomeFlagged(t *testing.T) {
++	// A live-looking job (Status 0, paths exist) whose GC_HOME is
++	// TMPDIR-rooted: the worse half of Finding 3.
++	tmp := "/var/folders/xc/T/gc-int-env-99/gc-home"
++	f := &launchdFixture{
++		listOut: "PID\tStatus\tLabel\n46424\t0\tcom.gascity.supervisor\n",
++		plists: map[string][]byte{
++			"com.gascity.supervisor": []byte(supervisorPlistFixture(tmp+"/supervisor.log", tmp+"/supervisor.log.err", tmp)),
++		},
++		exists: map[string]bool{tmp + "/supervisor.log": true, tmp + "/supervisor.log.err": true},
++	}
++	r := f.check(t)
++	joined := strings.Join(r.Details, "\n")
++	if !strings.Contains(joined, "GC_HOME resolves under a temp root") {
++		t.Fatalf("details missing GC_HOME contamination: %v", r.Details)
++	}
++	if r.Status != doctor.StatusError {
++		t.Fatalf("status=%s msg=%q", r.Status, r.Message)
++	}
++}
++
++func TestSupervisorLaunchdCheckCleanHostOK(t *testing.T) {
++	f := &launchdFixture{
++		listOut: "PID\tStatus\tLabel\n46424\t0\tcom.gascity.supervisor\n",
++		plists: map[string][]byte{
++			"com.gascity.supervisor": []byte(supervisorPlistFixture(
++				"/Users/operator/.gc/supervisor.log",
++				"/Users/operator/.gc/supervisor.log.err",
++				"/Users/operator/.gc")),
++		},
++		exists: map[string]bool{
++			"/Users/operator/.gc/supervisor.log":     true,
++			"/Users/operator/.gc/supervisor.log.err": true,
++		},
++	}
++	r := f.check(t)
++	if r.Status != doctor.StatusOK {
++		t.Fatalf("status=%s msg=%q details=%v", r.Status, r.Message, r.Details)
++	}
++	if !strings.Contains(r.Message, "1 supervisor launchd job(s)") {
++		t.Fatalf("message=%q", r.Message)
++	}
++}
++
++func TestSupervisorLaunchdCheckUnrelatedJobsIgnored(t *testing.T) {
++	f := &launchdFixture{
++		listOut: "PID\tStatus\tLabel\n-\t78\tcom.other.thing\n-\t-9\tcom.gascity.watchman\n",
++		plists:  map[string][]byte{},
++	}
++	r := f.check(t)
++	if r.Status != doctor.StatusOK || !strings.Contains(r.Message, "no supervisor launchd jobs") {
++		t.Fatalf("status=%s msg=%q — non-supervisor labels must be ignored", r.Status, r.Message)
++	}
++}
++
++func TestSupervisorLaunchdCheckLaunchctlFailureWarns(t *testing.T) {
++	r := (&launchdFixture{listErr: errors.New("launchctl unavailable")}).check(t)
++	if r.Status != doctor.StatusWarning || !strings.Contains(r.Message, "could not read launchctl list") {
++		t.Fatalf("status=%s msg=%q", r.Status, r.Message)
++	}
++}
++
++func TestSupervisorLaunchdCheckUnreadablePlistFlagged(t *testing.T) {
++	f := &launchdFixture{
++		listOut: "PID\tStatus\tLabel\n-\t0\tcom.gascity.supervisor\n",
++		plists:  map[string][]byte{}, // no fixture: read fails
++	}
++	r := f.check(t)
++	if r.Status != doctor.StatusError {
++		t.Fatalf("status=%s msg=%q", r.Status, r.Message)
++	}
++	if joined := strings.Join(r.Details, "\n"); !strings.Contains(joined, "plist unreadable") {
++		t.Fatalf("details=%v", r.Details)
++	}
++}
++
++func TestSupervisorPlistExtraction(t *testing.T) {
++	raw := []byte(supervisorPlistFixture("/a/log", "/a/log.err", "/a/home"))
++	if got := supervisorPlistString(raw, "StandardOutPath"); got != "/a/log" {
++		t.Fatalf("StandardOutPath=%q", got)
++	}
++	if got := supervisorPlistString(raw, "StandardErrorPath"); got != "/a/log.err" {
++		t.Fatalf("StandardErrorPath=%q", got)
++	}
++	if got := supervisorPlistEnvString(raw, "GC_HOME"); got != "/a/home" {
++		t.Fatalf("GC_HOME=%q", got)
++	}
++	if got := supervisorPlistString(raw, "MissingKey"); got != "" {
++		t.Fatalf("MissingKey=%q, want empty", got)
++	}
++	if got := supervisorPlistEnvString(raw, "GC_HOME"); got == "/a/home" {
++		// EnvironmentVariables extractor must not leak past its dict start.
++		if supervisorPlistEnvString([]byte("<dict/>"), "GC_HOME") != "" {
++			t.Fatal("env extractor matched without EnvironmentVariables dict")
++		}
++	}
++}
++
++func TestSupervisorPathUnder(t *testing.T) {
++	for _, tc := range []struct {
++		p, root string
++		want    bool
++	}{
++		{"/Users/o/.gc", "/Users/o", true},
++		{"/Users/o/.gc/supervisor.log", "/Users/o", true},
++		{"/Users/other/.gc", "/Users/o", false},
++		{"/Users/o", "/Users/o", true},
++		{"/var/folders/x/T/a", "/var/folders", true},
++		{"/Users/ovar/folders", "/var/folders", false}, // prefix must respect separator
++	} {
++		if got := supervisorPathUnder(tc.p, tc.root); got != tc.want {
++			t.Errorf("supervisorPathUnder(%q, %q) = %v, want %v", tc.p, tc.root, got, tc.want)
++		}
++	}
++}
+diff --git a/cmd/gc/cmd_supervisor_lifecycle.go b/cmd/gc/cmd_supervisor_lifecycle.go
+index e52b898e0..6a9aa7284 100644
+--- a/cmd/gc/cmd_supervisor_lifecycle.go
++++ b/cmd/gc/cmd_supervisor_lifecycle.go
+@@ -1234,8 +1234,15 @@ func ensureSupervisorServiceLogDir(logPath string) error {
+ }
+ 
+ type supervisorServiceData struct {
+-	GCPath        string
+-	LogPath       string
++	GCPath string
++	// LogPath is the plist StandardOutPath and the supervisor's own tee
++	// target (stable name so `gc supervisor logs` keeps working).
++	LogPath string
++	// StderrLogPath is the plist StandardErrorPath (bead vp-ry9jm): the Go
++	// runtime writes panic text to fd 2 directly, bypassing the in-process
++	// tee, so a hard death is only captured if stderr has its own file.
++	// The supervisor tee re-merges routine stderr into LogPath.
++	StderrLogPath string
+ 	GCHome        string
+ 	XDGRuntimeDir string
+ 	LaunchdLabel  string
+@@ -1268,6 +1275,7 @@ func buildSupervisorServiceData() (*supervisorServiceData, error) {
+ 	return &supervisorServiceData{
+ 		GCPath:            gcPath,
+ 		LogPath:           supervisorLogPath(),
++		StderrLogPath:     supervisorLogPath() + ".err",
+ 		GCHome:            home,
+ 		XDGRuntimeDir:     xdgRuntimeDir,
+ 		LaunchdLabel:      supervisorLaunchdLabel(),
+@@ -1645,7 +1653,7 @@ const supervisorLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
+     <key>StandardOutPath</key>
+     <string>{{xmlesc .LogPath}}</string>
+     <key>StandardErrorPath</key>
+-    <string>{{xmlesc .LogPath}}</string>
++    <string>{{xmlesc .StderrLogPath}}</string>
+     <key>EnvironmentVariables</key>
+     <dict>
+         <key>GC_HOME</key>
+@@ -2088,7 +2096,45 @@ func warnSupervisorSystemdWarmRefreshPreservedUnit(stderr io.Writer, service str
+ 	fmt.Fprintf(stderr, "gc supervisor install: leaving refreshed systemd unit %s in place after warm-refresh failure; not restoring the previous unit because it may lack KillMode=process. Resolve the error, then run 'systemctl --user start %s' or rerun 'gc supervisor install'.\n", service, service) //nolint:errcheck // best-effort stderr
+ }
+ 
++// supervisorLaunchdHomeRootedPathGuard refuses a launchd install whose
++// GC_HOME or log paths do not resolve under the user's home directory
++// (bead vp-ry9jm, leg D). The 2026-09-08 census found 13 supervisor plists
++// provisioned by an integration-test harness with TMPDIR-rooted GC_HOME and
++// log paths: 8 loaded and crash-looping (exit 78), every one writing crash
++// output to a path that died with the harness. The guard must lead content —
++// without it the contamination silently returns the next time a harness
++// runs `gc supervisor install` against the real LaunchAgents directory.
++// Test harnesses that pin HOME to a temp root are unaffected: their
++// GC_HOME/log paths sit under that same temp HOME.
++func supervisorLaunchdHomeRootedPathGuard(data *supervisorServiceData) error {
++	homeDir, err := os.UserHomeDir()
++	if err != nil {
++		return fmt.Errorf("resolving home dir for path guard: %w", err)
++	}
++	for _, p := range []struct{ name, val string }{
++		{"GC_HOME", data.GCHome},
++		{"StandardOutPath", data.LogPath},
++		{"StandardErrorPath", data.StderrLogPath},
++	} {
++		if p.val == "" {
++			continue
++		}
++		if !supervisorPathUnder(filepath.Clean(p.val), homeDir) {
++			return fmt.Errorf(
++				"refusing launchd install: %s %q does not resolve under the user home %q — "+
++					"a temp-rooted GC_HOME or log path dies with its harness and loses crash output "+
++					"(integration-test provisioning leak, vp-ry9jm). Set GC_HOME (and the log path) under $HOME.",
++				p.name, p.val, homeDir)
++		}
++	}
++	return nil
++}
++
+ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Writer) int {
++	if err := supervisorLaunchdHomeRootedPathGuard(data); err != nil {
++		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
++		return 1
++	}
+ 	sweepStaleIsolatedSupervisorServices(stderr)
+ 	content, err := renderSupervisorTemplate(supervisorLaunchdTemplate, data)
+ 	if err != nil {

@@ -1,0 +1,559 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 6102d811f..a51fafc9a 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++### Added
++
++- **Dolt CPU runaway watchdog (`GC_DOLT_CPU_WATCHDOG`).** A goroutine spawned
++  alongside the managed `dolt sql-server` samples its CPU every 15 s via `ps`.
++  If usage exceeds 200 % for ≥ 60 s (4 consecutive samples) it emits a
++  structured `severity=critical` alert to the supervisor log, sends SIGKILL to
++  the dolt process, and lets the existing supervisor restart path recover the
++  server. A single-burst spike (e.g. a large `DOLT_MERGE`) does not trigger a
++  kill; only sustained pathological spin loops do. Disable with
++  `GC_DOLT_CPU_WATCHDOG=0`; override the sample interval in tests with
++  `GC_DOLT_CPU_WATCHDOG_INTERVAL_MS`. Defense-in-depth for the 2026-06-16
++  incident where a `DOLT_CLONE` against a git URL consumed 1000 % CPU.
++
+ ### Changed
+ 
+ - **Version pins on builtin packs are honored: the binary only pre-seeds
+diff --git a/cmd/gc/dolt_cpu_watchdog.go b/cmd/gc/dolt_cpu_watchdog.go
+new file mode 100644
+index 000000000..acc8d9454
+--- /dev/null
++++ b/cmd/gc/dolt_cpu_watchdog.go
+@@ -0,0 +1,162 @@
++package main
++
++// CPU runaway watchdog for managed dolt sql-servers.
++//
++// Dolt can enter a CPU spin loop (e.g. DOLT_CLONE against a git code-repo URL)
++// and consume 1000%+ CPU indefinitely, requiring a manual SIGKILL. This
++// watchdog runs as a goroutine alongside the managed server and self-heals the
++// situation: it SIGKILLs the dolt process and lets the supervisor restart it
++// clean.
++
++import (
++	"fmt"
++	"os"
++	"os/exec"
++	"strconv"
++	"strings"
++	"syscall"
++	"time"
++)
++
++const (
++	// doltCPUWatchdogInterval is how often the watchdog samples the dolt
++	// process's CPU usage. 15 s is fast enough to react in under 90 s while
++	// keeping steady-state CPU cost negligible.
++	doltCPUWatchdogInterval = 15 * time.Second
++
++	// doltCPUWatchdogThreshold is the CPU percentage above which usage is
++	// considered pathological. 200% means the process is consuming 2+ full
++	// CPU cores. Healthy dolt under normal query load stays below 100%; 200%
++	// sustained signals a pathological spin loop (e.g. a stalled DOLT_CLONE).
++	doltCPUWatchdogThreshold = 200.0
++
++	// doltCPUWatchdogSustainedSamples is the minimum number of consecutive
++	// samples above doltCPUWatchdogThreshold before the watchdog kills. At
++	// the default 15 s interval this requires 60 s of sustained high CPU,
++	// protecting against a single DOLT_MERGE burst that legitimately peaks
++	// above the threshold.
++	doltCPUWatchdogSustainedSamples = 4
++
++	// doltCPUWatchdogEnv disables the CPU watchdog when set to "0".
++	doltCPUWatchdogEnv = "GC_DOLT_CPU_WATCHDOG"
++
++	// doltCPUWatchdogIntervalEnv overrides the sample interval in
++	// milliseconds, used in tests to avoid wall-clock waits.
++	doltCPUWatchdogIntervalEnv = "GC_DOLT_CPU_WATCHDOG_INTERVAL_MS"
++)
++
++// doltCPUWatchdogEnabled reports whether the CPU watchdog is active.
++// Default on; opt out with GC_DOLT_CPU_WATCHDOG=0.
++func doltCPUWatchdogEnabled() bool {
++	return strings.TrimSpace(os.Getenv(doltCPUWatchdogEnv)) != "0"
++}
++
++// doltCPUWatchdogResolvedInterval returns the sample interval, honoring the
++// millisecond test override when it parses to a positive value.
++func doltCPUWatchdogResolvedInterval() time.Duration {
++	raw := strings.TrimSpace(os.Getenv(doltCPUWatchdogIntervalEnv))
++	if raw == "" {
++		return doltCPUWatchdogInterval
++	}
++	ms, err := strconv.Atoi(raw)
++	if err != nil || ms <= 0 {
++		return doltCPUWatchdogInterval
++	}
++	return time.Duration(ms) * time.Millisecond
++}
++
++// doltCPUSample reads the current CPU% for pid via `ps -o pcpu= -p <pid>`.
++// Returns (pct, nil) on success. Returns (-1, nil) when the process no
++// longer exists (ps exits non-zero). Returns (-1, err) on unexpected parse
++// errors.
++//
++// `ps -o pcpu=` reports accumulated CPU as a percentage of one CPU core. On
++// multi-core machines a multi-threaded process can legitimately show > 100%.
++// The value is the same semantics on Darwin and Linux.
++func doltCPUSample(pid int) (float64, error) {
++	out, err := exec.Command("ps", "-o", "pcpu=", "-p", strconv.Itoa(pid)).Output()
++	if err != nil {
++		// ps exits non-zero when the PID is not found; treat as gone.
++		return -1, nil
++	}
++	val := strings.TrimSpace(string(out))
++	if val == "" {
++		return -1, nil
++	}
++	pct, err := strconv.ParseFloat(val, 64)
++	if err != nil {
++		return -1, fmt.Errorf("dolt cpu watchdog: parse pcpu %q for pid %d: %w", val, pid, err)
++	}
++	return pct, nil
++}
++
++// doltCPUKillEvent is sent on the cpuKill channel when the watchdog fires.
++type doltCPUKillEvent struct {
++	PeakCPU   float64
++	DurationS int // approximate sustained seconds = highStreak * interval
++}
++
++// runDoltCPUWatchdog starts the CPU watchdog as a goroutine. Call it inside
++// runManagedDoltScopeWatchdog after the dolt process starts. When it detects
++// sustained high CPU it SIGKILLs the process and sends an event on cpuKill.
++// Close stop to signal a clean shutdown (e.g. when dolt exits normally).
++func runDoltCPUWatchdog(pid int, logFile *os.File, interval time.Duration, cpuKill chan<- doltCPUKillEvent, stop <-chan struct{}) {
++	runDoltCPUWatchdogWithSampler(pid, logFile, interval, cpuKill, stop, doltCPUSample)
++}
++
++// runDoltCPUWatchdogWithSampler is the testable inner implementation; it
++// accepts an injectable sampler so unit tests can drive CPU values without
++// spawning a real process.
++func runDoltCPUWatchdogWithSampler(
++	pid int,
++	logFile *os.File,
++	interval time.Duration,
++	cpuKill chan<- doltCPUKillEvent,
++	stop <-chan struct{},
++	sampler func(int) (float64, error),
++) {
++	highStreak := 0
++	peakCPU := 0.0
++	ticker := time.NewTicker(interval)
++	defer ticker.Stop()
++	for {
++		select {
++		case <-stop:
++			return
++		case <-ticker.C:
++			pct, err := sampler(pid)
++			if err != nil {
++				fmt.Fprintf(logFile, "gc cpu watchdog: sample error pid %d: %v\n", pid, err) //nolint:errcheck
++				highStreak = 0
++				peakCPU = 0
++				continue
++			}
++			if pct < 0 {
++				// Process already gone; nothing left to watch.
++				return
++			}
++			if pct > doltCPUWatchdogThreshold {
++				highStreak++
++				if pct > peakCPU {
++					peakCPU = pct
++				}
++			} else {
++				highStreak = 0
++				peakCPU = 0
++			}
++			if highStreak >= doltCPUWatchdogSustainedSamples {
++				durationS := int(float64(highStreak) * interval.Seconds())
++				fmt.Fprintf(logFile, //nolint:errcheck
++					"gc cpu watchdog: ALERT severity=critical source=dolt-cpu-watchdog "+
++						"dolt_pid=%d cpu_pct=%.1f duration_s=%d; sending SIGKILL\n",
++					pid, peakCPU, durationS)
++				_ = syscall.Kill(pid, syscall.SIGKILL)
++				select {
++				case cpuKill <- doltCPUKillEvent{PeakCPU: peakCPU, DurationS: durationS}:
++				default:
++				}
++				return
++			}
++		}
++	}
++}
+diff --git a/cmd/gc/dolt_cpu_watchdog_test.go b/cmd/gc/dolt_cpu_watchdog_test.go
+new file mode 100644
+index 000000000..d28e221c0
+--- /dev/null
++++ b/cmd/gc/dolt_cpu_watchdog_test.go
+@@ -0,0 +1,284 @@
++package main
++
++import (
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++)
++
++const testWatchdogInterval = 10 * time.Millisecond
++
++// samplersAbove returns a sampler that always reports cpuPct.
++func samplersAbove(cpuPct float64) func(int) (float64, error) {
++	return func(_ int) (float64, error) { return cpuPct, nil }
++}
++
++// samplersSequence returns a sampler that returns pcts[i] on the i-th call,
++// clamping at pcts[len-1] for subsequent calls.
++func samplersSequence(pcts []float64) func(int) (float64, error) {
++	i := 0
++	return func(_ int) (float64, error) {
++		v := pcts[i]
++		if i < len(pcts)-1 {
++			i++
++		}
++		return v, nil
++	}
++}
++
++// newTestLogFile creates a temp log file in t.TempDir() and returns it.
++func newTestLogFile(t *testing.T) *os.File {
++	t.Helper()
++	f, err := os.Create(filepath.Join(t.TempDir(), "watchdog.log"))
++	if err != nil {
++		t.Fatalf("create log file: %v", err)
++	}
++	t.Cleanup(func() { f.Close() }) //nolint:errcheck
++	return f
++}
++
++// readLogFile returns the content of the log file.
++func readLogFile(t *testing.T, f *os.File) string {
++	t.Helper()
++	if _, err := f.Seek(0, 0); err != nil {
++		t.Fatalf("seek log file: %v", err)
++	}
++	b, err := os.ReadFile(f.Name())
++	if err != nil {
++		t.Fatalf("read log file: %v", err)
++	}
++	return string(b)
++}
++
++// TestDoltCPUWatchdog_KillsAfterSustainedHighCPU verifies that
++// doltCPUWatchdogSustainedSamples consecutive high-CPU samples cause a kill
++// event to be sent and a structured alert to be logged.
++func TestDoltCPUWatchdog_KillsAfterSustainedHighCPU(t *testing.T) {
++	logFile := newTestLogFile(t)
++	cpuKill := make(chan doltCPUKillEvent, 1)
++	stop := make(chan struct{})
++	defer close(stop)
++
++	// A non-existent PID — the kill syscall will fail silently, which is
++	// fine: we test watchdog logic, not the OS kill.
++	const fakePID = 99999
++
++	go runDoltCPUWatchdogWithSampler(
++		fakePID, logFile, testWatchdogInterval, cpuKill, stop,
++		samplersAbove(doltCPUWatchdogThreshold+100),
++	)
++
++	select {
++	case ev := <-cpuKill:
++		if ev.PeakCPU <= doltCPUWatchdogThreshold {
++			t.Errorf("PeakCPU %.1f <= threshold %.1f", ev.PeakCPU, doltCPUWatchdogThreshold)
++		}
++		if ev.DurationS < 0 {
++			t.Errorf("DurationS %d; want >= 0", ev.DurationS)
++		}
++		log := readLogFile(t, logFile)
++		if !strings.Contains(log, "ALERT") {
++			t.Errorf("watchdog log missing ALERT; got:\n%s", log)
++		}
++		if !strings.Contains(log, "severity=critical") {
++			t.Errorf("watchdog log missing severity=critical; got:\n%s", log)
++		}
++	case <-time.After(5 * time.Second):
++		t.Fatal("watchdog did not fire after sustained high CPU")
++	}
++}
++
++// TestDoltCPUWatchdog_NokillOnBurstOneHighSample verifies that a single
++// sample above the threshold does not trigger a kill (burst protection).
++func TestDoltCPUWatchdog_NokillOnBurstOneHighSample(t *testing.T) {
++	logFile := newTestLogFile(t)
++	cpuKill := make(chan doltCPUKillEvent, 1)
++	stop := make(chan struct{})
++
++	// One high sample, then drop below threshold.
++	bursts := make([]float64, doltCPUWatchdogSustainedSamples+4)
++	bursts[0] = doltCPUWatchdogThreshold + 50
++	for i := 1; i < len(bursts); i++ {
++		bursts[i] = 50.0
++	}
++
++	go runDoltCPUWatchdogWithSampler(
++		99999, logFile, testWatchdogInterval, cpuKill, stop,
++		samplersSequence(bursts),
++	)
++
++	// Allow enough ticks to cover a sustained run if it were to fire.
++	time.Sleep(time.Duration(doltCPUWatchdogSustainedSamples+3) * testWatchdogInterval * 3)
++	close(stop)
++
++	select {
++	case <-cpuKill:
++		t.Error("watchdog fired on a single-sample burst; expected no kill")
++	default:
++	}
++}
++
++// TestDoltCPUWatchdog_StreakResetOnNormalSample verifies that the sustained
++// streak resets when a normal sample interrupts high-CPU samples.
++func TestDoltCPUWatchdog_StreakResetOnNormalSample(t *testing.T) {
++	logFile := newTestLogFile(t)
++	cpuKill := make(chan doltCPUKillEvent, 1)
++	stop := make(chan struct{})
++
++	// Pattern: (threshold-1) highs, one low, (threshold-1) highs → no kill.
++	n := doltCPUWatchdogSustainedSamples - 1
++	pcts := make([]float64, 0, n+1+n+4)
++	for i := 0; i < n; i++ {
++		pcts = append(pcts, doltCPUWatchdogThreshold+10)
++	}
++	pcts = append(pcts, 50.0) // reset
++	for i := 0; i < n; i++ {
++		pcts = append(pcts, doltCPUWatchdogThreshold+10)
++	}
++	for i := 0; i < 4; i++ {
++		pcts = append(pcts, 50.0) // stay low to drain
++	}
++
++	go runDoltCPUWatchdogWithSampler(
++		99999, logFile, testWatchdogInterval, cpuKill, stop,
++		samplersSequence(pcts),
++	)
++
++	time.Sleep(time.Duration(len(pcts)+2) * testWatchdogInterval * 3)
++	close(stop)
++
++	select {
++	case <-cpuKill:
++		t.Error("watchdog fired after streak reset; expected no kill")
++	default:
++	}
++}
++
++// TestDoltCPUWatchdog_StopChannelExitsCleanly verifies the goroutine exits
++// when the stop channel is closed.
++func TestDoltCPUWatchdog_StopChannelExitsCleanly(t *testing.T) {
++	logFile := newTestLogFile(t)
++	cpuKill := make(chan doltCPUKillEvent, 1)
++	stop := make(chan struct{})
++
++	exited := make(chan struct{})
++	go func() {
++		defer close(exited)
++		runDoltCPUWatchdogWithSampler(
++			99999, logFile, testWatchdogInterval, cpuKill, stop,
++			samplersAbove(0.0),
++		)
++	}()
++
++	close(stop)
++	select {
++	case <-exited:
++	case <-time.After(2 * time.Second):
++		t.Fatal("watchdog goroutine did not exit after stop channel closed")
++	}
++}
++
++// TestDoltCPUWatchdog_ProcessGoneExitsCleanly verifies the goroutine exits
++// when the sampler reports the process is gone (pct < 0).
++func TestDoltCPUWatchdog_ProcessGoneExitsCleanly(t *testing.T) {
++	logFile := newTestLogFile(t)
++	cpuKill := make(chan doltCPUKillEvent, 1)
++	stop := make(chan struct{})
++	defer close(stop)
++
++	exited := make(chan struct{})
++	go func() {
++		defer close(exited)
++		runDoltCPUWatchdogWithSampler(
++			99999, logFile, testWatchdogInterval, cpuKill, stop,
++			func(_ int) (float64, error) { return -1.0, nil },
++		)
++	}()
++
++	select {
++	case <-exited:
++	case <-time.After(2 * time.Second):
++		t.Fatal("watchdog goroutine did not exit when process is gone")
++	}
++}
++
++// TestDoltCPUWatchdog_AlertLogContainsFields verifies the structured alert
++// log line contains the expected fields.
++func TestDoltCPUWatchdog_AlertLogContainsFields(t *testing.T) {
++	logFile := newTestLogFile(t)
++	cpuKill := make(chan doltCPUKillEvent, 1)
++	stop := make(chan struct{})
++	defer close(stop)
++
++	go runDoltCPUWatchdogWithSampler(
++		42, logFile, testWatchdogInterval, cpuKill, stop,
++		samplersAbove(doltCPUWatchdogThreshold+1),
++	)
++
++	select {
++	case <-cpuKill:
++	case <-time.After(5 * time.Second):
++		t.Fatal("watchdog did not fire")
++	}
++
++	log := readLogFile(t, logFile)
++	for _, want := range []string{
++		"ALERT",
++		"severity=critical",
++		"source=dolt-cpu-watchdog",
++		"dolt_pid=42",
++		"cpu_pct=",
++		"duration_s=",
++		"SIGKILL",
++	} {
++		if !strings.Contains(log, want) {
++			t.Errorf("alert log missing %q; got:\n%s", want, log)
++		}
++	}
++}
++
++// TestDoltCPUWatchdogEnabled verifies the env-var gate.
++func TestDoltCPUWatchdogEnabled(t *testing.T) {
++	t.Run("enabled by default", func(t *testing.T) {
++		t.Setenv(doltCPUWatchdogEnv, "")
++		if !doltCPUWatchdogEnabled() {
++			t.Error("expected enabled by default")
++		}
++	})
++	t.Run("disabled by 0", func(t *testing.T) {
++		t.Setenv(doltCPUWatchdogEnv, "0")
++		if doltCPUWatchdogEnabled() {
++			t.Error("expected disabled when env=0")
++		}
++	})
++	t.Run("enabled by non-zero", func(t *testing.T) {
++		t.Setenv(doltCPUWatchdogEnv, "1")
++		if !doltCPUWatchdogEnabled() {
++			t.Error("expected enabled when env=1")
++		}
++	})
++}
++
++// TestDoltCPUWatchdogResolvedInterval verifies the env-var override.
++func TestDoltCPUWatchdogResolvedInterval(t *testing.T) {
++	t.Run("default when unset", func(t *testing.T) {
++		t.Setenv(doltCPUWatchdogIntervalEnv, "")
++		if got := doltCPUWatchdogResolvedInterval(); got != doltCPUWatchdogInterval {
++			t.Errorf("got %v; want %v", got, doltCPUWatchdogInterval)
++		}
++	})
++	t.Run("override via env", func(t *testing.T) {
++		t.Setenv(doltCPUWatchdogIntervalEnv, "250")
++		if got := doltCPUWatchdogResolvedInterval(); got != 250*time.Millisecond {
++			t.Errorf("got %v; want 250ms", got)
++		}
++	})
++	t.Run("default on invalid env", func(t *testing.T) {
++		t.Setenv(doltCPUWatchdogIntervalEnv, "notanumber")
++		if got := doltCPUWatchdogResolvedInterval(); got != doltCPUWatchdogInterval {
++			t.Errorf("got %v; want %v", got, doltCPUWatchdogInterval)
++		}
++	})
++}
+diff --git a/cmd/gc/dolt_scope_watchdog.go b/cmd/gc/dolt_scope_watchdog.go
+index e1850749a..9488b92db 100644
+--- a/cmd/gc/dolt_scope_watchdog.go
++++ b/cmd/gc/dolt_scope_watchdog.go
+@@ -211,6 +211,14 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
+ 	fmt.Fprintf(logFile, "gc scope watchdog: supervising dolt sql-server pid %d (config %s, poll interval %s)\n", //nolint:errcheck
+ 		cmd.Process.Pid, configFile, interval)
+ 
++	// CPU runaway watchdog — defense-in-depth against spin loops.
++	cpuKill := make(chan doltCPUKillEvent, 1)
++	stopCPUWatchdog := make(chan struct{})
++	defer close(stopCPUWatchdog)
++	if doltCPUWatchdogEnabled() {
++		go runDoltCPUWatchdog(cmd.Process.Pid, logFile, doltCPUWatchdogResolvedInterval(), cpuKill, stopCPUWatchdog)
++	}
++
+ 	done := make(chan error, 1)
+ 	go func() { done <- cmd.Wait() }()
+ 
+@@ -228,6 +236,12 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
+ 			_ = terminateManagedDoltPID(cityPath, cmd.Process.Pid)
+ 			<-done
+ 			return 0
++		case ev := <-cpuKill:
++			// Alert already written by the CPU watchdog goroutine; log context here.
++			fmt.Fprintf(logFile, "gc scope watchdog: dolt pid %d CPU-killed (peak=%.1f%% sustained %ds); restarting\n", //nolint:errcheck
++				cmd.Process.Pid, ev.PeakCPU, ev.DurationS)
++			<-done
++			return 1
+ 		case <-ticker.C:
+ 			if !managedDoltScopeGone(configFile) {
+ 				goneStreak = 0
+diff --git a/engdocs/plans/vp-petx-bisect-serialization-failure.md b/engdocs/plans/vp-petx-bisect-serialization-failure.md
+new file mode 100644
+index 000000000..fed043711
+--- /dev/null
++++ b/engdocs/plans/vp-petx-bisect-serialization-failure.md
+@@ -0,0 +1,39 @@
++# Plan: vp-petx — Bisect fork-delta serialization failure
++
++## Problem
++
++`TestSelectOrCreatePoolSessionBead_SerializesAliasCheckAndCreate` fails 5/5 on `fork/main` but passes 5/5 on `origin/main` under identical conditions. Every directly-involved symbol (test function, `blockingPoolCreateStore` fake, `selectOrCreatePoolSessionBead`, `createPoolSessionBeadWithGuardedAlias`, `WithCitySessionIdentifierLocks`, `withCitySessionIdentifierLock`, `internal/session/names.go`, `agent_build_params.go`) is **byte-identical** between branches. The fork carries 50 commits ahead of origin.
++
++### Failure symptom
++
++```
++second pool create did not start after first create completed
++```
++
++The test races two goroutines calling `selectOrCreatePoolSessionBead`. The first acquires a `syscall.Flock` file lock on alias `"claude-1"` via `WithCitySessionIdentifierLocks`, then blocks inside `store.Create()` on `<-releaseFirstCreate`. The second goroutine should block at the `Flock` call, then proceed after the first releases. Instead, the second goroutine **never reaches `store.Create()`** after the first completes.
++
++### Root cause hypothesis
++
++The fork's 50-commit delta introduces a package-level side effect (an `init()` change in `dolt_scope_watchdog.go` / `dolt_start_managed.go` — 279 lines changed between those two files alone, or a transitive import that alters behavior) that interferes with the file-lock serialization path or the goroutine scheduling before the second goroutine reaches `Flock`. The direct call chain is untouched.
++
++### Why bisect, not static analysis
++
++With 50 commits and no changes to the direct call chain, the interaction is transitive. A `git bisect` on the single test is the fastest way to isolate the breaking commit. Static analysis of all 50 commits' transitive effects would take longer than a 6-step bisect.
++
++## Plan
++
++| ID | Description | Acceptance | est_min | slings |
++|----|-------------|------------|---------|--------|
++| T-001 | Write a failing reproduction script that runs `TestSelectOrCreatePoolSessionBead_SerializesAliasCheckAndCreate` 5× on the current branch and asserts at least one failure | Script exits 0 if it captures a failure, 1 if all 5 pass (wrong branch or test was fixed) | 3 | |
++| T-002 | Run `git bisect` between `origin/main` (good) and `fork/main` (bad), using the reproduction script from T-001 as the bisect runner, to isolate the breaking commit | Bisect completes and reports a single culpable commit SHA | 5 | |
++| T-003 | Read the culpable commit diff in full, trace how its changes reach the `selectOrCreatePoolSessionBead` / `WithCitySessionIdentifierLocks` / `Flock` path, and write a root-cause analysis as a `bd comment` on vp-petx | Comment posted on vp-petx with: (1) the breaking commit SHA, (2) the specific code change, (3) the mechanism by which it breaks serialization, (4) proposed fix (fork-specific guard, upstream revert, or init-order fix) | 4 | |
++| T-004 | Implement the fix identified in T-003 — apply the minimal change to fork/main that restores the test (guard the init side-effect, add a missing unlock, or revert the culpable commit) | `TestSelectOrCreatePoolSessionBead_SerializesAliasCheckAndCreate` passes 5/5 on the fix branch | 4 | |
++| T-005 | Run the full `cmd/gc` test suite (`go test ./cmd/gc/ -count=1 -timeout=300s`) to confirm the fix doesn't regress any other test | Full suite green, 0 failures | 5 | |
++
++## GDPR data-flow impact
++
++None. This is a test-only change in the gascity build/desired-state reconciliation code. No user data, no PII, no cross-border data flows.
++
++## MDR Class I traceability
++
++No-op. This change is outside the voxmemo clinical pipeline. No clinical data, no chain-of-evidence impact.

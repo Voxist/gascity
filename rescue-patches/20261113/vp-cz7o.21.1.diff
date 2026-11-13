@@ -1,0 +1,430 @@
+diff --git a/cmd/gc/city_identity_map.go b/cmd/gc/city_identity_map.go
+new file mode 100644
+index 000000000..c561deeff
+--- /dev/null
++++ b/cmd/gc/city_identity_map.go
+@@ -0,0 +1,87 @@
++package main
++
++import (
++	"os"
++	"path/filepath"
++	"strings"
++
++	"github.com/BurntSushi/toml"
++)
++
++type cityIdentityMapEntry struct {
++	ProjectID string `toml:"project_id"`
++	Project   string `toml:"project"`
++}
++
++type cityIdentityMapFile struct {
++	IdentityMap map[string]cityIdentityMapEntry `toml:"identity_map"`
++	Rigs        []struct {
++		Name string `toml:"name"`
++	} `toml:"rigs"`
++}
++
++// readCityIdentityMapEntry returns the canonical project_id for the rig whose
++// directory is scopeRoot. It resolves the rig name by matching
++// filepath.Join(cityPath, rigName) against scopeRoot, then looks it up in the
++// [identity_map] table of city.toml.
++//
++// Returns ("", false, nil) when:
++//   - cityPath is empty
++//   - city.toml is absent or has no [identity_map]
++//   - no [[rigs]] entry resolves to scopeRoot
++//   - the rig has no entry in [identity_map] or the entry has an empty project_id
++//
++// Returns an error only on I/O or TOML parse failures.
++func readCityIdentityMapEntry(cityPath, scopeRoot string) (string, bool, error) {
++	cityPath = strings.TrimSpace(cityPath)
++	if cityPath == "" {
++		return "", false, nil
++	}
++	scopeRoot = filepath.Clean(strings.TrimSpace(scopeRoot))
++
++	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
++	if err != nil {
++		if os.IsNotExist(err) {
++			return "", false, nil
++		}
++		return "", false, err
++	}
++
++	var cfg cityIdentityMapFile
++	if _, err := toml.Decode(string(data), &cfg); err != nil {
++		return "", false, err
++	}
++
++	if len(cfg.IdentityMap) == 0 {
++		return "", false, nil
++	}
++
++	// Resolve rig name: for each [[rigs]] entry compute filepath.Join(cityPath, name)
++	// and compare against scopeRoot. This convention holds for all current Voxist
++	// rigs (all are immediate subdirectories of cityPath). For rigs bound via
++	// site.toml-level paths (not accessible from the minimal struct), this returns
++	// ok=false, preserving full backward compatibility.
++	rigName := ""
++	for _, rig := range cfg.Rigs {
++		if rig.Name == "" {
++			continue
++		}
++		if filepath.Clean(filepath.Join(cityPath, rig.Name)) == scopeRoot {
++			rigName = rig.Name
++			break
++		}
++	}
++	if rigName == "" {
++		return "", false, nil
++	}
++
++	entry, ok := cfg.IdentityMap[rigName]
++	if !ok {
++		return "", false, nil
++	}
++	projectID := strings.TrimSpace(entry.ProjectID)
++	if projectID == "" {
++		return "", false, nil
++	}
++	return projectID, true, nil
++}
+diff --git a/cmd/gc/city_identity_map_test.go b/cmd/gc/city_identity_map_test.go
+new file mode 100644
+index 000000000..2a016808f
+--- /dev/null
++++ b/cmd/gc/city_identity_map_test.go
+@@ -0,0 +1,130 @@
++package main
++
++import (
++	"os"
++	"path/filepath"
++	"testing"
++)
++
++func TestReadCityIdentityMapEntry(t *testing.T) {
++	t.Run("absent_city_toml_returns_false", func(t *testing.T) {
++		cityPath := t.TempDir()
++		id, ok, err := readCityIdentityMapEntry(cityPath, filepath.Join(cityPath, "my-rig"))
++		if err != nil {
++			t.Fatalf("err = %v, want nil", err)
++		}
++		if ok || id != "" {
++			t.Fatalf("got (%q, %v), want (\"\", false)", id, ok)
++		}
++	})
++
++	t.Run("empty_city_path_returns_false", func(t *testing.T) {
++		id, ok, err := readCityIdentityMapEntry("", "/any/path")
++		if err != nil {
++			t.Fatalf("err = %v, want nil", err)
++		}
++		if ok || id != "" {
++			t.Fatalf("got (%q, %v), want (\"\", false)", id, ok)
++		}
++	})
++
++	t.Run("no_identity_map_section_returns_false", func(t *testing.T) {
++		cityPath := t.TempDir()
++		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"),
++			[]byte("[workspace]\nname = \"demo\"\n\n[[rigs]]\nname = \"my-rig\"\n"),
++			0o644); err != nil {
++			t.Fatal(err)
++		}
++		id, ok, err := readCityIdentityMapEntry(cityPath, filepath.Join(cityPath, "my-rig"))
++		if err != nil {
++			t.Fatalf("err = %v, want nil", err)
++		}
++		if ok || id != "" {
++			t.Fatalf("got (%q, %v), want (\"\", false)", id, ok)
++		}
++	})
++
++	t.Run("rig_not_in_rigs_table_returns_false", func(t *testing.T) {
++		cityPath := t.TempDir()
++		toml := "[identity_map]\nother-rig = { project_id = \"pid-123\", project = \"p\" }\n\n[[rigs]]\nname = \"other-rig\"\n"
++		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
++			t.Fatal(err)
++		}
++		id, ok, err := readCityIdentityMapEntry(cityPath, filepath.Join(cityPath, "my-rig"))
++		if err != nil {
++			t.Fatalf("err = %v, want nil", err)
++		}
++		if ok || id != "" {
++			t.Fatalf("got (%q, %v), want (\"\", false)", id, ok)
++		}
++	})
++
++	t.Run("rig_in_rigs_table_but_no_identity_map_entry_returns_false", func(t *testing.T) {
++		cityPath := t.TempDir()
++		toml := "[identity_map]\nother-rig = { project_id = \"pid-123\", project = \"p\" }\n\n[[rigs]]\nname = \"my-rig\"\n"
++		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
++			t.Fatal(err)
++		}
++		id, ok, err := readCityIdentityMapEntry(cityPath, filepath.Join(cityPath, "my-rig"))
++		if err != nil {
++			t.Fatalf("err = %v, want nil", err)
++		}
++		if ok || id != "" {
++			t.Fatalf("got (%q, %v), want (\"\", false)", id, ok)
++		}
++	})
++
++	t.Run("successful_lookup_returns_project_id", func(t *testing.T) {
++		cityPath := t.TempDir()
++		toml := "[identity_map]\nmy-rig = { project_id = \"c3c9af4a-abcd-1234-efgh-000000000001\", project = \"my-project\" }\n\n[[rigs]]\nname = \"my-rig\"\n"
++		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
++			t.Fatal(err)
++		}
++		id, ok, err := readCityIdentityMapEntry(cityPath, filepath.Join(cityPath, "my-rig"))
++		if err != nil {
++			t.Fatalf("err = %v, want nil", err)
++		}
++		if !ok || id != "c3c9af4a-abcd-1234-efgh-000000000001" {
++			t.Fatalf("got (%q, %v), want (\"c3c9af4a-abcd-1234-efgh-000000000001\", true)", id, ok)
++		}
++	})
++
++	t.Run("multiple_rigs_resolves_correct_one", func(t *testing.T) {
++		cityPath := t.TempDir()
++		toml := `[identity_map]
++rig-a = { project_id = "pid-aaa", project = "proj-a" }
++rig-b = { project_id = "pid-bbb", project = "proj-b" }
++
++[[rigs]]
++name = "rig-a"
++
++[[rigs]]
++name = "rig-b"
++`
++		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
++			t.Fatal(err)
++		}
++		id, ok, err := readCityIdentityMapEntry(cityPath, filepath.Join(cityPath, "rig-b"))
++		if err != nil {
++			t.Fatalf("err = %v, want nil", err)
++		}
++		if !ok || id != "pid-bbb" {
++			t.Fatalf("got (%q, %v), want (\"pid-bbb\", true)", id, ok)
++		}
++	})
++
++	t.Run("empty_project_id_returns_false", func(t *testing.T) {
++		cityPath := t.TempDir()
++		toml := "[identity_map]\nmy-rig = { project_id = \"\", project = \"p\" }\n\n[[rigs]]\nname = \"my-rig\"\n"
++		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
++			t.Fatal(err)
++		}
++		id, ok, err := readCityIdentityMapEntry(cityPath, filepath.Join(cityPath, "my-rig"))
++		if err != nil {
++			t.Fatalf("err = %v, want nil", err)
++		}
++		if ok || id != "" {
++			t.Fatalf("got (%q, %v), want (\"\", false)", id, ok)
++		}
++	})
++}
+diff --git a/cmd/gc/dolt_project_id.go b/cmd/gc/dolt_project_id.go
+index f5495c2d5..424b48c1b 100644
+--- a/cmd/gc/dolt_project_id.go
++++ b/cmd/gc/dolt_project_id.go
+@@ -167,6 +167,31 @@ func ensureManagedDoltProjectIDWithRecorder(metadataPath, host, port, user, data
+ 		return managedDoltProjectIDReport{}, err
+ 	}
+ 
++	// L0 pre-heal: if city.toml [identity_map] has a canonical project_id that
++	// the DB (L3) confirms, but L1 is absent or was regenerated to a wrong value,
++	// repair L1 and L2 before reconcile so the subsequent decideReconcile is a
++	// no-op. This closes the recovery gap from vp-cz7o where a rig-clone wipe
++	// caused actionGenerate to stamp a fresh wrong L1 while L3 survived.
++	//
++	// Only fires when L3 == L0 (DB confirms canonical). If L3 != L0, we log and
++	// fall through — a genuine mismatch requires human triage, not auto-repair.
++	if l0, l0ok, l0err := readCityIdentityMapEntry(cityPath, scopeRoot); l0err == nil && l0ok {
++		if ok && databaseProjectID == l0 && (!identityOK || identityProjectID != l0) {
++			if err := contract.WriteProjectIdentity(fs, scopeRoot, l0); err != nil {
++				return managedDoltProjectIDReport{}, fmt.Errorf("L0 pre-heal write identity: %w", err)
++			}
++			if _, err := writeManagedMetadataProjectID(metadataPath, l0); err != nil {
++				return managedDoltProjectIDReport{}, fmt.Errorf("L0 pre-heal write metadata: %w", err)
++			}
++			emitProjectIdentityStampedEvent(rec, cityPath, scopeRoot, "restored_from_canonical", "L1", identityProjectID, l0)
++			identityProjectID, identityOK = l0, true
++			metadataProjectID, metadataOK = l0, true
++		} else if ok && databaseProjectID != l0 {
++			fmt.Fprintf(os.Stderr, "gc dolt-state ensure-project-id: warning: city.toml [identity_map] canonical %q != DB %q for %s; skipping auto-repair\n",
++				l0, databaseProjectID, filepath.Base(scopeRoot))
++		}
++	}
++
+ 	decision := decideReconcile(identityProjectID, identityOK, metadataProjectID, metadataOK, databaseProjectID, ok)
+ 	return applyReconcileDecision(ctx, fs, scopeRoot, metadataPath, db, decision, cityPath, rec)
+ }
+diff --git a/cmd/gc/dolt_project_id_test.go b/cmd/gc/dolt_project_id_test.go
+index 10bfe35b5..3b2a2a529 100644
+--- a/cmd/gc/dolt_project_id_test.go
++++ b/cmd/gc/dolt_project_id_test.go
+@@ -846,3 +846,160 @@ func TestEnsureManagedDoltProjectIDGeneratesLocalIdentityWithPasswordedServer(t
+ 		t.Fatalf("database _project_id = %q, want %q", databaseProjectID, report.ProjectID)
+ 	}
+ }
++
++func TestEnsureProjectIDRestoresFromCityIdentityMap(t *testing.T) {
++	skipSlowCmdGCTest(t, "requires a managed dolt server; run make test-cmd-gc-process for full coverage")
++
++	const canonicalID = "c3c9af4a-abcd-1234-efgh-000000000001"
++	const rigName = "my-rig"
++
++	makeCityDir := func(t *testing.T, canonicalProjectID string) (cityPath string, scopeRoot string) {
++		t.Helper()
++		cityPath = t.TempDir()
++		toml := "[identity_map]\n" +
++			rigName + " = { project_id = \"" + canonicalProjectID + "\", project = \"my-project\" }\n\n" +
++			"[[rigs]]\nname = \"" + rigName + "\"\n"
++		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
++			t.Fatal(err)
++		}
++		scopeRoot = filepath.Join(cityPath, rigName)
++		if err := os.MkdirAll(scopeRoot, 0o755); err != nil {
++			t.Fatal(err)
++		}
++		return cityPath, scopeRoot
++	}
++
++	t.Run("L1_absent_L3_eq_L0_restores_canonical", func(t *testing.T) {
++		cityPath, scopeRoot := makeCityDir(t, canonicalID)
++		metadataPath := writeProjectIDMetadataFile(t, scopeRoot, "")
++		port, cleanup := startProjectIDTestServer(t, seedDatabaseProjectIDQueries(canonicalID)...)
++		defer cleanup()
++
++		rec := &projectIdentityRecordingRecorder{}
++		report, err := ensureManagedDoltProjectIDWithRecorder(metadataPath, "127.0.0.1", port, "root", "hq", cityPath, rec)
++		if err != nil {
++			t.Fatalf("ensureManagedDoltProjectIDWithRecorder: %v", err)
++		}
++
++		// After L0 pre-heal, L1=L2=L3=canonicalID → actionNoOp.
++		if report.ProjectID != canonicalID {
++			t.Fatalf("report.ProjectID = %q, want %q", report.ProjectID, canonicalID)
++		}
++		if report.Source != "match" {
++			t.Fatalf("report.Source = %q, want \"match\"", report.Source)
++		}
++
++		// L1 and L2 were written by the pre-heal.
++		assertProjectIdentityFile(t, scopeRoot, canonicalID)
++		assertMetadataProjectID(t, metadataPath, canonicalID)
++
++		// One event was emitted for the pre-heal restore.
++		if len(rec.records) != 1 {
++			t.Fatalf("recorded %d event(s), want 1", len(rec.records))
++		}
++		payloads := decodeProjectIdentityStampedPayloads(t, rec.records)
++		if payloads[0].Source != "restored_from_canonical" {
++			t.Fatalf("event Source = %q, want \"restored_from_canonical\"", payloads[0].Source)
++		}
++		if payloads[0].Layer != "L1" {
++			t.Fatalf("event Layer = %q, want \"L1\"", payloads[0].Layer)
++		}
++		if payloads[0].NewID != canonicalID {
++			t.Fatalf("event NewID = %q, want %q", payloads[0].NewID, canonicalID)
++		}
++	})
++
++	t.Run("L1_wrong_L3_eq_L0_overwrites_wrong_L1", func(t *testing.T) {
++		cityPath, scopeRoot := makeCityDir(t, canonicalID)
++		// Write a wrong L1 — simulates actionGenerate having run before DB recovered.
++		if err := contract.WriteProjectIdentity(fsys.OSFS{}, scopeRoot, "wrong-regenerated-id"); err != nil {
++			t.Fatal(err)
++		}
++		metadataPath := writeProjectIDMetadataFile(t, scopeRoot, "wrong-regenerated-id")
++		port, cleanup := startProjectIDTestServer(t, seedDatabaseProjectIDQueries(canonicalID)...)
++		defer cleanup()
++
++		rec := &projectIdentityRecordingRecorder{}
++		report, err := ensureManagedDoltProjectIDWithRecorder(metadataPath, "127.0.0.1", port, "root", "hq", cityPath, rec)
++		if err != nil {
++			t.Fatalf("ensureManagedDoltProjectIDWithRecorder: %v", err)
++		}
++		if report.ProjectID != canonicalID {
++			t.Fatalf("report.ProjectID = %q, want %q", report.ProjectID, canonicalID)
++		}
++		assertProjectIdentityFile(t, scopeRoot, canonicalID)
++		if len(rec.records) != 1 || decodeProjectIdentityStampedPayloads(t, rec.records)[0].Source != "restored_from_canonical" {
++			t.Fatalf("expected exactly one restored_from_canonical event, got %d events", len(rec.records))
++		}
++	})
++
++	t.Run("L3_neq_L0_no_auto_repair", func(t *testing.T) {
++		// L0 = canonicalID but DB has a different value; pre-heal must not fire.
++		cityPath, scopeRoot := makeCityDir(t, canonicalID)
++		metadataPath := writeProjectIDMetadataFile(t, scopeRoot, "")
++		port, cleanup := startProjectIDTestServer(t, seedDatabaseProjectIDQueries("different-db-id")...)
++		defer cleanup()
++
++		rec := &projectIdentityRecordingRecorder{}
++		report, err := ensureManagedDoltProjectIDWithRecorder(metadataPath, "127.0.0.1", port, "root", "hq", cityPath, rec)
++		if err != nil {
++			t.Fatalf("ensureManagedDoltProjectIDWithRecorder: %v", err)
++		}
++		// No pre-heal: actionAdoptFromL3SeedL2 runs and adopts "different-db-id".
++		if report.ProjectID != "different-db-id" {
++			t.Fatalf("report.ProjectID = %q, want \"different-db-id\"", report.ProjectID)
++		}
++		// L1 should have been seeded with the DB value (not canonicalID).
++		assertProjectIdentityFile(t, scopeRoot, "different-db-id")
++	})
++
++	t.Run("L1_eq_L0_L3_eq_L0_no_op", func(t *testing.T) {
++		cityPath, scopeRoot := makeCityDir(t, canonicalID)
++		if err := contract.WriteProjectIdentity(fsys.OSFS{}, scopeRoot, canonicalID); err != nil {
++			t.Fatal(err)
++		}
++		metadataPath := writeProjectIDMetadataFile(t, scopeRoot, canonicalID)
++		port, cleanup := startProjectIDTestServer(t, seedDatabaseProjectIDQueries(canonicalID)...)
++		defer cleanup()
++
++		rec := &projectIdentityRecordingRecorder{}
++		report, err := ensureManagedDoltProjectIDWithRecorder(metadataPath, "127.0.0.1", port, "root", "hq", cityPath, rec)
++		if err != nil {
++			t.Fatalf("ensureManagedDoltProjectIDWithRecorder: %v", err)
++		}
++		if report.Source != "match" {
++			t.Fatalf("report.Source = %q, want \"match\"", report.Source)
++		}
++		if len(rec.records) != 0 {
++			t.Fatalf("recorded %d event(s), want 0 (no-op)", len(rec.records))
++		}
++	})
++
++	t.Run("no_identity_map_entry_falls_through_to_existing_reconcile", func(t *testing.T) {
++		// city.toml has no [identity_map] section — no-op from L0 perspective;
++		// existing reconcile runs (here: actionAdoptFromL3SeedL2).
++		cityPath := t.TempDir()
++		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"),
++			[]byte("[workspace]\nname = \"demo\"\n\n[[rigs]]\nname = \"my-rig\"\n"),
++			0o644); err != nil {
++			t.Fatal(err)
++		}
++		scopeRoot := filepath.Join(cityPath, rigName)
++		if err := os.MkdirAll(scopeRoot, 0o755); err != nil {
++			t.Fatal(err)
++		}
++		metadataPath := writeProjectIDMetadataFile(t, scopeRoot, "")
++		port, cleanup := startProjectIDTestServer(t, seedDatabaseProjectIDQueries("db-only-id")...)
++		defer cleanup()
++
++		report, err := ensureManagedDoltProjectIDWithRecorder(metadataPath, "127.0.0.1", port, "root", "hq", cityPath, events.Discard)
++		if err != nil {
++			t.Fatalf("ensureManagedDoltProjectIDWithRecorder: %v", err)
++		}
++		// Falls through to actionAdoptFromL3SeedL2.
++		if report.ProjectID != "db-only-id" {
++			t.Fatalf("report.ProjectID = %q, want \"db-only-id\"", report.ProjectID)
++		}
++		assertProjectIdentityFile(t, scopeRoot, "db-only-id")
++	})
++}

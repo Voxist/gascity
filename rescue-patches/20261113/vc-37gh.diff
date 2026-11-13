@@ -1,0 +1,348 @@
+diff --git a/internal/beads/caching_store.go b/internal/beads/caching_store.go
+index 7870a1fed..22a83a445 100644
+--- a/internal/beads/caching_store.go
++++ b/internal/beads/caching_store.go
+@@ -163,6 +163,27 @@ type CacheStats struct {
+ 	// "latency" (P95 above the high-water mark), or "both" (bead count
+ 	// and latency both push to MEDIUM).
+ 	CadenceDriver string
++	// DepsComplete mirrors CachingStore.depsComplete: whether the cached dep
++	// map is a faithful projection of the backing store's edges. While it is
++	// false, clearDependentReadyProjectionsLocked degenerates to a whole-cache
++	// wipe on every one of its callers, and every dep read falls back to the
++	// backing store (ADR-0094 D6).
++	DepsComplete bool
++	// DepsCompleteSince stamps when DepsComplete last CHANGED value, so
++	// now-Since is the dwell in the current state. ADR-0094's trigger
++	// condition -- "depsComplete observed latched false for > 1h" -- is
++	// exactly a predicate on this field, and was unmeasurable before it.
++	DepsCompleteSince time.Time
++	// DepsCompleteDriver names the site that most recently WROTE DepsComplete
++	// (see the depsDriver* constants). Read it together with DepsComplete:
++	// it names the last writer, whichever value that writer wrote.
++	DepsCompleteDriver string
++	// DepsCompleteFalseWrites counts every write of false, including the
++	// redundant ones that find it already false. It is what separates a LATCH
++	// (dwell grows, count flat) from a PING-PONG (dwell grows, count climbs
++	// every tick) -- two states a bare boolean reports identically, and the
++	// distinction ADR-0094 A1 D10 turns on.
++	DepsCompleteFalseWrites int64
+ }
+ 
+ const (
+@@ -1106,7 +1127,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
+ 		}
+ 		c.beads = nextBeads
+ 		c.deps = nextDeps
+-		c.depsComplete = depsComplete && depErr == nil
++		c.setDepsCompleteLocked(depsComplete && depErr == nil, depsDriverPrime)
+ 		c.dirty = nextDirty
+ 		c.beadSeq = nextBeadSeq
+ 		c.localBeadAt = nextLocalBeadAt
+@@ -1129,7 +1150,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
+ 			}
+ 			c.absorbFreshLocked(id, b, now, opts)
+ 		}
+-		c.depsComplete = false
++		c.setDepsCompleteLocked(false, depsDriverPartialPrime)
+ 	}
+ 	c.state = cacheLive
+ 	c.syncFailures = 0
+@@ -1418,6 +1439,71 @@ func (c *CachingStore) problemLogMessageLocked(msg string, now time.Time) (strin
+ 	return logMsg, true
+ }
+ 
++// depsComplete write-site names, recorded on CacheStats.DepsCompleteDriver.
++// ADR-0094 D6 asks not just whether depsComplete is false but WHICH site keeps
++// making it false, so every writer identifies itself.
++const (
++	// depsDriverPrime: full cache rebuild folded the backing store's own
++	// completeness verdict (fetchDepsForBeads) with the dep-fetch error.
++	depsDriverPrime = "prime"
++	// depsDriverPartialPrime: a partial prime cannot claim whole-store dep
++	// coverage, so it writes false unconditionally.
++	depsDriverPartialPrime = "partial-prime"
++	// depsDriverReconcile: a reconcile pass folded its fetch verdict with any
++	// per-row degradeDepsComplete decision (coverage hole, or a recency-keep
++	// whose retained deps diverge from the fresh snapshot).
++	depsDriverReconcile = "reconcile"
++	// depsDriverEventDepsStale: a bead.updated whose payload looked complete
++	// but was not refreshed from the backing, so bd's on_update hook may have
++	// omitted dependencies after a removal.
++	depsDriverEventDepsStale = "event-deps-stale"
++	// depsDriverEventMissing: a bead.updated for a row the cache had no deps
++	// entry for while claiming completeness.
++	depsDriverEventMissing = "event-missing-deps"
++	// depsDriverEventOther: any other event type for a row with no cached deps
++	// entry.
++	depsDriverEventOther = "event-other"
++)
++
++// setDepsCompleteLocked is the ONLY writer of c.depsComplete.
++//
++// Routing all six sites through one setter is what makes ADR-0094 D6
++// answerable. The useful question is not "is depsComplete false" -- a single
++// sampled boolean answers that and still leaves the defect invisible, which is
++// how D6's own trigger condition sat unevaluable for six days. The question is
++// which site keeps writing false, and whether the value is LATCHED or
++// PING-PONGING. Those need three things a boolean does not carry: the last
++// writer's identity, the dwell in the current value, and a count of false
++// writes.
++//
++// Since is stamped only on a real transition. Re-stamping it whenever an
++// already-false value is written false again would reset the dwell on every
++// reconcile tick and make "latched false for > 1h" unreachable no matter how
++// long the latch held -- the precise reason that trigger has never fired.
++// DepsCompleteFalseWrites absorbs the redundant writes instead, so a latch
++// (dwell grows, count flat) and a ping-pong (dwell grows, count climbs per
++// tick) stay distinguishable.
++//
++// Caller must hold c.mu.
++func (c *CachingStore) setDepsCompleteLocked(v bool, driver string) {
++	if !v {
++		c.stats.DepsCompleteFalseWrites++
++	}
++	c.stats.DepsCompleteDriver = driver
++	// Stamp on the first write as well as on every real transition. A zero
++	// Since is the "never written" sentinel, and depsComplete's zero value is
++	// already false -- so without this clause a store that primes false and
++	// stays false would short-circuit on every write and report its dwell as
++	// unknown forever, which is the exact reading the >1h trigger needs and the
++	// exact case it would most need it in.
++	if c.depsComplete == v && !c.stats.DepsCompleteSince.IsZero() {
++		return
++	}
++	c.depsComplete = v
++	c.stats.DepsComplete = v
++	c.stats.DepsCompleteSince = time.Now()
++}
++
+ func (c *CachingStore) updateStatsLocked() {
+ 	c.stats.TotalBeads = len(c.beads)
+ 	totalDeps := 0
+diff --git a/internal/beads/caching_store_deps_complete_gauge_internal_test.go b/internal/beads/caching_store_deps_complete_gauge_internal_test.go
+new file mode 100644
+index 000000000..3ae8c6cd6
+--- /dev/null
++++ b/internal/beads/caching_store_deps_complete_gauge_internal_test.go
+@@ -0,0 +1,111 @@
++package beads
++
++import (
++	"strings"
++	"testing"
++	"time"
++)
++
++// ADR-0094 D6 AC1/AC3. These assert the three properties that separate a
++// USEFUL depsComplete gauge from a boolean that reports "false" and leaves the
++// defect exactly as invisible as it was before -- the failure mode vc-vlyk was
++// opened to stop, where a guard is satisfiable without covering the condition.
++
++// A latch and a ping-pong present identically to a sampled boolean: both read
++// false. They are told apart by dwell holding while the false-write count
++// climbs, which is why the setter must not re-stamp Since on a redundant write.
++func TestDepsCompleteGaugeDistinguishesLatchFromPingPong(t *testing.T) {
++	c := &CachingStore{}
++
++	c.setDepsCompleteLocked(true, depsDriverPrime)
++	if !c.stats.DepsComplete {
++		t.Fatal("DepsComplete = false after a true write")
++	}
++	stampAfterTrue := c.stats.DepsCompleteSince
++	if stampAfterTrue.IsZero() {
++		t.Fatal("DepsCompleteSince unstamped after the first write: dwell is unmeasurable")
++	}
++
++	c.setDepsCompleteLocked(false, depsDriverReconcile)
++	falseAt := c.stats.DepsCompleteSince
++	if !falseAt.After(stampAfterTrue) {
++		t.Fatal("DepsCompleteSince did not advance on the true->false transition")
++	}
++	if got := c.stats.DepsCompleteFalseWrites; got != 1 {
++		t.Fatalf("DepsCompleteFalseWrites = %d, want 1", got)
++	}
++
++	// Nine more reconcile passes, each folding false again. This is the shape
++	// a per-tick ping-pong actually has, and the dwell must survive it: if
++	// Since were re-stamped here, ADR-0094's "latched false for > 1h" trigger
++	// could never fire no matter how long the condition held.
++	for i := 0; i < 9; i++ {
++		c.setDepsCompleteLocked(false, depsDriverReconcile)
++	}
++	if c.stats.DepsCompleteSince != falseAt {
++		t.Fatalf("DepsCompleteSince moved on a redundant false write (%v -> %v): the >1h trigger becomes unreachable",
++			falseAt, c.stats.DepsCompleteSince)
++	}
++	if got := c.stats.DepsCompleteFalseWrites; got != 10 {
++		t.Fatalf("DepsCompleteFalseWrites = %d, want 10: redundant writes are the ping-pong signal", got)
++	}
++}
++
++// Deliverable #3 is "identify the surviving driver", so the gauge has to name
++// the writer. Each of the six sites reports itself.
++func TestDepsCompleteGaugeAttributesTheWritingSite(t *testing.T) {
++	for _, driver := range []string{
++		depsDriverPrime,
++		depsDriverPartialPrime,
++		depsDriverReconcile,
++		depsDriverEventDepsStale,
++		depsDriverEventMissing,
++		depsDriverEventOther,
++	} {
++		c := &CachingStore{}
++		c.setDepsCompleteLocked(false, driver)
++		if got := c.stats.DepsCompleteDriver; got != driver {
++			t.Fatalf("DepsCompleteDriver = %q, want %q", got, driver)
++		}
++		if got := c.depsCompleteDriverLocked(); got != driver {
++			t.Fatalf("depsCompleteDriverLocked = %q, want %q", got, driver)
++		}
++	}
++}
++
++// AC1: observable without a debugger. The value has to reach the one periodic
++// per-rig line an operator greps on a running supervisor.
++func TestReconcileHeartbeatCarriesDepsCompleteGauge(t *testing.T) {
++	c := &CachingStore{idPrefix: "vc"}
++	now := time.Now()
++
++	// Before any write the dwell is unknown, not zero: a fresh process must not
++	// read as a long-held latch.
++	if got := c.depsCompleteDwellLocked(now); got != "unknown" {
++		t.Fatalf("dwell before any write = %q, want %q", got, "unknown")
++	}
++	if got := c.depsCompleteDriverLocked(); got != "none" {
++		t.Fatalf("driver before any write = %q, want %q", got, "none")
++	}
++
++	c.setDepsCompleteLocked(false, depsDriverReconcile)
++	c.setDepsCompleteLocked(false, depsDriverReconcile)
++
++	line, ok := c.reconcileSuccessLogLocked(now.Add(90*time.Second), 42*time.Millisecond, 1, 2, 3)
++	if !ok {
++		t.Fatal("reconcileSuccessLogLocked suppressed the first heartbeat")
++	}
++	for _, want := range []string{
++		"depsComplete=false",
++		"depsDriver=" + depsDriverReconcile,
++		"depsFalseWrites=2",
++		"depsFor=",
++	} {
++		if !strings.Contains(line, want) {
++			t.Fatalf("heartbeat line missing %q\nline: %s", want, line)
++		}
++	}
++	if strings.Contains(line, "depsFor=unknown") {
++		t.Fatalf("dwell reported unknown after a write\nline: %s", line)
++	}
++}
+diff --git a/internal/beads/caching_store_events.go b/internal/beads/caching_store_events.go
+index 57f437759..908abc23f 100644
+--- a/internal/beads/caching_store_events.go
++++ b/internal/beads/caching_store_events.go
+@@ -341,7 +341,7 @@ func (c *CachingStore) updateEventDepsLocked(eventType string, b Bead, fields ma
+ 			mutated = true
+ 		}
+ 		if c.depsComplete {
+-			c.depsComplete = false
++			c.setDepsCompleteLocked(false, depsDriverEventDepsStale)
+ 			mutated = true
+ 		}
+ 		return mutated
+@@ -350,14 +350,14 @@ func (c *CachingStore) updateEventDepsLocked(eventType string, b Bead, fields ma
+ 		return false
+ 	}
+ 	if eventType == "bead.updated" && c.depsComplete {
+-		c.depsComplete = false
++		c.setDepsCompleteLocked(false, depsDriverEventMissing)
+ 		c.recordProblemLocked("apply bead.updated event", fmt.Errorf("dependency cache marked complete but missing deps for %s", b.ID))
+ 		return true
+ 	}
+ 	if !c.depsComplete {
+ 		return false
+ 	}
+-	c.depsComplete = false
++	c.setDepsCompleteLocked(false, depsDriverEventOther)
+ 	return true
+ }
+ 
+diff --git a/internal/beads/caching_store_reconcile.go b/internal/beads/caching_store_reconcile.go
+index 6b1406c15..777bea3b6 100644
+--- a/internal/beads/caching_store_reconcile.go
++++ b/internal/beads/caching_store_reconcile.go
+@@ -628,7 +628,7 @@ func (c *CachingStore) mergeSnapshotLocked(
+ 
+ 	// 4. Shared tail (was duplicated per branch).
+ 	c.syncFailures = 0
+-	c.depsComplete = nextDepsComplete
++	c.setDepsCompleteLocked(nextDepsComplete, depsDriverReconcile)
+ 	c.primePartialErr = nil
+ 	c.advanceObservationLocked()
+ 	c.promoteLiveLocked()
+@@ -721,12 +721,38 @@ func (c *CachingStore) reconcileSuccessLogLocked(now time.Time, elapsed time.Dur
+ 	if cadence == "" {
+ 		cadence = "default"
+ 	}
++	// depsComplete rides the existing heartbeat rather than a new log line or a
++	// metrics endpoint: this is already the one periodic, rate-limited,
++	// per-rig line an operator greps on a running supervisor, which is exactly
++	// what ADR-0094 D6 AC1 asks for ("observable without a debugger"). Emitting
++	// dwell and the false-write count beside the value is what makes the
++	// reading actionable -- see setDepsCompleteLocked.
+ 	return fmt.Sprintf(
+-		"beads cache: reconciled rig=%s beads=%d adds=%d updates=%d removes=%d took=%s cadence=%s",
++		"beads cache: reconciled rig=%s beads=%d adds=%d updates=%d removes=%d took=%s cadence=%s depsComplete=%t depsFor=%s depsDriver=%s depsFalseWrites=%d",
+ 		rig, len(c.beads), adds, updates, removes, elapsed.Round(time.Millisecond), cadence,
++		c.stats.DepsComplete, c.depsCompleteDwellLocked(now), c.depsCompleteDriverLocked(), c.stats.DepsCompleteFalseWrites,
+ 	), true
+ }
+ 
++// depsCompleteDwellLocked renders how long depsComplete has held its current
++// value. "unknown" until the first write stamps it, so a fresh process is never
++// misread as a long-held latch. Caller must hold c.mu.
++func (c *CachingStore) depsCompleteDwellLocked(now time.Time) string {
++	if c.stats.DepsCompleteSince.IsZero() {
++		return "unknown"
++	}
++	return now.Sub(c.stats.DepsCompleteSince).Round(time.Second).String()
++}
++
++// depsCompleteDriverLocked names the last site to write depsComplete, or
++// "none" before any write. Caller must hold c.mu.
++func (c *CachingStore) depsCompleteDriverLocked() string {
++	if c.stats.DepsCompleteDriver == "" {
++		return "none"
++	}
++	return c.stats.DepsCompleteDriver
++}
++
+ func (c *CachingStore) depsForReconcileLocked(id string, freshBead Bead, depMap map[string][]Dep, useFreshDeps bool) []Dep {
+ 	if useFreshDeps {
+ 		return cloneDeps(depMap[id])
+diff --git a/internal/beads/caching_store_reconcile_census_test.go b/internal/beads/caching_store_reconcile_census_test.go
+index d71d0ee29..25a8dd27a 100644
+--- a/internal/beads/caching_store_reconcile_census_test.go
++++ b/internal/beads/caching_store_reconcile_census_test.go
+@@ -122,6 +122,21 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
+ 		"SyncFailures": true, "ProblemCount": true, "LastProblemAt": true,
+ 		"LastProblem": true, "State": true, "StaggerOffsetMs": true,
+ 		"CurrentReconcileInterval": true, "LatencyP95Ms": true, "CadenceDriver": true,
++		// The four DepsComplete* fields are the OBSERVABILITY PROJECTION of
++		// c.depsComplete, not merge state. The semantic value itself is already
++		// compared by the oracle (comparedStore["depsComplete"]); these carry
++		// when it last changed, which of the six sites wrote it, and how many
++		// false writes have accumulated (ADR-0094 D6, vc-37gh). Two of them are
++		// deliberately not replay-idempotent -- DepsCompleteSince is a
++		// wall-clock stamp and DepsCompleteFalseWrites a monotonic counter that
++		// also counts redundant writes -- so comparing them would pin timing and
++		// write COUNT rather than merge semantics, and a replay that reached the
++		// same end state by a different path would read as a merge divergence.
++		// Same class as CadenceDriver above. The setter's own contract is pinned
++		// by TestDepsCompleteGaugeDistinguishesLatchFromPingPong and
++		// TestDepsCompleteGaugeAttributesTheWritingSite.
++		"DepsComplete": true, "DepsCompleteSince": true,
++		"DepsCompleteDriver": true, "DepsCompleteFalseWrites": true,
+ 	}
+ 	assertFieldsClassified(t, reflect.TypeOf(CacheStats{}), comparedStats, excludedStats)
+ }

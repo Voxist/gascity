@@ -1,0 +1,1450 @@
+diff --git a/cmd/gc/assigned_work_residency_test.go b/cmd/gc/assigned_work_residency_test.go
+index 1ddb4cbce..6fbdffb9d 100644
+--- a/cmd/gc/assigned_work_residency_test.go
++++ b/cmd/gc/assigned_work_residency_test.go
+@@ -1,6 +1,7 @@
+ package main
+ 
+ import (
++	"github.com/gastownhall/gascity/internal/events"
+ 	"io"
+ 	"os"
+ 	"path/filepath"
+@@ -295,7 +296,7 @@ func TestOrphanReleaseSparesALiveHoldersBindingResidentClaim(t *testing.T) {
+ 	infos := sessionInfosFromBeads([]beads.Bead{sess})
+ 	released := releaseOrphanedPoolAssignments(
+ 		work, beads.SessionStore{Store: work}, cfg, cityPath, infos,
+-		[]beads.Bead{claim}, []beads.Store{work}, []string{""}, nil, nil, nil,
++		[]beads.Bead{claim}, []beads.Store{work}, []string{""}, nil, nil, nil, events.Discard,
+ 	)
+ 	if len(released) != 0 {
+ 		t.Fatalf("released %v — a LIVE holder's claim was taken back on a leg the release path now reads; that is claim loss, not a strand", released)
+diff --git a/cmd/gc/bead_worktree_reaper.go b/cmd/gc/bead_worktree_reaper.go
+index b380357ef..c84fbd8d8 100644
+--- a/cmd/gc/bead_worktree_reaper.go
++++ b/cmd/gc/bead_worktree_reaper.go
+@@ -141,6 +141,7 @@ func reapClosedBeadWorktrees(
+ 	}
+ 
+ 	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
++	configuredRoots := configuredWorktreeRoots(cfg, cityPath)
+ 
+ 	for rigName, store := range rigStores {
+ 		if store == nil {
+@@ -180,15 +181,40 @@ func reapClosedBeadWorktrees(
+ 		for _, wt := range worktreeLivenessResults {
+ 			worktreePath := wt.Path
+ 
+-			// Only per-bead worktrees under this rig's .gc/worktrees/<rig>/
+-			// subtree are in scope. This excludes the rig's main working tree
+-			// and any worktree checked out elsewhere.
+-			if !pathutil.PathWithin(rigWorktreeDir, worktreePath) || pathutil.SamePath(rigWorktreeDir, worktreePath) {
++			// The main working tree is never a per-bead worktree to classify,
++			// independent of the containment check below -- rigRoot is now
++			// itself one of configuredRoots, so it would otherwise pass
++			// trivially (PathWithin treats "same path as root" as contained).
++			if pathutil.SamePath(rigRoot, worktreePath) || pathutil.SamePath(rigWorktreeDir, worktreePath) {
+ 				continue
+ 			}
+-			// Defense in depth: never act on a path that is not strictly under
+-			// the city worktree root.
+-			if !isStrictlyUnderDir(wtRoot, worktreePath) {
++
++			// ADR-0089 D2 (the F4 defect): in scope if contained within ANY
++			// configured worktree root, not only <city>/.gc/worktrees/<rig>/ --
++			// that single hardcoded root saw 9 of 59 fleet worktrees (15%).
++			// A path outside every configured root is NOT silently dropped
++			// (the pre-D2 bug): it is classified as protected-with-reason, so
++			// an unrecognized location is visible instead of reading as
++			// "nothing to do" -- ADR-0089's non-negotiable that silence must
++			// never be the signal for "cannot see". isStrictlyUnderDir's own
++			// defense-in-depth role is preserved: matchedRoot comes from this
++			// same configuredRoots set, so nothing downstream can act outside
++			// it either.
++			matchedRoot, inScope := matchingWorktreeRoot(configuredRoots, worktreePath)
++			if !inScope {
++				reason := "worktree outside every configured worktree root (unrecognized location)"
++				branch, _ := git.New(worktreePath).CurrentBranch()
++				beadID := extractBeadIDFromWorktreeName(cfg, filepath.Base(worktreePath))
++				if skips.shouldSurface(worktreePath, reason) {
++					fmt.Fprintf(stderr, //nolint:errcheck
++						"reapClosedBeadWorktrees: protecting %s (bead %s: %s)\n",
++						worktreePath, beadIDOrUnknown(beadID), reason,
++					)
++					recordReapSkipped(rec, beadID, worktreePath, rigName, reason)
++				}
++				report.Protected = append(report.Protected, reapDecision{
++					BeadID: beadID, Path: worktreePath, Rig: rigName, Branch: branch, Reason: reason,
++				})
+ 				continue
+ 			}
+ 
+@@ -200,7 +226,12 @@ func reapClosedBeadWorktrees(
+ 			}
+ 
+ 			// Resolve which bead this worktree belongs to from its path.
+-			beadID := extractBeadIDFromWorktreePath(cfg, rigWorktreeDir, worktreePath)
++			// matchedRoot, not rigWorktreeDir: the worktree may be in scope via
++			// a different member of configuredRoots (e.g. rigRoot itself for
++			// the <rig>/worktrees/<bead> convention), and the one-level-climb
++			// fallback inside extractBeadIDFromWorktreePath must bound itself
++			// to whichever root actually contains this path.
++			beadID := extractBeadIDFromWorktreePath(cfg, matchedRoot, worktreePath)
+ 			if beadID == "" {
+ 				continue
+ 			}
+@@ -556,6 +587,61 @@ func rigRootByName(cfg *config.City, rigName string) string {
+ 	return ""
+ }
+ 
++// configuredWorktreeRoots returns the union of filesystem roots a per-bead
++// worktree can legitimately live under, derived from config (ADR-0089 D2's
++// second option: replace the single hardcoded <city>/.gc/worktrees root with
++// the union of configured worktree roots, rather than deleting the scope
++// filter outright). Covers:
++//   - <cityPath>/.gc/worktrees  (today's only recognized root)
++//   - <cityPath>/.gc/agents     (the "<city>/.gc/agents/<seat>/wt-*" family)
++//   - each configured rig's own root directory (covers BOTH the
++//     "<rig>/worktrees/<bead>" role-prompt convention and
++//     "<rig>/.claude/worktrees/agent-*", since both nest under the rig root)
++//
++// This does not claim to enumerate all six location families ADR-0089 F4
++// measured -- the remaining ones (ad-hoc siblings of a rig root, shared
++// top-level worktree directories such as "/.../Github/worktrees/*") have no
++// config-derivable root at all, which is exactly the governance gap ADR-0089
++// D5 names and defers. A worktree outside this union is not silently dropped
++// (the pre-D2 bug): the caller classifies it as protected-with-reason, so the
++// F4 fix does not depend on this list being exhaustive.
++func configuredWorktreeRoots(cfg *config.City, cityPath string) []string {
++	roots := []string{
++		filepath.Join(cityPath, ".gc", "worktrees"),
++		filepath.Join(cityPath, ".gc", "agents"),
++	}
++	if cfg != nil {
++		for i := range cfg.Rigs {
++			if p := strings.TrimSpace(cfg.Rigs[i].Path); p != "" {
++				roots = append(roots, p)
++			}
++		}
++	}
++	return roots
++}
++
++// matchingWorktreeRoot returns the first member of roots that contains path,
++// and whether any did. Order matches configuredWorktreeRoots's declaration
++// order and has no behavioral significance -- membership, not priority, is
++// what the caller uses.
++func matchingWorktreeRoot(roots []string, path string) (string, bool) {
++	for _, r := range roots {
++		if pathutil.PathWithin(r, path) {
++			return r, true
++		}
++	}
++	return "", false
++}
++
++// beadIDOrUnknown renders an empty bead ID (extraction failed) as a stable
++// placeholder for log lines, rather than an empty pair of quotes.
++func beadIDOrUnknown(beadID string) string {
++	if beadID == "" {
++		return "unknown"
++	}
++	return beadID
++}
++
+ // extractBeadIDFromWorktreePath resolves which bead a worktree belongs to from
+ // its path: from the leaf directory name, or — only when the leaf carries no
+ // bead ID — from its parent directory name.
+diff --git a/cmd/gc/bead_worktree_reaper_integration_test.go b/cmd/gc/bead_worktree_reaper_integration_test.go
+index 98bd619eb..85e556052 100644
+--- a/cmd/gc/bead_worktree_reaper_integration_test.go
++++ b/cmd/gc/bead_worktree_reaper_integration_test.go
+@@ -229,16 +229,22 @@ func TestReapClosedBeadWorktrees_DryRunRemovesNothing(t *testing.T) {
+ 	}
+ }
+ 
+-// TestReapClosedBeadWorktrees_NeverActsOnWorktreeOutsideGcOwnedRoot locks in
+-// the other half of ga-1xaqgo.1: now that discoverWorktreeLiveness (used by
+-// this function) reports liveness for every worktree git knows about,
+-// including ones outside .gc/worktrees, the reaper's own scope restriction
+-// must still keep such a worktree completely untouched — not reaped, and not
+-// even listed as protected, since it was never a candidate this rig owns.
+-func TestReapClosedBeadWorktrees_NeverActsOnWorktreeOutsideGcOwnedRoot(t *testing.T) {
++// TestReapClosedBeadWorktrees_NeverReapsWorktreeOutsideConfiguredRoots locks
++// in the surviving half of ga-1xaqgo.1 (never REAP a worktree outside this
++// rig's ownership) — the "not even listed as protected" half is superseded by
++// ADR-0089 D2: now that discoverWorktreeLiveness reports liveness for every
++// worktree git knows about, including ones outside .gc/worktrees, silently
++// dropping an unrecognized one (neither reaped nor protected, no event) is
++// exactly the F4 defect ADR-0089 measured at 85% of the fleet's worktrees. The
++// scope filter now resolves to the union of configured worktree roots
++// (configuredWorktreeRoots), and a path outside that union is classified
++// protected-with-reason — visible, not silent — while remaining just as
++// untouched on disk as before.
++func TestReapClosedBeadWorktrees_NeverReapsWorktreeOutsideConfiguredRoots(t *testing.T) {
+ 	cityPath, rigRoot := initReapRig(t)
+ 	// Mirrors a worktree Claude Code's own EnterWorktree tool would create:
+-	// registered with git, but outside any .gc/worktrees convention.
++	// registered with git, but outside any configured worktree root (not
++	// under .gc/worktrees, .gc/agents, or any configured rig's own path).
+ 	foreign := filepath.Join(t.TempDir(), ".claude", "worktrees", "some-session")
+ 	if err := os.MkdirAll(filepath.Dir(foreign), 0o755); err != nil {
+ 		t.Fatalf("mkdir foreign worktree parent: %v", err)
+@@ -248,11 +254,34 @@ func TestReapClosedBeadWorktrees_NeverActsOnWorktreeOutsideGcOwnedRoot(t *testin
+ 	cfg := reapTestConfig(rigRoot)
+ 	injectLiveness(t, liveWorktreeState{scanned: true, cwds: []string{pathutil.NormalizePathForCompare(foreign)}})
+ 
++	rec := events.NewFake()
+ 	var stderr bytes.Buffer
+-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
++	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, rec, nil, &stderr)
+ 
+-	if len(report.Reaped) != 0 || len(report.Protected) != 0 {
+-		t.Fatalf("reaper acted on or reported a worktree outside its owned root: Reaped=%+v Protected=%+v", report.Reaped, report.Protected)
++	if len(report.Reaped) != 0 {
++		t.Fatalf("reaper REAPED a worktree outside its owned root: Reaped=%+v", report.Reaped)
++	}
++	wantPath := pathutil.NormalizePathForCompare(foreign)
++	var protectedHere *reapDecision
++	for i := range report.Protected {
++		if report.Protected[i].Path == wantPath {
++			protectedHere = &report.Protected[i]
++		}
++	}
++	if protectedHere == nil {
++		t.Fatalf("foreign worktree %s does not appear in Protected -- ADR-0089 D2: an unrecognized location must be visible, not silently dropped\nProtected: %+v", wantPath, report.Protected)
++	}
++	if protectedHere.Reason == "" {
++		t.Fatalf("Protected entry for the foreign worktree carries no reason")
++	}
++	var sawSkipEvent bool
++	for _, e := range rec.Events {
++		if e.Type == events.BeadWorktreeReapSkipped {
++			sawSkipEvent = true
++		}
++	}
++	if !sawSkipEvent {
++		t.Fatalf("no %s event recorded for the foreign worktree", events.BeadWorktreeReapSkipped)
+ 	}
+ 	if _, err := os.Stat(foreign); err != nil {
+ 		t.Fatalf("foreign worktree %s was removed or unstattable: %v", foreign, err)
+diff --git a/cmd/gc/bead_worktree_reaper_scope_root_test.go b/cmd/gc/bead_worktree_reaper_scope_root_test.go
+new file mode 100644
+index 000000000..56a14a141
+--- /dev/null
++++ b/cmd/gc/bead_worktree_reaper_scope_root_test.go
+@@ -0,0 +1,158 @@
++package main
++
++import (
++	"bytes"
++	"os"
++	"path/filepath"
++	"testing"
++	"time"
++
++	"github.com/gastownhall/gascity/internal/beads"
++	"github.com/gastownhall/gascity/internal/events"
++	"github.com/gastownhall/gascity/internal/pathutil"
++)
++
++// ADR-0089 D2 / F4: the reaper discovers every worktree authoritatively via
++// `git worktree list`, then used to discard everything outside
++// <cityPath>/.gc/worktrees/<rig>/ -- measured fleet-wide at 15% in scope, 85%
++// silently invisible (neither reaped nor protected, no event). These tests
++// pin the fix: the scope filter now recognizes the union of configured
++// worktree roots (AC3: specifically the "<rig>/worktrees/<bead>" role-prompt
++// convention, which the old filter discarded), and anything still outside
++// that union is classified protected-with-reason rather than dropped -- so
++// in-scope share is 100% regardless of whether every historical location
++// family is individually enumerated.
++//
++// Bead IDs here stay short, single-hyphen, alnum suffixes (validBeadSuffix
++// caps a suffix at 8 chars, and extractBeadIDFromWorktreeName's pairwise scan
++// greedily matches the FIRST valid-shaped dash-pair, so an extra hyphen in a
++// fixture bead ID silently resolves to the wrong, non-existent id instead of
++// erroring -- this bit the first draft of these tests).
++//
++// Worktree paths are compared through pathutil.NormalizePathForCompare, the
++// same normalization the reaper itself applies: a raw filepath.Join off
++// t.TempDir() does not resolve macOS's /var -> /private/var symlink, so a
++// byte-equality check against the reaper's (resolved) reported path fails
++// even when they name the same file.
++
++// addRoleConventionWorktree creates a worktree at "<rigRoot>/worktrees/<beadID>"
++// -- the convention AC3 names as a path the pre-D2 filter discarded -- fully
++// merged and pushed so it is also eligible to be REAPED outright, proving the
++// new root is not just "recognized" but carries the full safety pipeline.
++// Returns the NORMALIZED path, ready to compare against report fields.
++func addRoleConventionWorktree(t *testing.T, rigRoot, beadID string) string {
++	t.Helper()
++	wtPath := filepath.Join(rigRoot, "worktrees", beadID)
++	branch := "gc/" + beadID
++	mustGit(t, rigRoot, "worktree", "add", "-b", branch, wtPath)
++	mustGit(t, wtPath, "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "work ("+beadID+")")
++	mustGit(t, wtPath, "push", "-u", "origin", branch)
++	mustGit(t, rigRoot, "push", "origin", "--delete", branch)
++	mustGit(t, rigRoot, "fetch", "--prune", "origin")
++	backdateWorktreeGitFile(t, wtPath, 24*time.Hour)
++	return pathutil.NormalizePathForCompare(wtPath)
++}
++
++func TestReapClosedBeadWorktrees_RigWorktreesConventionIsInScope(t *testing.T) {
++	cityPath, rigRoot := initReapRig(t)
++	wt := addRoleConventionWorktree(t, rigRoot, "ga-rolec1")
++	store := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "ga-rolec1", Status: "closed"}}, nil)
++	cfg := reapTestConfig(rigRoot)
++	injectLiveness(t, liveWorktreeState{scanned: true})
++
++	var stderr bytes.Buffer
++	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{reapTestRigName: store}, nil, false, events.Discard, nil, &stderr)
++
++	if len(report.Reaped) != 1 || report.Reaped[0].Path != wt {
++		t.Fatalf("Reaped = %+v, want exactly 1 (%s) -- the pre-D2 filter discarded this entire location family (AC3)\nProtected: %+v\nstderr:\n%s",
++			report.Reaped, wt, report.Protected, stderr.String())
++	}
++	if _, err := os.Stat(wt); !os.IsNotExist(err) {
++		t.Errorf("worktree %s still on disk after reap", wt)
++	}
++}
++
++func TestReapClosedBeadWorktrees_UnrecognizedLocationIsProtectedNotDropped(t *testing.T) {
++	cityPath, rigRoot := initReapRig(t)
++	// A location no configured root covers: a sibling of the rig root
++	// entirely, not nested under it and not under any .gc/ path. This is the
++	// residual ADR-0089 D5 names (ad-hoc siblings) -- the F4 fix's claim is
++	// not that every such family is enumerated, but that NONE of them is
++	// silently dropped any more.
++	rawPath := filepath.Join(filepath.Dir(rigRoot), "elsewhere-"+filepath.Base(rigRoot))
++	mustGit(t, rigRoot, "worktree", "add", "-b", "gc/ga-elsw1", rawPath)
++	mustGit(t, rawPath, "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "work")
++	wtPath := pathutil.NormalizePathForCompare(rawPath)
++
++	store := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "ga-elsw1", Status: "closed"}}, nil)
++	cfg := reapTestConfig(rigRoot)
++	injectLiveness(t, liveWorktreeState{scanned: true})
++
++	rec := events.NewFake()
++	var stderr bytes.Buffer
++	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{reapTestRigName: store}, nil, false, rec, nil, &stderr)
++
++	if len(report.Reaped) != 0 {
++		t.Fatalf("Reaped = %+v, want none -- an unrecognized location must never be deleted automatically", report.Reaped)
++	}
++	var protectedHere *reapDecision
++	for i := range report.Protected {
++		if report.Protected[i].Path == wtPath {
++			protectedHere = &report.Protected[i]
++		}
++	}
++	if protectedHere == nil {
++		t.Fatalf("worktree %s does not appear in Protected at all -- this is the pre-D2 bug: silently dropped, neither reaped nor recorded.\nReaped: %+v\nProtected: %+v",
++			wtPath, report.Reaped, report.Protected)
++	}
++	if protectedHere.Reason == "" {
++		t.Fatalf("Protected entry for %s carries no reason", wtPath)
++	}
++	var sawSkipEvent bool
++	for _, e := range rec.Events {
++		if e.Type == events.BeadWorktreeReapSkipped {
++			sawSkipEvent = true
++		}
++	}
++	if !sawSkipEvent {
++		t.Fatalf("no %s event recorded for the unrecognized-location path; silence must never be the signal for \"cannot see\" (ADR-0089)", events.BeadWorktreeReapSkipped)
++	}
++	if _, err := os.Stat(wtPath); err != nil {
++		t.Errorf("worktree %s removed from disk (err=%v); an unrecognized location must be protected, not acted on", wtPath, err)
++	}
++}
++
++func TestReapClosedBeadWorktrees_InScopeShareIsComplete(t *testing.T) {
++	// AC4's spirit without the external census tooling: every worktree git
++	// worktree list knows about for this rig (besides the main tree itself)
++	// ends up classified as Reaped OR Protected. None vanish silently.
++	cityPath, rigRoot := initReapRig(t)
++	reaped := addRoleConventionWorktree(t, rigRoot, "ga-shrr1")
++	rawProtected := filepath.Join(filepath.Dir(rigRoot), "elsewhere-share")
++	mustGit(t, rigRoot, "worktree", "add", "-b", "gc/ga-shrp1", rawProtected)
++	mustGit(t, rawProtected, "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "unpushed")
++	protectedUnknown := pathutil.NormalizePathForCompare(rawProtected)
++
++	store := beads.NewMemStoreFrom(1, []beads.Bead{
++		{ID: "ga-shrr1", Status: "closed"},
++		{ID: "ga-shrp1", Status: "closed"},
++	}, nil)
++	cfg := reapTestConfig(rigRoot)
++	injectLiveness(t, liveWorktreeState{scanned: true})
++
++	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{reapTestRigName: store}, nil, false, events.Discard, nil, nil)
++
++	classified := map[string]bool{}
++	for _, d := range report.Reaped {
++		classified[d.Path] = true
++	}
++	for _, d := range report.Protected {
++		classified[d.Path] = true
++	}
++	if !classified[reaped] {
++		t.Errorf("%s classified as neither reaped nor protected", reaped)
++	}
++	if !classified[protectedUnknown] {
++		t.Errorf("%s classified as neither reaped nor protected -- the F4 silent-drop bug", protectedUnknown)
++	}
++}
+diff --git a/cmd/gc/city_runtime.go b/cmd/gc/city_runtime.go
+index db76e9570..0cafd87a5 100644
+--- a/cmd/gc/city_runtime.go
++++ b/cmd/gc/city_runtime.go
+@@ -2728,7 +2728,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
+ 	// arm of this very tick is about to act on (the release-first ordering plus
+ 	// snapshot staleness otherwise produces the wake/release/retire treadmill).
+ 	preWakeCandidates, preWakeCandidateRefs := filterAssignedWorkBeadsForSessionWake(cr.cfg, cr.cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
+-	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, sessStore, cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), result, rigStores, protectedWakeWorkKeys(preWakeCandidates, preWakeCandidateRefs), recordPhase)
++	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, sessStore, cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), result, rigStores, protectedWakeWorkKeys(preWakeCandidates, preWakeCandidateRefs), recordPhase, cr.rec)
+ 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.release_orphaned_pool_assignments", phaseStart, map[string]any{
+ 		"released_count": len(released),
+ 	})
+diff --git a/cmd/gc/cmd_start.go b/cmd/gc/cmd_start.go
+index aa64afd25..0333158bd 100644
+--- a/cmd/gc/cmd_start.go
++++ b/cmd/gc/cmd_start.go
+@@ -1034,7 +1034,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
+ 	// Same protection as the daemon tick: wake candidates computed before the
+ 	// release, so the one-shot path cannot reopen work this run is about to wake.
+ 	preWakeCandidates, preWakeCandidateRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, oneShotStore, sessionBeads.OpenInfos(), dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
+-	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, beads.SessionStore{Store: sessStore}, cfg, cityPath, sessionBeads.OpenInfos(), dsResult, rigStores, protectedWakeWorkKeys(preWakeCandidates, preWakeCandidateRefs), nil); len(released) > 0 {
++	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, beads.SessionStore{Store: sessStore}, cfg, cityPath, sessionBeads.OpenInfos(), dsResult, rigStores, protectedWakeWorkKeys(preWakeCandidates, preWakeCandidateRefs), nil, recorder); len(released) > 0 {
+ 		for _, r := range released {
+ 			fmt.Fprintf(stderr, "released orphaned pool work: %s\n", r.ID) //nolint:errcheck
+ 		}
+diff --git a/cmd/gc/cmd_start_test.go b/cmd/gc/cmd_start_test.go
+index dc6cd5983..8b8bae098 100644
+--- a/cmd/gc/cmd_start_test.go
++++ b/cmd/gc/cmd_start_test.go
+@@ -3,6 +3,7 @@ package main
+ import (
+ 	"bytes"
+ 	"context"
++	"github.com/gastownhall/gascity/internal/events"
+ 	"io"
+ 	"os"
+ 	"os/exec"
+@@ -667,7 +668,7 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
+ 		},
+ 		nil,
+ 		nil,
+-		nil,
++		nil, events.Discard,
+ 	)
+ 	if len(released) != 0 {
+ 		t.Fatalf("released %d work bead(s) from a partial snapshot, want none", len(released))
+@@ -693,7 +694,7 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
+ 		},
+ 		nil,
+ 		nil,
+-		nil,
++		nil, events.Discard,
+ 	)
+ 	if len(released) != 0 {
+ 		t.Fatalf("released %d work bead(s) from a partial session snapshot, want none", len(released))
+@@ -718,7 +719,7 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
+ 		},
+ 		nil,
+ 		nil,
+-		nil,
++		nil, events.Discard,
+ 	)
+ 	if len(released) != 1 {
+ 		t.Fatalf("complete one-shot snapshot released %d work bead(s), want 1", len(released))
+diff --git a/cmd/gc/dead_assignee_repair_test.go b/cmd/gc/dead_assignee_repair_test.go
+index b9611b6ee..c9871d674 100644
+--- a/cmd/gc/dead_assignee_repair_test.go
++++ b/cmd/gc/dead_assignee_repair_test.go
+@@ -187,7 +187,7 @@ func TestReleaseOrphanedPoolAssignments_SkipsLiveAssigneeStaysAssigned(t *testin
+ 		"",
+ 		sessionInfosFromBeads([]beads.Bead{live}),
+ 		[]beads.Bead{work},
+-		nil, nil, nil, nil, nil,
++		nil, nil, nil, nil, nil, events.Discard,
+ 	)
+ 	if len(released) != 0 {
+ 		t.Fatalf("live assignee must not be released, got %v", released)
+@@ -242,7 +242,7 @@ func TestReleaseOrphanedPoolAssignments_NilSessionsStoreFallsBackToWorkStore(t *
+ 		"",
+ 		nil, // empty snapshot: the two snapshot gates miss, so the live re-read decides
+ 		[]beads.Bead{work},
+-		nil, nil, nil, nil, nil,
++		nil, nil, nil, nil, nil, events.Discard,
+ 	)
+ 	if len(released) != 0 {
+ 		t.Fatalf("a live assignee was released with a nil sessions store, got %v; "+
+diff --git a/cmd/gc/execution_stalled_convergence_test.go b/cmd/gc/execution_stalled_convergence_test.go
+index 1ffb77d6e..94c05f3b5 100644
+--- a/cmd/gc/execution_stalled_convergence_test.go
++++ b/cmd/gc/execution_stalled_convergence_test.go
+@@ -1,6 +1,7 @@
+ package main
+ 
+ import (
++	"github.com/gastownhall/gascity/internal/events"
+ 	"strings"
+ 	"testing"
+ 	"time"
+@@ -178,7 +179,7 @@ func TestExecutionStalledDrainConvergesToAReclaimableRow(t *testing.T) {
+ 		t.Fatalf("re-reading the claim: %v", err)
+ 	}
+ 	released := releaseOrphanedPoolAssignments(h.env.store, beads.SessionStore{Store: h.env.store}, h.env.cfg, "", nil,
+-		[]beads.Bead{claimed}, []beads.Store{h.env.store}, []string{""}, nil, nil, nil)
++		[]beads.Bead{claimed}, []beads.Store{h.env.store}, []string{""}, nil, nil, nil, events.Discard)
+ 	if len(released) != 1 || released[0].ID != h.work.ID {
+ 		t.Fatalf("released = %+v, want the stalled claim reopened", released)
+ 	}
+@@ -308,7 +309,7 @@ func TestExecutionStalledDrainDoesNotStrandAMidDrainWake(t *testing.T) {
+ 		t.Fatalf("re-reading the claim: %v", err)
+ 	}
+ 	released := releaseOrphanedPoolAssignments(h.env.store, beads.SessionStore{Store: h.env.store}, h.env.cfg, "", nil,
+-		[]beads.Bead{claimed}, []beads.Store{h.env.store}, []string{""}, nil, nil, nil)
++		[]beads.Bead{claimed}, []beads.Store{h.env.store}, []string{""}, nil, nil, nil, events.Discard)
+ 	if len(released) != 1 {
+ 		t.Fatalf("released = %+v, want the claim released once its holder is gone", released)
+ 	}
+diff --git a/cmd/gc/pool_session_name.go b/cmd/gc/pool_session_name.go
+index 8e2259fa0..33d337090 100644
+--- a/cmd/gc/pool_session_name.go
++++ b/cmd/gc/pool_session_name.go
+@@ -4,8 +4,11 @@ import (
+ 	"context"
+ 	"crypto/sha256"
+ 	"encoding/hex"
++	"encoding/json"
+ 	"errors"
++	"fmt"
+ 	"log"
++	"os"
+ 	"path"
+ 	"strings"
+ 	"time"
+@@ -14,6 +17,8 @@ import (
+ 	"github.com/gastownhall/gascity/internal/beadmeta"
+ 	"github.com/gastownhall/gascity/internal/beads"
+ 	"github.com/gastownhall/gascity/internal/config"
++	"github.com/gastownhall/gascity/internal/events"
++	"github.com/gastownhall/gascity/internal/git"
+ 	"github.com/gastownhall/gascity/internal/session"
+ 	"github.com/gastownhall/gascity/internal/sling"
+ 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+@@ -147,6 +152,7 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
+ 	rigStores map[string]beads.Store,
+ 	protectedWakeWork map[storeScopedBeadKey]struct{},
+ 	recordPhase func(TraceSiteCode, string, time.Time, map[string]any),
++	rec events.Recorder,
+ ) []releasedPoolAssignment {
+ 	// Partial input snapshots can make active work look orphaned for this
+ 	// tick only: missing work affects drain decisions, and missing sessions
+@@ -154,7 +160,7 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
+ 	if result.snapshotQueryPartial() {
+ 		return nil
+ 	}
+-	return releaseOrphanedPoolAssignments(store, sessionStore, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores, protectedWakeWork, recordPhase)
++	return releaseOrphanedPoolAssignments(store, sessionStore, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores, protectedWakeWork, recordPhase, rec)
+ }
+ 
+ // protectedWakeWorkKeys indexes the wake-candidate slice by store ref + bead ID
+@@ -220,6 +226,7 @@ func releaseOrphanedPoolAssignments(
+ 	rigStores map[string]beads.Store,
+ 	protectedWakeWork map[storeScopedBeadKey]struct{},
+ 	recordPhase func(TraceSiteCode, string, time.Time, map[string]any),
++	rec events.Recorder,
+ ) []releasedPoolAssignment {
+ 	if store == nil || cfg == nil || len(assignedWorkBeads) == 0 {
+ 		return nil
+@@ -375,7 +382,7 @@ func releaseOrphanedPoolAssignments(
+ 		if !allowsRelease {
+ 			continue
+ 		}
+-		if !releaseOrphanedPoolAssignment(ownerStore, wb, clearDetached) {
++		if !releaseOrphanedPoolAssignment(ownerStore, wb, clearDetached, rec) {
+ 			continue
+ 		}
+ 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
+@@ -430,6 +437,7 @@ func releaseConfirmedOrphanSessionWork(
+ 	assignedWorkBeads []beads.Bead,
+ 	assignedWorkStores []beads.Store,
+ 	info session.Info,
++	rec events.Recorder,
+ ) []releasedPoolAssignment {
+ 	if cfg == nil || store == nil || len(assignedWorkBeads) == 0 {
+ 		return nil
+@@ -478,7 +486,7 @@ func releaseConfirmedOrphanSessionWork(
+ 		if !allowsRelease {
+ 			continue
+ 		}
+-		if !releaseOrphanedPoolAssignment(ownerStore, wb, clearDetached) {
++		if !releaseOrphanedPoolAssignment(ownerStore, wb, clearDetached, rec) {
+ 			continue
+ 		}
+ 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
+@@ -683,24 +691,130 @@ func isCanonicalWorkflowRoot(wb beads.Bead) bool {
+ //     This single Update also clears the affinity metadata alongside
+ //     status/assignee, so it is the correct path for continuation-group beads:
+ //     the group is never exposed on an open, unassigned bead.
+-func releaseOrphanedPoolAssignment(store beads.Store, wb beads.Bead, clearDetached bool) bool {
++func releaseOrphanedPoolAssignment(store beads.Store, wb beads.Bead, clearDetached bool, rec events.Recorder) bool {
+ 	if store == nil || strings.TrimSpace(wb.ID) == "" {
+ 		return false
+ 	}
+-	// Continuation-group beads bypass the CAS fast path: ReleaseIfCurrent swaps
+-	// only status/assignee, so clearing the group would need a second write, and
+-	// that gap would expose the routing vector on a claimable bead. The recheck
+-	// fallback clears status, assignee, and affinity metadata in one Update.
+-	if !beadHasActiveContinuationGroup(wb) {
+-		if released, handled := releasePoolAssignmentIfCurrent(store, wb); handled {
+-			if !released {
+-				return false
++	released := func() bool {
++		// Continuation-group beads bypass the CAS fast path: ReleaseIfCurrent swaps
++		// only status/assignee, so clearing the group would need a second write, and
++		// that gap would expose the routing vector on a claimable bead. The recheck
++		// fallback clears status, assignee, and affinity metadata in one Update.
++		if !beadHasActiveContinuationGroup(wb) {
++			if ok, handled := releasePoolAssignmentIfCurrent(store, wb); handled {
++				if !ok {
++					return false
++				}
++				clearReleasedPoolAssignmentMetadata(store, wb.ID, clearDetached)
++				return true
+ 			}
+-			clearReleasedPoolAssignmentMetadata(store, wb.ID, clearDetached)
+-			return true
+ 		}
++		return releasePoolAssignmentWithRecheck(store, wb, clearDetached)
++	}()
++	if released {
++		// ADR-0089 D1: the release above is final and is never rolled back or
++		// blocked on this — pool liveness must not be held hostage to git I/O.
++		// This only records, after the fact, whether the worktree this bead
++		// leaves behind was actually disposable.
++		recordWorktreeCustodyOnRelease(store, wb, rec)
+ 	}
+-	return releasePoolAssignmentWithRecheck(store, wb, clearDetached)
++	return released
++}
++
++// recordWorktreeCustodyOnRelease implements ADR-0089 D1: a bead returned to
++// the pool must not silently abandon a worktree. Advisory only, and best-
++// effort — a failure here never un-releases the bead (see the caller).
++//
++// If wb names a worktree that still exists on disk, evaluate ADR-0088's
++// containment predicate (HEAD reachable from its own origin branch, AND a
++// clean tree). When it holds, the worktree is disposable and nothing is
++// recorded (ADR-0089 AC2: no false positives). When it does not — or when the
++// predicate itself cannot be evaluated, which is exactly the kind of
++// ambiguous signal ADR-0089's fail-safe constraint says must resolve toward
++// "needs a look" rather than silently toward "fine" — the bead is stamped
++// gc.salvage_required=1 and a bead.worktree.salvage_required event fires.
++// That stamp is the durable, queryable surface a patrol or operator uses to
++// find these worktrees, replacing a full worktree scan every cycle.
++func recordWorktreeCustodyOnRelease(store beads.Store, wb beads.Bead, rec events.Recorder) {
++	if rec == nil {
++		rec = events.Discard
++	}
++	workDir := strings.TrimSpace(wb.Metadata[beadmeta.WorkDirMetadataKey])
++	if workDir == "" {
++		workDir = strings.TrimSpace(wb.Metadata[beadmeta.LegacyWorkDirMetadataKey])
++	}
++	if workDir == "" {
++		return
++	}
++	if info, err := os.Stat(workDir); err != nil || !info.IsDir() {
++		// Nothing on disk to salvage. This is absence, not ambiguity: a stale
++		// metadata pointer to a worktree that was already cleaned up is not
++		// itself a custody hazard.
++		return
++	}
++	branch := strings.TrimSpace(wb.Metadata[beadmeta.WorkBranchMetadataKey])
++	ok, reason := worktreeContainmentHolds(workDir, branch)
++	if ok {
++		return
++	}
++	stampSalvageRequired(store, wb.ID, workDir, branch, reason, rec)
++}
++
++// worktreeContainmentHolds evaluates ADR-0088's containment predicate for one
++// worktree: its HEAD must be reachable from its own remote-tracking branch
++// (i.e. every commit in it has been pushed) AND its tree must be clean. Any
++// error evaluating either half is reported as "does not hold" with the error
++// as the reason — ADR-0089's fail-safe constraint is that an unreadable
++// worktree resolves toward "needs a look", never toward silently treating it
++// as disposable.
++func worktreeContainmentHolds(workDir, branch string) (bool, string) {
++	g := git.New(workDir)
++	status, err := g.StatusPorcelain()
++	if err != nil {
++		return false, fmt.Sprintf("worktree status unreadable: %v", err)
++	}
++	if strings.TrimSpace(status) != "" {
++		return false, "worktree has uncommitted or untracked changes"
++	}
++	if branch == "" {
++		return false, "no branch recorded for this worktree"
++	}
++	ancestor, err := g.IsAncestor("HEAD", "origin/"+branch)
++	if err != nil {
++		return false, fmt.Sprintf("checking push state against origin/%s: %v", branch, err)
++	}
++	if !ancestor {
++		return false, fmt.Sprintf("worktree HEAD is not reachable from origin/%s (unpushed work)", branch)
++	}
++	return true, ""
++}
++
++// stampSalvageRequired writes gc.salvage_required=1 on id (merged into
++// existing metadata, never replacing it — see clearReleasedPoolAssignmentMetadata
++// for the same convention) and emits the accompanying event. Both steps are
++// best-effort: a failure here is logged, not propagated, because the release
++// this follows has already happened and must not be undone by a bookkeeping
++// failure.
++func stampSalvageRequired(store beads.Store, id, workDir, branch, reason string, rec events.Recorder) {
++	if err := store.Update(id, beads.UpdateOpts{
++		Metadata: map[string]string{beadmeta.SalvageRequiredMetadataKey: "1"},
++	}); err != nil {
++		log.Printf("releaseOrphanedPoolAssignment: stamping %s=1 on %s failed: %v", beadmeta.SalvageRequiredMetadataKey, id, err)
++	}
++	raw, err := json.Marshal(events.BeadWorktreeSalvageRequiredPayload{
++		BeadID: id, Path: workDir, Branch: branch, Reason: reason,
++	})
++	if err != nil {
++		log.Printf("releaseOrphanedPoolAssignment: marshaling salvage_required payload for %s: %v", id, err)
++		return
++	}
++	rec.Record(events.Event{
++		Type:    events.BeadWorktreeSalvageRequired,
++		Actor:   "gc",
++		Subject: id,
++		Message: fmt.Sprintf("worktree custody at risk on release: %s (%s)", id, reason),
++		Payload: raw,
++	})
+ }
+ 
+ // beadHasActiveContinuationGroup reports whether wb still advertises the active
+diff --git a/cmd/gc/pool_session_name_orphan_release_fanout_test.go b/cmd/gc/pool_session_name_orphan_release_fanout_test.go
+index c28c1ff6d..65edc1d3c 100644
+--- a/cmd/gc/pool_session_name_orphan_release_fanout_test.go
++++ b/cmd/gc/pool_session_name_orphan_release_fanout_test.go
+@@ -2,6 +2,7 @@ package main
+ 
+ import (
+ 	"fmt"
++	"github.com/gastownhall/gascity/internal/events"
+ 	"testing"
+ 	"time"
+ 
+@@ -75,7 +76,7 @@ func countOrphanReleaseLiveSessionLists(t *testing.T, workBeadCount int) int {
+ 		storeRefs,
+ 		nil,
+ 		nil,
+-		nil,
++		nil, events.Discard,
+ 	)
+ 	return store.liveSessionLists
+ }
+@@ -206,7 +207,7 @@ func TestReleaseOrphanedPoolAssignments_OwnerStoreMemoDoesNotCollapseDistinctSto
+ 				tc.refs,
+ 				nil,
+ 				nil,
+-				nil,
++				nil, events.Discard,
+ 			)
+ 
+ 			var releasedIDs []string
+@@ -304,7 +305,7 @@ func TestReleaseOrphanedPoolAssignments_RecordsMemoizedVsFallbackBranchCounts(t
+ 
+ 		releaseOrphanedPoolAssignments(
+ 			mem, beads.SessionStore{Store: mem}, testPoolReleaseConfig(), "", nil,
+-			work, stores, storeRefs, nil, nil, recordPhase,
++			work, stores, storeRefs, nil, nil, recordPhase, events.Discard,
+ 		)
+ 
+ 		phase := findCapturedTracePhase(t, captured, "bead_reconcile.release_orphaned_pool_assignments.release_sweep")
+@@ -349,7 +350,7 @@ func TestReleaseOrphanedPoolAssignments_RecordsMemoizedVsFallbackBranchCounts(t
+ 
+ 		releaseOrphanedPoolAssignments(
+ 			mem, beads.SessionStore{Store: mem}, testPoolReleaseConfig(), "", nil,
+-			work, nil, nil, nil, nil, recordPhase,
++			work, nil, nil, nil, nil, recordPhase, events.Discard,
+ 		)
+ 
+ 		phase := findCapturedTracePhase(t, captured, "bead_reconcile.release_orphaned_pool_assignments.release_sweep")
+diff --git a/cmd/gc/pool_session_name_protected_wake_test.go b/cmd/gc/pool_session_name_protected_wake_test.go
+index 862de88bf..1be08ab32 100644
+--- a/cmd/gc/pool_session_name_protected_wake_test.go
++++ b/cmd/gc/pool_session_name_protected_wake_test.go
+@@ -1,6 +1,7 @@
+ package main
+ 
+ import (
++	"github.com/gastownhall/gascity/internal/events"
+ 	"testing"
+ 
+ 	"github.com/gastownhall/gascity/internal/beadmeta"
+@@ -44,7 +45,7 @@ func TestReleaseOrphanedPoolAssignments_RetainsProtectedWakeWork(t *testing.T) {
+ 		store, beads.SessionStore{Store: store}, testPoolReleaseConfig(), "", nil,
+ 		[]beads.Bead{work}, []beads.Store{store}, nil, nil,
+ 		map[storeScopedBeadKey]struct{}{{ID: work.ID}: {}},
+-		nil,
++		nil, events.Discard,
+ 	)
+ 	if len(released) != 0 {
+ 		t.Fatalf("released %v — protected wake work was reopened; the release arm ran ahead of the wake arm it must yield to", released)
+@@ -68,7 +69,7 @@ func TestReleaseOrphanedPoolAssignments_EmptyProtectedSetStillReleases(t *testin
+ 		store, beads.SessionStore{Store: store}, testPoolReleaseConfig(), "", nil,
+ 		[]beads.Bead{work}, []beads.Store{store}, nil, nil,
+ 		nil,
+-		nil,
++		nil, events.Discard,
+ 	)
+ 	if len(released) != 1 || released[0].ID != work.ID {
+ 		t.Fatalf("released = %v, want exactly the dead-assignee bead %s", released, work.ID)
+@@ -108,7 +109,7 @@ func TestReleaseOrphanedPoolAssignments_ProtectsAliasAssignedRigWork(t *testing.
+ 		cityStore, beads.SessionStore{Store: cityStore}, testPoolReleaseConfig(), "", nil,
+ 		[]beads.Bead{work}, []beads.Store{ownerStore}, nil, nil,
+ 		map[storeScopedBeadKey]struct{}{{ID: work.ID}: {}},
+-		nil,
++		nil, events.Discard,
+ 	)
+ 	if len(released) != 0 {
+ 		t.Fatalf("released %v — alias-assigned rig-store work was reopened despite wake protection", released)
+@@ -166,7 +167,7 @@ func TestReleaseOrphanedPoolAssignments_ProtectionDoesNotCrossStoreIDCollision(t
+ 		storeA, beads.SessionStore{Store: storeA}, testPoolReleaseConfig(), "", nil,
+ 		[]beads.Bead{aWork, bWork}, []beads.Store{storeA, storeB}, []string{"", "rig:b"}, nil,
+ 		protectedWakeWorkKeys([]beads.Bead{aWork}, []string{""}),
+-		nil,
++		nil, events.Discard,
+ 	)
+ 	if len(released) != 1 || released[0].ID != bWork.ID {
+ 		t.Fatalf("released = %v, want exactly storeB's %s — storeA's wake candidate shielded a same-ID bead in another store", released, bWork.ID)
+diff --git a/cmd/gc/pool_session_name_route_assignee_liveness_test.go b/cmd/gc/pool_session_name_route_assignee_liveness_test.go
+index 90c2bd7b9..2b0664834 100644
+--- a/cmd/gc/pool_session_name_route_assignee_liveness_test.go
++++ b/cmd/gc/pool_session_name_route_assignee_liveness_test.go
+@@ -1,6 +1,7 @@
+ package main
+ 
+ import (
++	"github.com/gastownhall/gascity/internal/events"
+ 	"testing"
+ 
+ 	"github.com/gastownhall/gascity/internal/beads"
+@@ -60,7 +61,7 @@ func TestReleaseOrphanedPoolAssignments_TemplateAssigneeSkippedWhenSessionLive(t
+ 		nil,
+ 		nil,
+ 		nil,
+-		nil,
++		nil, events.Discard,
+ 	)
+ 
+ 	if len(released) != 0 {
+@@ -90,7 +91,7 @@ func TestReleaseOrphanedPoolAssignments_TemplateAssigneeReleasedWhenNoLiveSessio
+ 		nil,
+ 		nil,
+ 		nil,
+-		nil,
++		nil, events.Discard,
+ 	)
+ 
+ 	if len(released) != 1 || released[0].ID != work.ID {
+@@ -127,7 +128,7 @@ func TestReleaseOrphanedPoolAssignments_DeadNamedAssigneeReleasedDespiteLiveTemp
+ 		nil,
+ 		nil,
+ 		nil,
+-		nil,
++		nil, events.Discard,
+ 	)
+ 
+ 	if len(released) != 1 || released[0].ID != work.ID {
+@@ -163,7 +164,7 @@ func TestReleaseOrphanedPoolAssignments_TemplateAssigneeReleasedWhenOnlyNamedSes
+ 		nil,
+ 		nil,
+ 		nil,
+-		nil,
++		nil, events.Discard,
+ 	)
+ 
+ 	if len(released) != 1 || released[0].ID != work.ID {
+@@ -215,7 +216,7 @@ func TestReleaseOrphanedPoolAssignments_TemplateAssigneeSkippedWhenSessionLiveIn
+ 		[]string{"repo"}, // store-ref aware: the work lives in the agent's own rig
+ 		nil,
+ 		nil,
+-		nil,
++		nil, events.Discard,
+ 	)
+ 
+ 	if len(released) != 0 {
+@@ -248,7 +249,7 @@ func TestReleaseOrphanedPoolAssignments_TemplateAssigneeReleasedWhenLiveSessionS
+ 		[]string{"other-repo"}, // store-ref aware: the work lives outside the agent's rig
+ 		nil,
+ 		nil,
+-		nil,
++		nil, events.Discard,
+ 	)
+ 
+ 	if len(released) != 1 || released[0].ID != work.ID {
+diff --git a/cmd/gc/pool_session_name_test.go b/cmd/gc/pool_session_name_test.go
+index ca1bb9b6c..e82aaee82 100644
+--- a/cmd/gc/pool_session_name_test.go
++++ b/cmd/gc/pool_session_name_test.go
+@@ -3,6 +3,7 @@ package main
+ import (
+ 	"bytes"
+ 	"errors"
++	"github.com/gastownhall/gascity/internal/events"
+ 	"log"
+ 	"slices"
+ 	"strings"
+@@ -2287,7 +2288,7 @@ func releaseProbeAssignments(store *conditionalReleaseProbeStore, work beads.Bea
+ 		nil,
+ 		nil,
+ 		nil,
+-		nil,
++		nil, events.Discard,
+ 	)
+ }
+ 
+@@ -2490,7 +2491,7 @@ func releaseOrphanedPoolAssignmentsFromBeads(
+ 	}
+ 	// Single-store fixtures: the session class resolves to the work store, which
+ 	// is what a city without a [storage.classes] sessions binding does.
+-	return releaseOrphanedPoolAssignments(store, beads.SessionStore{Store: store}, cfg, cityPath, infos, assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, rigStores, nil, nil)
++	return releaseOrphanedPoolAssignments(store, beads.SessionStore{Store: store}, cfg, cityPath, infos, assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, rigStores, nil, nil, events.Discard)
+ }
+ 
+ // gcSweepSessionBeadsFromBeads projects raw session beads to session.Info and
+@@ -2595,7 +2596,7 @@ func TestReleaseOrphanedPoolAssignments_SkipsLiveModernPoolSessionWhenLiveListMi
+ 		nil,
+ 		nil,
+ 		nil,
+-		nil,
++		nil, events.Discard,
+ 	)
+ 	if len(released) != 0 {
+ 		t.Fatalf("released = %v, want none — the owning pool session is live", released)
+diff --git a/cmd/gc/pool_session_name_worktree_custody_test.go b/cmd/gc/pool_session_name_worktree_custody_test.go
+new file mode 100644
+index 000000000..06d09cdfe
+--- /dev/null
++++ b/cmd/gc/pool_session_name_worktree_custody_test.go
+@@ -0,0 +1,207 @@
++package main
++
++import (
++	"os"
++	"path/filepath"
++	"testing"
++
++	"github.com/gastownhall/gascity/internal/beadmeta"
++	"github.com/gastownhall/gascity/internal/beads"
++	"github.com/gastownhall/gascity/internal/events"
++)
++
++// ADR-0089 D1: releaseOrphanedPoolAssignment must not return a bead to the
++// pool while silently abandoning a worktree. These tests pin the ACTUAL
++// behavior change over the first pass (which only reported the condition,
++// vp-vt3wf-shaped): the release now evaluates ADR-0088's containment
++// predicate (HEAD reachable from its own origin branch, AND clean tree) and
++// stamps gc.salvage_required=1 + emits bead.worktree.salvage_required when it
++// does not hold -- without ever blocking or rolling back the release itself.
++
++// custodyTestWorktree creates a per-bead worktree on its own branch under
++// rigRoot (a real git repo with a real "origin" remote, via initReapRig), then
++// optionally pushes it to origin so tests can control whether the predicate's
++// ancestor check holds. Returns the worktree path and branch name.
++func custodyTestWorktree(t *testing.T, rigRoot, beadID string, push bool) (path, branch string) {
++	t.Helper()
++	wtPath := filepath.Join(t.TempDir(), beadID)
++	branch = "gc/" + beadID
++	mustGit(t, rigRoot, "worktree", "add", "-b", branch, wtPath)
++	mustGit(t, wtPath, "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "work ("+beadID+")")
++	if push {
++		mustGit(t, wtPath, "push", "-u", "origin", branch)
++	}
++	return wtPath, branch
++}
++
++func custodyTestBead(id, workDir, branch string) beads.Bead {
++	return beads.Bead{
++		ID:       id,
++		Status:   "in_progress",
++		Assignee: "worker-dead",
++		Metadata: map[string]string{
++			"gc.routed_to":                 "worker",
++			beadmeta.WorkDirMetadataKey:    workDir,
++			beadmeta.WorkBranchMetadataKey: branch,
++		},
++	}
++}
++
++func TestReleaseOrphanedPoolAssignment_StampsSalvageRequiredOnUnpushedWork(t *testing.T) {
++	_, rigRoot := initReapRig(t)
++	wtPath, branch := custodyTestWorktree(t, rigRoot, "ga-unpushed1", true)
++	// An extra LOCAL commit after the push -- HEAD is now ahead of
++	// origin/<branch>, so HEAD is not reachable from it (not an ancestor).
++	mustGit(t, wtPath, "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "unpushed follow-up")
++
++	store := beads.NewMemStore()
++	wb, err := store.Create(custodyTestBead("ga-unpushed1", wtPath, branch))
++	if err != nil {
++		t.Fatalf("Create: %v", err)
++	}
++	rec := events.NewFake()
++
++	if !releaseOrphanedPoolAssignment(store, wb, false, rec) {
++		t.Fatalf("release reported failure; ADR-0089 D1 must never block release on custody")
++	}
++
++	got, err := store.Get(wb.ID)
++	if err != nil {
++		t.Fatalf("Get: %v", err)
++	}
++	if got.Status != "open" || got.Assignee != "" {
++		t.Fatalf("release did not happen: status=%q assignee=%q", got.Status, got.Assignee)
++	}
++	if got.Metadata[beadmeta.SalvageRequiredMetadataKey] != "1" {
++		t.Fatalf("%s = %q, want \"1\" (AC1: unpublished work must stamp)", beadmeta.SalvageRequiredMetadataKey, got.Metadata[beadmeta.SalvageRequiredMetadataKey])
++	}
++	var found bool
++	for _, e := range rec.Events {
++		if e.Type == events.BeadWorktreeSalvageRequired && e.Subject == wb.ID {
++			found = true
++		}
++	}
++	if !found {
++		t.Fatalf("no %s event recorded for %s; events=%+v", events.BeadWorktreeSalvageRequired, wb.ID, rec.Events)
++	}
++}
++
++func TestReleaseOrphanedPoolAssignment_NoStampWhenContainedAndClean(t *testing.T) {
++	_, rigRoot := initReapRig(t)
++	wtPath, branch := custodyTestWorktree(t, rigRoot, "ga-clean1", true)
++
++	store := beads.NewMemStore()
++	wb, err := store.Create(custodyTestBead("ga-clean1", wtPath, branch))
++	if err != nil {
++		t.Fatalf("Create: %v", err)
++	}
++	rec := events.NewFake()
++
++	if !releaseOrphanedPoolAssignment(store, wb, false, rec) {
++		t.Fatalf("release reported failure")
++	}
++
++	got, err := store.Get(wb.ID)
++	if err != nil {
++		t.Fatalf("Get: %v", err)
++	}
++	if v, ok := got.Metadata[beadmeta.SalvageRequiredMetadataKey]; ok {
++		t.Fatalf("%s = %q, want absent (AC2: no false positives on a contained+clean worktree)", beadmeta.SalvageRequiredMetadataKey, v)
++	}
++	if len(rec.Events) != 0 {
++		t.Fatalf("unexpected events on a contained+clean release: %+v", rec.Events)
++	}
++}
++
++func TestReleaseOrphanedPoolAssignment_StampsOnDirtyTree(t *testing.T) {
++	_, rigRoot := initReapRig(t)
++	wtPath, branch := custodyTestWorktree(t, rigRoot, "ga-dirty1", true)
++	// Pushed (HEAD == origin/branch), but the tree itself is dirty.
++	if err := os.WriteFile(filepath.Join(wtPath, "scratch.txt"), []byte("wip\n"), 0o644); err != nil {
++		t.Fatalf("write scratch file: %v", err)
++	}
++
++	store := beads.NewMemStore()
++	wb, err := store.Create(custodyTestBead("ga-dirty1", wtPath, branch))
++	if err != nil {
++		t.Fatalf("Create: %v", err)
++	}
++	rec := events.NewFake()
++
++	releaseOrphanedPoolAssignment(store, wb, false, rec)
++
++	got, err := store.Get(wb.ID)
++	if err != nil {
++		t.Fatalf("Get: %v", err)
++	}
++	if got.Metadata[beadmeta.SalvageRequiredMetadataKey] != "1" {
++		t.Fatalf("%s = %q, want \"1\" (a dirty tree is never disposable even if fully pushed)", beadmeta.SalvageRequiredMetadataKey, got.Metadata[beadmeta.SalvageRequiredMetadataKey])
++	}
++}
++
++func TestReleaseOrphanedPoolAssignment_NoWorkDirNoCustodyCheck(t *testing.T) {
++	store := beads.NewMemStore()
++	wb, err := store.Create(beads.Bead{
++		ID: "ga-nowd1", Status: "in_progress", Assignee: "worker-dead",
++		Metadata: map[string]string{"gc.routed_to": "worker"},
++	})
++	if err != nil {
++		t.Fatalf("Create: %v", err)
++	}
++	rec := events.NewFake()
++
++	if !releaseOrphanedPoolAssignment(store, wb, false, rec) {
++		t.Fatalf("release reported failure")
++	}
++	got, _ := store.Get(wb.ID)
++	if _, ok := got.Metadata[beadmeta.SalvageRequiredMetadataKey]; ok {
++		t.Fatalf("stamped salvage_required on a bead with no recorded worktree at all")
++	}
++	if len(rec.Events) != 0 {
++		t.Fatalf("unexpected events with no work_dir: %+v", rec.Events)
++	}
++}
++
++func TestReleaseOrphanedPoolAssignment_MissingWorktreeOnDiskNoCustodyCheck(t *testing.T) {
++	store := beads.NewMemStore()
++	wb, err := store.Create(custodyTestBead("ga-gone1", filepath.Join(t.TempDir(), "never-existed"), "gc/ga-gone1"))
++	if err != nil {
++		t.Fatalf("Create: %v", err)
++	}
++	rec := events.NewFake()
++
++	if !releaseOrphanedPoolAssignment(store, wb, false, rec) {
++		t.Fatalf("release reported failure")
++	}
++	got, _ := store.Get(wb.ID)
++	if _, ok := got.Metadata[beadmeta.SalvageRequiredMetadataKey]; ok {
++		t.Fatalf("stamped salvage_required for a work_dir that no longer exists on disk -- absence is not ambiguity")
++	}
++}
++
++func TestReleaseOrphanedPoolAssignment_LegacyWorkDirKeyFallback(t *testing.T) {
++	_, rigRoot := initReapRig(t)
++	wtPath, branch := custodyTestWorktree(t, rigRoot, "ga-legacy1", true)
++	mustGit(t, wtPath, "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "unpushed")
++
++	store := beads.NewMemStore()
++	wb, err := store.Create(beads.Bead{
++		ID: "ga-legacy1", Status: "in_progress", Assignee: "worker-dead",
++		Metadata: map[string]string{
++			"gc.routed_to":                    "worker",
++			beadmeta.LegacyWorkDirMetadataKey: wtPath,
++			beadmeta.WorkBranchMetadataKey:    branch,
++		},
++	})
++	if err != nil {
++		t.Fatalf("Create: %v", err)
++	}
++	rec := events.NewFake()
++
++	releaseOrphanedPoolAssignment(store, wb, false, rec)
++
++	got, _ := store.Get(wb.ID)
++	if got.Metadata[beadmeta.SalvageRequiredMetadataKey] != "1" {
++		t.Fatalf("legacy work_dir key was not honored as a fallback; %s = %q", beadmeta.SalvageRequiredMetadataKey, got.Metadata[beadmeta.SalvageRequiredMetadataKey])
++	}
++}
+diff --git a/cmd/gc/pool_session_release_binding_owner_test.go b/cmd/gc/pool_session_release_binding_owner_test.go
+index 4e4ae4aa2..728253105 100644
+--- a/cmd/gc/pool_session_release_binding_owner_test.go
++++ b/cmd/gc/pool_session_release_binding_owner_test.go
+@@ -1,6 +1,7 @@
+ package main
+ 
+ import (
++	"github.com/gastownhall/gascity/internal/events"
+ 	"path/filepath"
+ 	"testing"
+ 
+@@ -77,7 +78,7 @@ func TestReleaseConfirmedOrphanSessionWork_ReleasesBindingResidentClaimThroughAl
+ 	rigStores := map[string]beads.Store{"beads": beads.NewMemStore()}
+ 
+ 	released := releaseConfirmedOrphanSessionWork(
+-		cfg, binding, rigStores, []beads.Bead{work}, []beads.Store{binding}, bindingOrphanSessionInfo(),
++		cfg, binding, rigStores, []beads.Bead{work}, []beads.Store{binding}, bindingOrphanSessionInfo(), events.Discard,
+ 	)
+ 
+ 	if len(released) != 1 || released[0].ID != work.ID {
+@@ -104,7 +105,7 @@ func TestReleaseConfirmedOrphanSessionWork_NilAlignedStoresKeepsRoutedFallback(t
+ 	rigStores := map[string]beads.Store{"beads": beads.NewMemStore()}
+ 
+ 	released := releaseConfirmedOrphanSessionWork(
+-		cfg, binding, rigStores, []beads.Bead{work}, nil, bindingOrphanSessionInfo(),
++		cfg, binding, rigStores, []beads.Bead{work}, nil, bindingOrphanSessionInfo(), events.Discard,
+ 	)
+ 
+ 	if len(released) != 0 {
+@@ -130,7 +131,7 @@ func TestReleaseConfirmedOrphanSessionWork_LegacyRigStoreUnchanged(t *testing.T)
+ 	rigStores := map[string]beads.Store{"beads": rigStore}
+ 
+ 	released := releaseConfirmedOrphanSessionWork(
+-		cfg, beads.NewMemStore(), rigStores, []beads.Bead{work}, nil, bindingOrphanSessionInfo(),
++		cfg, beads.NewMemStore(), rigStores, []beads.Bead{work}, nil, bindingOrphanSessionInfo(), events.Discard,
+ 	)
+ 
+ 	if len(released) != 1 || released[0].ID != work.ID {
+@@ -158,7 +159,7 @@ func TestReleaseConfirmedOrphanSessionWork_MisalignedStoresSkipTheUnalignedBead(
+ 	rigStores := map[string]beads.Store{"beads": beads.NewMemStore()}
+ 
+ 	released := releaseConfirmedOrphanSessionWork(
+-		cfg, binding, rigStores, []beads.Bead{first, second}, []beads.Store{binding}, bindingOrphanSessionInfo(),
++		cfg, binding, rigStores, []beads.Bead{first, second}, []beads.Store{binding}, bindingOrphanSessionInfo(), events.Discard,
+ 	)
+ 
+ 	if len(released) != 1 || released[0].ID != first.ID {
+diff --git a/cmd/gc/pool_session_release_owner_store_test.go b/cmd/gc/pool_session_release_owner_store_test.go
+index 539f380e5..cb739d30f 100644
+--- a/cmd/gc/pool_session_release_owner_store_test.go
++++ b/cmd/gc/pool_session_release_owner_store_test.go
+@@ -1,6 +1,7 @@
+ package main
+ 
+ import (
++	"github.com/gastownhall/gascity/internal/events"
+ 	"testing"
+ 
+ 	"github.com/gastownhall/gascity/internal/beads"
+@@ -87,7 +88,7 @@ func TestReleaseOrphanedPoolAssignmentsReadsLivenessFromWorkOwnerStore(t *testin
+ 		nil,
+ 		nil,
+ 		nil,
+-		nil,
++		nil, events.Discard,
+ 	)
+ 
+ 	if len(released) != 0 {
+@@ -140,7 +141,7 @@ func TestReleaseOrphanedPoolAssignmentsReleasesWhenNoStoreHoldsTheSession(t *tes
+ 		nil,
+ 		nil,
+ 		nil,
+-		nil,
++		nil, events.Discard,
+ 	)
+ 
+ 	if len(released) != 1 || released[0].ID != work.ID {
+diff --git a/cmd/gc/pool_session_release_session_store_test.go b/cmd/gc/pool_session_release_session_store_test.go
+index 52a47710d..30a691036 100644
+--- a/cmd/gc/pool_session_release_session_store_test.go
++++ b/cmd/gc/pool_session_release_session_store_test.go
+@@ -1,6 +1,7 @@
+ package main
+ 
+ import (
++	"github.com/gastownhall/gascity/internal/events"
+ 	"testing"
+ 
+ 	"github.com/gastownhall/gascity/internal/beads"
+@@ -86,7 +87,7 @@ func TestReleaseOrphanedPoolAssignmentsReadsLivenessFromSessionStore(t *testing.
+ 		nil,
+ 		nil,
+ 		nil,
+-		nil,
++		nil, events.Discard,
+ 	)
+ 
+ 	if len(released) != 0 {
+@@ -124,7 +125,7 @@ func TestReleaseOrphanedPoolAssignmentsStillReleasesWhenSessionStoreSaysDead(t *
+ 		nil,
+ 		nil,
+ 		nil,
+-		nil,
++		nil, events.Discard,
+ 	)
+ 
+ 	if len(released) != 1 || released[0].ID != work.ID {
+@@ -162,7 +163,7 @@ func TestReleaseOrphanedPoolAssignmentsFallsBackToWorkStoreForLiveness(t *testin
+ 		nil,
+ 		nil,
+ 		nil,
+-		nil,
++		nil, events.Discard,
+ 	)
+ 
+ 	if len(released) != 0 {
+diff --git a/cmd/gc/pool_slot_unaliased_test.go b/cmd/gc/pool_slot_unaliased_test.go
+index d4a9e39f5..6c30dc3c0 100644
+--- a/cmd/gc/pool_slot_unaliased_test.go
++++ b/cmd/gc/pool_slot_unaliased_test.go
+@@ -2,6 +2,7 @@ package main
+ 
+ import (
+ 	"bytes"
++	"github.com/gastownhall/gascity/internal/events"
+ 	"io"
+ 	"strings"
+ 	"testing"
+@@ -329,7 +330,7 @@ func TestReleaseOrphanedPoolAssignmentsReopensStaleSlotFormClaim(t *testing.T) {
+ 		nil,
+ 		nil,
+ 		nil,
+-		nil,
++		nil, events.Discard,
+ 	)
+ 	if len(released) != 1 || released[0].ID != work.ID {
+ 		t.Fatalf("released = %v, want [%s] — a stale slot-form assignee names no live session once pool beads are unaliased", released, work.ID)
+diff --git a/cmd/gc/session_reconciler.go b/cmd/gc/session_reconciler.go
+index fe8447323..5c8cece62 100644
+--- a/cmd/gc/session_reconciler.go
++++ b/cmd/gc/session_reconciler.go
+@@ -2681,7 +2681,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
+ 						//
+ 						// Restricted to "orphaned": a "suspended" seat is configured and
+ 						// merely scaled down, so its work stays put for its return.
+-						if released := releaseConfirmedOrphanSessionWork(cfg, store, rigStores, assignedWorkBeads, orphanReleaseStores, infoByID[id]); len(released) > 0 {
++						if released := releaseConfirmedOrphanSessionWork(cfg, store, rigStores, assignedWorkBeads, orphanReleaseStores, infoByID[id], rec); len(released) > 0 {
+ 							emitDeadAssigneeReopenedEvents(rec, assignedWorkBeads, released, clk.Now().UTC())
+ 							closed = closeSessionBeadIfReachableStoreUnassigned(cityPath, cfg, store, rigStores, infoByID[id], reason, clk.Now().UTC(), stderr, false)
+ 						}
+diff --git a/cmd/gc/split_topology_conformance_test.go b/cmd/gc/split_topology_conformance_test.go
+index b07ed1b7b..6b20d4ef6 100644
+--- a/cmd/gc/split_topology_conformance_test.go
++++ b/cmd/gc/split_topology_conformance_test.go
+@@ -337,7 +337,7 @@ func conformanceAssignedWorkCapture(t *testing.T, e splitEnv) {
+ 		got, stores, refs,
+ 		e.rigStores,
+ 		nil,
+-		nil,
++		nil, events.Discard,
+ 	)
+ 	wantReleased := []string{dead.ID, hqDead.ID}
+ 	releasedIDs := make(map[string]bool, len(released))
+diff --git a/internal/beadmeta/keys.go b/internal/beadmeta/keys.go
+index 8b15765ce..7a37a3cbc 100644
+--- a/internal/beadmeta/keys.go
++++ b/internal/beadmeta/keys.go
+@@ -221,12 +221,21 @@ const (
+ 	RoutedToMetadataKey                 = "gc.routed_to"
+ 	RunTargetMetadataKey                = "gc.run_target"
+ 	RuntimeVarsMetadataKey              = "gc.graphv2_vars.v1"
+-	ScopeKindMetadataKey                = "gc.scope_kind"
+-	ScopeNameMetadataKey                = "gc.scope_name"
+-	ScopeRefMetadataKey                 = "gc.scope_ref"
+-	ScopeRoleMetadataKey                = "gc.scope_role"
+-	SessionAffinityMetadataKey          = "gc.session_affinity"
+-	SessionIDMetadataKey                = "gc.session_id"
++	// SalvageRequiredMetadataKey (ADR-0089 D1) marks a bead that was returned
++	// to the pool while its worktree's ADR-0088 containment predicate did not
++	// hold (unpushed work, dirty tree, or an unreadable git state) — the
++	// durable, queryable surface a patrol or operator uses to find worktrees
++	// that need a human look, replacing a full worktree scan every cycle.
++	// Stamped by releaseOrphanedPoolAssignment; never read by any routing
++	// path (it is advisory only, see the bead.worktree.salvage_required
++	// event this accompanies).
++	SalvageRequiredMetadataKey = "gc.salvage_required"
++	ScopeKindMetadataKey       = "gc.scope_kind"
++	ScopeNameMetadataKey       = "gc.scope_name"
++	ScopeRefMetadataKey        = "gc.scope_ref"
++	ScopeRoleMetadataKey       = "gc.scope_role"
++	SessionAffinityMetadataKey = "gc.session_affinity"
++	SessionIDMetadataKey       = "gc.session_id"
+ 	// SessionIDCamelMetadataKey is the camelCase variant some bead writers stamp
+ 	// alongside the snake_case SessionIDMetadataKey; both are read when resolving a
+ 	// bead's session link.
+@@ -566,6 +575,7 @@ var KnownMetadataKeys = []string{
+ 	RoutedToMetadataKey,
+ 	RunTargetMetadataKey,
+ 	RuntimeVarsMetadataKey,
++	SalvageRequiredMetadataKey,
+ 	ScopeKindMetadataKey,
+ 	ScopeNameMetadataKey,
+ 	ScopeRefMetadataKey,
+diff --git a/internal/events/events.go b/internal/events/events.go
+index 34c5b1ae4..3e3fa6165 100644
+--- a/internal/events/events.go
++++ b/internal/events/events.go
+@@ -26,6 +26,15 @@ const (
+ 	BeadUpdated             = "bead.updated"
+ 	BeadWorktreeReaped      = "bead.worktree.reaped"
+ 	BeadWorktreeReapSkipped = "bead.worktree.reap_skipped"
++	// BeadWorktreeSalvageRequired fires when a pool-routed bead is returned to
++	// the pool (releaseOrphanedPoolAssignment) while its worktree's ADR-0088
++	// containment predicate does not hold — unpushed work, a dirty tree, or an
++	// unreadable git state. The release itself is never blocked on this (ADR-
++	// 0089 D1: pool liveness must not be held hostage to git I/O); this event
++	// plus the accompanying gc.salvage_required=1 stamp is the durable,
++	// queryable surface a patrol or operator uses to find worktrees that need
++	// a human look, replacing a full worktree scan every cycle.
++	BeadWorktreeSalvageRequired = "bead.worktree.salvage_required"
+ 	// BeadClaimRejected fires when a worker attempts to claim a work bead that
+ 	// is already live-claimed by a different worker — the claim is rejected as
+ 	// an idempotent no-op rather than fanning out a second concurrent claim.
+@@ -492,7 +501,7 @@ var KnownEventTypes = []string{
+ 	SessionDemandClaimDivergence,
+ 	SessionColdStartTimeout,
+ 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
+-	BeadWorktreeReaped, BeadWorktreeReapSkipped,
++	BeadWorktreeReaped, BeadWorktreeReapSkipped, BeadWorktreeSalvageRequired,
+ 	BeadClaimRejected, BeadClaimReleased,
+ 	HookClaimReclaimedStale,
+ 	BeadDeadAssigneeReopened,
+diff --git a/internal/events/payloads.go b/internal/events/payloads.go
+index 5518dce8f..4608c1263 100644
+--- a/internal/events/payloads.go
++++ b/internal/events/payloads.go
+@@ -63,6 +63,20 @@ type BeadWorktreeReapSkippedPayload struct {
+ // IsEventPayload marks BeadWorktreeReapSkippedPayload as an events.Payload variant.
+ func (BeadWorktreeReapSkippedPayload) IsEventPayload() {}
+ 
++// BeadWorktreeSalvageRequiredPayload is the typed payload for
++// bead.worktree.salvage_required events (ADR-0089 D1). Emitted when a bead is
++// released back to the pool while its worktree's ADR-0088 containment
++// predicate does not hold.
++type BeadWorktreeSalvageRequiredPayload struct {
++	BeadID string `json:"bead_id"`
++	Path   string `json:"path"`
++	Branch string `json:"branch"`
++	Reason string `json:"reason"`
++}
++
++// IsEventPayload marks BeadWorktreeSalvageRequiredPayload as an events.Payload variant.
++func (BeadWorktreeSalvageRequiredPayload) IsEventPayload() {}
++
+ // BeadClaimRejectedPayload is the typed payload for bead.claim_rejected events
+ // (ADR-0009). Emitted when AttemptedClaimant tries to claim BeadID while it is
+ // already live-claimed by ExistingClaimant; the second claim is rejected as an
+@@ -108,6 +122,7 @@ func (HookClaimReclaimedStalePayload) IsEventPayload() {}
+ func init() {
+ 	RegisterPayload(BeadWorktreeReaped, BeadWorktreeReapedPayload{})
+ 	RegisterPayload(BeadWorktreeReapSkipped, BeadWorktreeReapSkippedPayload{})
++	RegisterPayload(BeadWorktreeSalvageRequired, BeadWorktreeSalvageRequiredPayload{})
+ 	RegisterPayload(OrderGateTimeoutFailOpen, OrderGateTimeoutFailOpenPayload{})
+ 	RegisterPayload(BeadClaimRejected, BeadClaimRejectedPayload{})
+ 	RegisterPayload(BeadClaimReleased, BeadClaimReleasedPayload{})
+diff --git a/internal/git/git.go b/internal/git/git.go
+index 104257fc3..c17f8ae6c 100644
+--- a/internal/git/git.go
++++ b/internal/git/git.go
+@@ -3,6 +3,7 @@ package git
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"fmt"
+ 	"os"
+ 	"os/exec"
+@@ -344,6 +345,27 @@ func (g *Git) AheadBehind() (ahead, behind int, err error) {
+ 	return g.AheadBehindCtx(context.Background())
+ }
+ 
++// IsAncestor reports whether ancestor is reachable from descendant (`git
++// merge-base --is-ancestor ancestor descendant`). Unlike run/runCtx's blanket
++// "any non-zero exit is an error", exit code 1 from this specific git verb is
++// a legitimate "false" answer, not a failure — so it is special-cased here
++// rather than going through run(). Any other non-zero exit (bad ref, not a
++// repo) is a real error, not a false answer.
++func (g *Git) IsAncestor(ancestor, descendant string) (bool, error) {
++	cmd := exec.Command("git", "merge-base", "--is-ancestor", ancestor, descendant)
++	cmd.Dir = g.workDir
++	cmd.Env = sanitizeGitEnv(os.Environ())
++	output, err := cmd.CombinedOutput()
++	if err == nil {
++		return true, nil
++	}
++	var exitErr *exec.ExitError
++	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
++		return false, nil
++	}
++	return false, fmt.Errorf("git merge-base --is-ancestor %s %s: %s: %w", ancestor, descendant, strings.TrimSpace(string(output)), err)
++}
++
+ // AheadBehindCtx is like AheadBehind but accepts a context.
+ func (g *Git) AheadBehindCtx(ctx context.Context) (ahead, behind int, err error) {
+ 	out, err := g.runCtx(ctx, "rev-list", "--left-right", "--count", "HEAD...@{upstream}")
