@@ -136,11 +136,13 @@ func TestReadSortHybridServesBDsRecencySeam(t *testing.T) {
 	nilPriority := func(b *beads.Bead) { b.Priority = nil }
 	city := beads.NewMemStoreFrom(0, []beads.Bead{
 		readyRow("aged-p1", 1, now.Add(-72*time.Hour)),
+		readyRow("aged-p4", 4, now.Add(-96*time.Hour)),
 		readyRow("fresh-p3", 3, now.Add(-30*time.Minute)),
 		readyRow("seam-aged", 0, now.Add(-48*time.Hour-time.Minute), nilPriority),
 	}, nil)
 	rig := beads.NewMemStoreFrom(0, []beads.Bead{
 		readyRow("aged-p2", 2, now.Add(-50*time.Hour)),
+		readyRow("aged-p0", 0, now.Add(-60*time.Hour)),
 		readyRow("fresh-p1", 1, now.Add(-time.Hour)),
 		readyRow("fresh-nil", 0, now.Add(-2*time.Hour), nilPriority),
 		readyRow("seam-fresh", 3, now.Add(-48*time.Hour+time.Minute)),
@@ -149,9 +151,10 @@ func TestReadSortHybridServesBDsRecencySeam(t *testing.T) {
 
 	// Fresh tier: priority first (a nil priority sorts as 2), then created_at
 	// ascending, so the p3 row a minute inside the seam precedes the half-hour
-	// old one. Aged tier: created_at ascending whatever the priority, so the p1
-	// row 72h old precedes the p2 row 50h old.
-	want := []string{"fresh-p1", "fresh-nil", "seam-fresh", "fresh-p3", "aged-p1", "aged-p2", "seam-aged"}
+	// old one. Aged tier: created_at ascending whatever the priority, so the p4
+	// row 96h old precedes the p0 row 60h old; an aged tier that still sorted
+	// by priority would put aged-p0 first.
+	want := []string{"fresh-p1", "fresh-nil", "seam-fresh", "fresh-p3", "aged-p4", "aged-p1", "aged-p0", "aged-p2", "seam-aged"}
 	if got := readIDs(t, legs, Query{Sort: SortHybrid}); !slices.Equal(got, want) {
 		t.Fatalf("--sort hybrid = %v, want %v", got, want)
 	}

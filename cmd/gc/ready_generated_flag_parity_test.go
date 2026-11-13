@@ -60,6 +60,11 @@ type generatedReadyRead struct {
 // extractReadyReaderInvocations returns every `bd ready`/`gc ready` invocation
 // in a generated command, with the reader word it was emitted under.
 //
+// A read is the reader word at the head of a command substitution, `$(bd ready`
+// or `$(gc ready`, which is where the generator puts every read it emits. The
+// anchor is what keeps the reader word inside a quoted message from counting
+// as a read: the failure clause after each read prints "bd ready failed".
+//
 // The capture runs to the first unquoted shell terminator rather than to
 // ` --json`: the pool-demand builder puts --sort and --limit AFTER --json, and
 // that half of the argv is exactly what the reader rejected while captures
@@ -70,20 +75,27 @@ func extractReadyReaderInvocations(command string) []generatedReadyRead {
 	command = strings.ReplaceAll(command, " 2>/dev/null", " ")
 	var out []generatedReadyRead
 	for _, reader := range []string{"bd ready", "gc ready"} {
+		head := "$(" + reader + " "
 		for from := 0; ; {
-			at := strings.Index(command[from:], reader)
+			at := strings.Index(command[from:], head)
 			if at < 0 {
 				break
 			}
-			start := from + at + len(reader)
-			quoted := false
+			start := from + at + len(head)
+			// A terminator inside a double- or single-quoted value is part of the
+			// value, not the end of the read.
+			var quote byte
 			end := len(command)
 		scan:
 			for p := start; p < len(command); p++ {
 				switch c := command[p]; {
-				case c == '"':
-					quoted = !quoted
-				case !quoted && (c == ')' || c == ';' || c == '|' || c == '&' || c == '`' || c == '\n' || c == '\''):
+				case quote != 0:
+					if c == quote {
+						quote = 0
+					}
+				case c == '"' || c == '\'':
+					quote = c
+				case c == ')' || c == ';' || c == '|' || c == '&' || c == '`' || c == '\n':
 					end = p
 					break scan
 				}
@@ -158,7 +170,10 @@ func TestGeneratedReadyReaderArgvIsAcceptedByGcReady(t *testing.T) {
 	invocations := 0
 	uniqueArgv := map[string]bool{}
 	readerSeen := map[string]bool{}
-	sortSeen := map[string]bool{}
+	// sortSeen is keyed by reader and order: the orders that broke are the ones
+	// `gc ready` is asked for, so seeing them only under `bd ready` proves
+	// nothing about the replacement reader.
+	sortSeen := map[[2]string]bool{}
 	statusReadSeen := false
 
 	for _, kind := range readyReaderSweepKinds() {
@@ -172,8 +187,13 @@ func TestGeneratedReadyReaderArgvIsAcceptedByGcReady(t *testing.T) {
 						if strings.Contains(arg, "$") {
 							t.Errorf("%s: the generated argv %v carries an unbound shell variable", label, read.args)
 						}
+						// splitShellWords unquotes double quotes only; a single-quoted
+						// value would reach the reader with its quotes on.
+						if strings.Contains(arg, "'") {
+							t.Errorf("%s: the generated argv %v carries a single-quoted value this sweep does not unquote", label, read.args)
+						}
 						if i > 0 && read.args[i-1] == "--sort" {
-							sortSeen[arg] = true
+							sortSeen[[2]string{read.reader, arg}] = true
 						}
 						if arg == "--status" || arg == "--status="+readywork.StatusInProgress {
 							statusReadSeen = true
@@ -194,12 +214,18 @@ func TestGeneratedReadyReaderArgvIsAcceptedByGcReady(t *testing.T) {
 	if !readerSeen["bd ready"] || !readerSeen["gc ready"] {
 		t.Errorf("sweep saw readers %v; both `bd ready` and `gc ready` must appear or the swap's parity claim is not exercised", readerSeen)
 	}
-	// hybrid and priority are the argv that broke; if the sweep stops observing
-	// them, the generator changed shape and this test no longer covers the
-	// regression.
-	for _, order := range []string{readywork.SortHybrid, readywork.SortPriority, readywork.SortOldest} {
-		if !sortSeen[order] {
-			t.Errorf("sweep never observed --sort %s (saw %v); the generator or the scanner changed", order, sortSeen)
+	// hybrid and priority are the argv that broke, under `gc ready`; if the
+	// sweep stops observing them there, the generator changed shape and this
+	// test no longer covers the regression. oldest is the migration probe's.
+	for _, want := range [][2]string{
+		{"gc ready", readywork.SortHybrid},
+		{"gc ready", readywork.SortPriority},
+		{"gc ready", readywork.SortOldest},
+		{"bd ready", readywork.SortHybrid},
+		{"bd ready", readywork.SortPriority},
+	} {
+		if !sortSeen[want] {
+			t.Errorf("sweep never observed `%s --sort %s` (saw %v); the generator or the scanner changed", want[0], want[1], sortSeen)
 		}
 	}
 	if !statusReadSeen {
@@ -207,5 +233,29 @@ func TestGeneratedReadyReaderArgvIsAcceptedByGcReady(t *testing.T) {
 	}
 	if invocations < 30 || len(uniqueArgv) < 10 {
 		t.Fatalf("sweep extracted %d ready-reader invocations (%d unique argv); the generator or the extractor regressed", invocations, len(uniqueArgv))
+	}
+}
+
+// TestExtractReadyReaderInvocationsReadsPastQuotedTerminators pins the
+// scanner: a shell terminator inside a double- or single-quoted value belongs
+// to the value, so the read's argv runs on to the real terminator. Ending the
+// scan inside a quoted value would drop every flag after it, --sort included,
+// and the sweep would pass over the argv it exists to check.
+func TestExtractReadyReaderInvocationsReadsPastQuotedTerminators(t *testing.T) {
+	for _, command := range []string{
+		`r=$(gc ready --metadata-field "gc.routed_to=a)b" --json --sort hybrid --limit=20) || exit $?`,
+		`r=$(gc ready --exclude-label 'hold;x' --json --sort hybrid --limit=20) || exit $?`,
+	} {
+		reads := extractReadyReaderInvocations(command)
+		if len(reads) != 1 {
+			t.Fatalf("%s: extracted %d reads, want 1: %+v", command, len(reads), reads)
+		}
+		args := reads[0].args
+		if len(args) < 3 {
+			t.Fatalf("%s: extracted argv %v, want it to run on past the quoted value to --sort hybrid --limit=20", command, args)
+		}
+		if got := strings.Join(args[len(args)-3:], " "); got != "--sort hybrid --limit=20" {
+			t.Fatalf("%s: extracted argv %v ends %q, want --sort hybrid --limit=20", command, args, got)
+		}
 	}
 }

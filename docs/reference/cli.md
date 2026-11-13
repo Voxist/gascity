@@ -3915,9 +3915,9 @@ older rows oldest first) and oldest, plus newest. --limit is applied last, so a
 bounded read is the true top-N of the merged set rather than the top-N of
 whichever store answered first.
 
-A failed read writes nothing to stdout and exits non-zero, as bd ready does:
-stdout carries a JSON array and nothing else, and the diagnostic, with the
---json failure envelope, goes to stderr.
+A failed read fails as bd ready does: it writes nothing to stdout, names the
+cause on stderr, and exits non-zero. stdout carries a JSON array and nothing
+else, and --json adds no failure envelope.
 
 The rows of --status in_progress carry their blockers (blocked_by), and a row
 whose blockers cannot be resolved fails the read. --until-unblocked ends that
