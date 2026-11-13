@@ -82,8 +82,9 @@ jobs:
       - name: CI policy
         run: make test-ci-policy
       # deps.env LIBRARY BRIDGE POLICY: the network half of the bridge guard
-      # (TestBDLibBridgePins holds the offline half). Fails once the upstream
-      # PR the bridge carries merges, so the bridge cannot outlive it.
+      # (TestBDLibBridgePins holds the offline half). A wrong parent or a
+      # change the upstream PR does not carry fails; a PR that has merged or
+      # closed is a warning annotation telling the bridge owner to drop it.
       - name: Beads library bridge
         env:
           GITHUB_TOKEN: ${{ github.token }}

@@ -1308,9 +1308,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Voxist/beads 872c78ec2, that commit plus #8412 alone. deps.env records the
   bridge (`BD_LIB_BRIDGE_REF`, `BD_LIB_BRIDGE_UPSTREAM_PR`) under a written
   policy, `TestBDLibBridgePins` checks go.mod and go.sum against it, and
-  `make check-bd-lib-bridge` (the fork's CI / preflight) checks its parent,
-  that its change is the PR's, and that the PR is still open. The bridge is
-  dropped when #8412 merges. The bd binary is unchanged: only gc's in-process
+  `make check-bd-lib-bridge` (the fork's CI / preflight) fails on a wrong
+  parent or a change the PR does not carry, and warns once the PR is no longer
+  open (merged, or closed after maintainers absorbed it). The bridge is
+  dropped when #8412 lands. The bd binary is unchanged: only gc's in-process
   library reads `BEADS_DOLT_SERVER_PROXY_ROOT`, so bd v1.96.0 stays the fleet
   pin.
 

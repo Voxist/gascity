@@ -52,6 +52,8 @@ func TestCheckBDLibBridge(t *testing.T) {
 		bridgeDiff string
 		state      string
 		want       string // "" means the check must pass
+		// wantWarn, when set, is a warning the passing check must print.
+		wantWarn string
 	}{
 		{name: "the PR on BD_LIB_REF", depsEnv: bridged, parents: bridgeTestLibRef, bridgeDiff: bridgeTestPRDiff, state: "open"},
 		{name: "the PR less a test hunk", depsEnv: bridged, parents: bridgeTestLibRef, bridgeDiff: bridgeTestOnlyProd, state: "open"},
@@ -70,8 +72,24 @@ func TestCheckBDLibBridge(t *testing.T) {
 			name: "a production hunk dropped", depsEnv: bridged, parents: bridgeTestLibRef, state: "open", want: "drops 1 line",
 			bridgeDiff: strings.Replace(bridgeTestPRDiff, "-// old\n", "", 1),
 		},
-		{name: "the PR merged", depsEnv: bridged, parents: bridgeTestLibRef, bridgeDiff: bridgeTestPRDiff, state: "merged", want: "drop the bridge"},
-		{name: "the PR closed", depsEnv: bridged, parents: bridgeTestLibRef, bridgeDiff: bridgeTestPRDiff, state: "closed", want: "not open"},
+		// A merged or closed PR (maintainers often absorb a PR into their own
+		// commit and close it unmerged) is the bridge owner's next change, not
+		// a failure of whatever PR happens to run CI: a warning naming the
+		// bridge and how to drop it.
+		{
+			name: "the PR merged", depsEnv: bridged, parents: bridgeTestLibRef, bridgeDiff: bridgeTestPRDiff, state: "merged",
+			wantWarn: "carries gastownhall/beads#8412, which is merged, not open: drop the bridge",
+		},
+		{
+			name: "the PR closed unmerged", depsEnv: bridged, parents: bridgeTestLibRef, bridgeDiff: bridgeTestPRDiff, state: "closed",
+			wantWarn: "carries gastownhall/beads#8412, which is closed, not open: drop the bridge",
+		},
+		// The structural checks stay hard failures whatever the PR's state.
+		{name: "a merged PR does not excuse another parent", depsEnv: bridged, parents: strings.Repeat("a", 40), bridgeDiff: bridgeTestPRDiff, state: "merged", want: "want exactly BD_LIB_REF"},
+		{
+			name: "a closed PR does not excuse a fork-only line", depsEnv: bridged, parents: bridgeTestLibRef, state: "closed", want: "the PR does not carry",
+			bridgeDiff: bridgeTestPRDiff + "diff --git a/proxy_data.go b/proxy_data.go\n+// fork only\n",
+		},
 		{name: "a malformed upstream PR", depsEnv: strings.Replace(bridged, "gastownhall/beads#8412", "Voxist/beads#80", 1), want: "want gastownhall/beads#<n>"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -92,6 +110,7 @@ func TestCheckBDLibBridge(t *testing.T) {
 				"--pr-state", tc.state,
 			}
 			cmd := exec.Command(filepath.Join(repoRoot(t), "scripts", "check-bd-lib-bridge"), args...)
+			cmd.Env = append(os.Environ(), "GITHUB_ACTIONS=true")
 			out, err := cmd.CombinedOutput()
 			switch {
 			case tc.want == "" && err != nil:
@@ -100,6 +119,15 @@ func TestCheckBDLibBridge(t *testing.T) {
 				t.Fatalf("the check passed; want a refusal naming %q\n%s", tc.want, out)
 			case tc.want != "" && !strings.Contains(string(out), tc.want):
 				t.Fatalf("the refusal does not name %q:\n%s", tc.want, out)
+			}
+			annotated := strings.Contains(string(out), "::warning title=Beads library bridge::")
+			switch {
+			case tc.wantWarn != "" && (!annotated || !strings.Contains(string(out), tc.wantWarn)):
+				t.Fatalf("the check did not warn %q as a GitHub annotation:\n%s", tc.wantWarn, out)
+			case tc.wantWarn != "" && !strings.Contains(string(out), "delete BD_LIB_BRIDGE_REF and BD_LIB_BRIDGE_UPSTREAM_PR"):
+				t.Fatalf("the warning does not name the step that drops the bridge:\n%s", out)
+			case tc.wantWarn == "" && annotated:
+				t.Fatalf("the check warned with nothing to warn about:\n%s", out)
 			}
 		})
 	}

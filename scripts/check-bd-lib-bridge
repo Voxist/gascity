@@ -14,8 +14,11 @@ checks the half that needs the network:
           bridge changes identically. A test hunk the PR carries may be absent
           (it can touch a test the older base does not have), but nothing may
           be present that the PR does not carry: that would be a fork delta.
-  open    The PR is still open. Once it merges the bridge must be dropped:
-          repin BD_LIB_REF onto an upstream commit carrying it.
+  open    The PR is still open. This one is a WARNING, not a failure: once the
+          PR merges, or closes because a maintainer absorbed it into their own
+          commit, the bridge is due to be dropped, but that is the bridge
+          owner's next change and must not fail unrelated PRs. The parent and
+          diff checks stay hard failures.
 
 With no bridge declared it checks nothing and exits 0; the offline test owns
 "no undeclared replace".
@@ -190,18 +193,28 @@ def main() -> int:
         pr_diff = http_get(f"https://github.com/{owner_repo}/pull/{number}.diff", "text/plain").decode()
     errors += compare_diffs(changed_lines(bridge_diff), changed_lines(pr_diff))
 
-    state = args.pr_state if args.pr_state is not None else pr_state(owner_repo, number)
-    if state == "merged":
-        errors.append(
-            f"{upstream_pr} has merged: drop the bridge — repin BD_LIB_REF to an upstream commit carrying it, "
-            "delete BD_LIB_BRIDGE_REF/BD_LIB_BRIDGE_UPSTREAM_PR and the go.mod replace, in one change"
-        )
-    elif state != "open":
-        errors.append(f"{upstream_pr} is {state or 'in an unknown state'}, not open: a bridge may carry only an open upstream PR")
     if errors:
         return report(errors)
-    print(f"check-bd-lib-bridge: {repo}@{bridge_ref[:12]} is {lib_ref[:12]} plus exactly {upstream_pr} (open)")
+
+    state = args.pr_state if args.pr_state is not None else pr_state(owner_repo, number)
+    if state != "open":
+        warn(
+            f"the library bridge {repo}@{bridge_ref[:12]} carries {upstream_pr}, which is "
+            f"{state or 'in an unknown state'}, not open: drop the bridge. Repin BD_LIB_REF to the upstream "
+            "commit that carries the change (the merge, or the maintainers' own commit if they absorbed it), "
+            "delete BD_LIB_BRIDGE_REF and BD_LIB_BRIDGE_UPSTREAM_PR from deps.env and the beads replace from "
+            "go.mod, in one change (deps.env LIBRARY BRIDGE POLICY)"
+        )
+    print(f"check-bd-lib-bridge: {repo}@{bridge_ref[:12]} is {lib_ref[:12]} plus exactly {upstream_pr} ({state})")
     return 0
+
+
+def warn(message: str) -> None:
+    # A GitHub Actions annotation, so the warning shows on the run summary
+    # without failing the step; plain stderr everywhere else.
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::warning title=Beads library bridge::{message}")
+    print(f"check-bd-lib-bridge: warning: {message}", file=sys.stderr)
 
 
 def report(errors: list[str]) -> int:
