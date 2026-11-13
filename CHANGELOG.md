@@ -1297,6 +1297,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc dolt sync` retries its pre-push fetch, which is what fails on a store
+  that is cold for the current Dolt server lifetime (vp-q3kp).** The
+  fast-forward check fetches the remote before pushing, and any fetch failure
+  skipped the store as `skipped (NOT pushed)` on the first try, so the push was
+  never attempted. The cost that decides this is cold versus warm, not delta
+  size: measured on a 9-store fleet against `read_timeout_millis=15000`, warm
+  fetches took 1.6-2.1s while the same stores after a restart died at
+  15.2-15.7s. A fetch is read-only and idempotent and its remote cache warms
+  across attempts, so it is now tried `GC_DOLT_SYNC_FETCH_ATTEMPTS` times
+  (default 5) with `GC_DOLT_SYNC_FETCH_RETRY_DELAY_SECS` (default 2) between
+  tries. From cold, every store but the largest converged in 1 to 4 attempts;
+  the largest gains about 4 KB per attempt against a 2.24 GB cache, so no
+  budget converges it. An invalid value of either variable fails the run with
+  exit 2 before any database is touched.
+
+  A first-push signal and a client-bound timeout (exit 124) are not retried.
+  Everything else is, including `Blob not found`, which recurs on this class of
+  remote on days when nothing is damaged. A fetch killed at the listener
+  deadline is retried too: the cold-open wall status (vp-9v6f9) now applies
+  only when the last attempt of a spent budget still dies there, and both it
+  and the generic fetch-failure status report the attempts spent.
+  `dolt-remotes-patrol` moves from the 300s exec default to 600s, because the
+  run is sequential across databases and a cold cycle that spends its retries
+  would otherwise leave the databases later in the scan unattempted.
+
 - **Adopting or restarting with a bd store bound to a loopback Dolt server
   gc does not run works.** A store `bd init --server --external` bound to a
   dolt sql-server on `127.0.0.1`/`localhost`/`::1` was classified as gc's own
