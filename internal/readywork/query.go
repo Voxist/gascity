@@ -8,12 +8,18 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// The two orders --sort accepts, as `bd ready --sort` spells them. Anything
-// else is a typo, and a typo that silently fell back to a different order is
-// how a bounded query ends up serving the wrong prefix.
+// The orders --sort accepts. priority, hybrid and oldest are `bd ready --sort`'s
+// own policies with bd's semantics: the generated routed tier reads
+// `--sort priority` and `--sort hybrid`, and on a federated city that read is
+// this reader, so bd's vocabulary has to parse here verbatim (vp-bzeg). newest is
+// the created_at direction bd's flag does not name. Anything else is a typo, and
+// a typo that silently fell back to a different order is how a bounded query
+// ends up serving the wrong prefix.
 const (
-	SortOldest = "oldest"
-	SortNewest = "newest"
+	SortPriority = "priority"
+	SortHybrid   = "hybrid"
+	SortOldest   = "oldest"
+	SortNewest   = "newest"
 )
 
 // The statuses --status accepts.
@@ -62,8 +68,9 @@ type Query struct {
 	ExcludeTypes []string
 	// ExcludeLabels drops beads carrying any of these labels.
 	ExcludeLabels []string
-	// Sort is "" for the canonical ready order (priority, created_at, id),
-	// SortOldest, or SortNewest.
+	// Sort is "" or SortPriority for the canonical ready order (priority,
+	// created_at, id), SortHybrid for bd's 48h-recency order, SortOldest, or
+	// SortNewest.
 	Sort string
 	// Limit bounds the answer to its first Limit rows; zero is unlimited, and a
 	// negative limit is refused, as the API refuses it. It is applied after the
@@ -187,9 +194,13 @@ func (c compiled) filter(items []beads.Bead) []beads.Bead {
 // here: a second copy of a total order across a package boundary is a copy that
 // drifts, and this one decides which rows a bounded read serves. Imposing it is
 // also what makes the merged set well-ordered at all: each leg emits its own rows
-// in its own order, and a concatenation of sorted legs is not sorted.
+// in its own order, and a concatenation of sorted legs is not sorted. --sort
+// priority compiles to the default, and --sort hybrid is bd's recency order
+// (beads.SortBeadsHybridOrder), imposed here because no leg can cut in it.
 func (c compiled) order(items []beads.Bead) {
 	switch c.sort {
+	case SortHybrid:
+		beads.SortBeadsHybridOrder(items)
 	case SortOldest:
 		beads.SortBeads(items, beads.SortCreatedAsc)
 	case SortNewest:
@@ -213,15 +224,20 @@ func statusSelector(status string) (string, error) {
 	return "", fmt.Errorf("unknown --status %q (want one of %s)", status, strings.Join(knownStatuses, ", "))
 }
 
-// sortSelector validates --sort. An unrecognized order is rejected rather than
-// falling back to the default, which is how a bounded query quietly serves the
-// wrong prefix.
+// sortSelector validates --sort and returns the order to impose. SortPriority
+// IS the canonical ready order (bd's flag default and this reader's default are
+// one law), so it compiles to "" and every path that orders, or pushes a bounded
+// read, treats the two spellings alike. An unrecognized order is rejected rather
+// than falling back to the default, which is how a bounded query quietly serves
+// the wrong prefix.
 func sortSelector(order string) (string, error) {
 	switch order = strings.TrimSpace(order); order {
-	case "", SortOldest, SortNewest:
+	case "", SortPriority:
+		return "", nil
+	case SortHybrid, SortOldest, SortNewest:
 		return order, nil
 	default:
-		return "", fmt.Errorf("unknown --sort %q (want %s or %s)", order, SortOldest, SortNewest)
+		return "", fmt.Errorf("unknown --sort %q (want %s, %s, %s or %s)", order, SortPriority, SortHybrid, SortOldest, SortNewest)
 	}
 }
 
