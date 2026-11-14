@@ -825,3 +825,60 @@ func evalBoolExpr(expr string) (bool, error) {
 	}
 	return v, err
 }
+
+// Off upstream Mac / quality runs on the larger hosted runner (ga-05vt3.49).
+// On the 3-core, 7 GB macos-15 runner its Vet step, go vet ./... (which
+// type-checks cmd/gc's test package), took 17-23 minutes, and the job hit its
+// 35-minute cap in the Docs step on the 2026-11-12 and 2026-11-13 nightlies
+// and dispatch 43508125363. There Vet runs under /usr/bin/time -l so its peak
+// RSS and wall time are measured, not guessed. Upstream runs on the
+// runner-policy runner with the same unmeasured Vet step and the same 35.
+func TestMacQualityRunsOnTheLargerRunnerOffUpstream(t *testing.T) {
+	quality := readCriticalPathWorkflow(t, "mac-regression.yml").Jobs["mac-quality"]
+	if want := "${{ github.repository == 'gastownhall/gascity' && needs.runner-policy.outputs.runner_macos || 'macos-15-xlarge' }}"; quality.RunsOn != want {
+		t.Errorf("mac-quality runs-on = %q, want %q (upstream: the runner-policy runner; fork: macos-15-xlarge)", quality.RunsOn, want)
+	}
+	if got := macJobTimeoutMinutes(t, "mac-quality"); got != "35" {
+		t.Errorf("mac-quality timeout-minutes = %q, want 35 on both sides", got)
+	}
+
+	var upstreamVet, forkVet []ciCriticalPathStep
+	for _, step := range quality.Steps {
+		if !strings.Contains(step.Run, "make vet-go") {
+			continue
+		}
+		switch strings.TrimSpace(step.If) {
+		case "github.repository == 'gastownhall/gascity'":
+			upstreamVet = append(upstreamVet, step)
+		case "github.repository != 'gastownhall/gascity'":
+			forkVet = append(forkVet, step)
+		default:
+			t.Errorf("mac-quality vet step %q has if %q, want one side of the repository split", step.Name, step.If)
+		}
+	}
+	if len(upstreamVet) != 1 || upstreamVet[0].Name != "Vet" || strings.TrimSpace(upstreamVet[0].Run) != "make vet-go" {
+		t.Errorf("mac-quality upstream vet steps = %v, want the one unchanged Vet step running make vet-go", upstreamVet)
+	}
+	if len(forkVet) != 1 {
+		t.Fatalf("mac-quality fork vet steps = %v, want one", forkVet)
+	}
+	for _, want := range []string{"/usr/bin/time -l", "make vet-go", "maximum resident set size", `exit "${status:-0}"`} {
+		if !strings.Contains(forkVet[0].Run, want) {
+			t.Errorf("mac-quality fork vet step lacks %q:\n%s", want, forkVet[0].Run)
+		}
+	}
+}
+
+// Off upstream Mac / make test gets headroom over its 50 minutes
+// (ga-05vt3.49): in dispatch 43508125363 every package passed and
+// make test-mac finished at 49m55s, then post-job cleanup crossed the cap and
+// the job reported cancelled. Upstream keeps 35.
+func TestMacUnitCapHasHeadroomOffUpstream(t *testing.T) {
+	budget := macJobTimeoutMinutes(t, "mac-unit")
+	if got := parseMinutes(t, resolveMacRepoValue(t, budget, "gastownhall/gascity")); got != 35*time.Minute {
+		t.Errorf("mac-unit upstream timeout = %s, want 35m", got)
+	}
+	if got := parseMinutes(t, resolveMacRepoValue(t, budget, "Voxist/gascity")); got != 60*time.Minute {
+		t.Errorf("mac-unit fork timeout = %s, want 60m", got)
+	}
+}

@@ -264,7 +264,10 @@ jobs:
       - runner-policy
       - gate
     if: needs.gate.outputs.run_smoke == 'true'
-    runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
+    # Off upstream (ga-05vt3.49) on macos-15-xlarge: on the 3-core, 7 GB
+    # hosted macos-15 runner Vet (go vet ./..., which type-checks cmd/gc's
+    # test package) took 17-23 minutes and the job hit its cap in Docs.
+    runs-on: ${{ github.repository == 'gastownhall/gascity' && needs.runner-policy.outputs.runner_macos || 'macos-15-xlarge' }}
     # 35 like mac-unit: without the full-repo lint the job is install-tools,
     # fmt-check, vet and docs (about 10 minutes); a hang should not burn an
     # hour of macOS runner time, least of all on the nightly schedule.
@@ -285,7 +288,21 @@ jobs:
       - name: Format
         run: make fmt-check
       - name: Vet
+        if: github.repository == 'gastownhall/gascity'
         run: make vet-go
+      # Off upstream Vet is measured: peak RSS (largest single process) and
+      # wall time, in the log and the step summary.
+      - name: Vet (measured)
+        if: github.repository != 'gastownhall/gascity'
+        run: |
+          set -euo pipefail
+          /usr/bin/time -l -o "$RUNNER_TEMP/vet.rusage" make vet-go || status=$?
+          cat "$RUNNER_TEMP/vet.rusage"
+          wall="$(awk '/ real / {print $1}' "$RUNNER_TEMP/vet.rusage")"
+          peak="$(awk '/maximum resident set size/ {printf "%.2f", $1 / 1073741824}' "$RUNNER_TEMP/vet.rusage")"
+          echo "vet: wall ${wall}s, peak RSS ${peak} GiB"
+          echo "Vet: wall ${wall}s, peak RSS ${peak} GiB, status ${status:-0}" >>"$GITHUB_STEP_SUMMARY"
+          exit "${status:-0}"
       - name: Docs
         run: make check-docs-go
 
@@ -299,8 +316,11 @@ jobs:
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     # Fork (ga-s69mk.16): off gastownhall/gascity this runs on GitHub-hosted
     # macOS (runner_policy.py), where make test took 31-35 min after the
-    # 2026-10-27 resync and was cancelled at 35 with no failing test.
-    timeout-minutes: ${{ github.repository == 'gastownhall/gascity' && 35 || 50 }}
+    # 2026-10-27 resync and was cancelled at 35 with no failing test. It then
+    # grew to about 44 minutes of tests plus 6 of setup, and dispatch
+    # 43508125363 passed every package yet crossed 50 in post-job cleanup, so
+    # the fork gets 60 (ga-05vt3.49).
+    timeout-minutes: ${{ github.repository == 'gastownhall/gascity' && 35 || 60 }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
