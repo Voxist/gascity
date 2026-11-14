@@ -7,6 +7,7 @@ import (
 	"runtime/debug"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/spf13/cobra"
 )
 
@@ -48,6 +49,10 @@ func init() {
 	info, ok := debug.ReadBuildInfo()
 	version, commit, date = resolveBuildMetadata(version, commit, date, ok, info)
 	beadsVersion = resolveBeadsVersion(ok, info)
+	// Bundled-pack cache markers record the build that materialized them.
+	// The resolved revision exists only here, so it is handed to
+	// builtinpacks before any command can materialize a cache.
+	builtinpacks.BuiltBy = commit
 }
 
 // resolveBeadsVersion reports the effective linked beads library version

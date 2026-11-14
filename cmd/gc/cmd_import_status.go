@@ -11,6 +11,8 @@ import (
 	"sort"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/builtinpacks"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/spf13/cobra"
@@ -54,14 +56,30 @@ type ImportStatusEntry struct {
 	Source string `json:"source"`
 	// Constraint is the declared version constraint, when present.
 	Constraint string `json:"constraint,omitempty"`
-	// Kind is "remote" for git-backed sources and "path" for local
-	// directory sources.
+	// Kind is "remote" for git-backed sources, "path" for local directory
+	// sources, and "builtin" for bundled sources locked at a canonical pin,
+	// whose bytes the running gc binary serves from its embedded packs.
 	Kind string `json:"kind"`
 	// Path is the resolved absolute path for kind "path" entries.
 	Path string `json:"path,omitempty"`
-	// Pin is the packs.lock resolution for kind "remote" entries.
-	// Omitted when the source has no lock entry (unlocked).
+	// Pin is the packs.lock resolution for kind "remote" and "builtin"
+	// entries. Omitted when the source has no lock entry (unlocked).
 	Pin *ImportStatusPin `json:"pin,omitempty"`
+	// Builtin describes what serves a kind "builtin" entry. Its pin names
+	// the canonical commit the source is addressed by, not the bytes served.
+	Builtin *ImportStatusBuiltin `json:"builtin,omitempty"`
+}
+
+// ImportStatusBuiltin identifies the embedded content a kind "builtin"
+// import is served from: the running gc binary, not the pinned commit.
+type ImportStatusBuiltin struct {
+	// Pack is the bundled pack serving the import.
+	Pack string `json:"pack"`
+	// BuiltBy is the build revision of the running gc binary. Omitted when
+	// the binary carries no build stamp.
+	BuiltBy string `json:"built_by,omitempty"`
+	// ContentHash is the digest of the binary's embedded pack content.
+	ContentHash string `json:"content_hash"`
 }
 
 // ImportStatusPin is the packs.lock resolution pinned for a remote import.
@@ -168,6 +186,7 @@ func buildImportStatus(cityPath string) (*ImportStatusJSON, error) {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	var contentHash string
 	for _, name := range names {
 		imp := allImports[name]
 		entry := ImportStatusEntry{
@@ -182,6 +201,17 @@ func buildImportStatus(cityPath string) (*ImportStatusJSON, error) {
 					Version: pack.Version,
 					Commit:  pack.Commit,
 					Fetched: formatImportStatusTime(pack.Fetched),
+				}
+				// Only a canonical pin is served from the embedded packs;
+				// a bundled source locked anywhere else is fetched from git.
+				if packName, ok := builtinpacks.NameForSource(imp.Source); ok && config.IsBundledSourceAtCanonicalPin(imp.Source, pack.Commit) {
+					if contentHash == "" {
+						if contentHash, err = builtinpacks.SyntheticContentHash(); err != nil {
+							return nil, fmt.Errorf("hashing bundled pack content: %w", err)
+						}
+					}
+					entry.Kind = "builtin"
+					entry.Builtin = &ImportStatusBuiltin{Pack: packName, BuiltBy: commit, ContentHash: contentHash}
 				}
 			}
 		} else {
@@ -237,7 +267,18 @@ func writeImportStatusText(stdout io.Writer, status *ImportStatusJSON) {
 		case entry.Kind == "remote":
 			pinnedVersion = "(unlocked)"
 		}
+		source := entry.Source
+		if entry.Builtin != nil {
+			// The bytes come from this binary: name it and the content it
+			// serves, rather than the browse URL and the canonical pin.
+			builtBy := entry.Builtin.BuiltBy
+			if builtBy == "" {
+				builtBy = "unknown"
+			}
+			source = fmt.Sprintf("builtin:%s (gc %s)", entry.Builtin.Pack, builtBy)
+			pinnedCommit = "content:" + entry.Builtin.ContentHash
+		}
 		fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%s\t%s\n", //nolint:errcheck
-			entry.Name, entry.Source, entry.Constraint, entry.Kind, pinnedVersion, pinnedCommit)
+			entry.Name, source, entry.Constraint, entry.Kind, pinnedVersion, pinnedCommit)
 	}
 }

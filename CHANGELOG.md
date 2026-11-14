@@ -1316,6 +1316,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GET /v0/city/{cityName}/work/ready` still takes only `oldest|newest`, so for
   `hybrid` `gc ready` falls back to its in-process read.
 
+- **`gc import status` no longer presents the canonical pin as the source of
+  bundled pack bytes.** A bundled import locked at a canonical pin is served
+  from the running gc binary's embedded packs, yet its row showed the
+  gastownhall tree URL and pinned commit as if that commit had been fetched, so
+  a fork-built gc reported fork content as upstream. Such rows now have kind
+  `builtin` and render as `builtin:<pack> (gc <build>)` with
+  `content:<sha256>` in the commit column; `--json` adds a `builtin` object
+  (`pack`, `built_by`, `content_hash`) and keeps the authored source and lock
+  pin. A bundled source locked at any other commit is fetched from git and
+  stays `remote`. Bundled-pack cache markers also record the gc build that
+  materialized them (`built_by`). (vp-fkrl)
+
 - **Adopting or restarting with a bd store bound to a loopback Dolt server
   gc does not run works.** A store `bd init --server --external` bound to a
   dolt sql-server on `127.0.0.1`/`localhost`/`::1` was classified as gc's own

@@ -381,6 +381,7 @@ func MaterializeSyntheticRepo(dst, repository, commit string) error {
 		Repository:  repository,
 		Commit:      commit,
 		ContentHash: hash,
+		BuiltBy:     BuiltBy,
 	}
 	data, err := toml.Marshal(marker)
 	if err != nil {
@@ -604,7 +605,19 @@ type syntheticMarker struct {
 	Repository  string `toml:"repository"`
 	Commit      string `toml:"commit"`
 	ContentHash string `toml:"content_hash"`
+	// BuiltBy is the build revision of the gc binary that materialized the
+	// cache. Repository and Commit name the canonical pin, which the cache
+	// key and validation depend on; they say nothing about which binary
+	// produced the bytes. Validation ignores this field, and markers written
+	// before it existed decode it as "" (builder unknown).
+	BuiltBy string `toml:"built_by,omitempty"`
 }
+
+// BuiltBy is the running gc binary's build revision, recorded in every
+// marker MaterializeSyntheticRepo writes. The gc main package sets it once
+// at init from its resolved build metadata; this package cannot import it.
+// Empty means the binary carries no build stamp.
+var BuiltBy string
 
 type fileEntry struct {
 	data []byte
