@@ -70,8 +70,11 @@ func TestSyncProxiedFetchFailureIsNotAColdWall(t *testing.T) {
 	if strings.Contains(out, "COLD-OPEN WALL") || strings.Contains(out, "NO OFF-BOX COPY") {
 		t.Fatalf("a failed proxied fetch was reported as a cold-open wall:\n%s", out)
 	}
+	if n := strings.Count(fake.log(t), "CALL DOLT_FETCH("); n != 5 {
+		t.Fatalf("DOLT_FETCH calls = %d, want the default budget of 5:\n%s", n, fake.log(t))
+	}
 	for _, want := range []string{
-		"  hq: fetch failed (exit 1) after ",
+		"  hq: fetch failed (exit 1) after 5 attempts, last after ",
 		"  hq: Error: query error: Error 1105 (HY000): permission denied fetching hq",
 	} {
 		if !strings.Contains(out, want) {

@@ -44,6 +44,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -52,31 +53,88 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
-// writeSyncFakeDoltFetchFlaky makes DOLT_FETCH fail with failMsg and exit
-// failRC for the first failCount attempts and succeed afterwards, counting
-// attempts in a file of its own so the count covers DOLT_FETCH calls only.
-// Classification then reports ahead=2/behind=0, so a converged fetch proceeds
-// to a real push.
-func writeSyncFakeDoltFetchFlaky(t *testing.T, dir, failMsg string, failRC, failCount int) (logPath, countPath string) {
+// fetchStep is one scripted DOLT_FETCH outcome: sleep sleepSecs, then exit
+// rc (0 succeeds) after printing msg to stderr.
+type fetchStep struct {
+	rc        int
+	msg       string
+	sleepSecs int
+}
+
+// writeSyncFakeDoltFetchSeq makes attempt i of DOLT_FETCH play steps[i-1] and
+// every later attempt play rest. It counts attempts in a file of its own, so
+// the count covers DOLT_FETCH calls only, and appends each attempt's start
+// time (epoch seconds) to fetch.times. Classification reports
+// ahead=2/behind=0, so a converged fetch proceeds to a real push.
+func writeSyncFakeDoltFetchSeq(t *testing.T, dir string, steps []fetchStep, rest fetchStep) (logPath, countPath string) {
 	t.Helper()
 	branch := "main"
 	logPath = filepath.Join(dir, "dolt.log")
 	countPath = filepath.Join(dir, "fetch.count")
+	timesPath := filepath.Join(dir, "fetch.times")
 	aheadPat := "dolt_log('remotes/origin/" + branch + ".." + branch + "')"
 	behindPat := "dolt_log('" + branch + "..remotes/origin/" + branch + "')"
+	play := func(st fetchStep) string {
+		var b strings.Builder
+		if st.sleepSecs > 0 {
+			b.WriteString("sleep " + strconv.Itoa(st.sleepSecs) + " ; ")
+		}
+		if st.msg != "" {
+			b.WriteString("printf '%s\\n' '" + st.msg + "' >&2 ; ")
+		}
+		b.WriteString("exit " + strconv.Itoa(st.rc))
+		return b.String()
+	}
 	body := fakeDoltHeader(logPath, branch) +
 		"  *\"CALL DOLT_FETCH(\"*)\n" +
 		"    n=$(cat \"" + countPath + "\" 2>/dev/null || echo 0)\n" +
 		"    n=$((n+1)) ; printf '%s' \"$n\" > \"" + countPath + "\"\n" +
-		"    if [ \"$n\" -le " + strconv.Itoa(failCount) + " ]; then\n" +
-		"      printf '%s\\n' '" + failMsg + "' >&2 ; exit " + strconv.Itoa(failRC) + "\n" +
-		"    fi\n" +
-		"    exit 0 ;;\n" +
+		"    date +%s >> \"" + timesPath + "\"\n" +
+		"    case \"$n\" in\n"
+	for i, st := range steps {
+		body += "      " + strconv.Itoa(i+1) + ") " + play(st) + " ;;\n"
+	}
+	body += "      *) " + play(rest) + " ;;\n" +
+		"    esac ;;\n" +
 		"  *\"" + aheadPat + "\"*) printf 'n\\n2\\n' ; exit 0 ;;\n" +
 		"  *\"" + behindPat + "\"*) printf 'n\\n0\\n' ; exit 0 ;;\n" +
 		"esac\nexit 0\n"
 	installFFFakeDolt(t, dir, body)
 	return logPath, countPath
+}
+
+// writeSyncFakeDoltFetchFlaky makes DOLT_FETCH fail with failMsg and exit
+// failRC for the first failCount attempts and succeed afterwards; a failCount
+// of 99 or more fails every attempt.
+func writeSyncFakeDoltFetchFlaky(t *testing.T, dir, failMsg string, failRC, failCount int) (logPath, countPath string) {
+	t.Helper()
+	fail := fetchStep{rc: failRC, msg: failMsg}
+	if failCount >= 99 {
+		return writeSyncFakeDoltFetchSeq(t, dir, nil, fail)
+	}
+	steps := make([]fetchStep, failCount)
+	for i := range steps {
+		steps[i] = fail
+	}
+	return writeSyncFakeDoltFetchSeq(t, dir, steps, fetchStep{})
+}
+
+// fetchTimes reads the start time of each DOLT_FETCH attempt.
+func fetchTimes(t *testing.T, dir string) []int64 {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, "fetch.times"))
+	if err != nil {
+		t.Fatalf("read fetch times: %v", err)
+	}
+	var times []int64
+	for _, f := range strings.Fields(string(data)) {
+		v, err := strconv.ParseInt(f, 10, 64)
+		if err != nil {
+			t.Fatalf("parse fetch time %q: %v", f, err)
+		}
+		times = append(times, v)
+	}
+	return times
 }
 
 // fetchAttempts reads the fake's DOLT_FETCH counter; a missing file is zero
@@ -131,8 +189,11 @@ func TestSyncRetriesTransientFetchFailureThenPushes(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0 after a converged retry\nout:\n%s", code, out)
 	}
-	if !strings.Contains(out, "app: fetch attempt 1/5 failed") {
+	if !strings.Contains(out, "app: fetch attempt 1/5 failed (exit 1) after ") {
 		t.Fatalf("expected the failed attempt to be reported against the budget.\nout:\n%s", out)
+	}
+	if !strings.Contains(out, ": unexpected EOF — retrying") {
+		t.Fatalf("expected the retry line to carry the attempt's first stderr line.\nout:\n%s", out)
 	}
 }
 
@@ -228,26 +289,55 @@ func TestSyncFirstPushSignalIsNotRetried(t *testing.T) {
 	}
 }
 
-// TestSyncFetchTimeoutIsNotRetried: exit 124 means the client bound already
-// burned GC_DOLT_SYNC_FETCH_TIMEOUT_SECS. Another attempt would cost the same
-// again and starve the stores queued behind this one.
+// TestSyncFetchTimeoutIsNotRetried: a timed-out attempt already burned
+// GC_DOLT_SYNC_FETCH_TIMEOUT_SECS. Another attempt would cost the same again
+// and starve the stores queued behind this one. The client bound reports
+// either 124 (timeout) or 137 (timeout --kill-after escalated to SIGKILL for a
+// child that ignored SIGTERM); both are the same timeout.
 func TestSyncFetchTimeoutIsNotRetried(t *testing.T) {
+	for _, rc := range []int{124, 137} {
+		t.Run(fmt.Sprintf("exit %d", rc), func(t *testing.T) {
+			binDir := t.TempDir()
+			logPath, countPath := writeSyncFakeDoltFetchFlaky(t, binDir, "context deadline exceeded", rc, 99)
+
+			out, code := runFFSyncCode(t, binDir, nil, "--db", "app")
+
+			if got := fetchAttempts(t, countPath); got != 1 {
+				t.Fatalf("a timed-out fetch must not be retried: fetch attempts = %d, want 1\nout:\n%s", got, out)
+			}
+			if pushed(readLog(t, logPath)) {
+				t.Fatalf("must NOT push after a fetch timeout.\nout:\n%s", out)
+			}
+			if code == 0 {
+				t.Fatalf("expected a non-zero exit after a fetch timeout\nout:\n%s", out)
+			}
+			want := fmt.Sprintf("app: fetch timed out after 60s (exit %d, attempt 1/5)", rc)
+			if !strings.Contains(out, want) {
+				t.Fatalf("expected %q.\nout:\n%s", want, out)
+			}
+		})
+	}
+}
+
+// TestSyncFetchTimeoutReportsPriorAttempts: a timeout that ends a run of
+// failed attempts says which attempt timed out, so the earlier failures are
+// not hidden behind a bare "timed out".
+func TestSyncFetchTimeoutReportsPriorAttempts(t *testing.T) {
 	binDir := t.TempDir()
-	logPath, countPath := writeSyncFakeDoltFetchFlaky(t, binDir, "context deadline exceeded", 124, 99)
+	fail := fetchStep{rc: 1, msg: "unexpected EOF"}
+	_, countPath := writeSyncFakeDoltFetchSeq(t, binDir,
+		[]fetchStep{fail, fail}, fetchStep{rc: 124, msg: "context deadline exceeded"})
 
 	out, code := runFFSyncCode(t, binDir, nil, "--db", "app")
 
-	if got := fetchAttempts(t, countPath); got != 1 {
-		t.Fatalf("a timed-out fetch must not be retried: fetch attempts = %d, want 1\nout:\n%s", got, out)
-	}
-	if pushed(readLog(t, logPath)) {
-		t.Fatalf("must NOT push after a fetch timeout.\nout:\n%s", out)
+	if got := fetchAttempts(t, countPath); got != 3 {
+		t.Fatalf("fetch attempts = %d, want 3 (two failures, then the timeout)\nout:\n%s", got, out)
 	}
 	if code == 0 {
 		t.Fatalf("expected a non-zero exit after a fetch timeout\nout:\n%s", out)
 	}
-	if !strings.Contains(out, "app: fetch timed out after 60s") {
-		t.Fatalf("expected the fetch-timeout status.\nout:\n%s", out)
+	if !strings.Contains(out, "app: fetch timed out after 60s (exit 124, attempt 3/5)") {
+		t.Fatalf("expected the timeout to name the attempt it ended.\nout:\n%s", out)
 	}
 }
 
@@ -269,7 +359,17 @@ func TestSyncFetchAttemptsEnvOverride(t *testing.T) {
 			t.Fatalf("expected the status to report the overridden budget.\nout:\n%s", out)
 		}
 	})
-	for _, bad := range []string{"0", "00", "abc", "-1", ""} {
+	t.Run("upper bound", func(t *testing.T) {
+		binDir := t.TempDir()
+		_, countPath := writeSyncFakeDoltFetchFlaky(t, binDir, "unexpected EOF", 1, 99)
+		out, _ := runFFSyncCode(t, binDir, []string{"GC_DOLT_SYNC_FETCH_ATTEMPTS=20"}, "--db", "app")
+		if got := fetchAttempts(t, countPath); got != 20 {
+			t.Fatalf("fetch attempts = %d, want 20 (the largest accepted budget)\nout:\n%s", got, out)
+		}
+	})
+	// 99999999999999999999 overflows the shell's integer comparison, which
+	// would otherwise turn the budget into an endless loop.
+	for _, bad := range []string{"0", "00", "abc", "-1", "", "21", "99999999999999999999"} {
 		t.Run(fmt.Sprintf("invalid %q", bad), func(t *testing.T) {
 			binDir := t.TempDir()
 			_, countPath := writeSyncFakeDoltFetchFlaky(t, binDir, "unexpected EOF", 1, 99)
@@ -288,9 +388,9 @@ func TestSyncFetchAttemptsEnvOverride(t *testing.T) {
 }
 
 // TestSyncFetchRetryDelayEnvValidation: the backoff accepts 0 (retry at once)
-// but rejects an empty or non-numeric value before any database is touched.
+// up to 60, and rejects anything else before any database is touched.
 func TestSyncFetchRetryDelayEnvValidation(t *testing.T) {
-	for _, bad := range []string{"abc", "-1", "1.5", ""} {
+	for _, bad := range []string{"abc", "-1", "1.5", "", "61", "99999999999999999999"} {
 		t.Run(fmt.Sprintf("invalid %q", bad), func(t *testing.T) {
 			binDir := t.TempDir()
 			_, countPath := writeSyncFakeDoltFetchFlaky(t, binDir, "unexpected EOF", 1, 99)
@@ -328,25 +428,146 @@ func TestSyncColdOpenWallReportedAfterBudget(t *testing.T) {
 	if got := strings.Count(readLog(t, logPath), "CALL DOLT_FETCH("); got != 2 {
 		t.Fatalf("a wall-shaped attempt must be retried: fetch attempts = %d, want 2\nout:\n%s", got, out)
 	}
-	if !strings.Contains(out, "listener deadline 2s, 2 attempt(s)") {
+	if !strings.Contains(out, "app: COLD-OPEN WALL — fetch killed at ") ||
+		!strings.Contains(out, "did not converge in 2 attempt(s) this run") {
 		t.Fatalf("expected a COLD-OPEN WALL status reporting the attempts spent.\nout:\n%s", out)
 	}
-	if !strings.Contains(out, "NO OFF-BOX COPY:") {
-		t.Fatalf("expected the no-off-box-copy summary.\nout:\n%s", out)
+	if strings.Contains(out, "server lifetime") {
+		t.Fatalf("the wall status must not claim the whole server lifetime: progress persists into the next cycle.\nout:\n%s", out)
+	}
+	if !strings.Contains(out, "NO OFF-BOX COPY THIS RUN:") {
+		t.Fatalf("expected the no-off-box-copy-this-run summary.\nout:\n%s", out)
 	}
 	if code == 0 {
 		t.Fatalf("expected a non-zero exit for a cold-open wall\nout:\n%s", out)
 	}
 }
 
+// TestSyncWallShapedAttemptThenSuccessPushes: an attempt killed at the
+// listener deadline is retried, and when the next attempt converges the store
+// is pushed with no COLD-OPEN WALL status: the wall is only reported for the
+// last attempt of a spent budget.
+func TestSyncWallShapedAttemptThenSuccessPushes(t *testing.T) {
+	binDir := t.TempDir()
+	logPath, countPath := writeSyncFakeDoltFetchSeq(t, binDir,
+		[]fetchStep{{rc: 1, msg: "row read wait bigger than connection timeout", sleepSecs: 2}}, fetchStep{})
+	cfgPath := filepath.Join(t.TempDir(), "dolt-config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("listener:\n  read_timeout_millis: 2000\n"), 0o644); err != nil {
+		t.Fatalf("write fake dolt-config.yaml: %v", err)
+	}
+
+	out, code := runFFSyncCode(t, binDir, []string{"GC_DOLT_CONFIG_FILE=" + cfgPath}, "--db", "app")
+
+	if got := fetchAttempts(t, countPath); got != 2 {
+		t.Fatalf("fetch attempts = %d, want 2 (one wall-shaped, one converged)\nout:\n%s", got, out)
+	}
+	if !pushed(readLog(t, logPath)) {
+		t.Fatalf("expected a DOLT_PUSH once the fetch converged.\nout:\n%s", out)
+	}
+	if strings.Contains(out, "COLD-OPEN WALL") || strings.Contains(out, "NO OFF-BOX COPY") {
+		t.Fatalf("a store that converged within the budget must not be reported as a wall.\nout:\n%s", out)
+	}
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0\nout:\n%s", code, out)
+	}
+}
+
+// TestSyncFetchRetryDelayIsHonoured exercises the backoff branch: with a 1s
+// delay the second attempt starts at least a second after the first.
+func TestSyncFetchRetryDelayIsHonoured(t *testing.T) {
+	binDir := t.TempDir()
+	_, countPath := writeSyncFakeDoltFetchFlaky(t, binDir, "unexpected EOF", 1, 99)
+
+	out, code := runFFSyncCode(t, binDir, []string{
+		"GC_DOLT_SYNC_FETCH_ATTEMPTS=2",
+		"GC_DOLT_SYNC_FETCH_RETRY_DELAY_SECS=1",
+	}, "--db", "app")
+
+	if got := fetchAttempts(t, countPath); got != 2 {
+		t.Fatalf("fetch attempts = %d, want 2\nout:\n%s", got, out)
+	}
+	times := fetchTimes(t, binDir)
+	if len(times) != 2 || times[1]-times[0] < 1 {
+		t.Fatalf("attempt start times = %v, want the second at least 1s after the first\nout:\n%s", times, out)
+	}
+	if code == 0 {
+		t.Fatalf("expected a non-zero exit after the budget ran out\nout:\n%s", out)
+	}
+}
+
+// TestSyncFetchRetryBudget: retries stop once the run's cumulative fetch time
+// reaches GC_DOLT_SYNC_FETCH_RETRY_BUDGET_SECS, so every store after that
+// gets a single attempt and the run stays inside the order deadline. Every
+// store still gets its first attempt.
+func TestSyncFetchRetryBudget(t *testing.T) {
+	t.Run("zero budget allows no retry", func(t *testing.T) {
+		binDir := t.TempDir()
+		logPath, countPath := writeSyncFakeDoltFetchFlaky(t, binDir, "unexpected EOF", 1, 99)
+		out, code := runFFSyncCode(t, binDir, []string{"GC_DOLT_SYNC_FETCH_RETRY_BUDGET_SECS=0"}, "--db", "app")
+		if got := fetchAttempts(t, countPath); got != 1 {
+			t.Fatalf("fetch attempts = %d, want 1\nout:\n%s", got, out)
+		}
+		if pushed(readLog(t, logPath)) || code == 0 {
+			t.Fatalf("a failed fetch must not push and must exit non-zero (exit %d)\nout:\n%s", code, out)
+		}
+		if !strings.Contains(out, "app: fetch failed (exit 1) after 1 attempts") ||
+			!strings.Contains(out, "run fetch-retry budget of 0s spent") {
+			t.Fatalf("expected the status to say the run budget stopped the retries.\nout:\n%s", out)
+		}
+	})
+	t.Run("spent budget stops retries", func(t *testing.T) {
+		binDir := t.TempDir()
+		_, countPath := writeSyncFakeDoltFetchSeq(t, binDir, nil, fetchStep{rc: 1, msg: "unexpected EOF", sleepSecs: 1})
+		out, _ := runFFSyncCode(t, binDir, []string{"GC_DOLT_SYNC_FETCH_RETRY_BUDGET_SECS=1"}, "--db", "app")
+		if got := fetchAttempts(t, countPath); got != 1 {
+			t.Fatalf("a 1s attempt spends a 1s budget: fetch attempts = %d, want 1\nout:\n%s", got, out)
+		}
+		if !strings.Contains(out, "run fetch-retry budget of 1s spent") {
+			t.Fatalf("expected the status to say the run budget stopped the retries.\nout:\n%s", out)
+		}
+	})
+	t.Run("budget left allows retries", func(t *testing.T) {
+		binDir := t.TempDir()
+		logPath, countPath := writeSyncFakeDoltFetchFlaky(t, binDir, "unexpected EOF", 1, 2)
+		out, code := runFFSyncCode(t, binDir, []string{"GC_DOLT_SYNC_FETCH_RETRY_BUDGET_SECS=60"}, "--db", "app")
+		if got := fetchAttempts(t, countPath); got != 3 {
+			t.Fatalf("fetch attempts = %d, want 3\nout:\n%s", got, out)
+		}
+		if !pushed(readLog(t, logPath)) || code != 0 {
+			t.Fatalf("expected a push and exit 0 (exit %d)\nout:\n%s", code, out)
+		}
+	})
+	for _, bad := range []string{"abc", "-1", "", "3601", "99999999999999999999"} {
+		t.Run(fmt.Sprintf("invalid %q", bad), func(t *testing.T) {
+			binDir := t.TempDir()
+			_, countPath := writeSyncFakeDoltFetchFlaky(t, binDir, "unexpected EOF", 1, 99)
+			out, code := runFFSyncCode(t, binDir, []string{"GC_DOLT_SYNC_FETCH_RETRY_BUDGET_SECS=" + bad}, "--db", "app")
+			if code != 2 {
+				t.Fatalf("GC_DOLT_SYNC_FETCH_RETRY_BUDGET_SECS=%q: exit = %d, want 2\nout:\n%s", bad, code, out)
+			}
+			if !strings.Contains(out, "invalid GC_DOLT_SYNC_FETCH_RETRY_BUDGET_SECS") {
+				t.Fatalf("expected the invalid-budget error.\nout:\n%s", out)
+			}
+			if got := fetchAttempts(t, countPath); got != 0 {
+				t.Fatalf("GC_DOLT_SYNC_FETCH_RETRY_BUDGET_SECS=%q must abort before touching a db: fetch attempts = %d\nout:\n%s", bad, got, out)
+			}
+		})
+	}
+}
+
 // TestDoltRemotesPatrolTimeoutCoversFetchRetries: the sync run is sequential
-// across databases, and after a server restart every store is cold at once,
-// so a cycle can spend several fetch attempts per store. At the 300s exec
-// default a few slow stores would exhaust the order deadline and the databases
-// later in the scan would be killed before they were attempted: silent
-// starvation that the emitted event cannot tell apart from a clean run.
+// across databases, and after a server restart every store is cold at once.
+// A listener-killed attempt costs ~15.5s, so a 5-attempt budget costs ~85s
+// per store and ~770s across 9 stores: more than any fixed order deadline
+// worth having. The run-level fetch-retry budget bounds that: retries stop
+// once the run's fetch time reaches the budget, and every later store gets a
+// single attempt. The default budget must leave at least half the order
+// deadline for those single attempts and the pushes, or the databases later
+// in the scan would be killed before they were attempted: silent starvation
+// that the emitted event cannot tell apart from a clean run.
 func TestDoltRemotesPatrolTimeoutCoversFetchRetries(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join(repoRoot(t), "orders", "dolt-remotes-patrol.toml"))
+	root := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(root, "orders", "dolt-remotes-patrol.toml"))
 	if err != nil {
 		t.Fatalf("read order: %v", err)
 	}
@@ -354,7 +575,24 @@ func TestDoltRemotesPatrolTimeoutCoversFetchRetries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse order: %v", err)
 	}
-	if got := o.TimeoutOrDefault(); got < 600*time.Second {
-		t.Fatalf("dolt-remotes-patrol timeout = %s, want at least 600s for the fetch retry budget", got)
+	timeout := o.TimeoutOrDefault()
+	if timeout < 600*time.Second {
+		t.Fatalf("dolt-remotes-patrol timeout = %s, want at least 600s for the fetch retry budget", timeout)
+	}
+	script, err := os.ReadFile(filepath.Join(root, syncScript))
+	if err != nil {
+		t.Fatalf("read sync script: %v", err)
+	}
+	m := regexp.MustCompile(`fetch_retry_budget="\$\{GC_DOLT_SYNC_FETCH_RETRY_BUDGET_SECS-([0-9]+)\}"`).FindSubmatch(script)
+	if m == nil {
+		t.Fatalf("sync script does not default GC_DOLT_SYNC_FETCH_RETRY_BUDGET_SECS")
+	}
+	secs, err := strconv.Atoi(string(m[1]))
+	if err != nil {
+		t.Fatalf("parse default budget %q: %v", m[1], err)
+	}
+	budget := time.Duration(secs) * time.Second
+	if budget <= 0 || 2*budget > timeout {
+		t.Fatalf("default fetch-retry budget = %s, want > 0 and at most half the %s order deadline", budget, timeout)
 	}
 }

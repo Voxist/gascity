@@ -386,8 +386,11 @@ func TestSyncColdOpenWallIsClassified(t *testing.T) {
 	if !strings.Contains(out, "COLD-OPEN WALL") {
 		t.Fatalf("expected a COLD-OPEN WALL status.\nout:\n%s", out)
 	}
-	if !strings.Contains(out, "NO off-box copy this server lifetime") {
-		t.Fatalf("expected the no-off-box-copy explanation.\nout:\n%s", out)
+	if !strings.Contains(out, "did not converge in 1 attempt(s) this run; the next cycle continues the warm-up") {
+		t.Fatalf("expected the did-not-converge-this-run explanation.\nout:\n%s", out)
+	}
+	if strings.Contains(out, "server lifetime") {
+		t.Fatalf("the wall status must not claim the whole server lifetime.\nout:\n%s", out)
 	}
 }
 
@@ -466,8 +469,8 @@ func TestSyncSummaryListsStoresWithNoOffBoxCopy(t *testing.T) {
 	binDir := t.TempDir()
 	writeSyncFakeDoltColdWall(t, binDir)
 	out := runFFSyncWithConfig(t, binDir, 2000, "--db", "app")
-	if strings.Count(out, "NO OFF-BOX COPY:") != 1 {
-		t.Fatalf("expected exactly one 'NO OFF-BOX COPY:' header.\nout:\n%s", out)
+	if strings.Count(out, "NO OFF-BOX COPY THIS RUN:") != 1 {
+		t.Fatalf("expected exactly one 'NO OFF-BOX COPY THIS RUN:' header.\nout:\n%s", out)
 	}
 	if strings.Count(out, "app") < 2 { // once in the COLD-OPEN WALL line, once in the summary
 		t.Fatalf("expected the store name to appear in the summary.\nout:\n%s", out)

@@ -16,4 +16,8 @@ requires_backend = ["dolt"]
 # were attempted, which the emitted event cannot tell apart from a clean run.
 # Measured 2026-08-04: a 9-store cycle took 96-201s with no retries; warm
 # fetches take ~2s, so the retry budget costs little once stores are warm.
+# A cold cycle could still spend ~85s per store on 5 listener-killed attempts
+# (~770s for 9 stores), so gc dolt sync also caps retrying per run: once its
+# cumulative fetch time reaches GC_DOLT_SYNC_FETCH_RETRY_BUDGET_SECS (default
+# 300s, half of this deadline) every later store gets a single attempt.
 timeout = "600s"
