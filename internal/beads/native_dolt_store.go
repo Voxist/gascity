@@ -934,7 +934,15 @@ func (s *NativeDoltStore) withReadRetryContext(parent context.Context, fn func(c
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetError(ctxErr, rcErr))
 			}
-			if classifyNativeDoltReadError(rcErr, s.readLane()).disposition != nativeReadTransient {
+			switch classifyNativeDoltReadError(rcErr, s.readLane()).disposition {
+			case nativeReadTransient:
+			case nativeReadDataAuth:
+				// The re-point's own dial failed bd's handshake: return it
+				// typed, as the reconnect arm below does, so the wrapper stands
+				// the handle down rather than the next read repeating the
+				// re-point.
+				return s.proxiedReadVerdict(ProxiedVerdictDataAuthFailed, rcErr)
+			default:
 				return rcErr
 			}
 			// A proxy mid-restart is worth another pass while the budget remains.

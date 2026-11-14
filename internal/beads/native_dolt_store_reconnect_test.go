@@ -1129,6 +1129,43 @@ func TestFlagOffNativeReadIsByteIdenticalForTheLaneGatedRungs(t *testing.T) {
 //
 // The reconnect below marks the pool again from inside the hook, which is the
 // tick landing mid-reconnect, deterministically and with no goroutine.
+// TestStalePoolRepinThatFailsTheHandshakeIsTyped: the guard tick marked the
+// pool stale, and the re-point's own dial failed bd's BDPROXY1 handshake. The
+// read must return a typed data_auth_failed verdict (the wrapper's stand-down
+// signal) on that pass, not the raw error, after which the next read would
+// only repeat the re-point.
+func TestStalePoolRepinThatFailsTheHandshakeIsTyped(t *testing.T) {
+	authErr := fmt.Errorf("open the library over bd's proxy: %w: the listener closed the connection without answering the hello: %w",
+		beadslib.ErrProxyDataAuth, io.EOF)
+	store := newNativeDoltStoreForTest(healthySearchStorage())
+	store.proxiedReadVerdicts = true
+	store.readRetryBudgetOverride = 5 * time.Second
+	var reopens int32
+	store.reopen = func(context.Context) (beadslib.Storage, error) {
+		atomic.AddInt32(&reopens, 1)
+		return nil, authErr
+	}
+	if !store.markPoolStale() {
+		t.Fatal("markPoolStale refused a handle with a reopen hook")
+	}
+
+	start := time.Now()
+	_, err := store.Get("gc-1")
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("Get took %s; a failed handshake on the re-point must not spend the budget", elapsed)
+	}
+	if n := atomic.LoadInt32(&reopens); n != 1 {
+		t.Fatalf("reopens = %d, want exactly 1", n)
+	}
+	verdict, ok := ProxiedVerdictOf(err)
+	if !ok || verdict.Verdict != ProxiedVerdictDataAuthFailed {
+		t.Fatalf("Get err = %v, want a typed data_auth_failed verdict", err)
+	}
+	if !errors.Is(err, beadslib.ErrProxyDataAuth) {
+		t.Errorf("the verdict lost its cause: %v", err)
+	}
+}
+
 func TestStaleMarkSetDuringAReconnectSurvivesIt(t *testing.T) {
 	storage := healthySearchStorage()
 	store := newNativeDoltStoreForTest(storage)
