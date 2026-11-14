@@ -316,12 +316,13 @@ func inspectProxiedEndpoint(scopeRoot, database string) *ProxiedEndpointPayload 
 
 // proxiedEndpointDataAuthDetail is the endpoint detail for a data port whose
 // listener did not complete bd's BDPROXY1 handshake under the root's secret.
-// It names the three ways that happens, because an operator reading it is
-// deciding between them, and keeps bd's own error after them as the evidence.
+// It names the ways that happens, because an operator reading it is deciding
+// between them, and keeps bd's own error after them as the evidence.
 func proxiedEndpointDataAuthDetail(root string, port int, err error) string {
 	detail := fmt.Sprintf("data port %d did not complete bd's proxy handshake under the secret in %s: "+
 		"either the proxy root is wrong (another workspace's proxy holds this port), "+
 		"the proxy restarted and rotated its secret (re-run doctor), "+
+		"the proxy was started by a bd older than BDPROXY1 (restart it with this bd), "+
 		"or a process other than bd's proxy is listening on the port", port, root)
 	if err != nil {
 		detail += ": " + err.Error()

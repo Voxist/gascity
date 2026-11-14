@@ -363,6 +363,7 @@ func TestBeadsStorePayloadNamesAFailedDataHandshake(t *testing.T) {
 		ep.Root,
 		"proxy root is wrong",
 		"rotated its secret",
+		"a bd older than BDPROXY1",
 		"a process other than bd's proxy is listening",
 		"without answering the hello",
 	} {
