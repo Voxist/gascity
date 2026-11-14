@@ -779,21 +779,23 @@ func buildPinnedBDBinaryForTests() (string, error) {
 
 // buildBridgedBDBinaryForTests builds bd from a replaced beads module: a
 // throwaway module requiring github.com/steveyegge/beads at gascity's version
-// and replacing it exactly as gascity's go.mod does. -mod=mod lets it record
-// cmd/bd's own dependency closure in the throwaway go.sum, as go install
-// would; gascity's go.mod and go.sum are never touched.
+// and replacing it exactly as gascity's go.mod does. Its go.sum starts from
+// gascity's own hashes for the replacement, so the fetched module is checked
+// against gascity's pin (a mismatch is a checksum error, not a silent new
+// line); -mod=mod then records the rest of cmd/bd's dependency closure there,
+// as go install would. gascity's go.mod and go.sum are never touched.
 func buildBridgedBDBinaryForTests(buildDir string, mod pinnedBeadsModuleInfo) (string, error) {
-	if mod.replaceVersion == "" {
-		return "", fmt.Errorf("go.mod replaces github.com/steveyegge/beads with %s, which has no version; a test bd can only be built from a module version", mod.replacePath)
+	gascitySum, err := findModuleFile("go.sum")
+	if err != nil {
+		return "", err
+	}
+	raw, err := os.ReadFile(gascitySum)
+	if err != nil {
+		return "", fmt.Errorf("read gascity go.sum: %w", err)
 	}
 	srcDir := filepath.Join(buildDir, "src")
-	if err := os.MkdirAll(srcDir, 0o755); err != nil {
-		return "", fmt.Errorf("mkdir bd build module: %w", err)
-	}
-	goMod := fmt.Sprintf("module gascity.test/pinnedbd\n\ngo %s\n\nrequire github.com/steveyegge/beads %s\n\nreplace github.com/steveyegge/beads => %s %s\n",
-		mod.goVersion, mod.version, mod.replacePath, mod.replaceVersion)
-	if err := os.WriteFile(filepath.Join(srcDir, "go.mod"), []byte(goMod), 0o644); err != nil {
-		return "", fmt.Errorf("write bd build module: %w", err)
+	if err := writeBridgedBDBuildModule(srcDir, mod, string(raw)); err != nil {
+		return "", err
 	}
 	bdPath := filepath.Join(buildDir, "bd")
 	cmd := exec.Command("go", "build", "-mod=mod", "-tags", "gms_pure_go", "-o", bdPath, "github.com/steveyegge/beads/cmd/bd")
@@ -805,6 +807,81 @@ func buildBridgedBDBinaryForTests(buildDir string, mod pinnedBeadsModuleInfo) (s
 	return bdPath, nil
 }
 
+// writeBridgedBDBuildModule writes the throwaway module
+// buildBridgedBDBinaryForTests builds in: go.mod carrying gascity's require and
+// replace for beads, and go.sum carrying gascity's two hash lines for the
+// replacement (taken from gascitySum), which must both be present.
+func writeBridgedBDBuildModule(srcDir string, mod pinnedBeadsModuleInfo, gascitySum string) error {
+	if mod.replaceVersion == "" {
+		return fmt.Errorf("go.mod replaces github.com/steveyegge/beads with %s, which has no version; a test bd can only be built from a module version", mod.replacePath)
+	}
+	goVersion, ok := goDirectiveVersion(mod.goVersion)
+	if !ok {
+		return fmt.Errorf("cannot derive a go directive from toolchain version %q", mod.goVersion)
+	}
+	var sum []string
+	for _, suffix := range []string{"", "/go.mod"} {
+		prefix := mod.replacePath + " " + mod.replaceVersion + suffix + " "
+		found := ""
+		for _, line := range strings.Split(gascitySum, "\n") {
+			if strings.HasPrefix(line, prefix) {
+				found = line
+				break
+			}
+		}
+		if found == "" {
+			return fmt.Errorf("gascity go.sum has no %q line; the bridged bd would be built from a hash gascity never pinned", strings.TrimSpace(prefix))
+		}
+		sum = append(sum, found)
+	}
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir bd build module: %w", err)
+	}
+	goMod := fmt.Sprintf("module gascity.test/pinnedbd\n\ngo %s\n\nrequire github.com/steveyegge/beads %s\n\nreplace github.com/steveyegge/beads => %s %s\n",
+		goVersion, mod.version, mod.replacePath, mod.replaceVersion)
+	if err := os.WriteFile(filepath.Join(srcDir, "go.mod"), []byte(goMod), 0o644); err != nil {
+		return fmt.Errorf("write bd build module: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "go.sum"), []byte(strings.Join(sum, "\n")+"\n"), 0o644); err != nil {
+		return fmt.Errorf("write bd build module go.sum: %w", err)
+	}
+	return nil
+}
+
+// goDirectiveVersion turns a toolchain version as debug.BuildInfo reports it
+// ("go1.27.3", "go1.27.3 X:nocoverageredesign", "devel go1.28-abcdef ...")
+// into the bare 1.x[.y] a go directive accepts.
+func goDirectiveVersion(toolchain string) (string, bool) {
+	m := regexp.MustCompile(`(?:^|\s)go(\d+\.\d+(?:\.\d+)?)\b`).FindStringSubmatch(" " + strings.TrimSpace(toolchain))
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
+}
+
+// findModuleFile walks up from the working directory to the module root and
+// returns the path of name there.
+func findModuleFile(name string) (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("getwd: %w", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			path := filepath.Join(dir, name)
+			if _, err := os.Stat(path); err != nil {
+				return "", fmt.Errorf("module root %s has no %s: %w", dir, name, err)
+			}
+			return path, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("no go.mod found walking up from the working directory")
+		}
+		dir = parent
+	}
+}
+
 // pinnedBeadsModuleInfo is the github.com/steveyegge/beads module this test
 // binary links: the version go.mod requires and, under a library bridge, the
 // module and version it is replaced by.
@@ -812,8 +889,8 @@ type pinnedBeadsModuleInfo struct {
 	version        string
 	replacePath    string
 	replaceVersion string
-	// goVersion is the toolchain that built this test binary, without its
-	// "go" prefix.
+	// goVersion is the toolchain that built this test binary, as
+	// debug.BuildInfo reports it (see goDirectiveVersion).
 	goVersion string
 }
 
@@ -833,7 +910,7 @@ func pinnedBeadsModule() (pinnedBeadsModuleInfo, error) {
 		if dep.Path != "github.com/steveyegge/beads" {
 			continue
 		}
-		info := pinnedBeadsModuleInfo{version: dep.Version, goVersion: strings.TrimPrefix(bi.GoVersion, "go")}
+		info := pinnedBeadsModuleInfo{version: dep.Version, goVersion: bi.GoVersion}
 		if dep.Replace != nil {
 			info.replacePath, info.replaceVersion = dep.Replace.Path, dep.Replace.Version
 		}
@@ -928,6 +1005,69 @@ func depsEnvBDPinsWithLibBridge(t *testing.T) (bdVersion, sourceRef string, brid
 		t.Fatalf("deps.env missing BD_VERSION (%q) or BD_SOURCE_REF (%q)", bdVersion, sourceRef)
 	}
 	return bdVersion, sourceRef, bridged, libBridgeRef, bdRepo
+}
+
+// TestBridgedBDBuildModulePinsGascitysHashes checks the throwaway module the
+// bridged bd builds in, without building: gascity's require and replace, a go
+// directive cut from the toolchain version alone, and gascity's own two hash
+// lines for the replacement, so a module that does not match gascity's pin is
+// a checksum error rather than a new go.sum line.
+func TestBridgedBDBuildModulePinsGascitysHashes(t *testing.T) {
+	mod := pinnedBeadsModuleInfo{
+		version:        "v1.3.1-0.20261104055431-3c205e0a41e4",
+		replacePath:    "github.com/Voxist/beads",
+		replaceVersion: "v1.1.1-0.20261113210423-872c78ec288f",
+		goVersion:      "go1.27.3 X:nocoverageredesign",
+	}
+	const sumLines = "github.com/Voxist/beads v1.1.1-0.20261113210423-872c78ec288f h1:zip=\n" +
+		"github.com/Voxist/beads v1.1.1-0.20261113210423-872c78ec288f/go.mod h1:mod=\n"
+	gascitySum := "github.com/a/b v1.0.0 h1:x=\n" + sumLines + "github.com/c/d v1.0.0 h1:y=\n"
+
+	dir := filepath.Join(t.TempDir(), "src")
+	if err := writeBridgedBDBuildModule(dir, mod, gascitySum); err != nil {
+		t.Fatalf("writeBridgedBDBuildModule: %v", err)
+	}
+	goMod, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"\ngo 1.27.3\n",
+		"require github.com/steveyegge/beads v1.3.1-0.20261104055431-3c205e0a41e4\n",
+		"replace github.com/steveyegge/beads => github.com/Voxist/beads v1.1.1-0.20261113210423-872c78ec288f\n",
+	} {
+		if !strings.Contains(string(goMod), want) {
+			t.Errorf("go.mod does not carry %q:\n%s", want, goMod)
+		}
+	}
+	if strings.Contains(string(goMod), "X:") {
+		t.Errorf("go.mod carries the toolchain's experiment suffix:\n%s", goMod)
+	}
+	goSum, err := os.ReadFile(filepath.Join(dir, "go.sum"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(goSum) != sumLines {
+		t.Errorf("go.sum = %q, want exactly gascity's two lines for the replacement %q", goSum, sumLines)
+	}
+
+	if err := writeBridgedBDBuildModule(filepath.Join(t.TempDir(), "src"), mod, "github.com/a/b v1.0.0 h1:x=\n"); err == nil {
+		t.Error("a gascity go.sum without the replacement's hashes was accepted")
+	}
+
+	for toolchain, want := range map[string]string{
+		"go1.27.3":                            "1.27.3",
+		"go1.27.3 X:nocoverageredesign":       "1.27.3",
+		"go1.28":                              "1.28",
+		"devel go1.28-abcdef0 Mon Jan 1 2026": "1.28",
+	} {
+		if got, ok := goDirectiveVersion(toolchain); !ok || got != want {
+			t.Errorf("goDirectiveVersion(%q) = %q, %v; want %q", toolchain, got, ok, want)
+		}
+	}
+	if _, ok := goDirectiveVersion("unknown"); ok {
+		t.Error("goDirectiveVersion accepted a version with no go1.x in it")
+	}
 }
 
 func TestBuildPinnedBDBinaryForTestsUsesGoModSource(t *testing.T) {
