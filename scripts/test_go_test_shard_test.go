@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -35,6 +36,14 @@ type goTestShardFixture struct {
 	// hangFile, when written, makes that binary wait for SIGQUIT, print a
 	// fake goroutine dump and exit 2, as a wedged test binary would.
 	hangFile string
+	// fakeTestBinary is the script the fake `go test -c` copies to its -o
+	// path; a test copies it to stand in for a prebuilt binary.
+	fakeTestBinary string
+	// binaryEnvFile holds the environment of that binary's latest run.
+	binaryEnvFile string
+	// binaryExitFile, when written, holds the status that binary exits with
+	// from a run given -test.run, as a test binary does when a test fails.
+	binaryExitFile string
 }
 
 func newGoTestShardFixture(t *testing.T) goTestShardFixture {
@@ -63,10 +72,18 @@ func newGoTestShardFixtureWithExit(t *testing.T, productExit int) goTestShardFix
 	binaryArgsFile := filepath.Join(tmpDir, "binary-args")
 	hangFile := filepath.Join(tmpDir, "hang")
 	fakeTestBinary := filepath.Join(tmpDir, "fake-test-binary")
+	binaryEnvFile := filepath.Join(tmpDir, "binary-env")
+	binaryExitFile := filepath.Join(tmpDir, "binary-exit")
 	// The sleep holds no descriptor of the caller's, so the shard's capture
 	// of this binary's output ends when the binary does.
 	fakeBinary := fmt.Sprintf(`#!/bin/sh
 { pwd -P; printf '%%s\n' "$@"; } >> %q
+env | LC_ALL=C sort > %q
+for arg in "$@"; do
+  case "$arg" in
+    -test.run=*) [ ! -f %q ] || exit "$(cat %q)" ;;
+  esac
+done
 if [ -f %q ]; then
   trap 'printf "goroutine 1 [fake dump]:\n"; exit 2' QUIT
   sleep 60 </dev/null >/dev/null 2>&1 &
@@ -79,7 +96,7 @@ if [ -f %q ]; then
 else
   printf '%%s\n' TestAlpha TestBeta TestGamma
 fi
-`, binaryArgsFile, hangFile, listFile, listFile)
+`, binaryArgsFile, binaryEnvFile, binaryExitFile, binaryExitFile, hangFile, listFile, listFile)
 	if err := os.WriteFile(fakeTestBinary, []byte(fakeBinary), 0o755); err != nil {
 		t.Fatalf("write fake test binary: %v", err)
 	}
@@ -196,6 +213,9 @@ esac
 		pkgDir:          pkgDir,
 		binaryArgsFile:  binaryArgsFile,
 		hangFile:        hangFile,
+		fakeTestBinary:  fakeTestBinary,
+		binaryEnvFile:   binaryEnvFile,
+		binaryExitFile:  binaryExitFile,
 	}
 }
 
@@ -248,6 +268,23 @@ func (f goTestShardFixture) assertSeededGitConfig(t *testing.T, env map[string]s
 		t.Errorf("GIT_CONFIG_GLOBAL %q does not exist: %v", gitConfig, err)
 	} else if info.Mode().Perm()&0o200 == 0 {
 		t.Errorf("GIT_CONFIG_GLOBAL %q is not writable (mode %v)", gitConfig, info.Mode())
+	}
+}
+
+// directProductEnv is the whole environment a shard hands its product run
+// for shardIndex of shardTotal, but GIT_CONFIG_GLOBAL (assertSeededGitConfig).
+func (f goTestShardFixture) directProductEnv(shardIndex, shardTotal string) map[string]string {
+	return map[string]string{
+		"PATH": f.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"HOME": f.homeDir, "USER": "", "LOGNAME": "", "SHELL": "/bin/sh",
+		"GIT_CONFIG_NOSYSTEM": "1",
+		"LANG":                "C.UTF-8", "TMPDIR": f.tmpDir, "XDG_RUNTIME_DIR": "",
+		"GOPATH": filepath.Join(f.tmpDir, "gopath"), "GOCACHE": filepath.Join(f.tmpDir, "gocache"),
+		"GOMODCACHE": filepath.Join(f.tmpDir, "gomodcache"), "GOTMPDIR": filepath.Join(f.tmpDir, "gotmp"),
+		"GOROOT": filepath.Join(f.tmpDir, "goroot"), "GOENV": "", "GOFLAGS": "", "GO111MODULE": "",
+		"GOEXPERIMENT": "", "GOPROXY": "", "GOPRIVATE": "", "GONOPROXY": "", "GONOSUMDB": "",
+		"GOSUMDB": "", "GOINSECURE": "", "GOVCS": "", "GOWORK": "", "GC_FAST_UNIT": "0",
+		"CGO_CPPFLAGS": "", "CGO_LDFLAGS": "", "GC_TEST_SHARD_INDEX": shardIndex, "GC_TEST_SHARD_TOTAL": shardTotal,
 	}
 }
 
@@ -454,18 +491,7 @@ func TestGoTestShardWithoutTimingPreservesDirectProductContract(t *testing.T) {
 	if got := readFixtureFile(t, fixture.productArgsFile); got != wantArgs {
 		t.Fatalf("direct product argv:\n%s\nwant:\n%s", got, wantArgs)
 	}
-	wantEnv := map[string]string{
-		"PATH": fixture.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"HOME": fixture.homeDir, "USER": "", "LOGNAME": "", "SHELL": "/bin/sh",
-		"GIT_CONFIG_NOSYSTEM": "1",
-		"LANG":                "C.UTF-8", "TMPDIR": fixture.tmpDir, "XDG_RUNTIME_DIR": "",
-		"GOPATH": filepath.Join(fixture.tmpDir, "gopath"), "GOCACHE": filepath.Join(fixture.tmpDir, "gocache"),
-		"GOMODCACHE": filepath.Join(fixture.tmpDir, "gomodcache"), "GOTMPDIR": filepath.Join(fixture.tmpDir, "gotmp"),
-		"GOROOT": filepath.Join(fixture.tmpDir, "goroot"), "GOENV": "", "GOFLAGS": "", "GO111MODULE": "",
-		"GOEXPERIMENT": "", "GOPROXY": "", "GOPRIVATE": "", "GONOPROXY": "", "GONOSUMDB": "",
-		"GOSUMDB": "", "GOINSECURE": "", "GOVCS": "", "GOWORK": "", "GC_FAST_UNIT": "0",
-		"CGO_CPPFLAGS": "", "CGO_LDFLAGS": "", "GC_TEST_SHARD_INDEX": "1", "GC_TEST_SHARD_TOTAL": "2",
-	}
+	wantEnv := fixture.directProductEnv("1", "2")
 	got := fixtureEnvironment(t, readFixtureFile(t, fixture.productEnvFile))
 	fixture.assertSeededGitConfig(t, got)
 	delete(got, "GIT_CONFIG_GLOBAL")
@@ -1414,4 +1440,323 @@ func TestGoTestShardChunkedTimingRemovesStaleArtifactWhenMergeFails(t *testing.T
 		t.Fatalf("an earlier run's timing artifact survived as this shard's: err=%v\n%s", err, data)
 	}
 	assertNoChunkArtifacts(t, timingFile)
+}
+
+// prebuiltTestBinary copies the fixture's fake test binary to name, with
+// mode, in a directory of its own, as a shard's downloaded artifact sits.
+func (f goTestShardFixture) prebuiltTestBinary(t *testing.T, name string, mode os.FileMode) string {
+	t.Helper()
+	dir := filepath.Join(f.tmpDir, "prebuilt")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create prebuilt dir: %v", err)
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(readFixtureFile(t, f.fakeTestBinary)), mode); err != nil {
+		t.Fatalf("write prebuilt binary: %v", err)
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatalf("chmod prebuilt binary: %v", err)
+	}
+	return path
+}
+
+// binaryRuns returns each recorded run of the fixture's test binary as its
+// argv, after checking that every run's working directory was the package's.
+func (f goTestShardFixture) binaryRuns(t *testing.T) [][]string {
+	t.Helper()
+	pkgDir, err := filepath.EvalSymlinks(f.pkgDir)
+	if err != nil {
+		t.Fatalf("resolve package dir: %v", err)
+	}
+	data, err := os.ReadFile(f.binaryArgsFile)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatalf("read binary runs: %v", err)
+	}
+	var runs [][]string
+	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+		if strings.HasPrefix(line, string(os.PathSeparator)) && !strings.HasPrefix(line, "-") {
+			if line != pkgDir {
+				t.Fatalf("test binary ran in %q, want the package directory %q", line, pkgDir)
+			}
+			runs = append(runs, []string{})
+			continue
+		}
+		if len(runs) == 0 {
+			t.Fatalf("binary run record starts without a working directory:\n%s", data)
+		}
+		runs[len(runs)-1] = append(runs[len(runs)-1], line)
+	}
+	return runs
+}
+
+// GO_TEST_SHARD_PREBUILT runs a shard from a test binary compiled once
+// elsewhere (the fork's macOS cmd-gc process build job; ga-05vt3.12): the
+// shard runs no `go test` at all, discovers its tests from the binary's own
+// -test.list in the package directory, and runs the product as that binary,
+// with go test's flags spelled as the binary's, in the environment a
+// `go test` product run gets. The binary's exit status is the shard's.
+func TestGoTestShardPrebuiltSkipsTheCompileAndRunsTheBinary(t *testing.T) {
+	t.Parallel()
+
+	fixture := newGoTestShardFixture(t)
+	prebuilt := fixture.prebuiltTestBinary(t, "example.test", 0o755)
+	if err := os.WriteFile(fixture.binaryExitFile, []byte("23"), 0o644); err != nil {
+		t.Fatalf("arm binary exit: %v", err)
+	}
+	status, output := runShardCommand(t, fixture.command("GO_TEST_SHARD_PREBUILT="+prebuilt, "GO_TEST_COUNT=2"))
+	if status != 23 {
+		t.Fatalf("prebuilt shard exit = %d, want the binary's 23\n%s", status, output)
+	}
+	if allArgs, err := os.ReadFile(fixture.allTestArgsFile); !os.IsNotExist(err) {
+		t.Fatalf("prebuilt shard ran go test (err %v):\n%s", err, allArgs)
+	}
+	wantRuns := [][]string{
+		{"-test.timeout=1m", "-test.list", "^Test"},
+		{"-test.paniconexit0", "-test.timeout=1m", "-test.count=2", "-test.run=^(TestAlpha|TestGamma)$"},
+	}
+	if got := fixture.binaryRuns(t); !slices.EqualFunc(got, wantRuns, slices.Equal[[]string]) {
+		t.Fatalf("prebuilt binary runs = %q, want %q", got, wantRuns)
+	}
+	env := fixtureEnvironment(t, readFixtureFile(t, fixture.binaryEnvFile))
+	fixture.assertSeededGitConfig(t, env)
+	delete(env, "GIT_CONFIG_GLOBAL")
+	if want := fixture.directProductEnv("1", "2"); !maps.Equal(env, want) {
+		t.Fatalf("prebuilt product environment = %#v, want %#v", env, want)
+	}
+	if !strings.Contains(string(output), "Running ./example shard 1 of 2 (2 tests)") {
+		t.Fatalf("prebuilt shard output lacks its selection:\n%s", output)
+	}
+}
+
+// A prebuilt shard given a manifest takes its tests from the manifest and
+// runs the binary only for the product.
+func TestGoTestShardPrebuiltWithManifestRunsOnlyTheProduct(t *testing.T) {
+	t.Parallel()
+
+	fixture := newGoTestShardFixture(t)
+	prebuilt := fixture.prebuiltTestBinary(t, "example.test", 0o755)
+	manifest := writeGoTestManifest(t, fixture.tmpDir, "TestAlpha", "TestBeta", "TestGamma", "TestDelta", "TestEpsilon")
+	status, output := runShardCommand(t, fixture.commandForShard("2", "3", "GO_TEST_SHARD_PREBUILT="+prebuilt, "GO_TEST_MANIFEST="+manifest))
+	if status != 0 {
+		t.Fatalf("prebuilt manifest shard exit = %d, want 0\n%s", status, output)
+	}
+	wantRuns := [][]string{{"-test.paniconexit0", "-test.timeout=1m", "-test.run=^(TestBeta|TestEpsilon)$"}}
+	if got := fixture.binaryRuns(t); !slices.EqualFunc(got, wantRuns, slices.Equal[[]string]) {
+		t.Fatalf("prebuilt manifest binary runs = %q, want %q", got, wantRuns)
+	}
+	if _, err := os.Stat(fixture.allTestArgsFile); !os.IsNotExist(err) {
+		t.Fatalf("prebuilt manifest shard ran go test (stat err %v)", err)
+	}
+}
+
+// Every shard of a prebuilt run selects exactly the tests the same shard
+// selects when it compiles its own binary, so moving the compile to one build
+// job changes no shard's slice.
+func TestGoTestShardPrebuiltPartitionsAsTheCompilePathDoes(t *testing.T) {
+	t.Parallel()
+
+	names := []string{"TestAlpha", "TestBeta", "TestGamma", "TestDelta", "TestEpsilon", "TestZeta", "TestEta"}
+	writeList := func(t *testing.T, fixture goTestShardFixture) {
+		t.Helper()
+		if err := os.WriteFile(fixture.listFile, []byte(strings.Join(names, "\n")+"\n"), 0o644); err != nil {
+			t.Fatalf("write test list: %v", err)
+		}
+	}
+	runFlag := regexp.MustCompile(`(?m)^-run\n(.+)$`)
+	var covered []string
+	for shard := 1; shard <= 3; shard++ {
+		index := strconv.Itoa(shard)
+
+		compiled := newGoTestShardFixture(t)
+		writeList(t, compiled)
+		if status, output := runShardCommand(t, compiled.commandForShard(index, "3")); status != 23 {
+			t.Fatalf("compile-path shard %d exit = %d, want 23\n%s", shard, status, output)
+		}
+		m := runFlag.FindStringSubmatch(readFixtureFile(t, compiled.productArgsFile))
+		if m == nil {
+			t.Fatalf("compile-path shard %d product has no -run", shard)
+		}
+		want := m[1]
+
+		prebuiltFixture := newGoTestShardFixture(t)
+		writeList(t, prebuiltFixture)
+		prebuilt := prebuiltFixture.prebuiltTestBinary(t, "example.test", 0o755)
+		if status, output := runShardCommand(t, prebuiltFixture.commandForShard(index, "3", "GO_TEST_SHARD_PREBUILT="+prebuilt)); status != 0 {
+			t.Fatalf("prebuilt shard %d exit = %d, want 0\n%s", shard, status, output)
+		}
+		runs := prebuiltFixture.binaryRuns(t)
+		if len(runs) != 2 {
+			t.Fatalf("prebuilt shard %d binary runs = %q, want discovery and product", shard, runs)
+		}
+		got := strings.TrimPrefix(runs[1][len(runs[1])-1], "-test.run=")
+		if got != want {
+			t.Errorf("shard %d of 3: prebuilt selects %q, compile path %q", shard, got, want)
+		}
+		covered = append(covered, strings.Split(strings.TrimSuffix(strings.TrimPrefix(got, "^("), ")$"), "|")...)
+	}
+	slices.Sort(covered)
+	sortedNames := slices.Clone(names)
+	slices.Sort(sortedNames)
+	if !slices.Equal(covered, sortedNames) {
+		t.Fatalf("the 3 prebuilt shards together ran %q, want each of %q once", covered, sortedNames)
+	}
+}
+
+// With progress on, a prebuilt shard keeps ga-05vt3.12's progress contract:
+// it times discovery and the product run apart (there is no compile to time),
+// runs the product with -test.v, and SIGQUITs a wedged *.test binary past
+// GO_TEST_SHARD_PROGRESS_QUIT_AFTER so its goroutine dump reaches the log.
+func TestGoTestShardPrebuiltKeepsProgressAndTheQuitDump(t *testing.T) {
+	t.Parallel()
+
+	t.Run("markers", func(t *testing.T) {
+		t.Parallel()
+		fixture := newGoTestShardFixture(t)
+		prebuilt := fixture.prebuiltTestBinary(t, "gc.test", 0o755)
+		status, output := runShardCommand(t, fixture.commandForShardWithBash(findBash32(t), "1", "2",
+			"GO_TEST_SHARD_PROGRESS=1", "GO_TEST_SHARD_PREBUILT="+prebuilt))
+		text := string(output)
+		if status != 0 {
+			t.Fatalf("prebuilt progress shard exit = %d, want 0\n%s", status, text)
+		}
+		runs := fixture.binaryRuns(t)
+		if len(runs) != 2 || !slices.Contains(runs[1], "-test.v=true") {
+			t.Fatalf("prebuilt progress binary runs = %q, want a product run with -test.v=true", runs)
+		}
+		if strings.Contains(text, "compile: go test -c") {
+			t.Fatalf("prebuilt progress shard reports a compile:\n%s", text)
+		}
+		last := -1
+		for _, marker := range []string{
+			"progress on for ./example shard 1 of 2",
+			"prebuilt: " + prebuilt,
+			"discovery: gc.test -test.list (runs TestMain)",
+			"discovery done (status 0)",
+			"product run: gc.test -test.v (TestMain setup ends at the first === RUN)",
+			"example shard 1 of 2: product run done (status 0)",
+		} {
+			at := strings.Index(text, marker)
+			if at < 0 || at < last {
+				t.Fatalf("prebuilt progress output lacks %q in order:\n%s", marker, text)
+			}
+			last = at
+		}
+	})
+
+	t.Run("quit dump", func(t *testing.T) {
+		t.Parallel()
+		fixture := newGoTestShardFixture(t)
+		prebuilt := fixture.prebuiltTestBinary(t, "gc.test", 0o755)
+		if err := os.WriteFile(fixture.hangFile, nil, 0o644); err != nil {
+			t.Fatalf("arm wedged binary: %v", err)
+		}
+		status, output := runShardCommand(t, fixture.commandForShardWithBash(findBash32(t), "1", "2",
+			"GO_TEST_SHARD_PREBUILT="+prebuilt,
+			"GO_TEST_SHARD_PROGRESS=1",
+			"GO_TEST_SHARD_PROGRESS_INTERVAL=1",
+			"GO_TEST_SHARD_PROGRESS_QUIT_AFTER=0s",
+		))
+		text := string(output)
+		if status != 1 {
+			t.Fatalf("wedged prebuilt discovery exit = %d, want 1\n%s", status, text)
+		}
+		for _, want := range []string{
+			"past GO_TEST_SHARD_PROGRESS_QUIT_AFTER: SIGQUIT to gc.test (pid ",
+			"goroutine 1 [fake dump]:",
+		} {
+			if !strings.Contains(text, want) {
+				t.Fatalf("wedged prebuilt output lacks %q:\n%s", want, text)
+			}
+		}
+		if strings.Contains(text, "no SIGQUIT arrived") {
+			t.Fatalf("the wedged prebuilt binary was never signalled:\n%s", text)
+		}
+	})
+}
+
+// A prebuilt shard refuses, before running anything, a binary it cannot run
+// and settings a binary built elsewhere cannot honour.
+func TestGoTestShardPrebuiltRejectsAnUnusableBinary(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		setup func(*testing.T, goTestShardFixture) []string
+		want  string
+	}{
+		{"missing", func(t *testing.T, f goTestShardFixture) []string {
+			return []string{"GO_TEST_SHARD_PREBUILT=" + filepath.Join(f.tmpDir, "absent", "gc.test")}
+		}, "GO_TEST_SHARD_PREBUILT is not an executable file: "},
+		{"not executable", func(t *testing.T, f goTestShardFixture) []string {
+			return []string{"GO_TEST_SHARD_PREBUILT=" + f.prebuiltTestBinary(t, "gc.test", 0o644)}
+		}, "GO_TEST_SHARD_PREBUILT is not an executable file: "},
+		{"directory", func(t *testing.T, f goTestShardFixture) []string {
+			return []string{"GO_TEST_SHARD_PREBUILT=" + f.pkgDir}
+		}, "GO_TEST_SHARD_PREBUILT is not an executable file: "},
+		{"tags", func(t *testing.T, f goTestShardFixture) []string {
+			return []string{"GO_TEST_SHARD_PREBUILT=" + f.prebuiltTestBinary(t, "gc.test", 0o755), "GO_TEST_TAGS=x"}
+		}, "GO_TEST_SHARD_PREBUILT runs a binary built elsewhere; GO_TEST_TAGS cannot apply to it"},
+		{"coverage", func(t *testing.T, f goTestShardFixture) []string {
+			return []string{"GO_TEST_SHARD_PREBUILT=" + f.prebuiltTestBinary(t, "gc.test", 0o755), "GO_TEST_COVERPROFILE=" + filepath.Join(f.tmpDir, "c.out")}
+		}, "GO_TEST_SHARD_PREBUILT runs a binary built elsewhere; GO_TEST_COVERPROFILE cannot apply to it"},
+		{"timing", func(t *testing.T, f goTestShardFixture) []string {
+			return []string{"GO_TEST_SHARD_PREBUILT=" + f.prebuiltTestBinary(t, "gc.test", 0o755), "GO_TEST_TIMING_FILE=" + filepath.Join(f.tmpDir, "t.json")}
+		}, "GO_TEST_SHARD_PREBUILT runs a binary built elsewhere; GO_TEST_TIMING_FILE cannot apply to it"},
+		{"with build-only", func(t *testing.T, f goTestShardFixture) []string {
+			return []string{"GO_TEST_SHARD_PREBUILT=" + f.prebuiltTestBinary(t, "gc.test", 0o755), "GO_TEST_SHARD_BUILD_ONLY=" + filepath.Join(f.tmpDir, "out.test")}
+		}, "GO_TEST_SHARD_PREBUILT and GO_TEST_SHARD_BUILD_ONLY are exclusive"},
+		{"build-only with manifest", func(t *testing.T, f goTestShardFixture) []string {
+			return []string{"GO_TEST_SHARD_BUILD_ONLY=" + filepath.Join(f.tmpDir, "out.test"), "GO_TEST_MANIFEST=" + writeGoTestManifest(t, f.tmpDir, "TestAlpha")}
+		}, "GO_TEST_SHARD_BUILD_ONLY builds a binary and runs no tests; GO_TEST_MANIFEST cannot apply to it"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fixture := newGoTestShardFixture(t)
+			status, output := runShardCommand(t, fixture.command(tc.setup(t, fixture)...))
+			if status != 1 || !strings.Contains(string(output), tc.want) {
+				t.Fatalf("exit = %d, want 1 with %q:\n%s", status, tc.want, output)
+			}
+			if _, err := os.Stat(fixture.allTestArgsFile); !os.IsNotExist(err) {
+				t.Fatalf("a refused shard ran go test (stat err %v)", err)
+			}
+			if _, err := os.Stat(fixture.binaryArgsFile); !os.IsNotExist(err) {
+				t.Fatalf("a refused shard ran a test binary (stat err %v)", err)
+			}
+		})
+	}
+}
+
+// GO_TEST_SHARD_BUILD_ONLY compiles the package's test binary once, with the
+// shard's own environment, tags and flags, to the given path (creating its
+// directory), proves it lists tests, and runs none: the build job the
+// prebuilt shards download from (ga-05vt3.12).
+func TestGoTestShardBuildOnlyCompilesOnceAndRunsNoTests(t *testing.T) {
+	t.Parallel()
+
+	fixture := newGoTestShardFixture(t)
+	out := filepath.Join(fixture.tmpDir, "artifact", "nested", "example.test")
+	status, output := runShardCommand(t, fixture.command("GO_TEST_SHARD_BUILD_ONLY="+out, "GO_TEST_TAGS=fixturetag"))
+	if status != 0 {
+		t.Fatalf("build-only exit = %d, want 0\n%s", status, output)
+	}
+	wantCompile := "test\n-tags\nfixturetag\n-c\n-o\n" + out + "\n./example\n"
+	if got := readFixtureFile(t, fixture.allTestArgsFile); got != wantCompile {
+		t.Fatalf("build-only go invocations:\n%s\nwant exactly the compile:\n%s", got, wantCompile)
+	}
+	if info, err := os.Stat(out); err != nil || info.Mode().Perm()&0o100 == 0 {
+		t.Fatalf("build-only left no executable binary at %s (err %v)", out, err)
+	}
+	wantRuns := [][]string{{"-test.timeout=1m", "-test.list", "^Test"}}
+	if got := fixture.binaryRuns(t); !slices.EqualFunc(got, wantRuns, slices.Equal[[]string]) {
+		t.Fatalf("build-only binary runs = %q, want only discovery %q", got, wantRuns)
+	}
+	if _, err := os.Stat(fixture.productArgsFile); !os.IsNotExist(err) {
+		t.Fatalf("build-only ran a product (stat err %v)", err)
+	}
+	if want := "built ./example test binary " + out + " (3 tests)"; !strings.Contains(string(output), want) {
+		t.Fatalf("build-only output lacks %q:\n%s", want, output)
+	}
 }

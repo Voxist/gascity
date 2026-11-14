@@ -1,10 +1,12 @@
 package scripts_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -476,6 +478,9 @@ func processShardGoTimeout(t *testing.T, repo, count string) time.Duration {
 	return parseMinutes(t, processShardStepValue(t, repo, count, "timeout"))
 }
 
+// macRunnerTemp stands in for $RUNNER_TEMP when a test runs a step script.
+const macRunnerTemp = "/runner-temp"
+
 // processShardStepValue runs everything before the cmd-gc process shard
 // step's make call as repo with go_test_count count, and returns the shell
 // variable name as that leaves it.
@@ -496,6 +501,7 @@ func processShardStepValue(t *testing.T, repo, count, name string) string {
 	out, err := runWorkflowStepScript(t, t.TempDir(), script, map[string]string{
 		"GITHUB_REPOSITORY":   repo,
 		"GO_TEST_COUNT_INPUT": count,
+		"RUNNER_TEMP":         macRunnerTemp,
 	})
 	if err != nil {
 		t.Fatalf("process shard step prelude: %v\n%s", err, out)
@@ -539,16 +545,18 @@ func TestMacProcessShardGoTimeoutFiresBeforeTheJobCap(t *testing.T) {
 // Off upstream a cmd-gc process shard streams its progress (ga-05vt3.12):
 // every shard of the 2026-11-11 fork nightly reached the job cap still in
 // discovery, before go's own timeout starts, and logged nothing. The step
-// hands scripts/test-go-test-shard its progress settings through make's
-// EXTRA_TEST_ENV, the one way past the Makefile's env -i. Its SIGQUIT to a
+// hands scripts/test-go-test-shard its settings through make's
+// EXTRA_TEST_ENV, the one way past the Makefile's env -i: there, progress and
+// the binary mac-cmd-gc-process-build compiled once, which the shard runs
+// instead of compiling its own. Its SIGQUIT to a
 // live test binary must come, a heartbeat late at worst, at least 8 minutes
 // before the job cap (about 6 of setup precede the shard, then the dump is
 // written), and never during a soak, which has its own 80m budget. Upstream
 // runs the shard as before.
 func TestMacProcessShardStreamsProgressOffUpstream(t *testing.T) {
 	step := macRegressionStep(t, "mac-cmd-gc-process", "Run cmd/gc process shard")
-	if !strings.Contains(step.Run, `EXTRA_TEST_ENV="$progress_env"`) {
-		t.Fatalf("the process shard's make call does not pass EXTRA_TEST_ENV=\"$progress_env\":\n%s", step.Run)
+	if !strings.Contains(step.Run, `EXTRA_TEST_ENV="$shard_env"`) {
+		t.Fatalf("the process shard's make call does not pass EXTRA_TEST_ENV=\"$shard_env\":\n%s", step.Run)
 	}
 	jobCap := regexp.MustCompile(`github\.repository == 'gastownhall/gascity' && ([0-9]+) \|\| ([0-9]+)`).
 		FindStringSubmatch(macJobTimeoutMinutes(t, "mac-cmd-gc-process"))
@@ -563,16 +571,18 @@ func TestMacProcessShardStreamsProgressOffUpstream(t *testing.T) {
 		{name: "upstream", repo: "gastownhall/gascity", count: "1", want: nil},
 		{name: "upstream soak", repo: "gastownhall/gascity", count: "3", want: nil},
 		{name: "fork", repo: "Voxist/gascity", count: "1", want: []string{
+			"GO_TEST_SHARD_PREBUILT=" + macCmdGCPrebuiltPath,
 			"GO_TEST_SHARD_PROGRESS=1", "GO_TEST_SHARD_PROGRESS_INTERVAL=120", "GO_TEST_SHARD_PROGRESS_QUIT_AFTER=38m",
 		}},
 		{name: "fork soak", repo: "Voxist/gascity", count: "3", want: []string{
+			"GO_TEST_SHARD_PREBUILT=" + macCmdGCPrebuiltPath,
 			"GO_TEST_SHARD_PROGRESS=1", "GO_TEST_SHARD_PROGRESS_INTERVAL=120",
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := strings.Fields(processShardStepValue(t, tc.repo, tc.count, "progress_env"))
+			got := strings.Fields(processShardStepValue(t, tc.repo, tc.count, "shard_env"))
 			if !slices.Equal(got, tc.want) {
-				t.Fatalf("progress_env = %q, want %q", got, tc.want)
+				t.Fatalf("shard_env = %q, want %q", got, tc.want)
 			}
 			var interval, quitAfter time.Duration
 			for _, assignment := range got {
@@ -593,4 +603,225 @@ func TestMacProcessShardStreamsProgressOffUpstream(t *testing.T) {
 			}
 		})
 	}
+}
+
+// macCmdGCPrebuiltPath is where a fork cmd-gc process shard finds the binary
+// mac-cmd-gc-process-build compiled, with $RUNNER_TEMP as macRunnerTemp.
+const macCmdGCPrebuiltPath = macRunnerTemp + "/cmd-gc-test/gc.test"
+
+// Off upstream the cmd-gc process shards ran on 3-core, 7 GB hosted macOS
+// runners, where compiling cmd/gc's test package (10-12 GB peak) swapped for
+// 38-42 minutes in every shard, and the nightly lost all 12 to the 50-minute
+// job cap before a test ran (ga-05vt3.12). There one job on a larger runner
+// compiles the binary once, through the same make target and script the
+// shards use, reports the compile's peak RSS and wall time, and uploads it;
+// each shard downloads it and runs it in place of its own compile. Upstream,
+// where Blacksmith compiles in minutes, the build job never runs and a shard
+// runs exactly as before.
+func TestMacCmdGCProcessBuildsOnceOffUpstream(t *testing.T) {
+	wf := readCriticalPathWorkflow(t, "mac-regression.yml")
+	build, ok := wf.Jobs["mac-cmd-gc-process-build"]
+	if !ok {
+		t.Fatal("mac-regression.yml has no mac-cmd-gc-process-build job")
+	}
+	if build.RunsOn != "macos-15-xlarge" {
+		t.Errorf("build runs-on = %q, want the larger hosted runner macos-15-xlarge", build.RunsOn)
+	}
+	if want := "needs.gate.outputs.run_cmd_gc_process == 'true' && github.repository != 'gastownhall/gascity'"; strings.TrimSpace(build.If) != want {
+		t.Errorf("build if = %q, want %q (fork-only, and only when the shards run)", build.If, want)
+	}
+	if want := []string{"runner-policy", "gate"}; !slices.Equal(build.Needs, want) {
+		t.Errorf("build needs = %v, want %v", build.Needs, want)
+	}
+	if got := parseMinutes(t, macJobTimeoutMinutes(t, "mac-cmd-gc-process-build")); got > 45*time.Minute {
+		t.Errorf("build timeout-minutes = %s, want at most 45", got)
+	}
+
+	var setup, compile, upload *ciCriticalPathStep
+	for i := range build.Steps {
+		step := &build.Steps[i]
+		switch {
+		case step.Uses == "./.github/actions/setup-gascity-macos":
+			setup = step
+		case strings.Contains(step.Run, "make test-cmd-gc-process-build"):
+			compile = step
+		case strings.HasPrefix(step.Uses, "actions/upload-artifact@"):
+			upload = step
+		}
+	}
+	if setup == nil || compile == nil || upload == nil {
+		t.Fatalf("build steps: setup %v, compile %v, upload %v; want the shared macOS setup, the make compile and an artifact upload", setup != nil, compile != nil, upload != nil)
+	}
+	for _, want := range []string{
+		"/usr/bin/time -l",
+		`CMD_GC_PROCESS_BINARY="$RUNNER_TEMP/cmd-gc-test/gc.test"`,
+		"maximum resident set size",
+	} {
+		if !strings.Contains(compile.Run, want) {
+			t.Errorf("build compile step lacks %q:\n%s", want, compile.Run)
+		}
+	}
+	// The tagged product metrics profile is a second cmd/gc test compile of
+	// the same size, so off upstream it runs here too, measured the same way
+	// (TestProductMetricsTesthookProfileIsFocusedAndRequired pins that it
+	// runs nowhere else there).
+	var testhook *ciCriticalPathStep
+	for i := range build.Steps {
+		if strings.Contains(build.Steps[i].Run, "make test-productmetrics-testhook") {
+			testhook = &build.Steps[i]
+		}
+	}
+	if testhook == nil {
+		t.Fatal("build job does not run make test-productmetrics-testhook")
+	}
+	for _, want := range []string{"/usr/bin/time -l", "maximum resident set size"} {
+		if !strings.Contains(testhook.Run, want) {
+			t.Errorf("build testhook step lacks %q:\n%s", want, testhook.Run)
+		}
+	}
+	if upload.With["name"] != "cmd-gc-test-binary" || upload.With["path"] != "${{ runner.temp }}/cmd-gc-test/gc.test" ||
+		upload.With["if-no-files-found"] != "error" || upload.With["retention-days"] != "1" {
+		t.Errorf("build upload with = %v, want cmd-gc-test-binary from ${{ runner.temp }}/cmd-gc-test/gc.test, failing on no file, kept 1 day", upload.With)
+	}
+
+	shards := wf.Jobs["mac-cmd-gc-process"]
+	if !slices.Contains(shards.Needs, "mac-cmd-gc-process-build") {
+		t.Errorf("shard needs = %v, want mac-cmd-gc-process-build", shards.Needs)
+	}
+	var download, chmod *ciCriticalPathStep
+	for i := range shards.Steps {
+		step := &shards.Steps[i]
+		switch {
+		case strings.HasPrefix(step.Uses, "actions/download-artifact@"):
+			download = step
+		case strings.Contains(step.Run, "chmod +x"):
+			chmod = step
+		}
+	}
+	if download == nil || chmod == nil {
+		t.Fatalf("shard steps: download %v, chmod %v; want the artifact download and its chmod (artifacts drop the mode bits)", download != nil, chmod != nil)
+	}
+	const forkOnly = "github.repository != 'gastownhall/gascity'"
+	for _, step := range []*ciCriticalPathStep{download, chmod} {
+		if strings.TrimSpace(step.If) != forkOnly {
+			t.Errorf("shard step %q if = %q, want %q", step.Name, step.If, forkOnly)
+		}
+	}
+	if download.With["name"] != upload.With["name"] || download.With["path"] != "${{ runner.temp }}/cmd-gc-test" {
+		t.Errorf("shard download with = %v, want %s into ${{ runner.temp }}/cmd-gc-test", download.With, upload.With["name"])
+	}
+	if !strings.Contains(chmod.Run, `"$RUNNER_TEMP/cmd-gc-test/gc.test"`) {
+		t.Errorf("shard chmod step does not mark the downloaded binary:\n%s", chmod.Run)
+	}
+	if got := processShardStepValue(t, "gastownhall/gascity", "1", "shard_env"); strings.Contains(got, "GO_TEST_SHARD_PREBUILT") {
+		t.Errorf("upstream shard_env = %q, want no prebuilt binary", got)
+	}
+}
+
+// The shards' if: runs them upstream as before (where the build job is
+// skipped, which alone would skip a dependent job) and, off upstream, only
+// once the build succeeded. It never revives a shard the gate routed off or a
+// cancelled run.
+func TestMacCmdGCProcessShardsRunWhenTheirBinaryIsReady(t *testing.T) {
+	shards := readCriticalPathWorkflow(t, "mac-regression.yml").Jobs["mac-cmd-gc-process"]
+	cond := strings.TrimSpace(shards.If)
+	if inner, ok := strings.CutPrefix(cond, "${{"); ok {
+		inner, ok = strings.CutSuffix(inner, "}}")
+		if !ok {
+			t.Fatalf("shard if %q opens ${{ without closing it", shards.If)
+		}
+		cond = strings.TrimSpace(inner)
+	}
+	cond = regexp.MustCompile(`\s+`).ReplaceAllString(cond, " ")
+	for _, tc := range []struct {
+		name, repo, route, build, cancelled string
+		want                                bool
+	}{
+		{"upstream, build skipped", "gastownhall/gascity", "true", "skipped", "false", true},
+		{"upstream, routed off", "gastownhall/gascity", "false", "skipped", "false", false},
+		{"upstream, cancelled", "gastownhall/gascity", "true", "skipped", "true", false},
+		{"fork, build succeeded", "Voxist/gascity", "true", "success", "false", true},
+		{"fork, build failed", "Voxist/gascity", "true", "failure", "false", false},
+		{"fork, build skipped", "Voxist/gascity", "true", "skipped", "false", false},
+		{"fork, routed off", "Voxist/gascity", "false", "skipped", "false", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			expr := cond
+			for from, to := range map[string]string{
+				"!cancelled()": map[string]string{"true": "false", "false": "true"}[tc.cancelled],
+				"needs.gate.outputs.run_cmd_gc_process == 'true'":    strconv.FormatBool(tc.route == "true"),
+				"github.repository == 'gastownhall/gascity'":         strconv.FormatBool(tc.repo == "gastownhall/gascity"),
+				"needs.mac-cmd-gc-process-build.result == 'success'": strconv.FormatBool(tc.build == "success"),
+			} {
+				if !strings.Contains(expr, from) {
+					t.Fatalf("shard if %q lacks %q", cond, from)
+				}
+				expr = strings.ReplaceAll(expr, from, to)
+			}
+			got, err := evalBoolExpr(expr)
+			if err != nil {
+				t.Fatalf("evaluate shard if %q (from %q): %v", expr, cond, err)
+			}
+			if got != tc.want {
+				t.Errorf("shard if %q = %v, want %v", expr, got, tc.want)
+			}
+		})
+	}
+}
+
+// evalBoolExpr evaluates an expression of true, false, &&, || and
+// parentheses, with && binding tighter than ||, as GitHub's does.
+func evalBoolExpr(expr string) (bool, error) {
+	tokens := regexp.MustCompile(`true|false|&&|\|\||\(|\)|\S+`).FindAllString(expr, -1)
+	pos := 0
+	var parseOr func() (bool, error)
+	parseAtom := func() (bool, error) {
+		if pos >= len(tokens) {
+			return false, fmt.Errorf("unexpected end")
+		}
+		tok := tokens[pos]
+		pos++
+		switch tok {
+		case "true":
+			return true, nil
+		case "false":
+			return false, nil
+		case "(":
+			v, err := parseOr()
+			if err != nil {
+				return false, err
+			}
+			if pos >= len(tokens) || tokens[pos] != ")" {
+				return false, fmt.Errorf("unbalanced parenthesis")
+			}
+			pos++
+			return v, nil
+		}
+		return false, fmt.Errorf("unexpected token %q", tok)
+	}
+	parseAnd := func() (bool, error) {
+		v, err := parseAtom()
+		for err == nil && pos < len(tokens) && tokens[pos] == "&&" {
+			pos++
+			var r bool
+			r, err = parseAtom()
+			v = v && r
+		}
+		return v, err
+	}
+	parseOr = func() (bool, error) {
+		v, err := parseAnd()
+		for err == nil && pos < len(tokens) && tokens[pos] == "||" {
+			pos++
+			var r bool
+			r, err = parseAnd()
+			v = v || r
+		}
+		return v, err
+	}
+	v, err := parseOr()
+	if err == nil && pos != len(tokens) {
+		err = fmt.Errorf("trailing token %q", tokens[pos])
+	}
+	return v, err
 }
