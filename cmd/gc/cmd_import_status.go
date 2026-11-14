@@ -211,7 +211,7 @@ func buildImportStatus(cityPath string) (*ImportStatusJSON, error) {
 						}
 					}
 					entry.Kind = "builtin"
-					entry.Builtin = &ImportStatusBuiltin{Pack: packName, BuiltBy: commit, ContentHash: contentHash}
+					entry.Builtin = &ImportStatusBuiltin{Pack: packName, BuiltBy: bundledPackBuilder(commit), ContentHash: contentHash}
 				}
 			}
 		} else {

@@ -606,10 +606,14 @@ type syntheticMarker struct {
 	Commit      string `toml:"commit"`
 	ContentHash string `toml:"content_hash"`
 	// BuiltBy is the build revision of the gc binary that materialized the
-	// cache. Repository and Commit name the canonical pin, which the cache
-	// key and validation depend on; they say nothing about which binary
-	// produced the bytes. Validation ignores this field, and markers written
-	// before it existed decode it as "" (builder unknown).
+	// cache: the first binary to write this cache directory. Binaries whose
+	// embedded content is identical share the directory (the cache key folds
+	// in the content hash, not the revision), so a later binary with the same
+	// content serves it without rewriting this field. Repository and Commit
+	// name the canonical pin, which the cache key and validation depend on;
+	// they say nothing about which binary produced the bytes. Validation
+	// ignores this field, and markers written before it existed, or by an
+	// unstamped binary, leave it "" (builder unknown).
 	BuiltBy string `toml:"built_by,omitempty"`
 }
 

@@ -345,28 +345,39 @@ func TestImportStatusCommandRegistered(t *testing.T) {
 func bundledImportStatusFixture(t *testing.T, dir, lockCommit string) string {
 	t.Helper()
 	source := builtinpacks.MustSource("core")
+	bundledImportStatusFixtureFor(t, dir, source, lockCommit)
+	return source
+}
+
+// bundledImportStatusFixtureFor writes a city whose root pack imports source
+// as [imports.dep], locked at lockCommit (or unlocked when it is empty).
+func bundledImportStatusFixtureFor(t *testing.T, dir, source, lockCommit string) {
+	t.Helper()
 	version := config.BundledSourcePinnedVersion(source)
 	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	name := "core"
+	if source != builtinpacks.MustSource("core") {
+		name = "dep"
+	}
 	writePackToml(t, dir, fmt.Sprintf(`[pack]
 name = "demo"
 schema = 1
 
-[imports.core]
+[imports.%s]
 source = %q
 version = %q
-`, source, version))
+`, name, source, version))
 	if lockCommit == "" {
-		return source
+		return
 	}
 	if err := packman.WriteLockfile(fsys.OSFS{}, dir, &packman.Lockfile{
 		Schema: packman.LockfileSchema,
 		Packs: map[string]packman.LockedPack{
-			source: {Version: version, Commit: lockCommit, Fetched: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)},
+			source: {Version: "sha:" + lockCommit, Commit: lockCommit, Fetched: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)},
 		},
 	}); err != nil {
 		t.Fatalf("WriteLockfile: %v", err)
 	}
-	return source
 }
 
 func canonicalBundledCommit(t *testing.T) string {
@@ -440,19 +451,104 @@ func TestImportStatusBundledSourceRendersBuiltin(t *testing.T) {
 
 // TestImportStatusBundledSourceUnstampedBuildRendersUnknown pins that a
 // binary without a build stamp says so instead of guessing from the pin.
+// An unstamped production binary resolves its commit to "unknown"
+// (cmd_version.go), so that is the value under test alongside empty.
 func TestImportStatusBundledSourceUnstampedBuildRendersUnknown(t *testing.T) {
+	for _, rev := range []string{"unknown", ""} {
+		t.Run(fmt.Sprintf("commit=%q", rev), func(t *testing.T) {
+			clearGCEnv(t)
+			dir := t.TempDir()
+			bundledImportStatusFixture(t, dir, canonicalBundledCommit(t))
+			setCommitForTest(t, rev)
+
+			var stdout, stderr bytes.Buffer
+			if code := doImportStatus(dir, false, &stdout, &stderr); code != 0 {
+				t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+			}
+			cols := importStatusTextRow(t, stdout.String(), "pack:core")
+			if cols[1] != "builtin:core (gc unknown)" {
+				t.Errorf("source column = %q, want builtin:core (gc unknown)", cols[1])
+			}
+
+			stdout.Reset()
+			if code := doImportStatus(dir, true, &stdout, &stderr); code != 0 {
+				t.Fatalf("json code = %d, stderr = %s", code, stderr.String())
+			}
+			if strings.Contains(stdout.String(), `"built_by"`) {
+				t.Errorf("JSON carries built_by for an unstamped binary; want it omitted:\n%s", stdout.String())
+			}
+		})
+	}
+}
+
+// TestImportStatusBundledSourceSupersededPinIsBuiltin pins parity with
+// install: a superseded canonical pin is still served from the embedded
+// packs (config.isSupersededEmbeddedOnlyPin), so its row is builtin too.
+func TestImportStatusBundledSourceSupersededPinIsBuiltin(t *testing.T) {
+	if len(config.SupersededBundledPackImportVersions) == 0 {
+		t.Fatal("no superseded bundled pins to test")
+	}
+	for _, version := range config.SupersededBundledPackImportVersions {
+		t.Run(version, func(t *testing.T) {
+			clearGCEnv(t)
+			dir := t.TempDir()
+			bundledImportStatusFixture(t, dir, strings.TrimPrefix(version, "sha:"))
+
+			var stdout, stderr bytes.Buffer
+			if code := doImportStatus(dir, true, &stdout, &stderr); code != 0 {
+				t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+			}
+			var doc ImportStatusJSON
+			if err := json.Unmarshal(stdout.Bytes(), &doc); err != nil {
+				t.Fatalf("Unmarshal: %v\n%s", err, stdout.String())
+			}
+			if len(doc.Imports) != 1 {
+				t.Fatalf("imports = %+v, want one entry", doc.Imports)
+			}
+			if got := doc.Imports[0]; got.Kind != "builtin" || got.Builtin == nil || got.Builtin.Pack != "core" {
+				t.Errorf("entry = %+v, want kind builtin served by pack core", got)
+			}
+		})
+	}
+}
+
+// TestImportStatusBundledSubpackIsBuiltin pins the registered nested
+// subpack (gc-roles inside the gascity pack): at its parent's canonical pin
+// it is served from the embedded tree and reports its own name.
+func TestImportStatusBundledSubpackIsBuiltin(t *testing.T) {
 	clearGCEnv(t)
 	dir := t.TempDir()
-	bundledImportStatusFixture(t, dir, canonicalBundledCommit(t))
-	setCommitForTest(t, "")
+	source := config.PublicGascityRolesPackSource
+	if name, ok := builtinpacks.NameForSource(source); !ok || name != "gc-roles" {
+		t.Fatalf("NameForSource(%q) = %q, %v; want gc-roles", source, name, ok)
+	}
+	pin := strings.TrimPrefix(config.BundledSourcePinnedVersion(source), "sha:")
+	bundledImportStatusFixtureFor(t, dir, source, pin)
+	setCommitForTest(t, "gcbuild111bbb")
 
 	var stdout, stderr bytes.Buffer
 	if code := doImportStatus(dir, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
 	}
-	cols := importStatusTextRow(t, stdout.String(), "pack:core")
-	if cols[1] != "builtin:core (gc unknown)" {
-		t.Errorf("source column = %q, want builtin:core (gc unknown)", cols[1])
+	cols := importStatusTextRow(t, stdout.String(), "pack:dep")
+	if cols[1] != "builtin:gc-roles (gc gcbuild111bbb)" || cols[3] != "builtin" {
+		t.Errorf("row = %q, want builtin:gc-roles (gc gcbuild111bbb) with kind builtin", cols)
+	}
+}
+
+// TestBundledPackBuilderNormalizesUnstamped pins the init handoff: the
+// unstamped commit default "unknown" becomes "" so markers and JSON omit
+// built_by instead of recording a placeholder as a revision.
+func TestBundledPackBuilderNormalizesUnstamped(t *testing.T) {
+	for in, want := range map[string]string{
+		"unknown":      "",
+		"":             "",
+		"8086e0bc4":    "8086e0bc4",
+		"abc123-dirty": "abc123-dirty",
+	} {
+		if got := bundledPackBuilder(in); got != want {
+			t.Errorf("bundledPackBuilder(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 
