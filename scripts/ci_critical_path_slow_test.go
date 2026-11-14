@@ -81,22 +81,34 @@ func TestCmdGCProcessTimingEnvCrossesMakeIsolation(t *testing.T) {
 	}
 }
 
-// The fork's macOS process shard step hands its progress settings to
+// The fork's macOS process shard step hands its settings to
 // scripts/test-go-test-shard through make's EXTRA_TEST_ENV (ga-05vt3.12).
 // Run through the real make target with the value the step computes, the
-// shard must come out in progress mode, past the Makefile's env -i.
+// shard must come out in progress mode and run the prebuilt binary the build
+// job compiled, past the Makefile's env -i, compiling nothing itself.
 func TestMacProcessShardProgressCrossesMakeIsolation(t *testing.T) {
 	fixture := newGoTestShardFixture(t)
-	progressEnv := processShardStepValue(t, "Voxist/gascity", "1", "progress_env")
-	if progressEnv == "" {
-		t.Fatal("the fork's process shard step sets no progress_env")
+	shardEnv := processShardStepValue(t, "Voxist/gascity", "1", "shard_env")
+	if shardEnv == "" {
+		t.Fatal("the fork's process shard step sets no shard_env")
+	}
+	runnerTemp := filepath.Join(fixture.tmpDir, "runner-temp")
+	if err := os.MkdirAll(filepath.Join(runnerTemp, "cmd-gc-test"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prebuilt := strings.Replace(macCmdGCPrebuiltPath, macRunnerTemp, runnerTemp, 1)
+	if err := os.WriteFile(prebuilt, []byte(readFixtureFile(t, fixture.fakeTestBinary)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture.binaryExitFile, []byte("23"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
 	cmd := makeCommand(
 		"test-cmd-gc-process-shard",
 		"CMD_GC_PROCESS_SHARD=1",
 		"CMD_GC_PROCESS_TOTAL=2",
-		"EXTRA_TEST_ENV="+progressEnv,
+		"EXTRA_TEST_ENV="+strings.ReplaceAll(shardEnv, macRunnerTemp, runnerTemp),
 	)
 	cmd.Dir = fixture.repoRoot
 	cmd.Env = []string{
@@ -110,16 +122,65 @@ func TestMacProcessShardProgressCrossesMakeIsolation(t *testing.T) {
 	}
 	status, output := runShardCommand(t, cmd)
 	if status == 0 || !strings.Contains(string(output), "Error 23") {
-		t.Fatalf("make status = %d, want product failure 23 to remain authoritative\n%s", status, output)
+		t.Fatalf("make status = %d, want the prebuilt binary's failure 23 to remain authoritative\n%s", status, output)
 	}
 	for _, want := range []string{
 		"progress on for ./cmd/gc shard 1 of 2: heartbeat every 120s, SIGQUIT to test binaries after 38m",
-		"compile: go test -c ./cmd/gc",
+		"/cmd-gc-test/gc.test",
 		"discovery: gc.test -test.list (runs TestMain)",
-		"product run: go test -v",
+		"product run: gc.test -test.v",
 	} {
 		if !strings.Contains(string(output), want) {
 			t.Fatalf("make-run shard output lacks %q:\n%s", want, output)
 		}
+	}
+	if allArgs, err := os.ReadFile(fixture.allTestArgsFile); !os.IsNotExist(err) {
+		t.Fatalf("the prebuilt shard ran go test (err %v):\n%s", err, allArgs)
+	}
+}
+
+// make test-cmd-gc-process-build compiles cmd/gc's test binary once, through
+// scripts/test-go-test-shard's own compile, to CMD_GC_PROCESS_BINARY, and runs
+// no test; without CMD_GC_PROCESS_BINARY it refuses to run.
+func TestMacProcessBuildCrossesMakeIsolation(t *testing.T) {
+	fixture := newGoTestShardFixture(t)
+	env := []string{
+		"PATH=" + fixture.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"HOME=" + fixture.homeDir,
+		"SHELL=/bin/sh",
+		"LANG=C.UTF-8",
+		"TMPDIR=" + fixture.tmpDir,
+		"GC_TEST_NO_SLICE=1",
+		"SYS_USR_CGO_FALLBACK=0",
+	}
+
+	missing := makeCommand("test-cmd-gc-process-build")
+	missing.Dir, missing.Env = fixture.repoRoot, env
+	if status, output := runShardCommand(t, missing); status == 0 || !strings.Contains(string(output), "CMD_GC_PROCESS_BINARY") {
+		t.Fatalf("make without CMD_GC_PROCESS_BINARY: status %d, want a failure naming it\n%s", status, output)
+	}
+
+	out := filepath.Join(fixture.tmpDir, "runner temp", "cmd-gc-test", "gc.test")
+	cmd := makeCommand(
+		"test-cmd-gc-process-build",
+		"CMD_GC_PROCESS_BINARY="+out,
+		"EXTRA_TEST_ENV=GO_TEST_SHARD_PROGRESS=1 GO_TEST_SHARD_PROGRESS_INTERVAL=60",
+	)
+	cmd.Dir, cmd.Env = fixture.repoRoot, env
+	status, output := runShardCommand(t, cmd)
+	if status != 0 {
+		t.Fatalf("make status = %d, want 0\n%s", status, output)
+	}
+	wantCompile := "test\n-c\n-o\n" + out + "\n./cmd/gc\n"
+	if got := readFixtureFile(t, fixture.allTestArgsFile); got != wantCompile {
+		t.Fatalf("build go invocations:\n%s\nwant exactly the compile:\n%s", got, wantCompile)
+	}
+	for _, want := range []string{"compile: go test -c ./cmd/gc", "built ./cmd/gc test binary " + out + " (3 tests)"} {
+		if !strings.Contains(string(output), want) {
+			t.Fatalf("make-run build output lacks %q:\n%s", want, output)
+		}
+	}
+	if _, err := os.Stat(fixture.productArgsFile); !os.IsNotExist(err) {
+		t.Fatalf("the build ran a product (stat err %v)", err)
 	}
 }

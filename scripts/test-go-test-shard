@@ -265,6 +265,53 @@ if [[ -n "$cover_profile" ]]; then
   go_test_args+=(-coverpkg=./...)
 fi
 
+# Build once, run many (the fork's macOS cmd-gc process shards; ga-05vt3.12).
+# Compiling cmd/gc's test package peaks at 10-12 GB, so on a 7 GB hosted
+# runner every shard spent its whole job budget swapping through that one
+# compile. Two opt-in modes split the compile from the shards:
+#   - GO_TEST_SHARD_BUILD_ONLY=<path> compiles the package's test binary to
+#     <path> (relative to the repository root) with exactly the environment,
+#     tags and flags a shard's own `go test -c` uses, runs its -test.list to
+#     prove it lists tests, and exits without selecting or running any;
+#   - GO_TEST_SHARD_PREBUILT=<path> runs the shard from such a binary: no
+#     `go test` at all. Discovery is the binary's -test.list, the selection is
+#     the same modulo slice, and the product run is the binary itself, in the
+#     package directory as go test would run it, with go test's flags spelled
+#     as the binary's (-test.timeout, -test.count, -test.v). Name the binary
+#     *.test, as go test does, so the progress SIGQUIT finds it.
+# Coverage, timing capture and build tags belong to the compile, so a
+# prebuilt shard refuses them rather than run without them.
+prebuilt="${GO_TEST_SHARD_PREBUILT:-}"
+build_only="${GO_TEST_SHARD_BUILD_ONLY:-}"
+if [[ -n "$prebuilt" && -n "$build_only" ]]; then
+  echo "GO_TEST_SHARD_PREBUILT and GO_TEST_SHARD_BUILD_ONLY are exclusive" >&2
+  exit 1
+fi
+if [[ -n "$prebuilt" ]]; then
+  if [[ ! -f "$prebuilt" || ! -x "$prebuilt" ]]; then
+    echo "GO_TEST_SHARD_PREBUILT is not an executable file: ${prebuilt}" >&2
+    exit 1
+  fi
+  for setting in GO_TEST_TAGS GO_TEST_COVERPROFILE GO_TEST_TIMING_FILE; do
+    if [[ -n "${!setting:-}" ]]; then
+      echo "GO_TEST_SHARD_PREBUILT runs a binary built elsewhere; ${setting} cannot apply to it" >&2
+      exit 1
+    fi
+  done
+  # The product runs from the package directory, so pin the path first.
+  prebuilt="$(cd "$(dirname "$prebuilt")" && pwd)/$(basename "$prebuilt")"
+fi
+if [[ -n "$build_only" ]]; then
+  for setting in GO_TEST_MANIFEST GO_TEST_COVERPROFILE GO_TEST_TIMING_FILE; do
+    if [[ -n "${!setting:-}" ]]; then
+      echo "GO_TEST_SHARD_BUILD_ONLY builds a binary and runs no tests; ${setting} cannot apply to it" >&2
+      exit 1
+    fi
+  done
+  mkdir -p "$(dirname "$build_only")"
+  build_only="$(cd "$(dirname "$build_only")" && pwd)/$(basename "$build_only")"
+fi
+
 if [[ "$progress" == 1 ]]; then
   progress_interval="${GO_TEST_SHARD_PROGRESS_INTERVAL:-180}"
   if ! [[ "$progress_interval" =~ ^[0-9]+$ ]] || (( progress_interval < 1 )); then
@@ -279,10 +326,38 @@ if [[ "$progress" == 1 ]]; then
   fi
   progress_dir="$(mktemp -d "${TMPDIR:-/var/tmp}/gc-shard-progress.XXXXXX")"
   gc_shard_progress "progress on for ${test_pkg} shard ${shard_index} of ${shard_total}: heartbeat every ${progress_interval}s, SIGQUIT to test binaries after ${GO_TEST_SHARD_PROGRESS_QUIT_AFTER:-never}"
+  if [[ -n "$prebuilt" ]]; then
+    gc_shard_progress "prebuilt: ${prebuilt}"
+  fi
   gc_shard_progress_heartbeat "$progress_interval" "$progress_quit_after" &
   progress_pid=$!
   go_test_args=(-v "${go_test_args[@]}")
 fi
+
+# pkg_dir is where go test runs a package's test binary; a binary this script
+# runs itself runs there too.
+pkg_dir=""
+gc_shard_resolve_pkg_dir() {
+  [[ -z "$pkg_dir" ]] || return 0
+  if ! pkg_dir="$(run_in_test_env go list -f '{{.Dir}}' "$test_pkg")"; then
+    echo "go list could not resolve the directory of ${test_pkg}" >&2
+    exit 1
+  fi
+}
+
+# The flags go test hands a test binary for a product run, in its own
+# spelling, for a binary this script runs itself.
+binary_args=(-test.paniconexit0 -test.timeout="$timeout")
+if [[ -n "${GO_TEST_COUNT:-}" ]]; then
+  binary_args+=(-test.count="$GO_TEST_COUNT")
+fi
+if [[ "$progress" == 1 ]]; then
+  binary_args+=(-test.v=true)
+fi
+
+run_prebuilt_test() {
+  (cd "$pkg_dir" && run_in_test_env "$prebuilt" "$@")
+}
 
 tests=()
 if [[ ${GO_TEST_MANIFEST+x} == x ]]; then
@@ -329,26 +404,27 @@ else
   # the "no tests discovered" branch below), producing an undebuggable empty
   # shard failure. Check the status explicitly and print what go printed.
   list_status=0
-  if [[ "$progress" == 1 ]]; then
-    # Progress splits what `go test -list` does in one step: compile and link
-    # the binary, then run it under -test.list in the package directory, as
-    # go test would, so each phase gets its own time in the log.
-    build_args=()
-    if [[ -n "${GO_TEST_TAGS:-}" ]]; then
-      build_args=(-tags "$GO_TEST_TAGS")
+  if [[ -n "$prebuilt" || -n "$build_only" || "$progress" == 1 ]]; then
+    # Compile and link the binary (unless it is prebuilt), then run it under
+    # -test.list in the package directory, as go test would, so each phase
+    # gets its own time in the log.
+    if [[ -n "$prebuilt" ]]; then
+      test_bin="$prebuilt"
+    else
+      build_args=()
+      if [[ -n "${GO_TEST_TAGS:-}" ]]; then
+        build_args=(-tags "$GO_TEST_TAGS")
+      fi
+      test_bin="${build_only:-${progress_dir}/$(basename "$test_pkg").test}"
+      gc_shard_progress "compile: go test -c ${test_pkg}"
+      if ! list_output="$(run_go_test ${build_args[@]+"${build_args[@]}"} -c -o "$test_bin" "$test_pkg" 2>&1)"; then
+        echo "go test -c failed for ${test_pkg} (build/compile error); output:" >&2
+        printf '%s\n' "$list_output" >&2
+        exit 1
+      fi
+      gc_shard_progress "compile done"
     fi
-    test_bin="${progress_dir}/$(basename "$test_pkg").test"
-    gc_shard_progress "compile: go test -c ${test_pkg}"
-    if ! list_output="$(run_go_test ${build_args[@]+"${build_args[@]}"} -c -o "$test_bin" "$test_pkg" 2>&1)"; then
-      echo "go test -c failed for ${test_pkg} (build/compile error); output:" >&2
-      printf '%s\n' "$list_output" >&2
-      exit 1
-    fi
-    gc_shard_progress "compile done"
-    if ! pkg_dir="$(run_in_test_env go list -f '{{.Dir}}' ${build_args[@]+"${build_args[@]}"} "$test_pkg")"; then
-      echo "go list could not resolve the directory of ${test_pkg}" >&2
-      exit 1
-    fi
+    gc_shard_resolve_pkg_dir
     gc_shard_progress "discovery: $(basename "$test_bin") -test.list (runs TestMain)"
     list_output="$(cd "$pkg_dir" && run_in_test_env "$test_bin" -test.timeout="$timeout" -test.list '^Test' 2>&1)" || list_status=$?
     gc_shard_progress "discovery done (status ${list_status})"
@@ -370,6 +446,14 @@ else
     printf '%s\n' "$list_output" >&2
     exit 1
   fi
+fi
+
+if [[ -n "$build_only" ]]; then
+  echo "built ${test_pkg} test binary ${build_only} (${#tests[@]} tests)"
+  exit 0
+fi
+if [[ -n "$prebuilt" ]]; then
+  gc_shard_resolve_pkg_dir
 fi
 
 selected=()
@@ -425,7 +509,11 @@ chunk_total=${#regex_chunks[@]}
 echo "Running ${test_pkg} shard ${shard_index} of ${shard_total} (${#selected[@]} tests)"
 printf '  %s\n' "${selected[@]}"
 # The product run's own link and TestMain setup end at its first `=== RUN`.
-gc_shard_progress "product run: go test -v (link and TestMain setup end at the first === RUN)"
+if [[ -n "$prebuilt" ]]; then
+  gc_shard_progress "product run: $(basename "$prebuilt") -test.v (TestMain setup ends at the first === RUN)"
+else
+  gc_shard_progress "product run: go test -v (link and TestMain setup end at the first === RUN)"
+fi
 # External watchdog budget. `-timeout` bounds only the test binary, and only
 # while go's own timeout goroutine can still be scheduled — the failure this
 # guards against is precisely one that defeats it. The budget therefore adds a
@@ -495,7 +583,10 @@ for chunk_i in "${!regex_chunks[@]}"; do
     chunk_args+=(-coverprofile "$chunk_cover_profile")
   fi
   chunk_status=0
-  if [[ -n "$timing_file" ]]; then
+  if [[ -n "$prebuilt" ]]; then
+    gc_harness_run_supervised "$chunk_label" "$watchdog_deadline" "$watchdog_quit_grace" -- \
+      run_prebuilt_test "${binary_args[@]}" -test.run="${regex_chunks[$chunk_i]}" || chunk_status=$?
+  elif [[ -n "$timing_file" ]]; then
     gc_harness_run_supervised "$chunk_label" "$watchdog_deadline" "$watchdog_quit_grace" -- \
       run_observable_go_test "${chunk_args[@]}" "$test_pkg" -run "${regex_chunks[$chunk_i]}" || chunk_status=$?
   else
