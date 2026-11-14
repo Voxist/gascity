@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -244,12 +245,14 @@ func TestCheckBDLibBridgeVerifiesThePinnedRange(t *testing.T) {
 	git(fork, "checkout", "--quiet", "-B", "bridge", libRef)
 	bridge := commit(fork, "proxy_data.go", "package beads\nfunc DialProxyData() {}\n", "bridge")
 
-	depsEnv := func(base string) string {
-		return "BD_REPO=Voxist/beads\nBD_LIB_REF=" + libRef + "\nBD_LIB_BRIDGE_REF=" + bridge +
+	pins := func(repo, bridgeRef, base, head string) string {
+		return "BD_REPO=" + repo + "\nBD_LIB_REF=" + libRef + "\nBD_LIB_BRIDGE_REF=" + bridgeRef +
 			"\nBD_LIB_BRIDGE_UPSTREAM_PR=gastownhall/beads#8412\nBD_LIB_BRIDGE_UPSTREAM_BASE=" + base +
 			"\nBD_LIB_BRIDGE_UPSTREAM_HEAD=" + head + "\n"
 	}
+	depsEnv := func(base string) string { return pins("Voxist/beads", bridge, base, head) }
 	url := "file://" + hosting
+	const missing = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 	t.Run("the bridge carries the pinned range", func(t *testing.T) {
 		out, err := runBridgeCheck(t, depsEnv(base), "--github-url", url, "--pr-state", "open", "--pr-head", head)
 		assertBridgeCheck(t, out, err, "", "")
@@ -258,6 +261,71 @@ func TestCheckBDLibBridgeVerifiesThePinnedRange(t *testing.T) {
 		out, err := runBridgeCheck(t, depsEnv(unrelated), "--github-url", url, "--pr-state", "open", "--pr-head", head)
 		assertBridgeCheck(t, out, err, "is not an ancestor of BD_LIB_BRIDGE_UPSTREAM_HEAD", "")
 	})
+	// A remote that ANSWERS and refuses is not an outage. Before, these warned
+	// "unchecked: diff" and exited 0, so an unfetchable pin (a force-pushed
+	// and collected PR head) switched the diff check off.
+	t.Run("an unfetchable pinned head fails", func(t *testing.T) {
+		out, err := runBridgeCheck(t, pins("Voxist/beads", bridge, base, missing), "--github-url", url, "--pr-state", "open", "--pr-head", missing)
+		assertBridgeCheck(t, out, err, "range (BD_LIB_BRIDGE_UPSTREAM_BASE..HEAD) cannot be fetched", "")
+		if !strings.Contains(out, "not our ref") {
+			t.Fatalf("the refusal does not carry git's own answer:\n%s", out)
+		}
+	})
+	t.Run("a refused bridge ref fails", func(t *testing.T) {
+		out, err := runBridgeCheck(t, pins("Voxist/beads", missing, base, head), "--github-url", url, "--pr-state", "open", "--pr-head", head)
+		assertBridgeCheck(t, out, err, "the bridge commit BD_LIB_BRIDGE_REF "+missing+" cannot be fetched", "")
+	})
+	t.Run("a bridge repository that is not there fails", func(t *testing.T) {
+		out, err := runBridgeCheck(t, pins("Voxist/no-such-beads", bridge, base, head), "--github-url", url, "--pr-state", "open", "--pr-head", head)
+		assertBridgeCheck(t, out, err, "cannot be fetched from Voxist/no-such-beads", "")
+	})
+}
+
+// TestCheckBDLibBridgeClassifiesFetchFailures pins the classifier over the
+// stderr git really prints (captured from git 2.x against GitHub, file:// and a
+// closed port; every one exits 128, so the exit code cannot tell them apart).
+// Only a failure that never got an answer may warn; anything else fails.
+func TestCheckBDLibBridgeClassifiesFetchFailures(t *testing.T) {
+	cases := map[string]string{
+		"fatal: remote error: upload-pack: not our ref deadbeefdeadbeefdeadbeefdeadbeefdeadbeef":                                    "refused",
+		"fatal: git upload-pack: not our ref deadbeef":                                                                              "refused",
+		"fatal: couldn't find remote ref refs/heads/gone":                                                                           "refused",
+		"ERROR: Repository not found.\nfatal: Could not read from remote repository.":                                               "refused",
+		"fatal: '/x/nope' does not appear to be a git repository":                                                                   "refused",
+		"fatal: unable to access 'http://127.0.0.1:1/x/': Failed to connect to 127.0.0.1:1 after 4 ms: Could not connect to server": "transport",
+		"fatal: unable to access 'https://no-such-host.invalid/x/': Could not resolve host: no-such-host.invalid":                   "transport",
+		"fatal: unable to access 'https://github.com/x/': The requested URL returned error: 502":                                    "transport",
+		"fatal: unable to access 'https://github.com/x/': SSL certificate problem: unable to get local issuer certificate":          "transport",
+		"fatal: unable to access 'https://github.com/x/': Operation timed out after 30000 milliseconds":                             "transport",
+		"error: something nobody has seen before":                                                                                   "unknown",
+	}
+	script := "import importlib.util, json, sys\n" +
+		"from importlib.machinery import SourceFileLoader\n" +
+		"loader = SourceFileLoader('bridge', sys.argv[1])\n" +
+		"spec = importlib.util.spec_from_loader('bridge', loader)\n" +
+		"mod = importlib.util.module_from_spec(spec)\n" +
+		"loader.exec_module(mod)\n" +
+		"cases = json.loads(sys.stdin.read())\n" +
+		"print(json.dumps({k: mod.classify_fetch_failure(k) for k in cases}))\n"
+	in, err := json.Marshal(cases)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("python3", "-I", "-c", script, filepath.Join(repoRoot(t), "scripts", "check-bd-lib-bridge"))
+	cmd.Stdin = strings.NewReader(string(in))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("classify: %v\n%s", err, out)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+	for stderr, want := range cases {
+		if got[stderr] != want {
+			t.Errorf("classify_fetch_failure(%q) = %q, want %q", stderr, got[stderr], want)
+		}
+	}
 }
 
 func assertBridgeCheck(t *testing.T, out string, err error, want, wantWarn string) {

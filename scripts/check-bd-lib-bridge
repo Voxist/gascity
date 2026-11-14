@@ -28,7 +28,14 @@ fail an unrelated PR):
           absorbed it into their own commit. Drop the bridge.
   head    The PR's head has moved past the pinned head. Rebuild the bridge on
           the new head.
-  network A lookup failed. The checks it feeds are skipped and named.
+  network A lookup could not reach GitHub: a connect, DNS, TLS or timeout
+          failure, or an HTTP 5xx. The checks it feeds are skipped and named.
+
+A fetch the remote ANSWERED and refused is not an outage: a pinned SHA it does
+not have ("not our ref", a force-pushed and collected PR head), a ref it cannot
+find, or a repository that is not there fails hard, as does any fetch failure
+this script cannot recognise as transport. Otherwise an unfetchable pin would
+switch the diff check off.
 
 With no bridge declared it checks nothing and exits 0; the offline test owns
 "no undeclared replace".
@@ -68,7 +75,49 @@ DROP_STEP = (
 
 
 class NetworkError(Exception):
-    """A lookup that could not reach GitHub."""
+    """A lookup that could not reach GitHub: the only failure that warns."""
+
+
+class FetchRefused(Exception):
+    """A fetch the remote answered and refused, or a failure that is not
+    recognisably transport. It fails the check."""
+
+
+# git prints these when the remote answered and said no.
+REFUSED_SIGNATURES = (
+    "not our ref",
+    "couldn't find remote ref",
+    "repository not found",
+    "does not appear to be a git repository",
+    "upload-pack",
+)
+# git prints these when it never got an answer.
+TRANSPORT_SIGNATURES = (
+    "could not resolve host",
+    "failed to connect",
+    "could not connect to server",
+    "connection refused",
+    "connection timed out",
+    "operation timed out",
+    "timed out",
+    "connection reset",
+    "empty reply from server",
+    "ssl",
+    "tls",
+    "gnutls",
+    "the requested url returned error: 5",
+    "network is unreachable",
+)
+
+
+def classify_fetch_failure(stderr: str) -> str:
+    """Return "refused", "transport" or "unknown" for a failed git fetch."""
+    text = stderr.lower()
+    if any(sig in text for sig in REFUSED_SIGNATURES):
+        return "refused"
+    if any(sig in text for sig in TRANSPORT_SIGNATURES):
+        return "transport"
+    return "unknown"
 
 
 def parse_args() -> argparse.Namespace:
@@ -126,7 +175,11 @@ class Repo:
         try:
             self.git("fetch", "--quiet", f"--depth={depth}", url, sha)
         except subprocess.CalledProcessError as err:
-            raise NetworkError(f"git fetch {url} {sha[:12]}: {(err.stderr or '').strip() or err}") from err
+            detail = (err.stderr or "").strip() or str(err)
+            message = f"git fetch {url} {sha[:12]} (exit {err.returncode}): {detail}"
+            if classify_fetch_failure(detail) == "transport":
+                raise NetworkError(message) from err
+            raise FetchRefused(message) from err
 
     def is_ancestor(self, older: str, newer: str) -> bool:
         try:
@@ -250,6 +303,8 @@ def main() -> int:
         except NetworkError as err:
             warn(f"could not fetch the bridge commit, so its parent and diff are unchecked: {err}")
             skipped += ["parent", "diff"]
+        except FetchRefused as err:
+            errors.append(f"the bridge commit BD_LIB_BRIDGE_REF {bridge_ref} cannot be fetched from {repo}: {err}")
 
         # range and diff: the pinned upstream range, never the live PR.
         if bridge_diff is not None and not errors:
@@ -273,6 +328,11 @@ def main() -> int:
             except NetworkError as err:
                 warn(f"could not fetch the pinned {upstream_pr} range, so the bridge's diff is unchecked: {err}")
                 skipped.append("diff")
+            except FetchRefused as err:
+                errors.append(
+                    f"the pinned {upstream_pr} range (BD_LIB_BRIDGE_UPSTREAM_BASE..HEAD) cannot be fetched from "
+                    f"{owner_repo}: {err}. A pin the remote does not have (a force-pushed and collected PR head) "
+                    "must be moved to a commit it serves")
     if errors:
         return report(errors)
 
