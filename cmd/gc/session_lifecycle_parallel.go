@@ -2906,7 +2906,10 @@ func keyedProbeRoots(searchPaths []string, provider string) []string {
 // provider and agent env) names an absolute CLAUDE_CONFIG_DIR, only that
 // dir's projects, the one root the launch reads: a conversation an agent
 // left under another observed root when it moved reads gone rather than
-// resumable. Otherwise sessionTranscriptSearchPaths(cfg):
+// resumable. The dir is read from tp.Env, where the session's own identity
+// expanded it: OperatorEnv is controller-expanded, so a per-session value
+// such as "/x/claude-${GC_SESSION_NAME}" names another dir there (vp-w7cc).
+// Otherwise sessionTranscriptSearchPaths(cfg):
 //   - an absolute CLAUDE_CONFIG_DIR the launch is otherwise handed (tp.Env:
 //     passed through from gc's own environment, or an upstream's env) adds
 //     its projects after those roots, never instead of them, because a
@@ -2920,7 +2923,15 @@ func keyedProbeRoots(searchPaths []string, provider string) []string {
 // does not read, and every start reads its conversation gone.
 func launchTranscriptRoots(cfg *config.City, tp TemplateParams) []string {
 	if root, ok := workertranscript.ClaudeConfigProjectsRoot(tp.OperatorEnv); ok {
-		return []string{root}
+		_, launched := tp.Env["CLAUDE_CONFIG_DIR"]
+		if !launched {
+			return []string{root}
+		}
+		if sessionRoot, ok := workertranscript.ClaudeConfigProjectsRoot(tp.Env); ok {
+			return []string{sessionRoot}
+		}
+		// The launch carries a relative or ~ dir (an upstream's raw env
+		// replaced the operator's), which the probe cannot resolve: no pin.
 	}
 	roots := sessionTranscriptSearchPaths(cfg)
 	if root, ok := workertranscript.ClaudeConfigProjectsRoot(tp.Env); ok {

@@ -1772,6 +1772,38 @@ func nudgeObservationBusy(obs worker.LiveObservation) bool {
 	return time.Since(*obs.LastActivity) < defaultNudgePollQuiescence
 }
 
+// nudgeWaitIdleMayBlock reports whether a wait-idle Nudge through target's
+// live handle can hold the caller in WaitForIdle. It mirrors the gates of
+// worker.RuntimeHandle.nudgeWaitIdle: only a claude-family session off ACP on
+// a provider that waits for idle ever enters that wait
+// (runtimeHandleWaitIdleTimeout); ACP delivers in process and every other
+// family returns at once.
+func nudgeWaitIdleMayBlock(target nudgeTarget, sp runtime.Provider) bool {
+	if target.sessionTransport() == "acp" || target.providerFamily() != "claude" {
+		return false
+	}
+	_, ok := sp.(runtime.IdleWaitProvider)
+	return ok
+}
+
+// nudgeLiveLegBusy reports whether a mail or sling notice to the running
+// session obs observes should skip its live wait-idle leg and go straight to
+// the queue: the leg could hold the caller in WaitForIdle
+// (nudgeWaitIdleMayBlock) and the session's activity clock reads busy
+// (nudgeObservationBusy), so it would not reach an idle boundary within the
+// wait. The worker's own pre-read reads the screen and misses a busy session
+// whose screen reads idle or unknown; this reads the activity clock, as the
+// session-nudge path does. Skipping the leg skips the worker's pre-read, so
+// under the shadow switch this records the busy reading in its place
+// (wait_idle_preread).
+func nudgeLiveLegBusy(target nudgeTarget, sp runtime.Provider, obs worker.LiveObservation) bool {
+	if !obs.Running || !nudgeWaitIdleMayBlock(target, sp) || !nudgeObservationBusy(obs) {
+		return false
+	}
+	runtime.ShadowCompareIdle(sp, target.sessionName, target.sessionID, target.providerFamily(), runtime.ProgramPointWaitIdlePreread, runtime.ProgramVerdictBusy)
+	return true
+}
+
 // nudgeSessionStartOwnedByReconciler is nudgeCityUsesManagedReconciler's
 // production wiring: whether a controller, not this process, starts sessions
 // in cityPath (sessionStartOwnedByReconciler), so a nudge to one that is not
@@ -2286,7 +2318,10 @@ func deliverMailNotifyLegacy(target nudgeTarget, store beads.Store, sp runtime.P
 	if err != nil {
 		return false, err
 	}
-	if obs.Running {
+	// A busy session queues at once (nudgeLiveLegBusy) instead of holding the
+	// caller in the live leg's WaitForIdle; the queue tail below starts its
+	// poller, which delivers at the next idle boundary.
+	if obs.Running && !nudgeLiveLegBusy(target, sp, obs) {
 		handle, err := workerHandleForNudgeTarget(target, sessStore, sp)
 		if err == nil && !nudgeHandleAwaitsInteraction(handle) {
 			result, nudgeErr := handle.Nudge(context.Background(), sessionActor(session.ActorAgent, target.cityPath), worker.NudgeRequest{

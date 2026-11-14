@@ -19,6 +19,10 @@ Checks:
             2.3.x regressed DOLT_RESET('--hard')), so DOLT_VERSION never falls
             below the qualified pin. It can sit above it: Gas City keeps its
             own Dolt floor (TestDoltVersionPins), and CI runs that version.
+            When deps.env sets BD_SOURCE_REF, bd is a source build of
+            BD_REPO at that commit rather than a release: the release
+            comparison becomes a warning, and Dolt is checked against the
+            Dolt that BD_REPO@BD_SOURCE_REF qualifies.
 
 The public gastown/gascity pack pins are checked against the registry by
 scripts/update-bundled-gastown-pack --check.
@@ -190,11 +194,11 @@ def latest_release_tag(repo: str) -> str:
     return json.loads(fetch(f"https://api.github.com/repos/{repo}/releases/latest"))["tag_name"]
 
 
-def beads_qualified_dolt(tag: str) -> str:
-    script = fetch(f"https://raw.githubusercontent.com/{BEADS_REPO}/{tag}/scripts/ci/install-dolt.sh").decode()
+def beads_qualified_dolt(ref: str, repo: str = BEADS_REPO) -> str:
+    script = fetch(f"https://raw.githubusercontent.com/{repo}/{ref}/scripts/ci/install-dolt.sh").decode()
     match = re.search(r'^readonly version="([^"]+)"', script, re.M)
     if not match:
-        raise SystemExit(f"{BEADS_REPO}@{tag} scripts/ci/install-dolt.sh: no readonly version= pin")
+        raise SystemExit(f"{repo}@{ref} scripts/ci/install-dolt.sh: no readonly version= pin")
     return match.group(1)
 
 
@@ -214,15 +218,29 @@ def check_releases(root: Path, latest_bd: str | None, qualified_dolt: str | None
     errors: list[str] = []
     online = qualified_dolt is None
     latest_bd = latest_bd or latest_release_tag(BEADS_REPO)
-    qualifying_bd = latest_bd
-    if bd != latest_bd:
-        message = f"deps.env BD_VERSION={bd}, latest beads release is {latest_bd}"
-        if bd_advisory:
-            print(f"::warning title=bd pin behind latest beads release::{message}")
-            qualifying_bd = bd
-        else:
-            errors.append(message)
-    qualified_dolt = qualified_dolt or beads_qualified_dolt(qualifying_bd)
+    source_ref = env.get("BD_SOURCE_REF", "")
+    if source_ref:
+        # deps.env BD_SOURCE_REF pins a source build of BD_REPO (a bridge ahead
+        # of any beads release): BD_VERSION is that build's version string, so
+        # the release comparison cannot apply. Report it, and check Dolt
+        # against the Dolt the pinned source qualifies.
+        source_repo = env.get("BD_REPO", "") or BEADS_REPO
+        qualifying_bd = f"{source_repo}@{source_ref}"
+        print(
+            f"::warning title=bd pin is a source build::deps.env BD_VERSION={bd} is built from "
+            f"{qualifying_bd} (BD_SOURCE_REF), not a {BEADS_REPO} release; latest beads release is {latest_bd}"
+        )
+        qualified_dolt = qualified_dolt or beads_qualified_dolt(source_ref, source_repo)
+    else:
+        qualifying_bd = latest_bd
+        if bd != latest_bd:
+            message = f"deps.env BD_VERSION={bd}, latest beads release is {latest_bd}"
+            if bd_advisory:
+                print(f"::warning title=bd pin behind latest beads release::{message}")
+                qualifying_bd = bd
+            else:
+                errors.append(message)
+        qualified_dolt = qualified_dolt or beads_qualified_dolt(qualifying_bd)
     have, floor = release_version(dolt), release_version(qualified_dolt)
     if have is None:
         errors.append(f"deps.env DOLT_VERSION={dolt} is not a release version")

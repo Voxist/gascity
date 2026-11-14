@@ -1958,7 +1958,10 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store, city bead
 	obs, err := workerObserveNudgeTarget(target, sessStore, sp)
 	running := err == nil && obs.Running
 	now := time.Now()
-	if running {
+	// A busy session queues at once (nudgeLiveLegBusy) instead of holding the
+	// sling in the live leg's WaitForIdle. The tail below still reads running:
+	// a busy session gets the poller, not the asleep poke.
+	if running && !nudgeLiveLegBusy(target, sp, obs) {
 		handle, err := workerHandleForNudgeTarget(target, sessStore, sp)
 		// A session waiting on a pending interaction gets the nudge queued
 		// at once (nudgeHandleAwaitsInteraction), with no wait for idle.

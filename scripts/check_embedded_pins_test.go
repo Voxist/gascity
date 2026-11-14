@@ -155,6 +155,28 @@ func TestCheckEmbeddedPins(t *testing.T) {
 		}
 	})
 
+	// A deps.env BD_SOURCE_REF pins a source build of BD_REPO (the fork-first
+	// bridge): BD_VERSION is that build's version string, not a gastownhall/beads
+	// release, so comparing it to the latest release can never pass. The
+	// comparison is reported as a warning naming the source pin, and Dolt is
+	// still checked against the Dolt the pinned source qualifies.
+	t.Run("a source-built bd pin is advisory and still checks Dolt", func(t *testing.T) {
+		f := newEmbeddedPinsFixture(t)
+		f.write("deps.env", "DOLT_VERSION=2.6.0\nBD_REPO=Voxist/beads\nBD_VERSION=v1.95.0\nBD_SOURCE_REF="+strings.Repeat("a", 40)+"\n")
+		f.commit("source-built bd pin")
+		out, err := f.run("--skip-bundled")
+		if err != nil || !strings.Contains(out, "::warning title=bd pin is a source build::") ||
+			!strings.Contains(out, "Voxist/beads@"+strings.Repeat("a", 40)) {
+			t.Fatalf("err = %v, want a passing run with a source-build bd warning:\n%s", err, out)
+		}
+		f.write("deps.env", "DOLT_VERSION=2.1.7\nBD_REPO=Voxist/beads\nBD_VERSION=v1.95.0\nBD_SOURCE_REF="+strings.Repeat("a", 40)+"\n")
+		f.commit("dolt behind the source-built bd")
+		out, err = f.run("--skip-bundled")
+		if err == nil || !strings.Contains(out, "DOLT_VERSION=2.1.7 is older than Dolt 2.2.0, which beads Voxist/beads@"+strings.Repeat("a", 40)+" qualifies") {
+			t.Fatalf("err = %v, want a Dolt-behind failure against the source pin:\n%s", err, out)
+		}
+	})
+
 	t.Run("example carries a superseded pin", func(t *testing.T) {
 		f := newEmbeddedPinsFixture(t)
 		f.write("examples/demo/pack.toml", "[imports.core]\nversion = \"sha:f895c0ff47d6ee9334ed282a416387eb5b084d24\"\n")

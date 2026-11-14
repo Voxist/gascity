@@ -205,3 +205,78 @@ func runNightlySummaryScript(t *testing.T, script string, values map[string]stri
 	output, err := cmd.CombinedOutput()
 	return string(output), err
 }
+
+// tierCJob is the Nightly job that runs only on the canonical repository: its
+// Ollama secrets do not reach forks, so its own `if` skips it everywhere else.
+const (
+	tierCJob             = "tier-c"
+	tierCCanonicalIf     = "github.repository == 'gastownhall/gascity'"
+	tierCSkipExpectedEnv = "TIER_C_SKIP_EXPECTED"
+	tierCSkipExpectedVal = "${{ github.repository != 'gastownhall/gascity' }}"
+)
+
+// TestNightlyAggregateAcceptsTierCSkipOnlyOffCanonicalRepo keeps a fork's
+// Nightly summary from failing on the one skip the workflow itself causes:
+// tier-c's `if` skips it off gastownhall/gascity, and the summary accepts that
+// skip only when its TIER_C_SKIP_EXPECTED input is the negation of that same
+// condition. Every other non-success result still fails the summary, tier-c's
+// failure included, and the canonical repository still requires tier-c to
+// succeed.
+func TestNightlyAggregateAcceptsTierCSkipOnlyOffCanonicalRepo(t *testing.T) {
+	workflow := readNightlyAggregateWorkflow(t)
+	summaryKey, summary := requireNightlySummaryJob(t, workflow)
+	step := requireNightlySummaryRunStep(t, summaryKey, summary)
+	dependencyEnv := requireNightlyDependencyEnvironment(t, summaryKey, summary.Needs, step.Env)
+
+	tierC, ok := workflow.Jobs[tierCJob]
+	if !ok {
+		t.Fatalf("%s has no %s job", nightlyWorkflowPath, tierCJob)
+	}
+	if strings.TrimSpace(tierC.If) != tierCCanonicalIf {
+		t.Fatalf("%s job %s if = %q, want %q", nightlyWorkflowPath, tierCJob, tierC.If, tierCCanonicalIf)
+	}
+	if got := step.Env[tierCSkipExpectedEnv]; got != tierCSkipExpectedVal {
+		t.Fatalf("%s job %q env %s = %q, want %q", nightlyWorkflowPath, summaryKey, tierCSkipExpectedEnv, got, tierCSkipExpectedVal)
+	}
+
+	results := func(overrides map[string]string, skipExpected string) map[string]string {
+		env := map[string]string{tierCSkipExpectedEnv: skipExpected}
+		for _, envName := range dependencyEnv {
+			env[envName] = "success"
+		}
+		for dependency, conclusion := range overrides {
+			env[dependencyEnv[dependency]] = conclusion
+		}
+		return env
+	}
+
+	if output, err := runNightlySummaryScript(t, step.Run, results(map[string]string{tierCJob: "skipped"}, "true")); err != nil {
+		t.Fatalf("fork Nightly summary failed on the expected tier-c skip: %v\n%s", err, output)
+	}
+	for _, tc := range []struct {
+		name         string
+		overrides    map[string]string
+		skipExpected string
+	}{
+		{"canonical repo requires tier-c", map[string]string{tierCJob: "skipped"}, "false"},
+		{"fork still fails a tier-c failure", map[string]string{tierCJob: "failure"}, "true"},
+		{"fork still fails a tier-c cancel", map[string]string{tierCJob: "cancelled"}, "true"}, //nolint:misspell // GitHub needs.<job>.result wire spelling
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if output, err := runNightlySummaryScript(t, step.Run, results(tc.overrides, tc.skipExpected)); err == nil {
+				t.Fatalf("Nightly summary passed with %v (TIER_C_SKIP_EXPECTED=%s)\n%s", tc.overrides, tc.skipExpected, output)
+			}
+		})
+	}
+	for dependency := range dependencyEnv {
+		if dependency == tierCJob {
+			continue
+		}
+		t.Run("fork still fails a skipped "+dependency, func(t *testing.T) {
+			overrides := map[string]string{tierCJob: "skipped", dependency: "skipped"}
+			if output, err := runNightlySummaryScript(t, step.Run, results(overrides, "true")); err == nil {
+				t.Fatalf("Nightly summary passed with %s skipped\n%s", dependency, output)
+			}
+		})
+	}
+}

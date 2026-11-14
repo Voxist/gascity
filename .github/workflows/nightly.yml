@@ -30,8 +30,9 @@ jobs:
 
       - name: Fetch the v1.5.0-rc1 tag for the split-storage upgrade scenario
         # TestSplitStorageMigratedFormulaCompletes builds gc from this tag; the
-        # checkout above is shallow and tagless.
-        run: git fetch --no-tags --depth=1 origin +refs/tags/v1.5.0-rc1:refs/tags/v1.5.0-rc1
+        # checkout above is shallow and tagless. Fetched from gastownhall/gascity
+        # by URL, not origin: a fork's origin need not carry upstream's tags.
+        run: git fetch --no-tags --depth=1 https://github.com/gastownhall/gascity +refs/tags/v1.5.0-rc1:refs/tags/v1.5.0-rc1
 
       - name: Tier B lifecycle tests
         env:
@@ -99,7 +100,11 @@ jobs:
   # enforced it (round3 review, completeness). This is that lane: the
   # native-lane test the PR topology job runs, with the gate on. bd is built from
   # BD_CURRENT_REF exactly as the PR jobs build it, so the bd on PATH and the
-  # beads library in go.mod reach the same upstream commit.
+  # beads library in go.mod reach the same upstream commit. When deps.env sets
+  # BD_SOURCE_REF (a source-built bd pin in BD_REPO, ahead of any release), the
+  # lane builds that commit instead: it is the bd every other job installs
+  # (install-bd-archive.sh), and BD_CURRENT_REF's bd would then sit schemas
+  # behind the library and fail TestMain's schema-skew check before any test.
   beads-proxied-perf:
     name: Beads / proxied-native perf lane
     runs-on: ubuntu-latest
@@ -118,19 +123,34 @@ jobs:
         id: bd
         run: |
           set -euo pipefail
-          ref="$(grep -E '^BD_CURRENT_REF=' deps.env | cut -d= -f2)"
-          ver="$(grep -E '^BD_CURRENT_VERSION=' deps.env | cut -d= -f2)"
-          if [ -z "$ref" ] || [ -z "$ver" ]; then
-            echo "::error::BD_CURRENT_REF/BD_CURRENT_VERSION missing or empty in deps.env" >&2
-            exit 1
+          pin() { grep -E "^$1=" deps.env | cut -d= -f2 || true; }
+          source_ref="$(pin BD_SOURCE_REF)"
+          if [ -n "$source_ref" ]; then
+            repo="$(pin BD_REPO)"
+            repo="${repo:-gastownhall/beads}"
+            ref="$source_ref"
+            ver="$(pin BD_VERSION)"
+            if [ -z "$ver" ]; then
+              echo "::error::deps.env sets BD_SOURCE_REF but BD_VERSION is missing or empty" >&2
+              exit 1
+            fi
+          else
+            repo="gastownhall/beads"
+            ref="$(pin BD_CURRENT_REF)"
+            ver="$(pin BD_CURRENT_VERSION)"
+            if [ -z "$ref" ] || [ -z "$ver" ]; then
+              echo "::error::BD_CURRENT_REF/BD_CURRENT_VERSION missing or empty in deps.env" >&2
+              exit 1
+            fi
           fi
+          echo "repo=$repo" >> "$GITHUB_OUTPUT"
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
           echo "ver=$ver" >> "$GITHUB_OUTPUT"
-      - name: Build bd ${{ steps.bd.outputs.ver }} from source @ ${{ steps.bd.outputs.ref }}
+      - name: Build bd ${{ steps.bd.outputs.ver }} from ${{ steps.bd.outputs.repo }} source @ ${{ steps.bd.outputs.ref }}
         run: |
           set -euo pipefail
           src="${RUNNER_TEMP}/beads-src"
-          git clone --filter=blob:none https://github.com/gastownhall/beads "$src"
+          git clone --filter=blob:none "https://github.com/${{ steps.bd.outputs.repo }}" "$src"
           git -C "$src" checkout "${{ steps.bd.outputs.ref }}"
           mkdir -p "${HOME}/.local/bin"
           go -C "$src" build -tags gms_pure_go -o "${HOME}/.local/bin/bd" ./cmd/bd
@@ -227,7 +247,9 @@ jobs:
   # workflow-level conclusion. A skipped or cancelled job does not reliably
   # turn the run red, so this always-run aggregate -- which fails on any
   # result other than success -- is the one signal the red-streak monitor
-  # can trust.
+  # can trust. One exception: tier-c's own `if` skips it off
+  # gastownhall/gascity (its secrets never reach a fork), so there, and only
+  # there, TIER_C_SKIP_EXPECTED lets tier-c's "skipped" count as expected.
   nightly-summary:
     name: Nightly summary
     needs:
@@ -247,6 +269,7 @@ jobs:
           BEADS_PROXIED_PERF_RESULT: ${{ needs.beads-proxied-perf.result }}
           BUNDLED_PACK_PINS_RESULT: ${{ needs.bundled-pack-pins.result }}
           WAIVER_CLOCK_RESULT: ${{ needs.waiver-clock.result }}
+          TIER_C_SKIP_EXPECTED: ${{ github.repository != 'gastownhall/gascity' }}
         run: |
           python3 - <<'PY'
           import os
@@ -267,7 +290,10 @@ jobs:
               for job, result in results.items():
                   handle.write(f"| {job} | {result} |\n")
 
-          failed = {job: result for job, result in results.items() if result != "success"}
+          expected = {job: {"success"} for job in results}
+          if os.environ.get("TIER_C_SKIP_EXPECTED") == "true":
+              expected["tier-c"] = {"skipped"}
+          failed = {job: result for job, result in results.items() if result not in expected[job]}
           if failed:
               for job, result in failed.items():
                   print(f"{job}: {result}", file=sys.stderr)

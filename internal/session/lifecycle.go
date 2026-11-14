@@ -80,6 +80,33 @@ func RuntimeEnvWithSessionContext(info Info, generation, continuationEpoch int, 
 	return env
 }
 
+// ConfigEnvExpansionIdentity returns the identity keys that config-authored
+// session env (workspace, provider, and agent env in city.toml) expands
+// against, from the same Info RuntimeEnvWithSessionContext projects:
+// GC_SESSION_NAME is the runtime session name and GC_AGENT the
+// AssigneeIdentifier. Both keys are always present. One not known yet, such as
+// the session name a create generates from the bead ID, is empty, so it
+// expands empty instead of to the controller process's own identity.
+func ConfigEnvExpansionIdentity(info Info) map[string]string {
+	return map[string]string{
+		"GC_SESSION_NAME": strings.TrimSpace(info.SessionName),
+		"GC_AGENT":        AssigneeIdentifier(info),
+	}
+}
+
+// ConfigEnvExpansionIdentityForCreate is ConfigEnvExpansionIdentity for a
+// session that does not exist yet, from the alias and explicit name its create
+// asks for. Without an explicit name the session name is generated from the
+// bead ID later, so GC_SESSION_NAME is empty.
+func ConfigEnvExpansionIdentityForCreate(alias, explicitName string) map[string]string {
+	explicitName = strings.TrimSpace(explicitName)
+	return ConfigEnvExpansionIdentity(Info{
+		Alias:               strings.TrimSpace(alias),
+		SessionName:         explicitName,
+		SessionNameMetadata: explicitName,
+	})
+}
+
 func runtimePublicAlias(info Info) string {
 	if alias := strings.TrimSpace(info.Alias); alias != "" {
 		return alias

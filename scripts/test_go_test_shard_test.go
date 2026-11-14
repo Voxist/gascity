@@ -27,6 +27,14 @@ type goTestShardFixture struct {
 	probeFile       string
 	// listFile, when written, replaces the fake `go test -list` output.
 	listFile string
+	// pkgDir is the package directory the fake `go list -f` reports.
+	pkgDir string
+	// binaryArgsFile records the working directory and argv of each run of
+	// a binary the fake `go test -c` built.
+	binaryArgsFile string
+	// hangFile, when written, makes that binary wait for SIGQUIT, print a
+	// fake goroutine dump and exit 2, as a wedged test binary would.
+	hangFile string
 }
 
 func newGoTestShardFixture(t *testing.T) goTestShardFixture {
@@ -48,6 +56,33 @@ func newGoTestShardFixtureWithExit(t *testing.T, productExit int) goTestShardFix
 	allTestArgsFile := filepath.Join(tmpDir, "all-test-args")
 	probeFile := filepath.Join(tmpDir, "metadata-probes")
 	listFile := filepath.Join(tmpDir, "test-list")
+	pkgDir := filepath.Join(tmpDir, "pkg")
+	if err := os.Mkdir(pkgDir, 0o755); err != nil {
+		t.Fatalf("create fake package dir: %v", err)
+	}
+	binaryArgsFile := filepath.Join(tmpDir, "binary-args")
+	hangFile := filepath.Join(tmpDir, "hang")
+	fakeTestBinary := filepath.Join(tmpDir, "fake-test-binary")
+	// The sleep holds no descriptor of the caller's, so the shard's capture
+	// of this binary's output ends when the binary does.
+	fakeBinary := fmt.Sprintf(`#!/bin/sh
+{ pwd -P; printf '%%s\n' "$@"; } >> %q
+if [ -f %q ]; then
+  trap 'printf "goroutine 1 [fake dump]:\n"; exit 2' QUIT
+  sleep 60 </dev/null >/dev/null 2>&1 &
+  wait "$!"
+  printf 'no SIGQUIT arrived\n'
+  exit 3
+fi
+if [ -f %q ]; then
+  cat %q
+else
+  printf '%%s\n' TestAlpha TestBeta TestGamma
+fi
+`, binaryArgsFile, hangFile, listFile, listFile)
+	if err := os.WriteFile(fakeTestBinary, []byte(fakeBinary), 0o755); err != nil {
+		t.Fatalf("write fake test binary: %v", err)
+	}
 	fakeGo := fmt.Sprintf(`#!/bin/sh
 set -eu
 case "${1:-}" in
@@ -62,12 +97,24 @@ case "${1:-}" in
     esac
     ;;
   list)
+    if [ "${2:-}" = "-f" ] && [ "${3:-}" = '{{.Dir}}' ]; then
+      printf '%%s\n' %q
+      exit 0
+    fi
     [ "${2:-}" = "-m" ] || exit 99
     printf 'go-list-module\n' >> %q
     printf '%%s\n' 'github.com/gastownhall/gascity'
     ;;
   test)
     printf '%%s\n' "$@" >> %q
+    previous=''
+    for arg in "$@"; do
+      if [ "$previous" = "-o" ]; then
+        cp -f %q "$arg"
+        exit 0
+      fi
+      previous="$arg"
+    done
     is_list=0
     is_json=0
     run_regex=''
@@ -124,7 +171,7 @@ case "${1:-}" in
     ;;
   *) exit 99 ;;
 esac
-`, filepath.Join(tmpDir, "gopath"), filepath.Join(tmpDir, "gocache"), filepath.Join(tmpDir, "gomodcache"), filepath.Join(tmpDir, "gotmp"), filepath.Join(tmpDir, "goroot"), probeFile, allTestArgsFile, listFile, listFile, productArgsFile, productEnvFile, productExit)
+`, filepath.Join(tmpDir, "gopath"), filepath.Join(tmpDir, "gocache"), filepath.Join(tmpDir, "gomodcache"), filepath.Join(tmpDir, "gotmp"), filepath.Join(tmpDir, "goroot"), pkgDir, probeFile, allTestArgsFile, fakeTestBinary, listFile, listFile, productArgsFile, productEnvFile, productExit)
 	if err := os.WriteFile(filepath.Join(binDir, "go"), []byte(fakeGo), 0o755); err != nil {
 		t.Fatalf("write fake go: %v", err)
 	}
@@ -146,6 +193,9 @@ esac
 		allTestArgsFile: allTestArgsFile,
 		probeFile:       probeFile,
 		listFile:        listFile,
+		pkgDir:          pkgDir,
+		binaryArgsFile:  binaryArgsFile,
+		hangFile:        hangFile,
 	}
 }
 
@@ -426,6 +476,155 @@ func TestGoTestShardWithoutTimingPreservesDirectProductContract(t *testing.T) {
 		t.Fatalf("timing-disabled shard ran metadata probes:\n%s", probes)
 	} else if !os.IsNotExist(err) {
 		t.Fatalf("inspect timing-disabled metadata probes: %v", err)
+	}
+}
+
+// With GO_TEST_SHARD_PROGRESS=1 a shard compiles its test binary with
+// `go test -c`, runs that binary under -test.list in the package directory for
+// discovery, and runs the product with -v, printing a timestamped marker at
+// each phase boundary: a shard cancelled at its job cap then shows which phase
+// it was in (ga-05vt3.12). The product environment is unchanged, and the
+// shard's scratch directory and heartbeat do not outlive it. Bash 3.2 runs it
+// when present, as the macOS runners do.
+func TestGoTestShardProgressTimesCompileDiscoveryAndRunApart(t *testing.T) {
+	t.Parallel()
+
+	fixture := newGoTestShardFixture(t)
+	cmd := fixture.commandForShardWithBash(findBash32(t), "1", "2", "GO_TEST_SHARD_PROGRESS=1", "GO_TEST_TAGS=fixturetag")
+	status, output := runShardCommand(t, cmd)
+	if status != 23 {
+		t.Fatalf("progress shard exit = %d, want product exit 23\n%s", status, output)
+	}
+
+	allArgs := strings.Split(strings.TrimSpace(readFixtureFile(t, fixture.allTestArgsFile)), "\n")
+	compileIndex := slices.Index(allArgs, "-c")
+	if compileIndex < 0 || slices.Contains(allArgs, "-list") {
+		t.Fatalf("progress shard go invocations = %q, want a `go test -c` and no `go test -list`", allArgs)
+	}
+	wantCompile := []string{"test", "-tags", "fixturetag", "-c", "-o"}
+	if !slices.Equal(allArgs[:len(wantCompile)], wantCompile) || allArgs[len(wantCompile)+1] != "./example" {
+		t.Fatalf("compile argv = %q, want %q <binary> ./example first", allArgs, wantCompile)
+	}
+	testBinary := allArgs[len(wantCompile)]
+	if filepath.Base(testBinary) != "example.test" {
+		t.Errorf("compiled binary %q, want it named example.test as go test names it", testBinary)
+	}
+	if _, err := os.Stat(filepath.Dir(testBinary)); !os.IsNotExist(err) {
+		t.Errorf("progress scratch dir %s outlived the shard (stat err %v)", filepath.Dir(testBinary), err)
+	}
+
+	pkgDir, err := filepath.EvalSymlinks(fixture.pkgDir)
+	if err != nil {
+		t.Fatalf("resolve package dir: %v", err)
+	}
+	wantBinary := pkgDir + "\n-test.timeout=1m\n-test.list\n^Test\n"
+	if got := readFixtureFile(t, fixture.binaryArgsFile); got != wantBinary {
+		t.Fatalf("discovery run of the compiled binary (cwd, argv):\n%s\nwant:\n%s", got, wantBinary)
+	}
+
+	wantProduct := "test\n-v\n-tags\nfixturetag\n-timeout\n1m\n./example\n-run\n^(TestAlpha|TestGamma)$\n"
+	if got := readFixtureFile(t, fixture.productArgsFile); got != wantProduct {
+		t.Fatalf("progress product argv:\n%s\nwant:\n%s", got, wantProduct)
+	}
+	env := fixtureEnvironment(t, readFixtureFile(t, fixture.productEnvFile))
+	for name := range env {
+		if strings.HasPrefix(name, "GO_TEST_SHARD_PROGRESS") {
+			t.Errorf("product environment carries %s; progress belongs to the runner", name)
+		}
+	}
+
+	text := string(output)
+	markers := []string{
+		"progress on for ./example shard 1 of 2: heartbeat every 180s, SIGQUIT to test binaries after never",
+		"compile: go test -c ./example",
+		"compile done",
+		"discovery: example.test -test.list (runs TestMain)",
+		"discovery done (status 0)",
+		"product run: go test -v",
+		"example shard 1 of 2: product run done (status 23)",
+	}
+	last := -1
+	for _, marker := range markers {
+		at := strings.Index(text, marker)
+		if at < 0 {
+			t.Fatalf("progress output lacks %q:\n%s", marker, text)
+		}
+		if at < last {
+			t.Fatalf("progress marker %q is out of order:\n%s", marker, text)
+		}
+		last = at
+		lineStart := strings.LastIndex(text[:at], "\n") + 1
+		if !strings.HasPrefix(text[lineStart:], "[shard-progress ") {
+			t.Errorf("progress marker %q is not on a timestamped [shard-progress ...] line:\n%s", marker, text)
+		}
+	}
+}
+
+// A shard still running past GO_TEST_SHARD_PROGRESS_QUIT_AFTER sends SIGQUIT
+// to its live test binary, so the goroutine dump reaches the log before the
+// job cap cancels the shard with nothing (ga-05vt3.12). The heartbeat before
+// it lists the shard's live processes, the wedged binary among them. Here the
+// binary wedges in discovery, as every shard of the 2026-11-11 fork nightly
+// did before printing a single test.
+func TestGoTestShardProgressDumpsAWedgedTestBinaryPastQuitAfter(t *testing.T) {
+	t.Parallel()
+
+	fixture := newGoTestShardFixture(t)
+	if err := os.WriteFile(fixture.hangFile, nil, 0o644); err != nil {
+		t.Fatalf("arm wedged binary: %v", err)
+	}
+	cmd := fixture.commandForShardWithBash(findBash32(t), "1", "2",
+		"GO_TEST_SHARD_PROGRESS=1",
+		"GO_TEST_SHARD_PROGRESS_INTERVAL=1",
+		"GO_TEST_SHARD_PROGRESS_QUIT_AFTER=0s",
+	)
+	status, output := runShardCommand(t, cmd)
+	text := string(output)
+	if status != 1 {
+		t.Fatalf("wedged discovery shard exit = %d, want 1\n%s", status, text)
+	}
+	for _, want := range []string{
+		"heartbeat; live processes (pid ppid rss-KiB elapsed command):",
+		"example.test -test.timeout=1m -test.list ^Test",
+		"past GO_TEST_SHARD_PROGRESS_QUIT_AFTER: SIGQUIT to example.test (pid ",
+		"go test -list failed for ./example",
+		"goroutine 1 [fake dump]:",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("wedged discovery output lacks %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "no SIGQUIT arrived") {
+		t.Fatalf("the wedged binary waited out its sleep instead of being signalled:\n%s", text)
+	}
+	if _, err := os.Stat(fixture.productArgsFile); !os.IsNotExist(err) {
+		t.Fatalf("a shard whose discovery failed ran the product (stat err %v)", err)
+	}
+}
+
+func TestGoTestShardProgressRejectsInvalidSettings(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		env  string
+		want string
+	}{
+		{"zero interval", "GO_TEST_SHARD_PROGRESS_INTERVAL=0", "GO_TEST_SHARD_PROGRESS_INTERVAL must be a positive number of seconds: 0"},
+		{"duration interval", "GO_TEST_SHARD_PROGRESS_INTERVAL=3m", "GO_TEST_SHARD_PROGRESS_INTERVAL must be a positive number of seconds: 3m"},
+		{"unparseable quit-after", "GO_TEST_SHARD_PROGRESS_QUIT_AFTER=soon", "GO_TEST_SHARD_PROGRESS_QUIT_AFTER must be an <n>[s|m|h] duration: soon"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fixture := newGoTestShardFixture(t)
+			status, output := runShardCommand(t, fixture.command("GO_TEST_SHARD_PROGRESS=1", tc.env))
+			if status != 1 || !strings.Contains(string(output), tc.want) {
+				t.Fatalf("exit = %d, want 1 with %q:\n%s", status, tc.want, output)
+			}
+			if _, err := os.Stat(fixture.allTestArgsFile); !os.IsNotExist(err) {
+				t.Fatalf("invalid progress settings still ran go test (stat err %v)", err)
+			}
+		})
 	}
 }
 

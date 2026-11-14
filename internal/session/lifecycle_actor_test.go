@@ -136,3 +136,56 @@ func TestSyncRuntimeAliasRollsBackOnPartialFailure(t *testing.T) {
 		}
 	}
 }
+
+// ConfigEnvExpansionIdentity hands config-env expansion the same identity
+// RuntimeEnvWithSessionContext binds, so a ${GC_SESSION_NAME} or ${GC_AGENT}
+// in city.toml expands to what the child session actually runs with.
+func TestConfigEnvExpansionIdentityMatchesRuntimeEnv(t *testing.T) {
+	for _, info := range []Info{
+		{ID: "gc-1", SessionName: "worker-9", Alias: "rig/worker"},
+		{ID: "gc-2", SessionName: "named-7", ConfiguredNamedIdentity: "rig/named"},
+		{ID: "gc-3", SessionName: "s-gc-3"},
+	} {
+		got := ConfigEnvExpansionIdentity(info)
+		runtimeEnv := RuntimeEnvWithSessionContext(info, 0, 0, "")
+		for _, key := range []string{"GC_SESSION_NAME", "GC_AGENT"} {
+			if got[key] != runtimeEnv[key] {
+				t.Errorf("%+v: ConfigEnvExpansionIdentity[%s] = %q, want runtime value %q", info, key, got[key], runtimeEnv[key])
+			}
+		}
+	}
+}
+
+// Identity not known yet (a create whose session name the bead ID will
+// generate) is present and empty, so expansion never falls back to the
+// controller process's own identity.
+func TestConfigEnvExpansionIdentityPinsUnknownIdentityEmpty(t *testing.T) {
+	got := ConfigEnvExpansionIdentity(Info{})
+	for _, key := range []string{"GC_SESSION_NAME", "GC_AGENT"} {
+		if v, ok := got[key]; !ok || v != "" {
+			t.Errorf("ConfigEnvExpansionIdentity(Info{})[%s] = %q (present=%v), want present and empty", key, v, ok)
+		}
+	}
+}
+
+func TestConfigEnvExpansionIdentityForCreate(t *testing.T) {
+	for _, tc := range []struct {
+		alias, explicitName    string
+		wantSession, wantAgent string
+	}{
+		{alias: "rig/worker", explicitName: "worker-7", wantSession: "worker-7", wantAgent: "rig/worker"},
+		{explicitName: " worker-7 ", wantSession: "worker-7", wantAgent: "worker-7"},
+		{alias: "rig/worker", wantSession: "", wantAgent: "rig/worker"},
+		{},
+	} {
+		got := ConfigEnvExpansionIdentityForCreate(tc.alias, tc.explicitName)
+		if got["GC_SESSION_NAME"] != tc.wantSession || got["GC_AGENT"] != tc.wantAgent {
+			t.Errorf("ConfigEnvExpansionIdentityForCreate(%q, %q) = %v, want GC_SESSION_NAME=%q GC_AGENT=%q", tc.alias, tc.explicitName, got, tc.wantSession, tc.wantAgent)
+		}
+		for _, key := range []string{"GC_SESSION_NAME", "GC_AGENT"} {
+			if _, ok := got[key]; !ok {
+				t.Errorf("ConfigEnvExpansionIdentityForCreate(%q, %q) omits %s; want present", tc.alias, tc.explicitName, key)
+			}
+		}
+	}
+}

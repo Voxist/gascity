@@ -43,7 +43,7 @@
 //
 // Run:
 //
-//	git fetch --no-tags --depth=1 origin +refs/tags/v1.5.0-rc1:refs/tags/v1.5.0-rc1
+//	git fetch --no-tags --depth=1 https://github.com/gastownhall/gascity +refs/tags/v1.5.0-rc1:refs/tags/v1.5.0-rc1
 //	make test-acceptance-split-storage GC_ACCEPTANCE_BD_BIN=/path/to/bd-1.3.1
 package tierb_test
 
@@ -255,7 +255,7 @@ func buildSplitRC1FromTag(t *testing.T) string {
 	repo := helpers.FindModuleRoot()
 	commit, err := exec.Command("git", "-C", repo, "rev-parse", "--verify", "--quiet", splitRC1Tag+"^{commit}").Output()
 	if err != nil || strings.TrimSpace(string(commit)) == "" {
-		reason := fmt.Sprintf("%s is unset and tag %s is not in this clone (git fetch --no-tags --depth=1 origin +refs/tags/%s:refs/tags/%s), so there is no v1.5.0-rc1 gc for the upgraded-city scenario",
+		reason := fmt.Sprintf("%s is unset and tag %s is not in this clone (git fetch --no-tags --depth=1 https://github.com/gastownhall/gascity +refs/tags/%s:refs/tags/%s), so there is no v1.5.0-rc1 gc for the upgraded-city scenario",
 			splitRC1GCBinEnv, splitRC1Tag, splitRC1Tag, splitRC1Tag)
 		if v := strings.TrimSpace(os.Getenv(splitRequireRC1Env)); v != "" && v != "0" {
 			t.Fatalf("%s is set, so this scenario must run, but %s", splitRequireRC1Env, reason)

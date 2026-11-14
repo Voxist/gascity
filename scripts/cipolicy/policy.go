@@ -429,12 +429,31 @@ const (
 	// 4ff2418f7, in place of upstream's v1.3.4; tier-c skipped off
 	// gastownhall/gascity). Taken from the candidate digest
 	// TestCurrentWorkflowsMatchPolicy prints for the merged workflow.
+	// Bumped (ga-05vt3.9, ga-05vt3.10): two fork-red nightly setup steps.
+	// tier-b fetches tag v1.5.0-rc1 from https://github.com/gastownhall/gascity
+	// by URL instead of `origin` (a fork's origin lacks upstream's tags, so the
+	// fetch exited 128 before any test). beads-proxied-perf's resolve-pin step
+	// builds bd from deps.env BD_REPO@BD_SOURCE_REF when BD_SOURCE_REF is set
+	// (the bd install-bd-archive.sh gives every other job; BD_CURRENT_REF's bd
+	// sat schemas behind the linked library) and from gastownhall/beads at
+	// BD_CURRENT_REF otherwise, as before; the build step clones the resolved
+	// repo. No new job, trigger, permission or secret.
+	// Then (fork, ga-05vt3) nightly-summary's aggregate step gains one env
+	// value, TIER_C_SKIP_EXPECTED: ${{ github.repository !=
+	// 'gastownhall/gascity' }}, the negation of tier-c's own `if`, and its
+	// script accepts tier-c = "skipped" only when that value is "true"; every
+	// other result still fails closed. No new job, trigger, permission or
+	// secret.
 	// Re-derived for the bd v1.96.0 repin (vp-pb00j), on top of that resync:
 	// BD_VERSION (v1.95.0 -> v1.96.0) and BD_SOURCE_REF (4ff2418f7 ->
 	// 9dbe41b77) at nightly.yml's two pin sites, nothing else. Taken from the
 	// candidate digest TestCurrentWorkflowsMatchPolicy printed for the merged
 	// workflow.
-	expectedNightlyExecutionHash = "f727f2a6ce8aa27c4ba6d86e9dd9462ae03795eb5b7988eb595c687b4b83ce82"
+	// Re-derived for the merge of fork/main (d5b1f32cb, 99580d416, 5552ce60d,
+	// a11ce9b2e, 4d1b4d417) into the vp-ut6qf.2 branch: the merged nightly.yml
+	// carries both deltas above and nothing else. Taken from the candidate
+	// digest TestCurrentWorkflowsMatchPolicy printed for the merged workflow.
+	expectedNightlyExecutionHash = "7fb8b0a41de14bf4587f903be5f43573d745d8d0e2d3b3241ba9c8c94a499ace"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`. Then the claude-version

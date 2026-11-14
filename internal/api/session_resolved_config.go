@@ -40,7 +40,7 @@ func resolvedSessionConfigForProvider(
 		resolvedCommand = resolved.ACPCommandString()
 	}
 	programStatusArm, providerEnv := sessionProgramStatus(programStatus, resolved, transport)
-	sessionEnv := cityAnchoredSessionEnv(cityPath, workspaceEnv, providerEnv)
+	sessionEnv := cityAnchoredSessionEnv(cityPath, workspaceEnv, providerEnv, session.ConfigEnvExpansionIdentityForCreate(alias, explicitName))
 	return worker.NormalizeResolvedSessionConfig(worker.ResolvedSessionConfig{
 		Alias:        alias,
 		ExplicitName: explicitName,

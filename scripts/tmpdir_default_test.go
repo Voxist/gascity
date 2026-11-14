@@ -114,7 +114,7 @@ print-test-env-tmpdir:
 var shardScriptTMPDirDefaults = map[string]int{
 	"scripts/test-local-parallel":    2, // log_dir mktemp + per-job env
 	"scripts/go-test-observable":     1, // per-run log file mktemp
-	"scripts/test-go-test-shard":     1, // per-shard env
+	"scripts/test-go-test-shard":     2, // progress scratch-dir mktemp + per-shard env
 	"scripts/test-integration-shard": 1, // per-shard env
 }
 

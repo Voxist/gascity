@@ -539,19 +539,38 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 	// Step 10: Merge environment layers. Workspace.Env sits between
 	// passthrough and provider so a per-provider/agent/patch entry can
-	// still override a workspace-wide default.
+	// still override a workspace-wide default. The config layers expand
+	// GC_SESSION_NAME and GC_AGENT against this session's Step-8 values, the
+	// same two identity keys the worker and API paths use
+	// (session.ConfigEnvExpansionIdentity), so a ${GC_SESSION_NAME} names
+	// this session (vp-w7cc). Every other key expands against the
+	// controller process.
 	var workspaceEnv map[string]string
 	if p.workspace != nil {
 		workspaceEnv = p.workspace.Env
 	}
-	env := mergeEnv(passthroughEnv(), expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
+	identity := map[string]string{
+		"GC_SESSION_NAME": agentEnv["GC_SESSION_NAME"],
+		"GC_AGENT":        agentEnv["GC_AGENT"],
+	}
+	env := mergeEnv(passthroughEnv(),
+		expandEnvMapWithIdentity(workspaceEnv, identity),
+		expandEnvMapWithIdentity(resolved.Env, identity),
+		expandEnvMapWithIdentity(cfgAgent.Env, identity),
+		agentEnv)
 	processenv.PrependGCBinDirToPATH(env, env["GC_BIN"])
 	env = convergence.ScrubTokenEnv(env)
 
 	// OperatorEnv carries only the operator-authored layers (workspace,
 	// resolved provider, agent) — excluding passthrough and the generated
 	// agentEnv plumbing — so a resolved config env change fingerprints as
-	// Launch-tier identity instead of a no-op.
+	// Launch-tier identity instead of a no-op. These layers expand against
+	// the controller process, not the session identity, so two sessions of
+	// one template keep the same Launch-tier identity. The fingerprint
+	// therefore depends on the authored config AND on the expanding
+	// process's environment for any $VAR the config references. Env holds
+	// the session-expanded values; read a per-session value from there
+	// (launchTranscriptRoots does for CLAUDE_CONFIG_DIR).
 	operatorEnv := mergeEnv(expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env))
 	operatorEnv = convergence.ScrubTokenEnv(operatorEnv)
 

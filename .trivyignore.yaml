@@ -8,7 +8,7 @@
 # analyses:
 #
 #   bd, gh, dolt  rebuilt from pinned source (Dockerfile.base, Dockerfile.agent)
-#                 with the Go 1.27.3 toolchain and explicit module floors --
+#                 with the Go 1.27.4 toolchain and explicit module floors --
 #                 grpc, x/text, x/crypto, x/net, x/mod, thrift, klauspost/compress
 #                 -- each ASSERTED
 #                 on the produced artifact with `go version -m`. A regressed
