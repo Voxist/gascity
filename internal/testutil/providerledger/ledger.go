@@ -226,7 +226,7 @@ func Catalog() []Entry {
 			waivedRuntime(
 				repoSymbol("internal/runtime/k8s", "NewSeamBacked"),
 				time.Date(2026, time.December, 16, 0, 0, 0, 0, time.UTC),
-				"the provider logic passes the full shared runtime contract on a fake k8sOps (internal/runtime/k8s/conformance_test.go#TestK8sSeamBackedConformance) through newSeamBackedFromProvider, the wrapping NewSeamBacked applies; the client-go transport in realK8sOps is not exercised. That test cannot be this claim's proof: NewSeamBacked returns (runtime.Provider, error), and ValidateProofRefs requires the factory to return the constructor call directly as one of its three results, which Go does not allow for a two-result call. Closing it needs a ledger-mechanism decision: proof.go accepting an error-returning constructor, or a NewSeamBacked signature change (vp-8eqrh)."+
+				"the provider logic passes the full shared runtime contract on a fake k8sOps (internal/runtime/k8s/conformance_test.go#TestK8sSeamBackedConformance) through newSeamBackedFromProvider, the wrapping NewSeamBacked applies. It runs with prebaked=true, so the init-container staging and the workspace-ready wait are not exercised, and neither is the client-go transport in realK8sOps. That test cannot be this claim's proof: NewSeamBacked returns (runtime.Provider, error), and ValidateProofRefs requires the factory to return the constructor call directly as one of its three results, which Go does not allow for a two-result call. Closing it needs a ledger-mechanism decision: proof.go accepting an error-returning constructor, or a NewSeamBacked signature change (vp-8eqrh)."+
 					" Renewed by owner decision 2026-11-07; the underlying test gap must be fixed separately.",
 			),
 		),
@@ -338,7 +338,7 @@ func Catalog() []Entry {
 				hybridConstructor,
 				"internal/runtime/hybrid/conformance_test.go",
 				"TestHybridConformance",
-				"default no-remote-match route against two internal/runtime.Fake backends; the remote-match route is covered by the package's focused routing tests, and the real tmux+k8s backends in cmd/gc.newHybridProvider are not exercised (see runtime.builtin.hybrid)",
+				"both routes against two internal/runtime.Fake backends (every other session goes remote); the real tmux+k8s backends in cmd/gc.newHybridProvider are not exercised (see runtime.builtin.hybrid)",
 				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
 				repoSymbol("internal/runtime", "NewFake"),
 				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},

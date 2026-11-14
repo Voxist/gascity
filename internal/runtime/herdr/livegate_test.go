@@ -2,6 +2,7 @@ package herdr
 
 import (
 	"context"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -14,9 +15,19 @@ import (
 // and the reasoning behind making the tier opt-in, live in
 // internal/runtime/herdr/herdrtest: the controller's own live journeys under
 // cmd/gc need the same gate, and one predicate cannot drift from itself.
+// Whether herdr is installed is read from realHerdrPath, not a PATH lookup:
+// TestMain puts the conformance fake first on PATH, so a lookup would always
+// find it.
 func requireLiveHerdr(t *testing.T) {
 	t.Helper()
-	herdrtest.RequireLive(t)
+	if reason := herdrtest.SkipReason(
+		testing.Short(),
+		realHerdrPath != "",
+		os.Getenv("GC_FAST_UNIT"),
+		os.Getenv("GC_HERDR_LIVE_TESTS"),
+	); reason != "" {
+		t.Skip(reason)
+	}
 }
 
 // herdrRegistryIsDetectionBased reports whether the installed herdr derives its

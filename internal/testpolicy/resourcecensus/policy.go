@@ -333,7 +333,7 @@ var bootstrapPolicy = Ledger{
 			Resources:       []Resource{ResourceNetListen},
 			OwnerBead:       "ga-cp3hwi",
 			Invariant:       "runtime herdr TestMain is the checked Medium owner of the conformance suite's fake herdr session-server socket",
-			ResourceOwner:   "TestMain binds one Unix stream listener at the pid-named conformance session's socket path, so TestHerdrConformance runs against the fake herdr CLI with no herdr binary, and closes it and removes its directory after the run",
+			ResourceOwner:   "TestMain binds one Unix stream listener at the conformance session's socket path under a private XDG_CONFIG_HOME in /tmp, so TestHerdrConformance runs against the fake herdr CLI with or without a herdr binary; it closes the listener and removes that directory when the run returns, and a panic or timeout leaves them under /tmp, never under the user's ~/.config/herdr",
 			MigrationTarget: "P0.4c-listener",
 			Expires:         "2026-12-31",
 		},
