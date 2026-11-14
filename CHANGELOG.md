@@ -1305,7 +1305,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DialProxyData` is not yet on upstream beads (gastownhall/beads#8412 is
   open), so gc links it through a temporary library bridge: go.mod still
   requires `BD_LIB_REF` (3c205e0a4, schema 0074/0031) and replaces it with
-  Voxist/beads 872c78ec2, that commit plus #8412 alone. deps.env records the
+  Voxist/beads b0548453a, that commit plus #8412 alone (at head 222279cbf,
+  where each store's pool dials over a network bound to its own proxy root
+  rather than a process-wide address registry). deps.env records the
   bridge (`BD_LIB_BRIDGE_REF`, `BD_LIB_BRIDGE_UPSTREAM_PR`) under a written
   policy, `TestBDLibBridgePins` checks go.mod and go.sum against it, and
   `make check-bd-lib-bridge` (the fork's CI / preflight) fails on a wrong

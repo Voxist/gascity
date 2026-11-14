@@ -263,4 +263,4 @@ require (
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
-replace github.com/steveyegge/beads => github.com/Voxist/beads v1.1.1-0.20261113210423-872c78ec288f
+replace github.com/steveyegge/beads => github.com/Voxist/beads v1.1.1-0.20261113233511-b0548453ae8d
