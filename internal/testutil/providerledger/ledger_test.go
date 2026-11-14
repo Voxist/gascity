@@ -1686,6 +1686,9 @@ func TestCatalogReturnsIndependentEntries(t *testing.T) {
 		t.Fatal("no waived claim in the catalog; the deep-copy guard needs one")
 	}
 	first[waivedIdx].Claims[waivedClaim].Waiver.Owner = "mutated-owner"
+	// Capture the last entry's source before mutating it: which entry is last
+	// changes as source-bound entries are appended.
+	wantSourceFunction := first[len(first)-1].Source.Function
 	first[len(first)-1].Source.Function = "mutatedSource"
 
 	second := Catalog()
@@ -1713,7 +1716,7 @@ func TestCatalogReturnsIndependentEntries(t *testing.T) {
 	if second[waivedIdx].Claims[waivedClaim].Waiver.Owner != runtimeContractWaiverOwner {
 		t.Errorf("Catalog() waiver leaked mutation: %q", second[waivedIdx].Claims[waivedClaim].Waiver.Owner)
 	}
-	if second[len(second)-1].Source.Function != "resolveSessionTransportProvider" {
+	if second[len(second)-1].Source.Function != wantSourceFunction {
 		t.Errorf("Catalog() source leaked mutation: %q", second[len(second)-1].Source.Function)
 	}
 }

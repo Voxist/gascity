@@ -153,6 +153,7 @@ type Entry struct {
 func Catalog() []Entry {
 	autoConstructor := repoSymbol("internal/runtime/auto", "New")
 	guardConstructor := repoSymbol("internal/runtime/guard", "New")
+	hybridConstructor := repoSymbol("internal/runtime/hybrid", "New")
 	return []Entry{
 		reusableBuiltin(
 			"fake", "exact:fake", repoSymbol("internal/runtime", "Fake"),
@@ -216,7 +217,7 @@ func Catalog() []Entry {
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
 				time.Date(2026, time.December, 11, 0, 0, 0, 0, time.UTC),
-				"the production T3 bridge composition has focused tests but no full shared runtime contract; needs a fake-double T3 server reachable from RunProviderTests."+
+				"the production T3 bridge composition has focused tests but no full shared runtime contract. A fake T3 server exists (provider_test.go t3BridgeTestServer), so the blocker is not a missing double: Provider.Start creates or reuses the named session's thread and returns nil for an existing one, by design, so a named T3 session resumes across restarts; that conflicts with runtimetest's Start_DuplicateReturnsError. Closing it needs a contract decision: an idempotent-Start allowance in runtimetest.Options, or a not_applicable disposition for that subtest (vp-8eqrh)."+
 					" Renewed by owner decision 2026-11-07; the underlying test gap must be fixed separately.",
 			),
 		),
@@ -225,16 +226,18 @@ func Catalog() []Entry {
 			waivedRuntime(
 				repoSymbol("internal/runtime/k8s", "NewSeamBacked"),
 				time.Date(2026, time.December, 16, 0, 0, 0, 0, time.UTC),
-				"no runnable harness proves NewSeamBacked() against a live Kubernetes API plus pod exec lifecycle; every k8s package test drives newProviderWithOps(fake) instead of the real constructor, and no kind/integration-tagged harness exists in internal/runtime/k8s."+
+				"the provider logic passes the full shared runtime contract on a fake k8sOps (internal/runtime/k8s/conformance_test.go#TestK8sSeamBackedConformance) through newSeamBackedFromProvider, the wrapping NewSeamBacked applies; the client-go transport in realK8sOps is not exercised. That test cannot be this claim's proof: NewSeamBacked returns (runtime.Provider, error), and ValidateProofRefs requires the factory to return the constructor call directly as one of its three results, which Go does not allow for a two-result call. Closing it needs a ledger-mechanism decision: proof.go accepting an error-returning constructor, or a NewSeamBacked signature change (vp-8eqrh)."+
 					" Renewed by owner decision 2026-11-07; the underlying test gap must be fixed separately.",
 			),
 		),
 		builtin(
 			"herdr", "exact:herdr", nil,
-			waivedRuntime(
+			provedRuntime(
 				repoSymbol("internal/runtime/herdr", "New"),
-				time.Date(2026, time.December, 31, 0, 0, 0, 0, time.UTC),
-				"the full conformance run is an opt-in live journey (make test-herdr-live, or GC_FAST_UNIT=0) and skips in the unit lane, in short mode, and when the herdr executable is absent",
+				"internal/runtime/herdr/conformance_test.go",
+				"TestHerdrConformance",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 		),
 		builtin(
@@ -242,7 +245,7 @@ func Catalog() []Entry {
 			waivedRuntime(
 				repoSymbol("cmd/gc", "newHybridProvider"),
 				time.Date(2026, time.December, 26, 0, 0, 0, 0, time.UTC),
-				"cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract."+
+				"cmd/gc.newHybridProvider is the selected registry construction boundary and has no full shared runtime contract of its own. Its parts are covered separately: runtime.builtin.tmux is proved, the hybrid routing and wrapping is proved as runtime.composition.hybrid, and the k8s backend waits on runtime.builtin.k8s, which this claim depends on (vp-8eqrh)."+
 					" Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation, and again on 2026-11-07; the underlying test gap must be fixed separately.",
 			),
 		),
@@ -259,7 +262,7 @@ func Catalog() []Entry {
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
 				time.Date(2026, time.December, 11, 0, 0, 0, 0, time.UTC),
-				"the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract; same underlying gap as runtime.builtin.t3bridge, so it shares that claim's date (one contract closes both)."+
+				"the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract; same underlying gap as runtime.builtin.t3bridge (idempotent Start versus Start_DuplicateReturnsError), so it shares that claim's date (one contract closes both)."+
 					" Renewed by owner decision 2026-11-07; the underlying test gap must be fixed separately.",
 			),
 		),
@@ -316,6 +319,26 @@ func Catalog() []Entry {
 				"internal/runtime/auto/conformance_test.go",
 				"TestAutoConformance",
 				"default-route conformance; ACP route covered by focused auto routing tests",
+				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
+				repoSymbol("internal/runtime", "NewFake"),
+				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
+			)},
+		},
+		{
+			ID:           "runtime.composition.hybrid",
+			Roles:        []Role{RoleProductionProvider},
+			Port:         PortRuntimeProvider,
+			Constructors: []SymbolRef{hybridConstructor},
+			Source: &SourceRef{
+				File:     "cmd/gc/providers.go",
+				Function: "newHybridProvider",
+				Reason:   "the registry's tmux+k8s backend composition is runtime.builtin.hybrid; this entry is the routing/wrapping primitive it builds on",
+			},
+			Claims: []ContractClaim{provedRuntimeScoped(
+				hybridConstructor,
+				"internal/runtime/hybrid/conformance_test.go",
+				"TestHybridConformance",
+				"default no-remote-match route against two internal/runtime.Fake backends; the remote-match route is covered by the package's focused routing tests, and the real tmux+k8s backends in cmd/gc.newHybridProvider are not exercised (see runtime.builtin.hybrid)",
 				SymbolRef{ImportPath: "fmt", Name: "Sprintf"},
 				repoSymbol("internal/runtime", "NewFake"),
 				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},

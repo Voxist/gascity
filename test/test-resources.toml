@@ -340,6 +340,17 @@ expires = "2026-12-31"
 [[medium]]
 package_dir = "internal/runtime/herdr"
 package_name = "herdr"
+owner = "TestMain"
+resources = ["net_listen"]
+owner_bead = "ga-cp3hwi"
+invariant = "runtime herdr TestMain is the checked Medium owner of the conformance suite's fake herdr session-server socket"
+resource_owner = "TestMain binds one Unix stream listener at the pid-named conformance session's socket path, so TestHerdrConformance runs against the fake herdr CLI with no herdr binary, and closes it and removes its directory after the run"
+migration_target = "P0.4c-listener"
+expires = "2026-12-31"
+
+[[medium]]
+package_dir = "internal/runtime/herdr"
+package_name = "herdr"
 owner = "TestServerAliveDetectsLiveServer"
 resources = ["net_listen"]
 owner_bead = "ga-cp3hwi"
