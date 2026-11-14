@@ -137,11 +137,28 @@ func withNativeDoltOpenEnvAndCredentialCommandLocked(env map[string]string, cred
 		restoreScoped()
 		return nil, err
 	}
+	// Projected from NO map, so always unset: a direct open never goes through
+	// a bd proxy, and an ambient proxy root would make the library dial its
+	// server as a proxy data port and refuse its socket and auto-start.
+	restoreProxyRoot, err := withProjectedOpenEnvLocked(directOpenUnsetEnvKeys, nil, "")
+	if err != nil {
+		restoreRemoteMigrate()
+		restoreScoped()
+		return nil, err
+	}
 	return func() {
+		restoreProxyRoot()
 		restoreRemoteMigrate()
 		restoreScoped()
 	}, nil
 }
+
+// directOpenUnsetEnvKeys are library keys a direct native open always unsets,
+// whatever its caller's map or the ambient environment says. They stay out of
+// nativeDoltOpenEnvKeys, which the proxied window extends: there
+// BEADS_DOLT_SERVER_PROXY_ROOT is projected with the pin's root
+// (proxiedOnlyOpenEnvKeys).
+var directOpenUnsetEnvKeys = []string{"BEADS_DOLT_SERVER_PROXY_ROOT"}
 
 // BDAllowRemoteMigrateEnvKey is the beads library's opt-in for letting a
 // writable open migrate a shared or remote database's schema forward. A direct
