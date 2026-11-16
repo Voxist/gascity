@@ -2316,6 +2316,132 @@ func TestHealthScriptSurfacesQuarantineInJSON(t *testing.T) {
 	}
 }
 
+// healthScriptQuarantineCompactorEnv builds the fixture TestHealthScriptQuarantine
+// CompactorEnabledDiscriminator cases share: a city with one quarantined db
+// and a fake `gc` whose `order list --json` answer is the only thing that
+// varies between cases. No live server: lsof/nc/dolt all fail, so the
+// filesystem-only quarantine scan runs in isolation, matching
+// TestHealthScriptSurfacesQuarantineInJSON.
+func healthScriptQuarantineCompactorEnv(t *testing.T, orderListJSON string) (root, cityPath string, env []string) {
+	t.Helper()
+	cityPath = t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	created := time.Now().UTC().Add(-24 * time.Hour).Format("2006-01-02T15:04:05Z")
+	writeQuarantineMarker(t, cityPath, "hq", "post-flatten table value hash changed with row-count increase", created)
+
+	binDir := t.TempDir()
+	writeExecutable(t, filepath.Join(binDir, "gc"), fmt.Sprintf(`#!/bin/sh
+if [ "${1:-}" = "order" ] && [ "${2:-}" = "list" ]; then
+  printf '%%s\n' '%s'
+  exit 0
+fi
+exit 1
+`, orderListJSON))
+	lsofEnv := fakeLsofEnv(t, binDir, "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(binDir, "nc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(binDir, "dolt"), "#!/bin/sh\nexit 1\n")
+
+	root = repoRoot(t)
+	env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT=59997",
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		lsofEnv,
+	)
+	return root, cityPath, env
+}
+
+// TestHealthScriptQuarantineCompactorEnabledDiscriminator pins vp-y9lk0: a
+// quarantine marker reads identically whether it's (a) a safeguard actively
+// withholding a database from compaction, or (b) a fossil left by a
+// compactor that was deliberately disabled after the marker was written.
+// Both render as a quarantine[] row with a large age_sec, so each row must
+// carry a `compactor_enabled` discriminator resolved from the same
+// order-registration surface `gc order list` reads — never city.toml
+// hand-parsed a second way.
+func TestHealthScriptQuarantineCompactorEnabledDiscriminator(t *testing.T) {
+	t.Run("compactor disabled reads false (fossil, case b)", func(t *testing.T) {
+		root, _, env := healthScriptQuarantineCompactorEnv(t,
+			`{"ok":true,"orders":[{"name":"mol-dog-compactor","enabled":false},{"name":"mol-dog-doctor","enabled":true}]}`)
+		out, err := newHealthScriptCmd(root, env, "--json").Output()
+		if err != nil {
+			t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+		}
+		var report struct {
+			Quarantine []struct {
+				DB               string `json:"db"`
+				CompactorEnabled bool   `json:"compactor_enabled"`
+			} `json:"quarantine"`
+		}
+		if err := json.Unmarshal(out, &report); err != nil {
+			t.Fatalf("parse health JSON: %v\n%s", err, out)
+		}
+		if len(report.Quarantine) != 1 {
+			t.Fatalf("quarantine = %d entries, want 1\n%s", len(report.Quarantine), out)
+		}
+		if report.Quarantine[0].CompactorEnabled {
+			t.Errorf("compactor_enabled = true, want false (mol-dog-compactor is disabled):\n%s", out)
+		}
+	})
+
+	t.Run("compactor absent from registration reads false (fossil, unregistered order)", func(t *testing.T) {
+		root, _, env := healthScriptQuarantineCompactorEnv(t,
+			`{"ok":true,"orders":[{"name":"mol-dog-doctor","enabled":true}]}`)
+		out, err := newHealthScriptCmd(root, env, "--json").Output()
+		if err != nil {
+			t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+		}
+		var report struct {
+			Quarantine []struct {
+				CompactorEnabled bool `json:"compactor_enabled"`
+			} `json:"quarantine"`
+		}
+		if err := json.Unmarshal(out, &report); err != nil {
+			t.Fatalf("parse health JSON: %v\n%s", err, out)
+		}
+		if len(report.Quarantine) != 1 {
+			t.Fatalf("quarantine = %d entries, want 1\n%s", len(report.Quarantine), out)
+		}
+		if report.Quarantine[0].CompactorEnabled {
+			t.Errorf("compactor_enabled = true, want false (mol-dog-compactor is unregistered, same as disabled):\n%s", out)
+		}
+	})
+
+	t.Run("compactor enabled reads true (active safeguard, case a)", func(t *testing.T) {
+		root, _, env := healthScriptQuarantineCompactorEnv(t,
+			`{"ok":true,"orders":[{"name":"mol-dog-compactor","enabled":true}]}`)
+		out, err := newHealthScriptCmd(root, env, "--json").Output()
+		if err != nil {
+			t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+		}
+		var report struct {
+			Quarantine []struct {
+				CompactorEnabled bool `json:"compactor_enabled"`
+			} `json:"quarantine"`
+		}
+		if err := json.Unmarshal(out, &report); err != nil {
+			t.Fatalf("parse health JSON: %v\n%s", err, out)
+		}
+		if len(report.Quarantine) != 1 {
+			t.Fatalf("quarantine = %d entries, want 1\n%s", len(report.Quarantine), out)
+		}
+		if !report.Quarantine[0].CompactorEnabled {
+			t.Errorf("compactor_enabled = false, want true (mol-dog-compactor is enabled):\n%s", out)
+		}
+	})
+}
+
 // TestHealthScriptQuarantineHumanExitCode pins the operator-facing half of
 // gascity#3729: with the server reachable, a standing quarantine marker must
 // (a) print a "Compaction quarantine" section naming the db/reason/age and
