@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"reflect"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/readywork"
@@ -64,6 +68,15 @@ Every leg is read across both storage tiers, so the wisp/ephemeral rows an
 orchestration step runs as are claimable work here whether or not
 --include-ephemeral is passed.
 
+--fields narrows each row to exactly the given wire field names (repeatable
+and/or comma-separated, e.g. --fields id,priority,status,title,metadata), in
+canonical wire order regardless of the order given; an unknown name is
+rejected before any store is read. --no-description is shorthand for --fields
+with every field except description, which measured 78% of a 918KB federated
+read's payload on a routed-work query (vp-7llgp) and is bytes most callers
+that only need id/priority/status/metadata pay for nothing. The two flags
+cannot be combined. Pass neither for the full, unchanged default row.
+
 Suspended rigs are not read: rigs suspended with "gc rig suspend", or declared
 suspended_on_start and not resumed. Their agents claim nothing and the
 controller counts no demand in them, so this reads the same rigs the controller
@@ -102,14 +115,90 @@ read.`,
 type readyFlags struct {
 	query          readywork.Query
 	untilUnblocked bool
+	// fields and noDescription are the --fields/--no-description projection
+	// flags (vp-7llgp). They narrow presentation only: the query above still
+	// decides which rows match, these decide which of a matched row's fields
+	// are emitted.
+	fields        []string
+	noDescription bool
 }
 
 // validate checks every flag without reading anything.
 func (f readyFlags) validate() error {
+	if f.noDescription && len(f.fields) > 0 {
+		return fmt.Errorf("--fields and --no-description cannot be combined")
+	}
+	for _, name := range f.fields {
+		if !readyWireFieldSet[name] {
+			return fmt.Errorf("unknown --fields entry %q (known fields: %s)", name, strings.Join(readyWireFieldOrder, ", "))
+		}
+	}
 	if f.untilUnblocked {
 		return readywork.ValidateUntilUnblocked(f.query)
 	}
 	return f.query.Validate()
+}
+
+// projectionFields resolves the --fields/--no-description flags into the
+// canonical-order field list writeReadyRows projects each row onto, or nil
+// when neither flag is set — nil means "no projection", the full, unchanged
+// default row.
+func (f readyFlags) projectionFields() []string {
+	if f.noDescription {
+		out := make([]string, 0, len(readyWireFieldOrder))
+		for _, name := range readyWireFieldOrder {
+			if name != "description" {
+				out = append(out, name)
+			}
+		}
+		return out
+	}
+	if len(f.fields) == 0 {
+		return nil
+	}
+	want := make(map[string]bool, len(f.fields))
+	for _, name := range f.fields {
+		want[name] = true
+	}
+	out := make([]string, 0, len(want))
+	for _, name := range readyWireFieldOrder {
+		if want[name] {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// readyWireFieldOrder is the JSON wire order of readywork.ReadyBead's fields,
+// derived by reflection so --fields/--no-description can never drift from the
+// struct's real field set (see TestReadyWireFieldSetIsPinnedToTheHTTPBeadShape,
+// which pins the same struct from the test side).
+var readyWireFieldOrder = readyBeadJSONFieldOrder()
+
+// readyWireFieldSet is readyWireFieldOrder as a membership set, for rejecting
+// an unknown --fields entry before any store is read.
+var readyWireFieldSet = func() map[string]bool {
+	set := make(map[string]bool, len(readyWireFieldOrder))
+	for _, name := range readyWireFieldOrder {
+		set[name] = true
+	}
+	return set
+}()
+
+// readyBeadJSONFieldOrder reads readywork.ReadyBead's JSON tags in struct
+// declaration order, which is the order json.Marshal emits them in.
+func readyBeadJSONFieldOrder() []string {
+	t := reflect.TypeOf(readywork.ReadyBead{})
+	names := make([]string, 0, t.NumField())
+	for i := range t.NumField() {
+		tag := t.Field(i).Tag.Get("json")
+		name, _, _ := strings.Cut(tag, ",")
+		if name == "" || name == "-" {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names
 }
 
 // read answers the flags in-process over legs.
@@ -147,6 +236,8 @@ func registerReadyFlags(cmd *cobra.Command, flags *readyFlags, includeEphemeral,
 	cmd.Flags().BoolVar(includeEphemeral, "include-ephemeral", false, "accept --include-ephemeral for bd-ready parity (every leg already spans the wisp tier)")
 	cmd.Flags().StringVar(&opts.Status, "status", "", "list beads in this status instead of ready work: open|in_progress|blocked|closed")
 	cmd.Flags().BoolVar(&flags.untilUnblocked, "until-unblocked", false, "with --status in_progress, end the answer at its first unblocked row, resolving no row past it")
+	cmd.Flags().StringSliceVar(&flags.fields, "fields", nil, "emit only these wire field names instead of the full row (repeatable, comma-separated); unknown names are rejected")
+	cmd.Flags().BoolVar(&flags.noDescription, "no-description", false, "omit the description field alone (shorthand for --fields with every field except description); cannot combine with --fields")
 	// --json is accepted for parity with `bd ready --json`, which the generated
 	// work_query carries verbatim. The payload is a JSON array either way; the
 	// flag exists so the query does not have to be rewritten to drop it.
@@ -183,7 +274,7 @@ func cmdReady(flags readyFlags, stdout, stderr io.Writer) int {
 			// read below answers.
 			rows = readywork.CutUntilUnblocked(rows)
 		}
-		if err := writeJSON(stdout, rows); err != nil {
+		if err := writeReadyRows(stdout, rows, flags.projectionFields()); err != nil {
 			fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -217,11 +308,80 @@ func cmdReady(flags readyFlags, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := writeJSON(stdout, rows); err != nil {
+	if err := writeReadyRows(stdout, rows, flags.projectionFields()); err != nil {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	return 0
+}
+
+// writeReadyRows writes rows as the `gc ready` contract: the full wire rows
+// unchanged when fields is empty (the default), or each row narrowed to
+// exactly fields, in canonical wire order, when it is not.
+func writeReadyRows(stdout io.Writer, rows []readywork.ReadyBead, fields []string) error {
+	if len(fields) == 0 {
+		return writeJSON(stdout, rows)
+	}
+	projected, err := projectReadyRows(rows, fields)
+	if err != nil {
+		return err
+	}
+	return writeJSON(stdout, projected)
+}
+
+// readyProjectedRow is one row narrowed to a field subset. It implements
+// json.Marshaler so the emitted object's key order follows fields (the
+// canonical wire order readyFlags.projectionFields already resolved it to)
+// rather than Go's map iteration order.
+type readyProjectedRow struct {
+	fields []string
+	raw    map[string]json.RawMessage
+}
+
+func (p readyProjectedRow) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	buf.WriteByte('{')
+	first := true
+	for _, name := range p.fields {
+		val, ok := p.raw[name]
+		if !ok {
+			// An omitempty field absent from the row's own marshaling (e.g. an
+			// unset assignee) stays absent under projection too, rather than
+			// being synthesized as null or a zero value.
+			continue
+		}
+		if !first {
+			buf.WriteByte(',')
+		}
+		first = false
+		key, err := json.Marshal(name)
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(key)
+		buf.WriteByte(':')
+		buf.Write(val)
+	}
+	buf.WriteByte('}')
+	return buf.Bytes(), nil
+}
+
+// projectReadyRows narrows each row to exactly fields, which must already be
+// in canonical wire order (readyFlags.projectionFields does this).
+func projectReadyRows(rows []readywork.ReadyBead, fields []string) ([]readyProjectedRow, error) {
+	out := make([]readyProjectedRow, 0, len(rows))
+	for _, row := range rows {
+		data, err := json.Marshal(row)
+		if err != nil {
+			return nil, fmt.Errorf("marshal row %s: %w", row.ID, err)
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return nil, fmt.Errorf("decode row %s: %w", row.ID, err)
+		}
+		out = append(out, readyProjectedRow{fields: fields, raw: raw})
+	}
+	return out, nil
 }
 
 // readyAPITimeout bounds how long `gc ready` waits for the controller before it
