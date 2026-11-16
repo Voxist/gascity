@@ -66,8 +66,11 @@ const (
 type RuntimeProjection string
 
 const (
-	// RuntimeProjectionUnknown means runtime facts were not observed.
-	RuntimeProjectionUnknown RuntimeProjection = ""
+	// RuntimeProjectionUnknown means runtime facts were not observed. Deliberately
+	// NOT the zero value (ADR-0096 D4): an in-band unknown sentinel occupying ""
+	// is indistinguishable from unset. RuntimeObserved on LifecycleView is the
+	// out-of-band channel for the same fact.
+	RuntimeProjectionUnknown RuntimeProjection = "unknown"
 	// RuntimeProjectionAlive means the runtime session is present and alive.
 	RuntimeProjectionAlive RuntimeProjection = "alive"
 	// RuntimeProjectionMissing means no matching runtime session was found.
@@ -262,10 +265,15 @@ type LifecycleView struct {
 	ContinuityEligible bool
 	Terminal           bool
 	CountsAgainstCap   bool
-	RuntimeAlive       bool
-	RuntimeAttached    bool
-	ReconciledState    State
-	ResetContinuation  bool
+	// RuntimeObserved reports whether runtime facts were observed at all — the
+	// out-of-band complement of RuntimeProjectionUnknown (ADR-0096 D4). A
+	// consumer that ignores the sentinel can consult this instead of
+	// string-matching, and never misreads "unknown" as a real projection.
+	RuntimeObserved   bool
+	RuntimeAlive      bool
+	RuntimeAttached   bool
+	ReconciledState   State
+	ResetContinuation bool
 }
 
 // HasBlocker reports whether the view contains the blocker.
@@ -593,6 +601,7 @@ func ProjectLifecycle(input LifecycleInput) LifecycleView {
 		ContinuityEligible: continuityEligible,
 		Terminal:           terminal,
 		CountsAgainstCap:   countsAgainstCapacity(baseState),
+		RuntimeObserved:    input.Runtime.Observed,
 		RuntimeAlive:       input.Runtime.Alive,
 		RuntimeAttached:    input.Runtime.Attached,
 		ReconciledState:    reconciledState,
