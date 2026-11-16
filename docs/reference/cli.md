@@ -3929,6 +3929,15 @@ Every leg is read across both storage tiers, so the wisp/ephemeral rows an
 orchestration step runs as are claimable work here whether or not
 --include-ephemeral is passed.
 
+--fields narrows each row to exactly the given wire field names (repeatable
+and/or comma-separated, e.g. --fields id,priority,status,title,metadata), in
+canonical wire order regardless of the order given; an unknown name is
+rejected before any store is read. --no-description is shorthand for --fields
+with every field except description, which measured 78% of a 918KB federated
+read's payload on a routed-work query (vp-7llgp) and is bytes most callers
+that only need id/priority/status/metadata pay for nothing. The two flags
+cannot be combined. Pass neither for the full, unchanged default row.
+
 Suspended rigs are not read: rigs suspended with "gc rig suspend", or declared
 suspended_on_start and not resumed. Their agents claim nothing and the
 controller counts no demand in them, so this reads the same rigs the controller
@@ -3956,10 +3965,12 @@ gc ready [flags]
 | `--assignee` | string |  | only work assigned to exactly this identity |
 | `--exclude-label` | stringArray |  | drop beads carrying this label (repeatable) |
 | `--exclude-type` | stringArray |  | drop beads of this issue type (repeatable) |
+| `--fields` | stringSlice |  | emit only these wire field names instead of the full row (repeatable, comma-separated); unknown names are rejected |
 | `--include-ephemeral` | bool |  | accept --include-ephemeral for bd-ready parity (every leg already spans the wisp tier) |
 | `--json` | bool | `true` | accept --json for bd-ready parity (output is always a JSON array) |
 | `--limit` | int |  | max beads to return (0 = unlimited) |
 | `--metadata-field` | stringArray |  | require metadata "key=value", or bare "key" for any non-empty value (repeatable) |
+| `--no-description` | bool |  | omit the description field alone (shorthand for --fields with every field except description); cannot combine with --fields |
 | `--sort` | string |  | sort order: priority\|hybrid\|oldest\|newest (default: priority, the canonical ready order) |
 | `--status` | string |  | list beads in this status instead of ready work: open\|in_progress\|blocked\|closed |
 | `--unassigned` | bool |  | only unassigned work |

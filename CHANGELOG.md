@@ -969,6 +969,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`gc ready --fields`/`--no-description` narrow a row to only the wire
+  fields a caller needs (vp-7llgp).** `--fields id,priority,status,...`
+  (repeatable, comma-separated) emits exactly those field names, in
+  canonical wire order regardless of the order given; an unknown name is
+  rejected before any store is read. `--no-description` is shorthand for
+  every field but `description`, which measured 78% of a federated read's
+  918KB/290-row payload — most callers that only need
+  id/priority/status/metadata were paying for description bodies they
+  never used. Neither flag changes the default: pass neither for the full,
+  unchanged row.
+
 - **API: optional fields so the CLI can print its local schema on the
   supervisor route (#8453).** All are optional, so existing clients are
   unaffected:
