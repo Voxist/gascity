@@ -328,6 +328,59 @@ func TestCheckBDLibBridgeClassifiesFetchFailures(t *testing.T) {
 	}
 }
 
+// TestBDLibBridgeFetchRetriesOnlyTheShallowRace pins Repo.fetch's one retry:
+// git's local "shallow file has changed since we read it" race (which failed
+// #289's CI as if the remote had refused the pin) is retried, a race that
+// persists still fails closed, and a real refusal is never retried.
+func TestBDLibBridgeFetchRetriesOnlyTheShallowRace(t *testing.T) {
+	script := "import importlib.util, json, subprocess, sys\n" +
+		"from importlib.machinery import SourceFileLoader\n" +
+		"loader = SourceFileLoader('bridge', sys.argv[1])\n" +
+		"spec = importlib.util.spec_from_loader('bridge', loader)\n" +
+		"mod = importlib.util.module_from_spec(spec)\n" +
+		"loader.exec_module(mod)\n" +
+		"race = 'fatal: shallow file has changed since we read it'\n" +
+		"refusal = 'fatal: remote error: upload-pack: not our ref deadbeef'\n" +
+		"def run(failures):\n" +
+		"    repo = mod.Repo.__new__(mod.Repo)\n" +
+		"    calls = []\n" +
+		"    def git(*args):\n" +
+		"        calls.append(args)\n" +
+		"        if len(calls) <= len(failures):\n" +
+		"            raise subprocess.CalledProcessError(128, ['git'], stderr=failures[len(calls) - 1])\n" +
+		"        return ''\n" +
+		"    repo.git = git\n" +
+		"    try:\n" +
+		"        repo.fetch('https://example.invalid/x', 'a' * 40, 1)\n" +
+		"        outcome = 'ok'\n" +
+		"    except mod.FetchRefused:\n" +
+		"        outcome = 'refused'\n" +
+		"    except mod.NetworkError:\n" +
+		"        outcome = 'transport'\n" +
+		"    return [outcome, len(calls)]\n" +
+		"print(json.dumps({'race_once': run([race]), 'race_twice': run([race, race]), 'refusal': run([refusal])}))\n"
+	cmd := exec.Command("python3", "-I", "-c", script, filepath.Join(repoRoot(t), "scripts", "check-bd-lib-bridge"))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("fetch harness: %v\n%s", err, out)
+	}
+	var got map[string][]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+	want := map[string][]any{
+		"race_once":  {"ok", float64(2)},
+		"race_twice": {"refused", float64(2)},
+		"refusal":    {"refused", float64(1)},
+	}
+	for name, w := range want {
+		g := got[name]
+		if len(g) != 2 || g[0] != w[0] || g[1] != w[1] {
+			t.Errorf("%s: got (outcome, git calls) %v, want %v", name, g, w)
+		}
+	}
+}
+
 func assertBridgeCheck(t *testing.T, out string, err error, want, wantWarn string) {
 	t.Helper()
 	switch {

@@ -61,6 +61,9 @@ UPSTREAM_PR_RE = re.compile(r"^(gastownhall/beads)#([1-9][0-9]*)$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 # How far behind the pinned head the fork point may sit in the shallow fetch.
 RANGE_DEPTH = 200
+# git's local .git/shallow race message, retried up to FETCH_ATTEMPTS times.
+SHALLOW_RACE = "shallow file has changed since we read it"
+FETCH_ATTEMPTS = 2
 
 REBUILD_STEP = (
     "rebuild the bridge: squash BD_LIB_BRIDGE_UPSTREAM_BASE..<new head> onto BD_LIB_REF as one BD_REPO commit, "
@@ -171,15 +174,30 @@ class Repo:
             ["git", "-C", self.path, *args], check=True, capture_output=True, text=True
         ).stdout
 
-    def fetch(self, url: str, sha: str, depth: int) -> None:
+    def has_commit(self, sha: str) -> bool:
         try:
-            self.git("fetch", "--quiet", f"--depth={depth}", url, sha)
-        except subprocess.CalledProcessError as err:
-            detail = (err.stderr or "").strip() or str(err)
-            message = f"git fetch {url} {sha[:12]} (exit {err.returncode}): {detail}"
-            if classify_fetch_failure(detail) == "transport":
-                raise NetworkError(message) from err
-            raise FetchRefused(message) from err
+            self.git("cat-file", "-e", f"{sha}^{{commit}}")
+            return True
+        except subprocess.CalledProcessError:
+            return False
+
+    def fetch(self, url: str, sha: str, depth: int) -> None:
+        for attempt in range(1, FETCH_ATTEMPTS + 1):
+            try:
+                self.git("fetch", "--quiet", f"--depth={depth}", url, sha)
+                return
+            except subprocess.CalledProcessError as err:
+                detail = (err.stderr or "").strip() or str(err)
+                # git rewrites .git/shallow at the end of a --depth fetch and
+                # refuses if it moved underneath it. That is a local race, not
+                # an answer from the remote, so it is retried, never read as
+                # a refusal of the pin.
+                if SHALLOW_RACE in detail.lower() and attempt < FETCH_ATTEMPTS:
+                    continue
+                message = f"git fetch {url} {sha[:12]} (exit {err.returncode}): {detail}"
+                if classify_fetch_failure(detail) == "transport":
+                    raise NetworkError(message) from err
+                raise FetchRefused(message) from err
 
     def is_ancestor(self, older: str, newer: str) -> bool:
         try:
@@ -315,7 +333,12 @@ def main() -> int:
                 else:
                     url = f"{args.github_url}/{owner_repo}"
                     git.fetch(url, up_head, RANGE_DEPTH)
-                    git.fetch(url, up_base, 1)
+                    # A PR range is far shorter than RANGE_DEPTH, so the head's
+                    # fetch normally brings the base along; a second shallow
+                    # fetch of an object already present only rewrites
+                    # .git/shallow (the race behind a CI failure on #289).
+                    if not git.has_commit(up_base):
+                        git.fetch(url, up_base, 1)
                     if git.is_ancestor(up_base, up_head):
                         pr_diff = git.git("diff", up_base, up_head)
                     else:

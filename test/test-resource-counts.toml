@@ -3013,7 +3013,7 @@ medium = 1
 [[count]]
 path = "scripts/check_bd_lib_bridge_test.go"
 resource = "subprocess"
-calls = 3
+calls = 4
 
 [[count]]
 path = "scripts/check_core_boundary_test.go"
