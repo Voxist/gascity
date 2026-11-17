@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/builtinpacks"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
 )
@@ -335,4 +337,318 @@ func TestImportStatusCommandRegistered(t *testing.T) {
 		}
 	}
 	t.Fatal("gc import status subcommand not registered")
+}
+
+// bundledImportStatusFixture writes a city whose root pack imports the
+// bundled core pack, locked at lockCommit (or unlocked when lockCommit is
+// empty), and returns the authored source.
+func bundledImportStatusFixture(t *testing.T, dir, lockCommit string) string {
+	t.Helper()
+	source := builtinpacks.MustSource("core")
+	bundledImportStatusFixtureFor(t, dir, source, lockCommit)
+	return source
+}
+
+// bundledImportStatusFixtureFor writes a city whose root pack imports source
+// as [imports.dep], locked at lockCommit (or unlocked when it is empty).
+func bundledImportStatusFixtureFor(t *testing.T, dir, source, lockCommit string) {
+	t.Helper()
+	version := config.BundledSourcePinnedVersion(source)
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	name := "core"
+	if source != builtinpacks.MustSource("core") {
+		name = "dep"
+	}
+	writePackToml(t, dir, fmt.Sprintf(`[pack]
+name = "demo"
+schema = 1
+
+[imports.%s]
+source = %q
+version = %q
+`, name, source, version))
+	if lockCommit == "" {
+		return
+	}
+	if err := packman.WriteLockfile(fsys.OSFS{}, dir, &packman.Lockfile{
+		Schema: packman.LockfileSchema,
+		Packs: map[string]packman.LockedPack{
+			source: {Version: "sha:" + lockCommit, Commit: lockCommit, Fetched: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+}
+
+func canonicalBundledCommit(t *testing.T) string {
+	t.Helper()
+	commit := strings.TrimPrefix(config.BundledSourcePinnedVersion(builtinpacks.MustSource("core")), "sha:")
+	if commit == "" {
+		t.Fatal("no canonical bundled pin")
+	}
+	return commit
+}
+
+func setCommitForTest(t *testing.T, rev string) {
+	t.Helper()
+	orig := commit
+	commit = rev
+	t.Cleanup(func() { commit = orig })
+}
+
+func importStatusTextRow(t *testing.T, out, name string) []string {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, name+"\t") {
+			cols := strings.Split(line, "\t")
+			if len(cols) != 6 {
+				t.Fatalf("row has %d columns, want 6: %q", len(cols), line)
+			}
+			return cols
+		}
+	}
+	t.Fatalf("no %s row in output:\n%s", name, out)
+	return nil
+}
+
+// TestImportStatusBundledSourceRendersBuiltin pins the vp-fkrl text
+// contract: a bundled source locked at the canonical pin is served from the
+// running binary's embedded packs, so its row names that binary and the
+// embedded content hash instead of presenting the canonical pin as the
+// provenance of the served bytes.
+func TestImportStatusBundledSourceRendersBuiltin(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	pin := canonicalBundledCommit(t)
+	bundledImportStatusFixture(t, dir, pin)
+	setCommitForTest(t, "gcbuild456def")
+
+	var stdout, stderr bytes.Buffer
+	if code := doImportStatus(dir, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	cols := importStatusTextRow(t, stdout.String(), "pack:core")
+	if cols[1] != "builtin:core (gc gcbuild456def)" {
+		t.Errorf("source column = %q, want the builtin rendering naming the serving build", cols[1])
+	}
+	if cols[3] != "builtin" {
+		t.Errorf("kind column = %q, want builtin", cols[3])
+	}
+	wantHash, err := builtinpacks.SyntheticContentHash()
+	if err != nil {
+		t.Fatalf("SyntheticContentHash: %v", err)
+	}
+	if cols[5] != "content:"+wantHash {
+		t.Errorf("commit column = %q, want content:%s (what this binary serves)", cols[5], wantHash)
+	}
+	if strings.Contains(cols[5], pin) {
+		t.Errorf("commit column = %q: the canonical pin is presented as the served content", cols[5])
+	}
+	if cols[4] != "sha:"+pin {
+		t.Errorf("version column = %q, want the locked pin sha:%s", cols[4], pin)
+	}
+}
+
+// TestImportStatusBundledSourceUnstampedBuildRendersUnknown pins that a
+// binary without a build stamp says so instead of guessing from the pin.
+// An unstamped production binary resolves its commit to "unknown"
+// (cmd_version.go), so that is the value under test alongside empty.
+func TestImportStatusBundledSourceUnstampedBuildRendersUnknown(t *testing.T) {
+	for _, rev := range []string{"unknown", ""} {
+		t.Run(fmt.Sprintf("commit=%q", rev), func(t *testing.T) {
+			clearGCEnv(t)
+			dir := t.TempDir()
+			bundledImportStatusFixture(t, dir, canonicalBundledCommit(t))
+			setCommitForTest(t, rev)
+
+			var stdout, stderr bytes.Buffer
+			if code := doImportStatus(dir, false, &stdout, &stderr); code != 0 {
+				t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+			}
+			cols := importStatusTextRow(t, stdout.String(), "pack:core")
+			if cols[1] != "builtin:core (gc unknown)" {
+				t.Errorf("source column = %q, want builtin:core (gc unknown)", cols[1])
+			}
+
+			stdout.Reset()
+			if code := doImportStatus(dir, true, &stdout, &stderr); code != 0 {
+				t.Fatalf("json code = %d, stderr = %s", code, stderr.String())
+			}
+			if strings.Contains(stdout.String(), `"built_by"`) {
+				t.Errorf("JSON carries built_by for an unstamped binary; want it omitted:\n%s", stdout.String())
+			}
+		})
+	}
+}
+
+// TestImportStatusBundledSourceSupersededPinIsBuiltin pins parity with
+// install: a superseded canonical pin is still served from the embedded
+// packs (config.isSupersededEmbeddedOnlyPin), so its row is builtin too.
+func TestImportStatusBundledSourceSupersededPinIsBuiltin(t *testing.T) {
+	if len(config.SupersededBundledPackImportVersions) == 0 {
+		t.Fatal("no superseded bundled pins to test")
+	}
+	for _, version := range config.SupersededBundledPackImportVersions {
+		t.Run(version, func(t *testing.T) {
+			clearGCEnv(t)
+			dir := t.TempDir()
+			bundledImportStatusFixture(t, dir, strings.TrimPrefix(version, "sha:"))
+
+			var stdout, stderr bytes.Buffer
+			if code := doImportStatus(dir, true, &stdout, &stderr); code != 0 {
+				t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+			}
+			var doc ImportStatusJSON
+			if err := json.Unmarshal(stdout.Bytes(), &doc); err != nil {
+				t.Fatalf("Unmarshal: %v\n%s", err, stdout.String())
+			}
+			if len(doc.Imports) != 1 {
+				t.Fatalf("imports = %+v, want one entry", doc.Imports)
+			}
+			if got := doc.Imports[0]; got.Kind != "builtin" || got.Builtin == nil || got.Builtin.Pack != "core" {
+				t.Errorf("entry = %+v, want kind builtin served by pack core", got)
+			}
+		})
+	}
+}
+
+// TestImportStatusBundledSubpackIsBuiltin pins the registered nested
+// subpack (gc-roles inside the gascity pack): at its parent's canonical pin
+// it is served from the embedded tree and reports its own name.
+func TestImportStatusBundledSubpackIsBuiltin(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	source := config.PublicGascityRolesPackSource
+	if name, ok := builtinpacks.NameForSource(source); !ok || name != "gc-roles" {
+		t.Fatalf("NameForSource(%q) = %q, %v; want gc-roles", source, name, ok)
+	}
+	pin := strings.TrimPrefix(config.BundledSourcePinnedVersion(source), "sha:")
+	bundledImportStatusFixtureFor(t, dir, source, pin)
+	setCommitForTest(t, "gcbuild111bbb")
+
+	var stdout, stderr bytes.Buffer
+	if code := doImportStatus(dir, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	cols := importStatusTextRow(t, stdout.String(), "pack:dep")
+	if cols[1] != "builtin:gc-roles (gc gcbuild111bbb)" || cols[3] != "builtin" {
+		t.Errorf("row = %q, want builtin:gc-roles (gc gcbuild111bbb) with kind builtin", cols)
+	}
+}
+
+// TestBundledPackBuilderNormalizesUnstamped pins the init handoff: the
+// unstamped commit default "unknown" becomes "" so markers and JSON omit
+// built_by instead of recording a placeholder as a revision.
+func TestBundledPackBuilderNormalizesUnstamped(t *testing.T) {
+	for in, want := range map[string]string{
+		"unknown":      "",
+		"":             "",
+		"8086e0bc4":    "8086e0bc4",
+		"abc123-dirty": "abc123-dirty",
+	} {
+		if got := bundledPackBuilder(in); got != want {
+			t.Errorf("bundledPackBuilder(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestImportStatusBundledSourceJSON pins the machine-readable surface: kind
+// is "builtin" and the builtin object names the serving build and the
+// served content hash, while the authored source and the lock pin stay
+// unchanged for drift checkers that join on them.
+func TestImportStatusBundledSourceJSON(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	pin := canonicalBundledCommit(t)
+	source := bundledImportStatusFixture(t, dir, pin)
+	setCommitForTest(t, "gcbuild789ghi")
+
+	var stdout, stderr bytes.Buffer
+	if code := doImportStatus(dir, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	var doc ImportStatusJSON
+	if err := json.Unmarshal(stdout.Bytes(), &doc); err != nil {
+		t.Fatalf("Unmarshal: %v\n%s", err, stdout.String())
+	}
+	if len(doc.Imports) != 1 {
+		t.Fatalf("imports = %+v, want one entry", doc.Imports)
+	}
+	entry := doc.Imports[0]
+	if entry.Kind != "builtin" {
+		t.Errorf("Kind = %q, want builtin", entry.Kind)
+	}
+	if entry.Builtin == nil {
+		t.Fatalf("Builtin is nil: machine consumers cannot tell the bytes come from the binary")
+	}
+	wantHash, err := builtinpacks.SyntheticContentHash()
+	if err != nil {
+		t.Fatalf("SyntheticContentHash: %v", err)
+	}
+	want := ImportStatusBuiltin{Pack: "core", BuiltBy: "gcbuild789ghi", ContentHash: wantHash}
+	if *entry.Builtin != want {
+		t.Errorf("Builtin = %+v, want %+v", *entry.Builtin, want)
+	}
+	if entry.Source != source {
+		t.Errorf("Source = %q, want the authored source %q unchanged", entry.Source, source)
+	}
+	if entry.Pin == nil || entry.Pin.Commit != pin {
+		t.Errorf("Pin = %+v, want the lock pin %s preserved", entry.Pin, pin)
+	}
+}
+
+// TestImportStatusBundledSourceOffCanonicalPinStaysRemote pins the boundary
+// the original vp-fkrl change missed: a bundled source locked at any commit
+// other than a canonical pin is fetched from git, not served from the
+// binary, so it must stay a plain remote row. Likewise an unlocked bundled
+// source has no resolution to attribute to the binary.
+func TestImportStatusBundledSourceOffCanonicalPinStaysRemote(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		lockCommit string
+	}{
+		{name: "locked off the canonical pin", lockCommit: "0123456789abcdef0123456789abcdef01234567"},
+		{name: "unlocked", lockCommit: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			dir := t.TempDir()
+			bundledImportStatusFixture(t, dir, tc.lockCommit)
+
+			var stdout, stderr bytes.Buffer
+			if code := doImportStatus(dir, true, &stdout, &stderr); code != 0 {
+				t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+			}
+			var doc ImportStatusJSON
+			if err := json.Unmarshal(stdout.Bytes(), &doc); err != nil {
+				t.Fatalf("Unmarshal: %v\n%s", err, stdout.String())
+			}
+			if len(doc.Imports) != 1 {
+				t.Fatalf("imports = %+v, want one entry", doc.Imports)
+			}
+			if got := doc.Imports[0]; got.Kind != "remote" || got.Builtin != nil {
+				t.Errorf("entry = %+v, want kind remote with no builtin object", got)
+			}
+		})
+	}
+}
+
+// TestImportStatusBundledSourceJSONProductionRun validates the builtin
+// entry shape against the embedded result schema through the production
+// CLI path.
+func TestImportStatusBundledSourceJSONProductionRun(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	bundledImportStatusFixture(t, dir, canonicalBundledCommit(t))
+	setCommitForTest(t, "gcbuild000aaa")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--city", dir, "import", "status", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("run(import status --json) = %d, stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stdout.String(), `"kind": "builtin"`) {
+		t.Fatalf("fixture emitted no builtin entry, so the schema validation does not cover that shape:\n%s", stdout.String())
+	}
+	assertTopLevelOKTrue(t, stdout.Bytes())
+	validateJSONAgainstResultSchema(t, []string{"import", "status"}, stdout.Bytes())
 }

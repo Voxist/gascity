@@ -781,3 +781,54 @@ func TestSourceLayoutRecognizesOnlyRegisteredSubpacks(t *testing.T) {
 		})
 	}
 }
+
+// TestMaterializeSyntheticRepoRecordsBuiltBy pins the descriptor's builder
+// provenance (vp-fkrl): the marker records the gc build that materialized
+// the cache, never a value derived from the canonical pin. The pin fields
+// stay as they were, because validation and the cache key depend on them.
+func TestMaterializeSyntheticRepoRecordsBuiltBy(t *testing.T) {
+	readMarker := func(t *testing.T) syntheticMarker {
+		t.Helper()
+		dst := filepath.Join(t.TempDir(), "cache")
+		if err := MaterializeSyntheticRepo(dst, Repository, testCommit); err != nil {
+			t.Fatalf("MaterializeSyntheticRepo: %v", err)
+		}
+		data, err := os.ReadFile(filepath.Join(dst, syntheticMarkerFile))
+		if err != nil {
+			t.Fatalf("ReadFile(marker): %v", err)
+		}
+		var marker syntheticMarker
+		if err := toml.Unmarshal(data, &marker); err != nil {
+			t.Fatalf("Unmarshal(marker): %v", err)
+		}
+		if err := ValidateSyntheticRepo(dst, Repository, testCommit); err != nil {
+			t.Fatalf("ValidateSyntheticRepo after stamping built_by: %v", err)
+		}
+		return marker
+	}
+	setBuiltBy := func(t *testing.T, rev string) {
+		t.Helper()
+		orig := BuiltBy
+		BuiltBy = rev
+		t.Cleanup(func() { BuiltBy = orig })
+	}
+
+	t.Run("records the materializing build", func(t *testing.T) {
+		setBuiltBy(t, "gcbuild123abc")
+		marker := readMarker(t)
+		if marker.BuiltBy != "gcbuild123abc" {
+			t.Errorf("marker.BuiltBy = %q, want the materializing build", marker.BuiltBy)
+		}
+		if marker.Commit != testCommit {
+			t.Errorf("marker.Commit = %q, want the canonical pin %q unchanged", marker.Commit, testCommit)
+		}
+	})
+
+	t.Run("unstamped build stays empty", func(t *testing.T) {
+		setBuiltBy(t, "")
+		marker := readMarker(t)
+		if marker.BuiltBy != "" {
+			t.Errorf("marker.BuiltBy = %q, want empty: an unstamped binary must not borrow the pin %q", marker.BuiltBy, marker.Commit)
+		}
+	})
+}

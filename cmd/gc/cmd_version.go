@@ -7,6 +7,7 @@ import (
 	"runtime/debug"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/spf13/cobra"
 )
 
@@ -48,6 +49,10 @@ func init() {
 	info, ok := debug.ReadBuildInfo()
 	version, commit, date = resolveBuildMetadata(version, commit, date, ok, info)
 	beadsVersion = resolveBeadsVersion(ok, info)
+	// Bundled-pack cache markers record the build that materialized them.
+	// The resolved revision exists only here, so it is handed to
+	// builtinpacks before any command can materialize a cache.
+	builtinpacks.BuiltBy = bundledPackBuilder(commit)
 }
 
 // resolveBeadsVersion reports the effective linked beads library version
@@ -233,4 +238,14 @@ type versionJSONResult struct {
 	BeadsVersion  string `json:"beads_version"`
 	BuildBase     string `json:"build_base"`
 	Long          bool   `json:"long"`
+}
+
+// bundledPackBuilder returns the build revision recorded as a bundled pack's
+// builder: commit as resolved, or "" for an unstamped binary, whose commit
+// keeps its "unknown" default. Empty is what markers and JSON omit.
+func bundledPackBuilder(commit string) string {
+	if commit == "unknown" {
+		return ""
+	}
+	return commit
 }

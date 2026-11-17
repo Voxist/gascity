@@ -72,6 +72,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **`gc import status --json` reports bundled packs at their canonical pin
+  as kind `builtin`, not `remote` (vp-fkrl).** Before, every git-backed
+  import had kind `remote`. Now a bundled pack (core, bd, dolt, gastown,
+  gascity, or the gc-roles subpack) locked at its canonical pin has kind
+  `builtin` and an optional `builtin` object (`pack`, `built_by`,
+  `content_hash`), because gc serves its bytes from the binary and never
+  fetches that commit. A superseded canonical pin counts too, but only for
+  gascity.git sources (core, bd, dolt, and the legacy gascity.git
+  `examples/` gastown source); the gascity-packs sources (gastown, gascity,
+  gc-roles) are `builtin` only at their canonical pin. In a typical city
+  that is most rows. `source`, `constraint` and `pin` are unchanged. A drift
+  check that filters `select(.kind == "remote")` now skips those packs:
+  match `.kind == "remote" or .kind == "builtin"`, or join on `source` and
+  `pin`. A validator built from the old schema's closed `kind` enum rejects
+  the new value; refresh it from `gc import status --json-schema=result`.
+  `schema_version` stays `"1"`: no field was removed or retyped, and
+  `builtin` is optional. The text output changes the same rows: source reads
+  `builtin:<pack> (gc <build>)`, kind `builtin`, and the commit column
+  `content:sha256:<hex>`.
+
 - **The fork's `[beads] proxied` opt-in is retired** in favour of upstream's
   bd-owned proxied-server. `[beads] proxied`, `proxy_pool_size`,
   `proxy_idle_timeout` and the whole `[storehealth]` table are ignored with a
@@ -1315,6 +1335,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--sort priority` reaches the controller as the default order.
   `GET /v0/city/{cityName}/work/ready` still takes only `oldest|newest`, so for
   `hybrid` `gc ready` falls back to its in-process read.
+
+- **`gc import status` no longer presents the canonical pin as the source of
+  bundled pack bytes.** A bundled import locked at a canonical pin is served
+  from the running gc binary's embedded packs, yet its row showed the
+  gastownhall tree URL and pinned commit as if that commit had been fetched, so
+  a fork-built gc reported fork content as upstream. Such rows now have kind
+  `builtin` and render as `builtin:<pack> (gc <build>)` with
+  `content:sha256:<hex>` in the commit column; `--json` adds a `builtin` object
+  (`pack`, `built_by`, `content_hash`) and keeps the authored source and lock
+  pin. A bundled source locked at any other commit is fetched from git and
+  stays `remote`. Bundled-pack cache markers also record the gc build that
+  first materialized them (`built_by`). See the Upgrading Note. (vp-fkrl)
 
 - **Adopting or restarting with a bd store bound to a loopback Dolt server
   gc does not run works.** A store `bd init --server --external` bound to a

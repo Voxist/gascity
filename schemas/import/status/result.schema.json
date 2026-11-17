@@ -60,9 +60,10 @@
             "type": "string",
             "enum": [
               "remote",
-              "path"
+              "path",
+              "builtin"
             ],
-            "description": "\"remote\" for git-backed sources and \"path\" for local directory sources."
+            "description": "\"remote\" for git-backed sources, \"path\" for local directory sources, and \"builtin\" for bundled sources locked at a canonical pin, whose bytes the running gc binary serves from its embedded packs."
           },
           "path": {
             "type": "string",
@@ -70,7 +71,7 @@
           },
           "pin": {
             "type": "object",
-            "description": "packs.lock resolution for kind \"remote\" entries. Omitted when the source has no lock entry (unlocked).",
+            "description": "packs.lock resolution for kind \"remote\" and \"builtin\" entries. Omitted when the source has no lock entry (unlocked).",
             "additionalProperties": false,
             "required": [
               "version",
@@ -88,6 +89,29 @@
               "fetched": {
                 "type": "string",
                 "description": "RFC 3339 UTC fetch timestamp, when recorded."
+              }
+            }
+          },
+          "builtin": {
+            "type": "object",
+            "description": "For kind \"builtin\" entries: the embedded content serving the import. The pin names the canonical commit the source is addressed by, not the bytes served.",
+            "additionalProperties": false,
+            "required": [
+              "pack",
+              "content_hash"
+            ],
+            "properties": {
+              "pack": {
+                "type": "string",
+                "description": "Bundled pack serving the import."
+              },
+              "built_by": {
+                "type": "string",
+                "description": "Build revision of the running gc binary. Omitted when the binary carries no build stamp."
+              },
+              "content_hash": {
+                "type": "string",
+                "description": "Digest of the binary's embedded pack content."
               }
             }
           }
