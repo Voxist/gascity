@@ -17,7 +17,9 @@ package main
 //   - the whole storage surface compiles identically with CGO on and off, so
 //     the pure-Go driver choice is a checked property rather than a comment;
 //   - the module graph carries no replace directive, so a build of this repo
-//     resolves the dependencies its manifest names and nothing else.
+//     resolves the dependencies its manifest names and nothing else (the one
+//     exception is the operator-authorised bd library bridge deps.env names;
+//     see bdLibBridgeReplace).
 //
 // The last two are what a downstream fork relies on. A fork appends its own
 // factory in its own tree; these arms are what keep the seam it appends to
@@ -220,12 +222,103 @@ func TestModuleGraphCarriesNoReplaceDirective(t *testing.T) {
 	if len(malformed) > 0 {
 		t.Fatalf("go.mod has replace directives this guard cannot parse (lines %v); a manifest we cannot read is a violation, not a pass", malformed)
 	}
-	for _, directive := range directives {
+	bridge, bridged := bdLibBridgeReplace(t, root)
+	for _, directive := range unauthorisedReplaces(directives, bridge, bridged) {
 		t.Errorf("go.mod line %d replaces %q with %q; this module graph carries no replace directive, so a build resolves the dependencies the manifest names and nothing else",
 			directive.line, directive.oldPath, directive.newPath)
 	}
 	if anyGoWorkFile(t, root) {
 		t.Error("the tree commits a go.work; a workspace redirects the module graph for every go invocation started at or below it")
+	}
+}
+
+// bdLibBridgeReplace returns the one replace directive the no-replace guard
+// lets through, and whether there is one. It exists only while deps.env names
+// a bd library bridge (BD_LIB_BRIDGE_REF): a fork commit that carries an open
+// upstream beads PR, which the Go module path cannot reach without a replace.
+// The repository's human operator authorised that exception on 2026-11-17;
+// scripts/check-gomod-replace.sh still blocks it, and that required check is
+// bypassed by the operator, never by an automated worker. Its shape is pinned
+// exactly: github.com/steveyegge/beads, unversioned on the left, redirected to
+// github.com/<BD_REPO> at a pseudo-version ending in BD_LIB_BRIDGE_REF's first
+// twelve hex digits. Anything else is still a violation, and so is this line
+// once deps.env drops the bridge.
+func bdLibBridgeReplace(t *testing.T, root string) (replaceDirective, bool) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(root, "deps.env"))
+	if err != nil {
+		t.Fatalf("reading deps.env: %v", err)
+	}
+	values := map[string]string{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if key, value, ok := strings.Cut(line, "="); ok {
+			values[strings.TrimSpace(key)] = strings.TrimSpace(value)
+		}
+	}
+	ref, repo := values["BD_LIB_BRIDGE_REF"], values["BD_REPO"]
+	if ref == "" {
+		return replaceDirective{}, false
+	}
+	if len(ref) != 40 || strings.Trim(ref, "0123456789abcdef") != "" || repo == "" {
+		t.Fatalf("deps.env BD_LIB_BRIDGE_REF=%q / BD_REPO=%q is not a full commit SHA and a repo; the bridge exemption cannot be pinned", ref, repo)
+	}
+	return replaceDirective{
+		oldPath:    "github.com/steveyegge/beads",
+		newPath:    "github.com/" + repo,
+		newVersion: "-" + ref[:12],
+	}, true
+}
+
+// unauthorisedReplaces returns every directive except at most one line that is
+// exactly the bridge: a second bridge line is a violation too.
+func unauthorisedReplaces(directives []replaceDirective, bridge replaceDirective, bridged bool) []replaceDirective {
+	var out []replaceDirective
+	for _, directive := range directives {
+		if bridged && directive.oldPath == bridge.oldPath && directive.oldVersion == "" &&
+			directive.newPath == bridge.newPath && strings.HasSuffix(directive.newVersion, bridge.newVersion) {
+			bridged = false
+			continue
+		}
+		out = append(out, directive)
+	}
+	return out
+}
+
+// TestNoReplaceGuardExemptsOnlyTheExactBridge proves the bridge exemption is
+// not a hole: each near-miss of the bridge line is still reported, and with no
+// bridge in deps.env the bridge line itself is.
+func TestNoReplaceGuardExemptsOnlyTheExactBridge(t *testing.T) {
+	bridge := replaceDirective{oldPath: "github.com/steveyegge/beads", newPath: "github.com/Voxist/beads", newVersion: "-b0548453ae8d"}
+	exact := replaceDirective{line: 1, oldPath: "github.com/steveyegge/beads", newPath: "github.com/Voxist/beads", newVersion: "v1.1.1-0.20261113233511-b0548453ae8d"}
+
+	if got := unauthorisedReplaces([]replaceDirective{exact}, bridge, true); len(got) != 0 {
+		t.Fatalf("the exact bridge line was reported: %+v", got)
+	}
+	if got := unauthorisedReplaces([]replaceDirective{exact}, bridge, false); len(got) != 1 {
+		t.Fatalf("with no bridge in deps.env the bridge line was let through: %+v", got)
+	}
+	nearMisses := map[string]func(*replaceDirective){
+		"another commit":       func(d *replaceDirective) { d.newVersion = "v1.1.1-0.20261113233511-000000000000" },
+		"another repo":         func(d *replaceDirective) { d.newPath = "github.com/someone/beads" },
+		"another module":       func(d *replaceDirective) { d.oldPath = "github.com/dolthub/driver" },
+		"a versioned old side": func(d *replaceDirective) { d.oldVersion = "v1.96.0" },
+		"a local path":         func(d *replaceDirective) { d.newPath, d.newVersion = "../beads", "" },
+	}
+	for name, mutate := range nearMisses {
+		miss := exact
+		mutate(&miss)
+		if got := unauthorisedReplaces([]replaceDirective{miss}, bridge, true); len(got) != 1 {
+			t.Errorf("%s: a near-miss of the bridge was let through", name)
+		}
+	}
+	second := exact
+	second.line = 2
+	if got := unauthorisedReplaces([]replaceDirective{exact, second}, bridge, true); len(got) != 1 || got[0].line != 2 {
+		t.Errorf("a second bridge line was let through: %+v", got)
 	}
 }
 

@@ -670,7 +670,7 @@ calls = 3
 [[count]]
 path = "cmd/gc/cmd_wait_test.go"
 resource = "subprocess"
-calls = 7
+calls = 8
 
 [[count]]
 path = "cmd/gc/control_dispatch_sigterm_test.go"
@@ -3009,6 +3009,11 @@ path = "scripts/bazel_nightly_fresh_test.go"
 resource = "subprocess"
 calls = 1
 medium = 1
+
+[[count]]
+path = "scripts/check_bd_lib_bridge_test.go"
+resource = "subprocess"
+calls = 3
 
 [[count]]
 path = "scripts/check_core_boundary_test.go"

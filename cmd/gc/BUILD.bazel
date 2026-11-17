@@ -2555,6 +2555,7 @@ go_test(
         "testdata/**",
         "*.go",
     ]) + [
+        "//:deps.env",
         "//:go.mod",
         "//:go_work_files",
         "//:repo_go_srcs",
