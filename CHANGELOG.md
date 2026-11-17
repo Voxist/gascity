@@ -1348,6 +1348,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stays `remote`. Bundled-pack cache markers also record the gc build that
   first materialized them (`built_by`). See the Upgrading Note. (vp-fkrl)
 
+- **`gc dolt sync` retries its pre-push fetch, which is what fails on a store
+  that is cold for the current Dolt server lifetime (vp-q3kp).** The
+  fast-forward check fetches the remote before pushing, and any fetch failure
+  skipped the store as `skipped (NOT pushed)` on the first try, so the push was
+  never attempted. The cost that decides this is cold versus warm, not delta
+  size: measured on a 9-store fleet against `read_timeout_millis=15000`, warm
+  fetches took 1.6-2.1s while the same stores after a restart died at
+  15.2-15.7s. A fetch is read-only and idempotent and its remote cache warms
+  across attempts, so it is now tried `GC_DOLT_SYNC_FETCH_ATTEMPTS` times
+  (default 5) with `GC_DOLT_SYNC_FETCH_RETRY_DELAY_SECS` (default 2) between
+  tries. From cold, every store but the largest converged in 1 to 4 attempts;
+  the largest gained about 4 KB per attempt against a 2.24 GB cache and did
+  not converge in 12. Once the run's cumulative fetch time reaches
+  `GC_DOLT_SYNC_FETCH_RETRY_BUDGET_SECS` (default 300, half of the order's
+  600s deadline), no store retries again and every later store gets a single
+  attempt. The attempts accept 1-20, the delay 0-60 and the budget 0-3600; any
+  other value fails the run with exit 2 before any database is touched.
+
+  A first-push signal and a client-bound timeout (exit 124, exit 137 when the
+  bound escalates to SIGKILL, or a failure that took the whole bound) are not
+  retried; the timeout status names the attempt it ended.
+  Everything else is, including `Blob not found`, which recurs on this class of
+  remote on days when nothing is damaged. A fetch killed at the listener
+  deadline is retried too: the cold-open wall status (vp-9v6f9) now applies
+  only when the last attempt of the run's budget still dies there, and it says
+  the store did not converge in that many attempts this run rather than
+  claiming the whole server lifetime, since the next cycle continues the
+  warm-up. The summary header stays exactly `NO OFF-BOX COPY:`, followed by a
+  `(this run; the next cycle continues the warm-up)` line. Each retry line
+  carries the attempt's first stderr line.
+  `dolt-remotes-patrol` moves from the 300s exec default to 600s, because the
+  run is sequential across databases and a cold cycle that spends its retries
+  would otherwise leave the databases later in the scan unattempted.
+
 - **Adopting or restarting with a bd store bound to a loopback Dolt server
   gc does not run works.** A store `bd init --server --external` bound to a
   dolt sql-server on `127.0.0.1`/`localhost`/`::1` was classified as gc's own
