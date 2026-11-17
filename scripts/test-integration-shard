@@ -323,7 +323,11 @@ run_packages_core_shard() {
   # emit an empty tier, so no consumer-side emptiness check is needed.
   local tier_pkgs
   tier_pkgs="$("$repo_root/scripts/test-tier-packages" integration-core)"
-  mapfile -t packages <<< "$tier_pkgs"
+  # Avoid bash 4 `mapfile` (see run_packages_shard above) so this runs on
+  # macOS's stock bash 3.2.
+  while IFS= read -r line; do
+    packages+=("$line")
+  done <<< "$tier_pkgs"
   for i in "${!packages[@]}"; do
     if (( i % shard_total == shard_index - 1 )); then
       selected+=("${packages[$i]}")
