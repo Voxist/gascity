@@ -55,6 +55,15 @@ push, or a supervised raise/restore window — tracked in **vp-6hb8**. This
 script only makes the condition visible; it does not close the gap.
 
 **End-of-run summary.** A run that hits the wall on one or more databases
-prints a `NO OFF-BOX COPY THIS RUN:` block listing every affected store, in addition
-to the per-database line above — so the condition is visible even in output
-scanned quickly for the summary line only.
+prints a block listing every affected store, in addition to the per-database
+line above — so the condition is visible even in output scanned quickly for
+the summary line only:
+
+```
+NO OFF-BOX COPY:
+(this run; the next cycle continues the warm-up)
+  <db>
+```
+
+The header line is always exactly `NO OFF-BOX COPY:`, a marker deployment
+checks grep for; the qualifier is on the line after it.

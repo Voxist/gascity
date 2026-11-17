@@ -435,11 +435,49 @@ func TestSyncColdOpenWallReportedAfterBudget(t *testing.T) {
 	if strings.Contains(out, "server lifetime") {
 		t.Fatalf("the wall status must not claim the whole server lifetime: progress persists into the next cycle.\nout:\n%s", out)
 	}
-	if !strings.Contains(out, "NO OFF-BOX COPY THIS RUN:") {
-		t.Fatalf("expected the no-off-box-copy-this-run summary.\nout:\n%s", out)
+	if !strings.Contains(out, "NO OFF-BOX COPY:\n(this run; the next cycle continues the warm-up)\n") {
+		t.Fatalf("expected the no-off-box-copy summary with its this-run qualifier.\nout:\n%s", out)
 	}
 	if code == 0 {
 		t.Fatalf("expected a non-zero exit for a cold-open wall\nout:\n%s", out)
+	}
+}
+
+// TestSyncWallSummaryHeaderIsTheExactMarker: the end-of-run summary header is
+// the exact line "NO OFF-BOX COPY:". Deployment checks grep the binary and the
+// run output for that literal marker (voxist-city ADR-0064 AC6/AC7), so the
+// this-run qualifier goes on the next line, never on the header itself, and
+// the affected stores follow.
+func TestSyncWallSummaryHeaderIsTheExactMarker(t *testing.T) {
+	binDir := t.TempDir()
+	writeSyncFakeDoltColdWall(t, binDir)
+	cfgPath := filepath.Join(t.TempDir(), "dolt-config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("listener:\n  read_timeout_millis: 2000\n"), 0o644); err != nil {
+		t.Fatalf("write fake dolt-config.yaml: %v", err)
+	}
+
+	out, _ := runFFSyncCode(t, binDir, []string{
+		"GC_DOLT_CONFIG_FILE=" + cfgPath,
+		"GC_DOLT_SYNC_FETCH_ATTEMPTS=1",
+	}, "--db", "app")
+
+	lines := strings.Split(out, "\n")
+	header := -1
+	for i, line := range lines {
+		if line == "NO OFF-BOX COPY:" {
+			if header >= 0 {
+				t.Fatalf("expected exactly one 'NO OFF-BOX COPY:' line.\nout:\n%s", out)
+			}
+			header = i
+		}
+	}
+	if header < 0 {
+		t.Fatalf("expected a line that is exactly 'NO OFF-BOX COPY:'.\nout:\n%s", out)
+	}
+	if header+2 >= len(lines) ||
+		lines[header+1] != "(this run; the next cycle continues the warm-up)" ||
+		lines[header+2] != "  app" {
+		t.Fatalf("expected the header, then the this-run qualifier, then the store.\nout:\n%s", out)
 	}
 }
 

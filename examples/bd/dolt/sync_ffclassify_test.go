@@ -469,8 +469,8 @@ func TestSyncSummaryListsStoresWithNoOffBoxCopy(t *testing.T) {
 	binDir := t.TempDir()
 	writeSyncFakeDoltColdWall(t, binDir)
 	out := runFFSyncWithConfig(t, binDir, 2000, "--db", "app")
-	if strings.Count(out, "NO OFF-BOX COPY THIS RUN:") != 1 {
-		t.Fatalf("expected exactly one 'NO OFF-BOX COPY THIS RUN:' header.\nout:\n%s", out)
+	if strings.Count(out, "NO OFF-BOX COPY:") != 1 {
+		t.Fatalf("expected exactly one 'NO OFF-BOX COPY:' header.\nout:\n%s", out)
 	}
 	if strings.Count(out, "app") < 2 { // once in the COLD-OPEN WALL line, once in the summary
 		t.Fatalf("expected the store name to appear in the summary.\nout:\n%s", out)

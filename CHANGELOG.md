@@ -1375,8 +1375,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only when the last attempt of the run's budget still dies there, and it says
   the store did not converge in that many attempts this run rather than
   claiming the whole server lifetime, since the next cycle continues the
-  warm-up. Its summary header is now `NO OFF-BOX COPY THIS RUN:`. Each retry
-  line carries the attempt's first stderr line.
+  warm-up. The summary header stays exactly `NO OFF-BOX COPY:`, followed by a
+  `(this run; the next cycle continues the warm-up)` line. Each retry line
+  carries the attempt's first stderr line.
   `dolt-remotes-patrol` moves from the 300s exec default to 600s, because the
   run is sequential across databases and a cold cycle that spends its retries
   would otherwise leave the databases later in the scan unattempted.

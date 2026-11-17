@@ -1385,9 +1385,14 @@ fi
 # could not push, buried among routine "up-to-date" output. It names this run
 # only: the warm-up progress is kept and the next cycle continues it. Silent
 # when the list is empty so a clean run stays quiet.
+#
+# The header line is exactly "NO OFF-BOX COPY:": deployment checks grep for
+# that literal marker (voxist-city ADR-0064 AC6/AC7). The this-run qualifier
+# goes on the next line so it never changes the marker.
 if [ -n "$cold_wall_stores" ]; then
   echo ""
-  echo "NO OFF-BOX COPY THIS RUN:"
+  echo "NO OFF-BOX COPY:"
+  echo "(this run; the next cycle continues the warm-up)"
   for cw_store in $cold_wall_stores; do
     echo "  $cw_store"
   done
