@@ -75,15 +75,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`gc import status --json` reports bundled packs at their canonical pin
   as kind `builtin`, not `remote` (vp-fkrl).** Before, every git-backed
   import had kind `remote`. Now a bundled pack (core, bd, dolt, gastown,
-  gascity, or the gc-roles subpack) locked at a canonical or superseded
-  canonical pin has kind `builtin` and an optional `builtin`
-  object (`pack`, `built_by`, `content_hash`), because gc serves its bytes
-  from the binary and never fetches that commit. In a typical city that is
-  most rows. `source`, `constraint` and `pin` are unchanged. A drift check
-  that filters `select(.kind == "remote")` now skips those packs: match
-  `.kind == "remote" or .kind == "builtin"`, or join on `source` and `pin`.
-  A validator built from the old schema's closed `kind` enum rejects the new
-  value; refresh it from `gc import status --json-schema=result`.
+  gascity, or the gc-roles subpack) locked at its canonical pin has kind
+  `builtin` and an optional `builtin` object (`pack`, `built_by`,
+  `content_hash`), because gc serves its bytes from the binary and never
+  fetches that commit. A superseded canonical pin counts too, but only for
+  gascity.git sources (core, bd, dolt, and the legacy gascity.git
+  `examples/` gastown source); the gascity-packs sources (gastown, gascity,
+  gc-roles) are `builtin` only at their canonical pin. In a typical city
+  that is most rows. `source`, `constraint` and `pin` are unchanged. A drift
+  check that filters `select(.kind == "remote")` now skips those packs:
+  match `.kind == "remote" or .kind == "builtin"`, or join on `source` and
+  `pin`. A validator built from the old schema's closed `kind` enum rejects
+  the new value; refresh it from `gc import status --json-schema=result`.
   `schema_version` stays `"1"`: no field was removed or retyped, and
   `builtin` is optional. The text output changes the same rows: source reads
   `builtin:<pack> (gc <build>)`, kind `builtin`, and the commit column
