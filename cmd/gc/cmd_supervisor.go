@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -16,6 +17,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	goruntime "runtime"
+	"runtime/debug"
+	"runtime/metrics"
 	"strconv"
 	"strings"
 	"sync"
@@ -1611,6 +1614,61 @@ func configureSupervisorRuntime() {
 	}
 }
 
+// applySupervisorGCTuning applies [supervisor] gogc and memory_limit_mib to
+// this process with runtime/debug and logs the effective GC settings.
+//
+// The settings are applied in-process rather than through GOGC/GOMEMLIMIT in
+// the service manager's environment on purpose: that environment is inherited
+// by every process the supervisor spawns (Dolt, gc and bd CLIs, agent
+// sessions), and a GOMEMLIMIT there also suppresses the default memory limit
+// nudge-poll sidecars install only when it is unset. Nothing here touches the
+// environment. An invalid value is returned as an error and nothing is
+// applied.
+func applySupervisorGCTuning(s supervisor.Section, stderr io.Writer) error {
+	if err := s.ValidateGCTuning(); err != nil {
+		return fmt.Errorf("%w (in %s)", err, supervisor.ConfigPath())
+	}
+	if s.GOGC != nil {
+		debug.SetGCPercent(*s.GOGC)
+	}
+	if s.MemoryLimitMiB != nil {
+		debug.SetMemoryLimit(*s.MemoryLimitMiB << 20)
+	}
+
+	gogcSource := gcSettingSource(s.GOGC != nil, "GOGC")
+	gogc := "unknown"
+	sample := []metrics.Sample{{Name: "/gc/gogc:percent"}}
+	metrics.Read(sample)
+	if sample[0].Value.Kind() == metrics.KindUint64 {
+		// The runtime reports GOGC=off (-1) as a wrapped uint64.
+		if v := sample[0].Value.Uint64(); v > math.MaxInt32 {
+			gogc = "off"
+		} else {
+			gogc = strconv.FormatUint(v, 10)
+		}
+	}
+	limitSource := gcSettingSource(s.MemoryLimitMiB != nil, "GOMEMLIMIT")
+	limit := "none"
+	if v := debug.SetMemoryLimit(-1); v != math.MaxInt64 {
+		limit = strconv.FormatInt(v>>20, 10) + "MiB"
+	}
+	fmt.Fprintf(stderr, "gc supervisor: GC settings: gogc=%s (%s), memory_limit=%s (%s); supervisor process only, not exported to children\n", //nolint:errcheck
+		gogc, gogcSource, limit, limitSource)
+	return nil
+}
+
+// gcSettingSource names where an effective GC setting came from, for the
+// startup log line.
+func gcSettingSource(fromConfig bool, envKey string) string {
+	if fromConfig {
+		return "supervisor.toml"
+	}
+	if _, ok := os.LookupEnv(envKey); ok {
+		return envKey + " env"
+	}
+	return "default"
+}
+
 // testHarnessDefaultPortError refuses a supervisor config that leaves the API
 // port unset while running under a test harness. The default port is the
 // production supervisor's: a test supervisor that falls back to it either
@@ -1733,6 +1791,10 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		return 1
 	}
 	if err := testHarnessDefaultPortError(supCfg.Supervisor); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if err := applySupervisorGCTuning(supCfg.Supervisor, stderr); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: %v\n", err) //nolint:errcheck
 		return 1
 	}

@@ -445,3 +445,66 @@ func TestLoadConfigSeedsAPortOutsideTheEphemeralRange(t *testing.T) {
 		seen[port] = true
 	}
 }
+
+func TestLoadConfigGCTuning(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "supervisor.toml")
+	if err := os.WriteFile(path, []byte("[supervisor]\ngogc = 200\nmemory_limit_mib = 3072\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Supervisor.GOGC == nil || *cfg.Supervisor.GOGC != 200 {
+		t.Errorf("GOGC = %v, want 200", cfg.Supervisor.GOGC)
+	}
+	if cfg.Supervisor.MemoryLimitMiB == nil || *cfg.Supervisor.MemoryLimitMiB != 3072 {
+		t.Errorf("MemoryLimitMiB = %v, want 3072", cfg.Supervisor.MemoryLimitMiB)
+	}
+	if err := cfg.Supervisor.ValidateGCTuning(); err != nil {
+		t.Errorf("ValidateGCTuning() = %v, want nil", err)
+	}
+}
+
+func TestLoadConfigGCTuningUnsetIsNil(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "supervisor.toml")
+	if err := os.WriteFile(path, []byte("[supervisor]\nport = 9000\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Supervisor.GOGC != nil || cfg.Supervisor.MemoryLimitMiB != nil {
+		t.Errorf("GOGC = %v, MemoryLimitMiB = %v, want both unset", cfg.Supervisor.GOGC, cfg.Supervisor.MemoryLimitMiB)
+	}
+	if err := cfg.Supervisor.ValidateGCTuning(); err != nil {
+		t.Errorf("ValidateGCTuning() on unset = %v, want nil", err)
+	}
+}
+
+func TestValidateGCTuningRejectsOutOfRange(t *testing.T) {
+	intPtr := func(v int) *int { return &v }
+	int64Ptr := func(v int64) *int64 { return &v }
+	for _, tc := range []struct {
+		name    string
+		section Section
+		want    string
+	}{
+		{"gogc zero", Section{GOGC: intPtr(0)}, "gogc"},
+		{"gogc negative", Section{GOGC: intPtr(-1)}, "gogc"},
+		{"memory limit zero", Section{MemoryLimitMiB: int64Ptr(0)}, "memory_limit_mib"},
+		{"memory limit negative", Section{MemoryLimitMiB: int64Ptr(-5)}, "memory_limit_mib"},
+		{"memory limit overflows bytes", Section{MemoryLimitMiB: int64Ptr(1 << 44)}, "memory_limit_mib"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.section.ValidateGCTuning()
+			if err == nil {
+				t.Fatal("ValidateGCTuning() = nil, want error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("ValidateGCTuning() = %q, want it to name %q", err, tc.want)
+			}
+		})
+	}
+}

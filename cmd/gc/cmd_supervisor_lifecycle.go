@@ -615,7 +615,16 @@ Output is teed into ~/.gc/supervisor.log so 'gc supervisor logs' works
 regardless of how the supervisor was invoked. Set GC_SUPERVISOR_LOG_TEE=0
 in the supervisor's environment to disable the tee when the service manager
 already captures output (e.g. a hand-managed systemd unit with
-StandardOutput=journal).`,
+StandardOutput=journal).
+
+To tune the supervisor's own garbage collector, set gogc (a positive
+integer, as GOGC) and memory_limit_mib (a positive integer, as GOMEMLIMIT
+in MiB) under [supervisor] in ~/.gc/supervisor.toml. They apply to the
+supervisor process only and are never exported to the processes it
+spawns, unlike GOGC or GOMEMLIMIT in the service manager's environment,
+which every child inherits. They are read at startup, an invalid value
+stops the supervisor from starting, and the effective settings are
+logged on every start.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if doSupervisorRun(stdout, stderr) != 0 {
