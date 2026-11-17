@@ -2474,6 +2474,12 @@ resource = "fixed_sleep"
 calls = 10
 
 [[count]]
+path = "internal/runtime/herdr/conformance_fake_test.go"
+resource = "net_listen"
+calls = 1
+medium = 1
+
+[[count]]
 path = "internal/runtime/herdr/events_live_test.go"
 resource = "fixed_sleep"
 calls = 1

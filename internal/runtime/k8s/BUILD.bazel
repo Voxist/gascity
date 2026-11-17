@@ -35,6 +35,7 @@ go_test(
     name = "k8s_test",
     srcs = [
         "beads_script_test.go",
+        "conformance_test.go",
         "controller_script_test.go",
         "exec_provider_test.go",
         "name_test.go",

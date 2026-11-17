@@ -426,6 +426,40 @@ func sortBeadsReadyOrder(items []Bead) {
 	})
 }
 
+// hybridReadyRecency is the recency seam of bd's `--sort hybrid` policy: rows
+// created within it sort by priority, rows older than it drain oldest-first. bd
+// renders it as a now-48h parameter in sqlbuild.BuildReadyWorkOrder; bd is a
+// separate module, so the constant is restated here and held to bd's order by
+// readywork's TestReadSortHybridServesBDsRecencySeam.
+const hybridReadyRecency = 48 * time.Hour
+
+// SortBeadsHybridOrder sorts ready results into bd's `--sort hybrid` order:
+// rows created within the last 48h first, by (priority, created_at, id); rows
+// past the seam after them, strictly (created_at, id). It mirrors bd's SQL CASE
+// ladder: a row exactly at the seam is fresh (created >= cutoff), a nil
+// priority sorts as 2 as in sortBeadsReadyOrder, and the aged tier's constant
+// priority reduces it to (created_at, id).
+//
+// The federated ready reader merges its legs in Go rather than under one SQL
+// ORDER BY, so a hybrid read of a split city is ordered here.
+func SortBeadsHybridOrder(items []Bead) {
+	cutoff := time.Now().UTC().Add(-hybridReadyRecency)
+	sort.Slice(items, func(i, j int) bool {
+		a, b := items[i], items[j]
+		aFresh, bFresh := !a.CreatedAt.Before(cutoff), !b.CreatedAt.Before(cutoff)
+		if aFresh != bFresh {
+			return aFresh
+		}
+		if aFresh {
+			return beadReadyLess(a, b)
+		}
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			return a.CreatedAt.Before(b.CreatedAt)
+		}
+		return a.ID < b.ID
+	})
+}
+
 // sortBeadsReadyOrderContext is the cancellation-aware form used by
 // deadline-sensitive cache projections. A local merge sort keeps cancellation
 // checks inside both comparison and copy work instead of abandoning an

@@ -34,8 +34,16 @@ func NewSeamBacked(opts ...Option) (runtime.Provider, error) {
 	for _, opt := range opts {
 		opt(raw)
 	}
+	return newSeamBackedFromProvider(raw), nil
+}
+
+// newSeamBackedFromProvider serves raw through the de-conflated seams. It is
+// the wrapping NewSeamBacked applies to a provider on the real k8sOps, and the
+// conformance proof applies to one on a fake k8sOps, so the two differ only in
+// their ops.
+func newSeamBackedFromProvider(raw *Provider) runtime.Provider {
 	rt, tp := raw.Seams()
-	return &seamBackedProvider{Provider: runtime.NewProviderFromSeams(rt, tp), raw: raw}, nil
+	return &seamBackedProvider{Provider: runtime.NewProviderFromSeams(rt, tp), raw: raw}
 }
 
 // SleepCapability passes through to the underlying provider (non-seam).

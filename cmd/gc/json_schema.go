@@ -398,6 +398,21 @@ func isBDCommandPath(commandPath []string) bool {
 	return len(commandPath) > 0 && commandPath[0] == "bd"
 }
 
+// jsonFailureOutput returns where a failed command's --json envelope is
+// written: stdout, except for `gc ready`, which writes none. That command
+// stands in for `bd ready` in generated work queries and pack scripts. They
+// capture its stdout as the answer, so its stdout is a JSON array and nothing
+// else, and several report its stderr whole as the reason a read failed, so
+// the diagnostic it already wrote there is not repeated as JSON. A failed
+// `gc ready` is bd ready's failure: empty stdout, one stderr line, non-zero
+// exit (vp-bzeg).
+func jsonFailureOutput(executed *cobra.Command, stdout io.Writer) io.Writer {
+	if path := commandPathWords(executed); len(path) == 1 && path[0] == "ready" {
+		return io.Discard
+	}
+	return stdout
+}
+
 func schemaDeclaresJSONL(schema json.RawMessage) bool {
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal(schema, &object); err != nil {
