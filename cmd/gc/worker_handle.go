@@ -524,6 +524,36 @@ func workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath string, sto
 	return factory.RuntimeHandle(target, providerName, "", processNames)
 }
 
+// workerHandleForSessionIDOwningName resolves the session row id with one
+// primary-key Get and returns its handle only while that row is still the one
+// a live session_name lookup of sessionName would match: an open session bead
+// whose metadata session_name is exactly sessionName. ok is false, with no
+// error, when the id is empty, unreadable, not a session bead, closed, or now
+// carries another session_name (renamed or recycled); the caller then resolves
+// by name as before. This lets a caller that already holds the row id (the
+// nudge poller) skip the unindexed metadata search behind
+// workerHandleForSessionTargetWithConfig on every observation.
+func workerHandleForSessionIDOwningName(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, id, sessionName string) (handle worker.Handle, ok bool, err error) {
+	id = strings.TrimSpace(id)
+	sessionName = strings.TrimSpace(sessionName)
+	if store == nil || id == "" || sessionName == "" {
+		return nil, false, nil
+	}
+	info, pr, err := session.ResolveSessionRecordByExactID(beads.SessionStore{Store: store}, id)
+	if err != nil || pr.Status != "open" || pr.Metadata["session_name"] != sessionName {
+		return nil, false, nil
+	}
+	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
+	if err != nil {
+		return nil, false, err
+	}
+	handle, err = factory.SessionByRecord(info, pr)
+	if err != nil {
+		return nil, false, err
+	}
+	return handle, true, nil
+}
+
 func runtimeWorkerHandleWithConfig(
 	cityPath string,
 	store beads.Store,

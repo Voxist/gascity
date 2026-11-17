@@ -1941,7 +1941,7 @@ func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtim
 	programShadowDecideForTarget(target)
 	if target.sessionName != "" {
 		if target.sessionID != "" || target.continuationEpoch != "" {
-			obs, err := workerObserveSessionTargetWithConfig(target.cityPath, store, sp, target.cfg, target.sessionName)
+			obs, err := workerObserveNudgeTargetSession(target, store, sp)
 			if err == nil {
 				matches, matchErr := nudgeTargetLiveGenerationMatches(target, obs, sp)
 				if matchErr != nil {
@@ -1993,7 +1993,7 @@ func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtim
 func workerObserveNudgeTarget(target nudgeTarget, store beads.Store, sp runtime.Provider) (worker.LiveObservation, error) {
 	programShadowDecideForTarget(target)
 	if target.sessionName != "" {
-		obs, err := workerObserveSessionTargetWithConfig(target.cityPath, store, sp, target.cfg, target.sessionName)
+		obs, err := workerObserveNudgeTargetSession(target, store, sp)
 		if err != nil {
 			return worker.LiveObservation{}, err
 		}
@@ -2012,6 +2012,27 @@ func workerObserveNudgeTarget(target nudgeTarget, store beads.Store, sp runtime.
 	}
 	if target.sessionID != "" {
 		return workerObserveSessionTargetWithConfig(target.cityPath, store, sp, target.cfg, target.sessionID)
+	}
+	return workerObserveSessionTargetWithConfig(target.cityPath, store, sp, target.cfg, target.sessionName)
+}
+
+// workerObserveNudgeTargetSession observes the session target.sessionName
+// names. When the target holds its session row id (a poller always does: it is
+// the poller's positional argument) and that row is still the open row named
+// target.sessionName, it resolves the row with one primary-key Get instead of
+// the session_name metadata search, which has no index and scans every session
+// row on each poll observation (vp-ejz0w). Otherwise -- no id, or the row is
+// gone, closed, unreadable, or renamed/recycled -- it resolves by name exactly
+// as before. Either way the caller's nudgeTargetLiveGenerationMatches check
+// still fences the observation to this generation (ga-fsp5w9), and a dead
+// session still observes as not running (ga-8x82f4).
+func workerObserveNudgeTargetSession(target nudgeTarget, store beads.Store, sp runtime.Provider) (worker.LiveObservation, error) {
+	handle, ok, err := workerHandleForSessionIDOwningName(target.cityPath, store, sp, target.cfg, target.sessionID, target.sessionName)
+	if err != nil {
+		return worker.LiveObservation{}, err
+	}
+	if ok {
+		return worker.ObserveHandle(context.Background(), handle)
 	}
 	return workerObserveSessionTargetWithConfig(target.cityPath, store, sp, target.cfg, target.sessionName)
 }
