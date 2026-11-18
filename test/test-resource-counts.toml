@@ -583,6 +583,16 @@ resource = "fixed_sleep"
 calls = 1
 
 [[count]]
+path = "cmd/gc/cmd_supervisor_runtime_test.go"
+resource = "environment"
+calls = 4
+
+[[count]]
+path = "cmd/gc/cmd_supervisor_runtime_test.go"
+resource = "listener_helper"
+calls = 1
+
+[[count]]
 path = "cmd/gc/cmd_supervisor_sdnotify_test.go"
 resource = "fixed_sleep"
 calls = 1
