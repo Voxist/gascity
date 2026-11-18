@@ -44,7 +44,103 @@ func PinnedBeadsModuleDir(t *testing.T) string {
 	if dir := bazelRunfilesBeadsModule(); dir != "" {
 		return dir
 	}
-	return pinnedBeadsModuleDirOrFatal(t, goModuleCache(t), PinnedBeadsVersion(t))
+	path, version := LinkedBeadsModule(t)
+	return linkedModuleDirOrFatal(t, goModuleCache(t), path, version)
+}
+
+// LinkedBeadsModule returns the module path and version the go command
+// actually links for PinnedBeadsModulePath: the go.mod requirement, or, when
+// go.mod replaces it (the bd library bridge, deps.env BD_LIB_BRIDGE_REF), the
+// replacement's path and version. The module cache holds a replaced module
+// under the replacement's path, so reading the requirement alone looks in a
+// directory the go command never filled.
+func LinkedBeadsModule(t *testing.T) (string, string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(RepositoryRoot(t), "go.mod"))
+	if err != nil {
+		t.Fatalf("read go.mod: %v", err)
+	}
+	path, version, replaced, err := beadsReplacement(string(data))
+	if err != nil {
+		t.Fatalf("go.mod: %v", err)
+	}
+	if replaced {
+		return path, version
+	}
+	return PinnedBeadsModulePath, PinnedBeadsVersion(t)
+}
+
+// beadsReplacement finds a replace of PinnedBeadsModulePath in go.mod text, in
+// the single-line or the block form. A replace to a local path has no module
+// cache directory at all, so it is an error rather than a fallback.
+func beadsReplacement(goMod string) (path, version string, replaced bool, err error) {
+	inBlock := false
+	for _, raw := range strings.Split(goMod, "\n") {
+		line := strings.TrimSpace(raw)
+		if i := strings.Index(line, "//"); i >= 0 {
+			line = strings.TrimSpace(line[:i])
+		}
+		var body string
+		switch {
+		case inBlock && line == ")":
+			inBlock = false
+			continue
+		case inBlock:
+			body = line
+		case line == "replace (":
+			inBlock = true
+			continue
+		case strings.HasPrefix(line, "replace "):
+			body = strings.TrimSpace(strings.TrimPrefix(line, "replace "))
+		default:
+			continue
+		}
+		left, right, ok := strings.Cut(body, "=>")
+		if !ok {
+			continue
+		}
+		old := strings.Fields(left)
+		if len(old) == 0 || old[0] != PinnedBeadsModulePath {
+			continue
+		}
+		target := strings.Fields(right)
+		if len(target) != 2 {
+			return "", "", false, fmt.Errorf("replace of %s targets %q, which is not a module path and version, so it has no module cache directory", PinnedBeadsModulePath, strings.TrimSpace(right))
+		}
+		return target[0], target[1], true, nil
+	}
+	return "", "", false, nil
+}
+
+// escapeModulePath applies the module cache's case encoding: each upper-case
+// letter becomes '!' and its lower-case form (golang.org/x/mod/module's
+// EscapePath), so github.com/Voxist/beads lives at github.com/!voxist/beads.
+func escapeModulePath(path string) string {
+	var b strings.Builder
+	for _, r := range path {
+		if r >= 'A' && r <= 'Z' {
+			b.WriteByte('!')
+			r += 'a' - 'A'
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// linkedModuleDirOrFatal is pinnedBeadsModuleDirOrFatal for any module path.
+func linkedModuleDirOrFatal(t moduleDirReporter, cache, path, version string) string {
+	t.Helper()
+	if path == PinnedBeadsModulePath {
+		return pinnedBeadsModuleDirOrFatal(t, cache, version)
+	}
+	dir, err := moduleDir(cache, path, version)
+	if err != nil {
+		t.Fatalf("%v\n"+
+			"go.mod replaces %s with %s %s, so the go command linked that module from the cache; this resolution did not find it. "+
+			"Check GOMODCACHE, GOPATH and GOENV (resolved cache: %s) — the pinned-cursor drift check must not pass without running.",
+			err, PinnedBeadsModulePath, path, version, cache)
+	}
+	return dir
 }
 
 // bazelRunfilesBeadsModule locates the pinned beads module inside the bazel
@@ -107,7 +203,12 @@ func pinnedBeadsModuleDirOrFatal(t moduleDirReporter, cache, version string) str
 // pinnedBeadsModuleDir is the resolution itself, separated from the test so that
 // the failure path has a test of its own.
 func pinnedBeadsModuleDir(cache, version string) (string, error) {
-	dir := filepath.Join(cache, filepath.FromSlash(PinnedBeadsModulePath)+"@"+version)
+	return moduleDir(cache, PinnedBeadsModulePath, version)
+}
+
+// moduleDir is the module cache directory of path@version, case-escaped.
+func moduleDir(cache, path, version string) (string, error) {
+	dir := filepath.Join(cache, filepath.FromSlash(escapeModulePath(path))+"@"+version)
 	info, err := os.Stat(dir)
 	switch {
 	case err != nil:
