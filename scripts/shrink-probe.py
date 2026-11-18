@@ -34,6 +34,28 @@ ASSIGN_RE = re.compile(
     r'^\s*([A-Za-z_][A-Za-z0-9_]*(?:Timeout|Interval|Budget|Deadline))\s*=\s*([^=\n]+?)\s*(?://.*)?$'
 )
 FUNC_RE = re.compile(r'^func\s+(Test[A-Za-z0-9_]*)\s*\(')
+# ANY_FUNC_RE additionally tracks non-Test top-level funcs and methods (vp-bajac):
+# the census used to track ONLY `func TestXxx(`, so a literal sitting inside a
+# shared non-Test helper (`func withFastClaimRetries(t *testing.T) {...}`), or
+# at package level (a `const (...)` block, outside any function), carried
+# forward whatever Test function was last seen in the file -- or "?" if none
+# yet had. Both misattributions produce the SAME wrong site.test: "?", which
+# sweep's `go test -run '^?$'` then runs as an unanchored, effectively
+# unbounded selection (RE2 accepts "^?" as "optionally anchored"; it matches
+# far more than nothing) -- measured live: one such site ran 8+ minutes before
+# being killed, vs. this script's own PER_SITE_TIMEOUT_S=180 budget. Detecting
+# this case and refusing to probe it (see NO_OWNING_TEST below) is cheaper and
+# more honest than burning a full timeout on a command whose target was never
+# well-formed to begin with.
+ANY_FUNC_RE = re.compile(r'^func\s+(?:\([^)]*\)\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\(')
+# NO_OWNING_TEST marks a site whose enclosing scope sweep cannot resolve to a
+# single `go test -run` target: either no function encloses it (a package-level
+# const/var) or the enclosing function is a shared helper, not a Test itself.
+# The differential probe's whole protocol ("run the owning test") has no single
+# test to run here -- it needs the helper's CALLERS resolved first, a call-graph
+# question this lexical census does not answer. sweep() skips these rows rather
+# than mis-probing them.
+NO_OWNING_TEST = "NO_OWNING_TEST"
 PER_SITE_TIMEOUT_S = 180
 FRAGILE_STOP_THRESHOLD = 3
 
@@ -95,10 +117,12 @@ def census():
         except OSError:
             continue
         current_func = None
+        current_func_is_test = False
         for lineno, line in enumerate(lines, start=1):
-            fm = FUNC_RE.match(line)
-            if fm:
-                current_func = fm.group(1)
+            afm = ANY_FUNC_RE.match(line)
+            if afm:
+                current_func = afm.group(1)
+                current_func_is_test = bool(FUNC_RE.match(line))
                 continue
             am = ASSIGN_RE.match(line)
             if not am:
@@ -107,7 +131,13 @@ def census():
             ns = eval_duration_ns(expr)
             if ns is None or ns < 0 or ns >= 1_000_000_000:
                 continue
-            sites.append((path, lineno, current_func or "?", ident, expr.strip(), ns))
+            if current_func_is_test:
+                test = current_func
+            elif current_func:
+                test = f"{NO_OWNING_TEST}:helper={current_func}"
+            else:
+                test = f"{NO_OWNING_TEST}:package-level"
+            sites.append((path, lineno, test, ident, expr.strip(), ns))
     for s in sites:
         print("\t".join(str(x) for x in s))
     print(f"TOTAL={len(sites)}", file=sys.stderr)
@@ -239,6 +269,16 @@ def _sweep_locked(sites_path, results_path, bead_id, bead_store):
                 print(f"STOP: fragile_count={fragile_count} exceeds threshold {FRAGILE_STOP_THRESHOLD} -- halting sweep, escalate to PA", file=sys.stderr)
                 return
             ns_i = int(ns)
+            if test.startswith(NO_OWNING_TEST):
+                # No single `go test -run` target exists for this site (see
+                # NO_OWNING_TEST's doc comment) -- record it as skipped rather
+                # than probe it. This still satisfies "every site carries a
+                # probe-confirmed label" (the label is SKIPPED, with a reason),
+                # without burning PER_SITE_TIMEOUT_S on a malformed command.
+                out.write(f"{path}\t{lineno}\t{test}\t{ident}\t{expr}\t{ns_i}\t-\tSKIPPED_NO_OWNING_TEST\t{test}\t0.0\n")
+                out.flush()
+                print(f"{path}:{lineno} {test} -> SKIPPED_NO_OWNING_TEST (not probed)", file=sys.stderr)
+                continue
             verdict, detail, elapsed = run_probe(path, int(lineno), test, ident, expr, ns_i, heartbeat)
             total_elapsed = elapsed
             if verdict == "FRAGILE":
