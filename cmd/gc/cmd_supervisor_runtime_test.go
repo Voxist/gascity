@@ -147,20 +147,162 @@ func TestApplySupervisorGCTuningRejectsInvalid(t *testing.T) {
 // start on an invalid GC setting instead of running with a value the operator
 // did not ask for.
 func TestRunSupervisorRefusesInvalidGCTuning(t *testing.T) {
-	restoreGCSettings(t)
-	t.Setenv("GC_HOME", t.TempDir())
 	neg := int64(-1)
-	oldLoadConfig := supervisorLoadConfig
-	supervisorLoadConfig = func(string) (supervisor.Config, error) {
-		return supervisor.Config{Supervisor: supervisor.Section{Port: 41235, MemoryLimitMiB: &neg}}, nil
-	}
-	t.Cleanup(func() { supervisorLoadConfig = oldLoadConfig })
+	overflow := 1 << 31
+	for _, tc := range []struct {
+		name    string
+		section supervisor.Section
+		want    string
+	}{
+		{"negative memory limit", supervisor.Section{Port: 41235, MemoryLimitMiB: &neg}, "memory_limit_mib"},
+		{"gogc past int32", supervisor.Section{Port: 41235, GOGC: &overflow}, "gogc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			restoreGCSettings(t)
+			t.Setenv("GC_HOME", t.TempDir())
+			oldLoadConfig := supervisorLoadConfig
+			supervisorLoadConfig = func(string) (supervisor.Config, error) {
+				return supervisor.Config{Supervisor: tc.section}, nil
+			}
+			t.Cleanup(func() { supervisorLoadConfig = oldLoadConfig })
 
-	var stdout, stderr bytes.Buffer
-	if code := runSupervisor(&stdout, &stderr); code != 1 {
-		t.Fatalf("runSupervisor code = %d, want 1; stderr=%q", code, stderr.String())
+			var stdout, stderr bytes.Buffer
+			if code := runSupervisor(&stdout, &stderr); code != 1 {
+				t.Fatalf("runSupervisor code = %d, want 1; stderr=%q", code, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tc.want) {
+				t.Fatalf("stderr = %q, want a %s error", stderr.String(), tc.want)
+			}
+		})
 	}
-	if !strings.Contains(stderr.String(), "memory_limit_mib") {
-		t.Fatalf("stderr = %q, want a memory_limit_mib error", stderr.String())
+}
+
+// TestApplySupervisorGCTuningConfigOverridesEnv pins that a supervisor.toml
+// value wins over an inherited GOGC/GOMEMLIMIT for the supervisor itself, and
+// that the log line names supervisor.toml as the source.
+func TestApplySupervisorGCTuningConfigOverridesEnv(t *testing.T) {
+	restoreGCSettings(t)
+	t.Setenv("GOGC", "50")
+	t.Setenv("GOMEMLIMIT", "1GiB")
+	gogc := 250
+	limitMiB := int64(2048)
+	var stderr bytes.Buffer
+	if err := applySupervisorGCTuning(supervisor.Section{GOGC: &gogc, MemoryLimitMiB: &limitMiB}, &stderr); err != nil {
+		t.Fatalf("applySupervisorGCTuning() = %v", err)
+	}
+	if got := debug.SetGCPercent(100); got != gogc {
+		t.Errorf("GC percent = %d, want supervisor.toml's %d over GOGC=50", got, gogc)
+	}
+	if got := debug.SetMemoryLimit(-1); got != limitMiB<<20 {
+		t.Errorf("memory limit = %d, want supervisor.toml's %d", got, limitMiB<<20)
+	}
+	for _, want := range []string{"gogc=250 (supervisor.toml)", "memory_limit=2048MiB (supervisor.toml)"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr = %q, want %q", stderr.String(), want)
+		}
+	}
+}
+
+// TestApplySupervisorGCTuningLogsSourceAndOff pins the log line's source
+// labels (a set-but-empty env var is not a source) and the GOGC=off branch.
+func TestApplySupervisorGCTuningLogsSourceAndOff(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		gogcEnv string
+		percent int
+		want    string
+	}{
+		{"inherited env", "50", 50, "gogc=50 (GOGC env)"},
+		{"empty env is default", "", 100, "gogc=100 (default)"},
+		{"gc off", "off", -1, "gogc=off (GOGC env)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			restoreGCSettings(t)
+			t.Setenv("GOGC", tc.gogcEnv)
+			t.Setenv("GOMEMLIMIT", "")
+			debug.SetGCPercent(tc.percent)
+			var stderr bytes.Buffer
+			if err := applySupervisorGCTuning(supervisor.Section{}, &stderr); err != nil {
+				t.Fatalf("applySupervisorGCTuning() = %v", err)
+			}
+			if !strings.Contains(stderr.String(), tc.want) {
+				t.Errorf("stderr = %q, want %q", stderr.String(), tc.want)
+			}
+			if !strings.Contains(stderr.String(), "(default); supervisor process only") {
+				t.Errorf("stderr = %q, want memory_limit source default for an empty GOMEMLIMIT", stderr.String())
+			}
+		})
+	}
+}
+
+// writeSupervisorTOML writes body as $GC_HOME/supervisor.toml under a fresh
+// GC_HOME, from a working directory outside any city.
+func writeSupervisorTOML(t *testing.T, body string) string {
+	t.Helper()
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	path := supervisor.ConfigPath()
+	if body != "" {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return path
+}
+
+// TestSupervisorGCTuningPreflight pins the operator-facing check `gc supervisor
+// start` and `install` run: an invalid or unreadable value is an error naming
+// the key, and a missing supervisor.toml is neither an error nor seeded.
+func TestSupervisorGCTuningPreflight(t *testing.T) {
+	t.Run("missing file", func(t *testing.T) {
+		path := writeSupervisorTOML(t, "")
+		if err := supervisorGCTuningPreflight(); err != nil {
+			t.Fatalf("preflight = %v, want nil", err)
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("preflight created %s (err=%v); it must only read", path, err)
+		}
+	})
+	t.Run("valid", func(t *testing.T) {
+		writeSupervisorTOML(t, "[supervisor]\nport = 41236\ngogc = 200\nmemory_limit_mib = 3072\n")
+		if err := supervisorGCTuningPreflight(); err != nil {
+			t.Fatalf("preflight = %v, want nil", err)
+		}
+	})
+	for _, tc := range []struct{ name, body, want string }{
+		{"out of range", "[supervisor]\ngogc = 0\n", "gogc = 0"},
+		{"wrong type", "[supervisor]\ngogc = \"off\"\n", "gogc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeSupervisorTOML(t, tc.body)
+			err := supervisorGCTuningPreflight()
+			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), path) {
+				t.Fatalf("preflight = %v, want an error naming %q and %s", err, tc.want, path)
+			}
+		})
+	}
+}
+
+// TestSupervisorStartAndInstallRefuseInvalidGCTuning pins that both commands
+// run the preflight before doing anything else.
+func TestSupervisorStartAndInstallRefuseInvalidGCTuning(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		run    func(stdout, stderr *bytes.Buffer) int
+		prefix string
+	}{
+		{"start", func(o, e *bytes.Buffer) int { return doSupervisorStart(o, e) }, "gc supervisor start: "},
+		{"install", func(o, e *bytes.Buffer) int { return doSupervisorInstall(o, e) }, "gc supervisor install: "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeSupervisorTOML(t, "[supervisor]\nport = 41237\nmemory_limit_mib = -1\n")
+			var stdout, stderr bytes.Buffer
+			if code := tc.run(&stdout, &stderr); code != 1 {
+				t.Fatalf("exit code = %d, want 1; stderr=%q", code, stderr.String())
+			}
+			if want := tc.prefix + "[supervisor] memory_limit_mib = -1"; !strings.HasPrefix(stderr.String(), want) {
+				t.Fatalf("stderr = %q, want prefix %q", stderr.String(), want)
+			}
+		})
 	}
 }

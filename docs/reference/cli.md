@@ -5963,7 +5963,11 @@ rotated, or revoked without a restart. The command prints the key ids
 the reload added, removed, or replaced, and exits 1 when the supervisor
 refused the new key list and kept the current keys. Other
 supervisor.toml settings, read_auth_verify_key included, take effect
-only when the supervisor restarts.
+only when the supervisor restarts. For gogc and memory_limit_mib the
+reload says when supervisor.toml differs from what the supervisor
+applied at startup (the change takes effect on restart), and exits 1
+when either holds a value the next start would refuse; it applies
+neither.
 
 ```
 gc supervisor reload [flags]
@@ -5987,14 +5991,18 @@ in the supervisor's environment to disable the tee when the service manager
 already captures output (e.g. a hand-managed systemd unit with
 StandardOutput=journal).
 
-To tune the supervisor's own garbage collector, set gogc (a positive
-integer, as GOGC) and memory_limit_mib (a positive integer, as GOMEMLIMIT
-in MiB) under [supervisor] in ~/.gc/supervisor.toml. They apply to the
-supervisor process only and are never exported to the processes it
-spawns, unlike GOGC or GOMEMLIMIT in the service manager's environment,
-which every child inherits. They are read at startup, an invalid value
-stops the supervisor from starting, and the effective settings are
-logged on every start.
+To tune the supervisor's own garbage collector, set gogc (an integer from
+1 to 2147483647, as GOGC) and memory_limit_mib (a positive integer, as
+GOMEMLIMIT in MiB) under [supervisor] in ~/.gc/supervisor.toml. They are
+applied to the supervisor process at startup and never exported to the
+processes it spawns, unlike GOGC or GOMEMLIMIT in the service manager's
+environment, which every child inherits. A value set here overrides an
+inherited GOGC or GOMEMLIMIT for the supervisor only; children still
+inherit those variables. An out-of-range value stops 'gc supervisor
+start', 'gc supervisor install' and the supervisor itself; a value of the
+wrong type (gogc = "off", memory_limit_mib = "3GiB") makes supervisor.toml
+unreadable for every gc command that loads it. 'gc supervisor reload' does
+not apply either key. The effective settings are logged on every start.
 
 ```
 gc supervisor run

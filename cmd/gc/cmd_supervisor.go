@@ -317,6 +317,9 @@ type reconcileRequest struct {
 	// writeAuthKeys, set only by the reload-report socket verb, receives the
 	// reload's write-auth key outcome (see reportWriteAuthKeys).
 	writeAuthKeys chan writeAuthKeyReload
+	// gcTuning, set only by the reload-report socket verb, receives the
+	// reload's GC-tuning check (see reportGCTuning).
+	gcTuning chan gcTuningReload
 }
 
 type supervisorShutdownMode int32
@@ -1349,7 +1352,11 @@ rotated, or revoked without a restart. The command prints the key ids
 the reload added, removed, or replaced, and exits 1 when the supervisor
 refused the new key list and kept the current keys. Other
 supervisor.toml settings, read_auth_verify_key included, take effect
-only when the supervisor restarts.`,
+only when the supervisor restarts. For gogc and memory_limit_mib the
+reload says when supervisor.toml differs from what the supervisor
+applied at startup (the change takes effect on restart), and exits 1
+when either holds a value the next start would refuse; it applies
+neither.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if reloadSupervisorReport(stdout, stderr, jsonOut) != 0 {
@@ -1663,10 +1670,30 @@ func gcSettingSource(fromConfig bool, envKey string) string {
 	if fromConfig {
 		return "supervisor.toml"
 	}
-	if _, ok := os.LookupEnv(envKey); ok {
+	if strings.TrimSpace(os.Getenv(envKey)) != "" {
 		return envKey + " env"
 	}
 	return "default"
+}
+
+// supervisorGCTuningPreflight checks supervisor.toml's gogc and
+// memory_limit_mib while an operator is at the command, so `gc supervisor
+// start` and `gc supervisor install` refuse a value the supervisor would
+// refuse at startup instead of leaving a service that cannot start. A missing
+// supervisor.toml has nothing to check.
+func supervisorGCTuningPreflight() error {
+	path := supervisor.ConfigPath()
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	cfg, err := supervisorLoadConfig(path)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", path, err)
+	}
+	if err := cfg.Supervisor.ValidateGCTuning(); err != nil {
+		return fmt.Errorf("%w (in %s)", err, path)
+	}
+	return nil
 }
 
 // testHarnessDefaultPortError refuses a supervisor config that leaves the API
@@ -2037,6 +2064,9 @@ func runSupervisor(stdout, stderr io.Writer) int {
 			// before reconciling. Only the key set changes; cities and their
 			// sessions are untouched.
 			req.reportWriteAuthKeys(reloadSupervisorWriteAuthKeys(apiMux, stderr))
+			// gogc and memory_limit_mib are startup-only: report a changed
+			// or invalid value without applying it.
+			req.reportGCTuning(checkSupervisorGCTuningReload(supCfg.Supervisor, stderr))
 			safeReconcile()
 			// Also poke all running cities so they immediately reconcile
 			// their agents (e.g. after a child process was killed).

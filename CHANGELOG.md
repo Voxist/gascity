@@ -989,6 +989,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`gogc` and `memory_limit_mib` under `[supervisor]` in `supervisor.toml`**
+  tune the supervisor's own Go garbage collector, as `GOGC` and `GOMEMLIMIT`
+  (in MiB) would, without exporting either to the processes it spawns: Dolt,
+  `gc` and `bd` CLIs, and agent sessions keep their own settings. Each is a
+  positive integer (`gogc` at most 2147483647). They are applied in-process at
+  startup and override an inherited `GOGC` or `GOMEMLIMIT` for the supervisor
+  alone; children still inherit those variables. An out-of-range value stops
+  `gc supervisor start`, `gc supervisor install` and the supervisor itself; a
+  value of the wrong type (`gogc = "off"`) makes `supervisor.toml` unreadable
+  for every command that loads it. `gc supervisor reload` applies neither key:
+  it reports a changed value (takes effect on restart) and fails on an invalid
+  one. The effective settings are logged on every start.
+
 - **API: optional fields so the CLI can print its local schema on the
   supervisor route (#8453).** All are optional, so existing clients are
   unaffected:

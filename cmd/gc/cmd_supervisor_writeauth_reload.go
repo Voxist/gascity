@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -109,6 +110,96 @@ func applySupervisorWriteAuthKeys(apiMux *api.SupervisorMux) writeAuthKeyReload 
 	}
 }
 
+// gcTuningReloadStatus classifies the GC-tuning check of a supervisor reload.
+type gcTuningReloadStatus string
+
+const (
+	// gcTuningUnchanged means supervisor.toml's gogc and memory_limit_mib
+	// match what the supervisor applied at startup, or the file could not be
+	// read (the write-auth key step reports that). There is nothing to report.
+	gcTuningUnchanged gcTuningReloadStatus = ""
+	// gcTuningChanged means supervisor.toml's values differ from the ones
+	// applied at startup; they take effect on the next start.
+	gcTuningChanged gcTuningReloadStatus = "changed"
+	// gcTuningInvalid means supervisor.toml holds a value the next start will
+	// refuse.
+	gcTuningInvalid gcTuningReloadStatus = "invalid"
+)
+
+// gcTuningReload is the outcome of the GC-tuning check of a supervisor reload.
+// A reload never applies gogc or memory_limit_mib; it only reports when
+// supervisor.toml no longer matches what the supervisor applied at startup.
+type gcTuningReload struct {
+	Status gcTuningReloadStatus `json:"status"`
+	Detail string               `json:"detail,omitempty"`
+}
+
+// summary renders the outcome as one line for the supervisor log and for
+// `gc supervisor reload`, or returns "" when there is nothing to report.
+func (r gcTuningReload) summary() string {
+	switch r.Status {
+	case gcTuningChanged:
+		return "GC tuning changed in supervisor.toml (" + r.Detail + "); not applied by reload, takes effect on restart"
+	case gcTuningInvalid:
+		return "GC tuning invalid in supervisor.toml: " + r.Detail + "; nothing applied, and the next start will refuse"
+	default:
+		return ""
+	}
+}
+
+// checkSupervisorGCTuningReload re-reads supervisor.toml and compares its
+// gogc and memory_limit_mib with startup, the values the supervisor applied
+// when it started. It applies nothing. It logs the outcome to stderr and
+// returns it for the client that asked for a reload report.
+func checkSupervisorGCTuningReload(startup supervisor.Section, stderr io.Writer) gcTuningReload {
+	result := classifySupervisorGCTuningReload(startup)
+	if line := result.summary(); line != "" {
+		fmt.Fprintf(stderr, "gc supervisor: reload: %s\n", line) //nolint:errcheck // best-effort stderr
+	}
+	return result
+}
+
+// classifySupervisorGCTuningReload is checkSupervisorGCTuningReload without
+// the log line.
+func classifySupervisorGCTuningReload(startup supervisor.Section) gcTuningReload {
+	cfg, err := supervisorLoadConfig(supervisor.ConfigPath())
+	if err != nil {
+		return gcTuningReload{Status: gcTuningUnchanged}
+	}
+	current := cfg.Supervisor
+	if err := current.ValidateGCTuning(); err != nil {
+		return gcTuningReload{Status: gcTuningInvalid, Detail: err.Error()}
+	}
+	var changes []string
+	if a, b := formatOptionalInt(startup.GOGC), formatOptionalInt(current.GOGC); a != b {
+		changes = append(changes, fmt.Sprintf("gogc %s -> %s", a, b))
+	}
+	if a, b := formatOptionalInt64(startup.MemoryLimitMiB), formatOptionalInt64(current.MemoryLimitMiB); a != b {
+		changes = append(changes, fmt.Sprintf("memory_limit_mib %s -> %s", a, b))
+	}
+	if len(changes) == 0 {
+		return gcTuningReload{Status: gcTuningUnchanged}
+	}
+	return gcTuningReload{Status: gcTuningChanged, Detail: strings.Join(changes, ", ")}
+}
+
+// formatOptionalInt renders an optional supervisor.toml integer, "unset" when
+// the key is absent.
+func formatOptionalInt(v *int) string {
+	if v == nil {
+		return "unset"
+	}
+	return strconv.Itoa(*v)
+}
+
+// formatOptionalInt64 is formatOptionalInt for an int64 key.
+func formatOptionalInt64(v *int64) string {
+	if v == nil {
+		return "unset"
+	}
+	return strconv.FormatInt(*v, 10)
+}
+
 // supervisorReloadReportCommand is the control-socket verb `gc supervisor
 // reload` sends. The supervisor reloads exactly as for the bare "reload" verb
 // but answers with one supervisorReloadReply JSON line that also carries the
@@ -140,6 +231,10 @@ type supervisorReloadReply struct {
 	// busy, and for a timeout while an earlier reconcile still held the
 	// supervisor's main loop.
 	WriteAuthKeys *writeAuthKeyReload `json:"write_auth_keys,omitempty"`
+	// GCTuning is the outcome of the reload's GC-tuning check. It is absent
+	// when there is nothing to report or the supervisor replied before the
+	// check ran.
+	GCTuning *gcTuningReload `json:"gc_tuning,omitempty"`
 }
 
 // reportWriteAuthKeys hands the write-auth key outcome to the client waiting
@@ -150,11 +245,19 @@ func (r reconcileRequest) reportWriteAuthKeys(result writeAuthKeyReload) {
 	}
 }
 
+// reportGCTuning hands the GC-tuning check to the client waiting on r, if
+// any. The channel is buffered, so the main loop never blocks here.
+func (r reconcileRequest) reportGCTuning(result gcTuningReload) {
+	if r.gcTuning != nil {
+		r.gcTuning <- result
+	}
+}
+
 // handleSupervisorReloadReport serves supervisorReloadReportCommand on conn. It
 // queues a reload as the bare "reload" verb does and replies once the
 // reconcile finishes, the queue stays full, or the wait times out.
 func handleSupervisorReloadReport(conn net.Conn, reconcileCh chan reconcileRequest) {
-	req := reconcileRequest{done: make(chan struct{}), writeAuthKeys: make(chan writeAuthKeyReload, 1)}
+	req := reconcileRequest{done: make(chan struct{}), writeAuthKeys: make(chan writeAuthKeyReload, 1), gcTuning: make(chan gcTuningReload, 1)}
 	select {
 	case reconcileCh <- req:
 	case <-time.After(supervisorReloadQueueTimeout):
@@ -173,6 +276,13 @@ func handleSupervisorReloadReport(conn net.Conn, reconcileCh chan reconcileReque
 	select {
 	case keys := <-req.writeAuthKeys:
 		reply.WriteAuthKeys = &keys
+	default:
+	}
+	select {
+	case gc := <-req.gcTuning:
+		if gc.Status != gcTuningUnchanged {
+			reply.GCTuning = &gc
+		}
 	default:
 	}
 	writeJSONLine(conn, reply)
@@ -254,6 +364,7 @@ func writeSupervisorReloadReply(stdout, stderr io.Writer, jsonOut bool, reply su
 		return 1
 	case supervisorReloadTimeout:
 		printWriteAuthKeyReload(stdout, stderr, jsonOut, reply.WriteAuthKeys)
+		printGCTuningReload(stdout, stderr, jsonOut, reply.GCTuning)
 		fmt.Fprintln(stderr, "gc supervisor reload: reconcile did not finish before timeout") //nolint:errcheck // best-effort stderr
 		return 1
 	default:
@@ -263,7 +374,9 @@ func writeSupervisorReloadReply(stdout, stderr io.Writer, jsonOut bool, reply su
 	if !jsonOut {
 		fmt.Fprintln(stdout, "Reconciliation triggered.") //nolint:errcheck // best-effort stdout
 	}
-	if refused := printWriteAuthKeyReload(stdout, stderr, jsonOut, reply.WriteAuthKeys); refused {
+	refused := printWriteAuthKeyReload(stdout, stderr, jsonOut, reply.WriteAuthKeys)
+	invalid := printGCTuningReload(stdout, stderr, jsonOut, reply.GCTuning)
+	if refused || invalid {
 		return 1
 	}
 	if jsonOut {
@@ -293,4 +406,24 @@ func printWriteAuthKeyReload(stdout, stderr io.Writer, jsonOut bool, keys *write
 		fmt.Fprintln(stdout, line) //nolint:errcheck // best-effort stdout
 	}
 	return refused
+}
+
+// printGCTuningReload prints the GC-tuning check when there is one to report
+// and reports whether supervisor.toml holds a value the next start will
+// refuse. An invalid value goes to stderr; a change goes to stdout, or to
+// stderr in JSON mode.
+func printGCTuningReload(stdout, stderr io.Writer, jsonOut bool, gc *gcTuningReload) (invalid bool) {
+	if gc == nil {
+		return false
+	}
+	invalid = gc.Status == gcTuningInvalid
+	line := gc.summary()
+	switch {
+	case line == "":
+	case invalid || jsonOut:
+		fmt.Fprintf(stderr, "gc supervisor reload: %s\n", line) //nolint:errcheck // best-effort stderr
+	default:
+		fmt.Fprintln(stdout, line) //nolint:errcheck // best-effort stdout
+	}
+	return invalid
 }

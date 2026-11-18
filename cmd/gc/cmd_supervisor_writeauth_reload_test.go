@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"testing"
@@ -614,5 +615,140 @@ func TestRunSupervisorReloadSwapsWriteAuthKeysWithoutStoppingCities(t *testing.T
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatalf("runSupervisor did not exit after SIGTERM; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+// TestCheckSupervisorGCTuningReload pins that a reload reports, and never
+// applies, a gogc or memory_limit_mib that differs from startup or that the
+// next start would refuse.
+func TestCheckSupervisorGCTuningReload(t *testing.T) {
+	restoreGCSettings(t)
+	gogc100, gogc200, gogc0 := 100, 200, 0
+	limit := int64(3072)
+	for _, tc := range []struct {
+		name       string
+		startup    supervisor.Section
+		current    supervisor.Section
+		loadErr    error
+		want       gcTuningReload
+		wantLogged string
+	}{
+		{name: "unchanged", startup: supervisor.Section{GOGC: &gogc100}, current: supervisor.Section{GOGC: &gogc100}, want: gcTuningReload{}},
+		{name: "both unset", want: gcTuningReload{}},
+		{
+			name: "changed", startup: supervisor.Section{GOGC: &gogc100}, current: supervisor.Section{GOGC: &gogc200, MemoryLimitMiB: &limit},
+			want:       gcTuningReload{Status: gcTuningChanged, Detail: "gogc 100 -> 200, memory_limit_mib unset -> 3072"},
+			wantLogged: "takes effect on restart",
+		},
+		{
+			name: "invalid", startup: supervisor.Section{GOGC: &gogc100}, current: supervisor.Section{GOGC: &gogc0},
+			want:       gcTuningReload{Status: gcTuningInvalid, Detail: "[supervisor] gogc = 0: must be between 1 and 2147483647"},
+			wantLogged: "the next start will refuse",
+		},
+		{name: "unreadable file is left to the write-auth step", loadErr: errors.New("toml: bad"), want: gcTuningReload{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_HOME", t.TempDir())
+			old := supervisorLoadConfig
+			supervisorLoadConfig = func(string) (supervisor.Config, error) {
+				return supervisor.Config{Supervisor: tc.current}, tc.loadErr
+			}
+			t.Cleanup(func() { supervisorLoadConfig = old })
+			debug.SetGCPercent(100)
+
+			var stderr bytes.Buffer
+			got := checkSupervisorGCTuningReload(tc.startup, &stderr)
+			if got != tc.want {
+				t.Fatalf("checkSupervisorGCTuningReload = %+v, want %+v", got, tc.want)
+			}
+			if pct := debug.SetGCPercent(100); pct != 100 {
+				t.Errorf("GC percent = %d after reload check, want unchanged 100", pct)
+			}
+			if tc.wantLogged == "" && stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want nothing logged", stderr.String())
+			}
+			if tc.wantLogged != "" && !strings.Contains(stderr.String(), tc.wantLogged) {
+				t.Errorf("stderr = %q, want %q", stderr.String(), tc.wantLogged)
+			}
+		})
+	}
+}
+
+// TestSupervisorReloadReportsGCTuning pins the client side: the handler
+// carries a GC-tuning outcome to the reply, a change is reported with exit 0,
+// and an invalid value fails the command.
+func TestSupervisorReloadReportsGCTuning(t *testing.T) {
+	changed := &gcTuningReload{Status: gcTuningChanged, Detail: "gogc 100 -> 200"}
+	invalid := &gcTuningReload{Status: gcTuningInvalid, Detail: "[supervisor] gogc = 0: must be between 1 and 2147483647"}
+
+	t.Run("handler carries the outcome", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			reconcileCh := make(chan reconcileRequest, 1)
+			go func() {
+				req := <-reconcileCh
+				req.reportGCTuning(*changed)
+				close(req.done)
+			}()
+			reply, err := exchangeSupervisorReloadReport(serveSupervisorConn(t, reconcileCh))
+			if err != nil {
+				t.Fatalf("exchangeSupervisorReloadReport: %v", err)
+			}
+			if want := (supervisorReloadReply{Outcome: supervisorReloadOK, GCTuning: changed}); !reflect.DeepEqual(reply, want) {
+				t.Fatalf("reply = %+v, want %+v", reply, want)
+			}
+		})
+	})
+
+	t.Run("handler omits an unchanged outcome", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			reconcileCh := make(chan reconcileRequest, 1)
+			go func() {
+				req := <-reconcileCh
+				req.reportGCTuning(gcTuningReload{})
+				close(req.done)
+			}()
+			reply, err := exchangeSupervisorReloadReport(serveSupervisorConn(t, reconcileCh))
+			if err != nil {
+				t.Fatalf("exchangeSupervisorReloadReport: %v", err)
+			}
+			if reply.GCTuning != nil {
+				t.Fatalf("reply.GCTuning = %+v, want nil", reply.GCTuning)
+			}
+		})
+	})
+
+	const (
+		triggered    = "Reconciliation triggered.\n"
+		changedLine  = "GC tuning changed in supervisor.toml (gogc 100 -> 200); not applied by reload, takes effect on restart\n"
+		invalidError = "gc supervisor reload: GC tuning invalid in supervisor.toml: [supervisor] gogc = 0: must be between 1 and 2147483647; nothing applied, and the next start will refuse\n"
+	)
+	for _, tc := range []struct {
+		name       string
+		reply      supervisorReloadReply
+		jsonOut    bool
+		wantCode   int
+		wantStdout string
+		wantStderr string
+	}{
+		{name: "changed", reply: supervisorReloadReply{Outcome: supervisorReloadOK, GCTuning: changed}, wantStdout: triggered + changedLine},
+		{name: "invalid fails", reply: supervisorReloadReply{Outcome: supervisorReloadOK, GCTuning: invalid}, wantCode: 1, wantStdout: triggered, wantStderr: invalidError},
+		{
+			name: "json changed goes to stderr", reply: supervisorReloadReply{Outcome: supervisorReloadOK, GCTuning: changed}, jsonOut: true,
+			wantStdout: `{"schema_version":"1","ok":true,"command":"supervisor reload","action":"reload","message":"Reconciliation triggered."}` + "\n",
+			wantStderr: "gc supervisor reload: " + changedLine,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := writeSupervisorReloadReply(&stdout, &stderr, tc.jsonOut, tc.reply); code != tc.wantCode {
+				t.Errorf("exit code = %d, want %d", code, tc.wantCode)
+			}
+			if stdout.String() != tc.wantStdout {
+				t.Errorf("stdout = %q, want %q", stdout.String(), tc.wantStdout)
+			}
+			if stderr.String() != tc.wantStderr {
+				t.Errorf("stderr = %q, want %q", stderr.String(), tc.wantStderr)
+			}
+		})
 	}
 }

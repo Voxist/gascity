@@ -617,14 +617,18 @@ in the supervisor's environment to disable the tee when the service manager
 already captures output (e.g. a hand-managed systemd unit with
 StandardOutput=journal).
 
-To tune the supervisor's own garbage collector, set gogc (a positive
-integer, as GOGC) and memory_limit_mib (a positive integer, as GOMEMLIMIT
-in MiB) under [supervisor] in ~/.gc/supervisor.toml. They apply to the
-supervisor process only and are never exported to the processes it
-spawns, unlike GOGC or GOMEMLIMIT in the service manager's environment,
-which every child inherits. They are read at startup, an invalid value
-stops the supervisor from starting, and the effective settings are
-logged on every start.`,
+To tune the supervisor's own garbage collector, set gogc (an integer from
+1 to 2147483647, as GOGC) and memory_limit_mib (a positive integer, as
+GOMEMLIMIT in MiB) under [supervisor] in ~/.gc/supervisor.toml. They are
+applied to the supervisor process at startup and never exported to the
+processes it spawns, unlike GOGC or GOMEMLIMIT in the service manager's
+environment, which every child inherits. A value set here overrides an
+inherited GOGC or GOMEMLIMIT for the supervisor only; children still
+inherit those variables. An out-of-range value stops 'gc supervisor
+start', 'gc supervisor install' and the supervisor itself; a value of the
+wrong type (gogc = "off", memory_limit_mib = "3GiB") makes supervisor.toml
+unreadable for every gc command that loads it. 'gc supervisor reload' does
+not apply either key. The effective settings are logged on every start.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if doSupervisorRun(stdout, stderr) != 0 {
@@ -702,10 +706,20 @@ func startBareSupervisor(stdout, stderr io.Writer, jsonOut, joinRunning bool) in
 		return 1
 	}
 	if delegated {
+		if err := supervisorGCTuningPreflight(); err != nil {
+			fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		return delegatedSupervisorStart(delegation, stdout, stderr, jsonOut)
 	}
 	if msg, blocked := bareSupervisorHomeOverrideError(); blocked {
 		fmt.Fprintf(stderr, "gc supervisor start: %s\n", msg) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	// After the HOME override guard: the check reads supervisor.toml from
+	// GC_HOME, which that guard is what vouches for.
+	if err := supervisorGCTuningPreflight(); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	alreadyRunning := func(pid int) int {
@@ -1624,6 +1638,10 @@ func doSupervisorInstall(stdout, stderr io.Writer) int {
 	}
 	if msg, blocked := platformSupervisorHomeOverrideError(); blocked {
 		fmt.Fprintf(stderr, "gc supervisor install: %s\n", msg) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := supervisorGCTuningPreflight(); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	data, err := buildSupervisorServiceData()
