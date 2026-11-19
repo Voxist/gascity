@@ -290,6 +290,115 @@ func TestPatrolTickTrigger(t *testing.T) {
 	}
 }
 
+// TestConfigWatchTickTrigger pins the trigger a config-watcher wake runs: its
+// own, unless a poke is pending, which then rides along as a plain poke tick.
+func TestConfigWatchTickTrigger(t *testing.T) {
+	tests := []struct {
+		name string
+		arm  func(pokeDB *tickDebouncer)
+		want string
+	}{
+		{name: "nothing pending", arm: func(*tickDebouncer) {}, want: configWatchTrigger},
+		{name: "queued poke fire", arm: func(p *tickDebouncer) { p.arm(0) }, want: "poke"},
+		{name: "debouncing poke", arm: func(p *tickDebouncer) { p.arm(time.Hour) }, want: "poke"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pokeDB := newTickDebouncer()
+			tt.arm(pokeDB)
+			if got := configWatchTickTrigger(pokeDB); got != tt.want {
+				t.Fatalf("configWatchTickTrigger = %q, want %q", got, tt.want)
+			}
+			if pokeDB.cancelPending() {
+				t.Fatal("configWatchTickTrigger left a poke fire pending")
+			}
+		})
+	}
+}
+
+// TestSettleConfigWatchTick pins vp-h1jgt's second half: a tick only the
+// config watcher asked for runs as a patrol tick when its reload found nothing
+// to do, and keeps the poke tick the watcher always got when the reload
+// applied, failed or was a manual one.
+func TestSettleConfigWatchTick(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		watchOnly       bool
+		configChanged   bool
+		outcome         reloadOutcome
+		manual          bool
+		wantTrigger     string
+		wantChanged     bool
+		wantWatchMarked bool
+	}{
+		{name: "no change", watchOnly: true, configChanged: true, outcome: reloadOutcomeNoChange, wantTrigger: "patrol"},
+		{name: "no reload due", watchOnly: true, wantTrigger: "patrol"},
+		{name: "applied", watchOnly: true, configChanged: true, outcome: reloadOutcomeApplied, wantTrigger: "poke", wantChanged: true, wantWatchMarked: true},
+		{name: "failed", watchOnly: true, configChanged: true, outcome: reloadOutcomeFailed, wantTrigger: "poke", wantChanged: true, wantWatchMarked: true},
+		{name: "manual reload", watchOnly: true, configChanged: true, outcome: reloadOutcomeNoChange, manual: true, wantTrigger: "poke", wantChanged: true, wantWatchMarked: true},
+		{name: "poke tick", configChanged: true, outcome: reloadOutcomeNoChange, wantTrigger: "poke", wantChanged: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &tickPass{trigger: "poke", configWatchOnly: tc.watchOnly, configChanged: tc.configChanged}
+			p.manualReply.Outcome = tc.outcome
+			if tc.manual {
+				p.manualReload = &reloadRequest{}
+			}
+			p.settleConfigWatchTick()
+			if p.trigger != tc.wantTrigger || p.configChanged != tc.wantChanged || p.configWatchOnly != tc.wantWatchMarked {
+				t.Fatalf("settled tick = (trigger %q, configChanged %v, configWatchOnly %v), want (%q, %v, %v)",
+					p.trigger, p.configChanged, p.configWatchOnly, tc.wantTrigger, tc.wantChanged, tc.wantWatchMarked)
+			}
+		})
+	}
+}
+
+// TestConfigWatchTickReadsLikePatrolWhenNothingToReload drives the real tick:
+// a config-watch tick with no reload due reads sessions from the cache, as a
+// patrol tick does, so it does not pay a poke's live read; a poke tick still
+// does.
+func TestConfigWatchTickReadsLikePatrolWhenNothingToReload(t *testing.T) {
+	backing := &listCountingStore{Store: beads.NewMemStore()}
+	cr := newPokeSnapshotRuntime(t, backing)
+	cr.cityPath = t.TempDir()
+	cr.sp = runtime.NewFake()
+	var (
+		mu    sync.Mutex
+		built []*sessionBeadSnapshot
+	)
+	cr.buildFnWithSessionBeads = func(_ *config.City, _ runtime.Provider, _ beads.Store, _ map[string]beads.Store, snap *sessionBeadSnapshot, _ *sessionReconcilerTraceCycle) DesiredStateResult {
+		mu.Lock()
+		built = append(built, snap)
+		mu.Unlock()
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+	id := createSessionBeadOutOfProcess(t, backing)
+	sawSession := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		saw := false
+		for _, snap := range built {
+			saw = saw || snapshotHasSession(snap, id)
+		}
+		built = nil
+		return saw
+	}
+
+	var dirty atomic.Bool
+	var lastProviderName string
+	var prevPoolRunning map[string]bool
+	ctx := context.Background()
+
+	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, configWatchTrigger)
+	if sawSession() {
+		t.Fatalf("config-watch tick with no reload due saw %s; want the cached read a patrol tick makes", id)
+	}
+	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "poke")
+	if !sawSession() {
+		t.Fatalf("poke tick did not see session %s written by another process", id)
+	}
+}
+
 // The run loop's patrol case itself (mc-03yxh). With a 1h
 // tick_debounce a poke stays pending (debouncing) when the 50ms patrol fires,
 // so only a patrol that runs the poke's tick reads sessions live and sees the
