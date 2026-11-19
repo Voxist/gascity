@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,6 +68,34 @@ type Section struct {
 	// but leaves the read-auth keys as they were.
 	ReadAuthVerifyKey string `toml:"read_auth_verify_key,omitempty"`
 	ReadAuthRequired  bool   `toml:"read_auth_required,omitempty"`
+	// GOGC sets the supervisor process's own garbage-collection target
+	// percentage, as runtime/debug.SetGCPercent. MemoryLimitMiB sets its soft
+	// memory limit in MiB, as runtime/debug.SetMemoryLimit. Both apply to the
+	// supervisor process only: they are set in-process at startup and never
+	// exported, so the processes the supervisor spawns keep their own GC
+	// settings. Unset leaves the Go runtime's setting (or the GOGC/GOMEMLIMIT
+	// the supervisor itself inherited) in place. Each must be a positive
+	// integer in range; ValidateGCTuning checks them. A value of the wrong TOML type (gogc = "off", memory_limit_mib = "3GiB") fails LoadConfig itself.
+	GOGC           *int   `toml:"gogc,omitempty"`
+	MemoryLimitMiB *int64 `toml:"memory_limit_mib,omitempty"`
+}
+
+// maxMemoryLimitMiB is the largest memory_limit_mib whose byte count fits in
+// an int64.
+const maxMemoryLimitMiB = math.MaxInt64 >> 20
+
+// ValidateGCTuning reports an error when gogc or memory_limit_mib is set to a
+// value the supervisor cannot apply. Unset keys are valid.
+func (s Section) ValidateGCTuning() error {
+	// runtime/debug.SetGCPercent converts to int32: a larger value would wrap,
+	// to a negative percent (GC off) or to zero (GC running continuously).
+	if s.GOGC != nil && (*s.GOGC <= 0 || *s.GOGC > math.MaxInt32) {
+		return fmt.Errorf("[supervisor] gogc = %d: must be between 1 and %d", *s.GOGC, math.MaxInt32)
+	}
+	if s.MemoryLimitMiB != nil && (*s.MemoryLimitMiB <= 0 || *s.MemoryLimitMiB > maxMemoryLimitMiB) {
+		return fmt.Errorf("[supervisor] memory_limit_mib = %d: must be between 1 and %d", *s.MemoryLimitMiB, int64(maxMemoryLimitMiB))
+	}
+	return nil
 }
 
 // PublicationConfig holds machine-wide publication policy for workspace

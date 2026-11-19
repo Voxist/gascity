@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -443,5 +444,107 @@ func TestLoadConfigSeedsAPortOutsideTheEphemeralRange(t *testing.T) {
 			t.Fatalf("seeded port %d twice", port)
 		}
 		seen[port] = true
+	}
+}
+
+func TestLoadConfigGCTuning(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "supervisor.toml")
+	if err := os.WriteFile(path, []byte("[supervisor]\ngogc = 200\nmemory_limit_mib = 3072\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Supervisor.GOGC == nil || *cfg.Supervisor.GOGC != 200 {
+		t.Errorf("GOGC = %v, want 200", cfg.Supervisor.GOGC)
+	}
+	if cfg.Supervisor.MemoryLimitMiB == nil || *cfg.Supervisor.MemoryLimitMiB != 3072 {
+		t.Errorf("MemoryLimitMiB = %v, want 3072", cfg.Supervisor.MemoryLimitMiB)
+	}
+	if err := cfg.Supervisor.ValidateGCTuning(); err != nil {
+		t.Errorf("ValidateGCTuning() = %v, want nil", err)
+	}
+}
+
+func TestLoadConfigGCTuningUnsetIsNil(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "supervisor.toml")
+	if err := os.WriteFile(path, []byte("[supervisor]\nport = 9000\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Supervisor.GOGC != nil || cfg.Supervisor.MemoryLimitMiB != nil {
+		t.Errorf("GOGC = %v, MemoryLimitMiB = %v, want both unset", cfg.Supervisor.GOGC, cfg.Supervisor.MemoryLimitMiB)
+	}
+	if err := cfg.Supervisor.ValidateGCTuning(); err != nil {
+		t.Errorf("ValidateGCTuning() on unset = %v, want nil", err)
+	}
+}
+
+func TestValidateGCTuningRejectsOutOfRange(t *testing.T) {
+	intPtr := func(v int) *int { return &v }
+	int64Ptr := func(v int64) *int64 { return &v }
+	for _, tc := range []struct {
+		name    string
+		section Section
+		want    string
+	}{
+		{"gogc zero", Section{GOGC: intPtr(0)}, "gogc"},
+		{"gogc negative", Section{GOGC: intPtr(-1)}, "gogc"},
+		{"memory limit zero", Section{MemoryLimitMiB: int64Ptr(0)}, "memory_limit_mib"},
+		{"memory limit negative", Section{MemoryLimitMiB: int64Ptr(-5)}, "memory_limit_mib"},
+		{"gogc overflows int32", Section{GOGC: intPtr(1 << 31)}, "gogc"},
+		{"memory limit overflows bytes", Section{MemoryLimitMiB: int64Ptr(1 << 44)}, "memory_limit_mib"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.section.ValidateGCTuning()
+			if err == nil {
+				t.Fatal("ValidateGCTuning() = nil, want error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("ValidateGCTuning() = %q, want it to name %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestValidateGCTuningAcceptsBoundaries pins the largest accepted values:
+// runtime/debug.SetGCPercent takes an int32, and a memory limit's byte count
+// must fit in an int64.
+func TestValidateGCTuningAcceptsBoundaries(t *testing.T) {
+	gogc := math.MaxInt32
+	limit := int64(maxMemoryLimitMiB)
+	if err := (Section{GOGC: &gogc, MemoryLimitMiB: &limit}).ValidateGCTuning(); err != nil {
+		t.Fatalf("ValidateGCTuning(gogc=MaxInt32, memory_limit_mib=max) = %v, want nil", err)
+	}
+	over := limit + 1
+	if err := (Section{MemoryLimitMiB: &over}).ValidateGCTuning(); err == nil {
+		t.Fatal("ValidateGCTuning(memory_limit_mib=max+1) = nil, want error")
+	}
+}
+
+// TestLoadConfigGCTuningWrongTypeFails pins that a GOGC-style string is a
+// config error naming the key, not a silently ignored value. The whole file is
+// then unreadable, for every command that loads it.
+func TestLoadConfigGCTuningWrongTypeFails(t *testing.T) {
+	for _, body := range []string{"[supervisor]\ngogc = \"off\"\n", "[supervisor]\nmemory_limit_mib = \"3GiB\"\n"} {
+		path := filepath.Join(t.TempDir(), "supervisor.toml")
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := LoadConfig(path)
+		if err == nil {
+			t.Fatalf("LoadConfig(%q) = nil error, want a type error", body)
+		}
+		key := "gogc"
+		if strings.Contains(body, "memory_limit_mib") {
+			key = "memory_limit_mib"
+		}
+		if !strings.Contains(err.Error(), key) {
+			t.Errorf("LoadConfig(%q) error = %q, want it to name %s", body, err, key)
+		}
 	}
 }
