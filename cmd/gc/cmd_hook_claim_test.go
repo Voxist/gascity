@@ -283,6 +283,52 @@ func TestPreassignHookContinuationGroupPinsSiblingsToSessionID(t *testing.T) {
 		name:         "blank session id falls back to the claim assignee",
 		opts:         hookClaimOptions{Assignee: "worker-1", SessionID: "   "},
 		wantAssignee: "worker-1",
+	}, {
+		// vp-trd6h: an unaliased wisp session's runtime name is bead-scoped
+		// (<template>-<beadID>), the same string the session bead records as
+		// session_name. The pin carries THAT spelling, so identity-shaped
+		// readers resolve it; the bare session id in Assignee/SessionID is
+		// only the actor form bd mutates under.
+		name: "unaliased bead-scoped session name wins over the bare session id",
+		opts: hookClaimOptions{
+			Assignee:  "vc-wisp-mxp02",
+			SessionID: "vc-wisp-mxp02",
+			Env:       []string{"GC_SESSION_NAME=voxist__platform-engineer-vc-wisp-mxp02"},
+		},
+		wantAssignee: "voxist__platform-engineer-vc-wisp-mxp02",
+	}, {
+		// A slot/chair label is shared across every occupant of the seat:
+		// pinning it stalled wake demand permanently. Even when the writer
+		// picked the bead id (Assignee == SessionID, unaliased), a runtime
+		// name without the bead-id suffix keeps the pin on the session id.
+		name: "runtime slot label never wins, even unaliased",
+		opts: hookClaimOptions{
+			Assignee:  "gcs-session-74f608f2",
+			SessionID: "gcs-session-74f608f2",
+			Env:       []string{"GC_SESSION_NAME=gascity--gc__implementation-worker-5-pool"},
+		},
+		wantAssignee: "gcs-session-74f608f2",
+	}, {
+		// An aliased session's claims belong to its alias: a fresh shell with
+		// no GC_SESSION_ID must still resolve to them, so the bead-id pin is
+		// kept even when the runtime name is bead-scoped.
+		name: "aliased session keeps the session id pin",
+		opts: hookClaimOptions{
+			Assignee:  "voxist-platform/furiosa",
+			SessionID: "vc-wisp-mxp02",
+			Env:       []string{"GC_SESSION_NAME=voxist__platform-engineer-vc-wisp-mxp02"},
+		},
+		wantAssignee: "vc-wisp-mxp02",
+	}, {
+		// No runtime session name in the query env: the gate has nothing to
+		// verify, so the bead-id pin stands.
+		name: "blank runtime name keeps the session id pin",
+		opts: hookClaimOptions{
+			Assignee:  "vc-wisp-mxp02",
+			SessionID: "vc-wisp-mxp02",
+			Env:       []string{"GC_TEMPLATE=voxist.platform-engineer"},
+		},
+		wantAssignee: "vc-wisp-mxp02",
 	}}
 
 	for _, tc := range tests {

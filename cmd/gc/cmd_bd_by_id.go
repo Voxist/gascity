@@ -198,6 +198,7 @@ import (
 	"io"
 	"maps"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1644,6 +1645,23 @@ func bdReservedClassIDs(token string) []string {
 // the same owner.
 func bdByIDClaimActor() string { return strings.TrimSpace(os.Getenv("BEADS_ACTOR")) }
 
+// bdByIDClaimOwnIdentities returns the identity spellings the calling session
+// answers to, read from the runtime environment gc puts in every session
+// subprocess: the bd actor (BEADS_ACTOR), the session bead ID (GC_SESSION_ID),
+// the runtime session name (GC_SESSION_NAME) and the alias (GC_ALIAS). It is
+// the manual-claim mirror of the hook claim door's IdentityCandidates, minus
+// the resolved-template forms a fresh shell cannot carry. Order is
+// insignificant; membership is what the caller asks.
+func bdByIDClaimOwnIdentities() []string {
+	identities := make([]string, 0, 4)
+	for _, key := range []string{"BEADS_ACTOR", "GC_SESSION_ID", "GC_SESSION_NAME", "GC_ALIAS"} {
+		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+			identities = append(identities, v)
+		}
+	}
+	return identities
+}
+
 // doBdByIDClaim acquires a class-store bead for assignee through the closed
 // graph contract.
 //
@@ -1655,6 +1673,21 @@ func bdByIDClaimActor() string { return strings.TrimSpace(os.Getenv("BEADS_ACTOR
 // read-then-write would lose the single-winner guarantee, which is why the CLI
 // projection only calls it.
 //
+// One spelling repair happens before the CAS: a bead already held under one of
+// the caller's OWN identity spellings — most commonly a continuation sibling
+// pinned to the full session name while BEADS_ACTOR carries the bare session
+// bead ID (vp-trd6h; the pin-side half of that agreement is
+// continuationPinAssignee) — would otherwise conflict with itself, because the
+// CAS compares exact strings and a bare-id claim cannot distinguish a
+// session-name pin on its own bead from another session's holder. The claim is
+// recorded AS the stored spelling so the same-owner no-op fires; the hook
+// claim door adopts such work the same way (it claims under the stored
+// spelling, and restampHookAdoption later moves it to the actor form). A
+// foreign holder fails the membership check and keeps the plain actor claim,
+// whose conflict names it. The pre-read costs one Get per claim and only
+// reads: a read error leaves the plain actor claim in place, and the CAS
+// remains the sole authority on the outcome.
+//
 // A conflict is reported to the operator as a non-zero exit, matching what the
 // bd passthrough does with a lost claim race; the conflict-is-not-an-error
 // property is about the store contract, not about the shell.
@@ -1663,7 +1696,13 @@ func doBdByIDClaim(graph storebinding.GraphStore, id, assignee string, jsonOut b
 		fmt.Fprintf(stderr, "gc bd: claiming %s requires BEADS_ACTOR to name the claimant\n", id) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	claimed, ok, err := graph.Claim(id, assignee)
+	claimAs := assignee
+	if current, err := graph.Get(id); err == nil {
+		if held := strings.TrimSpace(current.Assignee); held != "" && slices.Contains(bdByIDClaimOwnIdentities(), held) {
+			claimAs = held
+		}
+	}
+	claimed, ok, err := graph.Claim(id, claimAs)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: claiming %s: %v\n", id, err) //nolint:errcheck // best-effort stderr
 		return 1
