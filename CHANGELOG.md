@@ -1004,6 +1004,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value (takes effect on restart) and fails on an invalid one. The effective
   settings are logged on every start.
 
+- **`pprof_addr` under `[supervisor]` in `supervisor.toml`** serves
+  `/debug/pprof/` for the supervisor process only, on a loopback `host:port`
+  (`127.0.0.1:6061`, `[::1]:6061` or `localhost:6061`), and keeps the
+  supervisor's heap profiling on so a heap profile has data. Unlike
+  `GC_PPROF=1` in the service manager's environment, nothing is exported, so
+  the processes the supervisor spawns keep heap profiling off. A non-loopback
+  or empty host, or a port outside 1-65535, stops `gc supervisor start`,
+  `gc supervisor install` and the supervisor itself; a listen failure is
+  logged and the supervisor runs without pprof. `gc supervisor reload` does
+  not apply it and reports a changed or invalid value like `gogc`. Unset, the
+  `GC_PPROF=1` gate is unchanged. The effective setting is logged on every
+  start.
+
 - **API: optional fields so the CLI can print its local schema on the
   supervisor route (#8453).** All are optional, so existing clients are
   unaffected:

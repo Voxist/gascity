@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"math"
+	"net/http"
 	"os"
 	goruntime "runtime"
 	"runtime/debug"
@@ -156,6 +158,7 @@ func TestRunSupervisorRefusesInvalidGCTuning(t *testing.T) {
 	}{
 		{"negative memory limit", supervisor.Section{Port: 41235, MemoryLimitMiB: &neg}, "memory_limit_mib"},
 		{"gogc past int32", supervisor.Section{Port: 41235, GOGC: &overflow}, "gogc"},
+		{"non-loopback pprof_addr", supervisor.Section{Port: 41235, PprofAddr: "0.0.0.0:6061"}, "pprof_addr"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			restoreGCSettings(t)
@@ -264,7 +267,7 @@ func TestSupervisorGCTuningPreflight(t *testing.T) {
 		}
 	})
 	t.Run("valid", func(t *testing.T) {
-		writeSupervisorTOML(t, "[supervisor]\nport = 41236\ngogc = 200\nmemory_limit_mib = 3072\n")
+		writeSupervisorTOML(t, "[supervisor]\nport = 41236\ngogc = 200\nmemory_limit_mib = 3072\npprof_addr = \"127.0.0.1:6061\"\n")
 		if err := supervisorGCTuningPreflight(); err != nil {
 			t.Fatalf("preflight = %v, want nil", err)
 		}
@@ -272,6 +275,7 @@ func TestSupervisorGCTuningPreflight(t *testing.T) {
 	for _, tc := range []struct{ name, body, want string }{
 		{"out of range", "[supervisor]\ngogc = 0\n", "gogc = 0"},
 		{"wrong type", "[supervisor]\ngogc = \"off\"\n", "gogc"},
+		{"non-loopback pprof_addr", "[supervisor]\npprof_addr = \"0.0.0.0:6061\"\n", "pprof_addr"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := writeSupervisorTOML(t, tc.body)
@@ -335,5 +339,86 @@ func TestSupervisorStartAndInstallHomeGuardPrecedesGCTuning(t *testing.T) {
 				t.Fatalf("stderr = %q, want no GC-tuning error ahead of the HOME guard", stderr.String())
 			}
 		})
+	}
+}
+
+// TestStartSupervisorPprofServesFromConfig pins the pprof_addr wiring: the
+// supervisor serves pprof on the configured address, turns its own heap
+// profiling back on so /debug/pprof/heap has samples, and exports nothing a
+// child could inherit.
+func TestStartSupervisorPprofServesFromConfig(t *testing.T) {
+	orig := goruntime.MemProfileRate
+	t.Cleanup(func() { goruntime.MemProfileRate = orig })
+	goruntime.MemProfileRate = 0
+
+	var stderr bytes.Buffer
+	srv := startSupervisorPprof("127.0.0.1:0", &stderr)
+	if srv == nil {
+		t.Fatalf("startSupervisorPprof = nil, want a server; stderr=%q", stderr.String())
+	}
+	t.Cleanup(func() { srv.Close() }) //nolint:errcheck
+
+	if goruntime.MemProfileRate != defaultMemProfileRate {
+		t.Errorf("MemProfileRate = %d, want %d with pprof_addr set", goruntime.MemProfileRate, defaultMemProfileRate)
+	}
+	if v, ok := os.LookupEnv("GC_PPROF"); ok && v == "1" {
+		t.Errorf("GC_PPROF exported as %q; pprof_addr must stay in-process", v)
+	}
+	resp, err := http.Get("http://" + srv.Addr + "/debug/pprof/heap?debug=1")
+	if err != nil {
+		t.Fatalf("GET heap profile: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "heap profile") {
+		t.Fatalf("GET heap profile = %d %q, want 200 and a heap profile", resp.StatusCode, body)
+	}
+	want := "gc supervisor: pprof: listening on " + srv.Addr + " (supervisor.toml), heap profiling on; supervisor process only"
+	if !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	}
+}
+
+// TestStartSupervisorPprofUnsetIsOff pins the default: no pprof_addr and no
+// GC_PPROF=1 means no listener, heap profiling left off, and a log line that
+// says so.
+func TestStartSupervisorPprofUnsetIsOff(t *testing.T) {
+	orig := goruntime.MemProfileRate
+	t.Cleanup(func() { goruntime.MemProfileRate = orig })
+	goruntime.MemProfileRate = 0
+	t.Setenv("GC_PPROF", "")
+
+	var stderr bytes.Buffer
+	if srv := startSupervisorPprof("", &stderr); srv != nil {
+		srv.Close() //nolint:errcheck
+		t.Fatalf("startSupervisorPprof(\"\") = %v, want nil", srv.Addr)
+	}
+	if goruntime.MemProfileRate != 0 {
+		t.Errorf("MemProfileRate = %d, want 0 with pprof off", goruntime.MemProfileRate)
+	}
+	if want := "gc supervisor: pprof: off (pprof_addr unset)"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	}
+}
+
+// TestStartSupervisorPprofListenFailureRunsWithout pins that a pprof_addr the
+// supervisor cannot listen on is logged and leaves heap profiling off, instead
+// of stopping the control plane for a diagnostic listener. An out-of-range
+// port stands in for a busy one: both fail in net.Listen.
+func TestStartSupervisorPprofListenFailureRunsWithout(t *testing.T) {
+	orig := goruntime.MemProfileRate
+	t.Cleanup(func() { goruntime.MemProfileRate = orig })
+	goruntime.MemProfileRate = 0
+
+	var stderr bytes.Buffer
+	if srv := startSupervisorPprof("127.0.0.1:65536", &stderr); srv != nil {
+		srv.Close() //nolint:errcheck
+		t.Fatal("startSupervisorPprof on an unlistenable address returned a server, want nil")
+	}
+	if goruntime.MemProfileRate != 0 {
+		t.Errorf("MemProfileRate = %d, want 0 after a failed listen", goruntime.MemProfileRate)
+	}
+	if !strings.Contains(stderr.String(), "running without pprof") {
+		t.Errorf("stderr = %q, want a running-without-pprof line", stderr.String())
 	}
 }

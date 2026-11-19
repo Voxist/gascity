@@ -1352,11 +1352,11 @@ rotated, or revoked without a restart. The command prints the key ids
 the reload added, removed, or replaced, and exits 1 when the supervisor
 refused the new key list and kept the current keys. Other
 supervisor.toml settings, read_auth_verify_key included, take effect
-only when the supervisor restarts. For gogc and memory_limit_mib the
-reload says when supervisor.toml differs from what the supervisor
-applied at startup (the change takes effect on restart), and exits 1
-when either holds a value the next start would refuse; it applies
-neither.`,
+only when the supervisor restarts. For gogc, memory_limit_mib and
+pprof_addr the reload says when supervisor.toml differs from what the
+supervisor applied at startup (the change takes effect on restart), and
+exits 1 when any holds a value the next start would refuse; it applies
+none of them.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if reloadSupervisorReport(stdout, stderr, jsonOut) != 0 {
@@ -1610,8 +1610,9 @@ func notifySdState(stderr io.Writer, state string) {
 // accumulating across the daemon's long-running phase; buckets created
 // during CLI setup are a small fixed set and are still flushed.
 //
-// gc only serves pprof under GC_PPROF=1 (api.StartPprof), so reuse that
-// same gate rather than introducing a second knob.
+// gc only serves pprof under GC_PPROF=1 (api.StartPprof) or [supervisor]
+// pprof_addr, so heap profiling stays on under GC_PPROF=1 here and
+// startSupervisorPprof turns it back on once a pprof_addr listener is up.
 
 // configureSupervisorRuntime tunes runtime knobs for the long-lived supervisor
 // daemon. See the comment above for why heap profiling is disabled by default.
@@ -1664,6 +1665,40 @@ func applySupervisorGCTuning(s supervisor.Section, stderr io.Writer) error {
 	return nil
 }
 
+// defaultMemProfileRate is the Go runtime's default runtime.MemProfileRate,
+// restored when [supervisor] pprof_addr asks for a heap profile.
+const defaultMemProfileRate = 512 * 1024
+
+// startSupervisorPprof starts the supervisor's pprof listener and logs the
+// effective setting. With [supervisor] pprof_addr set (already vetted by
+// ValidatePprofAddr) it serves pprof there and turns heap profiling back on
+// for this process only; nothing is written to the environment, so the
+// processes the supervisor spawns keep heap profiling off. Unset falls back
+// to the GC_PPROF=1 gate of api.StartPprof. A listen failure is logged and
+// the supervisor runs on without pprof, leaving heap profiling off: pprof is
+// diagnostic and must not keep the control plane down. The caller Shutdowns
+// a non-nil server.
+func startSupervisorPprof(addr string, stderr io.Writer) *http.Server {
+	if addr == "" {
+		srv, err := api.StartPprof("")
+		switch {
+		case err != nil:
+			fmt.Fprintf(stderr, "gc supervisor: pprof: %v\n", err) //nolint:errcheck
+		case srv == nil:
+			fmt.Fprintln(stderr, "gc supervisor: pprof: off (pprof_addr unset)") //nolint:errcheck
+		}
+		return srv
+	}
+	srv, err := api.ServePprof(addr)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: pprof: listen %s (supervisor.toml pprof_addr) failed: %v; running without pprof\n", addr, err) //nolint:errcheck
+		return nil
+	}
+	goruntime.MemProfileRate = defaultMemProfileRate
+	fmt.Fprintf(stderr, "gc supervisor: pprof: listening on %s (supervisor.toml), heap profiling on; supervisor process only, not exported to children\n", srv.Addr) //nolint:errcheck
+	return srv
+}
+
 // gcSettingSource names where an effective GC setting came from, for the
 // startup log line.
 func gcSettingSource(fromConfig bool, envKey string) string {
@@ -1691,6 +1726,9 @@ func supervisorGCTuningPreflight() error {
 		return fmt.Errorf("reading %s: %w", path, err)
 	}
 	if err := cfg.Supervisor.ValidateGCTuning(); err != nil {
+		return fmt.Errorf("%w (in %s)", err, path)
+	}
+	if err := cfg.Supervisor.ValidatePprofAddr(); err != nil {
 		return fmt.Errorf("%w (in %s)", err, path)
 	}
 	return nil
@@ -1821,6 +1859,10 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	if err := supCfg.Supervisor.ValidatePprofAddr(); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: %v (in %s)\n", err, supervisor.ConfigPath()) //nolint:errcheck
+		return 1
+	}
 	if err := applySupervisorGCTuning(supCfg.Supervisor, stderr); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: %v\n", err) //nolint:errcheck
 		return 1
@@ -1907,11 +1949,7 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	dashboardPlane.Start(ctx)
 	defer dashboardPlane.Stop()
 
-	pprofSrv, pprofErr := api.StartPprof("")
-	if pprofErr != nil {
-		fmt.Fprintf(stderr, "gc supervisor: pprof: %v\n", pprofErr) //nolint:errcheck
-	}
-	if pprofSrv != nil {
+	if pprofSrv := startSupervisorPprof(supCfg.Supervisor.PprofAddr, stderr); pprofSrv != nil {
 		defer func() {
 			shutCtx, c := context.WithTimeout(context.Background(), 2*time.Second)
 			defer c()
@@ -2064,8 +2102,8 @@ func runSupervisor(stdout, stderr io.Writer) int {
 			// before reconciling. Only the key set changes; cities and their
 			// sessions are untouched.
 			req.reportWriteAuthKeys(reloadSupervisorWriteAuthKeys(apiMux, stderr))
-			// gogc and memory_limit_mib are startup-only: report a changed
-			// or invalid value without applying it.
+			// gogc, memory_limit_mib and pprof_addr are startup-only:
+			// report a changed or invalid value without applying it.
 			req.reportGCTuning(checkSupervisorGCTuningReload(supCfg.Supervisor, stderr))
 			safeReconcile()
 			// Also poke all running cities so they immediately reconcile

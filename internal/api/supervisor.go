@@ -415,23 +415,35 @@ func StartPprof(addr string) (*http.Server, error) {
 	if addr == "" {
 		addr = "127.0.0.1:6060"
 	}
+	srv, err := ServePprof(addr)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("pprof: listening on %s (GC_PPROF=1)", srv.Addr)
+	return srv, nil
+}
+
+// ServePprof serves pprof on addr regardless of GC_PPROF, on a dedicated mux
+// (not http.DefaultServeMux). The caller decides whether pprof is wanted and
+// vets addr; the returned server's Addr is the bound address, and the caller
+// Shutdowns it.
+func ServePprof(addr string) (*http.Server, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/debug/pprof/", pprof.Index)
 	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
 	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
 	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-	srv := &http.Server{Addr: addr, Handler: mux}
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
+	srv := &http.Server{Addr: lis.Addr().String(), Handler: mux}
 	go func() {
 		if err := srv.Serve(lis); err != nil && err != http.ErrServerClosed {
 			log.Printf("pprof: %v", err)
 		}
 	}()
-	log.Printf("pprof: listening on %s (GC_PPROF=1)", addr)
 	return srv, nil
 }
 
