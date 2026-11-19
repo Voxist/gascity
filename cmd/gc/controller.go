@@ -855,7 +855,7 @@ func watchConfigTargets(targets []config.WatchTarget, debounceDelay time.Duratio
 				if !ok {
 					return
 				}
-				if shouldIgnoreConfigWatchEvent(event.Name) {
+				if shouldIgnoreConfigWatchEvent(event.Name) || isChmodOnlyConfigWatchEvent(event.Op) {
 					continue
 				}
 				if event.Op&(fsnotify.Create|fsnotify.Rename) != 0 {
@@ -895,6 +895,18 @@ func watchConfigTargets(targets []config.WatchTarget, debounceDelay time.Duratio
 			<-eventLoopDone
 		})
 	}
+}
+
+// isChmodOnlyConfigWatchEvent reports whether op is a bare attribute change.
+// Nothing gc loads is carried by mode, ownership or timestamps, and on kqueue
+// an unchanged file fires NOTE_ATTRIB whenever something pages it in: a git
+// command that hashes a dirty city.toml (git diff, git stash, a
+// pull --autostash) produced about 100 no-change reloads an hour, each with a
+// forced demand rebuild (vp-h1jgt). fsnotify's own docs advise ignoring Chmod
+// for this reason. Only the exact Chmod op is dropped: Chmod combined with
+// Write, Create, Rename or Remove is a content change and still reloads.
+func isChmodOnlyConfigWatchEvent(op fsnotify.Op) bool {
+	return op == fsnotify.Chmod
 }
 
 func shouldIgnoreConfigWatchEvent(path string) bool {
