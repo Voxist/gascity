@@ -25,15 +25,15 @@ FROM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e13857
 # upstream release carries schema 0074 yet, so this image builds bd from the
 # Voxist/beads fork, whose newest upstream ancestor (BD_LIB_REF
 # 3c205e0a41e4) is the commit gc's go.mod links — same schema, no skew.
-# BD_SOURCE_REF is the commit the fork's annotated v1.96.0 tag names
-# (9dbe41b77); see deps.env.
+# BD_SOURCE_REF is the commit the fork's annotated v1.96.1 tag names
+# (296b01a30); see deps.env.
 # Retire the bridge once a release >= 0074 exists on a module-resolvable repo:
 # set BD_VERSION to that tag and drop BD_SOURCE_REF/BD_SOURCE_SHA256.
-ARG BD_VERSION=v1.96.0
+ARG BD_VERSION=v1.96.1
 ARG BD_REPO=Voxist/beads
-ARG BD_SOURCE_REF=9dbe41b77dbfbce1bcde5d5326f0e9f69f27336f
-ARG BD_SOURCE_SHA256=50597482f556c2fccb9b969a84b04192b97d8fd481731e50327ed055e5f509fd
-ARG BD_BUILD=9dbe41b77
+ARG BD_SOURCE_REF=296b01a308543adab56c5775018997a75aacf901
+ARG BD_SOURCE_SHA256=c5aae28925dbb90b39db470eeb3587c1af94a3e0cd92c43e16fd4815a9421333
+ARG BD_BUILD=296b01a30
 ARG BD_BRANCH=HEAD
 # 1.83.2, not 1.83.1: CVE-2026-84445 (HIGH) covers <=1.83.1. The pinned
 # source declares 1.83.2, so this is a match, not an override.
@@ -57,9 +57,11 @@ ARG XMOD_VERSION=0.41.0
 ARG THRIFT_VERSION=0.24.0
 ARG XNET_VERSION=0.62.0
 ARG JOSE_VERSION=4.1.6
-# BD_SOURCE_REF's go.mod pins klauspost/compress 1.18.7, which GO-2026-6865
-# (panic on two-block frames) affects; 1.20.2 is fixed and requires no other
-# module, so its `go get` cannot move any of the pins above.
+# klauspost/compress 1.20.2 fixes GO-2026-6865 (panic on two-block frames,
+# <1.20.2) and requires no other module, so its `go get` cannot move any of
+# the pins above. BD_SOURCE_REF's go.mod declares 1.20.2 itself since
+# Voxist/beads#80 (bd 1.96.1), so this is parity, not a lift; it stays as the
+# floor against a later source bump regressing it.
 ARG COMPRESS_VERSION=1.20.2
 
 # bd resolves grpc, x/text and the other overrides through the beads module
@@ -70,10 +72,11 @@ ARG COMPRESS_VERSION=1.20.2
 # security floor. Each must be >= what the pinned source already declares —
 # pinning BELOW it silently downgrades the shipped binary (ga-0emb8: an ARG
 # below what the graph selects fails its exact `go version -m` assertion). At
-# BD_SOURCE_REF 9dbe41b77 (v1.96.0) the source resolves grpc 1.83.2, x/text
+# BD_SOURCE_REF 296b01a30 (v1.96.1) the source resolves grpc 1.83.2, x/text
 # 0.43.0, x/crypto 0.58.0, x/mod 0.41.0, thrift 0.24.0, x/net 0.62.0 and
-# go-jose/v4 4.1.6 on its own (held at parity), and klauspost/compress
-# 1.18.7, which COMPRESS_VERSION lifts. Keep each `go get` and its trailing
+# go-jose/v4 4.1.6 and klauspost/compress 1.20.2 on its own (all held at
+# parity; v1.96.0's source still had compress 1.18.7, which COMPRESS_VERSION
+# lifted). Keep each `go get` and its trailing
 # `go version -m` check: together they fail the build if a later source bump
 # regresses one of them instead of silently shipping it. Raise them with the
 # upstream requirement -- never leave one behind, or the `go get` downgrades

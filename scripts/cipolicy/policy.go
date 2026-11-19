@@ -453,7 +453,11 @@ const (
 	// a11ce9b2e, 4d1b4d417) into the vp-ut6qf.2 branch: the merged nightly.yml
 	// carries both deltas above and nothing else. Taken from the candidate
 	// digest TestCurrentWorkflowsMatchPolicy printed for the merged workflow.
-	expectedNightlyExecutionHash = "7fb8b0a41de14bf4587f903be5f43573d745d8d0e2d3b3241ba9c8c94a499ace"
+	// Re-derived for the bd v1.96.1 repin (vp-pb00j): BD_VERSION (v1.96.0 ->
+	// v1.96.1) and BD_SOURCE_REF (9dbe41b77 -> 296b01a30) at nightly.yml's two
+	// pin sites, nothing else. Taken from the candidate digest
+	// TestCurrentWorkflowsMatchPolicy printed for the repinned workflow.
+	expectedNightlyExecutionHash = "73b273d34093640ebf552beb64636605fc136930f72bc1d20bf36d95f4f9a814"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`. Then the claude-version

@@ -106,12 +106,12 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		// a published release >= 0074 on a module-resolvable repo retires
 		// the bridge (one change: BD_VERSION=tag, drop the refs). Upstream
 		// v1.3.x is not such a release: it tops out at schema 0066.
-		// BD_VERSION is the string the pinned commit declares (1.96.0). bdSourceRef
-		// is the commit the fork's annotated v1.96.0 tag names (9dbe41b77)
+		// BD_VERSION is the string the pinned commit declares (1.96.1). bdSourceRef
+		// is the commit the fork's annotated v1.96.1 tag names (296b01a30)
 		// -- see deps.env.
-		bdSourceRef    = "9dbe41b77dbfbce1bcde5d5326f0e9f69f27336f"
-		bdSourceSHA256 = "50597482f556c2fccb9b969a84b04192b97d8fd481731e50327ed055e5f509fd"
-		bdBuild        = "9dbe41b77"
+		bdSourceRef    = "296b01a308543adab56c5775018997a75aacf901"
+		bdSourceSHA256 = "c5aae28925dbb90b39db470eeb3587c1af94a3e0cd92c43e16fd4815a9421333"
+		bdBuild        = "296b01a30"
 		bdBranch       = "HEAD"
 		grpcVersion    = "1.83.2"
 		// Floors, not exact pins: each must be >= what the pinned source
@@ -128,7 +128,7 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		xmodVersion    = "0.41.0"
 		// CVE-2026-43871 (HIGH, TCompactProtocol varint byte-count DoS, fixed
 		// 0.24.0). bd embeds dolt as a library and reaches thrift through the
-		// parquet writer; the pinned source (v1.96.0) resolves 0.24.0 on its
+		// parquet writer; the pinned source (v1.96.1) resolves 0.24.0 on its
 		// own, so this floor is now parity, kept to catch a regression.
 		thriftVersion = "0.24.0"
 	)
@@ -164,8 +164,8 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		}
 	}
 	bdVersion := env["BD_VERSION"]
-	if bdVersion != "v1.96.0" {
-		t.Fatalf("deps.env BD_VERSION = %q, want v1.96.0 for the pinned source build", bdVersion)
+	if bdVersion != "v1.96.1" {
+		t.Fatalf("deps.env BD_VERSION = %q, want v1.96.1 for the pinned source build", bdVersion)
 	}
 
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")
