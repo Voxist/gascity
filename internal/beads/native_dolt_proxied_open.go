@@ -26,9 +26,9 @@ const bdEnvPrefix = "BD_"
 // proxiedOnlyOpenEnvKeys are the keys the proxied-native window decides that a
 // direct native open does not.
 //
-// They fall into two groups with opposite purposes.
+// They fall into three groups.
 //
-// The first five are UNLOCKS, and they are listed so they are guaranteed
+// Five are UNLOCKS, and they are listed so they are guaranteed
 // UNSET: a key in an open-env key list whose value the projected map omits is
 // actively unset for the window (see withProjectedOpenEnvLocked). bd reads
 // BD_ALLOW_REMOTE_MIGRATE and BD_IGNORE_SCHEMA_SKEW to bypass exactly the gate
@@ -47,6 +47,12 @@ const bdEnvPrefix = "BD_"
 // bdRemoteMigrateOpenEnvKeys; this list states the proxied window's own
 // unlocks, independently of that.)
 //
+// BEADS_DOLT_SERVER_PROXY_ROOT is the PROXY ROOT, projected with the pin's
+// value. It makes the library dial the data port through bd's BDPROXY1
+// handshake, which the port requires before any MySQL byte; without it every
+// connection of the pool stalls until the proxy drops it. It is proxied-only
+// because a direct open has no proxy in front of its server.
+//
 // The last two are the AUTHOR PAIR, and they are projected with values. They
 // are here because the projection reaches commit time, which is not obvious:
 // beads' applyConfigDefaults reads GIT_AUTHOR_NAME and GIT_AUTHOR_EMAIL during
@@ -60,6 +66,7 @@ var proxiedOnlyOpenEnvKeys = []string{
 	"BD_EVENTS_JOURNAL",
 	"BD_IGNORE_SCHEMA_SKEW",
 	"BD_SMART_GATE",
+	"BEADS_DOLT_SERVER_PROXY_ROOT",
 	"BEADS_TEST_MODE",
 	"GIT_AUTHOR_EMAIL",
 	"GIT_AUTHOR_NAME",

@@ -26,9 +26,9 @@ permissions:
 
 env:
   DOLT_VERSION: "2.6.0"
-  BD_VERSION: "v1.95.0" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
+  BD_VERSION: "v1.96.1" # version string; source commit in BD_SOURCE_REF (lockstep with go.mod beads pin; deps.env, vp-kpoi)
   BD_REPO: "Voxist/beads"
-  BD_SOURCE_REF: "4ff2418f74b0d9d5e7cca19dfae40cca786d73bd" # fork-tip bd commit (schema 0072) — built from BD_REPO source by install-bd-archive.sh
+  BD_SOURCE_REF: "296b01a308543adab56c5775018997a75aacf901" # fork-tip bd commit (schema 0074) — built from BD_REPO source by install-bd-archive.sh
 
 jobs:
   verify:
@@ -81,6 +81,15 @@ jobs:
         run: make check-go-clean-cache
       - name: CI policy
         run: make test-ci-policy
+      # deps.env LIBRARY BRIDGE POLICY: the network half of the bridge guard
+      # (TestBDLibBridgePins holds the offline half). A wrong parent or a
+      # change the pinned upstream PR range does not carry fails; a PR that
+      # merged or closed, a PR head that moved past the pinned one, and a
+      # lookup that could not reach GitHub are warning annotations.
+      - name: Beads library bridge
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: make check-bd-lib-bridge
       - name: Format
         run: make fmt-check
       - name: Vet (go vet plus the build-tag scopes)

@@ -745,8 +745,15 @@ func waitTestRealBDPath(t *testing.T) string {
 // extras like AI-assisted duplicate detection, ADO rich-text rendering,
 // telemetry exporters) is broader than what gascity's own go.sum carries,
 // since gascity only imports internal/beads's storage packages.
+//
+// Under a library bridge (deps.env BD_LIB_BRIDGE_REF) go.mod replaces the
+// module with a BD_REPO commit, which `go install <module path>@version`
+// cannot fetch: the module path resolves to the upstream repository. The
+// binary is then built inside a throwaway module that carries exactly
+// gascity's require and replace for beads, so it compiles from the same source
+// the in-process library does and its build info records the replacement.
 func buildPinnedBDBinaryForTests() (string, error) {
-	version, err := pinnedBeadsModuleVersion()
+	mod, err := pinnedBeadsModule()
 	if err != nil {
 		return "", fmt.Errorf("resolve pinned beads module version: %w", err)
 	}
@@ -756,6 +763,10 @@ func buildPinnedBDBinaryForTests() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("mktemp bd binary dir: %w", err)
 	}
+	if mod.replacePath != "" {
+		return buildBridgedBDBinaryForTests(buildDir, mod)
+	}
+	version := mod.version
 
 	cmd := exec.Command("go", "install", "-tags", "gms_pure_go",
 		"github.com/steveyegge/beads/cmd/bd@"+version)
@@ -766,28 +777,146 @@ func buildPinnedBDBinaryForTests() (string, error) {
 	return filepath.Join(buildDir, "bd"), nil
 }
 
-// pinnedBeadsModuleVersion reports the github.com/steveyegge/beads version
-// this test binary was actually built against, read from this process's own
-// embedded build info rather than a `go list -m` subprocess or a go.mod text
-// scan: debug.ReadBuildInfo reflects the exact resolved dependency graph
-// (including any replace/exclude directives) with zero process spawn, and it
-// can never itself drift from go.mod the way a second hardcoded version
-// string could, since the compiler stamps it in at build time.
-func pinnedBeadsModuleVersion() (string, error) {
+// buildBridgedBDBinaryForTests builds bd from a replaced beads module: a
+// throwaway module requiring github.com/steveyegge/beads at gascity's version
+// and replacing it exactly as gascity's go.mod does. Its go.sum starts from
+// gascity's own hashes for the replacement, so the fetched module is checked
+// against gascity's pin (a mismatch is a checksum error, not a silent new
+// line); -mod=mod then records the rest of cmd/bd's dependency closure there,
+// as go install would. gascity's go.mod and go.sum are never touched.
+func buildBridgedBDBinaryForTests(buildDir string, mod pinnedBeadsModuleInfo) (string, error) {
+	gascitySum, err := findModuleFile("go.sum")
+	if err != nil {
+		return "", err
+	}
+	raw, err := os.ReadFile(gascitySum)
+	if err != nil {
+		return "", fmt.Errorf("read gascity go.sum: %w", err)
+	}
+	srcDir := filepath.Join(buildDir, "src")
+	if err := writeBridgedBDBuildModule(srcDir, mod, string(raw)); err != nil {
+		return "", err
+	}
+	bdPath := filepath.Join(buildDir, "bd")
+	cmd := exec.Command("go", "build", "-mod=mod", "-tags", "gms_pure_go", "-o", bdPath, "github.com/steveyegge/beads/cmd/bd")
+	cmd.Dir = srcDir
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOWORK=off", "GOFLAGS=")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("go build github.com/steveyegge/beads/cmd/bd (replaced by %s@%s): %w\n%s", mod.replacePath, mod.replaceVersion, err, out)
+	}
+	return bdPath, nil
+}
+
+// writeBridgedBDBuildModule writes the throwaway module
+// buildBridgedBDBinaryForTests builds in: go.mod carrying gascity's require and
+// replace for beads, and go.sum carrying gascity's two hash lines for the
+// replacement (taken from gascitySum), which must both be present.
+func writeBridgedBDBuildModule(srcDir string, mod pinnedBeadsModuleInfo, gascitySum string) error {
+	if mod.replaceVersion == "" {
+		return fmt.Errorf("go.mod replaces github.com/steveyegge/beads with %s, which has no version; a test bd can only be built from a module version", mod.replacePath)
+	}
+	goVersion, ok := goDirectiveVersion(mod.goVersion)
+	if !ok {
+		return fmt.Errorf("cannot derive a go directive from toolchain version %q", mod.goVersion)
+	}
+	var sum []string
+	for _, suffix := range []string{"", "/go.mod"} {
+		prefix := mod.replacePath + " " + mod.replaceVersion + suffix + " "
+		found := ""
+		for _, line := range strings.Split(gascitySum, "\n") {
+			if strings.HasPrefix(line, prefix) {
+				found = line
+				break
+			}
+		}
+		if found == "" {
+			return fmt.Errorf("gascity go.sum has no %q line; the bridged bd would be built from a hash gascity never pinned", strings.TrimSpace(prefix))
+		}
+		sum = append(sum, found)
+	}
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir bd build module: %w", err)
+	}
+	goMod := fmt.Sprintf("module gascity.test/pinnedbd\n\ngo %s\n\nrequire github.com/steveyegge/beads %s\n\nreplace github.com/steveyegge/beads => %s %s\n",
+		goVersion, mod.version, mod.replacePath, mod.replaceVersion)
+	if err := os.WriteFile(filepath.Join(srcDir, "go.mod"), []byte(goMod), 0o644); err != nil {
+		return fmt.Errorf("write bd build module: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "go.sum"), []byte(strings.Join(sum, "\n")+"\n"), 0o644); err != nil {
+		return fmt.Errorf("write bd build module go.sum: %w", err)
+	}
+	return nil
+}
+
+// goDirectiveVersion turns a toolchain version as debug.BuildInfo reports it
+// ("go1.27.3", "go1.27.3 X:nocoverageredesign", "devel go1.28-abcdef ...")
+// into the bare 1.x[.y] a go directive accepts.
+func goDirectiveVersion(toolchain string) (string, bool) {
+	m := regexp.MustCompile(`(?:^|\s)go(\d+\.\d+(?:\.\d+)?)\b`).FindStringSubmatch(" " + strings.TrimSpace(toolchain))
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
+}
+
+// findModuleFile walks up from the working directory to the module root and
+// returns the path of name there.
+func findModuleFile(name string) (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("getwd: %w", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			path := filepath.Join(dir, name)
+			if _, err := os.Stat(path); err != nil {
+				return "", fmt.Errorf("module root %s has no %s: %w", dir, name, err)
+			}
+			return path, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("no go.mod found walking up from the working directory")
+		}
+		dir = parent
+	}
+}
+
+// pinnedBeadsModuleInfo is the github.com/steveyegge/beads module this test
+// binary links: the version go.mod requires and, under a library bridge, the
+// module and version it is replaced by.
+type pinnedBeadsModuleInfo struct {
+	version        string
+	replacePath    string
+	replaceVersion string
+	// goVersion is the toolchain that built this test binary, as
+	// debug.BuildInfo reports it (see goDirectiveVersion).
+	goVersion string
+}
+
+// pinnedBeadsModule reports the github.com/steveyegge/beads module this test
+// binary was actually built against, read from this process's own embedded
+// build info rather than a `go list -m` subprocess or a go.mod text scan:
+// debug.ReadBuildInfo reflects the exact resolved dependency graph (including
+// any replace/exclude directives) with zero process spawn, and it can never
+// itself drift from go.mod the way a second hardcoded version string could,
+// since the compiler stamps it in at build time.
+func pinnedBeadsModule() (pinnedBeadsModuleInfo, error) {
 	bi, ok := debug.ReadBuildInfo()
 	if !ok {
-		return "", fmt.Errorf("read build info: not available (binary not built with module support)")
+		return pinnedBeadsModuleInfo{}, fmt.Errorf("read build info: not available (binary not built with module support)")
 	}
 	for _, dep := range bi.Deps {
 		if dep.Path != "github.com/steveyegge/beads" {
 			continue
 		}
+		info := pinnedBeadsModuleInfo{version: dep.Version, goVersion: bi.GoVersion}
 		if dep.Replace != nil {
-			return dep.Replace.Version, nil
+			info.replacePath, info.replaceVersion = dep.Replace.Path, dep.Replace.Version
 		}
-		return dep.Version, nil
+		return info, nil
 	}
-	return "", fmt.Errorf("github.com/steveyegge/beads not found in build info deps")
+	return pinnedBeadsModuleInfo{}, fmt.Errorf("github.com/steveyegge/beads not found in build info deps")
 }
 
 // TestBuildPinnedBDBinaryForTestsUsesGoModSource locks in the fix for
@@ -823,6 +952,14 @@ func pseudoVersionCommit(pinned string) (string, bool) {
 // (Dockerfile.agent greps for it), so when the two refs differ it says
 // nothing about what the go.mod commit declares.
 func depsEnvBDPins(t *testing.T) (bdVersion, sourceRef string, bridged bool) {
+	bdVersion, sourceRef, bridged, _, _ = depsEnvBDPinsWithLibBridge(t)
+	return bdVersion, sourceRef, bridged
+}
+
+// depsEnvBDPinsWithLibBridge is depsEnvBDPins plus the library bridge
+// (deps.env LIBRARY BRIDGE POLICY): the BD_REPO commit go.mod replaces the
+// beads module with, and that repository. Both are empty with no bridge.
+func depsEnvBDPinsWithLibBridge(t *testing.T) (bdVersion, sourceRef string, bridged bool, libBridgeRef, bdRepo string) {
 	t.Helper()
 	// Walk up to the module root rather than shelling out to `git rev-parse`:
 	// a subprocess here would be a new call site against the resource-census
@@ -853,6 +990,10 @@ func depsEnvBDPins(t *testing.T) (bdVersion, sourceRef string, bridged bool) {
 			buildRef = strings.TrimPrefix(line, "BD_SOURCE_REF=")
 		case strings.HasPrefix(line, "BD_LIB_REF="):
 			libRef = strings.TrimPrefix(line, "BD_LIB_REF=")
+		case strings.HasPrefix(line, "BD_LIB_BRIDGE_REF="):
+			libBridgeRef = strings.TrimPrefix(line, "BD_LIB_BRIDGE_REF=")
+		case strings.HasPrefix(line, "BD_REPO="):
+			bdRepo = strings.TrimPrefix(line, "BD_REPO=")
 		}
 	}
 	sourceRef = buildRef
@@ -863,7 +1004,70 @@ func depsEnvBDPins(t *testing.T) (bdVersion, sourceRef string, bridged bool) {
 	if bdVersion == "" || sourceRef == "" {
 		t.Fatalf("deps.env missing BD_VERSION (%q) or BD_SOURCE_REF (%q)", bdVersion, sourceRef)
 	}
-	return bdVersion, sourceRef, bridged
+	return bdVersion, sourceRef, bridged, libBridgeRef, bdRepo
+}
+
+// TestBridgedBDBuildModulePinsGascitysHashes checks the throwaway module the
+// bridged bd builds in, without building: gascity's require and replace, a go
+// directive cut from the toolchain version alone, and gascity's own two hash
+// lines for the replacement, so a module that does not match gascity's pin is
+// a checksum error rather than a new go.sum line.
+func TestBridgedBDBuildModulePinsGascitysHashes(t *testing.T) {
+	mod := pinnedBeadsModuleInfo{
+		version:        "v1.3.1-0.20261104055431-3c205e0a41e4",
+		replacePath:    "github.com/Voxist/beads",
+		replaceVersion: "v1.1.1-0.20261113210423-872c78ec288f",
+		goVersion:      "go1.27.3 X:nocoverageredesign",
+	}
+	const sumLines = "github.com/Voxist/beads v1.1.1-0.20261113210423-872c78ec288f h1:zip=\n" +
+		"github.com/Voxist/beads v1.1.1-0.20261113210423-872c78ec288f/go.mod h1:mod=\n"
+	gascitySum := "github.com/a/b v1.0.0 h1:x=\n" + sumLines + "github.com/c/d v1.0.0 h1:y=\n"
+
+	dir := filepath.Join(t.TempDir(), "src")
+	if err := writeBridgedBDBuildModule(dir, mod, gascitySum); err != nil {
+		t.Fatalf("writeBridgedBDBuildModule: %v", err)
+	}
+	goMod, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"\ngo 1.27.3\n",
+		"require github.com/steveyegge/beads v1.3.1-0.20261104055431-3c205e0a41e4\n",
+		"replace github.com/steveyegge/beads => github.com/Voxist/beads v1.1.1-0.20261113210423-872c78ec288f\n",
+	} {
+		if !strings.Contains(string(goMod), want) {
+			t.Errorf("go.mod does not carry %q:\n%s", want, goMod)
+		}
+	}
+	if strings.Contains(string(goMod), "X:") {
+		t.Errorf("go.mod carries the toolchain's experiment suffix:\n%s", goMod)
+	}
+	goSum, err := os.ReadFile(filepath.Join(dir, "go.sum"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(goSum) != sumLines {
+		t.Errorf("go.sum = %q, want exactly gascity's two lines for the replacement %q", goSum, sumLines)
+	}
+
+	if err := writeBridgedBDBuildModule(filepath.Join(t.TempDir(), "src"), mod, "github.com/a/b v1.0.0 h1:x=\n"); err == nil {
+		t.Error("a gascity go.sum without the replacement's hashes was accepted")
+	}
+
+	for toolchain, want := range map[string]string{
+		"go1.27.3":                            "1.27.3",
+		"go1.27.3 X:nocoverageredesign":       "1.27.3",
+		"go1.28":                              "1.28",
+		"devel go1.28-abcdef0 Mon Jan 1 2026": "1.28",
+	} {
+		if got, ok := goDirectiveVersion(toolchain); !ok || got != want {
+			t.Errorf("goDirectiveVersion(%q) = %q, %v; want %q", toolchain, got, ok, want)
+		}
+	}
+	if _, ok := goDirectiveVersion("unknown"); ok {
+		t.Error("goDirectiveVersion accepted a version with no go1.x in it")
+	}
 }
 
 func TestBuildPinnedBDBinaryForTestsUsesGoModSource(t *testing.T) {
@@ -879,10 +1083,11 @@ func TestBuildPinnedBDBinaryForTestsUsesGoModSource(t *testing.T) {
 	// any shard that also holds a waitTestRealBDPath caller.
 	bdPath := waitTestRealBDPath(t)
 
-	pinned, err := pinnedBeadsModuleVersion()
+	mod, err := pinnedBeadsModule()
 	if err != nil {
-		t.Fatalf("pinnedBeadsModuleVersion: %v", err)
+		t.Fatalf("pinnedBeadsModule: %v", err)
 	}
+	pinned := mod.version
 
 	// A go pseudo-version (vX.Y.Z-0.<timestamp>-<commit>) names a COMMIT, not a
 	// release, and a binary built from that commit reports whatever version the
@@ -898,10 +1103,24 @@ func TestBuildPinnedBDBinaryForTestsUsesGoModSource(t *testing.T) {
 	// comments promise and which nothing else checks.
 	wantVersion := strings.TrimPrefix(pinned, "v")
 	if commit, ok := pseudoVersionCommit(pinned); ok {
-		declared, sourceRef, bridged := depsEnvBDPins(t)
+		declared, sourceRef, bridged, libBridgeRef, bdRepo := depsEnvBDPinsWithLibBridge(t)
 		if !strings.HasPrefix(sourceRef, commit) {
 			t.Fatalf("go.mod pins beads commit %s but deps.env BD_SOURCE_REF is %s; "+
 				"the pseudo-version and the source ref must name the same commit", commit, sourceRef)
+		}
+		// The library bridge: go.mod still REQUIRES BD_LIB_REF (above) and
+		// replaces it with BD_LIB_BRIDGE_REF on BD_REPO — that exact commit,
+		// and only when deps.env declares it.
+		switch {
+		case libBridgeRef == "" && mod.replacePath != "":
+			t.Fatalf("this binary links github.com/steveyegge/beads replaced by %s@%s, but deps.env declares no library bridge (BD_LIB_BRIDGE_REF)",
+				mod.replacePath, mod.replaceVersion)
+		case libBridgeRef != "":
+			bridgeCommit, ok := pseudoVersionCommit(mod.replaceVersion)
+			if mod.replacePath != "github.com/"+bdRepo || !ok || !strings.HasPrefix(libBridgeRef, bridgeCommit) {
+				t.Fatalf("deps.env declares the library bridge %s on %s, but this binary links github.com/steveyegge/beads replaced by %q@%q",
+					libBridgeRef, bdRepo, mod.replacePath, mod.replaceVersion)
+			}
 		}
 		wantVersion = strings.TrimPrefix(declared, "v")
 		if bridged {
@@ -940,16 +1159,31 @@ func TestBuildPinnedBDBinaryForTestsUsesGoModSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("go version -m %s: %v\n%s", bdPath, err, metadata)
 	}
+	// go install builds bd as the main module ("mod"); a bridged build links
+	// beads as a dependency ("dep") followed by its replacement ("=>").
 	foundPinnedModule := false
-	for _, line := range strings.Split(string(metadata), "\n") {
+	lines := strings.Split(string(metadata), "\n")
+	for i, line := range lines {
 		fields := strings.Fields(line)
-		if len(fields) >= 3 && fields[0] == "mod" && fields[1] == "github.com/steveyegge/beads" && fields[2] == pinned {
+		if len(fields) < 3 || (fields[0] != "mod" && fields[0] != "dep") || fields[1] != "github.com/steveyegge/beads" || fields[2] != pinned {
+			continue
+		}
+		if mod.replacePath == "" {
 			foundPinnedModule = true
 			break
 		}
+		if i+1 < len(lines) {
+			next := strings.Fields(lines[i+1])
+			foundPinnedModule = len(next) >= 3 && next[0] == "=>" && next[1] == mod.replacePath && next[2] == mod.replaceVersion
+		}
+		break
 	}
 	if !foundPinnedModule {
-		t.Fatalf("%s build metadata %q does not retain pinned Beads module version %q", bdPath, metadata, pinned)
+		want := pinned
+		if mod.replacePath != "" {
+			want += " => " + mod.replacePath + " " + mod.replaceVersion
+		}
+		t.Fatalf("%s build metadata %q does not retain pinned Beads module version %q", bdPath, metadata, want)
 	}
 	// `bd version` reports the release variable declared by Beads source
 	// (currently 1.1.0), not the Go module pseudo-version used to fetch that

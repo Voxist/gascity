@@ -1330,6 +1330,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The proxied-native lane reaches a bd proxy's data port again.** Since
+  beads#7885 the port requires bd's `BDPROXY1` hello before any MySQL byte, so
+  gc's endpoint probe, the guard tick's cursor re-read and the doctor probe
+  stalled for their whole budget (`budget_exhausted`, cursors 0/0) and every
+  proxied scope fell back to the bd CLI. They now dial through bd's own
+  `DialProxyData` under the proxy root gc already resolves, and the native
+  leaf's library open gets `BEADS_DOLT_SERVER_PROXY_ROOT` beside host and port,
+  so its pool makes the same handshake. gc still never reads `proxy.secret`:
+  bd's library does, on every dial. A listener that fails the handshake — a
+  wrong root, a proxy that rotated its secret, or another process on the port —
+  is reported as probe `data_auth_failed` and the terminal verdict
+  `data_auth_failed`, never as the no-greeting signature whose recover is
+  `bd dolt stop` (vp-ut6qf.2).
+
+  `DialProxyData` is not yet on upstream beads (gastownhall/beads#8412 is
+  open), so gc links it through a temporary library bridge: go.mod still
+  requires `BD_LIB_REF` (3c205e0a4, schema 0074/0031) and replaces it with
+  Voxist/beads b0548453a, that commit plus #8412 alone (at head 222279cbf,
+  where each store's pool dials over a network bound to its own proxy root
+  rather than a process-wide address registry). deps.env records the
+  bridge (`BD_LIB_BRIDGE_REF`, `BD_LIB_BRIDGE_UPSTREAM_PR`) under a written
+  policy, `TestBDLibBridgePins` checks go.mod and go.sum against it, and
+  `make check-bd-lib-bridge` (the fork's CI / preflight) fails on a wrong
+  parent or a change the pinned PR range (`BD_LIB_BRIDGE_UPSTREAM_BASE..HEAD`)
+  does not carry, and warns when the PR is no longer open (merged, or closed
+  after maintainers absorbed it), when its head moved past the pinned one, and
+  when GitHub cannot be reached. The bridge is dropped when #8412 lands. The bd binary is unchanged: only gc's in-process
+  library reads `BEADS_DOLT_SERVER_PROXY_ROOT`, so bd v1.96.0 stays the fleet
+  pin.
 - **`gc ready` accepts every `--sort` the generated work queries emit, and a
   failed read leaves stdout empty (vp-bzeg).** The routed tier asks for
   `--sort priority` (its best-by-priority leg and rank probe) and

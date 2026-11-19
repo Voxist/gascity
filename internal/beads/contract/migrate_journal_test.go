@@ -1,12 +1,15 @@
 package contract
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/bazeltest"
+	"golang.org/x/mod/modfile"
+	"golang.org/x/mod/module"
 )
 
 // TestMigrateJournalFileMatchesPinnedBeads reads the name out of the pinned
@@ -31,10 +34,14 @@ import (
 // that ratchet is shrink-only, so the resolution is inlined instead.
 func TestMigrateJournalFileMatchesPinnedBeads(t *testing.T) {
 	modCache := goModuleCache(t)
-	version := pinnedBeadsVersion(t)
-	source, err := os.ReadFile(filepath.Join(modCache, "github.com/steveyegge/beads@"+version, "cmd", "bd", "migrate_dolt_mode.go"))
+	path, version := linkedBeadsModule(t)
+	escaped, err := module.EscapePath(path)
 	if err != nil {
-		t.Skipf("pinned beads %s is not unpacked in the local module cache: %v", version, err)
+		t.Fatalf("escape module path %q: %v", path, err)
+	}
+	source, err := os.ReadFile(filepath.Join(modCache, escaped+"@"+version, "cmd", "bd", "migrate_dolt_mode.go"))
+	if err != nil {
+		t.Skipf("pinned beads %s@%s is not unpacked in the local module cache: %v", path, version, err)
 	}
 
 	const decl = `migrateJournalFileName = "`
@@ -115,24 +122,102 @@ func goEnvFileValue(name string) string {
 	return ""
 }
 
-// pinnedBeadsVersion reads the beads version this module requires.
-func pinnedBeadsVersion(t *testing.T) string {
+// linkedBeadsModule returns the module path and version the go command links
+// for github.com/steveyegge/beads: the requirement, or the replacement when
+// go.mod replaces it (the bd library bridge, deps.env BD_LIB_BRIDGE_REF). The
+// module cache holds a replaced module under the replacement's path, so
+// reading the requirement alone would look in a directory the go command never
+// filled, and this check would skip on every clean cache.
+func linkedBeadsModule(t *testing.T) (string, string) {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(repositoryRoot(t), "go.mod"))
 	if err != nil {
 		t.Fatalf("read go.mod: %v", err)
 	}
-	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) >= 2 && fields[0] == "github.com/steveyegge/beads" {
-			return fields[1]
-		}
-		if len(fields) >= 3 && fields[0] == "require" && fields[1] == "github.com/steveyegge/beads" {
-			return fields[2]
+	path, version, err := linkedBeadsModuleFromGoMod(data)
+	if err != nil {
+		t.Fatalf("go.mod: %v", err)
+	}
+	return path, version
+}
+
+// linkedBeadsModuleFromGoMod is linkedBeadsModule's resolution, on go.mod text.
+func linkedBeadsModuleFromGoMod(data []byte) (string, string, error) {
+	const beadsPath = "github.com/steveyegge/beads"
+	file, err := modfile.Parse("go.mod", data, nil)
+	if err != nil {
+		return "", "", err
+	}
+	version := ""
+	for _, req := range file.Require {
+		if req.Mod.Path == beadsPath {
+			version = req.Mod.Version
 		}
 	}
-	t.Fatal("go.mod does not require github.com/steveyegge/beads")
-	return ""
+	if version == "" {
+		return "", "", fmt.Errorf("does not require %s", beadsPath)
+	}
+	for _, rep := range file.Replace {
+		if rep.Old.Path != beadsPath || (rep.Old.Version != "" && rep.Old.Version != version) {
+			continue
+		}
+		if rep.New.Version == "" {
+			return "", "", fmt.Errorf("replaces %s with the local path %q, which has no module cache directory", beadsPath, rep.New.Path)
+		}
+		return rep.New.Path, rep.New.Version, nil
+	}
+	return beadsPath, version, nil
+}
+
+// TestLinkedBeadsModuleFromGoMod pins the resolution the contract check above
+// depends on: under the library bridge it must look in the replacement's
+// module cache directory, or it skips on every clean cache.
+func TestLinkedBeadsModuleFromGoMod(t *testing.T) {
+	const req = "module m\n\ngo 1.24\n\nrequire github.com/steveyegge/beads v1.3.1-0.20261104055431-3c205e0a41e4\n"
+	cases := []struct {
+		name, goMod, path, version string
+		wantErr                    bool
+	}{
+		{
+			name: "require only", goMod: req,
+			path: "github.com/steveyegge/beads", version: "v1.3.1-0.20261104055431-3c205e0a41e4",
+		},
+		{
+			name: "bridge replace", goMod: req + "replace github.com/steveyegge/beads => github.com/Voxist/beads v1.1.1-0.20261113233511-b0548453ae8d\n",
+			path: "github.com/Voxist/beads", version: "v1.1.1-0.20261113233511-b0548453ae8d",
+		},
+		{
+			name: "replace block", goMod: req + "replace (\n\tgithub.com/steveyegge/beads => github.com/Voxist/beads v1.1.1-0.20261113233511-b0548453ae8d\n)\n",
+			path: "github.com/Voxist/beads", version: "v1.1.1-0.20261113233511-b0548453ae8d",
+		},
+		{
+			name: "replace of another version does not apply", goMod: req + "replace github.com/steveyegge/beads v1.0.0 => github.com/Voxist/beads v1.1.1-0.20261113233511-b0548453ae8d\n",
+			path: "github.com/steveyegge/beads", version: "v1.3.1-0.20261104055431-3c205e0a41e4",
+		},
+		{
+			name: "replace of another module does not apply", goMod: req + "replace github.com/other/mod => github.com/Voxist/beads v1.1.1-0.20261113233511-b0548453ae8d\n",
+			path: "github.com/steveyegge/beads", version: "v1.3.1-0.20261104055431-3c205e0a41e4",
+		},
+		{name: "local path replace", goMod: req + "replace github.com/steveyegge/beads => ../beads\n", wantErr: true},
+		{name: "no requirement", goMod: "module m\n\ngo 1.24\n", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path, version, err := linkedBeadsModuleFromGoMod([]byte(tc.goMod))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("got %s@%s, want an error", path, version)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if path != tc.path || version != tc.version {
+				t.Fatalf("got %s@%s, want %s@%s", path, version, tc.path, tc.version)
+			}
+		})
+	}
 }
 
 // TestGoModuleCacheResolutionOrder pins the precedence the skip regression turned

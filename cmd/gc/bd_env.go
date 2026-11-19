@@ -1233,6 +1233,9 @@ var projectedDoltEnvKeys = []string{
 	"BEADS_DOLT_SERVER_SOCKET",
 	"BEADS_DOLT_SERVER_USER",
 	"BEADS_DOLT_PASSWORD",
+	// No scope projects a proxy root to a bd child (only gc's in-process
+	// proxied window sets it), so an inherited one is always stripped.
+	"BEADS_DOLT_SERVER_PROXY_ROOT",
 	// BEADS_DOLT_SERVER_TLS is intentionally NOT a projected key: it is an
 	// ambient hosted-gateway credential passthrough (see
 	// hostedBeadsCredentialPassthroughKeys) with no per-scope source, so
@@ -2903,6 +2906,7 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 		"BEADS_DOLT_PASSWORD",
 		"BEADS_DOLT_SERVER_HOST",
 		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_SERVER_PROXY_ROOT",
 		"BEADS_DOLT_SERVER_SOCKET",
 		"BEADS_DOLT_SERVER_USER",
 		"GC_CITY",

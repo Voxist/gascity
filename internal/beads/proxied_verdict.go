@@ -67,6 +67,22 @@ const (
 	// It is decided from the record alone: no dial is ever spent on it.
 	ProxiedVerdictNotOurs ProxiedVerdict = "not_ours"
 
+	// ProxiedVerdictDataAuthFailed reports that the listener on the data port
+	// did not complete bd's BDPROXY1 handshake under the secret in the proxy
+	// root admission resolved (beadslib.ErrProxyDataAuth): the root is not the
+	// one serving this port, the proxy restarted and rotated its secret, or
+	// another process now holds the port. Unlike not_ours it is decided on the
+	// wire, by bd's own handshake, after the record validated.
+	//
+	// It is terminal by default, but only once it has been seen twice. bd binds
+	// a restarted proxy's listener before it writes the new secret, so a dial
+	// racing a restart that reused the port can fail once on a healthy proxy.
+	// The read path therefore reconnects once before naming it, admission
+	// re-reads the record and goes non-terminal when the generation moved, and
+	// the guard tick stands down non-terminally so its recovery re-admits. A
+	// repeat against an unchanged generation is the terminal fact.
+	ProxiedVerdictDataAuthFailed ProxiedVerdict = "data_auth_failed"
+
 	// ProxiedVerdictNoOwnershipRecord reports that the scope has no readable
 	// ownership record in the "ready" state.
 	ProxiedVerdictNoOwnershipRecord ProxiedVerdict = "no_ownership_record"
@@ -163,7 +179,7 @@ func (v ProxiedVerdict) String() string { return string(v) }
 //     session, not the database).
 //     Retrying inside the escalation ladder is the point.
 //   - Terminal: a fact about the database, the record, or the policy that a
-//     retry cannot move (schema_skew, not_ours, legacy_schema, database_gone,
+//     retry cannot move (schema_skew, not_ours, data_auth_failed, legacy_schema, database_gone,
 //     access_denied, prefix_mismatch, idle_policy_finite, no_ownership_record),
 //     or a state gc has already escalated to exhaustion (proxy_zombie), or a
 //     write whose outcome is unknown (write_indeterminate — the one case where

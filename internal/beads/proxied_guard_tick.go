@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	beadslib "github.com/steveyegge/beads"
+
 	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/pidutil"
 )
@@ -524,9 +526,16 @@ func repinRefusedVerdict(pin Pin, record proxyendpoint.Record, err error) *Proxi
 // and a loaded box all look the same from here, and none of them is evidence
 // that the schema moved; treating one as drift would demote a healthy controller
 // store for a slow tick.
+//
+// A failed BDPROXY1 handshake is the exception, because it is not about the
+// clock: the listener on the pinned port did not prove it holds the pinned
+// root's secret. See checkDataAuth.
 func (g *proxiedGuard) checkCursors(ctx context.Context, pin Pin) proxiedGuardStep {
 	observed, err := g.opts.cursors(ctx, pin)
 	if err != nil {
+		if errors.Is(err, beadslib.ErrProxyDataAuth) {
+			return g.checkDataAuth(ctx, pin, err)
+		}
 		return proxiedGuardUndecided
 	}
 	pinned := pin.Cursors()
@@ -541,6 +550,28 @@ func (g *proxiedGuard) checkCursors(ctx context.Context, pin Pin) proxiedGuardSt
 	lane, dir := cursorDriftAgainst(pinned, observed)
 	g.store.standDown(NewSchemaSkewVerdictError(lane, dir, fmt.Sprintf(
 		"the pinned database moved from %s to %s while this handle was open", pinned, observed)))
+	return proxiedGuardStoodDown
+}
+
+// checkDataAuth answers a cursor re-read whose BDPROXY1 handshake failed.
+//
+// Undecided would be wrong here: an undecided tick returns before the owner
+// rung, so a port another process took over would keep this handle serving
+// until a tick that happens to be a tenth one — and the native leaf's own pool
+// is meeting the same listener on every read. So the owner join runs now, and a
+// foreign owner is the terminal not_ours it always was. Otherwise the handle
+// stands down NON-terminally: a restart that reused the port can leave the
+// pinned record a secret behind, so the next tick's recovery re-admits, which
+// re-reads the record and the secret. A listener that still fails then is
+// admission's terminal data_auth_failed, not this tick's.
+func (g *proxiedGuard) checkDataAuth(ctx context.Context, pin Pin, err error) proxiedGuardStep {
+	if step := g.checkOwner(ctx, pin); step != proxiedGuardHeld {
+		return step
+	}
+	ForgetProxiedPin(pin.ScopeRoot(), pin.Database())
+	g.store.standDown(NewNonTerminalProxiedVerdictError(ProxiedVerdictDataAuthFailed, fmt.Sprintf(
+		"the listener on pinned data port %d did not complete bd's proxy handshake under the secret in %s; "+
+			"standing down until a recovery re-admits against a fresh record and secret", pin.Port(), pin.Root()), err))
 	return proxiedGuardStoodDown
 }
 
@@ -696,7 +727,7 @@ func (g *proxiedGuard) checkOwner(ctx context.Context, pin Pin) proxiedGuardStep
 // Admission proved effective == raw == pinned at open, so comparing an effective
 // re-read against the pin's raw pair is comparing like with like.
 func proxiedGuardReadCursors(ctx context.Context, pin Pin) (proxyendpoint.Cursors, error) {
-	result := proxyendpoint.Probe(ctx, proxyendpoint.DefaultProbeIO(pin.Port(), pin.Database()))
+	result := proxyendpoint.Probe(ctx, proxyendpoint.DefaultProbeIO(pin.Root(), pin.Port(), pin.Database()))
 	if result.Outcome != proxyendpoint.ProbeServed {
 		if result.Err != nil {
 			return proxyendpoint.Cursors{}, fmt.Errorf("guard cursor read (%s): %w", result.Outcome, result.Err)

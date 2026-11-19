@@ -84,6 +84,20 @@ containsAny(finding["secret"], [
   && attributes[?"path"].orValue("") == "internal/productmetrics/pause.go"
 )
 
+// internal/beads/proxyendpoint/probe_session_test.go's probeFixtureSecret and
+// otherProbeSecret are synthetic BDPROXY1 proxy secrets: the 64-hex shape bd
+// writes to `proxy.secret`, held only by the test's in-process fixture
+// listener and never by a real proxy (vp-ut6qf.2). Listed as the exact two
+// literals, scoped to their one file, so a real secret pasted into the same
+// file is still caught.
+|| (
+  finding["secret"] in [
+    "6a1f0c3e5b7d9a2c4e6f8b0d1a3c5e7f9b2d4f6a8c0e1b3d5f7a9c2e4b6d8f0a",
+    "f0e1d2c3b4a5968778695a4b3c2d1e0ff0e1d2c3b4a5968778695a4b3c2d1e0f"
+  ]
+  && attributes[?"path"].orValue("") == "internal/beads/proxyendpoint/probe_session_test.go"
+)
+
 // UUID-shaped (dashed or undashed) test-fixture ids — bead/session ids reused
 // verbatim as record identifiers in these specific test and corpus files, not
 // secrets on their own (a UUID identifies a record; it authorises nothing).

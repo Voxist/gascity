@@ -81,7 +81,8 @@ type ProxiedEndpointPayload struct {
 	IdleTimeout      string `json:"idle_timeout,omitempty"`
 	IdlePolicySource string `json:"idle_policy_source"`
 	// Probe is the data port's observed state: served, refused,
-	// accepted_no_greeting, unknown, or absent when no probe was attempted.
+	// accepted_no_greeting, data_auth_failed, unknown, or absent when no probe
+	// was attempted.
 	Probe string `json:"probe,omitempty"`
 	// Cursors are the database's two schema-migration cursors, read over the
 	// probe session. Absent unless the probe was served.
@@ -303,10 +304,30 @@ func inspectProxiedEndpoint(scopeRoot, database string) *ProxiedEndpointPayload 
 		payload.Cursors = &cursors
 		return payload
 	}
+	if probe.Outcome == proxyendpoint.ProbeDataAuthFailed {
+		payload.Detail = proxiedEndpointDataAuthDetail(root, ep.Record.Port, probe.Err)
+		return payload
+	}
 	if probe.Err != nil {
 		payload.Detail = probe.Err.Error()
 	}
 	return payload
+}
+
+// proxiedEndpointDataAuthDetail is the endpoint detail for a data port whose
+// listener did not complete bd's BDPROXY1 handshake under the root's secret.
+// It names the ways that happens, because an operator reading it is deciding
+// between them, and keeps bd's own error after them as the evidence.
+func proxiedEndpointDataAuthDetail(root string, port int, err error) string {
+	detail := fmt.Sprintf("data port %d did not complete bd's proxy handshake under the secret in %s: "+
+		"either the proxy root is wrong (another workspace's proxy holds this port), "+
+		"the proxy restarted and rotated its secret (re-run doctor), "+
+		"the proxy was started by a bd older than BDPROXY1 (restart it with this bd), "+
+		"or a process other than bd's proxy is listening on the port", port, root)
+	if err != nil {
+		detail += ": " + err.Error()
+	}
+	return detail
 }
 
 // expectedCursors is the linked library's schema pair.

@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	beadslib "github.com/steveyegge/beads"
 
 	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 )
@@ -367,6 +370,83 @@ func TestProxiedGuardTickUndecidedReadsDecideNothing(t *testing.T) {
 		}
 		if f.store.Demoted() {
 			t.Fatal("an undetermined socket-owner join demoted the store")
+		}
+	})
+}
+
+// TestProxiedGuardTickAnswersAFailedHandshake is the cursor rung's one decided
+// failure: a re-read whose BDPROXY1 handshake failed runs the owner join at once
+// rather than waiting for a tenth tick, and otherwise stands down NON-terminally
+// so the next tick's recovery re-admits against a fresh record and secret.
+func TestProxiedGuardTickAnswersAFailedHandshake(t *testing.T) {
+	authErr := fmt.Errorf("guard cursor read (data_auth_failed): %w: the listener closed the connection without answering the hello: %w",
+		beadslib.ErrProxyDataAuth, io.EOF)
+	start := func(f *guardFixture, owners *int) {
+		f.guard = f.store.startGuard(proxiedGuardOptions{
+			ticks:        f.ticks,
+			processTable: f.admitted.processTable(),
+			probe:        f.probe,
+			cursors: func(context.Context, Pin) (proxyendpoint.Cursors, error) {
+				return proxyendpoint.Cursors{}, authErr
+			},
+			owner: func(context.Context, Pin) proxiedOwner {
+				*owners++
+				return f.owner
+			},
+			ownerEvery: 10,
+			onStep:     func(step proxiedGuardStep) { f.steps <- step },
+		})
+		t.Cleanup(func() { _ = f.store.CloseStore() })
+	}
+
+	t.Run("a foreign owner is not_ours on the first tick", func(t *testing.T) {
+		f := newGuardFixture(t)
+		f.owner = proxiedOwnerForeign
+		owners := 0
+		start(f, &owners)
+		if step := f.tick(); step != proxiedGuardStoodDown {
+			t.Fatalf("a failed handshake on a foreign-owned port reported %s, want stood-down", step)
+		}
+		if owners != 1 {
+			t.Fatalf("the owner join ran %d time(s) on the first tick, want 1: an undecided tick never reaches it", owners)
+		}
+		verdict := f.store.Verdict()
+		if verdict == nil || verdict.Verdict != ProxiedVerdictNotOurs || !verdict.Terminal() {
+			t.Fatalf("verdict = %v, want a terminal not_ours", verdict)
+		}
+	})
+
+	t.Run("otherwise a non-terminal stand-down the next tick recovers", func(t *testing.T) {
+		f := newGuardFixture(t)
+		f.owner = proxiedOwnerUndetermined
+		owners := 0
+		start(f, &owners)
+		replacement := newNativeDoltStoreForTest(&nativeDoltMemStorage{
+			store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true},
+		})
+		replacement.idPrefix = "prx"
+		f.recover = func(context.Context) (*NativeDoltStore, Pin, error) {
+			return replacement, f.store.Pin(), nil
+		}
+
+		if step := f.tick(); step != proxiedGuardStoodDown {
+			t.Fatalf("a failed handshake reported %s, want stood-down", step)
+		}
+		if owners != 1 {
+			t.Fatalf("the owner join ran %d time(s), want 1", owners)
+		}
+		verdict := f.store.Verdict()
+		if verdict == nil || verdict.Verdict != ProxiedVerdictDataAuthFailed || verdict.Terminal() {
+			t.Fatalf("verdict = %v, want a NON-terminal data_auth_failed: a restart that reused the port leaves the pin a secret behind", verdict)
+		}
+		if !errors.Is(verdict, beadslib.ErrProxyDataAuth) {
+			t.Errorf("the stand-down lost its cause: %v", verdict)
+		}
+		if step := f.tick(); step != proxiedGuardRepinned {
+			t.Fatalf("the tick after the stand-down reported %s, want repinned by the recovery", step)
+		}
+		if f.recoveries != 1 {
+			t.Fatalf("the guard called the recovery %d time(s), want 1", f.recoveries)
 		}
 	})
 }

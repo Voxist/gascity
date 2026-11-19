@@ -137,11 +137,28 @@ func withNativeDoltOpenEnvAndCredentialCommandLocked(env map[string]string, cred
 		restoreScoped()
 		return nil, err
 	}
+	// Projected from NO map, so always unset: a direct open never goes through
+	// a bd proxy, and an ambient proxy root would make the library dial its
+	// server as a proxy data port and refuse its socket and auto-start.
+	restoreProxyRoot, err := withProjectedOpenEnvLocked(directOpenUnsetEnvKeys, nil, "")
+	if err != nil {
+		restoreRemoteMigrate()
+		restoreScoped()
+		return nil, err
+	}
 	return func() {
+		restoreProxyRoot()
 		restoreRemoteMigrate()
 		restoreScoped()
 	}, nil
 }
+
+// directOpenUnsetEnvKeys are library keys a direct native open always unsets,
+// whatever its caller's map or the ambient environment says. They stay out of
+// nativeDoltOpenEnvKeys, which the proxied window extends: there
+// BEADS_DOLT_SERVER_PROXY_ROOT is projected with the pin's root
+// (proxiedOnlyOpenEnvKeys).
+var directOpenUnsetEnvKeys = []string{"BEADS_DOLT_SERVER_PROXY_ROOT"}
 
 // BDAllowRemoteMigrateEnvKey is the beads library's opt-in for letting a
 // writable open migrate a shared or remote database's schema forward. A direct
@@ -892,6 +909,9 @@ func (s *NativeDoltStore) withReadRetryContext(parent context.Context, fn func(c
 	// when it expires, so the total cannot stack per-call timeouts past budget.
 	ctx, cancel := context.WithTimeout(parent, budget)
 	defer cancel()
+	// dataAuthReconnected records that this read has spent its one reconnect
+	// on a failed BDPROXY1 handshake (nativeReadDataAuth).
+	dataAuthReconnected := false
 	for {
 		storage, gen, release, err := s.acquireStorageGen()
 		if err != nil {
@@ -914,7 +934,15 @@ func (s *NativeDoltStore) withReadRetryContext(parent context.Context, fn func(c
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetError(ctxErr, rcErr))
 			}
-			if classifyNativeDoltReadError(rcErr, s.readLane()).disposition != nativeReadTransient {
+			switch classifyNativeDoltReadError(rcErr, s.readLane()).disposition {
+			case nativeReadTransient:
+			case nativeReadDataAuth:
+				// The re-point's own dial failed bd's handshake: return it
+				// typed, as the reconnect arm below does, so the wrapper stands
+				// the handle down rather than the next read repeating the
+				// re-point.
+				return s.proxiedReadVerdict(ProxiedVerdictDataAuthFailed, rcErr)
+			default:
 				return rcErr
 			}
 			// A proxy mid-restart is worth another pass while the budget remains.
@@ -959,6 +987,14 @@ func (s *NativeDoltStore) withReadRetryContext(parent context.Context, fn func(c
 				return opErr
 			}
 			backoff = class.cooldown
+		case nativeReadDataAuth:
+			// A repeat after the one reconnect, or a handle that cannot
+			// reconnect at all, is the terminal fact the class names.
+			if reopen == nil || dataAuthReconnected {
+				return s.proxiedReadVerdict(class.verdict, opErr)
+			}
+			dataAuthReconnected = true
+			fallthrough
 		case nativeReadTransient:
 			if reopen == nil {
 				return opErr
@@ -979,7 +1015,13 @@ func (s *NativeDoltStore) withReadRetryContext(parent context.Context, fn func(c
 				if ctxErr := ctx.Err(); ctxErr != nil {
 					return s.proxiedReadBudgetVerdict(nativeReadRetryBudgetError(ctxErr, reconnectErr))
 				}
-				if classifyNativeDoltReadError(rcErr, s.readLane()).disposition != nativeReadTransient {
+				switch classifyNativeDoltReadError(rcErr, s.readLane()).disposition {
+				case nativeReadTransient:
+				case nativeReadDataAuth:
+					// The reconnect's own dial met a listener that failed the
+					// handshake: the repeat that makes it terminal.
+					return s.proxiedReadVerdict(ProxiedVerdictDataAuthFailed, reconnectErr)
+				default:
 					return reconnectErr
 				}
 			}

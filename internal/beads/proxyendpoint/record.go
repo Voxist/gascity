@@ -11,6 +11,12 @@
 // running — and every one of those answers is derivable from files bd documents
 // plus the process table.
 //
+// The data port is the one place gc meets bd's secret, and it is bd's own
+// library that handles it, not gc: the port requires bd's BDPROXY1 handshake
+// before any MySQL byte, so the probe dials it through beadslib.DialProxyData,
+// which reads `proxy.secret` inside beads on every dial and hands gc only a
+// connection whose listener proved it holds that secret.
+//
 // The schema mirrors beads v1.3.0 internal/storage/dbproxy/pidfile/pidfile.go
 // (schema 2). Nothing in gc writes these files, so the risk this package
 // carries is misreading one: a field read wrongly is a field gc would use to

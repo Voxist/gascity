@@ -2,12 +2,17 @@ package proxyendpoint
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"database/sql/driver"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -18,6 +23,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/doltpool"
 	mysql "github.com/go-sql-driver/mysql"
+	beadslib "github.com/steveyegge/beads"
 )
 
 // TestProbeSessionClosesEveryConnectionItOpens is the fence under the hard
@@ -89,7 +95,7 @@ func TestProbeSessionLeavesNoSocketOpenOnARealListener(t *testing.T) {
 	// ends this session, and the test is about what it leaves behind.
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
-	if _, err := DefaultProbeIO(proxy.port, "beads").Session(ctx); err == nil {
+	if _, err := DefaultProbeIO(proxy.root, proxy.port, "beads").Session(ctx); err == nil {
 		t.Fatal("a listener that never greets produced a successful session")
 	}
 
@@ -125,12 +131,12 @@ func TestProbeSessionLeavesNoSocketOpenOnARealListener(t *testing.T) {
 func TestProbeSessionIsOneDialWhenTheHandshakeFailsAsABadConnection(t *testing.T) {
 	const budget = 2 * time.Second
 	proxy := startProbeListener(t, listenerClosesAtOnce)
-	connector, err := probeConnector(proxy.port, "beads", probeDriverTimeout(budget))
+	connector, err := probeConnector(proxy.root, proxy.port, "beads", probeDriverTimeout(budget))
 	if err != nil {
 		t.Fatalf("probeConnector: %v", err)
 	}
 	bait := &badConnHandshakeConnector{Connector: connector}
-	probeIO := probeIOWithDriverTimeout(proxy.port, "beads", probeDriverTimeout(budget))
+	probeIO := probeIOWithDriverTimeout(proxy.root, proxy.port, "beads", probeDriverTimeout(budget))
 	dials := 0
 	var sessionErr error
 	result := probeWithBudget(context.Background(), ProbeIO{
@@ -182,7 +188,7 @@ func TestProbeSessionNeverRedialsAPinnedConnection(t *testing.T) {
 			proxy := startProbeListener(t, tc.behavior)
 			ctx, cancel := context.WithTimeout(context.Background(), ProbeSessionTimeout)
 			defer cancel()
-			_, err := DefaultProbeIO(proxy.port, "beads").Session(ctx)
+			_, err := DefaultProbeIO(proxy.root, proxy.port, "beads").Session(ctx)
 			if !IsPostAcceptFailure(err) {
 				t.Fatalf("the session failed with %v, want a post-accept connection failure", err)
 			}
@@ -303,7 +309,7 @@ func TestProbeOnARealSocketNeverCallsASlowProxyAZombie(t *testing.T) {
 	for _, arm := range arms {
 		t.Run(arm.name, func(t *testing.T) {
 			proxy := startProbeListener(t, listenerStaysSilent)
-			probeIO := probeIOWithDriverTimeout(proxy.port, "beads", arm.driverTimeout)
+			probeIO := probeIOWithDriverTimeout(proxy.root, proxy.port, "beads", arm.driverTimeout)
 			dials := 0
 			outcomes := map[string]int{}
 			for i := 0; i < probes; i++ {
@@ -345,7 +351,7 @@ func TestProbeOnARealSocketNeverCallsASlowProxyAZombie(t *testing.T) {
 func TestProbeOnARealSocketStillNamesAProxyWhoseChildIsGone(t *testing.T) {
 	const budget = 200 * time.Millisecond
 	proxy := startProbeListener(t, listenerClosesAtOnce)
-	probeIO := probeIOWithDriverTimeout(proxy.port, "beads", probeDriverTimeout(budget))
+	probeIO := probeIOWithDriverTimeout(proxy.root, proxy.port, "beads", probeDriverTimeout(budget))
 	dials := 0
 	result := probeWithBudget(context.Background(), ProbeIO{
 		Session: probeIO.Session,
@@ -366,9 +372,159 @@ func TestProbeOnARealSocketStillNamesAProxyWhoseChildIsGone(t *testing.T) {
 	proxy.stop(t)
 }
 
+// TestProbeSessionDialsThroughTheBDProxy1Handshake is the fence under the data
+// port's hello requirement (beads#7885): a bd proxy reads a BDPROXY1 hello
+// before any MySQL byte, so a session that dials it as plain MySQL waits for a
+// greeting the proxy will never send while the proxy waits for a hello the
+// driver will never send. The probe then reads its own budget running out, and
+// admission reports budget_exhausted with no cursors at all.
+//
+// Both arms run the real driver over a real socket against the same listener,
+// which completes the handshake and then greets. The production session gets
+// as far as the MySQL greeting — its failure is the listener's reset, a
+// post-accept failure — and a plain connector to the same port never does.
+func TestProbeSessionDialsThroughTheBDProxy1Handshake(t *testing.T) {
+	const budget = 300 * time.Millisecond
+	proxy := startProbeListener(t, listenerGreetsThenResets)
+
+	t.Run("the production session", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), ProbeSessionTimeout)
+		defer cancel()
+		_, err := DefaultProbeIO(proxy.root, proxy.port, "beads").Session(ctx)
+		// A post-accept failure alone cannot tell the reset this listener
+		// sends after the handshake from bd's hang-up on a hello that did not
+		// verify: both wrap io.EOF. The handshake count and the absence of
+		// ErrProxyDataAuth are what say the session got past BDPROXY1.
+		if errors.Is(err, beadslib.ErrProxyDataAuth) {
+			t.Fatalf("the session failed bd's handshake (%v); it must complete it and reach the MySQL greeting", err)
+		}
+		if got := proxy.handshakes.Load(); got != 1 {
+			t.Fatalf("the listener completed %d BDPROXY1 handshake(s), want exactly 1 (session error %v)", got, err)
+		}
+		if !IsPostAcceptFailure(err) {
+			t.Fatalf("the session failed with %v, want the listener's post-handshake reset: the session never reached the MySQL greeting", err)
+		}
+	})
+
+	t.Run("a plain MySQL dial", func(t *testing.T) {
+		cfg := mysql.NewConfig()
+		cfg.User = probeUser
+		cfg.Net = "tcp"
+		cfg.Addr = net.JoinHostPort(Host, strconv.Itoa(proxy.port))
+		cfg.DBName = "beads"
+		cfg.Timeout = probeDriverTimeout(budget)
+		cfg.ReadTimeout = probeDriverTimeout(budget)
+		cfg.WriteTimeout = probeDriverTimeout(budget)
+		plain, err := mysql.NewConnector(cfg)
+		if err != nil {
+			t.Fatalf("plain connector: %v", err)
+		}
+		result := probeWithBudget(context.Background(), ProbeIO{
+			Session: func(ctx context.Context) (CursorReport, error) { return readCursorsOver(ctx, plain) },
+		}, budget)
+		if result.Outcome != ProbeUnknown || !IsIndeterminate(result.Err) {
+			t.Fatalf("a plain MySQL dial to a hello-first data port reported %v (%v), want unknown on the probe's own budget", result.Outcome, result.Err)
+		}
+	})
+	proxy.stop(t)
+}
+
+// TestProbeNamesAListenerThatFailsTheHandshake pins data_auth_failed on a real
+// socket, and pins what it must never be read as.
+//
+// A bd proxy hangs up on a hello minted from another secret without a word,
+// and go reports that as io.EOF under beadslib.ErrProxyDataAuth. Read as a
+// connection-level failure that is accepted_no_greeting — the zombie token
+// whose ladder ends in `bd dolt stop` — on a proxy that is healthy for the root
+// that owns it. The handshake's answer is its own outcome, and it costs no
+// confirming dial.
+func TestProbeNamesAListenerThatFailsTheHandshake(t *testing.T) {
+	const budget = 2 * time.Second
+	for _, tc := range []struct {
+		name     string
+		behavior probeListenerBehavior
+		root     func(t *testing.T, proxy probeListener) string
+	}{
+		{
+			name:     "a root holding another proxy's secret",
+			behavior: listenerStaysSilent,
+			root:     func(t *testing.T, _ probeListener) string { return writeProbeProxyRoot(t, otherProbeSecret) },
+		},
+		{
+			name:     "a MySQL server that took the port",
+			behavior: listenerGreetsBeforeHello,
+			root:     func(_ *testing.T, proxy probeListener) string { return proxy.root },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			proxy := startProbeListener(t, tc.behavior)
+			probeIO := probeIOWithDriverTimeout(tc.root(t, proxy), proxy.port, "beads", probeDriverTimeout(budget))
+			dials := 0
+			result := probeWithBudget(context.Background(), ProbeIO{
+				Session: probeIO.Session,
+				Dial: func(ctx context.Context) error {
+					dials++
+					return probeIO.Dial(ctx)
+				},
+			}, budget)
+			if result.Outcome != ProbeDataAuthFailed {
+				t.Fatalf("outcome = %v (%v), want data_auth_failed", result.Outcome, result.Err)
+			}
+			if !errors.Is(result.Err, beadslib.ErrProxyDataAuth) {
+				t.Fatalf("the session error %v does not wrap beadslib.ErrProxyDataAuth", result.Err)
+			}
+			if dials != 0 {
+				t.Fatalf("the probe spent %d confirming dial(s) on a failed handshake, want 0", dials)
+			}
+			if got := proxy.acceptsBefore(t); got != 1 {
+				t.Fatalf("the probe cost the listener %d accept(s), want exactly 1", got)
+			}
+			proxy.stop(t)
+		})
+	}
+}
+
+// TestProbeOverTheHandshakeStillSeesARefusedPort keeps the drain arm alive:
+// the authenticated dialer must hand the kernel's ECONNREFUSED back as it was
+// produced, or a draining proxy reads as unknown. It opens no listener: port 1
+// on loopback is refused without one.
+func TestProbeOverTheHandshakeStillSeesARefusedPort(t *testing.T) {
+	result := Probe(context.Background(), DefaultProbeIO(writeProbeProxyRoot(t, probeFixtureSecret), 1, "beads"))
+	if result.Outcome != ProbeRefused {
+		t.Fatalf("a probe of a closed port reported %v (%v), want refused", result.Outcome, result.Err)
+	}
+}
+
+// TestProbeWithoutAProxyRootDialsNothing pins the refusal of a probe that could
+// only have been a plain MySQL dial: it costs the listener no accept and claims
+// nothing about the proxy.
+func TestProbeWithoutAProxyRootDialsNothing(t *testing.T) {
+	proxy := startProbeListener(t, listenerStaysSilent)
+	for _, root := range []string{"", "  "} {
+		dials := 0
+		probeIO := DefaultProbeIO(root, proxy.port, "beads")
+		result := Probe(context.Background(), ProbeIO{
+			Session: probeIO.Session,
+			Dial:    func(context.Context) error { dials++; return nil },
+		})
+		if result.Outcome != ProbeUnknown || !errors.Is(result.Err, ErrNoProxyRoot) {
+			t.Fatalf("a probe with root %q reported %v (%v), want unknown with ErrNoProxyRoot", root, result.Outcome, result.Err)
+		}
+		if dials != 0 {
+			t.Fatalf("a probe with root %q spent %d confirming dial(s), want 0", root, dials)
+		}
+	}
+	if got := proxy.acceptsBefore(t); got != 0 {
+		t.Fatalf("a probe with no root cost the listener %d accept(s), want 0", got)
+	}
+	proxy.stop(t)
+}
+
 // probeListenerBehavior is what the fixture listener does with a connection it
-// has accepted. The two behaviors are the two states of bd's byte-pump proxy a
-// probe has to keep apart.
+// has accepted, once that connection has completed bd's BDPROXY1 handshake
+// (acceptProbeHello) — as a bd proxy authenticates every connection before it
+// dials its Dolt child. The two first behaviors are the two states of bd's
+// byte-pump proxy a probe has to keep apart.
 type probeListenerBehavior int
 
 const (
@@ -385,12 +541,84 @@ const (
 	// listenerAnswersPingThenResets completes the handshake, answers the Ping,
 	// and resets the connection before the session's first statement.
 	listenerAnswersPingThenResets
+	// listenerGreetsBeforeHello is not a bd proxy at all: a MySQL server that
+	// took the port and speaks first, never reading the hello. It is the
+	// foreign listener the handshake exists to refuse.
+	listenerGreetsBeforeHello
 )
+
+// probeFixtureSecret is the proxy secret the fixture listener holds, and
+// otherProbeSecret one minted for another proxy root. Both have the shape bd
+// writes to `proxy.secret`: 64 hex characters.
+const (
+	probeFixtureSecret = "6a1f0c3e5b7d9a2c4e6f8b0d1a3c5e7f9b2d4f6a8c0e1b3d5f7a9c2e4b6d8f0a"
+	otherProbeSecret   = "f0e1d2c3b4a5968778695a4b3c2d1e0ff0e1d2c3b4a5968778695a4b3c2d1e0f"
+)
+
+// The BDPROXY1 line shapes, mirrored from beads
+// internal/storage/dbproxy/proxy/data_auth.go. They are the fixture's half of
+// the wire: production never computes them, it calls beadslib.DialProxyData.
+const (
+	probeHelloPrefix = "BDPROXY1 "
+	probeNonceBytes  = 16
+	probeHelloLen    = len(probeHelloPrefix) + 2*sha256.Size + 1 + 2*probeNonceBytes + 1
+)
+
+// writeProbeProxyRoot is a proxy root holding secret in `proxy.secret`, as bd
+// writes it when its proxy starts. The test writes the file; production code
+// only ever names the root, and bd's library reads it.
+func writeProbeProxyRoot(t *testing.T, secret string) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "proxy.secret"), []byte(secret+"\n"), 0o600); err != nil {
+		t.Fatalf("write the fixture proxy secret: %v", err)
+	}
+	return root
+}
+
+// acceptProbeHello is bd's side of the BDPROXY1 exchange, mirrored from beads
+// dataAuth.accept and identity.DataAuthTokenForPort/DataServerProof: read the
+// fixed-length hello, check its token, answer with the proof over the client's
+// nonce. A hello that does not verify, or never arrives, is hung up on without
+// an answer, which is what bd does.
+func acceptProbeHello(conn net.Conn, secret string, port int) bool {
+	if conn.SetDeadline(time.Now().Add(5*time.Second)) != nil {
+		return false
+	}
+	hello := make([]byte, probeHelloLen)
+	if _, err := io.ReadFull(conn, hello); err != nil {
+		return false
+	}
+	token := hmac.New(sha256.New, []byte(secret))
+	_, _ = token.Write([]byte("bd-proxy-data-v1:" + strconv.Itoa(port)))
+	nonceAt := len(probeHelloPrefix) + 2*sha256.Size + 1
+	if string(hello[:nonceAt]) != probeHelloPrefix+hex.EncodeToString(token.Sum(nil))+" " || hello[probeHelloLen-1] != '\n' {
+		return false
+	}
+	nonce, err := hex.DecodeString(string(hello[nonceAt : probeHelloLen-1]))
+	if err != nil || len(nonce) != probeNonceBytes {
+		return false
+	}
+	proof := hmac.New(sha256.New, []byte(secret))
+	_, _ = proof.Write([]byte("bd-proxy-data-server-v1\x00" + strconv.Itoa(port) + "\x00"))
+	_, _ = proof.Write(nonce)
+	if _, err := io.WriteString(conn, probeHelloPrefix+hex.EncodeToString(proof.Sum(nil))+"\n"); err != nil {
+		return false
+	}
+	return conn.SetDeadline(time.Time{}) == nil
+}
 
 // probeListener is one loopback listener standing in for a proxy's data port.
 type probeListener struct {
-	port     int
+	port int
+	// root is a proxy root holding the secret the listener authenticates
+	// with, which is what a probe of this listener names.
+	root     string
 	accepted *atomic.Int64
+	// handshakes counts the connections that completed bd's BDPROXY1
+	// exchange with this listener: the proof was written to a hello that
+	// verified.
+	handshakes *atomic.Int64
 	// gone receives once for every accepted connection the listener has seen go
 	// away, which is the only place the client's socket close can be observed.
 	gone <-chan struct{}
@@ -411,7 +639,8 @@ func startProbeListener(t *testing.T, behavior probeListenerBehavior) probeListe
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	var accepted atomic.Int64
+	port := listener.Addr().(*net.TCPAddr).Port
+	var accepted, handshakes atomic.Int64
 	var peersMu sync.Mutex
 	var peers []string
 	var wg sync.WaitGroup
@@ -430,6 +659,18 @@ func startProbeListener(t *testing.T, behavior probeListenerBehavior) probeListe
 			go func() {
 				defer wg.Done()
 				defer conn.Close() //nolint:errcheck // the fixture's accepted connection
+				if behavior == listenerGreetsBeforeHello {
+					if writeMySQLPacket(conn, 0, mysqlGreeting()) == nil {
+						_, _ = io.Copy(io.Discard, conn)
+					}
+					return
+				}
+				if !acceptProbeHello(conn, probeFixtureSecret, port) {
+					// bd's answer to a hello that does not verify, and to a
+					// bare connect that sends none: hang up, say nothing.
+					return
+				}
+				handshakes.Add(1)
 				switch behavior {
 				case listenerClosesAtOnce:
 					// The deferred close IS the behavior: no greeting, and the
@@ -461,10 +702,12 @@ func startProbeListener(t *testing.T, behavior probeListenerBehavior) probeListe
 	}
 	t.Cleanup(func() { stop(t) })
 	return probeListener{
-		port:     listener.Addr().(*net.TCPAddr).Port,
-		accepted: &accepted,
-		gone:     gone,
-		stop:     stop,
+		port:       port,
+		root:       writeProbeProxyRoot(t, probeFixtureSecret),
+		accepted:   &accepted,
+		handshakes: &handshakes,
+		gone:       gone,
+		stop:       stop,
 		peers: func() []string {
 			peersMu.Lock()
 			defer peersMu.Unlock()

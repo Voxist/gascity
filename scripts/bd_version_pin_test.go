@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -326,6 +327,211 @@ func TestBDVersionPins(t *testing.T) {
 	// 1.3.0" while the code refused outright below it.
 	assertDocStatesVersion(t, root, "engdocs/design/beads-proxied-local-default.md",
 		"bd ≥ "+freshProviderFloor, "the fresh provider-owned init floor")
+}
+
+// TestBDLibBridgePins holds the temporary library bridge (deps.env "LIBRARY
+// BRIDGE POLICY") to its contract, offline.
+//
+// A bridge is the one sanctioned way gc links beads code upstream has not
+// merged: go.mod keeps REQUIRING BD_LIB_REF and replaces the module with the
+// BD_REPO commit BD_LIB_BRIDGE_REF, which carries exactly the open upstream PR
+// BD_LIB_BRIDGE_UPSTREAM_PR. This test pins everything about that which the
+// checkout alone can prove: the two keys come together and are well formed,
+// the replace is the single unqualified line naming github.com/<BD_REPO> at
+// the bridge commit, and go.sum carries the replacement's hashes (Bazel's
+// go_deps fetches the module by them). Just as strictly, a beads replace with
+// no declared bridge fails: that is fork divergence nobody recorded.
+//
+// What needs the network — that the bridge's single parent is BD_LIB_REF, that
+// its change is the PR's diff, and that the PR is still open — is
+// scripts/check-bd-lib-bridge, run by the fork's CI / preflight.
+func TestBDLibBridgePins(t *testing.T) {
+	root := repoRoot(t)
+	env := readDotenv(t, filepath.Join(root, "deps.env"))
+	checkBDLibBridgePins(t, env, readFile(t, root, "go.mod"), readFile(t, root, "go.sum"))
+}
+
+// TestBDLibBridgePinsRefusesDrift drives the guard over fabricated inputs, so
+// every refusal is proven to fire rather than assumed.
+func TestBDLibBridgePinsRefusesDrift(t *testing.T) {
+	const (
+		libRef    = "3c205e0a41e42c01be5dd2c1df6bf870b6104482"
+		bridgeRef = "872c78ec288f2540672e60fd9926c1490e0732ca"
+		require   = "require github.com/steveyegge/beads v1.3.1-0.20261104055431-3c205e0a41e4\n"
+		replace   = "replace github.com/steveyegge/beads => github.com/Voxist/beads v1.1.1-0.20261113210423-872c78ec288f\n"
+		sum       = "github.com/Voxist/beads v1.1.1-0.20261113210423-872c78ec288f h1:x=\n" +
+			"github.com/Voxist/beads v1.1.1-0.20261113210423-872c78ec288f/go.mod h1:y=\n"
+	)
+	bridged := map[string]string{
+		"BD_REPO": "Voxist/beads", "BD_LIB_REF": libRef,
+		"BD_LIB_BRIDGE_REF": bridgeRef, "BD_LIB_BRIDGE_UPSTREAM_PR": "gastownhall/beads#8412",
+		"BD_LIB_BRIDGE_UPSTREAM_BASE": "125c62063406d064d8392f3245920b47e9c81f85",
+		"BD_LIB_BRIDGE_UPSTREAM_HEAD": "4af8ad95e8e35907994c4bee62e27ee4b2371703",
+	}
+	with := func(key, value string) map[string]string {
+		out := map[string]string{}
+		for k, v := range bridged {
+			out[k] = v
+		}
+		if value == "" {
+			delete(out, key)
+		} else {
+			out[key] = value
+		}
+		return out
+	}
+	unbridged := with("BD_LIB_BRIDGE_REF", "")
+	for _, key := range []string{"BD_LIB_BRIDGE_UPSTREAM_PR", "BD_LIB_BRIDGE_UPSTREAM_BASE", "BD_LIB_BRIDGE_UPSTREAM_HEAD"} {
+		delete(unbridged, key)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		env   map[string]string
+		goMod string
+		goSum string
+		want  string // "" means the guard must pass
+	}{
+		{name: "a declared bridge", env: bridged, goMod: require + replace, goSum: sum},
+		{name: "no bridge and no replace", env: unbridged, goMod: require},
+		{name: "a replace nobody declared", env: unbridged, goMod: require + replace, want: "no bridge is declared"},
+		{name: "a declared bridge go.mod does not carry", env: bridged, goMod: require, goSum: sum, want: "no replace"},
+		{name: "a bridge with no upstream PR", env: with("BD_LIB_BRIDGE_UPSTREAM_PR", ""), goMod: require + replace, goSum: sum, want: "BD_LIB_BRIDGE_UPSTREAM_PR"},
+		{name: "an upstream PR that is not gastownhall/beads", env: with("BD_LIB_BRIDGE_UPSTREAM_PR", "Voxist/beads#80"), goMod: require + replace, goSum: sum, want: "BD_LIB_BRIDGE_UPSTREAM_PR"},
+		{name: "a short bridge ref", env: with("BD_LIB_BRIDGE_REF", "872c78ec2"), goMod: require + replace, goSum: sum, want: "40-char"},
+		{name: "a bridge with no pinned PR head", env: with("BD_LIB_BRIDGE_UPSTREAM_HEAD", ""), goMod: require + replace, goSum: sum, want: "BD_LIB_BRIDGE_UPSTREAM_HEAD"},
+		{name: "a bridge with no pinned PR base", env: with("BD_LIB_BRIDGE_UPSTREAM_BASE", "125c62063"), goMod: require + replace, goSum: sum, want: "BD_LIB_BRIDGE_UPSTREAM_BASE"},
+		{name: "a bridge with no lib ref under it", env: with("BD_LIB_REF", ""), goMod: require + replace, goSum: sum, want: "BD_LIB_REF"},
+		{
+			name: "a replace at another commit", env: bridged, goSum: sum, want: "BD_LIB_BRIDGE_REF",
+			goMod: require + "replace github.com/steveyegge/beads => github.com/Voxist/beads v1.1.1-0.20261113210423-aaaaaaaaaaaa\n",
+		},
+		{
+			name: "a replace onto another repo", env: bridged, goSum: sum, want: "github.com/Voxist/beads",
+			goMod: require + "replace github.com/steveyegge/beads => github.com/someone/beads v1.1.1-0.20261113210423-872c78ec288f\n",
+		},
+		{
+			name: "a replace onto a local path", env: bridged, goSum: sum, want: "github.com/Voxist/beads",
+			goMod: require + "replace github.com/steveyegge/beads => ../beads\n",
+		},
+		{
+			name: "a version-qualified replace", env: bridged, goSum: sum, want: "unqualified",
+			goMod: require + "replace github.com/steveyegge/beads v1.3.1-0.20261104055431-3c205e0a41e4 => github.com/Voxist/beads v1.1.1-0.20261113210423-872c78ec288f\n",
+		},
+		{
+			name: "a replace block", env: bridged, goSum: sum, want: "single-line",
+			goMod: require + "replace (\n\tgithub.com/steveyegge/beads => github.com/Voxist/beads v1.1.1-0.20261113210423-872c78ec288f\n)\n",
+		},
+		{name: "a bridge go.sum cannot fetch", env: bridged, goMod: require + replace, goSum: "", want: "go.sum"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &bridgeRecorder{}
+			checkBDLibBridgePins(rec, tc.env, tc.goMod, tc.goSum)
+			switch {
+			case tc.want == "" && len(rec.errs) > 0:
+				t.Fatalf("the guard refused a valid shape: %v", rec.errs)
+			case tc.want != "" && len(rec.errs) == 0:
+				t.Fatalf("the guard passed; want a refusal naming %q", tc.want)
+			case tc.want != "" && !strings.Contains(strings.Join(rec.errs, "\n"), tc.want):
+				t.Fatalf("the refusal %v does not name %q", rec.errs, tc.want)
+			}
+		})
+	}
+}
+
+// bridgeReporter is the part of testing.T the bridge guard reports through,
+// so its refusals can be asserted.
+type bridgeReporter interface {
+	Helper()
+	Errorf(format string, args ...any)
+}
+
+type bridgeRecorder struct{ errs []string }
+
+func (r *bridgeRecorder) Helper() {}
+func (r *bridgeRecorder) Errorf(format string, args ...any) {
+	r.errs = append(r.errs, fmt.Sprintf(format, args...))
+}
+
+func checkBDLibBridgePins(t bridgeReporter, env map[string]string, goMod, goSum string) {
+	t.Helper()
+	commitRE := regexp.MustCompile(`^[0-9a-f]{40}$`)
+	bridgeRef := env["BD_LIB_BRIDGE_REF"]
+	bridgePR := env["BD_LIB_BRIDGE_UPSTREAM_PR"]
+	libRef := env["BD_LIB_REF"]
+
+	// Every line of go.mod that replaces the beads module, in any form.
+	var replaces []string
+	for _, line := range strings.Split(goMod, "\n") {
+		trimmed := strings.TrimSpace(line)
+		fields := strings.Fields(trimmed)
+		if len(fields) > 0 && fields[0] == "replace" {
+			fields = fields[1:]
+		}
+		if len(fields) > 0 && fields[0] == "github.com/steveyegge/beads" && strings.Contains(trimmed, "=>") {
+			replaces = append(replaces, trimmed)
+		}
+	}
+
+	if bridgeRef == "" && bridgePR == "" && env["BD_LIB_BRIDGE_UPSTREAM_BASE"] == "" && env["BD_LIB_BRIDGE_UPSTREAM_HEAD"] == "" {
+		for _, line := range replaces {
+			t.Errorf("go.mod replaces the beads library (%q) but no bridge is declared: set BD_LIB_BRIDGE_REF and BD_LIB_BRIDGE_UPSTREAM_PR in deps.env (LIBRARY BRIDGE POLICY), or drop the replace", line)
+		}
+		return
+	}
+	if !commitRE.MatchString(bridgeRef) {
+		t.Errorf("deps.env BD_LIB_BRIDGE_REF = %q, want the full 40-char %s commit SHA the bridge builds from", bridgeRef, env["BD_REPO"])
+	}
+	for _, key := range []string{"BD_LIB_BRIDGE_UPSTREAM_BASE", "BD_LIB_BRIDGE_UPSTREAM_HEAD"} {
+		if !commitRE.MatchString(env[key]) {
+			t.Errorf("deps.env %s = %q, want the full 40-char gastownhall/beads SHA: the bridge is checked against the pinned PR range BASE..HEAD, never the live PR", key, env[key])
+		}
+	}
+	if !regexp.MustCompile(`^gastownhall/beads#[1-9][0-9]*$`).MatchString(bridgePR) {
+		t.Errorf("deps.env BD_LIB_BRIDGE_UPSTREAM_PR = %q, want the open gastownhall/beads#<n> PR the bridge carries: a bridge exists only while that PR is open", bridgePR)
+	}
+	if !commitRE.MatchString(libRef) {
+		t.Errorf("deps.env BD_LIB_REF = %q; a bridge is one commit on top of BD_LIB_REF, so it needs the full upstream SHA", libRef)
+	}
+	repo := env["BD_REPO"]
+	if repo == "" {
+		t.Errorf("deps.env BD_REPO is empty; the bridge commit lives on it")
+		return
+	}
+	wantPath := "github.com/" + repo
+
+	switch len(replaces) {
+	case 0:
+		t.Errorf("deps.env declares the bridge %s but go.mod has no replace for github.com/steveyegge/beads; add `replace github.com/steveyegge/beads => %s <pseudo-version of %s>`", bridgeRef, wantPath, bridgeRef)
+		return
+	case 1:
+	default:
+		t.Errorf("go.mod replaces github.com/steveyegge/beads %d times (%q); a bridge is one replace", len(replaces), replaces)
+		return
+	}
+	m := regexp.MustCompile(`^replace\s+github\.com/steveyegge/beads(\s+\S+)?\s+=>\s+(\S+)(?:\s+(\S+))?$`).FindStringSubmatch(replaces[0])
+	if m == nil {
+		t.Errorf("go.mod replaces the beads library as %q, want the single-line `replace github.com/steveyegge/beads => %s <version>` (a replace block hides it from this guard)", replaces[0], wantPath)
+		return
+	}
+	if m[1] != "" {
+		t.Errorf("go.mod's beads replace is qualified by version (%q); it must be unqualified, so it applies to whatever MVS resolves", replaces[0])
+	}
+	if m[2] != wantPath || m[3] == "" {
+		t.Errorf("go.mod replaces github.com/steveyegge/beads with %q; a bridge replaces it with the module %s at a version (deps.env BD_REPO)", strings.TrimSpace(m[2]+" "+m[3]), wantPath)
+		return
+	}
+	version := m[3]
+	pseudo := regexp.MustCompile(`[-.]\d{14}-([0-9a-f]{12})$`).FindStringSubmatch(version)
+	if pseudo == nil || !strings.HasPrefix(bridgeRef, pseudo[1]) {
+		t.Errorf("go.mod replaces the beads library with %s@%s, which is not BD_LIB_BRIDGE_REF %s", wantPath, version, bridgeRef)
+	}
+	for _, suffix := range []string{"", "/go.mod"} {
+		want := wantPath + " " + version + suffix + " h1:"
+		if !strings.Contains(goSum, want) {
+			t.Errorf("go.sum carries no %q line; Bazel's go_deps fetches the replacement by that hash", strings.TrimSuffix(want, " h1:"))
+		}
+	}
 }
 
 // assertDocStatesVersion fails when a doc no longer restates a version floor in

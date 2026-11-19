@@ -444,7 +444,20 @@ const (
 	// script accepts tier-c = "skipped" only when that value is "true"; every
 	// other result still fails closed. No new job, trigger, permission or
 	// secret.
-	expectedNightlyExecutionHash = "22b73bf1fe9f34ca5bbf714559a202084906d383bd44c8798d8bb8bca8774590"
+	// Re-derived for the bd v1.96.0 repin (vp-pb00j), on top of that resync:
+	// BD_VERSION (v1.95.0 -> v1.96.0) and BD_SOURCE_REF (4ff2418f7 ->
+	// 9dbe41b77) at nightly.yml's two pin sites, nothing else. Taken from the
+	// candidate digest TestCurrentWorkflowsMatchPolicy printed for the merged
+	// workflow.
+	// Re-derived for the merge of fork/main (d5b1f32cb, 99580d416, 5552ce60d,
+	// a11ce9b2e, 4d1b4d417) into the vp-ut6qf.2 branch: the merged nightly.yml
+	// carries both deltas above and nothing else. Taken from the candidate
+	// digest TestCurrentWorkflowsMatchPolicy printed for the merged workflow.
+	// Re-derived for the bd v1.96.1 repin (vp-pb00j): BD_VERSION (v1.96.0 ->
+	// v1.96.1) and BD_SOURCE_REF (9dbe41b77 -> 296b01a30) at nightly.yml's two
+	// pin sites, nothing else. Taken from the candidate digest
+	// TestCurrentWorkflowsMatchPolicy printed for the repinned workflow.
+	expectedNightlyExecutionHash = "73b273d34093640ebf552beb64636605fc136930f72bc1d20bf36d95f4f9a814"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`. Then the claude-version

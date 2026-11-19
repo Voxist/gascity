@@ -66,6 +66,27 @@ func TestDirectNativeOpenWindowWithholdsAmbientLibraryGates(t *testing.T) {
 	restore()
 }
 
+// TestDirectNativeOpenWindowUnsetsTheProxyRoot: a direct open never goes
+// through a bd proxy, so BEADS_DOLT_SERVER_PROXY_ROOT is unset inside its
+// window whether the ambient shell or the caller's map carries it, and the
+// ambient value is restored afterwards.
+func TestDirectNativeOpenWindowUnsetsTheProxyRoot(t *testing.T) {
+	clearAmbientMigrationFreezeEnv(t)
+	const key = "BEADS_DOLT_SERVER_PROXY_ROOT"
+	t.Setenv(key, "/ambient/proxy/root")
+	restore, err := withNativeDoltOpenEnvAndCredentialCommand(map[string]string{key: "/caller/proxy/root"}, "")
+	if err != nil {
+		t.Fatalf("open window: %v", err)
+	}
+	if v, ok := os.LookupEnv(key); ok {
+		t.Errorf("inside the direct open window %s=%q, want it unset", key, v)
+	}
+	restore()
+	if got := os.Getenv(key); got != "/ambient/proxy/root" {
+		t.Errorf("after the window %s=%q, want the ambient value restored", key, got)
+	}
+}
+
 // writeMigrationFreezeMarker writes a MIGRATION-FREEZE marker at scopeRoot's
 // .beads directory (the same directory checkMigrationFreezeForNativeOpen
 // walks from), in the fork bd's own tab-separated

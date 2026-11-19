@@ -13,6 +13,7 @@ import (
 	"time"
 
 	mysql "github.com/go-sql-driver/mysql"
+	beadslib "github.com/steveyegge/beads"
 )
 
 // TestClassifyProbeOutcomeTable pins the three-way split the whole error
@@ -53,6 +54,20 @@ func TestClassifyProbeOutcomeTable(t *testing.T) {
 			name:       "an unexpected EOF mid-handshake is the same signature",
 			sessionErr: io.ErrUnexpectedEOF,
 			want:       ProbeAcceptedNoGreeting,
+		},
+		{
+			// bd's dialer spells a hang-up on the hello as ErrProxyDataAuth
+			// wrapping io.EOF. The EOF must not win: that is the zombie token
+			// for a listener that only belongs to another secret.
+			name:       "a hang-up on the BDPROXY1 hello is a failed handshake, not a zombie",
+			sessionErr: fmt.Errorf("%w: closed without answering the hello: %w", beadslib.ErrProxyDataAuth, io.EOF),
+			want:       ProbeDataAuthFailed,
+		},
+		{
+			name:       "a proof that does not verify is a failed handshake",
+			sessionErr: fmt.Errorf("%w: did not prove it holds this workspace's proxy secret", beadslib.ErrProxyDataAuth),
+			dialErr:    refused,
+			want:       ProbeDataAuthFailed,
 		},
 		{
 			// Nothing is listening: both the session and the confirming dial are
@@ -421,7 +436,7 @@ func TestProbeDriverTimeoutsSitAboveTheSessionBudget(t *testing.T) {
 func TestProbeRefusesAnUnnamedDatabase(t *testing.T) {
 	for _, database := range []string{"", "   "} {
 		dials := 0
-		probeIO := DefaultProbeIO(1, database)
+		probeIO := DefaultProbeIO(t.TempDir(), 1, database)
 		got := Probe(context.Background(), ProbeIO{
 			Session: probeIO.Session,
 			Dial:    func(context.Context) error { dials++; return nil },
@@ -445,14 +460,15 @@ func TestProbeOutcomeTokensAreStable(t *testing.T) {
 		ProbeRefused:            "refused",
 		ProbeAcceptedNoGreeting: "accepted_no_greeting",
 		ProbeServed:             "served",
+		ProbeDataAuthFailed:     "data_auth_failed",
 	}
 	for outcome, token := range want {
 		if got := outcome.String(); got != token {
 			t.Errorf("ProbeOutcome(%d).String() = %q, want %q", outcome, got, token)
 		}
 	}
-	if len(want) != int(ProbeServed)+1 {
-		t.Fatalf("the probe outcome enum has %d values but %d are pinned", int(ProbeServed)+1, len(want))
+	if len(want) != int(ProbeDataAuthFailed)+1 {
+		t.Fatalf("the probe outcome enum has %d values but %d are pinned", int(ProbeDataAuthFailed)+1, len(want))
 	}
 }
 
@@ -462,7 +478,7 @@ func TestProbeOutcomeTokensAreStable(t *testing.T) {
 func TestDefaultProbeIODialRefusesAClosedPort(t *testing.T) {
 	// Port 1 on loopback needs no listener to be a valid negative: an
 	// unprivileged process cannot have bound it, so the dial is refused.
-	probeIO := DefaultProbeIO(1, "beads")
+	probeIO := DefaultProbeIO(t.TempDir(), 1, "beads")
 	ctx, cancel := context.WithTimeout(context.Background(), ProbeDialTimeout)
 	defer cancel()
 	if err := probeIO.Dial(ctx); err == nil {

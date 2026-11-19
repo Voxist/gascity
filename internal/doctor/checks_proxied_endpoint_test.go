@@ -338,6 +338,41 @@ func TestBeadsStorePayloadReportsAnUnservedProbe(t *testing.T) {
 	}
 }
 
+// TestBeadsStorePayloadNamesAFailedDataHandshake pins the operator's line for a
+// data port whose listener did not complete bd's BDPROXY1 handshake: it names
+// the three things that cause it, which is what the operator is choosing
+// between, keeps bd's own error as the evidence, and never reads as a silent
+// proxy (accepted_no_greeting) or a generic timeout.
+func TestBeadsStorePayloadNamesAFailedDataHandshake(t *testing.T) {
+	scope := t.TempDir()
+	fixture := writeProxiedScope(t, scope, `{"root_path":"dolt","idle_timeout":-1}`, 6005, 45300)
+	stubProxyProcess(t, fixture, "-1ns")
+	authErr := fmt.Errorf("dbproxy: data port authentication failed: the listener closed the connection without answering the hello: %w", io.EOF)
+	stubProbe(t, proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeDataAuthFailed, Err: authErr}, nil)
+
+	payload := newBeadsStorePayload(scope, proxiedTarget(), beadsStoreDiagnostic{Store: beads.BeadsStoreNameBdStore})
+	ep := payload.Endpoint
+	if ep.Probe != "data_auth_failed" {
+		t.Fatalf("probe = %q, want data_auth_failed", ep.Probe)
+	}
+	if ep.Cursors != nil {
+		t.Fatal("cursors reported for a failed handshake")
+	}
+	for _, want := range []string{
+		"data port 45300",
+		ep.Root,
+		"proxy root is wrong",
+		"rotated its secret",
+		"a bd older than BDPROXY1",
+		"a process other than bd's proxy is listening",
+		"without answering the hello",
+	} {
+		if !strings.Contains(ep.Detail, want) {
+			t.Errorf("detail %q does not name %q", ep.Detail, want)
+		}
+	}
+}
+
 // TestBeadsStorePayloadIdleSourcesCrossed pins the two-source resolution as the
 // payload reports it: a live proxy's argv is the truth, and the sidecar answers
 // only when no argv did.
