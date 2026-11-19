@@ -2147,7 +2147,7 @@ calls = 1
 [[count]]
 path = "internal/config/workquery_origin_gate_test.go"
 resource = "subprocess"
-calls = 2
+calls = 4
 
 [[count]]
 path = "internal/config/workquery_priority_representative_test.go"
