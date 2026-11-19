@@ -8839,3 +8839,217 @@ func TestNudgeSessionStartOwnedByReconciler(t *testing.T) {
 		})
 	}
 }
+
+// nudgeLookupCountingStore counts the session-row reads a nudge observation
+// makes: primary-key Gets, and List calls filtered on metadata session_name,
+// the unindexed search the poller must not pay for on every tick (vp-ejz0w).
+type nudgeLookupCountingStore struct {
+	beads.Store
+	gets         int
+	nameSearches int
+}
+
+func (s *nudgeLookupCountingStore) Get(id string) (beads.Bead, error) {
+	s.gets++
+	return s.Store.Get(id)
+}
+
+func (s *nudgeLookupCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if _, ok := query.Metadata["session_name"]; ok {
+		s.nameSearches++
+	}
+	return s.Store.List(query)
+}
+
+// createNudgeLookupSession creates a session row named sessionName, closing it
+// when status is "closed" (a store creates every bead open).
+func createNudgeLookupSession(t *testing.T, store beads.Store, status, sessionName string) beads.Bead {
+	t.Helper()
+	b, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   session.BeadType,
+		Status: status,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"agent_name":   "worker",
+			"session_name": sessionName,
+			"provider":     "codex",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	if status == "closed" {
+		if err := store.Close(b.ID); err != nil {
+			t.Fatalf("Close session: %v", err)
+		}
+	}
+	return b
+}
+
+func startNudgeLookupRuntime(t *testing.T, fake *runtime.Fake, sessionName, sessionID string) {
+	t.Helper()
+	if err := fake.Start(context.Background(), sessionName, runtime.Config{Env: map[string]string{"GC_SESSION_ID": sessionID}}); err != nil {
+		t.Fatalf("Start %s: %v", sessionName, err)
+	}
+	if err := fake.SetMeta(sessionName, "GC_SESSION_ID", sessionID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+}
+
+// TestWorkerObserveNudgeTargetResolvesKnownSessionIDWithoutNameSearch pins the
+// poller's happy path: with the session row id in hand and that row still the
+// open row named target.sessionName, the observation is one primary-key Get and
+// no session_name metadata search, on both the observe and the delivery-handle
+// legs.
+func TestWorkerObserveNudgeTargetResolvesKnownSessionIDWithoutNameSearch(t *testing.T) {
+	store := &nudgeLookupCountingStore{Store: beads.NewMemStore()}
+	sess := createNudgeLookupSession(t, store, "open", "sess-worker")
+	fake := runtime.NewFake()
+	startNudgeLookupRuntime(t, fake, "sess-worker", sess.ID)
+	target := nudgeTarget{cityPath: t.TempDir(), agent: config.Agent{Name: "worker"}, sessionID: sess.ID, sessionName: "sess-worker"}
+
+	store.gets = 0
+	obs, err := workerObserveNudgeTarget(target, store, fake)
+	if err != nil {
+		t.Fatalf("workerObserveNudgeTarget: %v", err)
+	}
+	if !obs.Running {
+		t.Fatal("obs.Running = false, want true for the live session the id names")
+	}
+	if obs.SessionID != sess.ID {
+		t.Fatalf("obs.SessionID = %q, want %q", obs.SessionID, sess.ID)
+	}
+	if store.nameSearches != 0 {
+		t.Fatalf("session_name searches = %d, want 0 when the session id is known", store.nameSearches)
+	}
+	// One Get resolves the row; worker.ObserveHandle re-reads it by id. The
+	// name path paid these too, plus two not-found Gets of the session name.
+	if store.gets > 2 {
+		t.Fatalf("Gets = %d, want at most 2 primary-key reads", store.gets)
+	}
+
+	if _, err := workerHandleForNudgeTarget(target, store, fake); err != nil {
+		t.Fatalf("workerHandleForNudgeTarget: %v", err)
+	}
+	if store.nameSearches != 0 {
+		t.Fatalf("session_name searches after the delivery handle = %d, want 0", store.nameSearches)
+	}
+}
+
+// TestWorkerObserveNudgeTargetFallsBackToNameSearch pins the fallback: a target
+// without a session id, or whose id no longer names the open row called
+// target.sessionName (gone, closed, renamed or recycled), resolves by name as
+// before, and the generation fence still refuses a runtime another row owns.
+func TestWorkerObserveNudgeTargetFallsBackToNameSearch(t *testing.T) {
+	cases := []struct {
+		name string
+		// setup returns the target's session id and the id that owns the
+		// live "sess-worker" runtime.
+		setup       func(t *testing.T, store beads.Store) (targetID, liveID string)
+		wantRunning bool
+	}{
+		{
+			name: "id unknown",
+			setup: func(t *testing.T, store beads.Store) (string, string) {
+				live := createNudgeLookupSession(t, store, "open", "sess-worker")
+				return "", live.ID
+			},
+			wantRunning: true,
+		},
+		{
+			name: "id missing from the store",
+			setup: func(t *testing.T, store beads.Store) (string, string) {
+				live := createNudgeLookupSession(t, store, "open", "sess-worker")
+				return "gc-gone", live.ID
+			},
+			wantRunning: false,
+		},
+		{
+			name: "row renamed",
+			setup: func(t *testing.T, store beads.Store) (string, string) {
+				old := createNudgeLookupSession(t, store, "open", "sess-renamed")
+				live := createNudgeLookupSession(t, store, "open", "sess-worker")
+				return old.ID, live.ID
+			},
+			wantRunning: false,
+		},
+		{
+			name: "row closed and name recycled",
+			setup: func(t *testing.T, store beads.Store) (string, string) {
+				old := createNudgeLookupSession(t, store, "closed", "sess-worker")
+				live := createNudgeLookupSession(t, store, "open", "sess-worker")
+				return old.ID, live.ID
+			},
+			wantRunning: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &nudgeLookupCountingStore{Store: beads.NewMemStore()}
+			targetID, liveID := tc.setup(t, store)
+			fake := runtime.NewFake()
+			startNudgeLookupRuntime(t, fake, "sess-worker", liveID)
+			target := nudgeTarget{cityPath: t.TempDir(), agent: config.Agent{Name: "worker"}, sessionID: targetID, sessionName: "sess-worker"}
+
+			obs, err := workerObserveNudgeTarget(target, store, fake)
+			if err != nil {
+				t.Fatalf("workerObserveNudgeTarget: %v", err)
+			}
+			if store.nameSearches == 0 {
+				t.Fatal("session_name searches = 0, want the name fallback")
+			}
+			if obs.Running != tc.wantRunning {
+				t.Fatalf("obs.Running = %v, want %v", obs.Running, tc.wantRunning)
+			}
+		})
+	}
+}
+
+// TestWorkerObserveNudgeTargetByIDStillDetectsDeadSession pins ga-8x82f4 on
+// the by-id path: a row that still names the session while its runtime is gone
+// observes as not running, so the poller's idle-cadence check lets it exit.
+func TestWorkerObserveNudgeTargetByIDStillDetectsDeadSession(t *testing.T) {
+	store := &nudgeLookupCountingStore{Store: beads.NewMemStore()}
+	sess := createNudgeLookupSession(t, store, "open", "sess-worker")
+	fake := runtime.NewFake()
+	target := nudgeTarget{cityPath: t.TempDir(), agent: config.Agent{Name: "worker"}, sessionID: sess.ID, sessionName: "sess-worker"}
+
+	obs, err := workerObserveNudgeTarget(target, store, fake)
+	if err != nil {
+		t.Fatalf("workerObserveNudgeTarget: %v", err)
+	}
+	if obs.Running {
+		t.Fatal("obs.Running = true, want false for a session whose runtime is gone")
+	}
+	if store.nameSearches != 0 {
+		t.Fatalf("session_name searches = %d, want 0", store.nameSearches)
+	}
+}
+
+// TestWorkerObserveNudgeTargetByIDStaysFencedToItsGeneration pins ga-fsp5w9 on
+// the by-id path: when two open rows carry the same session_name and the live
+// runtime belongs to the other one, the poller of this row must not observe
+// that runtime as its own, nor take a delivery handle on it.
+func TestWorkerObserveNudgeTargetByIDStaysFencedToItsGeneration(t *testing.T) {
+	store := &nudgeLookupCountingStore{Store: beads.NewMemStore()}
+	mine := createNudgeLookupSession(t, store, "open", "sess-worker")
+	sibling := createNudgeLookupSession(t, store, "open", "sess-worker")
+	fake := runtime.NewFake()
+	startNudgeLookupRuntime(t, fake, "sess-worker", sibling.ID)
+	target := nudgeTarget{cityPath: t.TempDir(), agent: config.Agent{Name: "worker"}, sessionID: mine.ID, sessionName: "sess-worker"}
+
+	obs, err := workerObserveNudgeTarget(target, store, fake)
+	if err != nil {
+		t.Fatalf("workerObserveNudgeTarget: %v", err)
+	}
+	if obs.Running {
+		t.Fatal("obs.Running = true, want false when the live runtime belongs to another row")
+	}
+	if _, err := workerHandleForNudgeTarget(target, store, fake); !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("workerHandleForNudgeTarget err = %v, want runtime.ErrSessionNotFound for another generation's runtime", err)
+	}
+	if store.nameSearches != 0 {
+		t.Fatalf("session_name searches = %d, want 0", store.nameSearches)
+	}
+}
