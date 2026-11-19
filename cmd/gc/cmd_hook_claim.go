@@ -216,32 +216,62 @@ type hookClaimOptions struct {
 }
 
 // continuationPinAssignee returns the identity a continuation sibling is pinned
-// to. It prefers the session's durable bead ID because that is the only value
-// the consumers of an assignee agree on: ComputeAwakeSet matches it via
-// sessionAssigneeMatches (assignee == bead.ID), and the session's own re-poll
-// queries $GC_SESSION_ID first.
+// to. For an unaliased session whose runtime name is bead-scoped — the
+// PoolSessionName form `<template>-<beadID>` minted since #6549 — that is the
+// FULL session name (GC_SESSION_NAME): the same string the session bead records
+// as session_name, so every reader that resolves an assignee against the
+// session bead's own identities (ComputeAwakeSet's sessionAssigneeMatches, the
+// reconciler's currentSessionAssigneeIdentities over
+// newPoolContinuationCandidateSnapshot, orphan release's AssigneeIdentities)
+// answers it, and the session's own re-poll finds it on the $GC_SESSION_NAME
+// tier of the default work query. Pinning the bare session bead ID there
+// (vp-trd6h) left wisp-child step beads carrying an assignee no
+// identity-shaped consumer resolved back to the session-name form, so the
+// executing session's claim-check stalled on beads that were already theirs.
 //
-// Assignee cannot serve here. With no alias or agent in the environment it falls
-// through to the runtime session-name form — GC_SESSION_NAME, resolved via
-// hookSessionAgentForQuery in the pool-worker path where this fix is load-bearing
-// (gascity--gc__implementation-worker-5-pool) — which is not what a session bead
-// records as session_name
-// (gc__implementation-worker-gcs-session-<id>). Beads pinned to that form matched
-// no session identity at all, so wake demand could never reach them and the
-// molecule stalled permanently.
+// The full-name pin is gated twice, because the runtime session name is only
+// sometimes that durable bead-scoped string:
 //
-// The reconciler's continuation-claim CANDIDATE gate is NOT one of those
-// consumers: evaluateReadyContinuationClaimCandidate (build_desired_state.go)
-// admits a row only when the root's gc.session_name equals the sibling's
-// assignee, and that key only ever holds a session name / alias
-// (sessionBeadIdentifier), never a bead ID — so a bead-ID pin is absent
-// before currentSessionAssigneeIdentities is ever consulted. That is
-// follow-up, not a regression: the slot-label form failed the same gate.
+//   - opts.Assignee == opts.SessionID means the claim writer's own identity
+//     order (hookClaimAssigneeIdentity: alias first, then the session bead ID)
+//     picked the bead ID — the session is unaliased. An aliased session's
+//     claims belong to its alias, because a fresh shell with no GC_SESSION_ID
+//     must still resolve to them; its pin keeps the bead ID.
+//   - the runtime name must carry the session bead ID as its suffix. A
+//     slot/chair label (gc__implementation-worker-5-pool, or a name minted by
+//     a pre-#6549 build) is shared across every occupant of the seat: pinning
+//     that form matched no session identity at all, so wake demand could never
+//     reach the step and the molecule stalled permanently. Such a name fails
+//     the suffix check, and the pin keeps the bead ID.
+//
+// A session-name pin still diverges from BEADS_ACTOR (the bare session bead ID
+// an unaliased session mutates bd under) until the session first claims the
+// bead: restampHookAdoption then moves the assignee to the actor form, and the
+// manual `gc bd update <id> --claim` door claims as the stored spelling when
+// that spelling is one of the caller's own identities. The pin is a claim made
+// on the sibling's behalf, so the two doors must agree on what "already ours"
+// spells like — this gate and bdByIDClaim are that agreement.
+//
+// With no session bead ID (a bare shell, an explicit target outside a
+// session) the claim assignee is still the answer. With no alias or agent in
+// the environment it falls through to the runtime session-name form —
+// GC_SESSION_NAME, resolved via hookSessionAgentForQuery in the pool-worker
+// path where the bead-ID preference used to be load-bearing
+// (gascity--gc__implementation-worker-5-pool) — which is not what a session
+// bead records as session_name (gc__implementation-worker-gcs-session-<id>).
+// The suffix gate above is what keeps this fallback from re-reading as safe:
+// it never applies where SessionID is empty.
 func continuationPinAssignee(opts hookClaimOptions) string {
-	if id := strings.TrimSpace(opts.SessionID); id != "" {
-		return id
+	sessionID := strings.TrimSpace(opts.SessionID)
+	if sessionID == "" {
+		return opts.Assignee
 	}
-	return opts.Assignee
+	if opts.Assignee == sessionID {
+		if name := hookClaimSessionName(opts.Env); name != "" && strings.HasSuffix(name, "-"+sessionID) {
+			return name
+		}
+	}
+	return sessionID
 }
 
 type hookClaimOps struct {
