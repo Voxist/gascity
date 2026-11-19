@@ -2105,10 +2105,18 @@ esac
 	}{
 		// Ephemeral pool seat: the routed tier runs unconditionally (unchanged).
 		{name: "demand-created pool", origin: "ephemeral", alias: "worker-1", session: "test-city--worker-1", wantCode: 0, wantRouted: true},
-		// Manual session whose probe target (poolDemandTarget() == "worker") is NOT
-		// its own alias: the origin gate keeps it out of another queue's generic
-		// routed demand. Self-target admit does not fire ("worker" != alias).
-		{name: "manual", origin: "manual", alias: "worker-adhoc-manual", session: "worker-adhoc-manual", wantCode: 1},
+		// Manual session whose session name is the minted adhoc pool-instance
+		// shape of THIS agent (`gc session new worker` with no alias mints
+		// "<agent>-adhoc-<token>" and stamps origin=manual). vp-xxnt9: the gate
+		// used to refuse it the pool tier, so the spawned worker drained
+		// no_work while ready routed work sat unclaimed — the spawn->drain loop
+		// the witness filed. The minted shape admits now (poolInstanceShapeAdmit);
+		// the routed query runs and the work is served.
+		{name: "manual adhoc pool instance", origin: "manual", alias: "worker-adhoc-manual", session: "worker-adhoc-manual", wantCode: 0, wantRouted: true},
+		// Manual session that is NOT an instance of this pool — a plain
+		// operator-chosen identity with no adhoc shape. The origin gate still
+		// keeps it out of the pool's generic routed demand, audibly.
+		{name: "manual other identity", origin: "manual", alias: "operator-chat", session: "operator-chat", wantCode: 1},
 		// Named session probing its OWN claim identity (GC_ALIAS == poolDemandTarget()
 		// == "worker"): the gate admits self-routed discovery so the session can
 		// claim work routed to itself. This is the C2 fix (ga-6wkhl) and the direct

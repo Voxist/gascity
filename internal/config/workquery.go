@@ -1260,6 +1260,53 @@ const PoolDemandOriginGateRefusalPrefix = "gc: work_query pool tier not probed:"
 // fails closed on the first test.
 const namedSelfTargetAdmit = `[ -n "$GC_ALIAS" ] && [ "$1" = "$GC_ALIAS" ]`
 
+// poolInstanceShapeAdmit is the origin-gate condition that admits a
+// gc-minted aliasless pool instance to the routed (pool-demand) tier even
+// though its origin stamp is not ephemeral (vp-xxnt9).
+//
+// `gc session new <pool agent>` with no --alias names the session with
+// session.GenerateAdhocExplicitName — "<agent>-adhoc-<token>" — which is
+// minted ONLY for aliasless instances of multi-session (pool) agents
+// (sessionExplicitNameForNewSession / sessionExplicitNameForCreate: an
+// aliased create and a single-session agent both get no adhoc name). The
+// shape is therefore a closed grammar statement about identities gc
+// actually mints — the same grammar poolInstanceBaseNames recognizes in
+// cmd/gc/pool_orphan_foreign_identity.go. A session whose GC_AGENT carries
+// it is a pool member by construction: it launched with the pool worker
+// persona and expects to claim the pool's routed work. Refusing it the pool
+// tier strands that work behind a spawn->drain loop (vp-xxnt9 evidence:
+// four adhoc polecat spawns in one evening, every one refused the pool
+// tier it was spawned for, ready routed work unclaimed, each empty
+// spawn/drain burning provider quota).
+//
+// The check mirrors the mint: take GC_AGENT's local part (strip the rig
+// prefix), require a non-empty token after the LAST "-adhoc-", and admit
+// only when the base before it equals the probe target's local part ($1).
+// `${var%-adhoc-*}` strips the shortest matching suffix, i.e. splits at the
+// last "-adhoc-" — the same split strings.LastIndex makes in
+// poolInstanceBaseNames, so both grammars stay in lockstep by construction.
+// Comparing LOCAL parts (after `##*/`) is what makes the identity line up:
+// poolDemandTarget() ($1) is the pool agent's QualifiedName (or PoolName)
+// and the adhoc name's base is that same agent's Name, rig prefix present
+// on one and not the other.
+//
+// What cannot slip through: a named session's GC_AGENT is its configured
+// identity — never adhoc-shaped — so the named+pool hybrid exclusion above
+// is untouched; a manual provider chat's GC_AGENT is a bead-ID-derived
+// session name — not adhoc-shaped either; and an identity a user chose
+// (an alias) is minted nowhere, so it carries the shape only if the
+// operator deliberately spells it — the same acceptance class
+// namedSelfTargetAdmit already grants a deliberately-aliased manual
+// session. The gate's refusal line keeps its stable wording (vc-ozanp5):
+// it now means "not ephemeral, and neither admit condition matched".
+//
+// Shell note: the emitters wrap EACH admit condition in its own brace
+// group before OR-ing (`{ { A; } || { B; }; }`), because shell && and ||
+// are left-associative with equal precedence — the ungrouped
+// `A && B || C && D` would parse as `((A && B) || C) && D` and make alias
+// admission (A && B) wrongly depend on the shape arm (D) also matching.
+const poolInstanceShapeAdmit = `[ -n "$GC_AGENT" ] && { case "${GC_AGENT##*/}" in *-adhoc-?*) gc_gate_base="${GC_AGENT##*/}"; gc_gate_base="${gc_gate_base%-adhoc-*}"; [ -n "$gc_gate_base" ] && [ "${1##*/}" = "$gc_gate_base" ] ;; *) false ;; esac; }`
+
 // poolDemandOriginGateScript refuses the pool tier for a non-ephemeral session
 // AUDIBLY (vc-ozanp5): it prints the refusal on stderr, the empty result on
 // stdout, and exits 0 — the same stdout/exit contract as an empty tier, so the
@@ -1270,12 +1317,14 @@ const namedSelfTargetAdmit = `[ -n "$GC_ALIAS" ] && [ "$1" = "$GC_ALIAS" ]`
 //
 // namedSelfTargetAdmit (upstream #6180) runs FIRST: a session admitted there
 // is not refused at all, so the refusal line still means exactly "the routed
-// tier was skipped". It is valid only at `sh -c` script top level, where $1 is
-// the probe target baked in after `--`.
+// tier was skipped". poolInstanceShapeAdmit (vp-xxnt9) is OR-ed in beside it
+// on the same terms: an admitted session is not refused, and the refusal line
+// still means exactly "the routed tier was skipped". Both are valid only at
+// `sh -c` script top level, where $1 is the probe target baked in after `--`.
 func poolDemandOriginGateScript() string {
 	return `case "$GC_SESSION_ORIGIN" in ` +
 		`ephemeral|"") ;; ` +
-		`*) ` + namedSelfTargetAdmit + ` || { ` +
+		`*) { { ` + namedSelfTargetAdmit + `; } || { ` + poolInstanceShapeAdmit + `; }; } || { ` +
 		`printf "` + PoolDemandOriginGateRefusalPrefix + ` origin=%s is not ephemeral; routed pool work (if any) was NOT considered\n" "$GC_SESSION_ORIGIN" >&2; ` +
 		`printf "[]"; exit 0; } ;; ` +
 		`esac; `
@@ -1284,11 +1333,13 @@ func poolDemandOriginGateScript() string {
 // poolDemandOriginGateScriptWithGraphAnchorFallback emits the origin gate used by
 // the combined work query, which flushes a remembered assigned workflow anchor
 // before short-circuiting. Like the plain gate it is valid only at `sh -c` script
-// top level, where $1 is the probe target baked in after `--`.
+// top level, where $1 is the probe target baked in after `--`, and like the plain
+// gate it admits namedSelfTargetAdmit or poolInstanceShapeAdmit sessions without
+// refusing them (vp-xxnt9).
 func poolDemandOriginGateScriptWithGraphAnchorFallback() string {
 	return `case "$GC_SESSION_ORIGIN" in ` +
 		`ephemeral|"") ;; ` +
-		`*) ` + namedSelfTargetAdmit + ` || { ` +
+		`*) { { ` + namedSelfTargetAdmit + `; } || { ` + poolInstanceShapeAdmit + `; }; } || { ` +
 		`if [ -n "$gc_assigned_workflow_anchor_json" ]; then printf "%s" "$gc_assigned_workflow_anchor_json"; exit 0; fi; ` +
 		`printf "` + PoolDemandOriginGateRefusalPrefix + ` origin=%s is not ephemeral; routed pool work (if any) was NOT considered\n" "$GC_SESSION_ORIGIN" >&2; ` +
 		`printf "[]"; exit 0; } ;; ` +
