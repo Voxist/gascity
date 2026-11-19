@@ -874,6 +874,17 @@ type TailProvider interface {
 	ListTail(filter Filter, limit int) ([]Event, error)
 }
 
+// LatestMatchProvider is an optional extension for providers that can return
+// the newest matching event without reading the whole history. List answers
+// "the newest match" only by returning every match, and a file-backed List
+// gunzips every retained archive oldest-first to do it. ok is false when no
+// event matches. warnings name unreadable history segments the search
+// skipped; it continues into older ones, so a skip can only make the answer
+// older (ReadLatestMatch).
+type LatestMatchProvider interface {
+	LatestMatch(filter Filter) (e Event, ok bool, warnings []string, err error)
+}
+
 // InFlightProvider is an optional extension for providers whose plain List can
 // momentarily miss events stranded in an in-flight rotation file. When a
 // file-backed provider rotates, the just-rotated segment lives only in the
