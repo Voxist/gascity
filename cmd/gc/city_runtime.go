@@ -3532,14 +3532,8 @@ func (cr *CityRuntime) restartConfigWatcher() {
 		dirty = &atomic.Bool{}
 		cr.configDirty = dirty
 	}
-	// The watcher wakes the run loop on its own channel so a tick it alone
-	// asked for can run as a patrol tick when the reload finds no change
-	// (configWatchTickTrigger). A runtime built without one wakes pokeCh.
-	wake := cr.wakeOf()
-	if cr.configWatchCh != nil {
-		wake = newLegacyWake(cr.configWatchCh, nil)
-	}
-	cleanup := watchConfigTargets(cr.configWatcherTargets(), cr.configDebounce, dirty, wake, cr.stderr)
+	// The watcher wakes through the runtime's wake (WakeConfigWatch).
+	cleanup := watchConfigTargets(cr.configWatcherTargets(), cr.configDebounce, dirty, cr.wakeOf(), cr.stderr)
 
 	cr.watchMu.Lock()
 	cr.watchCleanup = cleanup

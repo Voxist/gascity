@@ -803,7 +803,7 @@ func watchConfigTargets(targets []config.WatchTarget, debounceDelay time.Duratio
 
 	markDirty := func() {
 		dirty.Store(true)
-		wake.WakeMaintenance()
+		wake.WakeConfigWatch()
 	}
 
 	done := make(chan struct{})
@@ -923,10 +923,10 @@ const maxConfigWatchAttrStamps = 4096
 
 // configWatchAttrStamp is what a bare Chmod event is checked against: the
 // inode-change time moves on chmod, chown, truncate and utimes, and size,
-// mode and mtime catch a filesystem whose ctime does not.
+// mode, mtime and ownership catch a filesystem whose ctime does not.
 type configWatchAttrStamp struct {
 	ctime, mtime, size int64
-	mode               uint32
+	mode, uid, gid     uint32
 }
 
 // configWatchAttrStamps remembers the last stamp the watcher saw per path, so
@@ -950,7 +950,7 @@ func statConfigWatchAttrStamp(path string) (configWatchAttrStamp, bool) {
 	if err := unix.Stat(path, &st); err != nil {
 		return configWatchAttrStamp{}, false
 	}
-	return configWatchAttrStamp{ctime: st.Ctim.Nano(), mtime: st.Mtim.Nano(), size: st.Size, mode: uint32(st.Mode)}, true
+	return configWatchAttrStamp{ctime: st.Ctim.Nano(), mtime: st.Mtim.Nano(), size: st.Size, mode: uint32(st.Mode), uid: st.Uid, gid: st.Gid}, true
 }
 
 // seed records path, and the regular files directly in it when it is a

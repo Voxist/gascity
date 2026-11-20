@@ -319,10 +319,9 @@ func TestConfigWatchTickTrigger(t *testing.T) {
 	}
 }
 
-// TestSettleConfigWatchTick pins vp-h1jgt's second half: a tick only the
-// config watcher asked for runs as a patrol tick when its reload found nothing
-// to do, and keeps the poke tick the watcher always got when the reload
-// applied, failed or was a manual one.
+// TestSettleConfigWatchTick pins that a tick only the config watcher asked
+// for runs as a patrol tick when its reload found nothing to do, and stays a
+// poke tick when the reload applied, failed or was a manual one.
 func TestSettleConfigWatchTick(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
@@ -591,22 +590,20 @@ func TestRunLoopConfigWatchArm(t *testing.T) {
 	awaitWatchTicks("the config-watch tick that applied the edit", before+1)
 
 	// A watcher event whose reload finds no change runs as a patrol tick:
-	// no live session read.
-	data, err := os.ReadFile(tomlPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// no live session read. A touch fires the watcher without rewriting the
+	// file, so no tick can read it half-written.
 	reloads := strings.Count(stdout.String(), "Config reloaded")
 	before = configWatchTicksCompleted(t, rec)
 	backing.takeLists()
-	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
+	when := time.Now().Add(time.Minute)
+	if err := os.Chtimes(tomlPath, when, when); err != nil {
 		t.Fatal(err)
 	}
-	awaitWatchTicks("the config-watch tick for the unchanged rewrite", before+1)
+	awaitWatchTicks("the config-watch tick for the touch", before+1)
 	if n := backing.takeLists(); n != 0 {
 		t.Fatalf("no-change config-watch tick made %d live session lists, want 0 (it must run as a patrol tick)", n)
 	}
 	if got := strings.Count(stdout.String(), "Config reloaded"); got != reloads {
-		t.Fatalf("unchanged rewrite applied a reload (%d -> %d \"Config reloaded\" lines); want no change", reloads, got)
+		t.Fatalf("touch applied a reload (%d -> %d \"Config reloaded\" lines); want no change", reloads, got)
 	}
 }
