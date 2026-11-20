@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -12,9 +13,9 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
-// TestIsChmodOnlyConfigWatchEvent pins the op filter: a bare Chmod is
-// dropped, and any op that combines Chmod with a content or directory change
-// still reloads.
+// TestIsChmodOnlyConfigWatchEvent pins which ops go through the attribute
+// check: only a bare Chmod; any op that combines Chmod with a content or
+// directory change always reloads.
 func TestIsChmodOnlyConfigWatchEvent(t *testing.T) {
 	for _, tc := range []struct {
 		op   fsnotify.Op
@@ -36,10 +37,84 @@ func TestIsChmodOnlyConfigWatchEvent(t *testing.T) {
 	}
 }
 
-// TestWatchConfigDirs_IgnoresChmodOnlyEvents pins vp-h1jgt end to end on the
-// real fsnotify backend: a mode or timestamp change on an unchanged city.toml
-// does not mark config dirty, and a content write after it still does.
-func TestWatchConfigDirs_IgnoresChmodOnlyEvents(t *testing.T) {
+// TestConfigWatchAttrStampsDropOnlyUnchangedFiles pins the check a bare Chmod
+// event goes through: it is noise only when the file's ctime, mtime, size and
+// mode match the last stamp, which a page-in leaves alone. A truncate with no
+// write, a file turned unreadable or readable, a touch, an unseeded path and
+// a removed file all count as changes (vp-h1jgt).
+func TestConfigWatchAttrStampsDropOnlyUnchangedFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "city.toml")
+	if err := os.WriteFile(path, []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	attrs := newConfigWatchAttrStamps()
+	attrs.seed(dir)
+	expect := func(step string, want bool) {
+		t.Helper()
+		if got := attrs.unchanged(path); got != want {
+			t.Fatalf("%s: unchanged = %v, want %v", step, got, want)
+		}
+	}
+	expect("seeded, untouched", true)
+	expect("untouched again", true)
+
+	if err := os.Truncate(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	expect("truncated to zero", false)
+	expect("after the truncate was recorded", true)
+
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	expect("made unreadable", false)
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	expect("made readable again", false)
+
+	when := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(path, when, when); err != nil {
+		t.Fatal(err)
+	}
+	expect("touched", false)
+
+	fresh := filepath.Join(dir, "pack.toml")
+	if err := os.WriteFile(fresh, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if attrs.unchanged(fresh) {
+		t.Fatal("unchanged(unseeded path) = true, want false")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	expect("removed", false)
+}
+
+// TestConfigWatchAttrStampsStayBounded pins the record's size limit: past it
+// the record starts over instead of growing.
+func TestConfigWatchAttrStampsStayBounded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "city.toml")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	attrs := newConfigWatchAttrStamps()
+	for i := 0; i < maxConfigWatchAttrStamps; i++ {
+		attrs.seen[fmt.Sprintf("/synthetic/%d", i)] = configWatchAttrStamp{}
+	}
+	attrs.record(path)
+	if len(attrs.seen) != 1 {
+		t.Fatalf("len(seen) = %d after recording past the limit, want 1 (the record starts over)", len(attrs.seen))
+	}
+}
+
+// TestWatchConfigDirs_ChmodOnlyAttributeChangesReload pins vp-h1jgt end to end
+// on the real fsnotify backend: changes that can reach the watcher as a bare
+// Chmod (kqueue reports a truncate with no write that way, and chmod and
+// utimes always) still mark config dirty and poke.
+func TestWatchConfigDirs_ChmodOnlyAttributeChangesReload(t *testing.T) {
 	dir := t.TempDir()
 	tomlPath := filepath.Join(dir, "city.toml")
 	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test\"\n"), 0o644); err != nil {
@@ -52,35 +127,27 @@ func TestWatchConfigDirs_IgnoresChmodOnlyEvents(t *testing.T) {
 	cleanup := watchConfigTargets([]config.WatchTarget{{Path: dir, DiscoverConventions: true}}, testConfigDebounce, &dirty, newLegacyWake(pokeCh, nil), &stderr)
 	defer cleanup()
 
-	select {
-	case <-pokeCh:
-	default:
-	}
-	dirty.Store(false)
-
-	if err := os.Chmod(tomlPath, 0o600); err != nil {
-		t.Fatalf("Chmod(city.toml): %v", err)
-	}
 	when := time.Now().Add(-time.Hour)
-	if err := os.Chtimes(tomlPath, when, when); err != nil {
-		t.Fatalf("Chtimes(city.toml): %v", err)
-	}
-	// Negative-assertion window: asserts no watcher poke arrives for a
-	// Chmod-only event (vp-h1jgt exclusion).
-	select {
-	case <-pokeCh:
-		t.Fatalf("unexpected watcher poke after chmod/chtimes on city.toml; stderr=%q", stderr.String())
-	case <-time.After(250 * time.Millisecond):
-	}
-	if dirty.Load() {
-		t.Fatalf("dirty flag set after chmod/chtimes on city.toml; stderr=%q", stderr.String())
-	}
-
-	if err := os.WriteFile(tomlPath, []byte("[workspace]\nname = \"test-v2\"\n"), 0o644); err != nil {
-		t.Fatalf("rewrite city.toml: %v", err)
-	}
-	awaitClose(t, pokeCh, "watcher poke after city.toml rewrite following chmod")
-	if !dirty.Load() {
-		t.Fatalf("dirty flag not set after city.toml rewrite; stderr=%q", stderr.String())
+	for _, step := range []struct {
+		name   string
+		change func() error
+	}{
+		{"truncate to zero", func() error { return os.Truncate(tomlPath, 0) }},
+		{"made unreadable", func() error { return os.Chmod(tomlPath, 0o000) }},
+		{"made readable", func() error { return os.Chmod(tomlPath, 0o644) }},
+		{"touched", func() error { return os.Chtimes(tomlPath, when, when) }},
+	} {
+		select {
+		case <-pokeCh:
+		default:
+		}
+		dirty.Store(false)
+		if err := step.change(); err != nil {
+			t.Fatalf("%s: %v", step.name, err)
+		}
+		awaitClose(t, pokeCh, "watcher poke after "+step.name)
+		if !dirty.Load() {
+			t.Fatalf("dirty flag not set after %s; stderr=%q", step.name, stderr.String())
+		}
 	}
 }

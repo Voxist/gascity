@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -478,5 +481,132 @@ func TestRunLoopPatrolOverDebouncingPokeSeesOutOfProcessCreate(t *testing.T) {
 			t.Fatalf("after 5s (%d builds, patrol every 50ms) no tick saw session %s: the patrol dropped the debouncing poke", n, id)
 		case <-time.After(10 * time.Millisecond):
 		}
+	}
+}
+
+// sessionListCountingStore counts the session-bead lists that reach the store
+// under the controller's CachingStore: the live session read a poke tick
+// makes (the type leg and the label leg).
+type sessionListCountingStore struct {
+	beads.Store
+	mu    sync.Mutex
+	lists int
+}
+
+func (s *sessionListCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Type == sessionpkg.BeadType || query.Label == sessionpkg.LabelSession {
+		s.mu.Lock()
+		s.lists++
+		s.mu.Unlock()
+	}
+	return s.Store.List(query)
+}
+
+func (s *sessionListCountingStore) takeLists() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := s.lists
+	s.lists = 0
+	return n
+}
+
+// configWatchTicksCompleted counts the completed ticks the config watcher
+// alone started (controller.tick_completed with phase config-watch).
+func configWatchTicksCompleted(t *testing.T, rec *events.Fake) int {
+	t.Helper()
+	evts, err := rec.List(events.Filter{Type: events.ControllerTickCompleted})
+	if err != nil {
+		t.Fatalf("list tick events: %v", err)
+	}
+	n := 0
+	for _, e := range evts {
+		var p events.ControllerTickCompletedPayload
+		if json.Unmarshal(e.Payload, &p) == nil && p.Phase == configWatchTrigger {
+			n++
+		}
+	}
+	return n
+}
+
+// TestRunLoopConfigWatchArm drives the run loop's configWatchCh arm end to end
+// (vp-h1jgt). With the patrol an hour away and no socket reload, an edit on
+// disk reaches the watcher's own channel and is applied, and a watcher event
+// whose reload finds no change runs as a patrol tick, with no live session
+// read.
+func TestRunLoopConfigWatchArm(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	appendToFile(t, tomlPath, "\n[daemon]\npatrol_interval = \"1h\"\n")
+	cfg, prov, err := config.LoadWithIncludes(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	backing := &sessionListCountingStore{Store: beads.NewMemStore()}
+	sp := runtime.NewFake()
+	rec := events.NewFake()
+	stdout := newSyncBuffer()
+	ready := make(chan struct{})
+	var readyOnce sync.Once
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath: cityPath, CityName: "test-city", TomlPath: tomlPath, Cfg: cfg, SP: sp,
+		WatchTargets:   config.WatchTargets(prov, cfg, cityPath),
+		ConfigRev:      config.Revision(osFS{}, prov, cfg, cityPath),
+		ConfigDebounce: testConfigDebounce,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:      newDrainOps(sp),
+		Rec:       rec,
+		OnStarted: func() { readyOnce.Do(func() { close(ready) }) },
+		Stdout:    stdout,
+		Stderr:    io.Discard,
+	})
+	stubReloadBeadsLifecycle(t, func(string, string, *config.City, cityStoreRecord, io.Writer) error { return nil })
+	cr.od = &recordingOrderDispatcher{}
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = primeTestCache(t, backing)
+	cr.setControllerState(cs)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		cr.run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	awaitClose(t, ready, "readiness")
+
+	awaitWatchTicks := func(what string, want int) {
+		t.Helper()
+		awaitCond(t, func() bool { return configWatchTicksCompleted(t, rec) >= want }, what)
+	}
+
+	// An edit on disk is applied with no socket reload and no patrol.
+	before := configWatchTicksCompleted(t, rec)
+	appendToFile(t, tomlPath, "\n[orders]\nskip = [\"config-watch-arm\"]\n")
+	awaitCond(t, func() bool { return strings.Contains(stdout.String(), "Config reloaded") }, "the watcher-driven reload of the edited city.toml")
+	awaitWatchTicks("the config-watch tick that applied the edit", before+1)
+
+	// A watcher event whose reload finds no change runs as a patrol tick:
+	// no live session read.
+	data, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloads := strings.Count(stdout.String(), "Config reloaded")
+	before = configWatchTicksCompleted(t, rec)
+	backing.takeLists()
+	if err := os.WriteFile(tomlPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	awaitWatchTicks("the config-watch tick for the unchanged rewrite", before+1)
+	if n := backing.takeLists(); n != 0 {
+		t.Fatalf("no-change config-watch tick made %d live session lists, want 0 (it must run as a patrol tick)", n)
+	}
+	if got := strings.Count(stdout.String(), "Config reloaded"); got != reloads {
+		t.Fatalf("unchanged rewrite applied a reload (%d -> %d \"Config reloaded\" lines); want no change", reloads, got)
 	}
 }

@@ -1422,11 +1422,12 @@ func patrolTickTrigger(pokeDB, ctrlDB *tickDebouncer) string {
 }
 
 // configWatchTickTrigger is the trigger of the tick a config-watcher wake
-// runs. The watcher wakes on its own channel, not pokeCh, so the tick knows
-// that only a file change asked for it: it runs as a poke tick, exactly as
-// when the watcher poked, unless its config reload finds nothing to do, and
-// then as a patrol tick (tickConfigReload). A poke pending in the debouncer
-// rides along, as with patrolTickTrigger, and the tick is then a plain poke.
+// runs. The watcher wakes on its own channel, not pokeCh, and is not
+// debounced by tick_debounce (the watcher debounces its own events), so the
+// tick knows that only a file change asked for it: it runs as a poke tick
+// unless its config reload finds nothing to do, and then as a patrol tick
+// (settleConfigWatchTick). A poke pending in the debouncer rides along, as
+// with patrolTickTrigger, and the tick is then a plain poke.
 func configWatchTickTrigger(pokeDB *tickDebouncer) string {
 	if pokeDB.cancelPending() {
 		return "poke"
@@ -1640,8 +1641,8 @@ func (cr *CityRuntime) tick(
 		trigger:          trigger,
 	}
 	if trigger == configWatchTrigger {
-		// A config-watch tick runs as the poke the watcher used to send
-		// until its reload shows there is nothing to do (tickConfigReload).
+		// A config-watch tick runs as a poke tick until its reload shows
+		// there is nothing to do (settleConfigWatchTick).
 		p.trigger = "poke"
 		p.configWatchOnly = true
 	}
@@ -1771,7 +1772,7 @@ func (cr *CityRuntime) tickConfigReload(p *tickPass) bool {
 // rules (shouldRefreshDemandSnapshot) instead of forcing a live session read
 // and a full demand rebuild, and clears configChanged, which forces both and
 // bypasses the FS-pressure gate. A reload that applied or failed, and a
-// manual reload, keep the poke tick the watcher always got. It is idempotent.
+// manual reload, keep the poke tick. It is idempotent.
 func (p *tickPass) settleConfigWatchTick() {
 	if !p.configWatchOnly || p.manualReload != nil {
 		return
@@ -3533,7 +3534,7 @@ func (cr *CityRuntime) restartConfigWatcher() {
 	}
 	// The watcher wakes the run loop on its own channel so a tick it alone
 	// asked for can run as a patrol tick when the reload finds no change
-	// (configWatchTickTrigger). A runtime built without one pokes as before.
+	// (configWatchTickTrigger). A runtime built without one wakes pokeCh.
 	wake := cr.wakeOf()
 	if cr.configWatchCh != nil {
 		wake = newLegacyWake(cr.configWatchCh, nil)
