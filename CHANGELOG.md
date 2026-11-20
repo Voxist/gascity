@@ -996,7 +996,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   positive integer (`gogc` at most 2147483647). They are applied in-process at
   startup and override an inherited `GOGC` or `GOMEMLIMIT` for the supervisor
   alone; children still inherit those variables. An out-of-range value stops
-  `gc supervisor start`, `gc supervisor install` and the supervisor itself; a
+  `gc supervisor start` (except a delegated start, whose unit checks its own
+  config), `gc supervisor install` and the supervisor itself; a
   value of the wrong type (`gogc = "off"`) makes `supervisor.toml` unreadable
   for every command that loads it. `gc supervisor reload` applies neither key:
   it reports a changed value (takes effect on restart) and fails on an invalid

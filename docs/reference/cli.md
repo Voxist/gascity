@@ -5999,9 +5999,10 @@ processes it spawns, unlike GOGC or GOMEMLIMIT in the service manager's
 environment, which every child inherits. A value set here overrides an
 inherited GOGC or GOMEMLIMIT for the supervisor only; children still
 inherit those variables. An out-of-range value stops 'gc supervisor
-start', 'gc supervisor install' and the supervisor itself; a value of the
-wrong type (gogc = "off", memory_limit_mib = "3GiB") makes supervisor.toml
-unreadable for every gc command that loads it. 'gc supervisor reload' does
+start' (a delegated start leaves the check to its unit), 'gc supervisor
+install' and the supervisor itself; a value of the wrong type (gogc =
+"off", memory_limit_mib = "3GiB") makes supervisor.toml unreadable for
+every gc command that loads it. 'gc supervisor reload' does
 not apply either key. The effective settings are logged on every start.
 
 ```

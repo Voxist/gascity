@@ -625,9 +625,10 @@ processes it spawns, unlike GOGC or GOMEMLIMIT in the service manager's
 environment, which every child inherits. A value set here overrides an
 inherited GOGC or GOMEMLIMIT for the supervisor only; children still
 inherit those variables. An out-of-range value stops 'gc supervisor
-start', 'gc supervisor install' and the supervisor itself; a value of the
-wrong type (gogc = "off", memory_limit_mib = "3GiB") makes supervisor.toml
-unreadable for every gc command that loads it. 'gc supervisor reload' does
+start' (a delegated start leaves the check to its unit), 'gc supervisor
+install' and the supervisor itself; a value of the wrong type (gogc =
+"off", memory_limit_mib = "3GiB") makes supervisor.toml unreadable for
+every gc command that loads it. 'gc supervisor reload' does
 not apply either key. The effective settings are logged on every start.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
@@ -706,10 +707,10 @@ func startBareSupervisor(stdout, stderr io.Writer, jsonOut, joinRunning bool) in
 		return 1
 	}
 	if delegated {
-		if err := supervisorGCTuningPreflight(); err != nil {
-			fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
+		// No GC-tuning preflight here: the operator-managed unit runs with its
+		// own GC_HOME and supervisor.toml, so this shell's file says nothing
+		// about the supervisor the unit will start, which validates its own
+		// config at startup.
 		return delegatedSupervisorStart(delegation, stdout, stderr, jsonOut)
 	}
 	if msg, blocked := bareSupervisorHomeOverrideError(); blocked {

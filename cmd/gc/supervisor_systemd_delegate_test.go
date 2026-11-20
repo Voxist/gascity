@@ -1833,3 +1833,25 @@ func TestRunStartDriftCheck_NoAutoRestartGuidanceUsesDelegatedUnit(t *testing.T)
 		t.Errorf("stderr = %q, want guidance %q", stderr.String(), want)
 	}
 }
+
+// TestSupervisorStartDelegatedIgnoresCallerGCTuning pins that a delegated
+// start is not blocked by the caller's supervisor.toml: the unit runs with its
+// own GC_HOME and config and validates its GC tuning itself at startup.
+func TestSupervisorStartDelegatedIgnoresCallerGCTuning(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+	if err := os.WriteFile(filepath.Join(gcHome, "supervisor.toml"), []byte("[supervisor]\ngogc = \"off\"\nmemory_limit_mib = -1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	setDelegationEnvForTest(t, "gascity-prod.service", "")
+	argsFile := installFakeDelegatedSystemctl(t, 0, "")
+	stubSupervisorAliveAfterSystemctl(t, argsFile, 4242)
+
+	var stdout, stderr bytes.Buffer
+	if code := doSupervisorStart(&stdout, &stderr); code != 0 {
+		t.Fatalf("doSupervisorStart code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if lines := readRecordedSystemctlArgs(t, argsFile); len(lines) != 1 || lines[0] != "start gascity-prod.service" {
+		t.Fatalf("systemctl invocations = %v, want exactly [\"start gascity-prod.service\"]", lines)
+	}
+}

@@ -284,7 +284,8 @@ func TestSupervisorGCTuningPreflight(t *testing.T) {
 }
 
 // TestSupervisorStartAndInstallRefuseInvalidGCTuning pins that both commands
-// run the preflight before doing anything else.
+// run the preflight once their worker-site, delegation and HOME override
+// guards have passed, before they start or install anything.
 func TestSupervisorStartAndInstallRefuseInvalidGCTuning(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -302,6 +303,36 @@ func TestSupervisorStartAndInstallRefuseInvalidGCTuning(t *testing.T) {
 			}
 			if want := tc.prefix + "[supervisor] memory_limit_mib = -1"; !strings.HasPrefix(stderr.String(), want) {
 				t.Fatalf("stderr = %q, want prefix %q", stderr.String(), want)
+			}
+		})
+	}
+}
+
+// TestSupervisorStartAndInstallHomeGuardPrecedesGCTuning pins the ordering:
+// with HOME overridden and an invalid supervisor.toml under GC_HOME, the HOME
+// override guard answers, not the GC-tuning preflight, which would otherwise
+// read a supervisor.toml from a home nothing has vouched for.
+func TestSupervisorStartAndInstallHomeGuardPrecedesGCTuning(t *testing.T) {
+	requireHomeOverrideGuard(t)
+	for _, tc := range []struct {
+		name string
+		run  func(stdout, stderr *bytes.Buffer) int
+	}{
+		{"start", func(o, e *bytes.Buffer) int { return doSupervisorStart(o, e) }},
+		{"install", func(o, e *bytes.Buffer) int { return doSupervisorInstall(o, e) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeSupervisorTOML(t, "[supervisor]\nport = 41238\ngogc = 0\n")
+			t.Setenv("HOME", t.TempDir())
+			var stdout, stderr bytes.Buffer
+			if code := tc.run(&stdout, &stderr); code != 1 {
+				t.Fatalf("exit code = %d, want 1; stderr=%q", code, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "Keep HOME unchanged and use GC_HOME for isolated runs") {
+				t.Fatalf("stderr = %q, want the HOME override guard", stderr.String())
+			}
+			if strings.Contains(stderr.String(), "gogc") {
+				t.Fatalf("stderr = %q, want no GC-tuning error ahead of the HOME guard", stderr.String())
 			}
 		})
 	}
