@@ -5963,11 +5963,11 @@ rotated, or revoked without a restart. The command prints the key ids
 the reload added, removed, or replaced, and exits 1 when the supervisor
 refused the new key list and kept the current keys. Other
 supervisor.toml settings, read_auth_verify_key included, take effect
-only when the supervisor restarts. For gogc and memory_limit_mib the
-reload says when supervisor.toml differs from what the supervisor
-applied at startup (the change takes effect on restart), and exits 1
-when either holds a value the next start would refuse; it applies
-neither.
+only when the supervisor restarts. For gogc, memory_limit_mib and
+pprof_addr the reload says when supervisor.toml differs from what the
+supervisor applied at startup (the change takes effect on restart), and
+exits 1 when any holds a value the next start would refuse; it applies
+none of them.
 
 ```
 gc supervisor reload [flags]
@@ -6001,8 +6001,24 @@ inherited GOGC or GOMEMLIMIT for the supervisor only; children still
 inherit those variables. An out-of-range value stops 'gc supervisor
 start', 'gc supervisor install' and the supervisor itself; a value of the
 wrong type (gogc = "off", memory_limit_mib = "3GiB") makes supervisor.toml
-unreadable for every gc command that loads it. 'gc supervisor reload' does
-not apply either key. The effective settings are logged on every start.
+unreadable for every gc command that loads it. 'gc supervisor start',
+when delegated to a systemd unit, only warns about either: the unit
+validates its own config. 'gc supervisor reload' does not apply either
+key. The effective settings are logged on every start.
+
+To profile the supervisor, set pprof_addr under [supervisor] to a loopback
+host:port (127.0.0.1:6061, [::1]:6061 or localhost:6061). The supervisor
+serves /debug/pprof/ there and keeps its own heap profiling on; nothing is
+exported, so the processes it spawns are unaffected, unlike GC_PPROF=1 in
+the service manager's environment, which every child inherits. A
+non-loopback or empty host, or a port outside 1-65535, stops 'gc supervisor
+start' (when delegated, it only warns), 'gc supervisor install' and the
+supervisor itself. A listen failure is logged and the supervisor runs
+without pprof. 'gc supervisor reload' does not apply it. The effective
+setting is logged on every start. Setting pprof_addr turns heap profiling
+back on, which costs the supervisor about 23% of its on-CPU time on a
+long-lived process (runtime.mProf_Flush on every GC cycle), so unset it once
+the profiles are taken.
 
 ```
 gc supervisor run

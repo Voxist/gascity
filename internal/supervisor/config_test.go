@@ -548,3 +548,48 @@ func TestLoadConfigGCTuningWrongTypeFails(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadConfigPprofAddr(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "supervisor.toml")
+	if err := os.WriteFile(path, []byte("[supervisor]\npprof_addr = \"127.0.0.1:6061\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Supervisor.PprofAddr != "127.0.0.1:6061" {
+		t.Errorf("PprofAddr = %q, want 127.0.0.1:6061", cfg.Supervisor.PprofAddr)
+	}
+}
+
+// TestValidatePprofAddr pins that pprof_addr accepts only a loopback host and
+// a real port, since pprof serves heap dumps and CPU profiles unauthenticated,
+// and that unset is valid (pprof off).
+func TestValidatePprofAddr(t *testing.T) {
+	for _, addr := range []string{"", "127.0.0.1:6061", "127.1.2.3:6061", "[::1]:6061", "localhost:6061", "LOCALHOST:1", "127.0.0.1:65535"} {
+		if err := (Section{PprofAddr: addr}).ValidatePprofAddr(); err != nil {
+			t.Errorf("ValidatePprofAddr(%q) = %v, want nil", addr, err)
+		}
+	}
+	for _, tc := range []struct{ addr, want string }{
+		{":6061", "not loopback"},
+		{"0.0.0.0:6061", "not loopback"},
+		{"[::]:6061", "not loopback"},
+		{"192.168.1.5:6061", "not loopback"},
+		{"example.com:6061", "not loopback"},
+		{"127.0.0.1", "missing port"},
+		{"127.0.0.1:0", "between 1 and 65535"},
+		{"127.0.0.1:65536", "between 1 and 65535"},
+		{"127.0.0.1:pprof", "between 1 and 65535"},
+	} {
+		err := (Section{PprofAddr: tc.addr}).ValidatePprofAddr()
+		if err == nil {
+			t.Errorf("ValidatePprofAddr(%q) = nil, want error", tc.addr)
+			continue
+		}
+		if !strings.Contains(err.Error(), "pprof_addr") || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("ValidatePprofAddr(%q) = %q, want it to name pprof_addr and %q", tc.addr, err, tc.want)
+		}
+	}
+}

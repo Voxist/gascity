@@ -3,8 +3,10 @@ package supervisor
 import (
 	"fmt"
 	"math"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -75,9 +77,19 @@ type Section struct {
 	// exported, so the processes the supervisor spawns keep their own GC
 	// settings. Unset leaves the Go runtime's setting (or the GOGC/GOMEMLIMIT
 	// the supervisor itself inherited) in place. Each must be a positive
-	// integer in range; ValidateGCTuning checks them. A value of the wrong TOML type (gogc = "off", memory_limit_mib = "3GiB") fails LoadConfig itself.
+	// integer in range; ValidateGCTuning checks them. A value of the wrong
+	// TOML type (gogc = "off", memory_limit_mib = "3GiB") fails LoadConfig
+	// itself.
 	GOGC           *int   `toml:"gogc,omitempty"`
 	MemoryLimitMiB *int64 `toml:"memory_limit_mib,omitempty"`
+	// PprofAddr serves net/http/pprof for the supervisor process only, on a
+	// loopback host:port (127.0.0.1:6061, [::1]:6061 or localhost:6061), and
+	// keeps the supervisor's heap profiling on so /debug/pprof/heap has data.
+	// Unset leaves pprof off (unless GC_PPROF=1 is in the supervisor's own
+	// environment). It is read at startup and never exported, unlike GC_PPROF
+	// in the service manager's environment, which every child inherits.
+	// ValidatePprofAddr checks it.
+	PprofAddr string `toml:"pprof_addr,omitempty"`
 }
 
 // maxMemoryLimitMiB is the largest memory_limit_mib whose byte count fits in
@@ -96,6 +108,37 @@ func (s Section) ValidateGCTuning() error {
 		return fmt.Errorf("[supervisor] memory_limit_mib = %d: must be between 1 and %d", *s.MemoryLimitMiB, int64(maxMemoryLimitMiB))
 	}
 	return nil
+}
+
+// ValidatePprofAddr reports an error when pprof_addr is set to anything but a
+// loopback host and a port from 1 to 65535. pprof serves heap and goroutine
+// dumps and CPU profiles without authentication, so a non-loopback host
+// (including an empty one, which listens on every interface) is refused.
+// Unset is valid and leaves pprof off.
+func (s Section) ValidatePprofAddr() error {
+	if s.PprofAddr == "" {
+		return nil
+	}
+	host, port, err := net.SplitHostPort(s.PprofAddr)
+	if err != nil {
+		return fmt.Errorf("[supervisor] pprof_addr = %q: %v; want a loopback host:port such as 127.0.0.1:6061", s.PprofAddr, err)
+	}
+	if !isLoopbackHost(host) {
+		return fmt.Errorf("[supervisor] pprof_addr = %q: host %q is not loopback; pprof is unauthenticated, so only 127.0.0.1, ::1 or localhost is allowed", s.PprofAddr, host)
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("[supervisor] pprof_addr = %q: port %q must be between 1 and 65535", s.PprofAddr, port)
+	}
+	return nil
+}
+
+// isLoopbackHost reports whether host is localhost or a loopback IP literal.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // PublicationConfig holds machine-wide publication policy for workspace

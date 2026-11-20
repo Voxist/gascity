@@ -619,7 +619,7 @@ func TestRunSupervisorReloadSwapsWriteAuthKeysWithoutStoppingCities(t *testing.T
 }
 
 // TestCheckSupervisorGCTuningReload pins that a reload reports, and never
-// applies, a gogc or memory_limit_mib that differs from startup or that the
+// applies, a gogc, memory_limit_mib or pprof_addr that differs from startup or that the
 // next start would refuse.
 func TestCheckSupervisorGCTuningReload(t *testing.T) {
 	restoreGCSettings(t)
@@ -643,6 +643,16 @@ func TestCheckSupervisorGCTuningReload(t *testing.T) {
 		{
 			name: "invalid", startup: supervisor.Section{GOGC: &gogc100}, current: supervisor.Section{GOGC: &gogc0},
 			want:       gcTuningReload{Status: gcTuningInvalid, Detail: "[supervisor] gogc = 0: must be between 1 and 2147483647"},
+			wantLogged: "the next start will refuse",
+		},
+		{
+			name: "pprof_addr changed", current: supervisor.Section{PprofAddr: "127.0.0.1:6061"},
+			want:       gcTuningReload{Status: gcTuningChanged, Detail: `pprof_addr unset -> "127.0.0.1:6061"`},
+			wantLogged: "takes effect on restart",
+		},
+		{
+			name: "pprof_addr invalid", current: supervisor.Section{PprofAddr: "0.0.0.0:6061"},
+			want:       gcTuningReload{Status: gcTuningInvalid, Detail: `[supervisor] pprof_addr = "0.0.0.0:6061": host "0.0.0.0" is not loopback; pprof is unauthenticated, so only 127.0.0.1, ::1 or localhost is allowed`},
 			wantLogged: "the next start will refuse",
 		},
 		{name: "unreadable file is left to the write-auth step", loadErr: errors.New("toml: bad"), want: gcTuningReload{}},
