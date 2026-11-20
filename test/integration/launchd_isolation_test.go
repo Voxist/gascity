@@ -95,6 +95,20 @@ func TestSupervisorInstallNeverWritesRealLaunchAgents(t *testing.T) {
 	gcHome, _, env := newIsolatedEnvRoot(t, false)
 	realDir := realLaunchAgentsDirForTest(t)
 	before := supervisorPlistNames(t, realDir)
+	// gc supervisor install refuses any HOME override unconditionally — a
+	// launchd unit would execute under the real HOME regardless of what
+	// this process sets it to (a52e29fe9, #7033); there is deliberately no
+	// isolated-home opt-in for install, unlike a bare supervisor start.
+	// Exercising install therefore needs the real HOME. Isolation here
+	// comes entirely from GC_SUPERVISOR_LAUNCH_AGENTS_DIR, which
+	// buildIntegrationEnv already points at gcHome/LaunchAgents
+	// independently of HOME — the assertions below pin that it is
+	// install's actual write target.
+	lu, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil || strings.TrimSpace(lu.HomeDir) == "" {
+		t.Skipf("cannot resolve the real home dir: %v", err)
+	}
+	env = replaceEnv(env, "HOME", lu.HomeDir)
 	// Backstop for a regression: remove only plists this test planted (new
 	// since the snapshot and naming this test's GC_HOME). The permissive shim
 	// below means none of them was ever loaded into launchd.
