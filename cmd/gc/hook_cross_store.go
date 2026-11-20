@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -638,6 +639,137 @@ func bestStoreWithWorkRanked(command string, stores []hookStore, primary hookSto
 		return "", hookStore{}, &hookSecondaryStoreFailure{failures: secondaryFailures}
 	}
 	return lastOut, hookStore{}, nil
+}
+
+// hookFanOutConcurrency bounds how many secondary-store work queries
+// concurrentHookStoreRunner runs at once (vp-34cpm). A package var so tests
+// can drive it without a real subprocess budget.
+//
+// MEASURED 2026-08-13 (platform-architect-1): the federated fan-out is not a
+// hang, it is real sequential work — n=10 `gc hook` runs under fleet load
+// (131-135 claude processes, 68-73 sessions, dolt sql-server at 99.6% CPU)
+// took 12-31s, median ~14.5s, 3/10 runs >= 26s. Called with a 30s client-side
+// timeout (the symptom that originally got this filed as a hang, vl-3hb), a
+// 31s run fails indistinguishably from one. Running the fan-out's per-store
+// queries concurrently, bounded, turns that sum into roughly its slowest
+// single store, which is what brings p99 back under callers' timeout
+// budgets.
+var hookFanOutConcurrency = 6
+
+// hookFetchResult is one store's prefetched work-query output.
+type hookFetchResult struct {
+	out string
+	err error
+}
+
+// hookFetchKey identifies one (command, dir, env) work-query call uniquely
+// enough to serve it from a prefetched cache — the same triple
+// bestStoreWithWorkRanked's loop and hookProbeStoreRank's probe call both
+// pass to run.
+func hookFetchKey(command, dir string, env []string) string {
+	return command + "\x00" + dir + "\x00" + strings.Join(env, "\x00")
+}
+
+// concurrentHookStoreRunner prefetches every store's work-query output
+// concurrently, bounded by hookFanOutConcurrency, and returns a
+// hookStoreRunner that serves those prefetched results instead of running a
+// subprocess — so bestStoreWithWorkRanked's sequential ranking pass pays for
+// the fan-out's wall-clock cost once, as roughly its slowest single store,
+// rather than as their sum (vp-34cpm).
+//
+// The hot resume path is preserved exactly: primary (stores[0]) is queried
+// FIRST and ALONE; if that query alone already carries this session's own
+// in-progress work, nothing else is queried at all — matching
+// bestStoreWithWorkRanked's unconditional short-circuit at
+// hookTierInProgress (see its doc comment: "nothing may preempt it, and
+// short-circuiting keeps the hot resume path at one query"). Prefetching
+// every store unconditionally would trade that one-query guarantee for a
+// bounded-but-nonzero fan-out on every resume, which is exactly the added
+// Dolt load the hot path exists to avoid.
+//
+// Falls back to run unchanged — no prefetch, no concurrency — when stores
+// does not have the shape every production caller builds (primary as
+// stores[0]); every real call site (hookDiscoveryRunner,
+// selectStoreWithWorkRetryingRanked) satisfies this, so the fallback only
+// makes an unrecognized shape decline the optimization instead of risk
+// misreading it.
+//
+// A call bestStoreWithWorkRanked makes that this prefetch did not cover —
+// today, only hookProbeStoreRank's D1 priority probe, a different command
+// against an already-fetched store — falls through to a live call via run,
+// unaffected by this change.
+func concurrentHookStoreRunner(command string, stores []hookStore, primary hookStore, run hookStoreRunner, now time.Time) hookStoreRunner {
+	if len(stores) < 2 || !sameHookStore(stores[0], primary) {
+		return run
+	}
+
+	primaryCmd := hookStoreCommand(primary, command)
+	primaryOut, primaryErr := run(primaryCmd, primary.dir, primary.env)
+
+	cache := make(map[string]hookFetchResult, len(stores))
+	cache[hookFetchKey(primaryCmd, primary.dir, primary.env)] = hookFetchResult{out: primaryOut, err: primaryErr}
+
+	if primaryErr == nil && primaryHasInProgressWork(primaryOut, now) {
+		return cachedHookStoreRunner(cache, run)
+	}
+
+	concurrency := hookFanOutConcurrency
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, concurrency)
+	for i := 1; i < len(stores); i++ {
+		st := stores[i]
+		cmd := hookStoreCommand(st, command)
+		key := hookFetchKey(cmd, st.dir, st.env)
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			out, err := run(cmd, st.dir, st.env)
+			mu.Lock()
+			cache[key] = hookFetchResult{out: out, err: err}
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+
+	return cachedHookStoreRunner(cache, run)
+}
+
+// primaryHasInProgressWork reports whether out — the primary store's own
+// work-query output, already filtered by caller's now — alone carries this
+// session's in-progress-tier candidate. Mirrors
+// bestStoreWithWorkRanked's "Resuming this session's own in-progress work is
+// unconditional" check exactly, so concurrentHookStoreRunner's fast path and
+// the ranking pass it feeds never disagree about when the fan-out may stop
+// at one query.
+func primaryHasInProgressWork(out string, now time.Time) bool {
+	ready := filterUnreadyHookCandidates(normalizeWorkQueryOutput(strings.TrimSpace(out)), now)
+	if !workQueryHasReadyWork(ready) {
+		return false
+	}
+	rank, _, ok := bestHookCandidateRank(ready)
+	return ok && rank.tier == hookTierInProgress
+}
+
+// cachedHookStoreRunner returns a hookStoreRunner that serves cache by
+// (command, dir, env) identity, falling through to run for anything the
+// prefetch did not cover (the D1 rank probe's own command). cache is only
+// ever read here, after every write concurrentHookStoreRunner makes to it
+// has already completed (wg.Wait()), so no further synchronization is
+// needed even though this runner is then driven from
+// bestStoreWithWorkRanked's single-threaded sequential loop.
+func cachedHookStoreRunner(cache map[string]hookFetchResult, run hookStoreRunner) hookStoreRunner {
+	return func(command, dir string, env []string) (string, error) {
+		if res, ok := cache[hookFetchKey(command, dir, env)]; ok {
+			return res.out, res.err
+		}
+		return run(command, dir, env)
+	}
 }
 
 // errHookRigRuntimeUnavailable marks a failed read of a secondary rig leg whose
