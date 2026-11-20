@@ -1845,9 +1845,9 @@ func TestSupervisorStartDelegatedWarnsOnCallerGCTuning(t *testing.T) {
 		mode       os.FileMode
 		wantStderr string
 	}{
-		{"out_of_range", "[supervisor]\ngogc = 0\n", 0o644, "gogc"},
+		{"out_of_range", "[supervisor]\ngogc = 0\n", 0o644, "gogc = 0: must be"},
 		{"wrong_type", "[supervisor]\ngogc = \"off\"\n", 0o644, "reading "},
-		{"unreadable", "[supervisor]\ngogc = 100\n", 0o000, "reading "},
+		{"unreadable", "[supervisor]\ngogc = 100\n", 0o000, "permission denied"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.mode == 0o000 && os.Geteuid() == 0 {

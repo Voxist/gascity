@@ -627,10 +627,10 @@ inherited GOGC or GOMEMLIMIT for the supervisor only; children still
 inherit those variables. An out-of-range value stops 'gc supervisor
 start', 'gc supervisor install' and the supervisor itself; a value of the
 wrong type (gogc = "off", memory_limit_mib = "3GiB") makes supervisor.toml
-unreadable for every gc command that loads it. A start delegated to a
-systemd unit only warns about either: the unit validates its own config.
-'gc supervisor reload' does not apply either key. The effective settings
-are logged on every start.`,
+unreadable for every gc command that loads it. 'gc supervisor start',
+when delegated to a systemd unit, only warns about either: the unit
+validates its own config. 'gc supervisor reload' does not apply either
+key. The effective settings are logged on every start.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if doSupervisorRun(stdout, stderr) != 0 {
@@ -715,7 +715,7 @@ func startBareSupervisor(stdout, stderr io.Writer, jsonOut, joinRunning bool) in
 		// usually shares this file, so the warning still names the problem
 		// before the unit fails to become ready.
 		if err := supervisorGCTuningPreflight(); err != nil {
-			fmt.Fprintf(stderr, "gc supervisor start: warning: %v (this shell's supervisor.toml; the delegated unit validates its own config at startup)\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc supervisor start: warning: %v; this shell's supervisor.toml, and the delegated unit validates its own config at startup\n", err) //nolint:errcheck // best-effort stderr
 		}
 		return delegatedSupervisorStart(delegation, stdout, stderr, jsonOut)
 	}
