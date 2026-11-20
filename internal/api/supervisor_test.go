@@ -1467,3 +1467,21 @@ func eventListItemByType(t *testing.T, items []map[string]any, eventType string)
 	t.Fatalf("event type %s not found in items: %v", eventType, items)
 	return nil
 }
+
+// TestPprofHandlerServesHeapProfile pins the pprof mux ServePprof serves,
+// through an in-memory recorder so the test binds no listener.
+func TestPprofHandlerServesHeapProfile(t *testing.T) {
+	rec := httptest.NewRecorder()
+	pprofHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/debug/pprof/heap?debug=1", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "heap profile") {
+		t.Fatalf("GET /debug/pprof/heap = %d %q, want 200 and a heap profile", rec.Code, rec.Body.String())
+	}
+}
+
+// TestServePprofReportsListenError pins that ServePprof returns the listen
+// error and no server for an address it cannot listen on.
+func TestServePprofReportsListenError(t *testing.T) {
+	if srv, err := ServePprof("127.0.0.1:65536"); err == nil || srv != nil {
+		t.Fatalf("ServePprof(127.0.0.1:65536) = (%v, %v), want (nil, error)", srv, err)
+	}
+}

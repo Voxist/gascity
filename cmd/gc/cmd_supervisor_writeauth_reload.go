@@ -114,9 +114,10 @@ func applySupervisorWriteAuthKeys(apiMux *api.SupervisorMux) writeAuthKeyReload 
 type gcTuningReloadStatus string
 
 const (
-	// gcTuningUnchanged means supervisor.toml's gogc and memory_limit_mib
-	// match what the supervisor applied at startup, or the file could not be
-	// read (the write-auth key step reports that). There is nothing to report.
+	// gcTuningUnchanged means supervisor.toml's gogc, memory_limit_mib and
+	// pprof_addr match what the supervisor applied at startup, or the file
+	// could not be read (the write-auth key step reports that). There is
+	// nothing to report.
 	gcTuningUnchanged gcTuningReloadStatus = ""
 	// gcTuningChanged means supervisor.toml's values differ from the ones
 	// applied at startup; they take effect on the next start.
@@ -127,8 +128,9 @@ const (
 )
 
 // gcTuningReload is the outcome of the GC-tuning check of a supervisor reload.
-// A reload never applies gogc or memory_limit_mib; it only reports when
-// supervisor.toml no longer matches what the supervisor applied at startup.
+// A reload never applies gogc, memory_limit_mib or pprof_addr; it only
+// reports when supervisor.toml no longer matches what the supervisor applied
+// at startup.
 type gcTuningReload struct {
 	Status gcTuningReloadStatus `json:"status"`
 	Detail string               `json:"detail,omitempty"`
@@ -148,9 +150,9 @@ func (r gcTuningReload) summary() string {
 }
 
 // checkSupervisorGCTuningReload re-reads supervisor.toml and compares its
-// gogc and memory_limit_mib with startup, the values the supervisor applied
-// when it started. It applies nothing. It logs the outcome to stderr and
-// returns it for the client that asked for a reload report.
+// gogc, memory_limit_mib and pprof_addr with startup, the values the
+// supervisor applied when it started. It applies nothing. It logs the outcome
+// to stderr and returns it for the client that asked for a reload report.
 func checkSupervisorGCTuningReload(startup supervisor.Section, stderr io.Writer) gcTuningReload {
 	result := classifySupervisorGCTuningReload(startup)
 	if line := result.summary(); line != "" {
@@ -170,12 +172,18 @@ func classifySupervisorGCTuningReload(startup supervisor.Section) gcTuningReload
 	if err := current.ValidateGCTuning(); err != nil {
 		return gcTuningReload{Status: gcTuningInvalid, Detail: err.Error()}
 	}
+	if err := current.ValidatePprofAddr(); err != nil {
+		return gcTuningReload{Status: gcTuningInvalid, Detail: err.Error()}
+	}
 	var changes []string
 	if a, b := formatOptionalInt(startup.GOGC), formatOptionalInt(current.GOGC); a != b {
 		changes = append(changes, fmt.Sprintf("gogc %s -> %s", a, b))
 	}
 	if a, b := formatOptionalInt64(startup.MemoryLimitMiB), formatOptionalInt64(current.MemoryLimitMiB); a != b {
 		changes = append(changes, fmt.Sprintf("memory_limit_mib %s -> %s", a, b))
+	}
+	if a, b := formatOptionalString(startup.PprofAddr), formatOptionalString(current.PprofAddr); a != b {
+		changes = append(changes, fmt.Sprintf("pprof_addr %s -> %s", a, b))
 	}
 	if len(changes) == 0 {
 		return gcTuningReload{Status: gcTuningUnchanged}
@@ -190,6 +198,15 @@ func formatOptionalInt(v *int) string {
 		return "unset"
 	}
 	return strconv.Itoa(*v)
+}
+
+// formatOptionalString renders an optional supervisor.toml string, "unset"
+// when the key is absent or empty.
+func formatOptionalString(v string) string {
+	if v == "" {
+		return "unset"
+	}
+	return strconv.Quote(v)
 }
 
 // formatOptionalInt64 is formatOptionalInt for an int64 key.
