@@ -625,11 +625,12 @@ processes it spawns, unlike GOGC or GOMEMLIMIT in the service manager's
 environment, which every child inherits. A value set here overrides an
 inherited GOGC or GOMEMLIMIT for the supervisor only; children still
 inherit those variables. An out-of-range value stops 'gc supervisor
-start' (a delegated start leaves the check to its unit), 'gc supervisor
-install' and the supervisor itself; a value of the wrong type (gogc =
-"off", memory_limit_mib = "3GiB") makes supervisor.toml unreadable for
-every gc command that loads it. 'gc supervisor reload' does
-not apply either key. The effective settings are logged on every start.`,
+start', 'gc supervisor install' and the supervisor itself; a value of the
+wrong type (gogc = "off", memory_limit_mib = "3GiB") makes supervisor.toml
+unreadable for every gc command that loads it. A start delegated to a
+systemd unit only warns about either: the unit validates its own config.
+'gc supervisor reload' does not apply either key. The effective settings
+are logged on every start.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if doSupervisorRun(stdout, stderr) != 0 {
@@ -707,10 +708,15 @@ func startBareSupervisor(stdout, stderr io.Writer, jsonOut, joinRunning bool) in
 		return 1
 	}
 	if delegated {
-		// No GC-tuning preflight here: the operator-managed unit runs with its
-		// own GC_HOME and supervisor.toml, so this shell's file says nothing
-		// about the supervisor the unit will start, which validates its own
-		// config at startup.
+		// The GC-tuning preflight only warns here: the operator-managed unit
+		// may run with its own GC_HOME and supervisor.toml, so this shell's
+		// file need not be the one the unit's supervisor reads, and that
+		// supervisor validates its own config at startup. A user-scope unit
+		// usually shares this file, so the warning still names the problem
+		// before the unit fails to become ready.
+		if err := supervisorGCTuningPreflight(); err != nil {
+			fmt.Fprintf(stderr, "gc supervisor start: warning: %v (this shell's supervisor.toml; the delegated unit validates its own config at startup)\n", err) //nolint:errcheck // best-effort stderr
+		}
 		return delegatedSupervisorStart(delegation, stdout, stderr, jsonOut)
 	}
 	if msg, blocked := bareSupervisorHomeOverrideError(); blocked {
