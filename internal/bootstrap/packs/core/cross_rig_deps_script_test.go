@@ -201,3 +201,161 @@ exit 0
 		t.Fatalf("an empty result must not attempt to walk dependencies, got:\n%s", logged)
 	}
 }
+
+// gcCalls returns the fake gc's logged invocations that start with prefix.
+func gcCalls(t *testing.T, logPath, prefix string) []string {
+	t.Helper()
+	logged, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	var calls []string
+	for _, line := range strings.Split(string(logged), "\n") {
+		if strings.HasPrefix(line, prefix) {
+			calls = append(calls, line)
+		}
+	}
+	return calls
+}
+
+// TestCrossRigDepsSkipsClosesNothingDependsOn pins the N+1 fix: order-tracking
+// beads, session and other infra rows, ephemeral rows and any row bd reports
+// with dependent_count 0 are never looked up. A recent-close window is mostly
+// order bookkeeping (about 300 rows per run on a busy city), and the script
+// used to run one `gc bd dep list` per row and `gc rig list` on every run.
+func TestCrossRigDepsSkipsClosesNothingDependsOn(t *testing.T) {
+	binDir, logPath := fakeGCBin(t, `case "$*" in
+bd\ query\ status=closed*) printf '%s\n' '[
+  {"id":"ga-t1","labels":["exec","order-run:gate-sweep","order-tracking"],"dependent_count":0},
+  {"id":"ga-t2","labels":["order-tracking"]},
+  {"id":"ga-wisp-s1","issue_type":"session","labels":["gc:session"],"dependent_count":0},
+  {"id":"ga-op1","labels":["gc:op"]},
+  {"id":"ga-e1","ephemeral":true},
+  {"id":"ga-work","labels":["bug"],"dependent_count":0}
+]' ;;
+rig\ list*) printf '{"rigs":[]}\n' ;;
+esac
+exit 0
+`)
+	out, err := runCrossRigDeps(t, binDir)
+	if err != nil {
+		t.Fatalf("cross-rig-deps.sh failed: %v\n%s", err, out)
+	}
+	if calls := gcCalls(t, logPath, "gc bd dep "); len(calls) != 0 {
+		t.Fatalf("closes nothing depends on must not be looked up, got:\n%s", strings.Join(calls, "\n"))
+	}
+	if calls := gcCalls(t, logPath, "gc rig list"); len(calls) != 0 {
+		t.Fatalf("with no candidate the rig list must not be read, got:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+// TestCrossRigDepsBatchesLookupPerPrefix pins the batched lookup: the
+// candidates that remain are looked up with one `gc bd dep list` per bead
+// prefix (gc bd routes by prefix), carrying every candidate id of that prefix.
+// A batched answer with no external dependent ends the prefix there.
+func TestCrossRigDepsBatchesLookupPerPrefix(t *testing.T) {
+	binDir, logPath := fakeGCBin(t, `case "$*" in
+bd\ query\ status=closed*) printf '%s\n' '[
+  {"id":"ga-1","dependent_count":2},
+  {"id":"gb-1","dependent_count":1},
+  {"id":"ga-2"},
+  {"id":"ga-3","dependent_count":1}
+]' ;;
+rig\ list*) printf '{"rigs":[]}\n' ;;
+bd\ dep\ list\ ga-1\ ga-2\ ga-3\ *) printf '[{"id":"ga-local-1"},{"id":"ga-local-2"}]\n' ;;
+bd\ dep\ list\ gb-1\ *) printf '[{"id":"gb-local"}]\n' ;;
+bd\ dep\ list*) echo "unexpected dep list: $*" >&2; exit 2 ;;
+esac
+exit 0
+`)
+	out, err := runCrossRigDeps(t, binDir)
+	if err != nil {
+		t.Fatalf("cross-rig-deps.sh failed: %v\n%s", err, out)
+	}
+	want := []string{
+		"gc bd dep list ga-1 ga-2 ga-3 --direction=up --type=blocks --json",
+		"gc bd dep list gb-1 --direction=up --type=blocks --json",
+	}
+	got := gcCalls(t, logPath, "gc bd dep ")
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("dep calls =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if strings.Contains(out, "resolved") {
+		t.Fatalf("no external dependent means nothing resolved, got:\n%s", out)
+	}
+}
+
+// TestCrossRigDepsBatchFallsBackPerBead pins that the batch never changes what
+// gets converted: a batched answer holding an external dependent does not say
+// which closed issue it hangs off, so each id of that prefix is looked up on
+// its own and only its own external dependents are converted. A failed batch
+// call falls back the same way.
+func TestCrossRigDepsBatchFallsBackPerBead(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		batch string
+	}{
+		{name: "external dependent in batch", batch: `printf '[{"id":"ga-local"},{"id":"external:rig-b/gb-9"}]\n'`},
+		{name: "batch call fails", batch: `echo "batch refused" >&2; exit 1`},
+		{name: "batch answer not an array", batch: `printf '{"error":{"id":"x"}}\n'`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir, logPath := fakeGCBin(t, `case "$*" in
+bd\ query\ status=closed*) printf '[{"id":"ga-1"},{"id":"ga-2"}]\n' ;;
+rig\ list*) printf '{"rigs":[]}\n' ;;
+bd\ dep\ list\ ga-1\ ga-2\ *) `+tc.batch+` ;;
+bd\ dep\ list\ ga-1\ *) printf '[{"id":"ga-local"}]\n' ;;
+bd\ dep\ list\ ga-2\ *) printf '[{"id":"external:rig-b/gb-9"}]\n' ;;
+bd\ dep\ remove*|bd\ dep\ add*) ;;
+esac
+exit 0
+`)
+			out, err := runCrossRigDeps(t, binDir)
+			if err != nil {
+				t.Fatalf("cross-rig-deps.sh failed: %v\n%s", err, out)
+			}
+			if !strings.Contains(out, "resolved 1 cross-rig dependencies") {
+				t.Fatalf("expected one resolved dependency, got:\n%s", out)
+			}
+			want := []string{
+				"gc bd dep list ga-1 ga-2 --direction=up --type=blocks --json",
+				"gc bd dep list ga-1 --direction=up --type=blocks --json",
+				"gc bd dep list ga-2 --direction=up --type=blocks --json",
+				"gc bd dep remove external:rig-b/gb-9 external:ga-2",
+				"gc bd dep add external:rig-b/gb-9 external:ga-2 --type=related",
+			}
+			got := gcCalls(t, logPath, "gc bd dep ")
+			if strings.Join(got, "\n") != strings.Join(want, "\n") {
+				t.Fatalf("dep calls =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+			}
+		})
+	}
+}
+
+// TestCrossRigDepsSkipsSuspendedRigs pins that a closed issue whose prefix
+// belongs to a suspended rig is not looked up: any bd read against a suspended
+// rig restarts its retired proxy. The HQ entry is never treated as suspended.
+func TestCrossRigDepsSkipsSuspendedRigs(t *testing.T) {
+	binDir, logPath := fakeGCBin(t, `case "$*" in
+bd\ query\ status=closed*) printf '[{"id":"gs-1"},{"id":"ga-1"}]\n' ;;
+rig\ list*) printf '{"rigs":[{"name":"hq","prefix":"ga","hq":true,"suspended":true},{"name":"cold","prefix":"gs","suspended":true}]}\n' ;;
+bd\ dep\ list\ ga-1\ *) printf '[{"id":"external:gx-3"}]\n' ;;
+bd\ dep\ list*) echo "unexpected dep list: $*" >&2; exit 2 ;;
+bd\ dep\ remove*|bd\ dep\ add*) ;;
+esac
+exit 0
+`)
+	out, err := runCrossRigDeps(t, binDir)
+	if err != nil {
+		t.Fatalf("cross-rig-deps.sh failed: %v\n%s", err, out)
+	}
+	want := []string{
+		"gc bd dep list ga-1 --direction=up --type=blocks --json",
+		"gc bd dep remove external:gx-3 external:ga-1",
+		"gc bd dep add external:gx-3 external:ga-1 --type=related",
+	}
+	got := gcCalls(t, logPath, "gc bd dep ")
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("dep calls =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
