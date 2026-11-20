@@ -1010,12 +1010,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   supervisor's heap profiling on so a heap profile has data. Unlike
   `GC_PPROF=1` in the service manager's environment, nothing is exported, so
   the processes the supervisor spawns keep heap profiling off. A non-loopback
-  or empty host, or a port outside 1-65535, stops `gc supervisor start`,
-  `gc supervisor install` and the supervisor itself; a listen failure is
-  logged and the supervisor runs without pprof. `gc supervisor reload` does
-  not apply it and reports a changed or invalid value like `gogc`. Unset, the
+  or empty host, or a port outside 1-65535, stops `gc supervisor install`
+  and the supervisor itself, and `gc supervisor start` unless it is
+  delegated to a systemd unit, which only warns; a listen failure is logged
+  and the supervisor runs without pprof. `gc supervisor reload` does not
+  apply it and reports a changed or invalid value like `gogc`. Unset, the
   `GC_PPROF=1` gate is unchanged. The effective setting is logged on every
-  start.
+  start. Heap profiling costs the supervisor about 23% of its on-CPU time on
+  a long-lived process (`runtime.mProf_Flush` on every GC cycle), so unset
+  `pprof_addr` once the profiles are taken.
 
 - **API: optional fields so the CLI can print its local schema on the
   supervisor route (#8453).** All are optional, so existing clients are

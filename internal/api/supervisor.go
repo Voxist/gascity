@@ -428,23 +428,28 @@ func StartPprof(addr string) (*http.Server, error) {
 // vets addr; the returned server's Addr is the bound address, and the caller
 // Shutdowns it.
 func ServePprof(addr string) (*http.Server, error) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/debug/pprof/", pprof.Index)
-	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
-	srv := &http.Server{Addr: lis.Addr().String(), Handler: mux}
+	srv := &http.Server{Addr: lis.Addr().String(), Handler: pprofHandler()}
 	go func() {
 		if err := srv.Serve(lis); err != nil && err != http.ErrServerClosed {
 			log.Printf("pprof: %v", err)
 		}
 	}()
 	return srv, nil
+}
+
+// pprofHandler is the dedicated pprof mux ServePprof serves.
+func pprofHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	return mux
 }
 
 // Serve accepts connections on lis. Blocks until stopped.

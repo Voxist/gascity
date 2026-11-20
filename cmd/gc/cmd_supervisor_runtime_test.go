@@ -2,7 +2,7 @@ package main
 
 import (
 	"bytes"
-	"io"
+	"errors"
 	"math"
 	"net/http"
 	"os"
@@ -299,16 +299,21 @@ func TestSupervisorStartAndInstallRefuseInvalidGCTuning(t *testing.T) {
 		{"start", func(o, e *bytes.Buffer) int { return doSupervisorStart(o, e) }, "gc supervisor start: "},
 		{"install", func(o, e *bytes.Buffer) int { return doSupervisorInstall(o, e) }, "gc supervisor install: "},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			writeSupervisorTOML(t, "[supervisor]\nport = 41237\nmemory_limit_mib = -1\n")
-			var stdout, stderr bytes.Buffer
-			if code := tc.run(&stdout, &stderr); code != 1 {
-				t.Fatalf("exit code = %d, want 1; stderr=%q", code, stderr.String())
-			}
-			if want := tc.prefix + "[supervisor] memory_limit_mib = -1"; !strings.HasPrefix(stderr.String(), want) {
-				t.Fatalf("stderr = %q, want prefix %q", stderr.String(), want)
-			}
-		})
+		for _, key := range []struct{ name, body, want string }{
+			{"memory_limit_mib", "[supervisor]\nport = 41237\nmemory_limit_mib = -1\n", "[supervisor] memory_limit_mib = -1"},
+			{"pprof_addr", "[supervisor]\nport = 41237\npprof_addr = \"0.0.0.0:6061\"\n", `[supervisor] pprof_addr = "0.0.0.0:6061"`},
+		} {
+			t.Run(tc.name+"/"+key.name, func(t *testing.T) {
+				writeSupervisorTOML(t, key.body)
+				var stdout, stderr bytes.Buffer
+				if code := tc.run(&stdout, &stderr); code != 1 {
+					t.Fatalf("exit code = %d, want 1; stderr=%q", code, stderr.String())
+				}
+				if want := tc.prefix + key.want; !strings.HasPrefix(stderr.String(), want) {
+					t.Fatalf("stderr = %q, want prefix %q", stderr.String(), want)
+				}
+			})
+		}
 	}
 }
 
@@ -342,6 +347,15 @@ func TestSupervisorStartAndInstallHomeGuardPrecedesGCTuning(t *testing.T) {
 	}
 }
 
+// stubSupervisorServePprof replaces the pprof listener with serve for the
+// test, so the wiring tests bind nothing; internal/api tests the mux itself.
+func stubSupervisorServePprof(t *testing.T, serve func(addr string) (*http.Server, error)) {
+	t.Helper()
+	orig := supervisorServePprof
+	supervisorServePprof = serve
+	t.Cleanup(func() { supervisorServePprof = orig })
+}
+
 // TestStartSupervisorPprofServesFromConfig pins the pprof_addr wiring: the
 // supervisor serves pprof on the configured address, turns its own heap
 // profiling back on so /debug/pprof/heap has samples, and exports nothing a
@@ -350,30 +364,30 @@ func TestStartSupervisorPprofServesFromConfig(t *testing.T) {
 	orig := goruntime.MemProfileRate
 	t.Cleanup(func() { goruntime.MemProfileRate = orig })
 	goruntime.MemProfileRate = 0
+	// The host's service env may carry GC_PPROF=1; start from empty so the
+	// export check below sees only what startSupervisorPprof does.
+	t.Setenv("GC_PPROF", "")
+	var served string
+	stubSupervisorServePprof(t, func(addr string) (*http.Server, error) {
+		served = addr
+		return &http.Server{Addr: addr}, nil
+	})
 
 	var stderr bytes.Buffer
-	srv := startSupervisorPprof("127.0.0.1:0", &stderr)
+	srv := startSupervisorPprof("127.0.0.1:6061", &stderr)
 	if srv == nil {
 		t.Fatalf("startSupervisorPprof = nil, want a server; stderr=%q", stderr.String())
 	}
-	t.Cleanup(func() { srv.Close() }) //nolint:errcheck
-
+	if served != "127.0.0.1:6061" {
+		t.Errorf("served pprof on %q, want the configured 127.0.0.1:6061", served)
+	}
 	if goruntime.MemProfileRate != defaultMemProfileRate {
 		t.Errorf("MemProfileRate = %d, want %d with pprof_addr set", goruntime.MemProfileRate, defaultMemProfileRate)
 	}
-	if v, ok := os.LookupEnv("GC_PPROF"); ok && v == "1" {
-		t.Errorf("GC_PPROF exported as %q; pprof_addr must stay in-process", v)
+	if v := os.Getenv("GC_PPROF"); v != "" {
+		t.Errorf("GC_PPROF = %q after startSupervisorPprof, want \"\"; pprof_addr must stay in-process", v)
 	}
-	resp, err := http.Get("http://" + srv.Addr + "/debug/pprof/heap?debug=1")
-	if err != nil {
-		t.Fatalf("GET heap profile: %v", err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close() //nolint:errcheck
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "heap profile") {
-		t.Fatalf("GET heap profile = %d %q, want 200 and a heap profile", resp.StatusCode, body)
-	}
-	want := "gc supervisor: pprof: listening on " + srv.Addr + " (supervisor.toml), heap profiling on; supervisor process only"
+	want := "gc supervisor: pprof: listening on 127.0.0.1:6061 (supervisor.toml), heap profiling on; supervisor process only"
 	if !strings.Contains(stderr.String(), want) {
 		t.Errorf("stderr = %q, want %q", stderr.String(), want)
 	}
@@ -403,22 +417,23 @@ func TestStartSupervisorPprofUnsetIsOff(t *testing.T) {
 
 // TestStartSupervisorPprofListenFailureRunsWithout pins that a pprof_addr the
 // supervisor cannot listen on is logged and leaves heap profiling off, instead
-// of stopping the control plane for a diagnostic listener. An out-of-range
-// port stands in for a busy one: both fail in net.Listen.
+// of stopping the control plane for a diagnostic listener.
 func TestStartSupervisorPprofListenFailureRunsWithout(t *testing.T) {
 	orig := goruntime.MemProfileRate
 	t.Cleanup(func() { goruntime.MemProfileRate = orig })
 	goruntime.MemProfileRate = 0
+	stubSupervisorServePprof(t, func(string) (*http.Server, error) {
+		return nil, errors.New("listen tcp 127.0.0.1:6061: bind: address already in use")
+	})
 
 	var stderr bytes.Buffer
-	if srv := startSupervisorPprof("127.0.0.1:65536", &stderr); srv != nil {
-		srv.Close() //nolint:errcheck
-		t.Fatal("startSupervisorPprof on an unlistenable address returned a server, want nil")
+	if srv := startSupervisorPprof("127.0.0.1:6061", &stderr); srv != nil {
+		t.Fatal("startSupervisorPprof on a failed listen returned a server, want nil")
 	}
 	if goruntime.MemProfileRate != 0 {
 		t.Errorf("MemProfileRate = %d, want 0 after a failed listen", goruntime.MemProfileRate)
 	}
-	if !strings.Contains(stderr.String(), "running without pprof") {
-		t.Errorf("stderr = %q, want a running-without-pprof line", stderr.String())
+	if !strings.Contains(stderr.String(), "address already in use; running without pprof") {
+		t.Errorf("stderr = %q, want the listen error and a running-without-pprof line", stderr.String())
 	}
 }

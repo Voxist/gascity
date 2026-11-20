@@ -1669,6 +1669,10 @@ func applySupervisorGCTuning(s supervisor.Section, stderr io.Writer) error {
 // restored when [supervisor] pprof_addr asks for a heap profile.
 const defaultMemProfileRate = 512 * 1024
 
+// supervisorServePprof is api.ServePprof, a seam so the startSupervisorPprof
+// wiring tests bind no listener; api's own tests cover the pprof mux.
+var supervisorServePprof = api.ServePprof
+
 // startSupervisorPprof starts the supervisor's pprof listener and logs the
 // effective setting. With [supervisor] pprof_addr set (already vetted by
 // ValidatePprofAddr) it serves pprof there and turns heap profiling back on
@@ -1689,7 +1693,7 @@ func startSupervisorPprof(addr string, stderr io.Writer) *http.Server {
 		}
 		return srv
 	}
-	srv, err := api.ServePprof(addr)
+	srv, err := supervisorServePprof(addr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: pprof: listen %s (supervisor.toml pprof_addr) failed: %v; running without pprof\n", addr, err) //nolint:errcheck
 		return nil
@@ -1711,8 +1715,8 @@ func gcSettingSource(fromConfig bool, envKey string) string {
 	return "default"
 }
 
-// supervisorGCTuningPreflight checks supervisor.toml's gogc and
-// memory_limit_mib while an operator is at the command, so `gc supervisor
+// supervisorGCTuningPreflight checks supervisor.toml's gogc, memory_limit_mib
+// and pprof_addr while an operator is at the command, so `gc supervisor
 // start` and `gc supervisor install` refuse a value the supervisor would
 // refuse at startup instead of leaving a service that cannot start. A missing
 // supervisor.toml has nothing to check.
@@ -1859,12 +1863,12 @@ func runSupervisor(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	if err := supCfg.Supervisor.ValidatePprofAddr(); err != nil {
-		fmt.Fprintf(stderr, "gc supervisor: %v (in %s)\n", err, supervisor.ConfigPath()) //nolint:errcheck
-		return 1
-	}
 	if err := applySupervisorGCTuning(supCfg.Supervisor, stderr); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	if err := supCfg.Supervisor.ValidatePprofAddr(); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor: %v (in %s)\n", err, supervisor.ConfigPath()) //nolint:errcheck
 		return 1
 	}
 

@@ -6015,7 +6015,10 @@ non-loopback or empty host, or a port outside 1-65535, stops 'gc supervisor
 start' (when delegated, it only warns), 'gc supervisor install' and the
 supervisor itself. A listen failure is logged and the supervisor runs
 without pprof. 'gc supervisor reload' does not apply it. The effective
-setting is logged on every start.
+setting is logged on every start. Setting pprof_addr turns heap profiling
+back on, which costs the supervisor about 23% of its on-CPU time on a
+long-lived process (runtime.mProf_Flush on every GC cycle), so unset it once
+the profiles are taken.
 
 ```
 gc supervisor run
