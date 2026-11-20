@@ -1833,3 +1833,51 @@ func TestRunStartDriftCheck_NoAutoRestartGuidanceUsesDelegatedUnit(t *testing.T)
 		t.Errorf("stderr = %q, want guidance %q", stderr.String(), want)
 	}
 }
+
+// TestSupervisorStartDelegatedWarnsOnCallerGCTuning pins that a delegated
+// start is not blocked by the caller's supervisor.toml, whatever is wrong with
+// it: the unit may run with its own GC_HOME and config and validates its GC
+// tuning itself at startup, so the caller only gets a warning naming the file.
+func TestSupervisorStartDelegatedWarnsOnCallerGCTuning(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		body       string
+		mode       os.FileMode
+		wantStderr string
+	}{
+		{"out_of_range", "[supervisor]\ngogc = 0\n", 0o644, "gogc = 0: must be"},
+		{"wrong_type", "[supervisor]\ngogc = \"off\"\n", 0o644, "reading "},
+		{"unreadable", "[supervisor]\ngogc = 100\n", 0o000, "permission denied"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.mode == 0o000 && os.Geteuid() == 0 {
+				t.Skip("root reads a mode-000 file")
+			}
+			gcHome := t.TempDir()
+			t.Setenv("GC_HOME", gcHome)
+			path := filepath.Join(gcHome, "supervisor.toml")
+			if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+			setDelegationEnvForTest(t, "gascity-prod.service", "")
+			argsFile := installFakeDelegatedSystemctl(t, 0, "")
+			stubSupervisorAliveAfterSystemctl(t, argsFile, 4242)
+
+			var stdout, stderr bytes.Buffer
+			if code := doSupervisorStart(&stdout, &stderr); code != 0 {
+				t.Fatalf("doSupervisorStart code = %d, want 0; stderr=%q", code, stderr.String())
+			}
+			if lines := readRecordedSystemctlArgs(t, argsFile); len(lines) != 1 || lines[0] != "start gascity-prod.service" {
+				t.Fatalf("systemctl invocations = %v, want exactly [\"start gascity-prod.service\"]", lines)
+			}
+			got := stderr.String()
+			if !strings.Contains(got, "gc supervisor start: warning: ") || !strings.Contains(got, tc.wantStderr) || !strings.Contains(got, path) {
+				t.Fatalf("stderr = %q, want a warning naming %s and containing %q", got, path, tc.wantStderr)
+			}
+		})
+	}
+}

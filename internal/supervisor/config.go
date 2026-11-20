@@ -75,7 +75,9 @@ type Section struct {
 	// exported, so the processes the supervisor spawns keep their own GC
 	// settings. Unset leaves the Go runtime's setting (or the GOGC/GOMEMLIMIT
 	// the supervisor itself inherited) in place. Each must be a positive
-	// integer in range; ValidateGCTuning checks them. A value of the wrong TOML type (gogc = "off", memory_limit_mib = "3GiB") fails LoadConfig itself.
+	// integer in range; ValidateGCTuning checks them. A value of the wrong
+	// TOML type (gogc = "off", memory_limit_mib = "3GiB") fails LoadConfig
+	// itself.
 	GOGC           *int   `toml:"gogc,omitempty"`
 	MemoryLimitMiB *int64 `toml:"memory_limit_mib,omitempty"`
 }

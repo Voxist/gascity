@@ -998,9 +998,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   alone; children still inherit those variables. An out-of-range value stops
   `gc supervisor start`, `gc supervisor install` and the supervisor itself; a
   value of the wrong type (`gogc = "off"`) makes `supervisor.toml` unreadable
-  for every command that loads it. `gc supervisor reload` applies neither key:
-  it reports a changed value (takes effect on restart) and fails on an invalid
-  one. The effective settings are logged on every start.
+  for every command that loads it. `gc supervisor start`, when delegated to a
+  systemd unit, only warns about either, since the unit validates its own
+  config. `gc supervisor reload` applies neither key: it reports a changed
+  value (takes effect on restart) and fails on an invalid one. The effective
+  settings are logged on every start.
 
 - **API: optional fields so the CLI can print its local schema on the
   supervisor route (#8453).** All are optional, so existing clients are
