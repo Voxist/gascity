@@ -1,9 +1,14 @@
 package orders
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -299,5 +304,147 @@ func TestLastRunAndCursorKeepAHardBackingErrorThroughACache(t *testing.T) {
 	}
 	if got := store.Cursor("digest"); got != 0 {
 		t.Fatalf("Cursor() = %d, want 0 (unread); a hard backing error was answered from the cache's open rows", got)
+	}
+}
+
+// writeOrderFiredArchive writes a rotated events archive holding one
+// order.fired event per ts, named with the seq window the reader orders on.
+func writeOrderFiredArchive(t *testing.T, dir, stamp string, firstSeq, lastSeq uint64, subject string, ts ...time.Time) {
+	t.Helper()
+	var b strings.Builder
+	for i, at := range ts {
+		fmt.Fprintf(&b, `{"seq":%d,"type":%q,"ts":%q,"actor":"test","subject":%q}`+"\n",
+			firstSeq+uint64(i), events.OrderFired, at.UTC().Format(time.RFC3339Nano), subject)
+	}
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write([]byte(b.String())); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	name := fmt.Sprintf("events.jsonl.archive-%s-seq-%d-%d.gz", stamp, firstSeq, lastSeq)
+	if err := os.WriteFile(filepath.Join(dir, name), buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestLastRunFuncWithEventFallback_NewestFirstStopsAtNewestArchive pins
+// vp-d7vcu on a real file recorder. The two oldest archives are not gzip, so
+// any read of them leaves a "skipped unreadable archive" warning in the log
+// (ReadLatestMatch) or fails the read (List's oldest-first walk). The middle
+// archive holds an older match. The fallback must return the newest archive's
+// last match and never open the archives behind it.
+func TestLastRunFuncWithEventFallback_NewestFirstStopsAtNewestArchive(t *testing.T) {
+	oldLogf := runtimeHelpersLogf
+	var logs []string
+	runtimeHelpersLogf = func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+	t.Cleanup(func() { runtimeHelpersLogf = oldLogf })
+
+	dir := t.TempDir()
+	for _, w := range []struct {
+		stamp             string
+		firstSeq, lastSeq uint64
+	}{
+		{"20260701T000000Z", 1, 100},
+		{"20260702T000000Z", 101, 200},
+	} {
+		name := fmt.Sprintf("events.jsonl.archive-%s-seq-%d-%d.gz", w.stamp, w.firstSeq, w.lastSeq)
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("not gzip at all"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	older := time.Date(2026, 7, 3, 9, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 7, 4, 9, 0, 0, 0, time.UTC)
+	newest := time.Date(2026, 7, 4, 21, 0, 0, 0, time.UTC)
+	writeOrderFiredArchive(t, dir, "20260703T000000Z", 201, 300, "digest-generate", older)
+	writeOrderFiredArchive(t, dir, "20260705T000000Z", 301, 400, "digest-generate", newer, newest)
+
+	fr, err := events.NewFileRecorder(filepath.Join(dir, "events.jsonl"), io.Discard)
+	if err != nil {
+		t.Fatalf("NewFileRecorder: %v", err)
+	}
+	t.Cleanup(func() { fr.Close() }) //nolint:errcheck
+	// The active log holds only another order's event, so the answer must
+	// come from the archives.
+	fr.Record(events.Event{Type: events.OrderFired, Subject: "other-order", Actor: "test"})
+
+	storeFn := func(string) (time.Time, error) { return time.Time{}, nil }
+	got, err := LastRunFuncWithEventFallback(storeFn, fr)("digest-generate")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.Equal(newest) {
+		t.Fatalf("got %s, want the newest archive's last match %s", got, newest)
+	}
+	if len(logs) != 0 {
+		t.Fatalf("fallback logged %q; it opened an archive older than the newest match", logs)
+	}
+}
+
+// latestOnlyProvider answers LatestMatch and fails the test on List, so a
+// fallback that still walks the whole history is caught.
+type latestOnlyProvider struct {
+	*events.Fake
+	t        *testing.T
+	e        events.Event
+	found    bool
+	warnings []string
+	err      error
+	got      events.Filter
+}
+
+func (p *latestOnlyProvider) List(events.Filter) ([]events.Event, error) {
+	p.t.Error("List called; the fallback must ask a LatestMatchProvider for the newest match only")
+	return nil, nil
+}
+
+func (p *latestOnlyProvider) LatestMatch(filter events.Filter) (events.Event, bool, []string, error) {
+	p.got = filter
+	return p.e, p.found, p.warnings, p.err
+}
+
+func TestLastRunFuncWithEventFallback_UsesLatestMatchProvider(t *testing.T) {
+	oldLogf := runtimeHelpersLogf
+	var logs []string
+	runtimeHelpersLogf = func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+	t.Cleanup(func() { runtimeHelpersLogf = oldLogf })
+	storeFn := func(string) (time.Time, error) { return time.Time{}, nil }
+	want := time.Date(2026, 7, 4, 21, 0, 0, 0, time.UTC)
+
+	for _, tc := range []struct {
+		name     string
+		p        latestOnlyProvider
+		want     time.Time
+		wantLogs int
+	}{
+		{name: "match", p: latestOnlyProvider{e: events.Event{Ts: want}, found: true}, want: want},
+		{name: "match after a skipped archive", p: latestOnlyProvider{e: events.Event{Ts: want}, found: true, warnings: []string{"skipped unreadable archive \"a.gz\""}}, want: want, wantLogs: 1},
+		{name: "no match", p: latestOnlyProvider{}},
+		{name: "error fails open", p: latestOnlyProvider{err: errors.New("read failed")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs = nil
+			p := tc.p
+			p.Fake, p.t = events.NewFake(), t
+			got, err := LastRunFuncWithEventFallback(storeFn, &p)("digest-generate")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !got.Equal(tc.want) {
+				t.Fatalf("got %s, want %s", got, tc.want)
+			}
+			if p.got.Type != events.OrderFired || p.got.Subject != "digest-generate" {
+				t.Fatalf("LatestMatch filter = %+v, want order.fired for digest-generate", p.got)
+			}
+			if len(logs) != tc.wantLogs {
+				t.Fatalf("logs = %q, want %d line(s)", logs, tc.wantLogs)
+			}
+		})
 	}
 }
