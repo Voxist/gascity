@@ -941,24 +941,19 @@ func pseudoVersionCommit(pinned string) (string, bool) {
 	return m[1], true
 }
 
-// depsEnvBDPins reads BD_VERSION and the go.mod-facing ref out of the repo's
-// deps.env. Under the fork-first bridge the LIBRARY pin (BD_LIB_REF, the
-// newest upstream ancestor of the fork build commit) is what go.mod must
-// match — fork commits do not resolve on the module path. When BD_LIB_REF is
-// absent (upstream's one-commit shape), BD_SOURCE_REF plays both roles.
+// depsEnvBDPinsWithLibBridge reads BD_VERSION and the go.mod-facing ref out of
+// the repo's deps.env, plus the library bridge (deps.env LIBRARY BRIDGE
+// POLICY): the BD_REPO commit go.mod replaces the beads module with, and that
+// repository. The bridge refs are empty with no bridge.
 //
-// bridged reports whether BD_LIB_REF names a different commit than
-// BD_SOURCE_REF. BD_VERSION is the version string BD_SOURCE_REF declares
-// (Dockerfile.agent greps for it), so when the two refs differ it says
-// nothing about what the go.mod commit declares.
-func depsEnvBDPins(t *testing.T) (bdVersion, sourceRef string, bridged bool) {
-	bdVersion, sourceRef, bridged, _, _ = depsEnvBDPinsWithLibBridge(t)
-	return bdVersion, sourceRef, bridged
-}
-
-// depsEnvBDPinsWithLibBridge is depsEnvBDPins plus the library bridge
-// (deps.env LIBRARY BRIDGE POLICY): the BD_REPO commit go.mod replaces the
-// beads module with, and that repository. Both are empty with no bridge.
+// Under the fork-first bridge the LIBRARY pin (BD_LIB_REF, the newest upstream
+// ancestor of the fork build commit) is what go.mod must match — fork commits
+// do not resolve on the module path. When BD_LIB_REF is absent (upstream's
+// one-commit shape), BD_SOURCE_REF plays both roles. bridged reports whether
+// BD_LIB_REF names a different commit than BD_SOURCE_REF. BD_VERSION is the
+// version string BD_SOURCE_REF declares (Dockerfile.agent greps for it), so
+// when the two refs differ it says nothing about what the go.mod commit
+// declares.
 func depsEnvBDPinsWithLibBridge(t *testing.T) (bdVersion, sourceRef string, bridged bool, libBridgeRef, bdRepo string) {
 	t.Helper()
 	// Walk up to the module root rather than shelling out to `git rev-parse`:
