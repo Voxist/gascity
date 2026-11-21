@@ -67,6 +67,11 @@ func TestProxiedRuntimeEnvPinsBdSharedServerOff(t *testing.T) {
 // its config.yaml pin.
 func TestProviderLifecycleEnvPinsSharedServerOffOnlyForInitializingProxiedCity(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	// gc pins BD_DOLT_SHARED_SERVER=false into its own controller children
+	// city-wide (every gc session env on a pinned host carries it), so the
+	// ready phase below must prove the projection STRIPS the binding rather
+	// than merely passing on hosts whose ambient env happens to lack it.
+	t.Setenv("BD_DOLT_SHARED_SERVER", "false")
 	cityPath, _ := proxiedEnvTestCity(t)
 	journalProxiedScope(t, cityPath, cityPath, false)
 	provEnv, err := providerLifecycleProcessEnvFromBase(cityPath, beadsProvider(cityPath), os.Environ())
