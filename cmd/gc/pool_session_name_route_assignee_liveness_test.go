@@ -3,6 +3,8 @@ package main
 import (
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/events"
+
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
@@ -60,7 +62,7 @@ func TestReleaseOrphanedPoolAssignments_TemplateAssigneeSkippedWhenSessionLive(t
 		nil,
 		nil,
 		nil,
-		nil,
+		nil, events.Discard,
 	)
 
 	if len(released) != 0 {
@@ -90,7 +92,7 @@ func TestReleaseOrphanedPoolAssignments_TemplateAssigneeReleasedWhenNoLiveSessio
 		nil,
 		nil,
 		nil,
-		nil,
+		nil, events.Discard,
 	)
 
 	if len(released) != 1 || released[0].ID != work.ID {
@@ -127,7 +129,7 @@ func TestReleaseOrphanedPoolAssignments_DeadNamedAssigneeReleasedDespiteLiveTemp
 		nil,
 		nil,
 		nil,
-		nil,
+		nil, events.Discard,
 	)
 
 	if len(released) != 1 || released[0].ID != work.ID {
@@ -163,7 +165,7 @@ func TestReleaseOrphanedPoolAssignments_TemplateAssigneeReleasedWhenOnlyNamedSes
 		nil,
 		nil,
 		nil,
-		nil,
+		nil, events.Discard,
 	)
 
 	if len(released) != 1 || released[0].ID != work.ID {
@@ -215,7 +217,7 @@ func TestReleaseOrphanedPoolAssignments_TemplateAssigneeSkippedWhenSessionLiveIn
 		[]string{"repo"}, // store-ref aware: the work lives in the agent's own rig
 		nil,
 		nil,
-		nil,
+		nil, events.Discard,
 	)
 
 	if len(released) != 0 {
@@ -248,7 +250,7 @@ func TestReleaseOrphanedPoolAssignments_TemplateAssigneeReleasedWhenLiveSessionS
 		[]string{"other-repo"}, // store-ref aware: the work lives outside the agent's rig
 		nil,
 		nil,
-		nil,
+		nil, events.Discard,
 	)
 
 	if len(released) != 1 || released[0].ID != work.ID {

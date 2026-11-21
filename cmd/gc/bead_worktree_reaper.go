@@ -141,6 +141,7 @@ func reapClosedBeadWorktrees(
 	}
 
 	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
+	configuredRoots := configuredWorktreeRoots(cfg, cityPath)
 
 	for rigName, store := range rigStores {
 		if store == nil {
@@ -180,15 +181,40 @@ func reapClosedBeadWorktrees(
 		for _, wt := range worktreeLivenessResults {
 			worktreePath := wt.Path
 
-			// Only per-bead worktrees under this rig's .gc/worktrees/<rig>/
-			// subtree are in scope. This excludes the rig's main working tree
-			// and any worktree checked out elsewhere.
-			if !pathutil.PathWithin(rigWorktreeDir, worktreePath) || pathutil.SamePath(rigWorktreeDir, worktreePath) {
+			// The main working tree is never a per-bead worktree to classify,
+			// independent of the containment check below -- rigRoot is now
+			// itself one of configuredRoots, so it would otherwise pass
+			// trivially (PathWithin treats "same path as root" as contained).
+			if pathutil.SamePath(rigRoot, worktreePath) || pathutil.SamePath(rigWorktreeDir, worktreePath) {
 				continue
 			}
-			// Defense in depth: never act on a path that is not strictly under
-			// the city worktree root.
-			if !isStrictlyUnderDir(wtRoot, worktreePath) {
+
+			// ADR-0089 D2 (the F4 defect): in scope if contained within ANY
+			// configured worktree root, not only <city>/.gc/worktrees/<rig>/ --
+			// that single hardcoded root saw 9 of 59 fleet worktrees (15%).
+			// A path outside every configured root is NOT silently dropped
+			// (the pre-D2 bug): it is classified as protected-with-reason, so
+			// an unrecognized location is visible instead of reading as
+			// "nothing to do" -- ADR-0089's non-negotiable that silence must
+			// never be the signal for "cannot see". isStrictlyUnderDir's own
+			// defense-in-depth role is preserved: matchedRoot comes from this
+			// same configuredRoots set, so nothing downstream can act outside
+			// it either.
+			matchedRoot, inScope := matchingWorktreeRoot(configuredRoots, worktreePath)
+			if !inScope {
+				reason := "worktree outside every configured worktree root (unrecognized location)"
+				branch, _ := git.New(worktreePath).CurrentBranch()
+				beadID := extractBeadIDFromWorktreeName(cfg, filepath.Base(worktreePath))
+				if skips.shouldSurface(worktreePath, reason) {
+					fmt.Fprintf(stderr, //nolint:errcheck
+						"reapClosedBeadWorktrees: protecting %s (bead %s: %s)\n",
+						worktreePath, beadIDOrUnknown(beadID), reason,
+					)
+					recordReapSkipped(rec, beadID, worktreePath, rigName, reason)
+				}
+				report.Protected = append(report.Protected, reapDecision{
+					BeadID: beadID, Path: worktreePath, Rig: rigName, Branch: branch, Reason: reason,
+				})
 				continue
 			}
 
@@ -200,7 +226,12 @@ func reapClosedBeadWorktrees(
 			}
 
 			// Resolve which bead this worktree belongs to from its path.
-			beadID := extractBeadIDFromWorktreePath(cfg, rigWorktreeDir, worktreePath)
+			// matchedRoot, not rigWorktreeDir: the worktree may be in scope via
+			// a different member of configuredRoots (e.g. rigRoot itself for
+			// the <rig>/worktrees/<bead> convention), and the one-level-climb
+			// fallback inside extractBeadIDFromWorktreePath must bound itself
+			// to whichever root actually contains this path.
+			beadID := extractBeadIDFromWorktreePath(cfg, matchedRoot, worktreePath)
 			if beadID == "" {
 				continue
 			}
@@ -554,6 +585,61 @@ func rigRootByName(cfg *config.City, rigName string) string {
 		}
 	}
 	return ""
+}
+
+// configuredWorktreeRoots returns the union of filesystem roots a per-bead
+// worktree can legitimately live under, derived from config (ADR-0089 D2's
+// second option: replace the single hardcoded <city>/.gc/worktrees root with
+// the union of configured worktree roots, rather than deleting the scope
+// filter outright). Covers:
+//   - <cityPath>/.gc/worktrees  (today's only recognized root)
+//   - <cityPath>/.gc/agents     (the "<city>/.gc/agents/<seat>/wt-*" family)
+//   - each configured rig's own root directory (covers BOTH the
+//     "<rig>/worktrees/<bead>" role-prompt convention and
+//     "<rig>/.claude/worktrees/agent-*", since both nest under the rig root)
+//
+// This does not claim to enumerate all six location families ADR-0089 F4
+// measured -- the remaining ones (ad-hoc siblings of a rig root, shared
+// top-level worktree directories such as "/.../Github/worktrees/*") have no
+// config-derivable root at all, which is exactly the governance gap ADR-0089
+// D5 names and defers. A worktree outside this union is not silently dropped
+// (the pre-D2 bug): the caller classifies it as protected-with-reason, so the
+// F4 fix does not depend on this list being exhaustive.
+func configuredWorktreeRoots(cfg *config.City, cityPath string) []string {
+	roots := []string{
+		filepath.Join(cityPath, ".gc", "worktrees"),
+		filepath.Join(cityPath, ".gc", "agents"),
+	}
+	if cfg != nil {
+		for i := range cfg.Rigs {
+			if p := strings.TrimSpace(cfg.Rigs[i].Path); p != "" {
+				roots = append(roots, p)
+			}
+		}
+	}
+	return roots
+}
+
+// matchingWorktreeRoot returns the first member of roots that contains path,
+// and whether any did. Order matches configuredWorktreeRoots's declaration
+// order and has no behavioral significance -- membership, not priority, is
+// what the caller uses.
+func matchingWorktreeRoot(roots []string, path string) (string, bool) {
+	for _, r := range roots {
+		if pathutil.PathWithin(r, path) {
+			return r, true
+		}
+	}
+	return "", false
+}
+
+// beadIDOrUnknown renders an empty bead ID (extraction failed) as a stable
+// placeholder for log lines, rather than an empty pair of quotes.
+func beadIDOrUnknown(beadID string) string {
+	if beadID == "" {
+		return "unknown"
+	}
+	return beadID
 }
 
 // extractBeadIDFromWorktreePath resolves which bead a worktree belongs to from

@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/events"
+
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -329,7 +331,7 @@ func TestReleaseOrphanedPoolAssignmentsReopensStaleSlotFormClaim(t *testing.T) {
 		nil,
 		nil,
 		nil,
-		nil,
+		nil, events.Discard,
 	)
 	if len(released) != 1 || released[0].ID != work.ID {
 		t.Fatalf("released = %v, want [%s] — a stale slot-form assignee names no live session once pool beads are unaliased", released, work.ID)

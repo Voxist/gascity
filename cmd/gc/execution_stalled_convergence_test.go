@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/events"
+
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -178,7 +180,7 @@ func TestExecutionStalledDrainConvergesToAReclaimableRow(t *testing.T) {
 		t.Fatalf("re-reading the claim: %v", err)
 	}
 	released := releaseOrphanedPoolAssignments(h.env.store, beads.SessionStore{Store: h.env.store}, h.env.cfg, "", nil,
-		[]beads.Bead{claimed}, []beads.Store{h.env.store}, []string{""}, nil, nil, nil)
+		[]beads.Bead{claimed}, []beads.Store{h.env.store}, []string{""}, nil, nil, nil, events.Discard)
 	if len(released) != 1 || released[0].ID != h.work.ID {
 		t.Fatalf("released = %+v, want the stalled claim reopened", released)
 	}
@@ -308,7 +310,7 @@ func TestExecutionStalledDrainDoesNotStrandAMidDrainWake(t *testing.T) {
 		t.Fatalf("re-reading the claim: %v", err)
 	}
 	released := releaseOrphanedPoolAssignments(h.env.store, beads.SessionStore{Store: h.env.store}, h.env.cfg, "", nil,
-		[]beads.Bead{claimed}, []beads.Store{h.env.store}, []string{""}, nil, nil, nil)
+		[]beads.Bead{claimed}, []beads.Store{h.env.store}, []string{""}, nil, nil, nil, events.Discard)
 	if len(released) != 1 {
 		t.Fatalf("released = %+v, want the claim released once its holder is gone", released)
 	}

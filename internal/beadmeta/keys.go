@@ -221,12 +221,21 @@ const (
 	RoutedToMetadataKey                 = "gc.routed_to"
 	RunTargetMetadataKey                = "gc.run_target"
 	RuntimeVarsMetadataKey              = "gc.graphv2_vars.v1"
-	ScopeKindMetadataKey                = "gc.scope_kind"
-	ScopeNameMetadataKey                = "gc.scope_name"
-	ScopeRefMetadataKey                 = "gc.scope_ref"
-	ScopeRoleMetadataKey                = "gc.scope_role"
-	SessionAffinityMetadataKey          = "gc.session_affinity"
-	SessionIDMetadataKey                = "gc.session_id"
+	// SalvageRequiredMetadataKey (ADR-0089 D1) marks a bead that was returned
+	// to the pool while its worktree's ADR-0088 containment predicate did not
+	// hold (unpushed work, dirty tree, or an unreadable git state) — the
+	// durable, queryable surface a patrol or operator uses to find worktrees
+	// that need a human look, replacing a full worktree scan every cycle.
+	// Stamped by releaseOrphanedPoolAssignment; never read by any routing
+	// path (it is advisory only, see the bead.worktree.salvage_required
+	// event this accompanies).
+	SalvageRequiredMetadataKey = "gc.salvage_required"
+	ScopeKindMetadataKey       = "gc.scope_kind"
+	ScopeNameMetadataKey       = "gc.scope_name"
+	ScopeRefMetadataKey        = "gc.scope_ref"
+	ScopeRoleMetadataKey       = "gc.scope_role"
+	SessionAffinityMetadataKey = "gc.session_affinity"
+	SessionIDMetadataKey       = "gc.session_id"
 	// SessionIDCamelMetadataKey is the camelCase variant some bead writers stamp
 	// alongside the snake_case SessionIDMetadataKey; both are read when resolving a
 	// bead's session link.
@@ -566,6 +575,7 @@ var KnownMetadataKeys = []string{
 	RoutedToMetadataKey,
 	RunTargetMetadataKey,
 	RuntimeVarsMetadataKey,
+	SalvageRequiredMetadataKey,
 	ScopeKindMetadataKey,
 	ScopeNameMetadataKey,
 	ScopeRefMetadataKey,

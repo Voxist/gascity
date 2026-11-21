@@ -3,6 +3,7 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -342,6 +343,27 @@ func (g *Git) StatusPorcelainCtx(ctx context.Context) (string, error) {
 // tracking branch. Returns (0, 0, err) if no upstream is configured.
 func (g *Git) AheadBehind() (ahead, behind int, err error) {
 	return g.AheadBehindCtx(context.Background())
+}
+
+// IsAncestor reports whether ancestor is reachable from descendant (`git
+// merge-base --is-ancestor ancestor descendant`). Unlike run/runCtx's blanket
+// "any non-zero exit is an error", exit code 1 from this specific git verb is
+// a legitimate "false" answer, not a failure — so it is special-cased here
+// rather than going through run(). Any other non-zero exit (bad ref, not a
+// repo) is a real error, not a false answer.
+func (g *Git) IsAncestor(ancestor, descendant string) (bool, error) {
+	cmd := exec.Command("git", "merge-base", "--is-ancestor", ancestor, descendant)
+	cmd.Dir = g.workDir
+	cmd.Env = sanitizeGitEnv(os.Environ())
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("git merge-base --is-ancestor %s %s: %s: %w", ancestor, descendant, strings.TrimSpace(string(output)), err)
 }
 
 // AheadBehindCtx is like AheadBehind but accepts a context.

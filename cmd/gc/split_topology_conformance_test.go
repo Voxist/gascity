@@ -337,7 +337,7 @@ func conformanceAssignedWorkCapture(t *testing.T, e splitEnv) {
 		got, stores, refs,
 		e.rigStores,
 		nil,
-		nil,
+		nil, events.Discard,
 	)
 	wantReleased := []string{dead.ID, hqDead.ID}
 	releasedIDs := make(map[string]bool, len(released))

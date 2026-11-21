@@ -63,6 +63,20 @@ type BeadWorktreeReapSkippedPayload struct {
 // IsEventPayload marks BeadWorktreeReapSkippedPayload as an events.Payload variant.
 func (BeadWorktreeReapSkippedPayload) IsEventPayload() {}
 
+// BeadWorktreeSalvageRequiredPayload is the typed payload for
+// bead.worktree.salvage_required events (ADR-0089 D1). Emitted when a bead is
+// released back to the pool while its worktree's ADR-0088 containment
+// predicate does not hold.
+type BeadWorktreeSalvageRequiredPayload struct {
+	BeadID string `json:"bead_id"`
+	Path   string `json:"path"`
+	Branch string `json:"branch"`
+	Reason string `json:"reason"`
+}
+
+// IsEventPayload marks BeadWorktreeSalvageRequiredPayload as an events.Payload variant.
+func (BeadWorktreeSalvageRequiredPayload) IsEventPayload() {}
+
 // BeadClaimRejectedPayload is the typed payload for bead.claim_rejected events
 // (ADR-0009). Emitted when AttemptedClaimant tries to claim BeadID while it is
 // already live-claimed by ExistingClaimant; the second claim is rejected as an
@@ -108,6 +122,7 @@ func (HookClaimReclaimedStalePayload) IsEventPayload() {}
 func init() {
 	RegisterPayload(BeadWorktreeReaped, BeadWorktreeReapedPayload{})
 	RegisterPayload(BeadWorktreeReapSkipped, BeadWorktreeReapSkippedPayload{})
+	RegisterPayload(BeadWorktreeSalvageRequired, BeadWorktreeSalvageRequiredPayload{})
 	RegisterPayload(OrderGateTimeoutFailOpen, OrderGateTimeoutFailOpenPayload{})
 	RegisterPayload(BeadClaimRejected, BeadClaimRejectedPayload{})
 	RegisterPayload(BeadClaimReleased, BeadClaimReleasedPayload{})

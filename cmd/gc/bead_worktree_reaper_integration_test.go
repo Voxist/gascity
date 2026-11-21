@@ -229,16 +229,22 @@ func TestReapClosedBeadWorktrees_DryRunRemovesNothing(t *testing.T) {
 	}
 }
 
-// TestReapClosedBeadWorktrees_NeverActsOnWorktreeOutsideGcOwnedRoot locks in
-// the other half of ga-1xaqgo.1: now that discoverWorktreeLiveness (used by
-// this function) reports liveness for every worktree git knows about,
-// including ones outside .gc/worktrees, the reaper's own scope restriction
-// must still keep such a worktree completely untouched — not reaped, and not
-// even listed as protected, since it was never a candidate this rig owns.
-func TestReapClosedBeadWorktrees_NeverActsOnWorktreeOutsideGcOwnedRoot(t *testing.T) {
+// TestReapClosedBeadWorktrees_NeverReapsWorktreeOutsideConfiguredRoots locks
+// in the surviving half of ga-1xaqgo.1 (never REAP a worktree outside this
+// rig's ownership) — the "not even listed as protected" half is superseded by
+// ADR-0089 D2: now that discoverWorktreeLiveness reports liveness for every
+// worktree git knows about, including ones outside .gc/worktrees, silently
+// dropping an unrecognized one (neither reaped nor protected, no event) is
+// exactly the F4 defect ADR-0089 measured at 85% of the fleet's worktrees. The
+// scope filter now resolves to the union of configured worktree roots
+// (configuredWorktreeRoots), and a path outside that union is classified
+// protected-with-reason — visible, not silent — while remaining just as
+// untouched on disk as before.
+func TestReapClosedBeadWorktrees_NeverReapsWorktreeOutsideConfiguredRoots(t *testing.T) {
 	cityPath, rigRoot := initReapRig(t)
 	// Mirrors a worktree Claude Code's own EnterWorktree tool would create:
-	// registered with git, but outside any .gc/worktrees convention.
+	// registered with git, but outside any configured worktree root (not
+	// under .gc/worktrees, .gc/agents, or any configured rig's own path).
 	foreign := filepath.Join(t.TempDir(), ".claude", "worktrees", "some-session")
 	if err := os.MkdirAll(filepath.Dir(foreign), 0o755); err != nil {
 		t.Fatalf("mkdir foreign worktree parent: %v", err)
@@ -248,11 +254,34 @@ func TestReapClosedBeadWorktrees_NeverActsOnWorktreeOutsideGcOwnedRoot(t *testin
 	cfg := reapTestConfig(rigRoot)
 	injectLiveness(t, liveWorktreeState{scanned: true, cwds: []string{pathutil.NormalizePathForCompare(foreign)}})
 
+	rec := events.NewFake()
 	var stderr bytes.Buffer
-	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
+	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, rec, nil, &stderr)
 
-	if len(report.Reaped) != 0 || len(report.Protected) != 0 {
-		t.Fatalf("reaper acted on or reported a worktree outside its owned root: Reaped=%+v Protected=%+v", report.Reaped, report.Protected)
+	if len(report.Reaped) != 0 {
+		t.Fatalf("reaper REAPED a worktree outside its owned root: Reaped=%+v", report.Reaped)
+	}
+	wantPath := pathutil.NormalizePathForCompare(foreign)
+	var protectedHere *reapDecision
+	for i := range report.Protected {
+		if report.Protected[i].Path == wantPath {
+			protectedHere = &report.Protected[i]
+		}
+	}
+	if protectedHere == nil {
+		t.Fatalf("foreign worktree %s does not appear in Protected -- ADR-0089 D2: an unrecognized location must be visible, not silently dropped\nProtected: %+v", wantPath, report.Protected)
+	}
+	if protectedHere.Reason == "" {
+		t.Fatalf("Protected entry for the foreign worktree carries no reason")
+	}
+	var sawSkipEvent bool
+	for _, e := range rec.Events {
+		if e.Type == events.BeadWorktreeReapSkipped {
+			sawSkipEvent = true
+		}
+	}
+	if !sawSkipEvent {
+		t.Fatalf("no %s event recorded for the foreign worktree", events.BeadWorktreeReapSkipped)
 	}
 	if _, err := os.Stat(foreign); err != nil {
 		t.Fatalf("foreign worktree %s was removed or unstattable: %v", foreign, err)

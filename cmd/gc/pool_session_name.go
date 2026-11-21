@@ -4,8 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
+	"os"
 	"path"
 	"strings"
 	"time"
@@ -14,6 +17,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -147,6 +152,7 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	rigStores map[string]beads.Store,
 	protectedWakeWork map[storeScopedBeadKey]struct{},
 	recordPhase func(TraceSiteCode, string, time.Time, map[string]any),
+	rec events.Recorder,
 ) []releasedPoolAssignment {
 	// Partial input snapshots can make active work look orphaned for this
 	// tick only: missing work affects drain decisions, and missing sessions
@@ -154,7 +160,7 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	if result.snapshotQueryPartial() {
 		return nil
 	}
-	return releaseOrphanedPoolAssignments(store, sessionStore, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores, protectedWakeWork, recordPhase)
+	return releaseOrphanedPoolAssignments(store, sessionStore, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores, protectedWakeWork, recordPhase, rec)
 }
 
 // protectedWakeWorkKeys indexes the wake-candidate slice by store ref + bead ID
@@ -220,6 +226,7 @@ func releaseOrphanedPoolAssignments(
 	rigStores map[string]beads.Store,
 	protectedWakeWork map[storeScopedBeadKey]struct{},
 	recordPhase func(TraceSiteCode, string, time.Time, map[string]any),
+	rec events.Recorder,
 ) []releasedPoolAssignment {
 	if store == nil || cfg == nil || len(assignedWorkBeads) == 0 {
 		return nil
@@ -375,7 +382,7 @@ func releaseOrphanedPoolAssignments(
 		if !allowsRelease {
 			continue
 		}
-		if !releaseOrphanedPoolAssignment(ownerStore, wb, clearDetached) {
+		if !releaseOrphanedPoolAssignment(ownerStore, wb, clearDetached, rec) {
 			continue
 		}
 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
@@ -430,6 +437,7 @@ func releaseConfirmedOrphanSessionWork(
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStores []beads.Store,
 	info session.Info,
+	rec events.Recorder,
 ) []releasedPoolAssignment {
 	if cfg == nil || store == nil || len(assignedWorkBeads) == 0 {
 		return nil
@@ -478,7 +486,7 @@ func releaseConfirmedOrphanSessionWork(
 		if !allowsRelease {
 			continue
 		}
-		if !releaseOrphanedPoolAssignment(ownerStore, wb, clearDetached) {
+		if !releaseOrphanedPoolAssignment(ownerStore, wb, clearDetached, rec) {
 			continue
 		}
 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
@@ -683,24 +691,130 @@ func isCanonicalWorkflowRoot(wb beads.Bead) bool {
 //     This single Update also clears the affinity metadata alongside
 //     status/assignee, so it is the correct path for continuation-group beads:
 //     the group is never exposed on an open, unassigned bead.
-func releaseOrphanedPoolAssignment(store beads.Store, wb beads.Bead, clearDetached bool) bool {
+func releaseOrphanedPoolAssignment(store beads.Store, wb beads.Bead, clearDetached bool, rec events.Recorder) bool {
 	if store == nil || strings.TrimSpace(wb.ID) == "" {
 		return false
 	}
-	// Continuation-group beads bypass the CAS fast path: ReleaseIfCurrent swaps
-	// only status/assignee, so clearing the group would need a second write, and
-	// that gap would expose the routing vector on a claimable bead. The recheck
-	// fallback clears status, assignee, and affinity metadata in one Update.
-	if !beadHasActiveContinuationGroup(wb) {
-		if released, handled := releasePoolAssignmentIfCurrent(store, wb); handled {
-			if !released {
-				return false
+	released := func() bool {
+		// Continuation-group beads bypass the CAS fast path: ReleaseIfCurrent swaps
+		// only status/assignee, so clearing the group would need a second write, and
+		// that gap would expose the routing vector on a claimable bead. The recheck
+		// fallback clears status, assignee, and affinity metadata in one Update.
+		if !beadHasActiveContinuationGroup(wb) {
+			if ok, handled := releasePoolAssignmentIfCurrent(store, wb); handled {
+				if !ok {
+					return false
+				}
+				clearReleasedPoolAssignmentMetadata(store, wb.ID, clearDetached)
+				return true
 			}
-			clearReleasedPoolAssignmentMetadata(store, wb.ID, clearDetached)
-			return true
 		}
+		return releasePoolAssignmentWithRecheck(store, wb, clearDetached)
+	}()
+	if released {
+		// ADR-0089 D1: the release above is final and is never rolled back or
+		// blocked on this — pool liveness must not be held hostage to git I/O.
+		// This only records, after the fact, whether the worktree this bead
+		// leaves behind was actually disposable.
+		recordWorktreeCustodyOnRelease(store, wb, rec)
 	}
-	return releasePoolAssignmentWithRecheck(store, wb, clearDetached)
+	return released
+}
+
+// recordWorktreeCustodyOnRelease implements ADR-0089 D1: a bead returned to
+// the pool must not silently abandon a worktree. Advisory only, and best-
+// effort — a failure here never un-releases the bead (see the caller).
+//
+// If wb names a worktree that still exists on disk, evaluate ADR-0088's
+// containment predicate (HEAD reachable from its own origin branch, AND a
+// clean tree). When it holds, the worktree is disposable and nothing is
+// recorded (ADR-0089 AC2: no false positives). When it does not — or when the
+// predicate itself cannot be evaluated, which is exactly the kind of
+// ambiguous signal ADR-0089's fail-safe constraint says must resolve toward
+// "needs a look" rather than silently toward "fine" — the bead is stamped
+// gc.salvage_required=1 and a bead.worktree.salvage_required event fires.
+// That stamp is the durable, queryable surface a patrol or operator uses to
+// find these worktrees, replacing a full worktree scan every cycle.
+func recordWorktreeCustodyOnRelease(store beads.Store, wb beads.Bead, rec events.Recorder) {
+	if rec == nil {
+		rec = events.Discard
+	}
+	workDir := strings.TrimSpace(wb.Metadata[beadmeta.WorkDirMetadataKey])
+	if workDir == "" {
+		workDir = strings.TrimSpace(wb.Metadata[beadmeta.LegacyWorkDirMetadataKey])
+	}
+	if workDir == "" {
+		return
+	}
+	if info, err := os.Stat(workDir); err != nil || !info.IsDir() {
+		// Nothing on disk to salvage. This is absence, not ambiguity: a stale
+		// metadata pointer to a worktree that was already cleaned up is not
+		// itself a custody hazard.
+		return
+	}
+	branch := strings.TrimSpace(wb.Metadata[beadmeta.WorkBranchMetadataKey])
+	ok, reason := worktreeContainmentHolds(workDir, branch)
+	if ok {
+		return
+	}
+	stampSalvageRequired(store, wb.ID, workDir, branch, reason, rec)
+}
+
+// worktreeContainmentHolds evaluates ADR-0088's containment predicate for one
+// worktree: its HEAD must be reachable from its own remote-tracking branch
+// (i.e. every commit in it has been pushed) AND its tree must be clean. Any
+// error evaluating either half is reported as "does not hold" with the error
+// as the reason — ADR-0089's fail-safe constraint is that an unreadable
+// worktree resolves toward "needs a look", never toward silently treating it
+// as disposable.
+func worktreeContainmentHolds(workDir, branch string) (bool, string) {
+	g := git.New(workDir)
+	status, err := g.StatusPorcelain()
+	if err != nil {
+		return false, fmt.Sprintf("worktree status unreadable: %v", err)
+	}
+	if strings.TrimSpace(status) != "" {
+		return false, "worktree has uncommitted or untracked changes"
+	}
+	if branch == "" {
+		return false, "no branch recorded for this worktree"
+	}
+	ancestor, err := g.IsAncestor("HEAD", "origin/"+branch)
+	if err != nil {
+		return false, fmt.Sprintf("checking push state against origin/%s: %v", branch, err)
+	}
+	if !ancestor {
+		return false, fmt.Sprintf("worktree HEAD is not reachable from origin/%s (unpushed work)", branch)
+	}
+	return true, ""
+}
+
+// stampSalvageRequired writes gc.salvage_required=1 on id (merged into
+// existing metadata, never replacing it — see clearReleasedPoolAssignmentMetadata
+// for the same convention) and emits the accompanying event. Both steps are
+// best-effort: a failure here is logged, not propagated, because the release
+// this follows has already happened and must not be undone by a bookkeeping
+// failure.
+func stampSalvageRequired(store beads.Store, id, workDir, branch, reason string, rec events.Recorder) {
+	if err := store.Update(id, beads.UpdateOpts{
+		Metadata: map[string]string{beadmeta.SalvageRequiredMetadataKey: "1"},
+	}); err != nil {
+		log.Printf("releaseOrphanedPoolAssignment: stamping %s=1 on %s failed: %v", beadmeta.SalvageRequiredMetadataKey, id, err)
+	}
+	raw, err := json.Marshal(events.BeadWorktreeSalvageRequiredPayload{
+		BeadID: id, Path: workDir, Branch: branch, Reason: reason,
+	})
+	if err != nil {
+		log.Printf("releaseOrphanedPoolAssignment: marshaling salvage_required payload for %s: %v", id, err)
+		return
+	}
+	rec.Record(events.Event{
+		Type:    events.BeadWorktreeSalvageRequired,
+		Actor:   "gc",
+		Subject: id,
+		Message: fmt.Sprintf("worktree custody at risk on release: %s (%s)", id, reason),
+		Payload: raw,
+	})
 }
 
 // beadHasActiveContinuationGroup reports whether wb still advertises the active

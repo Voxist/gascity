@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/events"
+
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -77,7 +79,7 @@ func TestReleaseConfirmedOrphanSessionWork_ReleasesBindingResidentClaimThroughAl
 	rigStores := map[string]beads.Store{"beads": beads.NewMemStore()}
 
 	released := releaseConfirmedOrphanSessionWork(
-		cfg, binding, rigStores, []beads.Bead{work}, []beads.Store{binding}, bindingOrphanSessionInfo(),
+		cfg, binding, rigStores, []beads.Bead{work}, []beads.Store{binding}, bindingOrphanSessionInfo(), events.Discard,
 	)
 
 	if len(released) != 1 || released[0].ID != work.ID {
@@ -104,7 +106,7 @@ func TestReleaseConfirmedOrphanSessionWork_NilAlignedStoresKeepsRoutedFallback(t
 	rigStores := map[string]beads.Store{"beads": beads.NewMemStore()}
 
 	released := releaseConfirmedOrphanSessionWork(
-		cfg, binding, rigStores, []beads.Bead{work}, nil, bindingOrphanSessionInfo(),
+		cfg, binding, rigStores, []beads.Bead{work}, nil, bindingOrphanSessionInfo(), events.Discard,
 	)
 
 	if len(released) != 0 {
@@ -130,7 +132,7 @@ func TestReleaseConfirmedOrphanSessionWork_LegacyRigStoreUnchanged(t *testing.T)
 	rigStores := map[string]beads.Store{"beads": rigStore}
 
 	released := releaseConfirmedOrphanSessionWork(
-		cfg, beads.NewMemStore(), rigStores, []beads.Bead{work}, nil, bindingOrphanSessionInfo(),
+		cfg, beads.NewMemStore(), rigStores, []beads.Bead{work}, nil, bindingOrphanSessionInfo(), events.Discard,
 	)
 
 	if len(released) != 1 || released[0].ID != work.ID {
@@ -158,7 +160,7 @@ func TestReleaseConfirmedOrphanSessionWork_MisalignedStoresSkipTheUnalignedBead(
 	rigStores := map[string]beads.Store{"beads": beads.NewMemStore()}
 
 	released := releaseConfirmedOrphanSessionWork(
-		cfg, binding, rigStores, []beads.Bead{first, second}, []beads.Store{binding}, bindingOrphanSessionInfo(),
+		cfg, binding, rigStores, []beads.Bead{first, second}, []beads.Store{binding}, bindingOrphanSessionInfo(), events.Discard,
 	)
 
 	if len(released) != 1 || released[0].ID != first.ID {

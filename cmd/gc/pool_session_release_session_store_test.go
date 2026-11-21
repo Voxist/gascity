@@ -3,6 +3,8 @@ package main
 import (
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/events"
+
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -86,7 +88,7 @@ func TestReleaseOrphanedPoolAssignmentsReadsLivenessFromSessionStore(t *testing.
 		nil,
 		nil,
 		nil,
-		nil,
+		nil, events.Discard,
 	)
 
 	if len(released) != 0 {
@@ -124,7 +126,7 @@ func TestReleaseOrphanedPoolAssignmentsStillReleasesWhenSessionStoreSaysDead(t *
 		nil,
 		nil,
 		nil,
-		nil,
+		nil, events.Discard,
 	)
 
 	if len(released) != 1 || released[0].ID != work.ID {
@@ -162,7 +164,7 @@ func TestReleaseOrphanedPoolAssignmentsFallsBackToWorkStoreForLiveness(t *testin
 		nil,
 		nil,
 		nil,
-		nil,
+		nil, events.Discard,
 	)
 
 	if len(released) != 0 {

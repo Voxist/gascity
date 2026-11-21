@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/events"
+
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/bootstrap"
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -667,7 +669,7 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 		},
 		nil,
 		nil,
-		nil,
+		nil, events.Discard,
 	)
 	if len(released) != 0 {
 		t.Fatalf("released %d work bead(s) from a partial snapshot, want none", len(released))
@@ -693,7 +695,7 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 		},
 		nil,
 		nil,
-		nil,
+		nil, events.Discard,
 	)
 	if len(released) != 0 {
 		t.Fatalf("released %d work bead(s) from a partial session snapshot, want none", len(released))
@@ -718,7 +720,7 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 		},
 		nil,
 		nil,
-		nil,
+		nil, events.Discard,
 	)
 	if len(released) != 1 {
 		t.Fatalf("complete one-shot snapshot released %d work bead(s), want 1", len(released))

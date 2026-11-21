@@ -26,6 +26,15 @@ const (
 	BeadUpdated             = "bead.updated"
 	BeadWorktreeReaped      = "bead.worktree.reaped"
 	BeadWorktreeReapSkipped = "bead.worktree.reap_skipped"
+	// BeadWorktreeSalvageRequired fires when a pool-routed bead is returned to
+	// the pool (releaseOrphanedPoolAssignment) while its worktree's ADR-0088
+	// containment predicate does not hold — unpushed work, a dirty tree, or an
+	// unreadable git state. The release itself is never blocked on this (ADR-
+	// 0089 D1: pool liveness must not be held hostage to git I/O); this event
+	// plus the accompanying gc.salvage_required=1 stamp is the durable,
+	// queryable surface a patrol or operator uses to find worktrees that need
+	// a human look, replacing a full worktree scan every cycle.
+	BeadWorktreeSalvageRequired = "bead.worktree.salvage_required"
 	// BeadClaimRejected fires when a worker attempts to claim a work bead that
 	// is already live-claimed by a different worker — the claim is rejected as
 	// an idempotent no-op rather than fanning out a second concurrent claim.
@@ -492,7 +501,7 @@ var KnownEventTypes = []string{
 	SessionDemandClaimDivergence,
 	SessionColdStartTimeout,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
-	BeadWorktreeReaped, BeadWorktreeReapSkipped,
+	BeadWorktreeReaped, BeadWorktreeReapSkipped, BeadWorktreeSalvageRequired,
 	BeadClaimRejected, BeadClaimReleased,
 	HookClaimReclaimedStale,
 	BeadDeadAssigneeReopened,
