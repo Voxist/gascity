@@ -60,6 +60,13 @@ func resetSessionStorageWarnTypes(t *testing.T) {
 	t.Cleanup(ResetStorageWarningsForTest)
 }
 
+// physicalTypeOf is the name createSessionBead hands the warning ledger for a
+// store it reached through the front door's handle: the physical store's type
+// below the class layers, the same view the routes themselves resolve through.
+func physicalTypeOf(store beads.Store) string {
+	return beads.PhysicalStoreTypeName(beads.SessionStore{Store: store})
+}
+
 // recordingStorageStore implements both Create and CreateWithStorage so a test can
 // tell WHICH door a create went through. Deliberately not a mock of the function
 // under test: it is a store, and CreateSessionInfo drives it for real.
@@ -194,7 +201,9 @@ func TestUnsupportedStorageStampsClassAndIsReported(t *testing.T) {
 func TestWarningDoesNotAssertDoltSpecificConsequences(t *testing.T) {
 	resetSessionStorageWarnTypes(t)
 
-	out := captureStderr(t, func() { warnSessionStorageUnsupported(&plainOnlyStore{}) })
+	out := captureStderr(t, func() {
+		warnSessionStorageUnsupported(physicalTypeOf(&plainOnlyStore{}))
+	})
 
 	for _, forbidden := range []string{"issues table", "DOLT_COMMIT", "Dolt commit"} {
 		if strings.Contains(out, forbidden) {
@@ -289,9 +298,9 @@ func TestWarnIsPerStoreTypeNotPerProcess(t *testing.T) {
 	// real stderr both pollutes the test output and hides a regression where
 	// the first call is the one that misbehaves.
 	out := captureStderr(t, func() {
-		warnSessionStorageUnsupported(&plainOnlyStore{})          // first of its type: warns
-		warnSessionStorageUnsupported(&policySelfApplyingStore{}) // different type: must warn
-		warnSessionStorageUnsupported(&plainOnlyStore{})          // repeat type: must stay quiet
+		warnSessionStorageUnsupported(physicalTypeOf(&plainOnlyStore{}))          // first of its type: warns
+		warnSessionStorageUnsupported(physicalTypeOf(&policySelfApplyingStore{})) // different type: must warn
+		warnSessionStorageUnsupported(physicalTypeOf(&plainOnlyStore{}))          // repeat type: must stay quiet
 	})
 
 	if n := strings.Count(out, "NOT applied"); n != 2 {
