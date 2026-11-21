@@ -38,6 +38,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The core `cross-rig-deps` order no longer runs one `gc bd dep list` per
+  recently closed bead.** It skips closes nothing depends on: bd's
+  `dependent_count` is 0, the bead is an order-tracking, session or other
+  bookkeeping row, or it is ephemeral. It looks the rest up with one batched
+  call per bead prefix, and reads `gc rig list` only when a candidate is
+  left. On a busy city the 15-minute window holds about 300 closes, nearly
+  all order-tracking beads. A run now makes one `gc bd query` instead of
+  about 300 `gc bd` execs (0.35 to 0.6 of a core). The conversions it makes
+  are unchanged.
+
 - **On this fork, `gc status` and `gc rig status` keep reading the warm
   status (vp-e0hv)** rather than upstream's `?fresh=true` build-for-the-read
   described below: they answer at once with the supervisor's warm StatusView,
