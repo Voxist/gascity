@@ -41,6 +41,14 @@ func LastRunAcross(stores []*Store) LastRunFunc {
 // fn's result is returned unchanged. Event bus errors are non-fatal:
 // when the provider fails the zero time is returned so the order appears
 // unrun rather than permanently blocked.
+//
+// A provider that implements events.LatestMatchProvider (the file recorder)
+// is asked for the newest match only, which reads the active log's tail and
+// then the archives newest-first, stopping at the first that holds one. List
+// would gunzip and decode every retained archive oldest-first to take a max:
+// with no tracking bead for an order, that was the whole event history (90
+// archives, 2.9 GB of gzip) per order, on every dispatcher start
+// (vp-d7vcu). Other providers keep the List path.
 func LastRunFuncWithEventFallback(fn LastRunFunc, ep events.Provider) LastRunFunc {
 	if ep == nil {
 		return fn
@@ -53,10 +61,21 @@ func LastRunFuncWithEventFallback(fn LastRunFunc, ep events.Provider) LastRunFun
 		if !last.IsZero() {
 			return last, nil
 		}
-		evts, listErr := ep.List(events.Filter{
+		filter := events.Filter{
 			Type:    events.OrderFired,
 			Subject: name,
-		})
+		}
+		if lp, ok := ep.(events.LatestMatchProvider); ok {
+			e, found, warnings, latestErr := lp.LatestMatch(filter)
+			for _, w := range warnings {
+				runtimeHelpersLogf("orders: last-run event fallback for %q: %s", name, w)
+			}
+			if latestErr != nil || !found {
+				return time.Time{}, nil
+			}
+			return e.Ts, nil
+		}
+		evts, listErr := ep.List(filter)
 		if listErr != nil {
 			return time.Time{}, nil
 		}

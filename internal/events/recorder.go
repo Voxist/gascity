@@ -850,6 +850,14 @@ func (r *FileRecorder) List(filter Filter) ([]Event, error) {
 	return ReadFiltered(r.path, filter)
 }
 
+// LatestMatch returns the newest event matching filter: the active log's tail
+// first, then the rotated history newest seq window first, stopping at the
+// first segment holding a match (ReadLatestMatch). It implements
+// [LatestMatchProvider].
+func (r *FileRecorder) LatestMatch(filter Filter) (Event, bool, []string, error) {
+	return ReadLatestMatch(r.path, filter)
+}
+
 // ListInFlight returns events matching the filter, including any still stranded
 // in an in-flight events.jsonl.rotating-* file during the asynchronous
 // compression window that plain List cannot see. Results are seq-ordered and
