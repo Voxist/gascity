@@ -301,6 +301,9 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	register(expandedConfigLoadCheck{})
 	register(&doctor.ImplicitImportCacheCheck{})
 	register(&doctor.DeprecatedAttachmentFieldsCheck{})
+	// Host power settings, not city config — stays outside the config gate
+	// so a broken city.toml doesn't hide a sleeping fleet host (vp-bhn24).
+	register(newFleetHostWakefulnessDoctorCheck())
 	// Reads only ctx.CityPath, so it stays outside the config gate: a broken
 	// city.toml is precisely when session diagnostics need to be visible.
 	register(doctor.NewNudgeUnconfirmedCheck())
