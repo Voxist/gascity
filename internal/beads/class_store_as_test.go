@@ -641,3 +641,27 @@ func TestPhysicalStoreKey(t *testing.T) {
 		t.Errorf("a non-pointer store: PhysicalStoreKey = %q, want %q", got, want)
 	}
 }
+
+// TestPhysicalStoreTypeName: the name is the physical store's type through any
+// class handles, two stores of one type share it, and no store names "<nil>".
+func TestPhysicalStoreTypeName(t *testing.T) {
+	a, _ := NewMemStore(), NewMemStore()
+	want := fmt.Sprintf("%T", a)
+	for name, s := range map[string]Store{
+		"the store":      a,
+		"a handle":       MailStore{a},
+		"nested handles": MailStore{SessionStore{a}},
+	} {
+		if got := PhysicalStoreTypeName(s); got != want {
+			t.Errorf("%s: PhysicalStoreTypeName = %q, want %q", name, got, want)
+		}
+	}
+	for name, s := range map[string]Store{"nil": nil, "a zero handle": MailStore{}, "a handle over a zero handle": MailStore{SessionStore{}}} {
+		if got := PhysicalStoreTypeName(s); got != "<nil>" {
+			t.Errorf("%s: PhysicalStoreTypeName = %q, want <nil>", name, got)
+		}
+	}
+	if PhysicalStoreTypeName(a) != PhysicalStoreTypeName(NewMemStore()) {
+		t.Error("two stores of one type must share a name; a differing name means the name leaked an address")
+	}
+}

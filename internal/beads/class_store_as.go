@@ -258,6 +258,19 @@ func PhysicalStoreKey(s StoreReader) string {
 	}
 }
 
+// PhysicalStoreTypeName names the physical store below s's class layers for
+// diagnostics: its Go type ("%T"), or "<nil>" for no store. Like
+// PhysicalStoreKey it sees through every class handle and leg reader, but it
+// names the type alone, so two stores of one type share a name and a
+// diagnostic keyed on it stays per type.
+func PhysicalStoreTypeName(s StoreReader) string {
+	p := physicalStore(s)
+	if p == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("%T", p)
+}
+
 // IsNilStore reports whether s is no store: nil, a zero handle or leg reader
 // (or a handle over one), or a nil pointer below its class layers. A typed nil passes a
 // nil check on the interface and then panics on its first method call, so a
