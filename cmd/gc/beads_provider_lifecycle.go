@@ -4048,6 +4048,18 @@ func providerLifecycleProcessEnvFromBase(cityPath, provider string, env []string
 	if scopeUsesProxiedDoltMode(cityPath, cityPath) {
 		envMap := runtimeEnvEntriesToMap(env)
 		applyProxiedDoltEnv(envMap)
+		// The opt-out above is the only shared-server pin this env may carry,
+		// and only while a journaled proxied init is in flight. A ready proxied
+		// scope is pinned by the script itself, per scope, from its config.yaml
+		// (ensureGCOwnedProxiedScopeSharedServerOff), and this process env is
+		// city-wide — it serves rig ops for scopes gc may not own — so an
+		// inherited BD_DOLT_SHARED_SERVER (a controller env pinned for its own
+		// bd children, or an operator export) must not ride along: the viper
+		// binding outranks every config file and would force shared-server off
+		// under all of them. The BEADS_ switch stays inherited on purpose: bd
+		// reads only "1"/"true" as forced-on, so the operator's own value
+		// resolves the same way it would in an agent shell.
+		delete(envMap, proxiedSharedServerConfigEnv)
 		if external, err := proxiedScopeHasExternalUpstream(cityPath); err != nil {
 			return nil, err
 		} else if external {
