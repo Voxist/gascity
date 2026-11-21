@@ -6639,11 +6639,7 @@ func TestCityRuntimeReloadRestartsConfigWatcherWithNewPackTargets(t *testing.T) 
 	if err := os.WriteFile(packFile, []byte("second\n"), 0o644); err != nil {
 		t.Fatalf("edit pack file: %v", err)
 	}
-	select {
-	case <-cr.configWatchCh:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("timed out waiting for watcher poke after editing newly watched pack file; stdout=%q stderr=%q", stdout.String(), stderr.String())
-	}
+	awaitClose(t, cr.configWatchCh, "watcher wake after editing newly watched pack file")
 	if !dirty.Load() {
 		t.Fatalf("dirty flag not set after editing newly watched pack file; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}

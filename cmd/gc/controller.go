@@ -950,7 +950,14 @@ func statConfigWatchAttrStamp(path string) (configWatchAttrStamp, bool) {
 	if err := unix.Stat(path, &st); err != nil {
 		return configWatchAttrStamp{}, false
 	}
-	return configWatchAttrStamp{ctime: st.Ctim.Nano(), mtime: st.Mtim.Nano(), size: st.Size, mode: uint32(st.Mode), uid: st.Uid, gid: st.Gid}, true
+	return configWatchAttrStamp{
+		ctime: st.Ctim.Nano(),
+		mtime: st.Mtim.Nano(),
+		size:  st.Size,
+		mode:  uint32(st.Mode), //nolint:unconvert // Darwin's field is uint16.
+		uid:   st.Uid,
+		gid:   st.Gid,
+	}, true
 }
 
 // seed records path, and the regular files directly in it when it is a

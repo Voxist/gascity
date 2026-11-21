@@ -557,8 +557,8 @@ func parseCmdGCProductionFiles(t *testing.T, fset *token.FileSet) map[string]*as
 }
 
 // wakeSignalMentions are the only declarations in cmd/gc's non-test files
-// that may name the reconciler's two wake signals (pokeCh,
-// controlDispatcherCh, and the params' PokeCh, ControlDispatcherCh): the
+// that may name the reconciler's wake signals (pokeCh, controlDispatcherCh,
+// configWatchCh, and the params' PokeCh, ControlDispatcherCh): the
 // fields that hold them, the code that makes them and hands them to the
 // runtime and the wake, the run loop that selects on them, and legacyEnqueue,
 // which signals them. Any other mention can send behind the wake's back
