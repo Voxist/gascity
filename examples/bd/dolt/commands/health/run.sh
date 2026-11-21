@@ -554,6 +554,38 @@ if [ -d "$quarantine_dir" ]; then
   done
 fi
 
+# A quarantine marker reads identically whether it's (a) a safeguard
+# actively withholding a database from compaction, or (b) a fossil left by
+# a compactor that was deliberately disabled after the marker was written
+# (city.toml [[orders.overrides]] name="mol-dog-compactor" enabled=false).
+# Both render as a quarantine[] row with a large age_sec, and nothing else
+# in this report lets a reader tell them apart without going and reading
+# city.toml (vp-y9lk0). Resolve the discriminator from the SAME
+# order-registration surface `gc order list` reads, not by hand-parsing
+# city.toml ourselves — that way it tracks pack-level order definitions,
+# overrides, and any future registration mechanism gc adds, instead of a
+# second, divergent notion of "enabled". Only probed when there's a
+# quarantine to annotate, since the gc call is otherwise pure overhead.
+compactor_enabled=false
+if [ "$quarantine_count" -gt 0 ] && command -v gc >/dev/null 2>&1; then
+  order_json=$(run_bounded 10 gc order list --json 2>/dev/null) || true
+  if [ -n "$order_json" ]; then
+    if command -v jq >/dev/null 2>&1; then
+      compactor_enabled=$(printf '%s' "$order_json" | jq -r \
+        '([.orders[]? | select(.name == "mol-dog-compactor") | .enabled] | first) // false' 2>/dev/null)
+    else
+      # No jq: `name` precedes `enabled` within the same order object and
+      # object bodies have no nested braces before `enabled` — true for
+      # this flat order schema — so bound the match to one object with
+      # [^}]*.
+      compactor_enabled=$(printf '%s' "$order_json" \
+        | grep -oE '"name": *"mol-dog-compactor"[^}]*"enabled": *(true|false)' \
+        | grep -oE '(true|false)$' | head -1)
+    fi
+    [ "$compactor_enabled" = "true" ] || compactor_enabled=false
+  fi
+fi
+
 # Check for zombie dolt processes.
 # Use pgrep -x to match only processes named "dolt", then verify
 # each is actually running sql-server via ps. This avoids false
@@ -762,7 +794,8 @@ JSONEOF
     # db and reason both come from the filesystem; escape backslash then quote.
     q_db_esc=$(printf '%s' "$q_db" | sed 's/\\/\\\\/g; s/"/\\"/g')
     q_reason_esc=$(printf '%s' "$q_reason" | sed 's/\\/\\\\/g; s/"/\\"/g')
-    printf '    {"db": "%s", "reason": "%s", "age_sec": %s}' "$q_db_esc" "$q_reason_esc" "$q_age_sec"
+    printf '    {"db": "%s", "reason": "%s", "age_sec": %s, "compactor_enabled": %s}' \
+      "$q_db_esc" "$q_reason_esc" "$q_age_sec" "$compactor_enabled"
   done
   cat <<JSONEOF
 
@@ -831,9 +864,11 @@ fi
 if [ "$quarantine_count" -gt 0 ]; then
   echo ""
   echo "Compaction quarantine: $quarantine_count (auto-GC blocked)"
+  compactor_note=" [inert: mol-dog-compactor disabled, see vp-aw7r]"
+  [ "$compactor_enabled" = "true" ] && compactor_note=""
   echo "$quarantine_list" | while IFS='|' read -r q_db q_reason q_age_sec; do
     [ -z "$q_db" ] && continue
-    echo "  $q_db: $q_reason (held $(human_duration "$q_age_sec"))"
+    echo "  $q_db: $q_reason (held $(human_duration "$q_age_sec"))$compactor_note"
   done
 fi
 
