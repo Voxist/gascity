@@ -140,11 +140,50 @@ const (
 
 // RuntimeFacts contains already-observed runtime facts. ProjectLifecycle does
 // not perform runtime I/O.
+//
+// Fields are unexported (ADR-0096 D1): the only constructors are Observed and
+// NotObserved below, so a production call site must say which probe it ran,
+// or admit it ran none. A keyed literal naming these fields by their old
+// exported spelling no longer compiles anywhere, inside this package or out.
+//
+// The zero value RuntimeFacts{} is NotObserved — the safe direction — so a
+// construction site that forgets to set Runtime at all fails inert rather
+// than catastrophic. Preserve this property across any future change.
 type RuntimeFacts struct {
-	Observed bool
-	Alive    bool
-	Attached bool
-	Pending  bool
+	observed bool
+	alive    bool
+	attached bool
+	pending  bool
+	reason   string
+}
+
+// Observed reports a completed liveness probe: the runtime was reached and
+// its state is alive/attached/pending as given.
+func Observed(alive, attached, pending bool) RuntimeFacts {
+	return RuntimeFacts{observed: true, alive: alive, attached: attached, pending: pending}
+}
+
+// NotObserved reports that no probe completed. reason names the probe and its
+// failure mode (e.g. "gc session list: rc=124") for operator diagnosis — it is
+// an OPERATOR STRING, NEVER a payload: never put bead content, session
+// content, or user data in it (ADR-0096 GDPR data-flow impact).
+func NotObserved(reason string) RuntimeFacts {
+	return RuntimeFacts{reason: reason}
+}
+
+// Fold is the only way to read RuntimeFacts (ADR-0096 D2): a caller must
+// handle all three observation states, or the call does not compile — arity
+// is the enforcement. This is a free function, not a method, because Go does
+// not allow a method to declare its own type parameters; a generic Fold can
+// only live at package scope.
+func Fold[T any](f RuntimeFacts, onLive func(attached, pending bool) T, onDead func() T, onNotObserved func(reason string) T) T {
+	if !f.observed {
+		return onNotObserved(f.reason)
+	}
+	if f.alive {
+		return onLive(f.attached, f.pending)
+	}
+	return onDead()
 }
 
 // NamedIdentityInput describes a configured named identity even when no bead
@@ -577,6 +616,7 @@ func ProjectLifecycle(input LifecycleInput) LifecycleView {
 	runtimeProjection, reconciledState, resetContinuation := projectRuntimeProjection(input, baseState, compatState, sleepReason, wakeCauses)
 	blockers, heldUntil, quarantinedUntil := projectBlockers(input, now, baseState, identity)
 	desired := projectDesiredState(input, terminal, blockers, wakeCauses)
+	runtimeAlive, runtimeAttached, _ := runtimeFlags(input.Runtime)
 
 	return LifecycleView{
 		BaseState:          baseState,
@@ -593,8 +633,8 @@ func ProjectLifecycle(input LifecycleInput) LifecycleView {
 		ContinuityEligible: continuityEligible,
 		Terminal:           terminal,
 		CountsAgainstCap:   countsAgainstCapacity(baseState),
-		RuntimeAlive:       input.Runtime.Alive,
-		RuntimeAttached:    input.Runtime.Attached,
+		RuntimeAlive:       runtimeAlive,
+		RuntimeAttached:    runtimeAttached,
 		ReconciledState:    reconciledState,
 		ResetContinuation:  resetContinuation,
 	}
@@ -746,30 +786,52 @@ func projectBlockers(input LifecycleInput, now time.Time, base BaseState, identi
 // failure over a live session, so this must not fire on a normal hiccup —
 // only on a create that is definitively abandoned (ga-pofwv9).
 //
-// Reachability at this head: Runtime.Observed == false is entered in production
-// via zero-value LifecycleInput construction (cmd/gc/cmd_session.go,
-// cmd/gc/compute_awake_bridge.go, wait_store.go, manager.go), but the only
-// consumer of the fields this branch sets (RuntimeProjection, ReconciledState,
-// ResetContinuation) is cmd/gc/session_reconcile.go, which sets Observed: true.
-// So the branch is inert here rather than unreachable — defense in depth for a
-// future consumer that reads a projection built without runtime facts.
+// Reachability at this head: the not-observed branch is entered in production
+// both via zero-value LifecycleInput construction (cmd/gc/cmd_session.go,
+// cmd/gc/compute_awake_bridge.go, wait_store.go, manager.go — Runtime left
+// unset, so Fold's onNotObserved fires on the zero value) and, since this
+// package's ADR-0096 D1 constructors shipped, via a real failed liveness probe:
+// cmd/gc/session_reconcile.go's healStatePatchWithRollbackInfo constructs
+// NotObserved(...) whenever its caller's probe errored
+// (cmd/gc/session_reconciler.go's livenessErr != nil), not only on a zero
+// value. This head is therefore live, not merely defense in depth.
 const unobservedCreatingTimeout = 15 * time.Minute
 
+// runtimeProjectionResult bundles projectRuntimeProjection's three return
+// values so each Fold branch (ADR-0096 D2) can return a single T.
+type runtimeProjectionResult struct {
+	projection RuntimeProjection
+	state      State
+	reset      bool
+}
+
 func projectRuntimeProjection(input LifecycleInput, base BaseState, compat State, sleepReason string, wakeCauses []WakeCause) (RuntimeProjection, State, bool) {
-	if !input.Runtime.Observed {
-		if base == BaseStateCreating && creatingUnobservedExpired(input) {
-			return RuntimeProjectionStaleCreating, StateAsleep, shouldResetContinuation(base, input, sleepReason)
-		}
-		return RuntimeProjectionUnknown, compat, false
-	}
-	if input.Runtime.Alive {
-		return RuntimeProjectionAlive, StateAwake, false
-	}
+	r := Fold(input.Runtime,
+		func(attached, pending bool) runtimeProjectionResult {
+			return runtimeProjectionResult{RuntimeProjectionAlive, StateAwake, false}
+		},
+		func() runtimeProjectionResult {
+			return projectRuntimeProjectionDead(input, base, compat, sleepReason, wakeCauses)
+		},
+		func(reason string) runtimeProjectionResult {
+			if base == BaseStateCreating && creatingUnobservedExpired(input) {
+				return runtimeProjectionResult{RuntimeProjectionStaleCreating, StateAsleep, shouldResetContinuation(base, input, sleepReason)}
+			}
+			return runtimeProjectionResult{RuntimeProjectionUnknown, compat, false}
+		},
+	)
+	return r.projection, r.state, r.reset
+}
+
+// projectRuntimeProjectionDead handles the observed-and-not-alive branch of
+// projectRuntimeProjection — unchanged from the pre-Fold logic, just split out
+// so Fold's onDead closure has a single call to make.
+func projectRuntimeProjectionDead(input LifecycleInput, base BaseState, compat State, sleepReason string, wakeCauses []WakeCause) runtimeProjectionResult {
 	if base == BaseStateNone || base == BaseStateClosed || base == BaseStateClosing {
-		return RuntimeProjectionMissing, compat, false
+		return runtimeProjectionResult{RuntimeProjectionMissing, compat, false}
 	}
 	if base == BaseStateStartPending {
-		return RuntimeProjectionStartRequested, StateStartPending, false
+		return runtimeProjectionResult{RuntimeProjectionStartRequested, StateStartPending, false}
 	}
 	// #1460: A creating bead with last_woke_at represents an in-flight provider
 	// Start attempt and must age out through the stale-creating path. Legacy
@@ -778,23 +840,23 @@ func projectRuntimeProjection(input LifecycleInput, base BaseState, compat State
 	if base == BaseStateCreating {
 		if input.PendingCreateClaim &&
 			strings.TrimSpace(input.LastWokeAt) == "" {
-			return RuntimeProjectionStartRequested, StateStartPending, false
+			return runtimeProjectionResult{RuntimeProjectionStartRequested, StateStartPending, false}
 		}
 		if !creatingStateIsStale(input) {
 			if hasWakeCause(wakeCauses, WakeCausePendingCreate) {
-				return RuntimeProjectionStartRequested, StateCreating, false
+				return runtimeProjectionResult{RuntimeProjectionStartRequested, StateCreating, false}
 			}
-			return RuntimeProjectionFreshCreating, StateCreating, false
+			return runtimeProjectionResult{RuntimeProjectionFreshCreating, StateCreating, false}
 		}
-		return RuntimeProjectionStaleCreating, StateAsleep, shouldResetContinuation(base, input, sleepReason)
+		return runtimeProjectionResult{RuntimeProjectionStaleCreating, StateAsleep, shouldResetContinuation(base, input, sleepReason)}
 	}
 	if base == BaseStateFailedCreate {
-		return RuntimeProjectionMissing, StateFailedCreate, false
+		return runtimeProjectionResult{RuntimeProjectionMissing, StateFailedCreate, false}
 	}
 	if hasWakeCause(wakeCauses, WakeCausePendingCreate) {
-		return RuntimeProjectionStartRequested, StateStartPending, false
+		return runtimeProjectionResult{RuntimeProjectionStartRequested, StateStartPending, false}
 	}
-	return RuntimeProjectionMissing, StateAsleep, shouldResetContinuation(base, input, sleepReason)
+	return runtimeProjectionResult{RuntimeProjectionMissing, StateAsleep, shouldResetContinuation(base, input, sleepReason)}
 }
 
 func creatingStateIsStale(input LifecycleInput) bool {
@@ -878,6 +940,19 @@ func SleepReasonKeepsContinuation(reason string) bool {
 	return false
 }
 
+// runtimeFlags reads Alive/Attached/Pending through Fold (ADR-0096 D2):
+// unobserved and dead both report false/false/false, matching the zero-value
+// RuntimeFacts{} this replaces.
+func runtimeFlags(f RuntimeFacts) (alive, attached, pending bool) {
+	type flags struct{ alive, attached, pending bool }
+	v := Fold(f,
+		func(attached, pending bool) flags { return flags{alive: true, attached: attached, pending: pending} },
+		func() flags { return flags{} },
+		func(reason string) flags { return flags{} },
+	)
+	return v.alive, v.attached, v.pending
+}
+
 func projectWakeCauses(input LifecycleInput) []WakeCause {
 	var causes []WakeCause
 	for _, cause := range input.WakeCauses {
@@ -892,10 +967,11 @@ func projectWakeCauses(input LifecycleInput) []WakeCause {
 	if strings.TrimSpace(input.PinAwake) == "true" {
 		causes = appendUniqueWakeCause(causes, WakeCausePinned)
 	}
-	if input.Runtime.Attached {
+	_, runtimeAttached, runtimePending := runtimeFlags(input.Runtime)
+	if runtimeAttached {
 		causes = appendUniqueWakeCause(causes, WakeCauseAttached)
 	}
-	if input.Runtime.Pending {
+	if runtimePending {
 		causes = appendUniqueWakeCause(causes, WakeCausePending)
 	}
 	return causes

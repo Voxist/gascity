@@ -1205,7 +1205,11 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, observed b
 		staleCreatingAfter = staleCreatingStateTimeout
 	}
 	lcInput := sessionpkg.LifecycleInputFromInfo(info)
-	lcInput.Runtime = sessionpkg.RuntimeFacts{Observed: observed, Alive: alive}
+	if observed {
+		lcInput.Runtime = sessionpkg.Observed(alive, false, false)
+	} else {
+		lcInput.Runtime = sessionpkg.NotObserved("session_reconcile: liveness probe did not complete")
+	}
 	lcInput.CreatedAt = info.CreatedAt
 	lcInput.StaleCreatingAfter = staleCreatingAfter
 	lcInput.Now = now

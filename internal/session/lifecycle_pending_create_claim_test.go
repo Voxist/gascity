@@ -5,15 +5,16 @@ import (
 	"time"
 )
 
-// TestPendingCreateClaimIsLoadBearingOnObservedRuntime is the Observed:true twin
-// of the Observed:false subtests that previously concluded PendingCreateClaim
-// does not affect the projection. On the Observed:false path the
-// !input.Runtime.Observed bail returns before the PendingCreateClaim branch is
-// ever reached, so identical projections there prove nothing about the branch.
+// TestPendingCreateClaimIsLoadBearingOnObservedRuntime is the observed twin of
+// the not-observed subtests that previously concluded PendingCreateClaim does
+// not affect the projection. On the not-observed path the Fold onNotObserved
+// branch returns before the PendingCreateClaim branch is ever reached, so
+// identical projections there prove nothing about the branch.
 //
-// Observed:true is the only value either production RuntimeFacts construction
-// site uses (cmd/gc/session_reconcile.go:887, cmd/gc/session_sleep.go:144), so
-// this is the path that actually runs. Here the claim IS load-bearing: it
+// Every production RuntimeFacts construction site (cmd/gc/session_sleep.go,
+// cmd/gc/reconcile_effect_restart.go, and cmd/gc/session_reconcile.go's
+// healStatePatchWithRollbackInfo on a successful probe) calls Observed(...),
+// so this is a path that actually runs. Here the claim IS load-bearing: it
 // selects a start-requested projection that never consults creatingStateIsStale.
 func TestPendingCreateClaimIsLoadBearingOnObservedRuntime(t *testing.T) {
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
@@ -22,7 +23,7 @@ func TestPendingCreateClaimIsLoadBearingOnObservedRuntime(t *testing.T) {
 			StoredState:        string(StateCreating),
 			PendingCreateClaim: claim,
 			LastWokeAt:         "",
-			Runtime:            RuntimeFacts{Observed: true, Alive: false},
+			Runtime:            Observed(false, false, false),
 			// Ancient create against a one-minute staleness budget: any path
 			// that reaches creatingStateIsStale must classify this as stale.
 			CreatedAt:          now.Add(-24 * time.Hour),
@@ -66,7 +67,7 @@ func TestPendingCreateClaimStartRequestedHasNoAgeBound(t *testing.T) {
 			StoredState:        string(StateCreating),
 			PendingCreateClaim: true,
 			LastWokeAt:         "",
-			Runtime:            RuntimeFacts{Observed: true, Alive: false},
+			Runtime:            Observed(false, false, false),
 			CreatedAt:          now.Add(-age),
 			StaleCreatingAfter: time.Minute,
 			Now:                now,
@@ -91,7 +92,7 @@ func TestStartPendingProjectionHasNoAgeBound(t *testing.T) {
 		StoredState:        string(StateStartPending),
 		PendingCreateClaim: true,
 		LastWokeAt:         "",
-		Runtime:            RuntimeFacts{Observed: true, Alive: false},
+		Runtime:            Observed(false, false, false),
 		CreatedAt:          now.Add(-30 * 24 * time.Hour),
 		StaleCreatingAfter: time.Minute,
 		Now:                now,

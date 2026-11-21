@@ -103,7 +103,7 @@ func pendingExempt(row session.Info, now time.Time) bool {
 		return true
 	}
 	in := session.LifecycleInputFromInfo(row)
-	in.Runtime, in.Now = session.RuntimeFacts{Observed: true, Alive: true, Pending: true}, now
+	in.Runtime, in.Now = session.Observed(true, false, true), now
 	view := session.ProjectLifecycle(in)
 	return view.HasBlocker(session.BlockerHeld) || view.HasBlocker(session.BlockerQuarantined)
 }
