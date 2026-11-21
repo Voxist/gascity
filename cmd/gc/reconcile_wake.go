@@ -24,6 +24,10 @@ import (
 // reload) reach pokeCh in both modes: the reload runs on the maintenance tick.
 type controllerWake struct {
 	pokeCh, controlDispatcherCh chan<- struct{}
+	// configWatchCh, set by initWake, is the run loop's config-watcher arm
+	// (configWatchTickTrigger); WakeConfigWatch signals it in both modes. Nil
+	// leaves WakeConfigWatch on pokeCh.
+	configWatchCh chan<- struct{}
 	// mode is the session reconciler the controller latched, set by
 	// newControllerWiring; the controller socket publishes it
 	// (reconcilerModeCommand). A directly-built legacy wake is legacy.
@@ -87,9 +91,12 @@ func (cs *controllerState) wakeOf() *controllerWake {
 func (cr *CityRuntime) initWake(wired *controllerWake) {
 	if wired != nil {
 		cr.wake = wired
-		return
+	} else {
+		cr.wake = newLegacyWake(cr.pokeCh, cr.controlDispatcherCh)
 	}
-	cr.wake = newLegacyWake(cr.pokeCh, cr.controlDispatcherCh)
+	// The run loop's config-watcher arm, before the watcher or any other
+	// reader of the wake starts.
+	cr.wake.configWatchCh = cr.configWatchCh
 }
 
 // wakeOf returns the city runtime's wake (initWake).
@@ -164,6 +171,23 @@ func (w *controllerWake) WakeMaintenance() {
 		return
 	}
 	legacyEnqueue(w.pokeCh, nil)
+}
+
+// WakeConfigWatch asks for a maintenance pass after the config watcher saw a
+// file change. The caller has already set the dirty flag. In both modes it
+// wakes the run loop's config-watcher arm, whose tick is the maintenance tick
+// a poke runs (under v2, reloadV2 marks the planner dirty), except that it
+// settles to a patrol tick when its reload finds nothing to do
+// (settleConfigWatchTick). Without that arm it is WakeMaintenance.
+func (w *controllerWake) WakeConfigWatch() {
+	if w == nil {
+		return
+	}
+	if w.configWatchCh == nil {
+		w.WakeMaintenance()
+		return
+	}
+	legacyEnqueue(w.configWatchCh, nil)
 }
 
 // OnBeadEvent wakes the reconciler for one bead event after the caches

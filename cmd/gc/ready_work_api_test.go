@@ -390,6 +390,40 @@ func TestControllerReadyWorkRefusesAfterAFailedReloadUntilOneApplies(t *testing.
 	f.requireAnswers(t, "once a reload applied")
 }
 
+// TestConfigWatchTickSettlesOnTheReloadOutcome drives tickConfigReload on a
+// real config: a config-watch tick whose reload finds no change becomes a
+// patrol tick with configChanged cleared, and one whose reload applies stays
+// the poke tick that forces the demand rebuild (vp-h1jgt).
+func TestConfigWatchTickSettlesOnTheReloadOutcome(t *testing.T) {
+	f := newReadyWorkReloadFixture(t)
+	stubReloadBeadsLifecycle(t, func(string, string, *config.City, cityStoreRecord, io.Writer) error { return nil })
+	lastProviderName := "fake"
+	watchTick := func() *tickPass {
+		p := &tickPass{ctx: context.Background(), dirty: f.dirty, lastProviderName: &lastProviderName, cityRoot: f.cr.cityPath, trigger: "poke", configWatchOnly: true}
+		f.cr.tickConfigReload(p)
+		return p
+	}
+
+	f.dirty.Store(true)
+	p := watchTick()
+	if p.manualReply.Outcome != reloadOutcomeNoChange {
+		t.Fatalf("reload of an unchanged config = %q, want %q", p.manualReply.Outcome, reloadOutcomeNoChange)
+	}
+	if p.trigger != "patrol" || p.configChanged {
+		t.Fatalf("no-change config-watch tick = (trigger %q, configChanged %v), want (patrol, false)", p.trigger, p.configChanged)
+	}
+
+	writeCityRuntimeConfigWithOneSecondShutdownTimeout(t, f.tomlPath)
+	f.dirty.Store(true)
+	p = watchTick()
+	if p.manualReply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reload of a changed config = %q, want %q", p.manualReply.Outcome, reloadOutcomeApplied)
+	}
+	if p.trigger != "poke" || !p.configChanged {
+		t.Fatalf("applied config-watch tick = (trigger %q, configChanged %v), want (poke, true)", p.trigger, p.configChanged)
+	}
+}
+
 // TestControllerReadyWorkRefusesWhileAnAPIConfigWriteIsInFlight pins an API
 // config edit's window: it changes the config files before it marks the reload
 // pending, so a read in between must refuse; from the mark on, the pending

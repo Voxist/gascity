@@ -6622,10 +6622,11 @@ func TestCityRuntimeReloadRestartsConfigWatcherWithNewPackTargets(t *testing.T) 
 		t.Fatalf("watchTargets = %#v, want recursive pack target %q", cr.watchTargets, packDir)
 	}
 
+	// The watcher wakes the run loop on its own channel (configWatchTickTrigger).
 	drainPokes := func() {
 		for {
 			select {
-			case <-pokeCh:
+			case <-cr.configWatchCh:
 			default:
 				return
 			}
@@ -6639,7 +6640,7 @@ func TestCityRuntimeReloadRestartsConfigWatcherWithNewPackTargets(t *testing.T) 
 		t.Fatalf("edit pack file: %v", err)
 	}
 	select {
-	case <-pokeCh:
+	case <-cr.configWatchCh:
 	case <-time.After(3 * time.Second):
 		t.Fatalf("timed out waiting for watcher poke after editing newly watched pack file; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}

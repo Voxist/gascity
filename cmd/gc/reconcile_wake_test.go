@@ -288,10 +288,13 @@ var wakeSources = []wakeSource{
 		after:  func(w *controllerWake, _ wakeInput) { w.Enqueue(wakeReasonTrace, reconcilekey.Allocator()) },
 	},
 	{
-		site:   "controller.go:watchConfigTargets",
-		call:   "WakeMaintenance()",
+		site: "controller.go:watchConfigTargets",
+		call: "WakeConfigWatch()",
+		// A wake without the config-watcher arm (newLegacyWake here) folds
+		// WakeConfigWatch onto pokeCh, exactly the send it replaced;
+		// TestWakeConfigWatchSignalsTheConfigWatchArm pins the arm.
 		before: func(p, _ chan<- struct{}, _ wakeInput) { legacyEnqueue(p, nil, allocatorKey...) },
-		after:  func(w *controllerWake, _ wakeInput) { w.WakeMaintenance() },
+		after:  func(w *controllerWake, _ wakeInput) { w.WakeConfigWatch() },
 	},
 	{
 		site:   "cmd_supervisor.go:runSupervisor",
@@ -504,7 +507,7 @@ func topLevelDeclName(d ast.Decl) string {
 
 func isWakeMethod(name string) bool {
 	switch name {
-	case "Enqueue", "WakeMaintenance", "OnBeadEvent", "OnEventGap":
+	case "Enqueue", "WakeMaintenance", "WakeConfigWatch", "OnBeadEvent", "OnEventGap":
 		return true
 	}
 	return false
@@ -575,6 +578,7 @@ var wakeSignalMentions = map[string]bool{
 	"reconcile_wake.go:(*controllerState).wakeOf":               true,
 	"reconcile_wake.go:(*controllerWake).Enqueue":               true,
 	"reconcile_wake.go:(*controllerWake).WakeMaintenance":       true,
+	"reconcile_wake.go:(*controllerWake).WakeConfigWatch":       true, // the config watcher's arm, through legacyEnqueue
 	"reconcile_wake.go:(*controllerWake).OnBeadEvent":           true,
 	"reconcile_wake.go:(*CityRuntime).initWake":                 true,
 	"reconcile_wiring.go:type controllerWiring":                 true,
@@ -584,6 +588,31 @@ var wakeSignalMentions = map[string]bool{
 
 // wakeFiles are the only files that may build a controllerWake.
 var wakeFiles = map[string]bool{"reconcile_wake.go": true, "reconcile_wiring.go": true}
+
+// TestWakeConfigWatchSignalsTheConfigWatchArm pins the config watcher's wake:
+// with the run loop's config-watcher arm wired (initWake), WakeConfigWatch
+// signals that arm and no other signal, under v2 as under legacy, so the
+// tick it runs knows only a file change asked for it. A nil wake is a no-op.
+func TestWakeConfigWatchSignalsTheConfigWatchArm(t *testing.T) {
+	for _, v2 := range []bool{false, true} {
+		t.Run(fmt.Sprintf("v2=%v", v2), func(t *testing.T) {
+			poke, dispatch, watch := make(chan struct{}, 1), make(chan struct{}, 1), make(chan struct{}, 1)
+			cr := &CityRuntime{pokeCh: poke, controlDispatcherCh: dispatch, configWatchCh: watch}
+			wired := newLegacyWake(poke, dispatch)
+			if v2 {
+				wired.planner = &planner{}
+			}
+			cr.initWake(wired)
+			cr.wakeOf().WakeConfigWatch()
+			cr.wakeOf().WakeConfigWatch() // a pending signal already covers it
+			if len(watch) != 1 || len(poke) != 0 || len(dispatch) != 0 {
+				t.Fatalf("signals (config-watch, poke, dispatch) = (%d, %d, %d), want (1, 0, 0)", len(watch), len(poke), len(dispatch))
+			}
+		})
+	}
+	var nilWake *controllerWake
+	nilWake.WakeConfigWatch()
+}
 
 // TestEveryReconcileEnqueueGoesThroughTheWake pins the single sink over whole
 // files, func literals included: only the controllerWake's methods call
@@ -640,8 +669,9 @@ func TestEveryReconcileEnqueueGoesThroughTheWake(t *testing.T) {
 	}
 }
 
-// isWakeSignal reports whether ch names one of the reconciler's two wake
-// signals, whatever it is reached through.
+// isWakeSignal reports whether ch names one of the reconciler's wake signals
+// (pokeCh, controlDispatcherCh and the config watcher's configWatchCh),
+// whatever it is reached through.
 func isWakeSignal(ch ast.Expr) bool {
 	switch ch := ch.(type) {
 	case *ast.Ident:
@@ -653,7 +683,7 @@ func isWakeSignal(ch ast.Expr) bool {
 }
 
 func isWakeSignalName(name string) bool {
-	return name == "pokeCh" || name == "controlDispatcherCh" || name == "PokeCh" || name == "ControlDispatcherCh"
+	return name == "pokeCh" || name == "controlDispatcherCh" || name == "PokeCh" || name == "ControlDispatcherCh" || name == "configWatchCh"
 }
 
 // scriptedEventProvider is an events.Provider whose Watch calls play a
