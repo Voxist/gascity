@@ -43,11 +43,14 @@ func newModelProxyHandler(reg *providerHealthRegistry, providerUpstreams map[str
 		}
 
 		rp := &httputil.ReverseProxy{
-			Director: func(req *http.Request) {
-				req.URL.Scheme = target.Scheme
-				req.URL.Host = target.Host
-				req.URL.Path = rest
-				req.Host = target.Host
+			Rewrite: func(pr *httputil.ProxyRequest) {
+				pr.SetURL(target)
+				pr.Out.URL.Path = rest
+				// SetURL clears Out.Host so the Host header comes from the
+				// rewritten URL — the same Host value the old Director body
+				// assigned explicitly. Rewrite does not add X-Forwarded-For;
+				// this proxy never relied on it.
+				pr.Out.Host = target.Host
 			},
 			ModifyResponse: func(resp *http.Response) error {
 				reg.RecordResponse(provider, resp.StatusCode, time.Now())

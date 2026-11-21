@@ -2081,9 +2081,9 @@ func cmdOrderSweepTrackingForCity(cityPath string, cfg *config.City, now time.Ti
 	// the non-zero exit is deferred to the end of the function.
 	confirmGateBlocked := false
 	if dryRun {
-		result, sweepErr = sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWisps, 0, true, residualFor)
+		result, sweepErr = sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, includeWisps, true, residualFor)
 	} else {
-		result, sweepErr = sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWisps, 0, false, residualFor)
+		result, sweepErr = sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, includeWisps, false, residualFor)
 
 		// Bulk-delete confirm gate: before any retention deletions, count
 		// eligible beads and require --confirm when above
