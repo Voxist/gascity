@@ -1272,7 +1272,8 @@ func TestReadyUntilUnblockedAppliesTheCrossStoreRuleOnASplitCity(t *testing.T) {
 // reload (vp-h1jgt): with no further edit and no manual reload, a patrol tick
 // once the retry is due reloads again, and when the transient failure has
 // passed the reload applies and ready-work answers again. A patrol before the
-// retry is due, and a poke tick, leave it alone.
+// retry is due (half a patrol interval of slack before the deadline), and a
+// poke tick, leave it alone.
 func TestPatrolTickRetriesAFailedConfigReload(t *testing.T) {
 	f := newReadyWorkReloadFixture(t)
 	now := time.Unix(1_800_000_000, 0)
@@ -1303,11 +1304,12 @@ func TestPatrolTickRetriesAFailedConfigReload(t *testing.T) {
 	}
 
 	failing = false
-	now = now.Add(interval - time.Second)
+	failedAt := now
+	now = failedAt.Add(interval/2 - time.Second)
 	if got := tick("patrol"); got != "" {
 		t.Fatalf("patrol before the retry is due ran a reload (%q), want none", got)
 	}
-	now = now.Add(time.Second)
+	now = failedAt.Add(interval)
 	if got := tick("poke"); got != "" {
 		t.Fatalf("poke tick with the retry due ran a reload (%q); only a patrol retries", got)
 	}
@@ -1328,28 +1330,147 @@ func TestPatrolTickRetriesAFailedConfigReload(t *testing.T) {
 // by success. A patrol interval past the cap is the floor.
 func TestConfigReloadRetryBackoffGrowsAndCaps(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
-	cr := &CityRuntime{cfg: &config.City{}, reloadRetryNow: func() time.Time { return now }}
+	cr := &CityRuntime{cfg: &config.City{}}
 	cr.cfg.Daemon.PatrolInterval = "30s"
 	want := []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 10 * time.Minute, 10 * time.Minute}
 	for i, w := range want {
-		cr.scheduleConfigReloadRetry(reloadOutcomeFailed, i > 0)
+		cr.scheduleConfigReloadRetry(reloadOutcomeFailed, i > 0, now)
 		if cr.reloadRetryBackoff != w || !cr.reloadRetryAt.Equal(now.Add(w)) {
 			t.Fatalf("failure %d: backoff %s at %s, want %s", i+1, cr.reloadRetryBackoff, cr.reloadRetryAt, w)
 		}
 	}
-	cr.scheduleConfigReloadRetry(reloadOutcomeFailed, false)
+	cr.scheduleConfigReloadRetry(reloadOutcomeFailed, false, now)
 	if cr.reloadRetryBackoff != 30*time.Second {
 		t.Fatalf("a fresh reload's failure: backoff %s, want it reset to one patrol interval", cr.reloadRetryBackoff)
 	}
-	cr.scheduleConfigReloadRetry(reloadOutcomeNoChange, true)
+	cr.scheduleConfigReloadRetry(reloadOutcomeNoChange, true, now)
 	if !cr.reloadRetryAt.IsZero() || cr.reloadRetryBackoff != 0 {
 		t.Fatalf("after success: backoff %s at %s, want cleared", cr.reloadRetryBackoff, cr.reloadRetryAt)
 	}
 
 	cr.cfg.Daemon.PatrolInterval = "15m"
-	cr.scheduleConfigReloadRetry(reloadOutcomeFailed, false)
-	cr.scheduleConfigReloadRetry(reloadOutcomeFailed, true)
+	cr.scheduleConfigReloadRetry(reloadOutcomeFailed, false, now)
+	cr.scheduleConfigReloadRetry(reloadOutcomeFailed, true, now)
 	if cr.reloadRetryBackoff != 15*time.Minute {
 		t.Fatalf("patrol interval past the cap: backoff %s, want the 15m floor", cr.reloadRetryBackoff)
+	}
+}
+
+// TestPatrolRetryRunsOnTheNextPatrolAfterASlowFailedReload pins the retry's
+// anchor (vp-h1jgt): the deadline counts from the clock reading taken before
+// the failed reload ran, not from its finish, and the due check allows half a
+// patrol interval of slack. Patrols fire on a fixed grid, so a deadline
+// counted from the finish (now + backoff once the reload returned) always
+// fell just after the next patrol and the one-interval floor became two. The
+// reload here takes three quarters of an interval, and the next patrol reaches
+// the reload phase a second earlier in its grid slot than the failed one did.
+func TestPatrolRetryRunsOnTheNextPatrolAfterASlowFailedReload(t *testing.T) {
+	f := newReadyWorkReloadFixture(t)
+	interval := f.cr.cfg.Daemon.PatrolIntervalDuration()
+	reloadTakes := interval * 3 / 4
+	grid := time.Unix(1_800_000_000, 0)
+	now := grid
+	f.cr.reloadRetryNow = func() time.Time { return now }
+	failing := true
+	reloads := 0
+	stubReloadBeadsLifecycle(t, func(string, string, *config.City, cityStoreRecord, io.Writer) error {
+		reloads++
+		now = now.Add(reloadTakes)
+		if failing {
+			return errors.New("bead lifecycle step failed")
+		}
+		return nil
+	})
+	lastProviderName := "fake"
+	// patrolAt runs a patrol tick whose config-reload phase reads the clock at
+	// at, and reports whether it ran a reload.
+	patrolAt := func(at time.Time) reloadOutcome {
+		now = at
+		p := &tickPass{ctx: context.Background(), dirty: f.dirty, lastProviderName: &lastProviderName, cityRoot: f.cr.cityPath, trigger: "patrol"}
+		f.cr.tickConfigReload(p)
+		return p.manualReply.Outcome
+	}
+
+	// The failed reload of a real edit, on the patrol at grid slot 0.
+	writeCityRuntimeConfigWithOneSecondShutdownTimeout(t, f.tomlPath)
+	f.dirty.Store(true)
+	if got := patrolAt(grid.Add(time.Second)); got != reloadOutcomeFailed {
+		t.Fatalf("reload with a failing lifecycle step = %q, want %q", got, reloadOutcomeFailed)
+	}
+	if reloads == 0 {
+		t.Fatal("the stubbed lifecycle step never ran, so the clock never advanced")
+	}
+	// The next patrol, slot 1, retries: the floor is one patrol interval.
+	if got := patrolAt(grid.Add(interval)); got != reloadOutcomeFailed {
+		t.Fatalf("patrol one interval after the failed reload = %q, want the retry (%q)", got, reloadOutcomeFailed)
+	}
+	// That retry failed too, so the backoff doubled from slot 1: slot 2 skips
+	// and slot 3 retries.
+	if got := patrolAt(grid.Add(2 * interval)); got != "" {
+		t.Fatalf("patrol one interval after a failed retry ran a reload (%q); the backoff is two intervals", got)
+	}
+	failing = false
+	if got := patrolAt(grid.Add(3*interval + time.Second)); got != reloadOutcomeApplied {
+		t.Fatalf("patrol two intervals after the failed retry = %q, want the retry to apply", got)
+	}
+	f.requireAnswers(t, "once the retry applied")
+}
+
+// TestFailedConfigReloadRetryTickStaysAPatrol pins that a patrol retry whose
+// reload failed does not take the heavy path (vp-h1jgt). The failed reload
+// published nothing, so the tick keeps configChanged false and its patrol
+// trigger: the two inputs that, when set, bypass the FS-pressure gate and
+// reset its skip count (tickFSPressureGate) and force a live session read and
+// a full demand rebuild (shouldRefreshDemandSnapshot). A config that stays
+// broken therefore costs only the reload per retry. A failed reload that was
+// not a retry, and a retry that applied, still report the change.
+func TestFailedConfigReloadRetryTickStaysAPatrol(t *testing.T) {
+	f := newReadyWorkReloadFixture(t)
+	now := time.Unix(1_800_000_000, 0)
+	f.cr.reloadRetryNow = func() time.Time { return now }
+	failing := true
+	stubReloadBeadsLifecycle(t, func(string, string, *config.City, cityStoreRecord, io.Writer) error {
+		if failing {
+			return errors.New("bead lifecycle step failed")
+		}
+		return nil
+	})
+	lastProviderName := "fake"
+	tick := func(trigger string) *tickPass {
+		p := &tickPass{ctx: context.Background(), dirty: f.dirty, lastProviderName: &lastProviderName, cityRoot: f.cr.cityPath, trigger: trigger}
+		f.cr.tickConfigReload(p)
+		return p
+	}
+	interval := f.cr.cfg.Daemon.PatrolIntervalDuration()
+
+	writeCityRuntimeConfigWithOneSecondShutdownTimeout(t, f.tomlPath)
+	f.dirty.Store(true)
+	p := tick("patrol")
+	if p.manualReply.Outcome != reloadOutcomeFailed || !p.configChanged {
+		t.Fatalf("a real edit's failed reload: outcome %q, configChanged %t; want %q with the change still reported", p.manualReply.Outcome, p.configChanged, reloadOutcomeFailed)
+	}
+
+	for i := 1; i <= 3; i++ {
+		now = now.Add(maxConfigReloadRetryBackoff)
+		p = tick("patrol")
+		if p.manualReply.Outcome != reloadOutcomeFailed {
+			t.Fatalf("retry %d: outcome %q, want %q", i, p.manualReply.Outcome, reloadOutcomeFailed)
+		}
+		if p.configChanged || p.trigger != "patrol" {
+			t.Fatalf("failed retry %d: configChanged %t, trigger %q; want false and %q, so the tick keeps the FS-pressure gate and the cached snapshots", i, p.configChanged, p.trigger, "patrol")
+		}
+		if !p.dirtyCleared || f.dirty.Load() {
+			t.Fatalf("failed retry %d: dirtyCleared %t, dirty %t; the retry still consumes its own pending mark", i, p.dirtyCleared, f.dirty.Load())
+		}
+	}
+	if f.cr.reloadRetryBackoff < 2*interval {
+		t.Fatalf("backoff after failed retries = %s, want it to have grown", f.cr.reloadRetryBackoff)
+	}
+
+	failing = false
+	now = now.Add(maxConfigReloadRetryBackoff)
+	p = tick("patrol")
+	if p.manualReply.Outcome != reloadOutcomeApplied || !p.configChanged {
+		t.Fatalf("an applied retry: outcome %q, configChanged %t; want %q with the change reported", p.manualReply.Outcome, p.configChanged, reloadOutcomeApplied)
 	}
 }

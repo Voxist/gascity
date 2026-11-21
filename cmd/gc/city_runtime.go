@@ -1728,7 +1728,11 @@ func (cr *CityRuntime) tickReconcilePoolDeaths(p *tickPass) bool {
 }
 
 func (cr *CityRuntime) tickConfigReload(p *tickPass) bool {
-	retrying := cr.configReloadRetryDue(p)
+	// One clock reading serves the retry's due check and, after a failed
+	// reload, the next retry's anchor, so the reload's own duration never
+	// pushes that retry past the next patrol (scheduleConfigReloadRetry).
+	now := cr.configReloadRetryClock()
+	retrying := cr.configReloadRetryDue(p, now)
 	if retrying {
 		p.dirty.Store(true)
 	}
@@ -1753,12 +1757,14 @@ func (cr *CityRuntime) tickConfigReload(p *tickPass) bool {
 		cr.reloadMu.Unlock()
 		if cr.runsV2() {
 			cr.reloadV2(p, source)
-			cr.scheduleConfigReloadRetry(p.manualReply.Outcome, retrying)
+			cr.scheduleConfigReloadRetry(p.manualReply.Outcome, retrying, now)
+			p.settleFailedConfigReloadRetry(retrying)
 			p.settleConfigWatchTick()
 			return p.ctx.Err() != nil
 		}
 		p.manualReply = cr.reloadConfigTraced(p.ctx, p.lastProviderName, p.cityRoot, p.trace, source)
-		cr.scheduleConfigReloadRetry(p.manualReply.Outcome, retrying)
+		cr.scheduleConfigReloadRetry(p.manualReply.Outcome, retrying, now)
+		p.settleFailedConfigReloadRetry(retrying)
 		if p.manualReload != nil {
 			p.manualReloadCompleted = true
 			// #3206 defense-in-depth: a manual reload's reply is already final
@@ -1785,18 +1791,44 @@ func (cr *CityRuntime) tickConfigReload(p *tickPass) bool {
 // failure (a bead-lifecycle step error, a provider-swap timeout) should heal
 // within minutes. A failure that persists, such as a malformed city.toml
 // waiting for its fix, then costs one full reload (about 1 CPU-s) per 10
-// minutes, small beside the patrol itself. A patrol interval longer than the
-// cap is the backoff floor instead.
+// minutes. A failed retry leaves the rest of its patrol tick as a plain
+// patrol (settleFailedConfigReloadRetry), so the retry adds only the reload,
+// small beside the patrol itself. A patrol interval longer than the cap is
+// the backoff floor instead.
 const maxConfigReloadRetryBackoff = 10 * time.Minute
+
+// configReloadSucceeded reports whether a reload outcome leaves the published
+// config current: the same test configFreshness.endReload makes, so a retry is
+// scheduled exactly while ready-work refuses.
+func configReloadSucceeded(outcome reloadOutcome) bool {
+	return outcome == reloadOutcomeApplied || outcome == reloadOutcomeNoChange
+}
+
+// configReloadRetryFloor is the retry backoff's floor and step unit: one
+// patrol interval.
+func (cr *CityRuntime) configReloadRetryFloor() time.Duration {
+	floor := cr.cfg.Daemon.PatrolIntervalDuration()
+	if floor <= 0 {
+		floor = time.Second
+	}
+	return floor
+}
 
 // configReloadRetryDue reports whether this tick should retry a failed config
 // reload: it is a patrol tick, no reload is already pending, and the retry
-// scheduled by scheduleConfigReloadRetry is due.
-func (cr *CityRuntime) configReloadRetryDue(p *tickPass) bool {
+// scheduled by scheduleConfigReloadRetry is due at now. Due allows half a
+// patrol interval of slack: patrols fire on the ticker's fixed grid, but each
+// tick reaches this phase after a varying delay, so a deadline exactly one
+// interval after the failed tick's reading could land just after the next
+// patrol's reading and slip the retry a whole interval. Half an interval
+// absorbs that jitter and moves a retry at most half an interval early, so a
+// retry after a patrol's failure still never runs on that patrol's grid slot
+// or earlier.
+func (cr *CityRuntime) configReloadRetryDue(p *tickPass, now time.Time) bool {
 	if p.trigger != "patrol" || cr.reloadRetryAt.IsZero() || p.dirty == nil || p.dirty.Load() {
 		return false
 	}
-	return !cr.configReloadRetryClock().Before(cr.reloadRetryAt)
+	return !now.Before(cr.reloadRetryAt.Add(-cr.configReloadRetryFloor() / 2))
 }
 
 // scheduleConfigReloadRetry records a tick reload's outcome for the patrol
@@ -1805,16 +1837,16 @@ func (cr *CityRuntime) configReloadRetryDue(p *tickPass) bool {
 // edit, an API write, a manual reload) starts the backoff at one patrol
 // interval, and each failed retry doubles it up to
 // maxConfigReloadRetryBackoff. The failure is not classified: a reload that
-// cannot succeed costs only the capped retries.
-func (cr *CityRuntime) scheduleConfigReloadRetry(outcome reloadOutcome, retrying bool) {
-	if outcome == reloadOutcomeApplied || outcome == reloadOutcomeNoChange {
+// cannot succeed costs only the capped retries. The deadline counts from
+// started, the clock reading taken before the reload ran, not from when it
+// finished: counted from the finish, a one-interval backoff would always
+// fall just after the next patrol and the first retry would wait two.
+func (cr *CityRuntime) scheduleConfigReloadRetry(outcome reloadOutcome, retrying bool, started time.Time) {
+	if configReloadSucceeded(outcome) {
 		cr.reloadRetryAt, cr.reloadRetryBackoff = time.Time{}, 0
 		return
 	}
-	floor := cr.cfg.Daemon.PatrolIntervalDuration()
-	if floor <= 0 {
-		floor = time.Second
-	}
+	floor := cr.configReloadRetryFloor()
 	ceiling := maxConfigReloadRetryBackoff
 	if ceiling < floor {
 		ceiling = floor
@@ -1825,7 +1857,20 @@ func (cr *CityRuntime) scheduleConfigReloadRetry(outcome reloadOutcome, retrying
 	case cr.reloadRetryBackoff < ceiling:
 		cr.reloadRetryBackoff = min(2*cr.reloadRetryBackoff, ceiling)
 	}
-	cr.reloadRetryAt = cr.configReloadRetryClock().Add(cr.reloadRetryBackoff)
+	cr.reloadRetryAt = started.Add(cr.reloadRetryBackoff)
+}
+
+// settleFailedConfigReloadRetry clears configChanged after a patrol retry
+// whose reload failed. The failed reload published nothing, so the tick runs
+// under the config it already had: it keeps the patrol rules, the FS-pressure
+// gate and its skip count, and the cached session and demand snapshots,
+// instead of the forced live read and full rebuild configChanged asks for.
+// Without it, a config that stays broken would force that heavy path on every
+// retry. A failed reload that was not a retry keeps configChanged, as before.
+func (p *tickPass) settleFailedConfigReloadRetry(retrying bool) {
+	if retrying && !configReloadSucceeded(p.manualReply.Outcome) {
+		p.configChanged = false
+	}
 }
 
 func (cr *CityRuntime) configReloadRetryClock() time.Time {
