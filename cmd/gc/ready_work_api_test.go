@@ -1267,3 +1267,89 @@ func TestReadyUntilUnblockedAppliesTheCrossStoreRuleOnASplitCity(t *testing.T) {
 		t.Fatalf("after the graph bead closed: split cut = %v, want %v", got, want)
 	}
 }
+
+// TestPatrolTickRetriesAFailedConfigReload pins the self-heal of a failed
+// reload (vp-h1jgt): with no further edit and no manual reload, a patrol tick
+// once the retry is due reloads again, and when the transient failure has
+// passed the reload applies and ready-work answers again. A patrol before the
+// retry is due, and a poke tick, leave it alone.
+func TestPatrolTickRetriesAFailedConfigReload(t *testing.T) {
+	f := newReadyWorkReloadFixture(t)
+	now := time.Unix(1_800_000_000, 0)
+	f.cr.reloadRetryNow = func() time.Time { return now }
+	failing := true
+	stubReloadBeadsLifecycle(t, func(string, string, *config.City, cityStoreRecord, io.Writer) error {
+		if failing {
+			return errors.New("bead lifecycle step failed")
+		}
+		return nil
+	})
+	lastProviderName := "fake"
+	tick := func(trigger string) reloadOutcome {
+		p := &tickPass{ctx: context.Background(), dirty: f.dirty, lastProviderName: &lastProviderName, cityRoot: f.cr.cityPath, trigger: trigger}
+		f.cr.tickConfigReload(p)
+		return p.manualReply.Outcome
+	}
+
+	writeCityRuntimeConfigWithOneSecondShutdownTimeout(t, f.tomlPath)
+	f.dirty.Store(true)
+	if got := tick("poke"); got != reloadOutcomeFailed {
+		t.Fatalf("reload with a failing lifecycle step = %q, want %q", got, reloadOutcomeFailed)
+	}
+	f.requireRefuses(t, "after the failed reload")
+	interval := f.cr.cfg.Daemon.PatrolIntervalDuration()
+	if f.cr.reloadRetryBackoff != interval || !f.cr.reloadRetryAt.Equal(now.Add(interval)) {
+		t.Fatalf("retry = (backoff %s, at %s), want one patrol interval (%s) out", f.cr.reloadRetryBackoff, f.cr.reloadRetryAt, interval)
+	}
+
+	failing = false
+	now = now.Add(interval - time.Second)
+	if got := tick("patrol"); got != "" {
+		t.Fatalf("patrol before the retry is due ran a reload (%q), want none", got)
+	}
+	now = now.Add(time.Second)
+	if got := tick("poke"); got != "" {
+		t.Fatalf("poke tick with the retry due ran a reload (%q); only a patrol retries", got)
+	}
+	f.requireRefuses(t, "before the retry ran")
+
+	if got := tick("patrol"); got != reloadOutcomeApplied {
+		t.Fatalf("patrol retry = %q, want %q", got, reloadOutcomeApplied)
+	}
+	f.requireAnswers(t, "once the patrol retry applied")
+	if !f.cr.reloadRetryAt.IsZero() || f.cr.reloadRetryBackoff != 0 {
+		t.Fatalf("retry after success = (backoff %s, at %s), want cleared", f.cr.reloadRetryBackoff, f.cr.reloadRetryAt)
+	}
+}
+
+// TestConfigReloadRetryBackoffGrowsAndCaps pins the retry schedule: one
+// patrol interval after a fresh failure, doubling per failed retry up to
+// maxConfigReloadRetryBackoff, reset by a fresh reload's failure and cleared
+// by success. A patrol interval past the cap is the floor.
+func TestConfigReloadRetryBackoffGrowsAndCaps(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	cr := &CityRuntime{cfg: &config.City{}, reloadRetryNow: func() time.Time { return now }}
+	cr.cfg.Daemon.PatrolInterval = "30s"
+	want := []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 10 * time.Minute, 10 * time.Minute}
+	for i, w := range want {
+		cr.scheduleConfigReloadRetry(reloadOutcomeFailed, i > 0)
+		if cr.reloadRetryBackoff != w || !cr.reloadRetryAt.Equal(now.Add(w)) {
+			t.Fatalf("failure %d: backoff %s at %s, want %s", i+1, cr.reloadRetryBackoff, cr.reloadRetryAt, w)
+		}
+	}
+	cr.scheduleConfigReloadRetry(reloadOutcomeFailed, false)
+	if cr.reloadRetryBackoff != 30*time.Second {
+		t.Fatalf("a fresh reload's failure: backoff %s, want it reset to one patrol interval", cr.reloadRetryBackoff)
+	}
+	cr.scheduleConfigReloadRetry(reloadOutcomeNoChange, true)
+	if !cr.reloadRetryAt.IsZero() || cr.reloadRetryBackoff != 0 {
+		t.Fatalf("after success: backoff %s at %s, want cleared", cr.reloadRetryBackoff, cr.reloadRetryAt)
+	}
+
+	cr.cfg.Daemon.PatrolInterval = "15m"
+	cr.scheduleConfigReloadRetry(reloadOutcomeFailed, false)
+	cr.scheduleConfigReloadRetry(reloadOutcomeFailed, true)
+	if cr.reloadRetryBackoff != 15*time.Minute {
+		t.Fatalf("patrol interval past the cap: backoff %s, want the 15m floor", cr.reloadRetryBackoff)
+	}
+}

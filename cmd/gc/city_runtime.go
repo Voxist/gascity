@@ -356,6 +356,14 @@ type CityRuntime struct {
 	// drive the lane's retry floors and deadlines.
 	usageNow func() time.Time
 
+	// reloadRetryAt and reloadRetryBackoff schedule a patrol tick's retry of
+	// a failed config reload (scheduleConfigReloadRetry); zero means none is
+	// due. Only the tick goroutine touches them. reloadRetryNow is their
+	// clock; nil reads time.Now.
+	reloadRetryAt      time.Time
+	reloadRetryBackoff time.Duration
+	reloadRetryNow     func() time.Time
+
 	// transcriptMetaEnabled is set only by the machine-wide supervisor after it
 	// has armed the event-correlation sidecar gate. One asynchronous snapshot pass
 	// is permitted for this supervisor lifetime; a restart deliberately rebuilds
@@ -384,10 +392,10 @@ type CityRuntime struct {
 	convergenceReqCh    chan convergenceRequest      // receives CLI commands from controller.sock
 	reloadReqCh         chan reloadRequest           // receives structured reload requests from controller.sock
 	pokeCh              chan struct{}                // non-blocking signal to trigger immediate reconciler tick
-	configWatchCh       chan struct{}                // the config watcher's own wake (configWatchTickTrigger); nil wakes through pokeCh
+	configWatchCh       chan struct{}                // the run loop's config-watcher arm (WakeConfigWatch, configWatchTickTrigger)
 	sessionEvents       *sessionEventPump            // provider event stream → wake bridge; wired by run()
 	controlDispatcherCh chan struct{}                // non-blocking signal for control-dispatcher-only reconcile
-	wake                *controllerWake              // the wake over pokeCh and controlDispatcherCh; built once by initWake
+	wake                *controllerWake              // the wake over pokeCh, controlDispatcherCh and configWatchCh; built once by initWake
 	nudgeWakeCh         chan struct{}                // signal to dispatch queued nudges; fed by wake socket listener
 	reloadMu            sync.Mutex                   // guards activeReload
 	activeReload        *reloadRequest
@@ -1720,6 +1728,10 @@ func (cr *CityRuntime) tickReconcilePoolDeaths(p *tickPass) bool {
 }
 
 func (cr *CityRuntime) tickConfigReload(p *tickPass) bool {
+	retrying := cr.configReloadRetryDue(p)
+	if retrying {
+		p.dirty.Store(true)
+	}
 	if p.dirty.Load() {
 		// Mark the reload in progress before clearing the flag, so ReadyWork
 		// never finds it neither pending nor in progress (configFreshness). Only
@@ -1741,10 +1753,12 @@ func (cr *CityRuntime) tickConfigReload(p *tickPass) bool {
 		cr.reloadMu.Unlock()
 		if cr.runsV2() {
 			cr.reloadV2(p, source)
+			cr.scheduleConfigReloadRetry(p.manualReply.Outcome, retrying)
 			p.settleConfigWatchTick()
 			return p.ctx.Err() != nil
 		}
 		p.manualReply = cr.reloadConfigTraced(p.ctx, p.lastProviderName, p.cityRoot, p.trace, source)
+		cr.scheduleConfigReloadRetry(p.manualReply.Outcome, retrying)
 		if p.manualReload != nil {
 			p.manualReloadCompleted = true
 			// #3206 defense-in-depth: a manual reload's reply is already final
@@ -1763,6 +1777,62 @@ func (cr *CityRuntime) tickConfigReload(p *tickPass) bool {
 	}
 	p.settleConfigWatchTick()
 	return p.ctx.Err() != nil
+}
+
+// maxConfigReloadRetryBackoff caps the wait between patrol retries of a failed
+// config reload. While a reload stays failed, ready-work and active-step
+// refuse (configFreshness) and every hook reads in process, so a transient
+// failure (a bead-lifecycle step error, a provider-swap timeout) should heal
+// within minutes. A failure that persists, such as a malformed city.toml
+// waiting for its fix, then costs one full reload (about 1 CPU-s) per 10
+// minutes, small beside the patrol itself. A patrol interval longer than the
+// cap is the backoff floor instead.
+const maxConfigReloadRetryBackoff = 10 * time.Minute
+
+// configReloadRetryDue reports whether this tick should retry a failed config
+// reload: it is a patrol tick, no reload is already pending, and the retry
+// scheduled by scheduleConfigReloadRetry is due.
+func (cr *CityRuntime) configReloadRetryDue(p *tickPass) bool {
+	if p.trigger != "patrol" || cr.reloadRetryAt.IsZero() || p.dirty == nil || p.dirty.Load() {
+		return false
+	}
+	return !cr.configReloadRetryClock().Before(cr.reloadRetryAt)
+}
+
+// scheduleConfigReloadRetry records a tick reload's outcome for the patrol
+// retry. A reload that applied or found no change clears the retry. Any
+// other outcome schedules one: a reload that was not itself a retry (a real
+// edit, an API write, a manual reload) starts the backoff at one patrol
+// interval, and each failed retry doubles it up to
+// maxConfigReloadRetryBackoff. The failure is not classified: a reload that
+// cannot succeed costs only the capped retries.
+func (cr *CityRuntime) scheduleConfigReloadRetry(outcome reloadOutcome, retrying bool) {
+	if outcome == reloadOutcomeApplied || outcome == reloadOutcomeNoChange {
+		cr.reloadRetryAt, cr.reloadRetryBackoff = time.Time{}, 0
+		return
+	}
+	floor := cr.cfg.Daemon.PatrolIntervalDuration()
+	if floor <= 0 {
+		floor = time.Second
+	}
+	ceiling := maxConfigReloadRetryBackoff
+	if ceiling < floor {
+		ceiling = floor
+	}
+	switch {
+	case !retrying || cr.reloadRetryBackoff <= 0:
+		cr.reloadRetryBackoff = floor
+	case cr.reloadRetryBackoff < ceiling:
+		cr.reloadRetryBackoff = min(2*cr.reloadRetryBackoff, ceiling)
+	}
+	cr.reloadRetryAt = cr.configReloadRetryClock().Add(cr.reloadRetryBackoff)
+}
+
+func (cr *CityRuntime) configReloadRetryClock() time.Time {
+	if cr.reloadRetryNow != nil {
+		return cr.reloadRetryNow()
+	}
+	return time.Now()
 }
 
 // settleConfigWatchTick turns a tick only the config watcher asked for into a
