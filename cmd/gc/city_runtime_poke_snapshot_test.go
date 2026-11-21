@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -290,6 +293,114 @@ func TestPatrolTickTrigger(t *testing.T) {
 	}
 }
 
+// TestConfigWatchTickTrigger pins the trigger a config-watcher wake runs: its
+// own, unless a poke is pending, which then rides along as a plain poke tick.
+func TestConfigWatchTickTrigger(t *testing.T) {
+	tests := []struct {
+		name string
+		arm  func(pokeDB *tickDebouncer)
+		want string
+	}{
+		{name: "nothing pending", arm: func(*tickDebouncer) {}, want: configWatchTrigger},
+		{name: "queued poke fire", arm: func(p *tickDebouncer) { p.arm(0) }, want: "poke"},
+		{name: "debouncing poke", arm: func(p *tickDebouncer) { p.arm(time.Hour) }, want: "poke"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pokeDB := newTickDebouncer()
+			tt.arm(pokeDB)
+			if got := configWatchTickTrigger(pokeDB); got != tt.want {
+				t.Fatalf("configWatchTickTrigger = %q, want %q", got, tt.want)
+			}
+			if pokeDB.cancelPending() {
+				t.Fatal("configWatchTickTrigger left a poke fire pending")
+			}
+		})
+	}
+}
+
+// TestSettleConfigWatchTick pins that a tick only the config watcher asked
+// for runs as a patrol tick when its reload found nothing to do, and stays a
+// poke tick when the reload applied, failed or was a manual one.
+func TestSettleConfigWatchTick(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		watchOnly       bool
+		configChanged   bool
+		outcome         reloadOutcome
+		manual          bool
+		wantTrigger     string
+		wantChanged     bool
+		wantWatchMarked bool
+	}{
+		{name: "no change", watchOnly: true, configChanged: true, outcome: reloadOutcomeNoChange, wantTrigger: "patrol"},
+		{name: "no reload due", watchOnly: true, wantTrigger: "patrol"},
+		{name: "applied", watchOnly: true, configChanged: true, outcome: reloadOutcomeApplied, wantTrigger: "poke", wantChanged: true, wantWatchMarked: true},
+		{name: "failed", watchOnly: true, configChanged: true, outcome: reloadOutcomeFailed, wantTrigger: "poke", wantChanged: true, wantWatchMarked: true},
+		{name: "manual reload", watchOnly: true, configChanged: true, outcome: reloadOutcomeNoChange, manual: true, wantTrigger: "poke", wantChanged: true, wantWatchMarked: true},
+		{name: "poke tick", configChanged: true, outcome: reloadOutcomeNoChange, wantTrigger: "poke", wantChanged: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &tickPass{trigger: "poke", configWatchOnly: tc.watchOnly, configChanged: tc.configChanged}
+			p.manualReply.Outcome = tc.outcome
+			if tc.manual {
+				p.manualReload = &reloadRequest{}
+			}
+			p.settleConfigWatchTick()
+			if p.trigger != tc.wantTrigger || p.configChanged != tc.wantChanged || p.configWatchOnly != tc.wantWatchMarked {
+				t.Fatalf("settled tick = (trigger %q, configChanged %v, configWatchOnly %v), want (%q, %v, %v)",
+					p.trigger, p.configChanged, p.configWatchOnly, tc.wantTrigger, tc.wantChanged, tc.wantWatchMarked)
+			}
+		})
+	}
+}
+
+// TestConfigWatchTickReadsLikePatrolWhenNothingToReload drives the real tick:
+// a config-watch tick with no reload due reads sessions from the cache, as a
+// patrol tick does, so it does not pay a poke's live read; a poke tick still
+// does.
+func TestConfigWatchTickReadsLikePatrolWhenNothingToReload(t *testing.T) {
+	backing := &listCountingStore{Store: beads.NewMemStore()}
+	cr := newPokeSnapshotRuntime(t, backing)
+	cr.cityPath = t.TempDir()
+	cr.sp = runtime.NewFake()
+	var (
+		mu    sync.Mutex
+		built []*sessionBeadSnapshot
+	)
+	cr.buildFnWithSessionBeads = func(_ *config.City, _ runtime.Provider, _ beads.Store, _ map[string]beads.Store, snap *sessionBeadSnapshot, _ *sessionReconcilerTraceCycle) DesiredStateResult {
+		mu.Lock()
+		built = append(built, snap)
+		mu.Unlock()
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+	id := createSessionBeadOutOfProcess(t, backing)
+	sawSession := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		saw := false
+		for _, snap := range built {
+			saw = saw || snapshotHasSession(snap, id)
+		}
+		built = nil
+		return saw
+	}
+
+	var dirty atomic.Bool
+	var lastProviderName string
+	var prevPoolRunning map[string]bool
+	ctx := context.Background()
+
+	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, configWatchTrigger)
+	if sawSession() {
+		t.Fatalf("config-watch tick with no reload due saw %s; want the cached read a patrol tick makes", id)
+	}
+	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "poke")
+	if !sawSession() {
+		t.Fatalf("poke tick did not see session %s written by another process", id)
+	}
+}
+
 // The run loop's patrol case itself (mc-03yxh). With a 1h
 // tick_debounce a poke stays pending (debouncing) when the 50ms patrol fires,
 // so only a patrol that runs the poke's tick reads sessions live and sees the
@@ -369,5 +480,130 @@ func TestRunLoopPatrolOverDebouncingPokeSeesOutOfProcessCreate(t *testing.T) {
 			t.Fatalf("after 5s (%d builds, patrol every 50ms) no tick saw session %s: the patrol dropped the debouncing poke", n, id)
 		case <-time.After(10 * time.Millisecond):
 		}
+	}
+}
+
+// sessionListCountingStore counts the session-bead lists that reach the store
+// under the controller's CachingStore: the live session read a poke tick
+// makes (the type leg and the label leg).
+type sessionListCountingStore struct {
+	beads.Store
+	mu    sync.Mutex
+	lists int
+}
+
+func (s *sessionListCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Type == sessionpkg.BeadType || query.Label == sessionpkg.LabelSession {
+		s.mu.Lock()
+		s.lists++
+		s.mu.Unlock()
+	}
+	return s.Store.List(query)
+}
+
+func (s *sessionListCountingStore) takeLists() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := s.lists
+	s.lists = 0
+	return n
+}
+
+// configWatchTicksCompleted counts the completed ticks the config watcher
+// alone started (controller.tick_completed with phase config-watch).
+func configWatchTicksCompleted(t *testing.T, rec *events.Fake) int {
+	t.Helper()
+	evts, err := rec.List(events.Filter{Type: events.ControllerTickCompleted})
+	if err != nil {
+		t.Fatalf("list tick events: %v", err)
+	}
+	n := 0
+	for _, e := range evts {
+		var p events.ControllerTickCompletedPayload
+		if json.Unmarshal(e.Payload, &p) == nil && p.Phase == configWatchTrigger {
+			n++
+		}
+	}
+	return n
+}
+
+// TestRunLoopConfigWatchArm drives the run loop's configWatchCh arm end to end
+// (vp-h1jgt). With the patrol an hour away and no socket reload, an edit on
+// disk reaches the watcher's own channel and is applied, and a watcher event
+// whose reload finds no change runs as a patrol tick, with no live session
+// read.
+func TestRunLoopConfigWatchArm(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	appendToFile(t, tomlPath, "\n[daemon]\npatrol_interval = \"1h\"\n")
+	cfg, prov, err := config.LoadWithIncludes(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	backing := &sessionListCountingStore{Store: beads.NewMemStore()}
+	sp := runtime.NewFake()
+	rec := events.NewFake()
+	stdout := newSyncBuffer()
+	ready := make(chan struct{})
+	var readyOnce sync.Once
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath: cityPath, CityName: "test-city", TomlPath: tomlPath, Cfg: cfg, SP: sp,
+		WatchTargets:   config.WatchTargets(prov, cfg, cityPath),
+		ConfigRev:      config.Revision(osFS{}, prov, cfg, cityPath),
+		ConfigDebounce: testConfigDebounce,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:      newDrainOps(sp),
+		Rec:       rec,
+		OnStarted: func() { readyOnce.Do(func() { close(ready) }) },
+		Stdout:    stdout,
+		Stderr:    io.Discard,
+	})
+	stubReloadBeadsLifecycle(t, func(string, string, *config.City, cityStoreRecord, io.Writer) error { return nil })
+	cr.od = &recordingOrderDispatcher{}
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = primeTestCache(t, backing)
+	cr.setControllerState(cs)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		cr.run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	awaitClose(t, ready, "readiness")
+
+	awaitWatchTicks := func(what string, want int) {
+		t.Helper()
+		awaitCond(t, func() bool { return configWatchTicksCompleted(t, rec) >= want }, what)
+	}
+
+	// An edit on disk is applied with no socket reload and no patrol.
+	before := configWatchTicksCompleted(t, rec)
+	appendToFile(t, tomlPath, "\n[orders]\nskip = [\"config-watch-arm\"]\n")
+	awaitCond(t, func() bool { return strings.Contains(stdout.String(), "Config reloaded") }, "the watcher-driven reload of the edited city.toml")
+	awaitWatchTicks("the config-watch tick that applied the edit", before+1)
+
+	// A watcher event whose reload finds no change runs as a patrol tick:
+	// no live session read. A touch fires the watcher without rewriting the
+	// file, so no tick can read it half-written.
+	reloads := strings.Count(stdout.String(), "Config reloaded")
+	before = configWatchTicksCompleted(t, rec)
+	backing.takeLists()
+	when := time.Now().Add(time.Minute)
+	if err := os.Chtimes(tomlPath, when, when); err != nil {
+		t.Fatal(err)
+	}
+	awaitWatchTicks("the config-watch tick for the touch", before+1)
+	if n := backing.takeLists(); n != 0 {
+		t.Fatalf("no-change config-watch tick made %d live session lists, want 0 (it must run as a patrol tick)", n)
+	}
+	if got := strings.Count(stdout.String(), "Config reloaded"); got != reloads {
+		t.Fatalf("touch applied a reload (%d -> %d \"Config reloaded\" lines); want no change", reloads, got)
 	}
 }

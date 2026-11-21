@@ -36,6 +36,7 @@ import (
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
+	"golang.org/x/sys/unix"
 )
 
 var (
@@ -795,10 +796,14 @@ func watchConfigTargets(targets []config.WatchTarget, debounceDelay time.Duratio
 		return func() {}
 	}
 	registrar := newConfigWatchRegistrar(watcher, stderr)
+	attrs := newConfigWatchAttrStamps()
+	for _, target := range targets {
+		attrs.seed(target.Path)
+	}
 
 	markDirty := func() {
 		dirty.Store(true)
-		wake.WakeMaintenance()
+		wake.WakeConfigWatch()
 	}
 
 	done := make(chan struct{})
@@ -858,6 +863,13 @@ func watchConfigTargets(targets []config.WatchTarget, debounceDelay time.Duratio
 				if shouldIgnoreConfigWatchEvent(event.Name) {
 					continue
 				}
+				if isChmodOnlyConfigWatchEvent(event.Op) {
+					if attrs.unchanged(event.Name) {
+						continue
+					}
+				} else {
+					attrs.record(event.Name)
+				}
 				if event.Op&(fsnotify.Create|fsnotify.Rename) != 0 {
 					if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
 						// Convention roots may appear after startup, and nested
@@ -895,6 +907,90 @@ func watchConfigTargets(targets []config.WatchTarget, debounceDelay time.Duratio
 			<-eventLoopDone
 		})
 	}
+}
+
+// isChmodOnlyConfigWatchEvent reports whether op is a bare attribute change,
+// the only op the watcher checks against configWatchAttrStamps before acting
+// on it. Chmod combined with Write, Create, Rename or Remove is a content
+// change and always counts.
+func isChmodOnlyConfigWatchEvent(op fsnotify.Op) bool {
+	return op == fsnotify.Chmod
+}
+
+// maxConfigWatchAttrStamps bounds configWatchAttrStamps. Past it the record
+// starts over, which costs at most one extra reload per path.
+const maxConfigWatchAttrStamps = 4096
+
+// configWatchAttrStamp is what a bare Chmod event is checked against: the
+// inode-change time moves on chmod, chown, truncate and utimes, and size,
+// mode, mtime and ownership catch a filesystem whose ctime does not.
+type configWatchAttrStamp struct {
+	ctime, mtime, size int64
+	mode, uid, gid     uint32
+}
+
+// configWatchAttrStamps remembers the last stamp the watcher saw per path, so
+// a bare Chmod event reloads only when the file's attributes really moved.
+// kqueue fires NOTE_ATTRIB on an unchanged file whenever something pages it
+// in, which changes none of them, while a truncate with no later write, or a
+// file turned readable by chmod or chown, arrives as Chmod alone and does
+// change what gc loads (config.Revision skips unreadable files). It is used
+// only by the watcher's event-loop goroutine after seeding, so it holds no
+// lock.
+type configWatchAttrStamps struct {
+	seen map[string]configWatchAttrStamp
+}
+
+func newConfigWatchAttrStamps() *configWatchAttrStamps {
+	return &configWatchAttrStamps{seen: make(map[string]configWatchAttrStamp)}
+}
+
+func statConfigWatchAttrStamp(path string) (configWatchAttrStamp, bool) {
+	var st unix.Stat_t
+	if err := unix.Stat(path, &st); err != nil {
+		return configWatchAttrStamp{}, false
+	}
+	return configWatchAttrStamp{ctime: st.Ctim.Nano(), mtime: st.Mtim.Nano(), size: st.Size, mode: uint32(st.Mode), uid: st.Uid, gid: st.Gid}, true
+}
+
+// seed records path, and the regular files directly in it when it is a
+// directory, so the first bare Chmod after the watch starts has a stamp to
+// compare against.
+func (a *configWatchAttrStamps) seed(path string) {
+	a.record(path)
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.Type().IsRegular() {
+			a.record(filepath.Join(path, entry.Name()))
+		}
+	}
+}
+
+// record stores path's current stamp, or forgets path when it cannot be
+// stat'ed.
+func (a *configWatchAttrStamps) record(path string) {
+	stamp, ok := statConfigWatchAttrStamp(path)
+	if !ok {
+		delete(a.seen, path)
+		return
+	}
+	if _, known := a.seen[path]; !known && len(a.seen) >= maxConfigWatchAttrStamps {
+		clear(a.seen)
+	}
+	a.seen[path] = stamp
+}
+
+// unchanged reports whether path's stamp equals the one last recorded, and
+// records the current one. A path with no record, or one that cannot be
+// stat'ed, counts as changed.
+func (a *configWatchAttrStamps) unchanged(path string) bool {
+	prev, known := a.seen[path]
+	a.record(path)
+	cur, ok := a.seen[path]
+	return known && ok && prev == cur
 }
 
 func shouldIgnoreConfigWatchEvent(path string) bool {
