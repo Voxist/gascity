@@ -67,7 +67,7 @@ func TestLifecycleInputConstructorsProjectIdentically(t *testing.T) {
 				"pin_awake":                 "true",
 				"wake_request":              "explicit",
 			},
-			runtime: RuntimeFacts{Observed: true, Alive: false},
+			runtime: Observed(false, false, false),
 		},
 		{
 			name:   "creating stale with pending create claim and last woke",
@@ -78,7 +78,7 @@ func TestLifecycleInputConstructorsProjectIdentically(t *testing.T) {
 				"pending_create_claim": "true",
 				"last_woke_at":         now.Add(-2 * time.Minute).Format(time.RFC3339),
 			},
-			runtime:            RuntimeFacts{Observed: true, Alive: false},
+			runtime:            Observed(false, false, false),
 			createdAt:          now.Add(-2 * time.Minute),
 			staleCreatingAfter: time.Minute,
 		},
@@ -89,7 +89,7 @@ func TestLifecycleInputConstructorsProjectIdentically(t *testing.T) {
 				"state":                     "creating",
 				"pending_create_started_at": now.Add(-10 * time.Second).Format(time.RFC3339),
 			},
-			runtime:            RuntimeFacts{Observed: true, Alive: false},
+			runtime:            Observed(false, false, false),
 			createdAt:          now.Add(-2 * time.Minute),
 			staleCreatingAfter: time.Minute,
 		},
@@ -146,7 +146,7 @@ func TestLifecycleInputConstructorsProjectIdentically(t *testing.T) {
 				"session_key":         "old-conv",
 				"started_config_hash": "old-hash",
 			},
-			runtime: RuntimeFacts{Observed: true, Alive: false},
+			runtime: Observed(false, false, false),
 		},
 		{
 			name:   "keys present but empty strings",
@@ -176,7 +176,7 @@ func TestLifecycleInputConstructorsProjectIdentically(t *testing.T) {
 				"pin_awake":            " true ",
 				"wake_request":         " explicit ",
 			},
-			runtime: RuntimeFacts{Observed: true, Alive: false},
+			runtime: Observed(false, false, false),
 		},
 	}
 

@@ -235,11 +235,7 @@ func pendingInteractionHoldInfo(info sessionpkg.Info, sp runtime.Provider, name 
 		now = clk.Now()
 	}
 	lcInput := sessionpkg.LifecycleInputFromInfo(info)
-	lcInput.Runtime = sessionpkg.RuntimeFacts{
-		Observed: true,
-		Alive:    true,
-		Pending:  true,
-	}
+	lcInput.Runtime = sessionpkg.Observed(true, false, true)
 	lcInput.Now = now
 	view := sessionpkg.ProjectLifecycle(lcInput)
 	if view.HasBlocker(sessionpkg.BlockerHeld) || view.HasBlocker(sessionpkg.BlockerQuarantined) {

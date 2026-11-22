@@ -23,6 +23,10 @@ func TestCreatingWedgesWhenRuntimeUnobserved(t *testing.T) {
 	longAgo := now.Add(-12 * 24 * time.Hour) // 12 days, matching gm-4l0p2
 
 	newInput := func(observed bool) LifecycleInput {
+		runtime := NotObserved("test: runtime never probed")
+		if observed {
+			runtime = Observed(false, false, false)
+		}
 		return LifecycleInput{
 			Status:                 "open",
 			StoredState:            string(StateCreating),
@@ -30,7 +34,7 @@ func TestCreatingWedgesWhenRuntimeUnobserved(t *testing.T) {
 			CreatedAt:              longAgo,
 			StaleCreatingAfter:     time.Minute,
 			Now:                    now,
-			Runtime:                RuntimeFacts{Observed: observed, Alive: false},
+			Runtime:                runtime,
 		}
 	}
 
@@ -70,7 +74,7 @@ func TestCreatingWedgesWhenRuntimeUnobserved(t *testing.T) {
 			CreatedAt:              recent,
 			StaleCreatingAfter:     time.Minute,
 			Now:                    now,
-			Runtime:                RuntimeFacts{Observed: false, Alive: false},
+			Runtime:                NotObserved("test: not observed"),
 		})
 		t.Logf("observed=false, age=1m -> RuntimeProjection=%q ReconciledState=%q CountsAgainstCap=%v",
 			got.RuntimeProjection, got.ReconciledState, got.CountsAgainstCap)
@@ -102,7 +106,7 @@ func TestCreatingStaleDetectionIgnoresPendingCreateClaim(t *testing.T) {
 			CreatedAt:              longAgo,
 			StaleCreatingAfter:     time.Minute,
 			Now:                    now,
-			Runtime:                RuntimeFacts{Observed: false, Alive: false},
+			Runtime:                NotObserved("test: not observed"),
 		}
 	}
 
@@ -135,7 +139,7 @@ func TestStaleCreatingAfterUnsetNeverGoesStale(t *testing.T) {
 		CreatedAt:              longAgo,
 		// StaleCreatingAfter deliberately unset (zero).
 		Now:     now,
-		Runtime: RuntimeFacts{Observed: true, Alive: false},
+		Runtime: Observed(false, false, false),
 	})
 
 	t.Logf("StaleCreatingAfter=0, observed=true -> RuntimeProjection=%q ReconciledState=%q CountsAgainstCap=%v",
