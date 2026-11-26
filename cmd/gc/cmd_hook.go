@@ -1177,7 +1177,7 @@ func selectStoreWithWorkRetrying(workQuery string, stores []hookStore, primary h
 // ADR-0076 ranking add-ons in opt forwarded to every bestStoreWithWorkRanked
 // attempt unchanged.
 func selectStoreWithWorkRetryingRanked(workQuery string, stores []hookStore, primary hookStore, run hookStoreRunner, ops *hookClaimOps, opt hookStoreRankOptions, noted ...hookStoreFailureNote) (string, hookStore, error) {
-	out, selected, err := bestStoreWithWorkRanked(workQuery, stores, primary, run, opt, noted...)
+	out, selected, err := bestStoreWithWorkRanked(workQuery, stores, primary, concurrentHookStoreRunner(workQuery, stores, primary, run, time.Now()), opt, noted...)
 	for attempt := 0; err != nil && attempt < hookClaimQueryRetryAttempts; attempt++ {
 		if ops.claimWindowSpentAfter(hookClaimQueryRetryInterval) {
 			return out, selected, hookClaimRetryWindowClosed(err, ops)
@@ -1186,7 +1186,7 @@ func selectStoreWithWorkRetryingRanked(workQuery string, stores []hookStore, pri
 		if ops.claimWindowSpentAfter(0) {
 			return out, selected, hookClaimRetryWindowClosed(err, ops)
 		}
-		out, selected, err = bestStoreWithWorkRanked(workQuery, stores, primary, run, opt, noted...)
+		out, selected, err = bestStoreWithWorkRanked(workQuery, stores, primary, concurrentHookStoreRunner(workQuery, stores, primary, run, time.Now()), opt, noted...)
 	}
 	return out, selected, err
 }
@@ -1662,7 +1662,8 @@ func hookDiscoveryRunner(stores []hookStore, run hookStoreRunner, visibility hoo
 				// one that produced the answer, not a sum over dropped ones.
 				rank.Stats = &hookSelectionStats{}
 			}
-			out, selected, err := bestStoreWithWorkRanked(command, remaining, stores[0], run, rank, report.note)
+			fanOutRun := concurrentHookStoreRunner(command, remaining, stores[0], run, time.Now())
+			out, selected, err := bestStoreWithWorkRanked(command, remaining, stores[0], fanOutRun, rank, report.note)
 			report.failed(command, err)
 			if err != nil || isZeroHookStore(selected) || len(remaining) == 1 || workQueryHasReadyWork(hookListing(out, time.Now(), visibility)) {
 				if rank.Stats != nil {
@@ -2102,11 +2103,20 @@ const hookWorkQueryDiagPrefix = "gc hook: work_query (exit 0) stderr: "
 // federated hook runs the same query against every store in the set, and an
 // origin-gate refusal is a property of the session rather than of any one
 // store — without this it would be repeated once per store.
+//
+// seen and diag are guarded by mu: concurrentHookStoreRunner (vp-34cpm) calls
+// this runner from several goroutines at once for the federated fan-out, so
+// the dedup map and the shared diagnostic writer both need it — a plain map
+// write or two interleaved Fprintln calls from concurrent goroutines would
+// otherwise race or garble the diagnostic output.
 func hookWorkQueryRunner(diag io.Writer) hookStoreRunner {
 	seen := make(map[string]bool)
+	var mu sync.Mutex
 	return func(command, dir string, env []string) (string, error) {
 		var captured bytes.Buffer
 		out, err := shellWorkQueryWithEnvDiag(command, dir, env, &captured)
+		mu.Lock()
+		defer mu.Unlock()
 		for _, line := range strings.Split(captured.String(), "\n") {
 			line = strings.TrimSpace(line)
 			if line == "" || seen[line] {
