@@ -1,0 +1,160 @@
+file	lineno	test	ident	original_expr	original_ns	shrunk_ns	verdict	detail	elapsed_s
+cmd/gc/bd_inventory_trust_test.go	426	TestBdTrustWalkKillsAHungBd	bdWalkCommandTimeout	500 * time.Millisecond	500000000	25000000	NOT_FRAGILE	ok	55.7
+cmd/gc/city_runtime_test.go	7764	TestCityRuntimeReloadAcceptNotBlockedBySlowTick	controllerReloadAcceptTimeout	200 * time.Millisecond	200000000	10000000	NOT_FRAGILE	ok	69.4
+cmd/gc/city_status_snapshot_test.go	155	TestLoadStatusSessionSnapshotTimesOut	statusSessionSnapshotTimeout	20 * time.Millisecond	20000000	1000000	NOT_FRAGILE	ok	83.2
+cmd/gc/city_status_snapshot_test.go	237	NO_OWNING_TEST:helper=assertStatusSnapshotKillsBdChild	statusSessionSnapshotTimeout	200 * time.Millisecond	200000000	-	SKIPPED_NO_OWNING_TEST	NO_OWNING_TEST:helper=assertStatusSnapshotKillsBdChild	0.0
+cmd/gc/city_status_unknown_not_absent_test.go	38	NO_OWNING_TEST:helper=partialFromInjectedProbeTimeout	statusProviderCallTimeout	10 * time.Millisecond	10000000	-	SKIPPED_NO_OWNING_TEST	NO_OWNING_TEST:helper=partialFromInjectedProbeTimeout	0.0
+cmd/gc/cmd_bd_show_watch_test.go	308	TestGcBdShowWatchIsServedByGCOnProxiedScope	bdShowWatchInterval	20 * time.Millisecond	20000000	1000000	NOT_FRAGILE	ok	82.9
+cmd/gc/cmd_citystatus_test.go	146	TestCityStatusObservationTimesOut	statusObservationTimeout	20 * time.Millisecond	20000000	1000000	NOT_FRAGILE	ok	75.3
+cmd/gc/cmd_citystatus_test.go	1536	TestCityStatusPartialRuntimeProbeDoesNotRenderAuthoritativeStopped	statusProviderCallTimeout	10 * time.Millisecond	10000000	500000	NOT_FRAGILE	ok	55.4
+cmd/gc/cmd_convoy_dispatch_test.go	8042	TestRunWorkflowServeFollowUsesSweepFallback	workflowServeWakeSweepInterval	time.Millisecond	1000000	50000	NOT_FRAGILE	ok	69.4
+cmd/gc/cmd_hook_test.go	103	TestShellWorkQueryTimeoutClassifiesTransient	hookWorkQueryTimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	54.8
+cmd/gc/cmd_hook_test.go	1441	TestShellWorkQueryWithEnvTimeoutReportsPartialOutput	hookWorkQueryTimeout	200 * time.Millisecond	200000000	10000000	NOT_FRAGILE	ok	49.8
+cmd/gc/cmd_hook_test.go	2441	TestShellWorkQueryTimesOutPromptly	hookWorkQueryTimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	53.3
+cmd/gc/cmd_hook_unavailable_test.go	527	TestHookCommandJSONFailurePointsAtStderrOnExitTwo	hookClaimQueryRetryInterval	time.Nanosecond	1	1	NOT_FRAGILE	ok	55.0
+cmd/gc/cmd_hook_unavailable_test.go	573	TestHookCommandRendersWorkQueryTimeoutAsExitTwo	hookWorkQueryTimeout	200 * time.Millisecond	200000000	10000000	NOT_FRAGILE	ok	59.7
+cmd/gc/cmd_hook_unavailable_test.go	601	TestHookCommandRendersDefaultWorkQueryTimeoutAsExitTwo	hookWorkQueryTimeout	500 * time.Millisecond	500000000	25000000	NOT_FRAGILE	ok	28.8
+cmd/gc/cmd_reload_test.go	437	TestHandleReloadSocketCmdBusyOnAcceptTimeout	controllerReloadAcceptTimeout	20 * time.Millisecond	20000000	1000000	NOT_FRAGILE	ok	103.0
+cmd/gc/cmd_reload_test.go	471	TestHandleReloadSocketCmdWaitsForAcceptedAfterHandoff	controllerReloadAcceptTimeout	200 * time.Millisecond	200000000	10000000	INCONCLUSIVE_TIMEOUT	go test exceeded 180s (process group killed)	180.0
+cmd/gc/cmd_reload_test.go	526	TestReloadControlReadTimeoutWaitIncludesRequestedTimeout	controllerReloadAcceptTimeout	20 * time.Millisecond	20000000	1000000	NOT_FRAGILE	ok	106.4
+cmd/gc/cmd_start_drift_test.go	307	NO_OWNING_TEST:helper=shrinkDriftReadyTimeout	driftReadyTimeout	300 * time.Millisecond	300000000	-	SKIPPED_NO_OWNING_TEST	NO_OWNING_TEST:helper=shrinkDriftReadyTimeout	0.0
+cmd/gc/cmd_stop_confirm_test.go	163	TestConfirmControllerStopGivesTheFinalListingAPollIntervalToAnswer	stopVerifyPollInterval	250 * time.Millisecond	250000000	12500000	FRAGILE	FAIL confirmed 3/3 runs	29.9
+cmd/gc/cmd_supervisor_portcollision_test.go	163	TestSupervisorRespondingGCSupervisor	supervisorHealthProbeTimeout	100 * time.Millisecond	100000000	5000000	NOT_FRAGILE	ok	137.6
+cmd/gc/cmd_supervisor_test.go	1713	TestInstallSupervisorSystemdWarmRefreshFallsBackToKillWhenGracefulSignalDoesNotStop	supervisorSystemdWarmRefreshStopTimeout	time.Millisecond	1000000	50000	NOT_FRAGILE	ok	118.4
+cmd/gc/cmd_supervisor_test.go	1714	TestInstallSupervisorSystemdWarmRefreshFallsBackToKillWhenGracefulSignalDoesNotStop	supervisorSystemdWarmRefreshPollInterval	time.Millisecond	1000000	50000	NOT_FRAGILE	ok	81.5
+cmd/gc/cmd_supervisor_test.go	2659	TestUnloadSupervisorServiceDarwinWaitsThroughSIGTERMedUntilAbsent	supervisorLaunchdStopPollInterval	time.Millisecond	1000000	50000	NOT_FRAGILE	ok	118.7
+cmd/gc/cmd_supervisor_test.go	2714	TestUnloadSupervisorServiceDarwinFailsWhenTargetStillLoaded	supervisorLaunchdStopTimeout	5 * time.Millisecond	5000000	250000	NOT_FRAGILE	ok	104.7
+cmd/gc/cmd_supervisor_test.go	2715	TestUnloadSupervisorServiceDarwinFailsWhenTargetStillLoaded	supervisorLaunchdStopPollInterval	time.Millisecond	1000000	50000	NOT_FRAGILE	ok	74.4
+cmd/gc/cmd_supervisor_test.go	2765	TestVerifySupervisorServiceStoppedDarwinFailsWhenAbsenceUnconfirmed	supervisorLaunchdStopTimeout	5 * time.Millisecond	5000000	250000	NOT_FRAGILE	ok	65.1
+cmd/gc/cmd_supervisor_test.go	2766	TestVerifySupervisorServiceStoppedDarwinFailsWhenAbsenceUnconfirmed	supervisorLaunchdStopPollInterval	time.Millisecond	1000000	50000	NOT_FRAGILE	ok	89.7
+cmd/gc/cmd_supervisor_test.go	2813	TestVerifySupervisorServiceStoppedDarwinHonorsShorterCallerDeadline	supervisorLaunchdStopPollInterval	time.Millisecond	1000000	50000	NOT_FRAGILE	ok	72.5
+cmd/gc/cmd_supervisor_test.go	4677	TestWaitForSupervisorReadyUsesHookedTimeout	supervisorReadyTimeout	25 * time.Millisecond	25000000	1250000	FRAGILE	FAIL confirmed 3/3 runs	89.2
+cmd/gc/cmd_supervisor_test.go	4678	TestWaitForSupervisorReadyUsesHookedTimeout	supervisorReadyPollInterval	time.Millisecond	1000000	50000	NOT_FRAGILE	ok	69.2
+cmd/gc/cmd_supervisor_test.go	4700	TestWaitForSupervisorReadySucceedsWhenAlreadyReadyEvenWithZeroTimeout	supervisorReadyPollInterval	time.Millisecond	1000000	50000	NOT_FRAGILE	ok	71.8
+cmd/gc/cmd_supervisor_test.go	4747	TestDoSupervisorStartAlreadyRunning	supervisorReadyTimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	107.3
+cmd/gc/cmd_supervisor_test.go	7905	TestWaitForStartedSupervisorReportsAnEarlyExitAtOnce	supervisorReadyPollInterval	time.Millisecond	1000000	50000	NOT_FRAGILE	ok	93.7
+cmd/gc/cmd_supervisor_test.go	7944	TestWaitForStartedSupervisorReportsAReadySupervisor	supervisorReadyPollInterval	time.Millisecond	1000000	50000	NOT_FRAGILE	ok	55.3
+cmd/gc/cmd_supervisor_test.go	7972	TestWaitForStartedSupervisorWaitsForAConcurrentInstance	supervisorReadyPollInterval	time.Millisecond	1000000	50000	NOT_FRAGILE	ok	63.0
+cmd/gc/dolt_cleanup_drop_test.go	539	TestProbeLiveSessions_TimesOut	cleanupLiveSessionProbeTimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	73.3
+cmd/gc/dolt_sql_health_test.go	433	TestRunManagedDoltSQLTimesOut	managedDoltSQLCommandTimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	57.6
+cmd/gc/dolt_start_managed_test.go	496	TestReadManagedDoltTestWatchdogPIDTimeoutUnblocksReaderAfterClose	managedDoltTestWatchdogPIDTimeout	10 * time.Millisecond	10000000	500000	NOT_FRAGILE	ok	69.4
+cmd/gc/effective_api_url_test.go	49	TestDiscoverReachableSupervisorAPIBaseURLTimeout	effectiveAPIProbeTimeout	10 * time.Millisecond	10000000	500000	NOT_FRAGILE	ok	56.4
+cmd/gc/exec_runtime_readiness_test.go	238	TestExecAdmissionProbeIsBoundedAndShared	execReadinessProbeTimeout	300 * time.Millisecond	300000000	15000000	NOT_FRAGILE	ok	61.6
+cmd/gc/hook_claim_failure_honesty_test.go	137	NO_OWNING_TEST:helper=withFastClaimRetries	hookClaimQueryRetryInterval	time.Nanosecond	1	-	SKIPPED_NO_OWNING_TEST	NO_OWNING_TEST:helper=withFastClaimRetries	0.0
+cmd/gc/order_dispatch_gate_policy_test.go	81	TestOrderDispatchIdempotentFailsOpenOnGateTimeout	orderGateTimeout	20 * time.Millisecond	20000000	1000000	NOT_FRAGILE	ok	79.0
+cmd/gc/order_dispatch_gate_policy_test.go	339	TestOrderDispatchGateTimeoutBackoffPreventsRethrash	orderGateTimeout	20 * time.Millisecond	20000000	1000000	NOT_FRAGILE	ok	92.0
+cmd/gc/order_dispatch_gate_policy_test.go	457	TestOrderDispatchEventTriggeredBackoffOnTrackingGateTimeout	orderGateTimeout	20 * time.Millisecond	20000000	1000000	NOT_FRAGILE	ok	68.6
+cmd/gc/order_dispatch_gate_policy_test.go	511	TestOrderDispatchNonIdempotentBackoffOnOpenTrackingTimeout	orderGateTimeout	20 * time.Millisecond	20000000	1000000	NOT_FRAGILE	ok	62.0
+cmd/gc/order_dispatch_gate_policy_test.go	598	TestOrderDispatchNoWorkGateSkipsGatesUnderStoreDelay	orderGateTimeout	20 * time.Millisecond	20000000	1000000	NOT_FRAGILE	ok	72.0
+cmd/gc/order_dynamic_integration_test.go	25	TestControllerDiscoversAddedCronOrderWithoutRestart	orderRescanInterval	20 * time.Millisecond	20000000	1000000	NOT_FRAGILE	ok	19.2
+cmd/gc/path_helpers_test.go	53	NO_OWNING_TEST:package-level	doltLeakGuardGraceInitialInterval	250 * time.Millisecond	250000000	-	SKIPPED_NO_OWNING_TEST	NO_OWNING_TEST:package-level	0.0
+cmd/gc/path_helpers_test.go	611	NO_OWNING_TEST:helper=reapDoltLeakProcesses	doltLeakReapPollInterval	20 * time.Millisecond	20000000	-	SKIPPED_NO_OWNING_TEST	NO_OWNING_TEST:helper=reapDoltLeakProcesses	0.0
+cmd/gc/path_helpers_test.go	715	NO_OWNING_TEST:helper=processNeverAlive	scriptedDoltLeakReapPollInterval	5 * time.Millisecond	5000000	-	SKIPPED_NO_OWNING_TEST	NO_OWNING_TEST:helper=processNeverAlive	0.0
+cmd/gc/path_helpers_test.go	716	NO_OWNING_TEST:helper=processNeverAlive	scriptedDoltLeakReapDeadline	200 * time.Millisecond	200000000	-	SKIPPED_NO_OWNING_TEST	NO_OWNING_TEST:helper=processNeverAlive	0.0
+cmd/gc/ready_work_api_test.go	1126	TestReadyFallsBackWhenTheControllerHangs	readyAPITimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	58.5
+cmd/gc/session_reconciler_test.go	1536	TestQueueDrainAckAsyncStopConfirmsRuntimeDead	drainAckStopConfirmDeadTimeout	300 * time.Millisecond	300000000	15000000	NOT_FRAGILE	ok	52.4
+cmd/gc/session_reconciler_test.go	1686	TestFinalizeDrainAckStopPendingSessionsConfirmsProcessNameSurvivor	drainAckStopConfirmDeadTimeout	200 * time.Millisecond	200000000	10000000	NOT_FRAGILE	ok	43.1
+cmd/gc/session_reconciler_test.go	1769	TestConfirmDrainAckRuntimeDeadTokenFenceStopsOnReplacement	drainAckStopConfirmDeadTimeout	300 * time.Millisecond	300000000	15000000	NOT_FRAGILE	ok	65.7
+cmd/gc/status_provider_test.go	54	TestStatusProviderTimeoutDoesNotStickAcrossCalls	statusProviderCallTimeout	10 * time.Millisecond	10000000	500000	NOT_FRAGILE	ok	63.2
+cmd/gc/status_provider_test.go	84	TestStatusProviderServesLastKnownGoodOnTimeout	statusProviderCallTimeout	10 * time.Millisecond	10000000	500000	NOT_FRAGILE	ok	62.6
+cmd/gc/status_provider_test.go	127	TestStatusProviderLivenessTimeoutPreservesObservationUncertainty	statusProviderCallTimeout	10 * time.Millisecond	10000000	500000	NOT_FRAGILE	ok	58.8
+cmd/gc/status_provider_test.go	156	TestStatusProviderTimeoutMarksPartial	statusProviderCallTimeout	10 * time.Millisecond	10000000	500000	NOT_FRAGILE	ok	67.0
+cmd/gc/status_provider_test.go	223	TestStatusProviderAttachTimeoutIsUnavailable	statusProviderCallTimeout	10 * time.Millisecond	10000000	500000	NOT_FRAGILE	ok	42.3
+cmd/gc/supervisor_handoff_test.go	37	NO_OWNING_TEST:helper=stubSupervisorHandoff	supervisorReadyPollInterval	time.Millisecond	1000000	-	SKIPPED_NO_OWNING_TEST	NO_OWNING_TEST:helper=stubSupervisorHandoff	0.0
+cmd/gc/supervisor_handoff_test.go	81	TestAwaitSupervisorLockOrInstanceTimesOut	supervisorReadyTimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	91.4
+cmd/gc/supervisor_systemd_delegate_test.go	417	NO_OWNING_TEST:helper=delegatedStartFallbackEnv	supervisorReadyTimeout	50 * time.Millisecond	50000000	-	SKIPPED_NO_OWNING_TEST	NO_OWNING_TEST:helper=delegatedStartFallbackEnv	0.0
+cmd/gc/supervisor_systemd_delegate_test.go	556	TestSupervisorStartDelegatedBoundsSystemctl	delegatedSystemctlJobTimeout	300 * time.Millisecond	300000000	15000000	NOT_FRAGILE	ok	87.3
+cmd/gc/supervisor_systemd_delegate_test.go	563	TestSupervisorStartDelegatedBoundsSystemctl	supervisorReadyTimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	92.6
+cmd/gc/supervisor_systemd_delegate_test.go	594	TestSupervisorStartDelegatedTimeoutThenLateStartSucceeds	delegatedSystemctlJobTimeout	300 * time.Millisecond	300000000	15000000	NOT_FRAGILE	ok	10.7
+cmd/gc/supervisor_systemd_delegate_test.go	601	TestSupervisorStartDelegatedTimeoutThenLateStartSucceeds	supervisorReadyTimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	59.1
+cmd/gc/supervisor_systemd_delegate_test.go	629	TestDelegatedUnitActiveBoundsHangingProbe	delegatedIsActiveTimeout	300 * time.Millisecond	300000000	15000000	NOT_FRAGILE	ok	57.3
+cmd/gc/supervisor_systemd_delegate_test.go	657	TestSupervisorStartDelegatedTimeoutThenHangingIsActiveStaysBounded	delegatedSystemctlJobTimeout	300 * time.Millisecond	300000000	15000000	NOT_FRAGILE	ok	78.3
+cmd/gc/supervisor_systemd_delegate_test.go	660	TestSupervisorStartDelegatedTimeoutThenHangingIsActiveStaysBounded	delegatedIsActiveTimeout	300 * time.Millisecond	300000000	15000000	NOT_FRAGILE	ok	75.1
+cmd/gc/supervisor_systemd_delegate_test.go	667	TestSupervisorStartDelegatedTimeoutThenHangingIsActiveStaysBounded	supervisorReadyTimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	60.8
+cmd/gc/supervisor_systemd_delegate_test.go	698	TestEnsureSupervisorRunningDelegatedBoundsSystemctl	delegatedSystemctlJobTimeout	300 * time.Millisecond	300000000	15000000	NOT_FRAGILE	ok	59.2
+cmd/gc/supervisor_systemd_delegate_test.go	705	TestEnsureSupervisorRunningDelegatedBoundsSystemctl	supervisorReadyTimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	63.8
+cmd/gc/supervisor_systemd_delegate_test.go	736	TestEnsureSupervisorRunningDelegatedTimeoutThenLateStartSucceeds	delegatedSystemctlJobTimeout	300 * time.Millisecond	300000000	15000000	NOT_FRAGILE	ok	63.2
+cmd/gc/supervisor_systemd_delegate_test.go	743	TestEnsureSupervisorRunningDelegatedTimeoutThenLateStartSucceeds	supervisorReadyTimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	64.5
+cmd/gc/supervisor_systemd_delegate_test.go	883	TestSupervisorStopDelegatedUnmanagedSupervisorFails	delegatedStopVerifyTimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	70.5
+cmd/gc/supervisor_systemd_delegate_test.go	1020	TestEnsureSupervisorRunningDelegatedTimeoutPointsAtUnit	supervisorReadyTimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	53.6
+cmd/gc/supervisor_systemd_delegate_test.go	1053	TestEnsureSupervisorRunningDelegatedSocketUnreachableTrustsServiceManager	supervisorReadyTimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	48.9
+cmd/gc/supervisor_systemd_delegate_test.go	1691	TestRunStartDriftCheck_DelegatedTryRestartBoundsSystemctl	delegatedSystemctlJobTimeout	300 * time.Millisecond	300000000	15000000	NOT_FRAGILE	ok	56.0
+cmd/gc/supervisor_systemd_delegate_test.go	1734	TestRunStartDriftCheck_DelegatedTryRestartTimeoutThenReplacementSucceeds	delegatedSystemctlJobTimeout	300 * time.Millisecond	300000000	15000000	NOT_FRAGILE	ok	54.9
+cmd/gc/wisp_gc_round4_split_test.go	238	TestWorkArmHonoursItsDeadlineAndCtx	wispGCWorkArmWallBudget	time.Nanosecond	1	1	NOT_FRAGILE	ok	80.2
+cmd/gc/wisp_step_api_test.go	375	TestWispStepInjectionFallsBackOnAnyControllerFailure	activeWorkStepAPITimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	88.8
+cmd/gc/wisp_step_api_test.go	565	TestWispStepLookupIsBoundedWhileItsClientResolves	activeWorkStepAPITimeout	100 * time.Millisecond	100000000	5000000	NOT_FRAGILE	ok	47.1
+internal/api/dashboardbff/rundetail_grace_test.go	161	NO_OWNING_TEST:helper=graceTestPlane	runTailPollInterval	20 * time.Millisecond	20000000	-	SKIPPED_NO_OWNING_TEST	NO_OWNING_TEST:helper=graceTestPlane	0.0
+internal/api/dashboardbff/rundetail_grace_test.go	244	TestRunDetailWarmingDoesNotStartGraceClock	runTailPollInterval	20 * time.Millisecond	20000000	1000000	NOT_FRAGILE	ok	2.5
+internal/api/dashboardbff/rundetail_memo_test.go	81	TestRunDetailMemoRebuildsOnNewFoldGeneration	runTailPollInterval	15 * time.Millisecond	15000000	750000	NOT_FRAGILE	ok	2.8
+internal/api/dashboardbff/rundetail_memo_test.go	370	TestRunDetailNewGenerationRefolds	runTailPollInterval	15 * time.Millisecond	15000000	750000	NOT_FRAGILE	ok	3.4
+internal/api/dashboardbff/rundetail_session_push_test.go	29	TestFoldNextSessionEventRefreshesSessionsAndNotifies	runTailPollInterval	15 * time.Millisecond	15000000	750000	NOT_FRAGILE	ok	3.3
+internal/api/dashboardbff/rundetail_session_push_test.go	147	TestRunDetailStreamPushesFrameOnSessionAliasFlip	runTailPollInterval	15 * time.Millisecond	15000000	750000	NOT_FRAGILE	ok	4.4
+internal/api/dashboardbff/rundetail_stream_test.go	264	TestRunDetailStreamPushesOnRunMemberEvent	runTailPollInterval	15 * time.Millisecond	15000000	750000	NOT_FRAGILE	ok	3.9
+internal/api/dashboardbff/rundetail_stream_test.go	312	TestRunDetailStreamByteDedupeUnrelatedRun	runTailPollInterval	15 * time.Millisecond	15000000	750000	NOT_FRAGILE	ok	2.6
+internal/api/dashboardbff/runtailer_test.go	121	TestRunTailerColdLoadAndLiveTail	runTailPollInterval	15 * time.Millisecond	15000000	750000	NOT_FRAGILE	ok	3.7
+internal/api/dashboardbff/runtailer_test.go	245	TestRunTailerPrimeDoesNotBlockLiveTail	runTailPollInterval	15 * time.Millisecond	15000000	750000	NOT_FRAGILE	ok	4.0
+internal/api/effective_api_url_test.go	34	TestDiscoverReachableConfigSupervisorAPITimeout	configEffectiveAPIProbeTimeout	10 * time.Millisecond	10000000	500000	NOT_FRAGILE	ok	16.0
+internal/api/handler_mail_test.go	479	TestMailListRigStoreSlowReturnsTyped503	mailReadDeadline	5 * time.Millisecond	5000000	250000	NOT_FRAGILE	ok	13.9
+internal/api/handler_mail_test.go	498	TestMailCountRigStoreSlowReturnsTyped503	mailReadDeadline	5 * time.Millisecond	5000000	250000	NOT_FRAGILE	ok	17.4
+internal/api/handler_mail_test.go	517	TestMailGetRigStoreSlowReturnsTyped503	mailReadDeadline	5 * time.Millisecond	5000000	250000	NOT_FRAGILE	ok	12.6
+internal/api/handler_mail_test.go	690	TestMailListAllRigsStoreSlowAllFailedReturnsTyped503	mailReadDeadline	5 * time.Millisecond	5000000	250000	NOT_FRAGILE	ok	13.9
+internal/api/handler_mail_test.go	716	TestMailListAllStatusStoreSlowAllFailedReturnsTyped503	mailReadDeadline	5 * time.Millisecond	5000000	250000	NOT_FRAGILE	ok	14.6
+internal/api/handler_mail_test.go	742	TestMailCountAllRigsStoreSlowAllFailedReturnsTyped503	mailReadDeadline	5 * time.Millisecond	5000000	250000	NOT_FRAGILE	ok	16.4
+internal/api/handler_mail_test.go	762	TestMailThreadRigStoreSlowReturnsTyped503	mailReadDeadline	5 * time.Millisecond	5000000	250000	NOT_FRAGILE	ok	26.6
+internal/api/handler_mail_test.go	811	TestMailThreadAllRigsStoreSlowAllFailedReturnsTyped503	mailReadDeadline	5 * time.Millisecond	5000000	250000	NOT_FRAGILE	ok	17.1
+internal/api/handler_mail_test.go	839	TestClientMailListAllRigsMultipleStoreSlowReturnsTyped503BeforeClientTimeout	mailReadDeadline	100 * time.Millisecond	100000000	5000000	NOT_FRAGILE	ok	16.4
+internal/api/handler_sessions_test.go	5297	TestHandleSessionMessageSlowDeliveryFailureReportsRealError	sessionMessageAsyncTimeout	time.Nanosecond	1	1	NOT_FRAGILE	ok	12.3
+internal/api/handler_sessions_test.go	7708	TestHandleSessionStreamRawStallEmitsPendingWithoutTranscriptGrowth	sessionStreamPendingStallTimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	14.6
+internal/api/handler_sessions_test.go	7768	TestHandleSessionStreamRawStallEmitsPendingEventOnCityRoute	sessionStreamPendingStallTimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	13.8
+internal/api/handler_status_count_test.go	319	TestStatusStoreWorkCountsPreservesReadyWhenCounterTimesOut	statusStoreReadTimeout	200 * time.Millisecond	200000000	10000000	NOT_FRAGILE	ok	15.5
+internal/api/handler_status_count_test.go	342	TestStatusStoreWorkCountsBoundsContextIgnoringCounter	statusStoreReadTimeout	100 * time.Millisecond	100000000	5000000	NOT_FRAGILE	ok	15.2
+internal/api/handler_status_scoped_store_test.go	197	TestStatusSessionSnapshotKillsBdChildOnTimeout	statusStoreReadTimeout	200 * time.Millisecond	200000000	10000000	NOT_FRAGILE	ok	15.6
+internal/api/handler_status_scoped_store_test.go	310	TestStatusListStoreWithTimeoutCancelsCtxLister	statusStoreReadTimeout	200 * time.Millisecond	200000000	10000000	NOT_FRAGILE	ok	20.3
+internal/api/handler_status_scoped_store_test.go	346	TestStatusListStoreWithTimeoutAbandonFallbackBounded	statusStoreReadTimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	14.6
+internal/api/handler_status_scoped_store_test.go	427	TestStatusReadyStoreWithTimeoutRejectsContextBlindReady	statusStoreReadTimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	14.4
+internal/api/handler_status_scoped_store_test.go	503	TestStatusReadyStoreWithTimeoutWaitsForScopedResolutionCleanup	statusStoreReadTimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	17.6
+internal/api/handler_status_scoped_store_test.go	557	TestStatusStoreWorkCountsWaitsForReadyResolutionCleanup	statusStoreReadTimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	13.2
+internal/api/handler_status_scoped_store_test.go	615	TestStatusReadyStoreWithTimeoutBoundsSlowScopedStoreResolution	statusStoreReadTimeout	200 * time.Millisecond	200000000	10000000	NOT_FRAGILE	ok	15.4
+internal/api/handler_status_scoped_store_test.go	642	TestStatusListStoreWithTimeoutKillsBdChildOnTimeout	statusStoreReadTimeout	200 * time.Millisecond	200000000	10000000	NOT_FRAGILE	ok	13.2
+internal/api/handler_status_scoped_store_test.go	679	TestStatusReadyStoreWithTimeoutKillsBdChildOnTimeout	statusStoreReadTimeout	200 * time.Millisecond	200000000	10000000	NOT_FRAGILE	ok	24.3
+internal/api/handler_status_scoped_store_test.go	714	TestStatusSessionSnapshotBoundsSlowScopedStoreResolution	statusStoreReadTimeout	200 * time.Millisecond	200000000	10000000	NOT_FRAGILE	ok	27.4
+internal/api/handler_status_scoped_store_test.go	743	TestStatusListStoreWithTimeoutBoundsSlowScopedStoreResolution	statusStoreReadTimeout	200 * time.Millisecond	200000000	10000000	NOT_FRAGILE	ok	19.9
+internal/api/handler_status_test.go	358	TestHandleStatusDegradesWhenReadModelStoreStalls	statusStoreReadTimeout	20 * time.Millisecond	20000000	1000000	NOT_FRAGILE	ok	25.9
+internal/api/handler_status_test.go	399	TestHandleStatusDegradesWhenMailCountStalls	statusStoreReadTimeout	20 * time.Millisecond	20000000	1000000	NOT_FRAGILE	ok	27.3
+internal/api/handler_status_unread_store_test.go	77	TestStatusListUnderADeadlineIsUnchangedByTheUnreadStoreNotice	statusStoreReadTimeout	250 * time.Millisecond	250000000	12500000	NOT_FRAGILE	ok	35.9
+internal/api/rig_create_async_test.go	253	TestRigCreateAsyncStalledCloneTerminalizes	rigProvisionTimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	46.3
+internal/api/session_message_late_delivery_test.go	122	TestHandleSessionMessageSlowDeliveryReportsRealOutcome	sessionMessageAsyncTimeout	time.Nanosecond	1	1	NOT_FRAGILE	ok	29.2
+internal/api/session_ops_test.go	3263	TestSessionContentOpsMessagesOutcomes	sessionMessageAsyncTimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	26.8
+internal/api/session_ops_test.go	3341	TestSessionContentOpsSubmitTimeout	sessionSubmitAsyncTimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	22.6
+internal/api/session_ops_test.go	3366	TestSessionContentOpsSubmitTimeout	sessionSubmitAsyncTimeout	time.Nanosecond	1	1	NOT_FRAGILE	ok	22.5
+internal/api/status_warm_test.go	190	TestBuildAndStoreStatusEscapesWedgedBuild	statusWarmBuildTimeout	500 * time.Millisecond	500000000	25000000	NOT_FRAGILE	ok	18.6
+internal/beads/native_dolt_store_test.go	1803	TestNativeDoltStoreCreateDependencyTimeoutRollsBackFacadeTransaction	bdCommandTimeout	time.Millisecond	1000000	50000	NOT_FRAGILE	ok	11.4
+internal/doctor/checks_test.go	4463	TestDoltVersionCheck_Timeout	doltVersionCommandTimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	6.4
+internal/packman/network_git_group_unix_test.go	34	TestDefaultRunNetworkGitKillsDescendants	networkGitTimeout	300 * time.Millisecond	300000000	15000000	NOT_FRAGILE	ok	4.1
+internal/packman/network_git_timeout_test.go	150	TestDefaultRunNetworkGitIsBounded	networkGitTimeout	300 * time.Millisecond	300000000	15000000	NOT_FRAGILE	ok	3.2
+internal/runtime/dialog_test.go	717	TestAcceptStartupDialogsLeavesUntrustedExternalImportsDialog	dialogPollTimeout	200 * time.Millisecond	200000000	10000000	NOT_FRAGILE	ok	9.6
+internal/runtime/dialog_test.go	741	TestAcceptStartupDialogsLeavesExternalImportsWithoutTrustRoot	dialogPollTimeout	200 * time.Millisecond	200000000	10000000	NOT_FRAGILE	ok	8.7
+internal/runtime/dialog_test.go	1424	TestRespectsContextCancellation	dialogPollInterval	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	7.7
+internal/runtime/dialog_test.go	1615	TestAcceptStartupDialogsWithTimeoutBoundsBlankPaneToOneTimeout	dialogPollInterval	5 * time.Millisecond	5000000	250000	NOT_FRAGILE	ok	7.5
+internal/runtime/dialog_test.go	1649	TestAcceptStartupDialogsWithTimeoutRefreshesBudgetOnProgress	dialogPollInterval	5 * time.Millisecond	5000000	250000	NOT_FRAGILE	ok	9.6
+internal/runtime/dialog_trust_closed_loop_test.go	357	TestAcceptWorkspaceTrustDialogLateKeys	dialogPollInterval	5 * time.Millisecond	5000000	250000	NOT_FRAGILE	ok	8.6
+internal/runtime/dialog_trust_closed_loop_test.go	388	TestAcceptWorkspaceTrustDialogLaterPassWithKeysInFlight	dialogPollInterval	5 * time.Millisecond	5000000	250000	NOT_FRAGILE	ok	8.2
+internal/runtime/dialog_trust_closed_loop_test.go	447	TestAcceptWorkspaceTrustDialogCursorResetByRerender	dialogPollInterval	5 * time.Millisecond	5000000	250000	NOT_FRAGILE	ok	9.2
+internal/runtime/dialog_trust_closed_loop_test.go	551	TestAcceptStartupDialogsFromStreamTrustDialogFallsBackToPeeks	dialogPollInterval	2 * time.Millisecond	2000000	100000	NOT_FRAGILE	ok	7.0
+internal/runtime/exec/idle_test.go	31	NO_OWNING_TEST:helper=fastIdlePoll	execIdlePollInterval	time.Millisecond	1000000	-	SKIPPED_NO_OWNING_TEST	NO_OWNING_TEST:helper=fastIdlePoll	0.0
+internal/runtime/herdr/activity_names_test.go	56	TestActivitySeedRetryKeyedByRegistryName	activitySeedRetryInterval	10 * time.Millisecond	10000000	500000	NOT_FRAGILE	ok	0.8
+internal/runtime/herdr/activity_test.go	29	NO_OWNING_TEST:helper=activityTestProvider	activityPollInterval	25 * time.Millisecond	25000000	-	SKIPPED_NO_OWNING_TEST	NO_OWNING_TEST:helper=activityTestProvider	0.0
+internal/runtime/herdr/activity_test.go	160	TestActivityWorkingLegWaitsForObservedTransition	activityPollInterval	200 * time.Millisecond	200000000	10000000	NOT_FRAGILE	ok	1.9
+internal/runtime/herdr/activity_test.go	322	NO_OWNING_TEST:helper=shrinkActivityKnobs	activityPollInterval	25 * time.Millisecond	25000000	-	SKIPPED_NO_OWNING_TEST	NO_OWNING_TEST:helper=shrinkActivityKnobs	0.0
+internal/runtime/programstatus/relay/relay_test.go	494	TestRelayNoTTYReportsNotTerminal	forwardP99Budget	time.Millisecond	1000000	50000	NOT_FRAGILE	ok	0.5
+internal/runtime/programstatus/relay/relay_test.go	495	TestRelayNoTTYReportsNotTerminal	probeP50Budget	250 * time.Microsecond	250000	12500	NOT_FRAGILE	ok	0.5
+internal/runtime/tmux/executor_test.go	241	TestRunBoundsByTmuxSubprocessTimeout	tmuxSubprocessTimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	9.5
+internal/runtime/tmux/executor_test.go	1085	TestAgentPaneResolvedOncePerOperation	respondVerifyInterval	time.Millisecond	1000000	50000	NOT_FRAGILE	ok	8.4
+internal/runtime/tmux/executor_test.go	1110	TestAgentPaneResolvedOncePerOperation	respondVerifyTimeout	20 * time.Millisecond	20000000	1000000	NOT_FRAGILE	ok	8.3
+internal/runtime/tmux/executor_test.go	1135	TestCopyModeProbeAndCancelTargetResolvedAgentPane	respondVerifyTimeout	20 * time.Millisecond	20000000	1000000	NOT_FRAGILE	ok	6.6
+internal/runtime/tmux/respond_refusal_test.go	92	TestRespondFencedTypesTheAnswerUnderThePaneGuard	respondVerifyInterval	time.Millisecond	1000000	50000	NOT_FRAGILE	ok	7.2
+internal/runtime/tmux/server_probe_test.go	450	TestProbeServerAliveReprobeSharesPreflightDeadline	newSessionProbeTimeout	50 * time.Millisecond	50000000	2500000	NOT_FRAGILE	ok	7.8
+internal/runtime/tmux/server_probe_test.go	1033	TestProbeServerAliveBailsFastOnHang	newSessionProbeTimeout	100 * time.Millisecond	100000000	5000000	NOT_FRAGILE	ok	4.6
+scripts/docker_session_protocol_test.go	27	NO_OWNING_TEST:package-level	dockerProtocolObservationInterval	10 * time.Millisecond	10000000	-	SKIPPED_NO_OWNING_TEST	NO_OWNING_TEST:package-level	0.0
+test/integration/workflow_event_wait_test.go	16	NO_OWNING_TEST:package-level	beadEventScanInterval	250 * time.Millisecond	250000000	-	SKIPPED_NO_OWNING_TEST	NO_OWNING_TEST:package-level	0.0
+test/integration/workflow_event_wait_test.go	17	NO_OWNING_TEST:package-level	beadFallbackRefreshInterval	200 * time.Millisecond	200000000	-	SKIPPED_NO_OWNING_TEST	NO_OWNING_TEST:package-level	0.0
