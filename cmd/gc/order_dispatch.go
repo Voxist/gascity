@@ -4561,7 +4561,7 @@ func sweepStaleOrderTrackingAcrossStoresLimit(stores []beads.Store, wispStore be
 }
 
 func sweepStaleOrderTrackingAcrossStoresDryRun(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0, true, nil)
+	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, includeWispSubtrees, true, nil)
 }
 
 // sweepStaleOrderTrackingAcrossStoresLimitMode sweeps two coordination classes,
@@ -4598,8 +4598,8 @@ func sweepStaleOrderTrackingAcrossStoresDryRun(stores []beads.Store, wispStore b
 // (gc order sweep-tracking): it reads every not-closed tracking bead
 // (staleTrackingReadNotClosed) and takes residualFor, the per-order ADR-0130
 // D2 cutoff. sweepStaleOrderTrackingAcrossStoresLimitReadMode takes the read.
-func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool, residualFor func(scoped string) time.Duration) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingAcrossStoresLimitReadMode(stores, wispStore, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, dryRun, staleTrackingReadNotClosed, residualFor)
+func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, includeWispSubtrees bool, dryRun bool, residualFor func(scoped string) time.Duration) (orderTrackingSweepResult, error) {
+	return sweepStaleOrderTrackingAcrossStoresLimitReadMode(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0, dryRun, staleTrackingReadNotClosed, residualFor)
 }
 
 // sweepStaleOrderTrackingAcrossStoresLimitReadMode is

@@ -197,7 +197,7 @@ func TestRenderRigListFromAPI_JSONMakesNoSupervisorRoundTrip(t *testing.T) {
 		Body: []api.RigView{{Name: "frontend", Path: "/abs/frontend", Prefix: "fe"}},
 	}
 	var stdout, stderr bytes.Buffer
-	if code := renderRigListFromAPI(fsys.OSFS{}, cityPath, cr, true, &stdout, &stderr); code != 0 {
+	if code := renderRigListFromAPI(cityPath, cr, true, &stdout, &stderr); code != 0 {
 		t.Fatalf("renderRigListFromAPI = %d, stderr: %s", code, stderr.String())
 	}
 
