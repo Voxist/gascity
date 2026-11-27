@@ -124,16 +124,16 @@ func readRecordedSystemctlArgs(t *testing.T, argsFile string) []string {
 }
 
 // stubSupervisorAliveAfterSystemctl makes supervisorAliveHook report a
-// running supervisor only once the fake systemctl has been invoked
+// running supervisor (pid 4242) only once the fake systemctl has been invoked
 // (i.e., once argsFile exists), modeling a delegated unit that brings
 // the supervisor up in response to `systemctl start`.
-func stubSupervisorAliveAfterSystemctl(t *testing.T, argsFile string, pid int) {
+func stubSupervisorAliveAfterSystemctl(t *testing.T, argsFile string) {
 	t.Helper()
 	old := supervisorAliveHook
 	t.Cleanup(func() { supervisorAliveHook = old })
 	supervisorAliveHook = func() int {
 		if _, err := os.Stat(argsFile); err == nil {
-			return pid
+			return 4242
 		}
 		return 0
 	}
@@ -343,7 +343,7 @@ func TestSupervisorStartDelegatesToSystemctl(t *testing.T) {
 			t.Setenv("GC_HOME", t.TempDir())
 			setDelegationEnvForTest(t, "gascity-prod.service", tc.scope)
 			argsFile := installFakeDelegatedSystemctl(t, 0, "")
-			stubSupervisorAliveAfterSystemctl(t, argsFile, 4242)
+			stubSupervisorAliveAfterSystemctl(t, argsFile)
 
 			var stdout, stderr bytes.Buffer
 			if code := doSupervisorStart(&stdout, &stderr); code != 0 {
@@ -364,7 +364,7 @@ func TestSupervisorStartDelegatedJSON(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 	setDelegationEnvForTest(t, "gascity-prod.service", "")
 	argsFile := installFakeDelegatedSystemctl(t, 0, "")
-	stubSupervisorAliveAfterSystemctl(t, argsFile, 4242)
+	stubSupervisorAliveAfterSystemctl(t, argsFile)
 
 	var stdout, stderr bytes.Buffer
 	if code := doSupervisorStartJSON(&stdout, &stderr, true); code != 0 {
@@ -967,7 +967,7 @@ func TestEnsureSupervisorRunningDelegatesToSystemctl(t *testing.T) {
 	t.Setenv("GC_HOME", t.TempDir())
 	setDelegationEnvForTest(t, "gascity-prod.service", "")
 	argsFile := installFakeDelegatedSystemctl(t, 0, "")
-	stubSupervisorAliveAfterSystemctl(t, argsFile, 4242)
+	stubSupervisorAliveAfterSystemctl(t, argsFile)
 
 	var stdout, stderr bytes.Buffer
 	if code := ensureSupervisorRunning(&stdout, &stderr); code != 0 {
@@ -1866,7 +1866,7 @@ func TestSupervisorStartDelegatedWarnsOnCallerGCTuning(t *testing.T) {
 			t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
 			setDelegationEnvForTest(t, "gascity-prod.service", "")
 			argsFile := installFakeDelegatedSystemctl(t, 0, "")
-			stubSupervisorAliveAfterSystemctl(t, argsFile, 4242)
+			stubSupervisorAliveAfterSystemctl(t, argsFile)
 
 			var stdout, stderr bytes.Buffer
 			if code := doSupervisorStart(&stdout, &stderr); code != 0 {

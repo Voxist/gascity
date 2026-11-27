@@ -18,7 +18,7 @@ package main
 //     the pure-Go driver choice is a checked property rather than a comment;
 //   - the module graph carries no replace directive, so a build of this repo
 //     resolves the dependencies its manifest names and nothing else (the one
-//     exception is the operator-authorised bd library bridge deps.env names;
+//     exception is the operator-authorized bd library bridge deps.env names;
 //     see bdLibBridgeReplace).
 //
 // The last two are what a downstream fork relies on. A fork appends its own
@@ -236,7 +236,7 @@ func TestModuleGraphCarriesNoReplaceDirective(t *testing.T) {
 // lets through, and whether there is one. It exists only while deps.env names
 // a bd library bridge (BD_LIB_BRIDGE_REF): a fork commit that carries an open
 // upstream beads PR, which the Go module path cannot reach without a replace.
-// The repository's human operator authorised that exception on 2026-11-17;
+// The repository's human operator authorized that exception on 2026-11-17;
 // scripts/check-gomod-replace.sh still blocks it, and that required check is
 // bypassed by the operator, never by an automated worker. Its shape is pinned
 // exactly: github.com/steveyegge/beads, unversioned on the left, redirected to
