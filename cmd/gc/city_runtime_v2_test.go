@@ -1701,3 +1701,53 @@ func TestV2ReloadAndEnqueueWakeTheExternalReadsLane(t *testing.T) {
 		}
 	}
 }
+
+// Kills a config-watcher wake that skips the v2 router (vp-h1jgt): under v2
+// the watcher's WakeConfigWatch signals the config-watch arm, not pokeCh, and
+// the maintenance tick that arm runs reloads, marks the planner dirty and
+// wakes the external-reads lane, whether the reload applied or found no
+// change.
+func TestCityRuntimeV2ConfigWatchTickMarksPlannerAndWakesReads(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		edit    bool
+		changes bool
+	}{
+		{"no change", false, false},
+		{"applied", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cr, _ := newPhaseFixtureRuntime(t, false, false)
+			rt := attachTestV2(t, cr)
+			oldRev := rt.publishEnv().ConfigRev
+			lane := idleExternalReadsLane()
+			rt.lane.Store(lane)
+			if tc.edit {
+				writePhaseFixtureConfig(t, cr.tomlPath, true)
+			}
+			cr.configDirty.Store(true)
+
+			cr.wakeOf().WakeConfigWatch()
+			if !drainSignal(cr.configWatchCh) {
+				t.Fatal("WakeConfigWatch did not signal the config-watch arm under v2")
+			}
+			if len(cr.pokeCh) != 0 {
+				t.Fatalf("WakeConfigWatch poked pokeCh (%d) under v2; it must use the config-watch arm", len(cr.pokeCh))
+			}
+			runFixtureTick(cr, configWatchTrigger)
+
+			if cr.configDirty.Load() {
+				t.Fatal("the config-watch tick left the reload pending")
+			}
+			if n := plannerWakes(rt.planner, "reload"); n != 1 {
+				t.Errorf("reload wakes = %d, want 1", n)
+			}
+			if !lane.wantReads.Load() || len(lane.wakeCh) != 1 {
+				t.Error("the config-watch tick's reload did not wake the external-reads lane")
+			}
+			if changed := rt.env.Load().ConfigRev != oldRev; changed != tc.changes {
+				t.Errorf("config revision changed = %t, want %t", changed, tc.changes)
+			}
+		})
+	}
+}
