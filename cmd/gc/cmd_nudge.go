@@ -128,12 +128,13 @@ var (
 	nudgePollIdleExitAfter = 10 * time.Minute
 
 	// nudgePollIdleObserveWindowFactor is how many base intervals may elapse
-	// between idle observations before the loop forces one anyway. The
-	// tick-count cadence (nudgePollIdleObserveEvery) alone would stretch
-	// under idle backoff -- 5 ticks at the 30s ceiling is ~150s between
-	// probes -- so the wall-clock window keeps dead-session detection
-	// proportional to the configured interval (ga-8x82f4's contract) while
-	// the tick sleep backs off (vp-u8ky2).
+	// since the last successful idle observation before the next tick forces
+	// one anyway. The tick-count cadence (nudgePollIdleObserveEvery) alone
+	// would stretch under idle backoff -- 5 ticks at the 30s ceiling is ~150s
+	// between probes. The window is only checked once per tick, so a backed-off
+	// sidecar still observes no more often than its tick sleep: at the ceiling
+	// a dead session is seen within about nudgePollIdleBackoffCeiling (~30s)
+	// rather than ~150s (ga-8x82f4, vp-u8ky2).
 	nudgePollIdleObserveWindowFactor = 5
 )
 
@@ -1265,15 +1266,21 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 			if idleSince.IsZero() {
 				idleSince = time.Now()
 			} else if now := time.Now(); now.Sub(idleSince) >= nudgePollIdleExitAfter {
-				if nudgePollIdleQueueEmpty(target, now) {
+				released, err := nudgePollReleaseIdleLease(target, now)
+				if err != nil {
+					fmt.Fprintf(stderr, "gc nudge poll: idle exit check: %v\n", err) //nolint:errcheck
+				}
+				if released {
 					fmt.Fprintf(stderr, "gc nudge poll: session %q idle (queue empty) for %s; exiting -- the next enqueue re-arms a poller\n", target.sessionName, now.Sub(idleSince).Round(time.Second)) //nolint:errcheck
 					return 0
 				}
-				// The queue holds items none of this target's keys may take
-				// right now (fenced to a live sibling, or in flight on an
-				// unexpired lease). Hold at the base interval so a lease
-				// expiry or fence drop is picked up promptly, and start a
-				// fresh idle window instead of exiting.
+				// The queue still holds items (fenced to a live sibling, in
+				// flight on an unexpired lease, or just enqueued), or the
+				// check failed. Start a fresh idle window and restart the
+				// backoff count: the next nudgePollIdleBackoffAfter ticks run
+				// at the base interval, so a lease expiry or fence drop soon
+				// after the check is picked up promptly before the sleep
+				// climbs back toward the ceiling.
 				idleSince = now
 				emptyTicks = 0
 			}
@@ -1283,11 +1290,12 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 			idleTicksSinceObserve++
 			// The tick-count cadence alone would stretch under idle backoff
 			// (5 ticks at the ceiling is ~150s between probes), so the
-			// wall-clock window forces an observation whenever the gap since
-			// the last successful one reaches the same multiple of the base
-			// interval the tick cadence represents. Dead-session detection
-			// stays proportional to the configured interval (ga-8x82f4) at
-			// any backoff depth (vp-u8ky2).
+			// wall-clock window forces an observation on the first tick at
+			// which the gap since the last successful one has reached the
+			// same multiple of the base interval the tick cadence represents.
+			// Only ticks check it, so a sidecar at the backoff ceiling still
+			// observes about once per ceiling sleep (~30s), not once per
+			// window (ga-8x82f4, vp-u8ky2).
 			if idleTicksSinceObserve >= nudgePollIdleObserveEvery ||
 				(!lastObserve.IsZero() && time.Since(lastObserve) >= observeWindow) {
 				observeThisTick = true
@@ -1495,6 +1503,11 @@ func (s *nudgePollSkips) flush(now time.Time, stderr io.Writer) {
 // hard cap, so an idle sidecar's worst-case pickup latency for a nudge that
 // arrives mid-backoff is about the ceiling.
 func nudgePollBackoffInterval(base time.Duration, emptyTicks int) time.Duration {
+	if base <= 0 {
+		// Doubling a non-positive interval never reaches the ceiling, so
+		// the loop below would run once per accumulated idle tick.
+		return base
+	}
 	sleep := base
 	for i := 0; i < emptyTicks-nudgePollIdleBackoffAfter; i++ {
 		sleep *= 2
@@ -1505,15 +1518,46 @@ func nudgePollBackoffInterval(base time.Duration, emptyTicks int) time.Duration 
 	return max(base, min(sleep, nudgePollIdleBackoffCeiling))
 }
 
-// nudgePollIdleQueueEmpty reports whether nothing is queued for the target at
-// all -- not pending, not in flight -- so an expired idle window
-// (nudgePollIdleExitAfter) may end the sidecar. Dead items do not hold a
-// poller, matching shouldKeepNudgePollerAlive. A read error holds the window:
-// the exit fires only on a confident empty answer, never on a store hiccup
-// (vp-u8ky2).
-func nudgePollIdleQueueEmpty(target nudgeTarget, now time.Time) bool {
-	pending, inFlight, _, err := listQueuedNudgesForTargetSnapshot(target.cityPath, target, now)
-	return err == nil && len(pending) == 0 && len(inFlight) == 0
+// nudgePollReleaseIdleLease gives up this sidecar's poller lease when nothing
+// is queued for the target at all -- not pending, not in flight -- and
+// reports whether it did, so an expired idle window (nudgePollIdleExitAfter)
+// may end the sidecar. Dead items do not hold a poller, matching
+// shouldKeepNudgePollerAlive. A read error keeps the lease and is returned:
+// the exit fires only on a confident empty answer (vp-u8ky2).
+//
+// The queue read and the PID-file removal run under the per-key PID lock that
+// ensureNudgePoller takes, and every enqueuer writes the queue before it
+// calls ensureNudgePoller. So an enqueue either completes before this read
+// (the sidecar sees the item and keeps polling) or its lease check runs after
+// the removal, finds no PID file, and spawns a fresh poller: a nudge queued
+// while the sidecar exits is never left without one.
+func nudgePollReleaseIdleLease(target nudgeTarget, now time.Time) (bool, error) {
+	pidPath := nudgePollerPIDPath(target.cityPath, target.sessionName, target.pollerKey())
+	released := false
+	err := withNudgePollerPIDLock(pidPath, func() error {
+		pending, inFlight, _, err := listQueuedNudgesForTargetSnapshot(target.cityPath, target, now)
+		if err != nil {
+			return fmt.Errorf("reading the nudge queue for %q: %w", target.agentKey(), err)
+		}
+		if len(pending) > 0 || len(inFlight) > 0 {
+			return nil
+		}
+		current, err := os.ReadFile(pidPath)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+		case err != nil:
+			return fmt.Errorf("reading nudge poller pid %q: %w", pidPath, err)
+		case strings.TrimSpace(string(current)) == strconv.Itoa(os.Getpid()):
+			if err := os.Remove(pidPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("removing nudge poller pid %q: %w", pidPath, err)
+			}
+		}
+		// No PID file, or one naming another poller: this sidecar holds no
+		// lease an enqueuer could mistake for a live poller.
+		released = true
+		return nil
+	})
+	return released, err
 }
 
 func shouldKeepNudgePollerAlive(target nudgeTarget, missingSince, now time.Time) bool {
@@ -2217,8 +2261,15 @@ func queueSessionNudgeWithNote(target nudgeTarget, store beads.Store, sp runtime
 		return sessionNudgeResult{}, err
 	}
 	// The observe is a session-class read; route through the session store
-	// (identity today). The enqueue above stays on its own nudge store.
-	if obs, err := workerObserveNudgeTarget(target, cliSessionStore(store, target.cfg, target.cityPath), sp); err == nil && obs.Running {
+	// (identity today). The enqueue above stays on its own nudge store. A
+	// failed observe is no proof the session is down, and an idle session's
+	// sidecar may have exited, so it arms a poller too: the poller observes
+	// for itself and exits on a session that is really gone.
+	obs, err := workerObserveNudgeTarget(target, cliSessionStore(store, target.cfg, target.cityPath), sp)
+	if err != nil && nudgeWarningWriter != nil {
+		fmt.Fprintf(nudgeWarningWriter, "gc nudge: warning: observing %s after queueing: %v; starting its poller anyway\n", target.agentKey(), err) //nolint:errcheck // best-effort warning
+	}
+	if err != nil || obs.Running {
 		maybeStartNudgePoller(target)
 	}
 	return sessionNudgeResult{queued: true, undelivered: undelivered, note: note}, nil
