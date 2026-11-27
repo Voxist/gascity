@@ -641,3 +641,31 @@ func TestPhysicalStoreKey(t *testing.T) {
 		t.Errorf("a non-pointer store: PhysicalStoreKey = %q, want %q", got, want)
 	}
 }
+
+// TestPhysicalStoreTypeName: the name is the physical store's type through any
+// class handles, a plain wrapper is named itself (the walk stops there, as As
+// does), and no store names "<nil>".
+func TestPhysicalStoreTypeName(t *testing.T) {
+	a := NewMemStore()
+	const want = "*beads.MemStore"
+	for name, s := range map[string]Store{
+		"the store":      a,
+		"a handle":       MailStore{a},
+		"nested handles": MailStore{SessionStore{a}},
+	} {
+		if got := PhysicalStoreTypeName(s); got != want {
+			t.Errorf("%s: PhysicalStoreTypeName = %q, want %q", name, got, want)
+		}
+	}
+	for name, s := range map[string]Store{"nil": nil, "a zero handle": MailStore{}, "a handle over a zero handle": MailStore{SessionStore{}}} {
+		if got := PhysicalStoreTypeName(s); got != "<nil>" {
+			t.Errorf("%s: PhysicalStoreTypeName = %q, want <nil>", name, got)
+		}
+	}
+	// unhashableStore embeds the MemStore but is not a class layer: the name
+	// is the wrapper's value type, with neither the store below it nor the
+	// wrapper's value (PhysicalStoreKey's "%T:%v") in it.
+	if got, want := PhysicalStoreTypeName(MailStore{unhashableStore{MemStore: a, tags: []string{"x"}}}), "beads.unhashableStore"; got != want {
+		t.Errorf("a plain wrapper under a handle: PhysicalStoreTypeName = %q, want %q", got, want)
+	}
+}

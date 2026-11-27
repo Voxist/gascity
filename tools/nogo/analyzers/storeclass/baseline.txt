@@ -82,6 +82,8 @@ cmd/gc/api_state.go	relicStoreRef	raw-param	2
 cmd/gc/api_state.go	scheduleCloseBeadStoreHandle	raw-param	1
 cmd/gc/api_state.go	scheduleCloseReplacedBeadStoreHandles	raw-param	2
 cmd/gc/api_state.go	storePointerKey	raw-param	1
+cmd/gc/api_state.go	storeReportsDegraded	cap-assert	1
+cmd/gc/api_state.go	storeReportsDegraded	raw-param	1
 cmd/gc/api_state.go	uncachedBeadStore	cache-peel	1
 cmd/gc/api_state.go	uncachedBeadStore	cap-assert	1
 cmd/gc/api_state.go	uncachedBeadStore	raw-param	1
@@ -124,6 +126,9 @@ cmd/gc/bd_env.go	controlBdStoreForCity	raw-result	1
 cmd/gc/bd_env.go	controlBdStoreForRig	raw-result	1
 cmd/gc/bd_inventory_trust.go	bdBindingDependents	mint	1
 cmd/gc/bd_inventory_trust.go	bdReadEdgeEndpoints	cap-assert	1
+cmd/gc/bd_resilience.go	wireStoreAvailabilityGate	cache-peel	1
+cmd/gc/bd_resilience.go	wireStoreAvailabilityGate	cap-assert	1
+cmd/gc/bd_resilience.go	wireStoreAvailabilityGate	raw-param	1
 cmd/gc/bd_write_guard.go	bdWriteGuardStore	raw-result	1
 cmd/gc/bead_policy_store.go	beadPolicyGraphStore	raw-field	1
 cmd/gc/bead_policy_store.go	beadPolicyStore	raw-field	1
@@ -134,6 +139,7 @@ cmd/gc/bead_policy_store.go	beadPolicyStore.Count	cap-assert	1
 cmd/gc/bead_policy_store.go	beadPolicyStore.DeleteBatch	cap-assert	1
 cmd/gc/bead_policy_store.go	beadPolicyStore.DepMetadata	cap-assert	1
 cmd/gc/bead_policy_store.go	beadPolicyStore.GetExactBatch	cap-assert	1
+cmd/gc/bead_policy_store.go	beadPolicyStore.ListCtx	cap-assert	1
 cmd/gc/bead_policy_store.go	beadPolicyStore.ReadyContext	cap-assert	1
 cmd/gc/bead_policy_store.go	beadPolicyStore.ReleaseIfCurrent	cap-assert	1
 cmd/gc/bead_policy_store.go	beadPolicyStore.SawRows	cap-assert	1
@@ -292,8 +298,10 @@ cmd/gc/city_runtime.go	CityRuntime.run	unwrap	1
 cmd/gc/city_runtime.go	CityRuntime.runNudgeMailSweepWatchdog	unwrap	2
 cmd/gc/city_runtime.go	CityRuntime.setStandaloneStores	raw-param	2
 cmd/gc/city_runtime.go	CityRuntime.shutdown	unwrap	3
+cmd/gc/city_runtime.go	CityRuntime.startupReapStaleSessionBeads	unwrap	1
 cmd/gc/city_runtime.go	CityRuntime.startupSweepProcessTableOrphans	unwrap	1
 cmd/gc/city_runtime.go	CityRuntime.tickAutoSuspendChatSessions	unwrap	1
+cmd/gc/city_runtime.go	CityRuntime.tickReapStaleSessionBeads	unwrap	1
 cmd/gc/city_runtime.go	CityRuntime.tickSweepProcessTableOrphans	unwrap	1
 cmd/gc/city_runtime.go	CityRuntime.tickWispGC	unwrap	1
 cmd/gc/city_runtime.go	CityRuntimeParams	raw-field	2
@@ -370,6 +378,7 @@ cmd/gc/class_store_cache.go	storageRoutes.withControllerCache	cap-assert	2
 cmd/gc/class_store_emit.go	emittingClassStore	raw-field	1
 cmd/gc/class_store_emit.go	emittingClassStore.AdvanceSequenceFloor	cap-assert	1
 cmd/gc/class_store_emit.go	emittingClassStore.ApplyGraphPlanWithStorage	cap-assert	1
+cmd/gc/class_store_emit.go	emittingClassStore.AssertOpenedIdentity	cap-assert	1
 cmd/gc/class_store_emit.go	emittingClassStore.AtomicTx	cap-assert	1
 cmd/gc/class_store_emit.go	emittingClassStore.Claim	cap-assert	1
 cmd/gc/class_store_emit.go	emittingClassStore.CompareAndSetMetadataKey	cap-assert	1
@@ -382,6 +391,7 @@ cmd/gc/class_store_emit.go	emittingClassStore.DepAddWithMetadata	cap-assert	1
 cmd/gc/class_store_emit.go	emittingClassStore.DepMetadata	cap-assert	1
 cmd/gc/class_store_emit.go	emittingClassStore.GetExactBatch	cap-assert	1
 cmd/gc/class_store_emit.go	emittingClassStore.IDPrefix	cap-assert	1
+cmd/gc/class_store_emit.go	emittingClassStore.OpenedIdentity	cap-assert	1
 cmd/gc/class_store_emit.go	emittingClassStore.ReadOnly	cap-assert	1
 cmd/gc/class_store_emit.go	emittingClassStore.ReadyContext	cap-assert	1
 cmd/gc/class_store_emit.go	emittingClassStore.ReleaseIfCurrent	cap-assert	1
@@ -422,6 +432,9 @@ cmd/gc/cmd_beads_metadata_cas.go	applyBeadsMetadataCAS	raw-param	1
 cmd/gc/cmd_beads_metadata_cas.go	beadsMetadataCASClassFlipRefusal	raw-param	1
 cmd/gc/cmd_beads_metadata_cas.go	closeBeadsMetadataCASStore	raw-var	1
 cmd/gc/cmd_beads_metadata_cas.go	openBeadsMetadataCASStore	raw-var	1
+cmd/gc/cmd_beads_state.go	buildBeadsStateLiveSets	mint	1
+cmd/gc/cmd_beads_state.go	buildBeadsStateLiveSets	raw-param	1
+cmd/gc/cmd_beads_state.go	buildBlockedSet	raw-param	1
 cmd/gc/cmd_citystatus.go	doCityStatusJSONWithDiagnosticAndSnapshot	raw-param	1
 cmd/gc/cmd_citystatus.go	doCityStatusWithStoreAndSnapshot	raw-param	1
 cmd/gc/cmd_citystatus.go	loadStatusSessionSnapshot	raw-param	1
@@ -650,6 +663,7 @@ cmd/gc/cmd_nudge.go	withNudgeTargetFence	raw-param	1
 cmd/gc/cmd_nudge.go	withNudgeTargetFenceFromLiveSession	raw-param	1
 cmd/gc/cmd_nudge.go	workerHandleForNudgeTarget	raw-param	1
 cmd/gc/cmd_nudge.go	workerObserveNudgeTarget	raw-param	1
+cmd/gc/cmd_nudge.go	workerObserveNudgeTargetSession	raw-param	1
 cmd/gc/cmd_order.go	bdCursor	raw-param	1
 cmd/gc/cmd_order.go	bdCursor	read-marker	1
 cmd/gc/cmd_order.go	bdCursorAcrossStores	raw-param	1
@@ -657,6 +671,7 @@ cmd/gc/cmd_order.go	cmdOrderRun	unwrap	2
 cmd/gc/cmd_order.go	doOrderHistoryBounded	unwrap	1
 cmd/gc/cmd_order.go	doOrderRunWithJSON	mint	2
 cmd/gc/cmd_order.go	doOrderRunWithJSON	unwrap	1
+cmd/gc/cmd_order.go	openOrderTrackingSweepStores	raw-var	1
 cmd/gc/cmd_order.go	orderLastRunFn	mint	2
 cmd/gc/cmd_order.go	orderLastRunFn	raw-param	1
 cmd/gc/cmd_prime.go	doPrimeWithHookFormatOpts	unwrap	1
@@ -718,6 +733,7 @@ cmd/gc/cmd_sling.go	slingResidenceBinding	raw-result	1
 cmd/gc/cmd_start.go	doStartStandalone	mint	5
 cmd/gc/cmd_start.go	doStartStandalone	raw-param	1
 cmd/gc/cmd_start.go	doStartStandalone	raw-result	1
+cmd/gc/cmd_start.go	oneShotReconcileStartOptions	raw-param	1
 cmd/gc/cmd_start.go	standaloneBuildAgentsFnWithSessionBeads	raw-param	2
 cmd/gc/cmd_start.go	standaloneBuildAgentsFnWithSessionBeads	raw-result	1
 cmd/gc/cmd_status.go	doRigStatusWithStoreAndSnapshot	raw-param	1
@@ -857,6 +873,7 @@ cmd/gc/doctor_cross_store.go	doctorScope	raw-field	1
 cmd/gc/doctor_cross_store.go	newCrossStoreGatesCheck	raw-param	1
 cmd/gc/doctor_cross_store.go	newDanglingBlockingEdgesCheck	raw-param	1
 cmd/gc/doctor_cross_store.go	splitCityDoctorScopes	raw-param	1
+cmd/gc/doctor_delivery_view.go	prDeliveryDoctorCheck	raw-field	1
 cmd/gc/doctor_executor_identity_residue_check.go	buildExecutorRouteIdentityIndex	raw-param	1
 cmd/gc/doctor_executor_identity_residue_check.go	buildExecutorRouteIdentityIndex	read-marker	1
 cmd/gc/doctor_executor_identity_residue_check.go	executorIdentityResidueCheck	raw-field	1
@@ -1047,6 +1064,8 @@ cmd/gc/molecule_autoclose.go	doMoleculeAutocloseWith	unwrap	1
 cmd/gc/molecule_autoclose.go	subtreeTerminalExcludingRoot	raw-param	1
 cmd/gc/molecule_autoclose.go	subtreeTerminalOrErr	mint	1
 cmd/gc/molecule_autoclose.go	subtreeTerminalOrErr	raw-param	1
+cmd/gc/native_store_identity.go	assertNativeStoreIdentity	raw-param	1
+cmd/gc/native_store_identity.go	openNativeStoreWithIdentityAssertion	raw-result	1
 cmd/gc/nudge_backstop.go	backstopHoldObserver	raw-param	2
 cmd/gc/nudge_backstop.go	backstopLastNoticeStands	raw-param	1
 cmd/gc/nudge_backstop.go	backstopPredicate	raw-param	4
@@ -1064,7 +1083,8 @@ cmd/gc/nudge_beads.go	openOwnedNudgeBeadStore	raw-var	1
 cmd/gc/nudge_dispatcher.go	dispatchAllQueuedNudges	mint	1
 cmd/gc/nudge_dispatcher.go	dispatchAllQueuedNudges	raw-param	2
 cmd/gc/nudge_dispatcher.go	dispatchQueuedNudges	raw-param	2
-cmd/gc/nudge_file_queue.go	enqueueQueuedNudgeWithStoreAndClock	unwrap	2
+cmd/gc/nudge_file_queue.go	enqueueQueuedNudgeBody	unwrap	1
+cmd/gc/nudge_file_queue.go	enqueueQueuedNudgeWithStoreAndClock	unwrap	1
 cmd/gc/nudge_file_queue.go	nudgeMaintenanceStore	raw-field	1
 cmd/gc/nudge_file_queue.go	nudgeMaintenanceStore.ensureOpen	unwrap	1
 cmd/gc/nudge_shadow_debts.go	payAndConfirmNudgeShadowDebtsBy	unwrap	1
@@ -1108,7 +1128,9 @@ cmd/gc/order_dispatch.go	memoryOrderDispatcher.markTrackingFailure	raw-param	1
 cmd/gc/order_dispatch.go	memoryOrderDispatcher.orderFrontDoorFor	raw-param	1
 cmd/gc/order_dispatch.go	memoryOrderDispatcher.ordersStoreFor	raw-param	1
 cmd/gc/order_dispatch.go	memoryOrderDispatcher.ordersStoreFor	raw-result	1
+cmd/gc/order_dispatch.go	memoryOrderDispatcher.recordRunOnSkip	raw-param	1
 cmd/gc/order_dispatch.go	memoryOrderDispatcher.runDispatchGuarded	raw-param	1
+cmd/gc/order_dispatch.go	memoryOrderDispatcher.skipForRunOn	raw-param	1
 cmd/gc/order_dispatch.go	memoryOrderDispatcher.wispRootHasOpenWork	raw-param	1
 cmd/gc/order_dispatch.go	newMemoryOrderDispatcher	raw-result	1
 cmd/gc/order_dispatch.go	openOrderTrackingIDs	raw-param	1
@@ -1139,6 +1161,10 @@ cmd/gc/order_dispatch.go	sweepClosedOrderTrackingRetentionAcrossStoresBounded	ra
 cmd/gc/order_dispatch.go	sweepClosedOrderTrackingRetentionBounded	mint	1
 cmd/gc/order_dispatch.go	sweepClosedOrderTrackingRetentionBounded	raw-param	1
 cmd/gc/order_dispatch.go	sweepClosedOrderTrackingRetentionBounded	read-marker	1
+cmd/gc/order_dispatch.go	sweepOrderTrackingByGenerationAcrossStoresLimit	raw-param	1
+cmd/gc/order_dispatch.go	sweepOrderTrackingByGenerationAcrossStoresLimitRead	raw-param	1
+cmd/gc/order_dispatch.go	sweepOrderTrackingByGenerationLimitMode	mint	1
+cmd/gc/order_dispatch.go	sweepOrderTrackingByGenerationLimitMode	raw-param	1
 cmd/gc/order_dispatch.go	sweepOrphanedOrderTracking	raw-param	1
 cmd/gc/order_dispatch.go	sweepOrphanedOrderTrackingLimit	mint	1
 cmd/gc/order_dispatch.go	sweepOrphanedOrderTrackingLimit	raw-param	1
@@ -1149,6 +1175,7 @@ cmd/gc/order_dispatch.go	sweepStaleOrderTrackingAcrossStores	raw-param	2
 cmd/gc/order_dispatch.go	sweepStaleOrderTrackingAcrossStoresDryRun	raw-param	2
 cmd/gc/order_dispatch.go	sweepStaleOrderTrackingAcrossStoresLimit	raw-param	2
 cmd/gc/order_dispatch.go	sweepStaleOrderTrackingAcrossStoresLimitMode	raw-param	2
+cmd/gc/order_dispatch.go	sweepStaleOrderTrackingAcrossStoresLimitReadMode	raw-param	2
 cmd/gc/order_dispatch.go	sweepStaleOrderTrackingLimit	raw-param	1
 cmd/gc/order_dispatch.go	sweepStaleOrderTrackingWithOptionsLimit	raw-param	1
 cmd/gc/order_dispatch.go	sweepStaleOrderTrackingWithOptionsLimitDryRun	raw-param	1
@@ -1183,6 +1210,9 @@ cmd/gc/order_store.go	relocatedOrdersClassStore	raw-result	1
 cmd/gc/order_store.go	unwrapOrderTrackingSweepStore	cap-assert	1
 cmd/gc/order_store.go	unwrapOrderTrackingSweepStore	raw-param	1
 cmd/gc/order_store.go	unwrapOrderTrackingSweepStore	raw-result	1
+cmd/gc/order_tracking_sweep_breaker.go	filterDegradedSweepStores	cap-assert	1
+cmd/gc/order_tracking_sweep_breaker.go	filterDegradedSweepStores	raw-param	1
+cmd/gc/order_tracking_sweep_breaker.go	filterDegradedSweepStores	raw-result	1
 cmd/gc/pending_interaction_lane.go	pendingInteractionListing	raw-param	1
 cmd/gc/planner_notice.go	laneStoreWrapped	cache-peel	1
 cmd/gc/planner_notice.go	laneStoreWrapped	cap-assert	1
@@ -1418,6 +1448,7 @@ cmd/gc/session_beads.go	findOpenSessionBeadBySessionName	raw-param	1
 cmd/gc/session_beads.go	loadOpenSessionInfos	raw-param	1
 cmd/gc/session_beads.go	loadSessionBeads	mint	1
 cmd/gc/session_beads.go	loadSessionBeads	raw-param	1
+cmd/gc/session_beads.go	reapPhantomSessionBeads	raw-param	1
 cmd/gc/session_beads.go	reapPreBootSessionBeads	raw-param	1
 cmd/gc/session_beads.go	reapRuntimesBoundToClosedBeads	raw-param	1
 cmd/gc/session_beads.go	reapRuntimesBoundToClosedBeadsWith	raw-param	1
@@ -1716,6 +1747,8 @@ cmd/gc/worker_handle.go	runtimeWorkerHandleWithConfig	raw-param	1
 cmd/gc/worker_handle.go	workerFactoryWithAttribution	raw-param	1
 cmd/gc/worker_handle.go	workerFactoryWithConfig	raw-param	1
 cmd/gc/worker_handle.go	workerFactoryWithStaleKeyDetectionWaiter	raw-param	1
+cmd/gc/worker_handle.go	workerHandleForSessionIDOwningName	mint	1
+cmd/gc/worker_handle.go	workerHandleForSessionIDOwningName	raw-param	1
 cmd/gc/worker_handle.go	workerHandleForSessionTargetWithConfig	raw-param	1
 cmd/gc/worker_handle.go	workerHandleForSessionTargetWithRuntimeHintsWithConfig	mint	1
 cmd/gc/worker_handle.go	workerHandleForSessionTargetWithRuntimeHintsWithConfig	raw-param	1
@@ -1770,6 +1803,7 @@ internal/api/handler_status.go	Server.statusSessionSnapshot	mint	1
 internal/api/handler_status.go	Server.statusSessionSnapshot	unwrap	1
 internal/api/handler_status.go	Server.statusWorkCounts	raw-field	1
 internal/api/handler_status.go	Server.statusWorkCounts	unwrap	1
+internal/api/handler_status.go	statusListStoreWithTimeout	cap-assert	1
 internal/api/handler_status.go	statusListStoreWithTimeout	raw-param	1
 internal/api/handler_status.go	statusReadyStoreWithTimeout	raw-param	1
 internal/api/handler_status.go	statusStoreWorkCounts	raw-param	1
@@ -1861,10 +1895,13 @@ internal/dispatch/runtime.go	walkSourceBeadChain	unwrap	1
 internal/doctor/checks.go	NewRigBeadsCheck	raw-param	1
 internal/doctor/checks.go	RigBeadsCheck	raw-field	1
 internal/doctor/checks_proxied_endpoint.go	rigProxiedStoreMessage	raw-param	1
+internal/doctor/checks_rig_data_presence.go	NewRigDataPresenceCheck	raw-param	1
+internal/doctor/checks_rig_data_presence.go	RigDataPresenceCheck	raw-field	1
 internal/orders/store.go	Store.mixedLegStores	raw-result	1
 internal/orders/store.go	Store.mixedLegStores	unwrap	6
 internal/orders/store_reads.go	Store.HasOpenWork	raw-param	1
 internal/orders/store_reads.go	Store.LastRun	read-marker	1
+internal/orders/store_reads.go	lastRealRunForLeg	raw-param	1
 internal/orders/store_reads.go	lastRunRecords	raw-param	1
 internal/readywork/crossstore.go	crossStore.legIndex	raw-param	1
 internal/readywork/read.go	Leg	raw-field	1
@@ -1916,3 +1953,4 @@ test/dashport/corpus/corpus.go	seedMail	raw-param	1
 test/dashport/corpus/corpus.go	seedSession	mint	1
 test/dashport/corpus/corpus.go	seedSession	raw-param	1
 test/integration/filebdshim/main.go	openFileStore	raw-result	1
+test/loadharness/store.go	ampStore	raw-field	1
