@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // captureStderr redirects os.Stderr for the duration of fn and returns what was
@@ -58,6 +59,13 @@ func resetSessionStorageWarnTypes(t *testing.T) {
 	t.Helper()
 	ResetStorageWarningsForTest()
 	t.Cleanup(ResetStorageWarningsForTest)
+}
+
+// physicalTypeOf is the name createSessionBead hands the warning ledger for a
+// store it reached through the front door's handle: the physical store's type
+// below the class layers, the same view the routes themselves resolve through.
+func physicalTypeOf(store beads.Store) string {
+	return beads.PhysicalStoreTypeName(beads.SessionStore{Store: store})
 }
 
 // recordingStorageStore implements both Create and CreateWithStorage so a test can
@@ -194,7 +202,9 @@ func TestUnsupportedStorageStampsClassAndIsReported(t *testing.T) {
 func TestWarningDoesNotAssertDoltSpecificConsequences(t *testing.T) {
 	resetSessionStorageWarnTypes(t)
 
-	out := captureStderr(t, func() { warnSessionStorageUnsupported(&plainOnlyStore{}) })
+	out := captureStderr(t, func() {
+		warnSessionStorageUnsupported(physicalTypeOf(&plainOnlyStore{}))
+	})
 
 	for _, forbidden := range []string{"issues table", "DOLT_COMMIT", "Dolt commit"} {
 		if strings.Contains(out, forbidden) {
@@ -289,9 +299,9 @@ func TestWarnIsPerStoreTypeNotPerProcess(t *testing.T) {
 	// real stderr both pollutes the test output and hides a regression where
 	// the first call is the one that misbehaves.
 	out := captureStderr(t, func() {
-		warnSessionStorageUnsupported(&plainOnlyStore{})          // first of its type: warns
-		warnSessionStorageUnsupported(&policySelfApplyingStore{}) // different type: must warn
-		warnSessionStorageUnsupported(&plainOnlyStore{})          // repeat type: must stay quiet
+		warnSessionStorageUnsupported(physicalTypeOf(&plainOnlyStore{}))          // first of its type: warns
+		warnSessionStorageUnsupported(physicalTypeOf(&policySelfApplyingStore{})) // different type: must warn
+		warnSessionStorageUnsupported(physicalTypeOf(&plainOnlyStore{}))          // repeat type: must stay quiet
 	})
 
 	if n := strings.Count(out, "NOT applied"); n != 2 {
@@ -300,5 +310,113 @@ func TestWarnIsPerStoreTypeNotPerProcess(t *testing.T) {
 	}
 	if !strings.Contains(out, "plainOnlyStore") || !strings.Contains(out, "policySelfApplyingStore") {
 		t.Errorf("both offending types must be named; got %q", out)
+	}
+}
+
+// opaqueStoreWrapper is a plain wrapper, not a class layer: it forwards the
+// Store methods of the store it embeds and declares none of that store's
+// optional capabilities, as an emitter or a decorator that does not re-declare
+// a capability would.
+type opaqueStoreWrapper struct {
+	beads.Store
+}
+
+// A capability one or more CLASS layers below the front door's handle is still
+// found: both routes probe through beads.As, which walks typed handles and
+// ResidentStore. A probe that only asserts on the handle's direct inner store
+// would miss it and take the warn path for a store that accepts the class.
+func TestStorageCapabilityFoundThroughClassLayers(t *testing.T) {
+	for name, wrap := range map[string]func(beads.Store) beads.Store{
+		"a resident handle": func(s beads.Store) beads.Store { return beadstest.Resident(s) },
+		"nested handles": func(s beads.Store) beads.Store {
+			return beads.SessionStore{Store: beadstest.Resident(s)}
+		},
+	} {
+		t.Run(name+"/storage create", func(t *testing.T) {
+			resetSessionStorageWarnTypes(t)
+			rec := &recordingStorageStore{}
+			s := NewStore(beads.SessionStore{Store: wrap(rec)})
+			out := captureStderr(t, func() {
+				if _, err := s.CreateSessionInfo(newSpec()); err != nil {
+					t.Fatalf("CreateSessionInfo: %v", err)
+				}
+			})
+			if rec.storageCreates != 1 || rec.plainCreates != 0 {
+				t.Errorf("CreateWithStorage calls = %d, plain Create calls = %d, want 1 and 0: "+
+					"the capability below the class layers was not found", rec.storageCreates, rec.plainCreates)
+			}
+			if rec.lastStorage != beads.StorageNoHistory {
+				t.Errorf("storage class = %q, want %q", rec.lastStorage, beads.StorageNoHistory)
+			}
+			if strings.Contains(out, "NOT applied") {
+				t.Errorf("warned for a store that accepts the class: %q", out)
+			}
+		})
+		t.Run(name+"/self-applying", func(t *testing.T) {
+			resetSessionStorageWarnTypes(t)
+			pol := &policySelfApplyingStore{}
+			s := NewStore(beads.SessionStore{Store: wrap(pol)})
+			out := captureStderr(t, func() {
+				if _, err := s.CreateSessionInfo(newSpec()); err != nil {
+					t.Fatalf("CreateSessionInfo: %v", err)
+				}
+			})
+			if pol.plainCreates != 1 {
+				t.Errorf("plain Create calls = %d, want 1", pol.plainCreates)
+			}
+			if strings.Contains(out, "NOT applied") {
+				t.Errorf("warned for a store that applies the policy itself: %q", out)
+			}
+		})
+	}
+}
+
+// A PLAIN wrapper between the front door and a capable store hides the
+// capability: As stops at the first layer that is not a class layer, so the
+// front door takes the warn path, stamps the bead, and names the wrapper (the
+// store it actually probed), not the store below it.
+func TestPlainWrapperHidesStorageCapability(t *testing.T) {
+	resetSessionStorageWarnTypes(t)
+	rec := &recordingStorageStore{}
+	s := NewStore(beads.SessionStore{Store: beadstest.Resident(opaqueStoreWrapper{Store: rec})})
+
+	out := captureStderr(t, func() {
+		if _, err := s.CreateSessionInfo(newSpec()); err != nil {
+			t.Fatalf("CreateSessionInfo: %v", err)
+		}
+	})
+
+	if rec.storageCreates != 0 {
+		t.Errorf("CreateWithStorage calls = %d, want 0: the probe saw through a non-class wrapper",
+			rec.storageCreates)
+	}
+	if rec.plainCreates != 1 {
+		t.Errorf("plain Create calls = %d, want 1 (the bead must still be persisted)", rec.plainCreates)
+	}
+	if !strings.Contains(out, "NOT applied through session.opaqueStoreWrapper:") {
+		t.Errorf("warning does not name the plain wrapper the probe stopped at; got %q", out)
+	}
+}
+
+// The warning names the PHYSICAL store below the class layers, as the literal
+// type name an operator would grep for, not the handle or ResidentStore the
+// front door holds.
+func TestWarningNamesPhysicalStoreBelowClassLayers(t *testing.T) {
+	resetSessionStorageWarnTypes(t)
+	plain := &plainOnlyStore{}
+	s := NewStore(beads.SessionStore{Store: beads.SessionStore{Store: beadstest.Resident(plain)}})
+
+	out := captureStderr(t, func() {
+		if _, err := s.CreateSessionInfo(newSpec()); err != nil {
+			t.Fatalf("CreateSessionInfo: %v", err)
+		}
+	})
+
+	if !strings.Contains(out, "NOT applied through *session.plainOnlyStore:") {
+		t.Errorf("warning does not name *session.plainOnlyStore; got %q", out)
+	}
+	if !plain.last.NoHistory || plain.last.Ephemeral {
+		t.Errorf("bead reached the store with NoHistory = %v, Ephemeral = %v, want true and false",
+			plain.last.NoHistory, plain.last.Ephemeral)
 	}
 }
