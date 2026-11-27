@@ -102,6 +102,46 @@ const (
 	nudgePollFreeOSInterval = 30 * time.Second
 )
 
+// Nudge-poll idle economics (vp-u8ky2). A live session with an empty queue
+// used to keep its `gc nudge poll` sidecar ticking at the base interval for
+// the session's whole life: the witness correlated ~10 concurrent sidecars
+// (one idle 2h29m past its last nudge) with intermittent multi-second bd read
+// latency. Two bounds now land on ticks that found nothing due (hasDue
+// false): the tick sleep backs off toward nudgePollIdleBackoffCeiling, and a
+// queue that has stayed empty for nudgePollIdleExitAfter ends the sidecar --
+// the next enqueue (maybeStartNudgePoller), session start, gc wait or
+// gc prime --hook spawns a fresh poller cheaply.
+var (
+	// nudgePollIdleBackoffAfter is the number of consecutive not-due ticks
+	// before the tick sleep starts doubling toward the ceiling.
+	nudgePollIdleBackoffAfter = 5
+
+	// nudgePollIdleBackoffCeiling caps the idle tick sleep, and so bounds how
+	// long a nudge enqueued to an already-running-but-idle sidecar waits for
+	// its next tick. A nudge to a session with NO sidecar is picked up by the
+	// fresh poller the enqueue path spawns, so the ceiling bounds only this
+	// running sidecar's reaction time.
+	nudgePollIdleBackoffCeiling = 30 * time.Second
+
+	// nudgePollIdleExitAfter is how long the queue may stay continuously
+	// empty while the session runs before the sidecar exits gracefully.
+	nudgePollIdleExitAfter = 10 * time.Minute
+
+	// nudgePollIdleObserveWindowFactor is how many base intervals may elapse
+	// since the last successful idle observation before the next tick forces
+	// one anyway. The tick-count cadence (nudgePollIdleObserveEvery) alone
+	// would stretch under idle backoff -- 5 ticks at the 30s ceiling is ~150s
+	// between probes. The window is only checked once per tick, so a backed-off
+	// sidecar still observes no more often than its tick sleep: at the ceiling
+	// a dead session is seen within about nudgePollIdleBackoffCeiling (~30s)
+	// rather than ~150s (ga-8x82f4, vp-u8ky2).
+	nudgePollIdleObserveWindowFactor = 5
+)
+
+// nudgePollSleep is the poll loop's tick sleep. A var so tests can record
+// backoff growth (or run the loop without wall-clock time) by swapping it.
+var nudgePollSleep = time.Sleep
+
 // errNudgeSessionFenceMismatch is the contract's fence-mismatch cause, so every
 // queue dead-letters on it at once. Its text is what state.json last_error
 // has always carried.
@@ -1150,6 +1190,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		return 1
 	}
 	interval = resolveNudgePollInterval(target.cityPath, interval, intervalExplicit)
+	observeWindow := time.Duration(nudgePollIdleObserveWindowFactor) * interval
 
 	release, err := acquireNudgePollerLease(target.cityPath, target.sessionName, target.pollerKey())
 	if err != nil {
@@ -1180,6 +1221,9 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 	var missingSince time.Time
 	var lastFreeOS time.Time
 	var idleTicksSinceObserve int
+	var lastObserve time.Time
+	var emptyTicks int
+	var idleSince time.Time
 	gate := newNudgePollGate()
 	skips := &nudgePollSkips{cityPath: target.cityPath}
 	defer func() { skips.flush(time.Now(), stderr) }()
@@ -1202,15 +1246,63 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		// whose session died while its queue sat empty still notices and
 		// exits instead of being immortalized (ga-8x82f4).
 		hasDue := gate.hasDue(target, time.Now())
+
+		// Idle accounting (vp-u8ky2): ticks that find nothing due back their
+		// sleep off toward nudgePollIdleBackoffCeiling, and a queue that has
+		// stayed empty for nudgePollIdleExitAfter ends the sidecar -- the
+		// next enqueue, session start, gc wait or gc prime --hook spawns a
+		// fresh poller cheaply. Ticks with due work, delivery attempts and
+		// the transient-error and missing-session grace paths below all keep
+		// the base interval: only confirmed idleness slows down or exits.
+		tickSleep := interval
+		if hasDue {
+			emptyTicks = 0
+			idleSince = time.Time{}
+		} else {
+			emptyTicks++
+			if emptyTicks > nudgePollIdleBackoffAfter {
+				tickSleep = nudgePollBackoffInterval(interval, emptyTicks)
+			}
+			if idleSince.IsZero() {
+				idleSince = time.Now()
+			} else if now := time.Now(); now.Sub(idleSince) >= nudgePollIdleExitAfter {
+				released, err := nudgePollReleaseIdleLease(target, now)
+				if err != nil {
+					fmt.Fprintf(stderr, "gc nudge poll: idle exit check: %v\n", err) //nolint:errcheck
+				}
+				if released {
+					fmt.Fprintf(stderr, "gc nudge poll: session %q idle (queue empty) for %s; exiting -- the next enqueue re-arms a poller\n", target.sessionName, now.Sub(idleSince).Round(time.Second)) //nolint:errcheck
+					return 0
+				}
+				// The queue still holds items (fenced to a live sibling, in
+				// flight on an unexpired lease, or just enqueued), or the
+				// check failed. Start a fresh idle window and restart the
+				// backoff count: the next nudgePollIdleBackoffAfter ticks run
+				// at the base interval, so a lease expiry or fence drop soon
+				// after the check is picked up promptly before the sleep
+				// climbs back toward the ceiling.
+				idleSince = now
+				emptyTicks = 0
+			}
+		}
 		observeThisTick := hasDue
 		if !observeThisTick {
 			idleTicksSinceObserve++
-			if idleTicksSinceObserve >= nudgePollIdleObserveEvery {
+			// The tick-count cadence alone would stretch under idle backoff
+			// (5 ticks at the ceiling is ~150s between probes), so the
+			// wall-clock window forces an observation on the first tick at
+			// which the gap since the last successful one has reached the
+			// same multiple of the base interval the tick cadence represents.
+			// Only ticks check it, so a sidecar at the backoff ceiling still
+			// observes about once per ceiling sleep (~30s), not once per
+			// window (ga-8x82f4, vp-u8ky2).
+			if idleTicksSinceObserve >= nudgePollIdleObserveEvery ||
+				(!lastObserve.IsZero() && time.Since(lastObserve) >= observeWindow) {
 				observeThisTick = true
 			}
 		}
 		if !observeThisTick {
-			time.Sleep(interval)
+			nudgePollSleep(tickSleep)
 			continue
 		}
 		idleTicksSinceObserve = 0
@@ -1222,6 +1314,9 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 			return 0
 		}
 		obs, err := nudgeObserveTarget(target, sessStore, sp)
+		if err == nil {
+			lastObserve = time.Now()
+		}
 		if err != nil {
 			fmt.Fprintf(stderr, "gc nudge poll: %v\n", err) //nolint:errcheck
 			// Transient observation failures (store hiccup, runtime probe
@@ -1235,7 +1330,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 				if missingSince.IsZero() {
 					missingSince = now
 				}
-				time.Sleep(interval)
+				nudgePollSleep(interval)
 				continue
 			}
 			return 1
@@ -1246,7 +1341,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 				if missingSince.IsZero() {
 					missingSince = now
 				}
-				time.Sleep(interval)
+				nudgePollSleep(interval)
 				continue
 			}
 			return 0
@@ -1255,7 +1350,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 		if !hasDue {
 			// Observed only to satisfy the idle-cadence liveness check above;
 			// the cheap gate already established there is nothing to deliver.
-			time.Sleep(interval)
+			nudgePollSleep(tickSleep)
 			continue
 		}
 		delivered, pollErr := nudgePollDeliverQueued(gate.starvationTarget(target, time.Now()), store.Store, cliSessionStore(store.Store, target.cfg, target.cityPath), sp, quiescence, obs)
@@ -1266,7 +1361,7 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 			continue
 		}
 		countNudgePollSkip(gate, skips, target, pollErr, time.Now(), stderr)
-		time.Sleep(interval)
+		nudgePollSleep(interval)
 	}
 }
 
@@ -1280,8 +1375,9 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 // activity clock once the leaf's turn look, where it takes one, says no turn
 // runs). A running session with nothing it may claim (nothing queued,
 // or only items fenced to a live sibling) is the dispatcher's separate
-// "not-matched" class and is deliberately not counted: the poll loop never
-// exits while the session runs, so counting it would turn this into a tick
+// "not-matched" class and is deliberately not counted: while the session
+// runs the loop has nothing else to react to (and since vp-u8ky2 it exits
+// once the queue stays empty), so counting it would turn this into a tick
 // counter. See #5317. The gate is asked afresh (not the tick's pre-observe
 // answer) because the delivery attempt just run can itself have consumed the
 // only due item. The counts are flushed at most every
@@ -1397,6 +1493,71 @@ func (s *nudgePollSkips) flush(now time.Time, stderr io.Writer) {
 	}
 	s.counts = nil
 	s.lastFlush = now
+}
+
+// nudgePollBackoffInterval returns the tick sleep for a run of consecutive
+// not-due ticks: the base interval until nudgePollIdleBackoffAfter of them
+// have passed, then a doubling toward nudgePollIdleBackoffCeiling (vp-u8ky2).
+// The operator's configured interval is a floor -- an operator who raised it
+// above the ceiling did not ask to be sped back up -- and the ceiling is a
+// hard cap, so an idle sidecar's worst-case pickup latency for a nudge that
+// arrives mid-backoff is about the ceiling.
+func nudgePollBackoffInterval(base time.Duration, emptyTicks int) time.Duration {
+	if base <= 0 {
+		// Doubling a non-positive interval never reaches the ceiling, so
+		// the loop below would run once per accumulated idle tick.
+		return base
+	}
+	sleep := base
+	for i := 0; i < emptyTicks-nudgePollIdleBackoffAfter; i++ {
+		sleep *= 2
+		if sleep >= nudgePollIdleBackoffCeiling {
+			break
+		}
+	}
+	return max(base, min(sleep, nudgePollIdleBackoffCeiling))
+}
+
+// nudgePollReleaseIdleLease gives up this sidecar's poller lease when nothing
+// is queued for the target at all -- not pending, not in flight -- and
+// reports whether it did, so an expired idle window (nudgePollIdleExitAfter)
+// may end the sidecar. Dead items do not hold a poller, matching
+// shouldKeepNudgePollerAlive. A read error keeps the lease and is returned:
+// the exit fires only on a confident empty answer (vp-u8ky2).
+//
+// The queue read and the PID-file removal run under the per-key PID lock that
+// ensureNudgePoller takes, and every enqueuer writes the queue before it
+// calls ensureNudgePoller. So an enqueue either completes before this read
+// (the sidecar sees the item and keeps polling) or its lease check runs after
+// the removal, finds no PID file, and spawns a fresh poller: a nudge queued
+// while the sidecar exits is never left without one.
+func nudgePollReleaseIdleLease(target nudgeTarget, now time.Time) (bool, error) {
+	pidPath := nudgePollerPIDPath(target.cityPath, target.sessionName, target.pollerKey())
+	released := false
+	err := withNudgePollerPIDLock(pidPath, func() error {
+		pending, inFlight, _, err := listQueuedNudgesForTargetSnapshot(target.cityPath, target, now)
+		if err != nil {
+			return fmt.Errorf("reading the nudge queue for %q: %w", target.agentKey(), err)
+		}
+		if len(pending) > 0 || len(inFlight) > 0 {
+			return nil
+		}
+		current, err := os.ReadFile(pidPath)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+		case err != nil:
+			return fmt.Errorf("reading nudge poller pid %q: %w", pidPath, err)
+		case strings.TrimSpace(string(current)) == strconv.Itoa(os.Getpid()):
+			if err := os.Remove(pidPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("removing nudge poller pid %q: %w", pidPath, err)
+			}
+		}
+		// No PID file, or one naming another poller: this sidecar holds no
+		// lease an enqueuer could mistake for a live poller.
+		released = true
+		return nil
+	})
+	return released, err
 }
 
 func shouldKeepNudgePollerAlive(target nudgeTarget, missingSince, now time.Time) bool {
@@ -2100,8 +2261,15 @@ func queueSessionNudgeWithNote(target nudgeTarget, store beads.Store, sp runtime
 		return sessionNudgeResult{}, err
 	}
 	// The observe is a session-class read; route through the session store
-	// (identity today). The enqueue above stays on its own nudge store.
-	if obs, err := workerObserveNudgeTarget(target, cliSessionStore(store, target.cfg, target.cityPath), sp); err == nil && obs.Running {
+	// (identity today). The enqueue above stays on its own nudge store. A
+	// failed observe is no proof the session is down, and an idle session's
+	// sidecar may have exited, so it arms a poller too: the poller observes
+	// for itself and exits on a session that is really gone.
+	obs, err := workerObserveNudgeTarget(target, cliSessionStore(store, target.cfg, target.cityPath), sp)
+	if err != nil && nudgeWarningWriter != nil {
+		fmt.Fprintf(nudgeWarningWriter, "gc nudge: warning: observing %s after queueing: %v; starting its poller anyway\n", target.agentKey(), err) //nolint:errcheck // best-effort warning
+	}
+	if err != nil || obs.Running {
 		maybeStartNudgePoller(target)
 	}
 	return sessionNudgeResult{queued: true, undelivered: undelivered, note: note}, nil
