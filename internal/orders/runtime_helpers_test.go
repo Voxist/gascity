@@ -426,7 +426,7 @@ func TestLastRunFuncWithEventFallback_UsesLatestMatchProvider(t *testing.T) {
 		{name: "match", p: latestOnlyProvider{e: events.Event{Ts: want}, found: true}, want: want},
 		{name: "match after a skipped archive", p: latestOnlyProvider{e: events.Event{Ts: want}, found: true, warnings: []string{"skipped unreadable archive \"a.gz\""}}, want: want, wantLogs: 1},
 		{name: "no match", p: latestOnlyProvider{}},
-		{name: "error fails open", p: latestOnlyProvider{err: errors.New("read failed")}},
+		{name: "error fails open and is logged", p: latestOnlyProvider{err: errors.New("read failed")}, wantLogs: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			logs = nil
@@ -446,5 +446,84 @@ func TestLastRunFuncWithEventFallback_UsesLatestMatchProvider(t *testing.T) {
 				t.Fatalf("logs = %q, want %d line(s)", logs, tc.wantLogs)
 			}
 		})
+	}
+}
+
+// TestLastRunFuncWithEventFallback_ActiveLogMatchBeatsArchives pins the first
+// step of the newest-first read: a match in the active log answers, even when
+// an archive holds a newer-looking timestamp, and no archive is read.
+func TestLastRunFuncWithEventFallback_ActiveLogMatchBeatsArchives(t *testing.T) {
+	oldLogf := runtimeHelpersLogf
+	var logs []string
+	runtimeHelpersLogf = func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+	t.Cleanup(func() { runtimeHelpersLogf = oldLogf })
+
+	dir := t.TempDir()
+	// Unreadable, so any read of it would leave a skipped-archive warning.
+	name := "events.jsonl.archive-20260701T000000Z-seq-1-100.gz"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("not gzip at all"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fr, err := events.NewFileRecorder(filepath.Join(dir, "events.jsonl"), io.Discard)
+	if err != nil {
+		t.Fatalf("NewFileRecorder: %v", err)
+	}
+	t.Cleanup(func() { fr.Close() }) //nolint:errcheck
+	active := time.Date(2026, 7, 6, 9, 0, 0, 0, time.UTC)
+	fr.Record(events.Event{Type: events.OrderFired, Subject: "digest-generate", Actor: "test", Ts: active})
+
+	storeFn := func(string) (time.Time, error) { return time.Time{}, nil }
+	got, err := LastRunFuncWithEventFallback(storeFn, fr)("digest-generate")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.Equal(active) {
+		t.Fatalf("got %s, want the active log's match %s", got, active)
+	}
+	if len(logs) != 0 {
+		t.Fatalf("fallback logged %q; it read an archive although the active log held a match", logs)
+	}
+}
+
+// TestLastRunFuncWithEventFallback_NewestSegmentIsRotatingFile pins the
+// in-flight case: a rotating-* file not yet gzipped is the newest history
+// segment, and its last match answers ahead of the archives.
+func TestLastRunFuncWithEventFallback_NewestSegmentIsRotatingFile(t *testing.T) {
+	oldLogf := runtimeHelpersLogf
+	var logs []string
+	runtimeHelpersLogf = func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}
+	t.Cleanup(func() { runtimeHelpersLogf = oldLogf })
+
+	dir := t.TempDir()
+	older := time.Date(2026, 7, 3, 9, 0, 0, 0, time.UTC)
+	newest := time.Date(2026, 7, 5, 9, 0, 0, 0, time.UTC)
+	writeOrderFiredArchive(t, dir, "20260703T000000Z", 1, 100, "digest-generate", older)
+	rotating := fmt.Sprintf(`{"seq":101,"type":%q,"ts":%q,"actor":"test","subject":"digest-generate"}`+"\n",
+		events.OrderFired, newest.Format(time.RFC3339Nano))
+	if err := os.WriteFile(filepath.Join(dir, "events.jsonl.rotating-20260705T000000Z-seq-101-200"), []byte(rotating), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The startup sweep would promote the rotating file to an archive; the
+	// test needs it in flight.
+	fr, err := events.NewFileRecorder(filepath.Join(dir, "events.jsonl"), io.Discard, events.WithoutStartupSweep())
+	if err != nil {
+		t.Fatalf("NewFileRecorder: %v", err)
+	}
+	t.Cleanup(func() { fr.Close() }) //nolint:errcheck
+
+	storeFn := func(string) (time.Time, error) { return time.Time{}, nil }
+	got, err := LastRunFuncWithEventFallback(storeFn, fr)("digest-generate")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.Equal(newest) {
+		t.Fatalf("got %s, want the rotating file's match %s", got, newest)
+	}
+	if len(logs) != 0 {
+		t.Fatalf("fallback logged %q, want no warnings", logs)
 	}
 }
