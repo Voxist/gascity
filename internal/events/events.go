@@ -878,8 +878,10 @@ type TailProvider interface {
 // the newest matching event without reading the whole history. List answers
 // "the newest match" only by returning every match, and a file-backed List
 // gunzips every retained archive oldest-first to do it. ok is false when no
-// event matches. warnings name unreadable history segments the search
-// skipped; it continues into older ones, so a skip can only make the answer
+// event matches. err covers only opening, stat'ing and reading the active
+// log; a failure in the rotated history (archives, rotating-* files) comes
+// back in warnings instead, naming each segment the search skipped. The
+// search continues into older segments, so a skip can only make the answer
 // older (ReadLatestMatch).
 type LatestMatchProvider interface {
 	LatestMatch(filter Filter) (e Event, ok bool, warnings []string, err error)
