@@ -118,6 +118,11 @@ type StoragePolicySelfApplying interface {
 //     purpose: the class named in route 2 is a hardcoded default, while a
 //     self-applying store resolves the CONFIGURED class and can honor a
 //     [beads.policies.session] storage override that this package cannot see.
+//     Both routes resolve through beads.As, which sees through typed class
+//     handles the way the storeclass lint prescribes for capability probes: a
+//     capability one class layer deeper is still found, a plain wrapper in
+//     between still hides it (the probe stops at the first non-class layer),
+//     and the class guard (T8) still answers first when one is in the chain.
 //  2. The store accepts a class out of band (beads.StorageCreateStore). Here the
 //     class is hardcoded to StorageNoHistory, the policy DEFAULT for sessions;
 //     a configured override is not visible on this route. That divergence is
@@ -137,13 +142,13 @@ type StoragePolicySelfApplying interface {
 // the quiet default is exactly ADR-0043 Cause 1, and it would let this whole
 // mechanism ship inert and invisible.
 func (s *Store) createSessionBead(b beads.Bead) (beads.Bead, error) {
-	if _, ok := s.store.Store.(StoragePolicySelfApplying); ok {
+	if _, ok := beads.As[StoragePolicySelfApplying](s.store); ok {
 		return s.store.Create(b)
 	}
-	if storageStore, ok := s.store.Store.(beads.StorageCreateStore); ok {
+	if storageStore, ok := beads.As[beads.StorageCreateStore](s.store); ok {
 		return storageStore.CreateWithStorage(b, beads.StorageNoHistory)
 	}
-	warnSessionStorageUnsupported(s.store.Store)
+	warnSessionStorageUnsupported(beads.PhysicalStoreTypeName(s.store))
 	b.NoHistory = true
 	b.Ephemeral = false
 	return s.store.Create(b)
@@ -168,25 +173,23 @@ func ResetStorageWarningsForTest() {
 }
 
 // warnSessionStorageUnsupported reports that the session storage policy could
-// not be requested through a store, ONCE PER STORE TYPE per process.
+// not be requested through a store, ONCE PER STORE TYPE per process. It names
+// the PHYSICAL store below the handle's class layers
+// (beads.PhysicalStoreTypeName), so the key tracks the actual offending
+// engine: inserting a CLASS layer between the front door and an incapable
+// chain does not mint a new warning type. A plain wrapper in between does —
+// the walk stops at the first non-class layer, the same place the As probes
+// stop, so the warned name is always the store the routes actually probed.
 //
-// The key is the store type, not the process, because a single benign warning
-// would otherwise mute a later, genuinely incapable chain of a DIFFERENT type —
-// a silent failure inside the warning that exists to prevent silent failure.
-// Keying on the type bounds the noise (one line per offending type) without
-// ever muting a new offender.
-//
-// The message names the store TYPE and the POLICY that was lost, not a table or
-// a commit count: the same code path serves FileStore and MemStore chains where
-// there is no Dolt, no issues table, and no commit to count. What is universally
-// true is that the policy could not be expressed through this store, so the
-// tier now depends on the backend honoring a field rather than on gascity
-// having asked for it.
-func warnSessionStorageUnsupported(store any) {
-	typeName := fmt.Sprintf("%T", store)
+// The ledger is process-wide by design, which makes "this composition does not
+// warn" depend on whether an earlier test in the same binary already warned for
+// the same store type — a silence assertion that passes for the wrong reason is
+// a guard that cannot fail. Cross-package tests (cmd/gc's policy-composition
+// guard) reset it first so they observe the FIRST-warning behavior.
+func warnSessionStorageUnsupported(storeType string) {
 	sessionStorageWarnMu.Lock()
-	seen := sessionStorageWarnTypes[typeName]
-	sessionStorageWarnTypes[typeName] = true
+	seen := sessionStorageWarnTypes[storeType]
+	sessionStorageWarnTypes[storeType] = true
 	sessionStorageWarnMu.Unlock()
 	if seen {
 		return
@@ -199,7 +202,7 @@ func warnSessionStorageUnsupported(store any) {
 			"still place it in the no-history tier, but a backend that ignores the "+
 			"field keeps session beads in its default, fully-retained tier and the "+
 			"session storage policy is lost there (vp-ia76 / vp-9u1).\n",
-		typeName)
+		storeType)
 }
 
 // CreateSession creates a session bead from spec and returns its id. It is the
