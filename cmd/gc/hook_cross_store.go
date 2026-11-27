@@ -1210,9 +1210,10 @@ func hookRankCandidate(row map[string]any) hookCandidateRank {
 //
 // discovered is the output selection already read from this store, moments ago.
 //
-// noted is forwarded to bestStoreWithWork for its failed-secondary reports.
-func claimStoreWithFallback(command string, stores []hookStore, selected, primary hookStore, discovered string, run hookStoreRunner, noted ...hookStoreFailureNote) (string, hookStore, error) {
-	return claimStoreWithFallbackRanked(command, stores, selected, primary, discovered, run, hookStoreRankOptions{}, noted...)
+// The work query is always the claim work read the command names; there are no
+// failed-secondary reports to forward at this seam.
+func claimStoreWithFallback(command string, stores []hookStore, selected, primary hookStore, discovered string, run hookStoreRunner) (string, hookStore, error) {
+	return claimStoreWithFallbackRanked(command, stores, selected, primary, discovered, run, hookStoreRankOptions{})
 }
 
 // claimStoreWithFallbackRanked is claimStoreWithFallback with the ADR-0076
