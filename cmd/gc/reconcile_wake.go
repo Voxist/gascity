@@ -20,8 +20,10 @@ import (
 // Under the legacy reconciler every method is exactly the channel fold it
 // replaces (legacyEnqueue). Under v2, newControllerWiring sets planner before
 // the controller socket can deliver anything, and enqueues, relevant bead
-// events and bead event gaps mark it dirty instead. Maintenance wakes (config
-// reload) reach pokeCh in both modes: the reload runs on the maintenance tick.
+// events and bead event gaps mark it dirty instead. Maintenance wakes reach
+// the run loop's maintenance tick in both modes: a config reload through
+// pokeCh, and the config watcher through its own arm, configWatchCh
+// (WakeConfigWatch).
 type controllerWake struct {
 	pokeCh, controlDispatcherCh chan<- struct{}
 	// configWatchCh, set by initWake, is the run loop's config-watcher arm
@@ -94,8 +96,8 @@ func (cr *CityRuntime) initWake(wired *controllerWake) {
 	} else {
 		cr.wake = newLegacyWake(cr.pokeCh, cr.controlDispatcherCh)
 	}
-	// The run loop's config-watcher arm, before the watcher or any other
-	// reader of the wake starts.
+	// The run loop's config-watcher arm. It is set once while the runtime is
+	// built, before the config watcher, its only reader, starts.
 	cr.wake.configWatchCh = cr.configWatchCh
 }
 

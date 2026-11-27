@@ -43,12 +43,14 @@ func LastRunAcross(stores []*Store) LastRunFunc {
 // unrun rather than permanently blocked.
 //
 // A provider that implements events.LatestMatchProvider (the file recorder)
-// is asked for the newest match only, which reads the active log's tail and
-// then the archives newest-first, stopping at the first that holds one. List
-// would gunzip and decode every retained archive oldest-first to take a max:
-// with no tracking bead for an order, that was the whole event history (90
-// archives, 2.9 GB of gzip) per order, on every dispatcher start
-// (vp-d7vcu). Other providers keep the List path.
+// is asked for the newest match only: it reads the active log's tail, then
+// the rotated history (archives and in-flight rotating-* files) newest seq
+// window first, stopping at the first segment that holds one. List would
+// gunzip and decode every retained archive oldest-first to take a max, so an
+// order with no tracking bead would cost a walk of the whole event history
+// per dispatcher start. Skipped history segments and a failed read of the
+// active log are logged; the read error still fails open. Other providers
+// keep the List path.
 func LastRunFuncWithEventFallback(fn LastRunFunc, ep events.Provider) LastRunFunc {
 	if ep == nil {
 		return fn
@@ -70,7 +72,11 @@ func LastRunFuncWithEventFallback(fn LastRunFunc, ep events.Provider) LastRunFun
 			for _, w := range warnings {
 				runtimeHelpersLogf("orders: last-run event fallback for %q: %s", name, w)
 			}
-			if latestErr != nil || !found {
+			if latestErr != nil {
+				runtimeHelpersLogf("orders: last-run event fallback for %q: %v (treating the order as unrun)", name, latestErr)
+				return time.Time{}, nil
+			}
+			if !found {
 				return time.Time{}, nil
 			}
 			return e.Ts, nil
