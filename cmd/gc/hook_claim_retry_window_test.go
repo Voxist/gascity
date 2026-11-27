@@ -74,7 +74,7 @@ func TestClaimReadRetryStopsWhenNextRetryWouldMissTheWindow(t *testing.T) {
 	ops := clock.ops()
 	stores := []hookStore{{dir: "/rig"}}
 
-	_, _, err := selectStoreWithWorkRetrying("query", stores, stores[0], clock.failingRun, ops)
+	_, _, err := selectStoreWithWorkRetrying(stores, stores[0], clock.failingRun, ops)
 
 	if err == nil {
 		t.Fatal("selectStoreWithWorkRetrying returned no error for a leg that always fails")
@@ -103,7 +103,7 @@ func TestClaimReadRetryRunsOnlyRetriesThatStartInsideTheWindow(t *testing.T) {
 	ops := clock.ops()
 	stores := []hookStore{{dir: "/rig"}}
 
-	if _, _, err := selectStoreWithWorkRetrying("query", stores, stores[0], clock.failingRun, ops); err == nil {
+	if _, _, err := selectStoreWithWorkRetrying(stores, stores[0], clock.failingRun, ops); err == nil {
 		t.Fatal("selectStoreWithWorkRetrying returned no error for a leg that always fails")
 	}
 
@@ -135,7 +135,7 @@ func TestClaimReadRetryDoesNotReadAfterASleepThatOverranTheWindow(t *testing.T) 
 	ops := clock.ops()
 	stores := []hookStore{{dir: "/rig"}}
 
-	_, _, err := selectStoreWithWorkRetrying("query", stores, stores[0], clock.failingRun, ops)
+	_, _, err := selectStoreWithWorkRetrying(stores, stores[0], clock.failingRun, ops)
 
 	if err == nil || !strings.Contains(err.Error(), "claim window") {
 		t.Fatalf("err = %v, want the read failure annotated with the claim window", err)
@@ -153,7 +153,7 @@ func TestClaimReadRetryKeepsFullBudgetInsideTheWindow(t *testing.T) {
 	ops := clock.ops()
 	stores := []hookStore{{dir: "/rig"}}
 
-	_, _, err := selectStoreWithWorkRetrying("query", stores, stores[0], clock.failingRun, ops)
+	_, _, err := selectStoreWithWorkRetrying(stores, stores[0], clock.failingRun, ops)
 
 	if err == nil {
 		t.Fatal("selectStoreWithWorkRetrying returned no error for a leg that always fails")
@@ -174,7 +174,7 @@ func TestClaimReadRetryWithoutAnInvocationWindowKeepsFullBudget(t *testing.T) {
 	ops := &hookClaimOps{Now: clock.Now, Sleep: clock.Sleep}
 	stores := []hookStore{{dir: "/rig"}}
 
-	if _, _, err := selectStoreWithWorkRetrying("query", stores, stores[0], clock.failingRun, ops); err == nil {
+	if _, _, err := selectStoreWithWorkRetrying(stores, stores[0], clock.failingRun, ops); err == nil {
 		t.Fatal("selectStoreWithWorkRetrying returned no error for a leg that always fails")
 	}
 	if want := 1 + hookClaimQueryRetryAttempts; len(clock.readStarts) != want {

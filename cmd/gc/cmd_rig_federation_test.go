@@ -160,7 +160,7 @@ func TestRenderRigListFromAPIShowsRigFederation(t *testing.T) {
 		AgeSeconds: 2,
 	}
 	var stdout, stderr bytes.Buffer
-	if code := renderRigListFromAPI(fsys.OSFS{}, cityPath, cr, true, &stdout, &stderr); code != 0 {
+	if code := renderRigListFromAPI(cityPath, cr, true, &stdout, &stderr); code != 0 {
 		t.Fatalf("renderRigListFromAPI returned %d, stderr: %s", code, stderr.String())
 	}
 	assertRigListFederationRows(t, stdout.Bytes())
@@ -168,7 +168,7 @@ func TestRenderRigListFromAPIShowsRigFederation(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := renderRigListFromAPI(fsys.OSFS{}, cityPath, cr, false, &stdout, &stderr); code != 0 {
+	if code := renderRigListFromAPI(cityPath, cr, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("renderRigListFromAPI (text) returned %d, stderr: %s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "    Federation: rig (namespace: exclusive) (not enforced by this build)\n") {

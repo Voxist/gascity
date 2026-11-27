@@ -55,7 +55,7 @@ func residualForOrderList(aa []orders.Order) func(string) time.Duration {
 
 func runDeadlineAwareStaleSweep(t *testing.T, store beads.Store, now time.Time, residualFor func(string) time.Duration, dryRun bool) orderTrackingSweepResult {
 	t.Helper()
-	result, err := sweepStaleOrderTrackingAcrossStoresLimitMode([]beads.Store{store}, nil, now, defaultOrderTrackingSweepStaleAfter, nil, orderTrackingSweepMetadataInitiator, false, 0, dryRun, residualFor)
+	result, err := sweepStaleOrderTrackingAcrossStoresLimitMode([]beads.Store{store}, nil, now, defaultOrderTrackingSweepStaleAfter, nil, false, dryRun, residualFor)
 	if err != nil {
 		t.Fatalf("sweepStaleOrderTrackingAcrossStoresLimitMode: %v", err)
 	}

@@ -1167,10 +1167,10 @@ var (
 // code (2 if the read failed transport-class or timed out, else 1).
 //
 // A failed secondary store with no work anywhere is an error here too
-// (hookSecondaryStoreFailure), so it gets the same bounded retry. noted is
-// forwarded to bestStoreWithWork.
-func selectStoreWithWorkRetrying(workQuery string, stores []hookStore, primary hookStore, run hookStoreRunner, ops *hookClaimOps, noted ...hookStoreFailureNote) (string, hookStore, error) {
-	return selectStoreWithWorkRetryingRanked(workQuery, stores, primary, run, ops, hookStoreRankOptions{}, noted...)
+// (hookSecondaryStoreFailure), so it gets the same bounded retry. The work
+// query is always the claim work read ("query").
+func selectStoreWithWorkRetrying(stores []hookStore, primary hookStore, run hookStoreRunner, ops *hookClaimOps) (string, hookStore, error) {
+	return selectStoreWithWorkRetryingRanked("query", stores, primary, run, ops, hookStoreRankOptions{})
 }
 
 // selectStoreWithWorkRetryingRanked is selectStoreWithWorkRetrying with the
