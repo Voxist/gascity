@@ -9053,3 +9053,544 @@ func TestWorkerObserveNudgeTargetByIDStaysFencedToItsGeneration(t *testing.T) {
 		t.Fatalf("session_name searches = %d, want 0", store.nameSearches)
 	}
 }
+
+// TestNudgePollBackoffInterval pins the idle backoff curve (vp-u8ky2): the
+// base interval holds for the first nudgePollIdleBackoffAfter not-due ticks,
+// then doubles toward nudgePollIdleBackoffCeiling; the operator's configured
+// interval is a floor (backoff never shortens it) and the ceiling a hard cap.
+func TestNudgePollBackoffInterval(t *testing.T) {
+	prevAfter := nudgePollIdleBackoffAfter
+	prevCeiling := nudgePollIdleBackoffCeiling
+	t.Cleanup(func() {
+		nudgePollIdleBackoffAfter = prevAfter
+		nudgePollIdleBackoffCeiling = prevCeiling
+	})
+	nudgePollIdleBackoffAfter = 5
+	nudgePollIdleBackoffCeiling = 30 * time.Second
+
+	const base = 2 * time.Second
+	for tick := 1; tick <= 5; tick++ {
+		if got := nudgePollBackoffInterval(base, tick); got != base {
+			t.Fatalf("emptyTicks=%d: backoff = %s, want the base interval %s", tick, got, base)
+		}
+	}
+	for _, tc := range []struct {
+		emptyTicks int
+		want       time.Duration
+	}{
+		{6, 4 * time.Second},
+		{7, 8 * time.Second},
+		{8, 16 * time.Second},
+		{9, 30 * time.Second}, // 32s would overshoot; the ceiling caps it
+		{1000, 30 * time.Second},
+	} {
+		if got := nudgePollBackoffInterval(base, tc.emptyTicks); got != tc.want {
+			t.Fatalf("emptyTicks=%d: backoff = %s, want %s", tc.emptyTicks, got, tc.want)
+		}
+	}
+	if got := nudgePollBackoffInterval(60*time.Second, 50); got != 60*time.Second {
+		t.Fatalf("base above ceiling: backoff = %s, want the base interval (an operator-configured interval is a floor)", got)
+	}
+	// --interval 0: doubling a zero base never reaches the ceiling, so the
+	// curve must not loop once per accumulated idle tick.
+	if got := nudgePollBackoffInterval(0, 1<<40); got != 0 {
+		t.Fatalf("zero base: backoff = %s, want the zero base interval", got)
+	}
+}
+
+// TestCmdNudgePollBacksOffWhileIdle drives the loop against a live session
+// with an empty queue and records the tick sleeps (vp-u8ky2): the first
+// nudgePollIdleBackoffAfter idle ticks keep the base interval, later ones
+// double monotonically and cap at nudgePollIdleBackoffCeiling while the
+// session stays alive. The run ends through the normal missing-session exit
+// once the stub retires the session, proving backoff changed only the
+// cadence, not the exit paths.
+func TestCmdNudgePollBacksOffWhileIdle(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	markNudgePollCityRunningForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	writeNamedSessionCityTOML(t, cityDir)
+	t.Setenv("GC_CITY", cityDir)
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	created, err := store.Create(beads.Bead{
+		Title:  "Session: worker",
+		Type:   session.BeadType,
+		Status: "open",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "worker-session",
+			"agent_name":   "worker",
+			"template":     "worker",
+			"state":        string(session.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create session: %v", err)
+	}
+
+	const idleObserves = 5
+	observeCalls := 0
+	origObserve := nudgeObserveTarget
+	t.Cleanup(func() { nudgeObserveTarget = origObserve })
+	nudgeObserveTarget = func(_ nudgeTarget, _ beads.Store, _ runtime.Provider) (worker.LiveObservation, error) {
+		observeCalls++
+		if observeCalls > idleObserves {
+			// Session retired; queue is empty, so the poller exits.
+			return worker.LiveObservation{Running: false}, nil
+		}
+		last := time.Now()
+		return worker.LiveObservation{Running: true, Alive: true, LastActivity: &last}, nil
+	}
+
+	// The stubbed sleep advances no wall clock, so keep the observe cadence
+	// purely tick-counted: a wall-clock window derived from the 1ms base
+	// could otherwise fire extra observations on a slow machine and retire
+	// the session before the backoff curve reaches the ceiling.
+	prevWindow := nudgePollIdleObserveWindowFactor
+	t.Cleanup(func() { nudgePollIdleObserveWindowFactor = prevWindow })
+	nudgePollIdleObserveWindowFactor = 1 << 30
+
+	sleeps := []time.Duration{}
+	origSleep := nudgePollSleep
+	t.Cleanup(func() { nudgePollSleep = origSleep })
+	nudgePollSleep = func(d time.Duration) { sleeps = append(sleeps, d) }
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdNudgePoll([]string{created.ID}, "worker-session", time.Millisecond, time.Hour, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdNudgePoll = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if len(sleeps) <= nudgePollIdleBackoffAfter+nudgePollIdleBackoffAfter {
+		t.Fatalf("recorded %d sleeps, want enough idle ticks to cross the backoff start and reach the ceiling", len(sleeps))
+	}
+	for i := 0; i < nudgePollIdleBackoffAfter; i++ {
+		if sleeps[i] != time.Millisecond {
+			t.Fatalf("sleep[%d] = %s, want the base interval before backoff starts", i, sleeps[i])
+		}
+	}
+	if sleeps[nudgePollIdleBackoffAfter] != 2*time.Millisecond {
+		t.Fatalf("sleep[%d] = %s, want backoff to start doubling right after %d base ticks", nudgePollIdleBackoffAfter, sleeps[nudgePollIdleBackoffAfter], nudgePollIdleBackoffAfter)
+	}
+	ceiling := 30 * time.Second
+	capped := false
+	for i := nudgePollIdleBackoffAfter; i < len(sleeps); i++ {
+		if capped {
+			if sleeps[i] != ceiling {
+				t.Fatalf("sleep[%d] = %s, want the ceiling %s to hold once reached", i, sleeps[i], ceiling)
+			}
+			continue
+		}
+		if sleeps[i] > ceiling {
+			t.Fatalf("sleep[%d] = %s exceeds the ceiling %s", i, sleeps[i], ceiling)
+		}
+		if sleeps[i] == ceiling {
+			capped = true
+			continue
+		}
+		if i > nudgePollIdleBackoffAfter && sleeps[i] != 2*sleeps[i-1] {
+			t.Fatalf("sleep[%d] = %s, want the idle backoff to double the previous tick's %s", i, sleeps[i], sleeps[i-1])
+		}
+	}
+	if !capped {
+		t.Fatalf("backoff never reached the ceiling %s over %d idle ticks", ceiling, len(sleeps))
+	}
+}
+
+// TestCmdNudgePollExitsAfterIdleTTL is vp-u8ky2's graceful exit: a live
+// session whose queue stays empty ends the sidecar after
+// nudgePollIdleExitAfter, with the exit line on stderr and the poller lease
+// released, so the next enqueue re-arms a fresh poller.
+func TestCmdNudgePollExitsAfterIdleTTL(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	markNudgePollCityRunningForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	writeNamedSessionCityTOML(t, cityDir)
+	t.Setenv("GC_CITY", cityDir)
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	created, err := store.Create(beads.Bead{
+		Title:  "Session: worker",
+		Type:   session.BeadType,
+		Status: "open",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "worker-session",
+			"agent_name":   "worker",
+			"template":     "worker",
+			"state":        string(session.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create session: %v", err)
+	}
+
+	// The session stays alive the whole run; the ONLY expected exit is the
+	// idle TTL. The failsafe retires the session if that exit never fires so
+	// the test fails on its assertions instead of hanging.
+	observeCalls := 0
+	forcedExit := false
+	origObserve := nudgeObserveTarget
+	t.Cleanup(func() { nudgeObserveTarget = origObserve })
+	nudgeObserveTarget = func(_ nudgeTarget, _ beads.Store, _ runtime.Provider) (worker.LiveObservation, error) {
+		observeCalls++
+		if observeCalls > 20 {
+			forcedExit = true
+			return worker.LiveObservation{Running: false}, nil
+		}
+		last := time.Now()
+		return worker.LiveObservation{Running: true, Alive: true, LastActivity: &last}, nil
+	}
+
+	prevTTL := nudgePollIdleExitAfter
+	t.Cleanup(func() { nudgePollIdleExitAfter = prevTTL })
+	nudgePollIdleExitAfter = 5 * time.Millisecond
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdNudgePoll([]string{created.ID}, "worker-session", time.Millisecond, time.Hour, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdNudgePoll = %d, want 0 (graceful idle exit); stderr=%s", code, stderr.String())
+	}
+	if forcedExit {
+		t.Fatalf("observe calls = %d, want the idle exit to end the sidecar long before the observe failsafe", observeCalls)
+	}
+	if !strings.Contains(stderr.String(), "idle (queue empty)") {
+		t.Fatalf("stderr = %q, want the idle-exit line", stderr.String())
+	}
+	// The graceful exit released the singleton lease, so a fresh poller (the
+	// next enqueue's re-arm) can take it immediately.
+	target, err := resolveNudgeTarget(created.ID)
+	if err != nil {
+		t.Fatalf("resolveNudgeTarget: %v", err)
+	}
+	release, err := acquireNudgePollerLease(target.cityPath, target.sessionName, target.pollerKey())
+	if err != nil {
+		t.Fatalf("acquireNudgePollerLease after the idle exit = %v, want the lease released", err)
+	}
+	release()
+}
+
+// TestCmdNudgePollIdleTTLPendingNudgesHold is the hold half of vp-u8ky2: an
+// idle window must not end a sidecar while the queue still holds items. With
+// the exit window at its minimum, a nudge fenced to a live sibling holds the
+// loop across repeated expiry checks; only once the queue truly drains does
+// the graceful idle exit fire.
+func TestCmdNudgePollIdleTTLPendingNudgesHold(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	markNudgePollCityRunningForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	writeNamedSessionCityTOML(t, cityDir)
+	t.Setenv("GC_CITY", cityDir)
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	created, err := store.Create(beads.Bead{
+		Title:  "Session: worker",
+		Type:   session.BeadType,
+		Status: "open",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "worker-session",
+			"agent_name":   "worker",
+			"template":     "worker",
+			"state":        string(session.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create session: %v", err)
+	}
+	const sibling = "gc-sibling"
+	item := newQueuedNudgeWithOptions("worker", "hold the sidecar", "human", time.Now().Add(-time.Minute), queuedNudgeOptions{SessionID: sibling})
+	if err := enqueueQueuedNudge(cityDir, item); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	prevCensus := liveNudgeFenceSessionIDs
+	t.Cleanup(func() { liveNudgeFenceSessionIDs = prevCensus })
+	liveNudgeFenceSessionIDs = func(string) map[string]struct{} {
+		return map[string]struct{}{created.ID: {}, sibling: {}}
+	}
+
+	observeCalls := 0
+	forcedExit := false
+	origObserve := nudgeObserveTarget
+	t.Cleanup(func() { nudgeObserveTarget = origObserve })
+	nudgeObserveTarget = func(_ nudgeTarget, _ beads.Store, _ runtime.Provider) (worker.LiveObservation, error) {
+		observeCalls++
+		switch {
+		case observeCalls < 4:
+			last := time.Now()
+			return worker.LiveObservation{Running: true, Alive: true, LastActivity: &last}, nil
+		case observeCalls == 4:
+			// Drain the queue while the session stays alive: only the idle
+			// exit can end the sidecar now.
+			if err := ackQueuedNudges(cityDir, []string{item.ID}); err != nil {
+				t.Errorf("ackQueuedNudges: %v", err)
+			}
+			last := time.Now()
+			return worker.LiveObservation{Running: true, Alive: true, LastActivity: &last}, nil
+		default:
+			// Failsafe: the idle exit should have fired before this.
+			forcedExit = true
+			return worker.LiveObservation{Running: false}, nil
+		}
+	}
+
+	prevTTL := nudgePollIdleExitAfter
+	t.Cleanup(func() { nudgePollIdleExitAfter = prevTTL })
+	nudgePollIdleExitAfter = 0 // every idle tick asks whether to exit
+
+	idleTicks := 0
+	origSleep := nudgePollSleep
+	t.Cleanup(func() { nudgePollSleep = origSleep })
+	nudgePollSleep = func(time.Duration) { idleTicks++ }
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdNudgePoll([]string{created.ID}, "worker-session", time.Millisecond, 0, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdNudgePoll = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if forcedExit || observeCalls != 4 {
+		t.Fatalf("observe calls = %d (forced exit %v), want the pending nudge to hold the sidecar until the 4th observe drained the queue", observeCalls, forcedExit)
+	}
+	if idleTicks < 10 {
+		t.Fatalf("idle ticks = %d, want the loop to survive many expiry checks while the fenced nudge held it", idleTicks)
+	}
+	if !strings.Contains(stderr.String(), "idle (queue empty)") {
+		t.Fatalf("stderr = %q, want the graceful idle exit once the queue drained", stderr.String())
+	}
+}
+
+// nudgePollStderrHook is a stderr writer that runs hook once, synchronously,
+// on the first write containing marker: it lets a test act at the exact point
+// the poll loop announces a decision.
+type nudgePollStderrHook struct {
+	bytes.Buffer
+	marker string
+	fired  bool
+	hook   func()
+}
+
+func (w *nudgePollStderrHook) Write(p []byte) (int, error) {
+	n, err := w.Buffer.Write(p)
+	if !w.fired && strings.Contains(string(p), w.marker) {
+		w.fired = true
+		w.hook()
+	}
+	return n, err
+}
+
+// TestCmdNudgePollIdleExitDoesNotStrandANudgeQueuedAsItExits is the idle
+// exit's handoff (vp-u8ky2): an enqueuer that arrives while the sidecar is
+// exiting must either be seen by the sidecar or find no poller lease and
+// spawn a fresh one. The enqueue lands once the sidecar has announced its
+// idle exit, and the enqueuer runs the real maybeStartNudgePoller path with
+// ensureNudgePoller's lease check (under the per-key PID lock, a PID file
+// naming a live poller spawns nothing) -- the cmdline match is dropped
+// because the in-process sidecar is the test binary.
+func TestCmdNudgePollIdleExitDoesNotStrandANudgeQueuedAsItExits(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	markNudgePollCityRunningForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	cityDir := t.TempDir()
+	writeNamedSessionCityTOML(t, cityDir)
+	t.Setenv("GC_CITY", cityDir)
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	created, err := store.Create(beads.Bead{
+		Title:  "Session: worker",
+		Type:   session.BeadType,
+		Status: "open",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "worker-session",
+			"agent_name":   "worker",
+			"template":     "worker",
+			"state":        string(session.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create session: %v", err)
+	}
+	target, err := resolveNudgeTarget(created.ID)
+	if err != nil {
+		t.Fatalf("resolveNudgeTarget: %v", err)
+	}
+	target.sessionName = "worker-session"
+
+	observeCalls := 0
+	forcedExit := false
+	origObserve := nudgeObserveTarget
+	t.Cleanup(func() { nudgeObserveTarget = origObserve })
+	nudgeObserveTarget = func(_ nudgeTarget, _ beads.Store, _ runtime.Provider) (worker.LiveObservation, error) {
+		observeCalls++
+		if observeCalls > 20 {
+			forcedExit = true
+			return worker.LiveObservation{Running: false}, nil
+		}
+		last := time.Now()
+		return worker.LiveObservation{Running: true, Alive: true, LastActivity: &last}, nil
+	}
+	prevTTL := nudgePollIdleExitAfter
+	t.Cleanup(func() { nudgePollIdleExitAfter = prevTTL })
+	nudgePollIdleExitAfter = 0
+
+	spawned, sawLivePoller := false, false
+	prevStart := startNudgePoller
+	t.Cleanup(func() { startNudgePoller = prevStart })
+	startNudgePoller = func(cityPath, agentName, sessionName string) error {
+		pidPath := nudgePollerPIDPath(cityPath, sessionName, agentName)
+		return withNudgePollerPIDLock(pidPath, func() error {
+			data, err := os.ReadFile(pidPath)
+			if errors.Is(err, os.ErrNotExist) {
+				spawned = true
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			var pid int
+			if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &pid); err == nil && pidutil.Alive(pid) {
+				sawLivePoller = true
+				return nil
+			}
+			spawned = true
+			return nil
+		})
+	}
+
+	item := newQueuedNudgeWithOptions("worker", "queued as the sidecar exits", "session", time.Now(), queuedNudgeOptionsFromTarget(target))
+	stderr := &nudgePollStderrHook{marker: "idle (queue empty)"}
+	stderr.hook = func() {
+		if err := enqueueQueuedNudge(cityDir, item); err != nil {
+			t.Errorf("enqueueQueuedNudge: %v", err)
+			return
+		}
+		maybeStartNudgePoller(target)
+	}
+
+	var stdout bytes.Buffer
+	if code := cmdNudgePoll([]string{created.ID}, "worker-session", time.Millisecond, time.Hour, true, &stdout, stderr); code != 0 {
+		t.Fatalf("cmdNudgePoll = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if forcedExit || !stderr.fired {
+		t.Fatalf("idle exit did not fire (forced exit %v, observe calls %d); stderr=%s", forcedExit, observeCalls, stderr.String())
+	}
+	pending, _, _, err := listQueuedNudgesForTargetSnapshot(cityDir, target, time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudgesForTargetSnapshot: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("pending = %d, want the late nudge still queued for a poller", len(pending))
+	}
+	if !spawned {
+		t.Fatalf("nudge stranded: the enqueuer found the exiting sidecar's lease (saw live poller %v) and spawned nothing, and the sidecar exited without the item", sawLivePoller)
+	}
+}
+
+// nudgeObserveErrorTargetForTest returns a running fake session whose
+// live-generation probe (GC_SESSION_ID) fails, so workerObserveNudgeTarget
+// returns an error for the target fenced to it.
+func nudgeObserveErrorTargetForTest(t *testing.T, dir string) (*runtime.Fake, nudgeTarget) {
+	t.Helper()
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.GetMetaErrors["sess-worker"] = map[string]error{"GC_SESSION_ID": errors.New("runtime probe hiccup")}
+	return fake, nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		sessionID:   "gc-worker",
+		sessionName: "sess-worker",
+	}
+}
+
+// TestQueueSessionNudgeStartsPollerWhenObserveFails covers the session
+// enqueue path's observe hiccup (vp-u8ky2): with idle sidecars exiting, a
+// queued nudge whose post-enqueue observe failed must still arm a poller, or
+// nothing delivers it to an idle session.
+func TestQueueSessionNudgeStartsPollerWhenObserveFails(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	fake, target := nudgeObserveErrorTargetForTest(t, dir)
+	store := beads.NewMemStore()
+	if _, err := workerObserveNudgeTarget(target, store, fake); err == nil {
+		t.Fatal("workerObserveNudgeTarget succeeded; the test needs an observe error")
+	}
+
+	called := false
+	prev := startNudgePoller
+	t.Cleanup(func() { startNudgePoller = prev })
+	startNudgePoller = func(cityPath, agentName, sessionName string) error {
+		called = true
+		if cityPath != dir || agentName != target.pollerKey() || sessionName != "sess-worker" {
+			t.Errorf("unexpected poller args city=%q agent=%q session=%q", cityPath, agentName, sessionName)
+		}
+		return nil
+	}
+
+	result, err := queueSessionNudgeWithNote(target, store, fake, "check status", "", "")
+	if err != nil {
+		t.Fatalf("queueSessionNudgeWithNote: %v", err)
+	}
+	if !result.queued {
+		t.Fatal("result.queued = false, want the nudge queued")
+	}
+	if !called {
+		t.Fatal("startNudgePoller was not called after a failed observe; the queued nudge has no poller")
+	}
+}
+
+// TestDeliverMailNotifyLegacyObserveErrorQueuesNothing pins the mail path's
+// side of the same hiccup: its observe runs before any enqueue, so a failed
+// observe returns the error and leaves nothing queued -- there is no nudge
+// for a missing poller to strand.
+func TestDeliverMailNotifyLegacyObserveErrorQueuesNothing(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	fake, target := nudgeObserveErrorTargetForTest(t, dir)
+	store := beads.NewMemStore()
+
+	prev := startNudgePoller
+	t.Cleanup(func() { startNudgePoller = prev })
+	startNudgePoller = func(_, _, _ string) error { return nil }
+
+	queued, err := deliverMailNotifyLegacy(target, store, fake, mailNotifyText("human"), "")
+	if err == nil {
+		t.Fatal("deliverMailNotifyLegacy over a failing observe returned nil, want the observe error")
+	}
+	if queued {
+		t.Fatal("queued = true, want nothing queued when the observe failed")
+	}
+	pending, inFlight, _, err := listQueuedNudgesForTargetSnapshot(dir, target, time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudgesForTargetSnapshot: %v", err)
+	}
+	if len(pending) != 0 || len(inFlight) != 0 {
+		t.Fatalf("pending/inFlight = %d/%d, want 0/0", len(pending), len(inFlight))
+	}
+}
