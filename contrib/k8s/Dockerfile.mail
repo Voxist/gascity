@@ -27,6 +27,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #
 # apt and libapt-pkg7.0 carry CVE-2026-109518, fixed in 3.0.4; they are the two
 # binary packages of one source, so both are named.
+#
+# libzstd1 carries CVE-2026-124851 (fixed in 1.5.7+dfsg-1+deb13u1) and zlib1g
+# carries CVE-2026-85091 (fixed in 1:1.3.dfsg+really1.3.1-1+deb13u1). Each is
+# the only installed binary package of its source, so naming it alone is the
+# whole fix.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends --only-upgrade \
     apt \
@@ -44,11 +49,13 @@ RUN apt-get update \
     libsystemd0 \
     libudev1 \
     libuuid1 \
+    libzstd1 \
     login \
     mount \
     openssl \
     openssl-provider-legacy \
     util-linux \
+    zlib1g \
     && apt-get install -y --no-install-recommends \
     git \
     libnghttp2-14 \

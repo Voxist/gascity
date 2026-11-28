@@ -18,10 +18,12 @@ FROM ${BASE}
 USER root
 
 # kubectl for agent attach and beads/events exec providers.
-# v1.36.6 is the newest 1.36 patch (Go 1.26.10, x/net v0.56.0, x/text v0.39.0).
-# No stable kubectl release is built with x/net >= 0.62.0 or x/text >= 0.41.0
-# yet, so the findings that need them keep waivers in .trivyignore.yaml.
-ARG KUBECTL_VERSION=v1.36.6
+# v1.37.3 is the newest stable release (Go 1.26.11, x/net v0.57.0, x/text
+# v0.40.0); x/net v0.57.0 clears CVE-2026-39821, which v1.36.7 (still on x/net
+# v0.56.0) does not. No stable kubectl release is built with x/net >= 0.60.0 or
+# x/text >= 0.41.0 yet, so the findings that need them keep waivers in
+# .trivyignore.yaml.
+ARG KUBECTL_VERSION=v1.37.3
 RUN curl -fsSL \
     "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
     -o /tmp/kubectl \
