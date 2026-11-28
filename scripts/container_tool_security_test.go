@@ -770,6 +770,9 @@ func TestMCPMailImageUpgradesPatchedOSPackages(t *testing.T) {
 		"gzip", "libpcre2-8-0", "libsqlite3-0",
 		// apt set, CVE-2026-109518, fixed in 3.0.4.
 		"apt", "libapt-pkg7.0",
+		// libzstd1 CVE-2026-124851, fixed in 1.5.7+dfsg-1+deb13u1; zlib1g
+		// CVE-2026-85091, fixed in 1:1.3.dfsg+really1.3.1-1+deb13u1.
+		"libzstd1", "zlib1g",
 	} {
 		if !strings.Contains(upgrade, "\n    "+pkg+" \\") {
 			t.Errorf("contrib/k8s/Dockerfile.mail --only-upgrade list missing %q", pkg)
@@ -1296,7 +1299,7 @@ func TestTrivyIgnoreRejectsPathPatternAndUnscopedWaivers(t *testing.T) {
 // x/crypto, x/net, x/text and thrift forward in the gh and Dolt builds the same way
 // it forces grpc, so a waiver on those paths would let the scan gate mask a regressed
 // rebuild instead of proving the fix holds. The surviving reviewed waivers are the
-// three kubectl entries the v1.36.6 pin does not clear (CVE-2026-78669, the
+// three kubectl entries the v1.37.3 pin does not clear (CVE-2026-78669, the
 // owner-approved CVE-2026-56851 and CVE-2026-78661); kubectl is an upstream-signed
 // prebuilt this repo installs rather than builds, so nothing here can move its
 // dependencies, and a kubectl waiver outside that reviewed set fails here too.
